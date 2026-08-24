@@ -193,4 +193,28 @@ mod tests {
         let p = PathBuf::from("/tmp/proj");
         assert_eq!(strip_verbatim_prefix(&p), p);
     }
+
+    // The verbatim forms below can only be exercised where `\\?\` paths are
+    // meaningful; on other platforms `strip_verbatim_prefix` is the identity
+    // function and these inputs would round-trip unchanged.
+    #[cfg(windows)]
+    #[test]
+    fn strip_verbatim_prefix_strips_drive_prefix_on_windows() {
+        let p = PathBuf::from(r"\\?\C:\p");
+        assert_eq!(strip_verbatim_prefix(&p), PathBuf::from(r"C:\p"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn strip_verbatim_prefix_rewrites_unc_prefix_on_windows() {
+        let p = PathBuf::from(r"\\?\UNC\srv\share\p");
+        assert_eq!(strip_verbatim_prefix(&p), PathBuf::from(r"\\srv\share\p"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn strip_verbatim_prefix_leaves_plain_paths_alone_on_windows() {
+        let p = PathBuf::from(r"C:\p");
+        assert_eq!(strip_verbatim_prefix(&p), p);
+    }
 }

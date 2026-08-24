@@ -743,6 +743,17 @@ fn a_fake_installed_harness_launches_inside_the_discovered_project_root() {
     let resolved = exec::resolve_explicit(&harness_path).expect("resolve fake harness");
     let project = Project::discover(&project_dir, None, false).expect("discover project");
 
+    // Windows canonicalization returns a verbatim identity path. This makes
+    // the CI smoke prove that HarnessLaunch did not merely receive an already
+    // display-safe path: the child can start only after display_root strips
+    // this prefix at the process boundary.
+    #[cfg(windows)]
+    assert!(
+        project.root().to_string_lossy().starts_with(r"\\?\"),
+        "expected a verbatim canonical project root on Windows: {}",
+        project.root().display()
+    );
+
     // Sanity: the project root is genuinely elsewhere from the process cwd,
     // so only a correctly derived child cwd can match below.
     let process_cwd = std::env::current_dir().expect("process cwd");

@@ -38,9 +38,10 @@ use crate::tui::is_quit_key;
 /// with no public constructor — real instances only ever come from an actual
 /// [`crate::integrations::Discovery`] pass, which is deliberate: discovery
 /// results should not be fabricated. But the wizard must not call
-/// `Discovery::run()` itself (a terminal-driven wizard reaching out to spawn
-/// version-probe subprocesses on its own would be a surprising, hard-to-test
-/// side effect of constructing a [`WizardState`]), and tests need to
+/// [`crate::integrations::Discovery::run`] itself with a project (a
+/// terminal-driven wizard reaching out to spawn version-probe subprocesses
+/// on its own would be a surprising, hard-to-test side effect of constructing
+/// a [`WizardState`]), and tests need to
 /// construct arbitrary detection results — including the "cmux was not
 /// detected" case — without depending on what happens to be installed on the
 /// machine running the tests. [`super::detections_from`] maps a real

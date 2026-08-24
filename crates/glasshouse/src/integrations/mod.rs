@@ -21,6 +21,7 @@ pub mod version;
 
 use std::path::{Path, PathBuf};
 
+use crate::Project;
 use crate::platform::HostPlatform;
 use crate::platform::exec::{self, ResolveError, ResolvedExecutable};
 use providers::ProviderSignals;
@@ -286,11 +287,11 @@ impl Discovery {
     ///
     /// Never fails: an absent or misbehaving executable is reported as a
     /// [`DetectedIntegration`] with problems recorded, not as an `Err`.
-    pub fn run() -> Discovery {
+    pub fn run(project: &Project) -> Discovery {
         let home = home_dir();
         let integrations = IntegrationId::ALL
             .iter()
-            .map(|&id| detect_one(id, home.as_deref()))
+            .map(|&id| detect_one(id, home.as_deref(), project))
             .collect();
         Discovery {
             integrations,
@@ -370,8 +371,8 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 /// [`DetectedIntegration::evidence`] — just not counted as a problem. The
 /// one place total harness absence *is* treated as actionable is
 /// [`Discovery::problems`], at the whole-discovery level.
-fn detect_one(id: IntegrationId, home: Option<&Path>) -> DetectedIntegration {
-    detect_one_with(id, home, exec::resolve)
+fn detect_one(id: IntegrationId, home: Option<&Path>, project: &Project) -> DetectedIntegration {
+    detect_one_with(id, home, project, exec::resolve)
 }
 
 /// Core of [`detect_one`], with the executable resolver injected so tests
@@ -382,6 +383,7 @@ fn detect_one(id: IntegrationId, home: Option<&Path>) -> DetectedIntegration {
 fn detect_one_with(
     id: IntegrationId,
     home: Option<&Path>,
+    project: &Project,
     resolver: impl Fn(&str) -> Result<ResolvedExecutable, ResolveError>,
 ) -> DetectedIntegration {
     let mut evidence = Vec::new();
@@ -421,7 +423,7 @@ fn detect_one_with(
     };
 
     let version = match id.version_arg() {
-        Some(arg) => match version::probe_version(&exe, arg, DEFAULT_PROBE_TIMEOUT) {
+        Some(arg) => match version::probe_version(&exe, arg, project, DEFAULT_PROBE_TIMEOUT) {
             Ok(Some(v)) => Some(v),
             Ok(None) => {
                 evidence.push(format!(
@@ -638,7 +640,7 @@ fn evidence_result(found: bool) -> ConfigEvidence {
 pub fn doctor_report(runtime: &crate::Runtime) -> String {
     use std::fmt::Write as _;
 
-    let discovery = Discovery::run();
+    let discovery = Discovery::run(runtime.project());
     let mut out = String::new();
 
     let _ = writeln!(out, "Glasshouse doctor");
@@ -761,6 +763,13 @@ fn write_integration_line(out: &mut String, d: &DetectedIntegration, status_widt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_project() -> (tempfile::TempDir, Project) {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        let project = Project::discover(tmp.path(), None, false).unwrap();
+        (tmp, project)
+    }
 
     // --- catalog integrity ---------------------------------------------
 
@@ -923,7 +932,8 @@ mod tests {
 
     #[test]
     fn not_found_produces_no_problem_but_records_what_was_tried() {
-        let d = detect_one_with(IntegrationId::Codex, None, |name| {
+        let (_guard, project) = test_project();
+        let d = detect_one_with(IntegrationId::Codex, None, &project, |name| {
             Err(ResolveError::NotFound {
                 name: name.to_string(),
             })
@@ -940,7 +950,8 @@ mod tests {
 
     #[test]
     fn interop_only_hit_is_unknown_with_an_actionable_problem() {
-        let d = detect_one_with(IntegrationId::Codex, None, |name| {
+        let (_guard, project) = test_project();
+        let d = detect_one_with(IntegrationId::Codex, None, &project, |name| {
             Err(ResolveError::WindowsInteropOnly {
                 name: name.to_string(),
                 found_at: vec![PathBuf::from("/mnt/c/codex.exe")],
@@ -955,7 +966,8 @@ mod tests {
 
     #[test]
     fn discovery_runs_without_panicking_and_covers_the_whole_catalog() {
-        let discovery = Discovery::run();
+        let (_guard, project) = test_project();
+        let discovery = Discovery::run(&project);
         assert_eq!(discovery.all().len(), IntegrationId::ALL.len());
         for &id in IntegrationId::ALL {
             assert!(discovery.get(id).is_some());
@@ -1042,7 +1054,8 @@ mod tests {
 
     #[test]
     fn harnesses_and_available_harnesses_are_consistent() {
-        let discovery = Discovery::run();
+        let (_guard, project) = test_project();
+        let discovery = Discovery::run(&project);
         let harness_ids: Vec<_> = discovery.harnesses().map(|d| d.id()).collect();
         assert!(harness_ids.contains(&IntegrationId::ClaudeCode));
         assert!(harness_ids.contains(&IntegrationId::Codex));

@@ -21,6 +21,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use crate::Project;
 use crate::platform::exec::{LaunchError, ResolvedExecutable};
 
 /// Default timeout for a version probe.
@@ -215,6 +216,7 @@ fn take_number(chars: &[char], start: usize) -> Option<(u64, usize)> {
 pub fn probe_version(
     exe: &ResolvedExecutable,
     arg: &str,
+    project: &Project,
     timeout: Duration,
 ) -> Result<Option<Version>, ProbeError> {
     let (program, args) =
@@ -227,6 +229,9 @@ pub fn probe_version(
 
     let mut child = std::process::Command::new(&program)
         .args(&args)
+        // Version probes are harness processes too. Derive their cwd from
+        // the active project rather than inheriting Glasshouse's process cwd.
+        .current_dir(project.display_root())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -340,6 +345,13 @@ mod tests {
     use super::*;
     use crate::platform::exec;
 
+    fn test_project() -> (tempfile::TempDir, Project) {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        let project = Project::discover(tmp.path(), None, false).unwrap();
+        (tmp, project)
+    }
+
     // --- parse_version -----------------------------------------------------
 
     #[test]
@@ -423,7 +435,8 @@ mod tests {
             eprintln!("skipping: neither `git` nor `cargo` is on PATH");
             return;
         };
-        let result = probe_version(&exe, "--version", DEFAULT_PROBE_TIMEOUT).unwrap();
+        let (_guard, project) = test_project();
+        let result = probe_version(&exe, "--version", &project, DEFAULT_PROBE_TIMEOUT).unwrap();
         assert!(
             result.is_some(),
             "expected a parsed version from --version output"
@@ -436,8 +449,9 @@ mod tests {
             eprintln!("skipping: `sleep` is not on PATH");
             return;
         };
+        let (_guard, project) = test_project();
         let start = Instant::now();
-        let result = probe_version(&exe, "30", Duration::from_secs(1));
+        let result = probe_version(&exe, "30", &project, Duration::from_secs(1));
         let elapsed = start.elapsed();
 
         assert!(matches!(result, Err(ProbeError::Timeout { .. })));
@@ -457,14 +471,59 @@ mod tests {
             eprintln!("skipping: `cat` is not on PATH");
             return;
         };
+        let (_guard, project) = test_project();
         let start = Instant::now();
-        let result = probe_version(&exe, "-", Duration::from_secs(5));
+        let result = probe_version(&exe, "-", &project, Duration::from_secs(5));
         let elapsed = start.elapsed();
 
         assert!(result.is_ok(), "cat - should exit cleanly: {result:?}");
         assert!(
             elapsed < Duration::from_secs(3),
             "cat - took too long, stdin may not be null: {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn install_cwd_checking_probe(bin_dir: &Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = bin_dir.join("cwd-version-probe");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nexpected=$(CDPATH= cd \"$(dirname \"$0\")/..\" && pwd -P)\n[ \"$(pwd -P)\" = \"$expected\" ] || exit 23\necho 9.8.7\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    #[cfg(windows)]
+    fn install_cwd_checking_probe(bin_dir: &Path) -> std::path::PathBuf {
+        let path = bin_dir.join("cwd-version-probe.cmd");
+        std::fs::write(
+            &path,
+            "@echo off\r\nfor %%I in (\"%~dp0..\") do set \"EXPECTED=%%~fI\"\r\nif /I not \"%CD%\"==\"%EXPECTED%\" exit /b 23\r\necho 9.8.7\r\n",
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn version_probe_child_starts_in_the_active_project_root() {
+        let (guard, project) = test_project();
+        let bin_dir = guard.path().join("bin");
+        std::fs::create_dir(&bin_dir).unwrap();
+        let path = install_cwd_checking_probe(&bin_dir);
+        let exe = exec::resolve_explicit(&path).unwrap();
+
+        let version = probe_version(&exe, "--version", &project, DEFAULT_PROBE_TIMEOUT)
+            .unwrap()
+            .expect("probe prints a version only when its cwd is the project root");
+        assert_eq!(
+            (version.major(), version.minor(), version.patch()),
+            (9, 8, 7)
         );
     }
 }

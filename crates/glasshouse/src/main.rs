@@ -131,7 +131,7 @@ fn setup(runtime: &Runtime, trigger: SetupTrigger) -> anyhow::Result<bool> {
     // Discovery probes each harness for its version, so it is done once, here,
     // rather than inside the wizard: the wizard is a state machine over an
     // already-known result, which is what makes it testable without a terminal.
-    let discovery = Discovery::run();
+    let discovery = Discovery::run(runtime.project());
 
     match onboarding::run(runtime, &discovery, config)? {
         onboarding::Outcome::Completed(_) => Ok(true),
