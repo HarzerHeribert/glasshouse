@@ -1,0 +1,31 @@
+[package]
+name = "glasshouse"
+description = "A lean, project-scoped control plane for native coding-agent harnesses."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "glasshouse"
+path = "src/main.rs"
+
+[lib]
+name = "glasshouse"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+ctrlc.workspace = true
+directories.workspace = true
+hex.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
