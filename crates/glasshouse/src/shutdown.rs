@@ -88,12 +88,20 @@ impl TerminalGuard {
     /// Enter raw mode and the alternate screen.
     pub fn acquire() -> Result<Self> {
         terminal::enable_raw_mode().context("could not enable raw terminal mode")?;
+        // Store the flag immediately after raw mode is enabled, before
+        // touching the alternate screen: a signal landing in that window
+        // previously saw raw mode on but the flag still false, so
+        // `restore_terminal` no-op'd and the shell was left unusable.
+        TERMINAL_ENGAGED.store(true, Ordering::SeqCst);
+
         let mut out = std::io::stdout();
         if let Err(e) = execute!(out, EnterAlternateScreen, cursor::Hide) {
-            let _ = terminal::disable_raw_mode();
+            // Route the failure through `restore_terminal` so the flag is
+            // cleared and raw mode is disabled exactly once, rather than
+            // duplicating that bookkeeping here.
+            restore_terminal();
             return Err(e).context("could not enter the alternate screen");
         }
-        TERMINAL_ENGAGED.store(true, Ordering::SeqCst);
         Ok(Self { _private: () })
     }
 }

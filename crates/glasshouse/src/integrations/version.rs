@@ -21,7 +21,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use crate::platform::exec::ResolvedExecutable;
+use crate::platform::exec::{LaunchError, ResolvedExecutable};
 
 /// Default timeout for a version probe.
 ///
@@ -69,6 +69,18 @@ pub enum ProbeError {
         program: String,
         #[source]
         source: std::io::Error,
+    },
+
+    /// The resolved executable's launch command could not be safely
+    /// assembled — e.g. a `.cmd`/`.bat` shim's path or an argument being
+    /// probed contains a `cmd.exe` metacharacter (see
+    /// [`crate::platform::exec::LaunchError`]). This surfaces as a clean
+    /// probe failure rather than a panic or a silent skip.
+    #[error("cannot launch `{program}` to probe its version: {source}")]
+    InvalidLaunchCommand {
+        program: String,
+        #[source]
+        source: LaunchError,
     },
 }
 
@@ -205,7 +217,12 @@ pub fn probe_version(
     arg: &str,
     timeout: Duration,
 ) -> Result<Option<Version>, ProbeError> {
-    let (program, args) = exe.spawn_command([arg]);
+    let (program, args) =
+        exe.spawn_command([arg])
+            .map_err(|source| ProbeError::InvalidLaunchCommand {
+                program: exe.path().display().to_string(),
+                source,
+            })?;
     let program_display = display_program(&program);
 
     let mut child = std::process::Command::new(&program)

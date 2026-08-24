@@ -113,16 +113,70 @@ pub fn init(config: &LogConfig) -> Result<Option<PathBuf>> {
     }
 }
 
+/// Size threshold, checked at open time, past which the previous log file is
+/// rotated out of the way before a new one is opened.
+const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
+
 fn open_log_file(path: &Path) -> Result<File> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
+        create_dir_secure(parent)
             .with_context(|| format!("could not create log directory `{}`", parent.display()))?;
     }
-    OpenOptions::new()
-        .create(true)
-        .append(true)
+
+    rotate_if_large(path);
+
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // The log can carry diagnostic detail about the project and its
+        // sessions; default file permissions would leave it world-readable.
+        options.mode(0o600);
+    }
+    options
         .open(path)
         .with_context(|| format!("could not open log file `{}`", path.display()))
+}
+
+/// Create a directory restricted to its owner on Unix. Mirrors
+/// `glasshouse::create_state_dir`: the log directory hangs off the project
+/// state directory and should get the same treatment, not fall back to
+/// default (typically world-readable) permissions.
+#[cfg(unix)]
+fn create_dir_secure(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+}
+
+#[cfg(not(unix))]
+fn create_dir_secure(dir: &Path) -> std::io::Result<()> {
+    std::fs::DirBuilder::new().recursive(true).create(dir)
+}
+
+/// Rotate `path` to `path` + `.1` if it has grown past [`MAX_LOG_BYTES`].
+///
+/// One generation is enough for a diagnostic log nobody is expected to keep
+/// long-term — a background thread or a time-based scheme would be more
+/// machinery than the problem earns. Rotation only happens at open time, so
+/// a single run that grows past the threshold keeps appending to one file;
+/// the next start is what rotates it. A rename failure (permissions, a
+/// concurrent process holding the `.1` path, ...) is not fatal: it is not
+/// worth failing startup over, so logging just keeps appending to the
+/// existing file instead.
+fn rotate_if_large(path: &Path) {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    if metadata.len() <= MAX_LOG_BYTES {
+        return;
+    }
+    let mut rotated = path.as_os_str().to_owned();
+    rotated.push(".1");
+    let _ = std::fs::rename(path, PathBuf::from(rotated));
 }
 
 #[cfg(test)]
@@ -153,5 +207,58 @@ mod tests {
 
         let config = LogConfig::resolve(None, None, true, Path::new("/"));
         assert_eq!(config.sink, LogSink::Stderr);
+    }
+
+    #[test]
+    fn a_small_log_file_is_not_rotated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("glasshouse.log");
+        std::fs::write(&path, b"small").unwrap();
+
+        rotate_if_large(&path);
+
+        assert!(path.exists());
+        assert!(!tmp.path().join("glasshouse.log.1").exists());
+    }
+
+    #[test]
+    fn a_log_file_past_the_threshold_is_rotated_on_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("glasshouse.log");
+        std::fs::write(&path, vec![0u8; (MAX_LOG_BYTES + 1) as usize]).unwrap();
+        let rotated = tmp.path().join("glasshouse.log.1");
+        std::fs::write(&rotated, b"stale generation").unwrap();
+
+        let file = open_log_file(&path).unwrap();
+        drop(file);
+
+        assert!(path.exists(), "a fresh log file must exist after rotation");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            0,
+            "the newly opened log file must start empty"
+        );
+        assert_eq!(
+            std::fs::read(&rotated).unwrap().len(),
+            (MAX_LOG_BYTES + 1) as usize,
+            "rotation must replace any existing `.1` with the file just rotated"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_log_file_and_directory_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("logs");
+        let path = dir.join("glasshouse.log");
+
+        let file = open_log_file(&path).unwrap();
+        let file_mode = file.metadata().unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "log file mode was {file_mode:o}");
+
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "log directory mode was {dir_mode:o}");
     }
 }

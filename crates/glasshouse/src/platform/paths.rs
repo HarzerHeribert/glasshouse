@@ -5,7 +5,7 @@
 //! so normalization can never be *more* permissive than the underlying
 //! filesystem actually is.
 
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 /// Normalize a canonical path into the string used for identity and comparison.
 ///
@@ -20,8 +20,11 @@ pub fn normalize(path: &Path) -> String {
 
     #[cfg(windows)]
     {
+        // ASCII folding, for the same reason as `casefold` below: full Unicode
+        // lowercasing merges characters NTFS keeps distinct, which would give
+        // two different directories the same project identity.
         let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-        return s.to_lowercase();
+        s.to_ascii_lowercase()
     }
 
     #[cfg(not(windows))]
@@ -63,14 +66,86 @@ fn comparable_components(path: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Case-fold one path component for comparison.
+///
+/// Windows folding is ASCII-only on purpose. `str::to_lowercase` applies full
+/// Unicode case mapping, which folds characters NTFS keeps distinct — U+212A
+/// KELVIN SIGN lowercases to `k`, so `Proj\u{212a}` and `ProjK` would compare
+/// equal even though they are two different directories. In a containment
+/// check that is the wrong direction to be wrong in. ASCII folding matches
+/// NTFS exactly in the ASCII range and can only ever fail closed outside it.
 fn casefold(s: &str) -> String {
     #[cfg(windows)]
     {
-        s.to_lowercase()
+        s.to_ascii_lowercase()
     }
     #[cfg(not(windows))]
     {
         s.to_owned()
+    }
+}
+
+/// Strip Windows' extended-length `\\?\` prefix from a canonical path.
+///
+/// `fs::canonicalize` on Windows always returns a verbatim path. That form is
+/// correct for identity and comparison, but several Win32 consumers reject it:
+/// `CreateProcessW`'s `lpCurrentDirectory` does not reliably accept it, and
+/// `cmd.exe` refuses to run with a verbatim current directory — which is
+/// exactly the path Glasshouse takes to launch a `.cmd` harness shim in the
+/// project root. It also reads as noise to a user.
+///
+/// So the verbatim form is kept internally and stripped at the boundary: when
+/// handing a path to another process, or showing it to a person. A verbatim
+/// UNC path (`\\?\UNC\server\share`) becomes a normal UNC path
+/// (`\\server\share`). On other platforms this is the identity function.
+pub fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+        path.to_path_buf()
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
+}
+
+/// True when both paths name the same file or directory on disk.
+///
+/// This asks the filesystem instead of comparing strings, which is the only
+/// answer that is correct on a case-insensitive volume. Whether macOS
+/// `realpath` normalizes case is not something Glasshouse can assume, and a
+/// safety refusal that can be sidestepped by typing `/users/me` instead of
+/// `/Users/me` would not be a safety refusal at all.
+///
+/// Returns `false` when either path cannot be read, so a caller that uses this
+/// for a refusal fails closed only in the sense of not refusing — callers must
+/// therefore use it for identity, never for containment.
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows has no stable inode. Canonical paths plus the ASCII case
+        // folding above are the best available comparison here, and NTFS
+        // case-insensitivity makes it correct for the ASCII names these checks
+        // actually deal with.
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(x), Ok(y)) => same_path(&x, &y),
+            _ => false,
+        }
     }
 }
 
@@ -99,5 +174,23 @@ mod tests {
             &PathBuf::from("/tmp/proj"),
             &PathBuf::from("/tmp/proj/sub")
         ));
+    }
+
+    #[test]
+    fn same_file_identifies_a_directory_through_two_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let indirect = tmp.path().join("real/../real");
+
+        assert!(same_file(&real, &indirect));
+        assert!(!same_file(&real, tmp.path()));
+        assert!(!same_file(&real, &tmp.path().join("missing")));
+    }
+
+    #[test]
+    fn strip_verbatim_prefix_is_identity_off_windows() {
+        let p = PathBuf::from("/tmp/proj");
+        assert_eq!(strip_verbatim_prefix(&p), p);
     }
 }

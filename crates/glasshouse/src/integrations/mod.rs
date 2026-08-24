@@ -646,7 +646,13 @@ pub fn doctor_report(runtime: &crate::Runtime) -> String {
     let _ = writeln!(out);
     let _ = writeln!(out, "Project");
     let _ = writeln!(out, "  name:      {}", runtime.project().name());
-    let _ = writeln!(out, "  root:      {}", runtime.project().root().display());
+    // `display_root` and not `root`: the canonical root is a Windows
+    // verbatim path, which is correct for identity but noise to a reader.
+    let _ = writeln!(
+        out,
+        "  root:      {}",
+        runtime.project().display_root().display()
+    );
     let _ = writeln!(out, "  id:        {}", runtime.project().id());
     let _ = writeln!(out, "  state dir: {}", runtime.state_dir().display());
     let _ = writeln!(out);

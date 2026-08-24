@@ -51,6 +51,10 @@ pub enum UnsafeRoot {
     )]
     HomeDirectory(PathBuf),
     #[error(
+        "`{0}` is the parent of home directories (it holds every user's home directory on this machine); scoping Glasshouse to it would mix every user's projects into one memory database"
+    )]
+    HomeDirectoryParent(PathBuf),
+    #[error(
         "`{root}` looks like a container for multiple projects (found Git repositories: {})",
         .repositories.join(", ")
     )]
@@ -89,7 +93,12 @@ impl ProjectId {
     pub fn from_canonical_root(root: &Path) -> Self {
         let normalized = platform::normalize(root);
         let digest = Sha256::digest(normalized.as_bytes());
-        let short = hex::encode(&digest[..8]);
+        // 128 bits: two projects sharing an id would share one state
+        // directory, one memory database, and one set of resumable sessions,
+        // so the id needs to be collision-resistant, not just short. 64 bits
+        // made an accidental collision negligible but left a deliberately
+        // found one within reach (~2^32 work) for zero benefit over this.
+        let short = hex::encode(&digest[..16]);
 
         let name = root
             .file_name()
@@ -148,6 +157,7 @@ pub struct Project {
     scope: ProjectScope,
     source: RootSource,
     is_git_repository: bool,
+    overridden_refusal: Option<UnsafeRoot>,
 }
 
 impl Project {
@@ -183,6 +193,7 @@ impl Project {
 
         let is_git_repository = is_git_root(&root);
 
+        let mut overridden_refusal = None;
         if let Some(unsafe_root) = check_root_safety(&root, is_git_repository) {
             if allow_unsafe {
                 tracing::warn!(
@@ -190,6 +201,12 @@ impl Project {
                     reason = %unsafe_root,
                     "using an unsafe project root because --allow-unsafe-scope was given"
                 );
+                // `discover` runs before logging is initialized and logging is
+                // off by default, so the `tracing::warn!` above is frequently
+                // invisible. Carry the refusal forward so the caller can put a
+                // warning somewhere a user actually sees it (see
+                // `Project::overridden_refusal`).
+                overridden_refusal = Some(unsafe_root);
             } else {
                 anyhow::bail!("{unsafe_root}\n\n{}", unsafe_root.remedy());
             }
@@ -200,6 +217,7 @@ impl Project {
             scope: ProjectScope::new(root),
             source,
             is_git_repository,
+            overridden_refusal,
         })
     }
 
@@ -207,9 +225,29 @@ impl Project {
         &self.id
     }
 
-    /// The canonical project root.
+    /// The canonical project root, in the exact form `fs::canonicalize`
+    /// produced.
+    ///
+    /// This is the identity and containment form: it is what [`ProjectId`]
+    /// hashes and what [`ProjectScope`] compares against, and it must stay
+    /// that way. On Windows this is the verbatim `\\?\...` path.
+    /// `CreateProcessW`'s `lpCurrentDirectory` does not reliably accept that
+    /// form and `cmd.exe` refuses it outright, so it is the wrong value to
+    /// hand to another process or show to a person — use
+    /// [`Project::display_root`] for that instead.
     pub fn root(&self) -> &Path {
         self.scope.root()
+    }
+
+    /// The project root in the form suitable for a child process or a
+    /// person: a process's working directory, or text printed to the user.
+    ///
+    /// This differs from [`Project::root`] only on Windows, where it strips
+    /// the verbatim `\\?\` prefix. Never substitute this into [`ProjectId`]
+    /// derivation or a [`ProjectScope`] containment check — those must keep
+    /// using [`Project::root`].
+    pub fn display_root(&self) -> PathBuf {
+        platform::strip_verbatim_prefix(self.root())
     }
 
     pub fn scope(&self) -> &ProjectScope {
@@ -224,6 +262,12 @@ impl Project {
         self.is_git_repository
     }
 
+    /// The safety refusal that `--allow-unsafe-scope` overrode to select this
+    /// root, if any. `None` means the root needed no override.
+    pub fn overridden_refusal(&self) -> Option<&UnsafeRoot> {
+        self.overridden_refusal.as_ref()
+    }
+
     /// Short display name for the project.
     pub fn name(&self) -> String {
         self.root()
@@ -235,13 +279,34 @@ impl Project {
 
 /// Return the refusal reason for a root, if any.
 fn check_root_safety(root: &Path, is_git_repository: bool) -> Option<UnsafeRoot> {
+    root_safety(root, is_git_repository, home_dir().as_deref())
+}
+
+/// The actual safety logic, parameterized on the home directory so it is
+/// testable with a fabricated one instead of the process's real `$HOME`.
+fn root_safety(root: &Path, is_git_repository: bool, home: Option<&Path>) -> Option<UnsafeRoot> {
     if root.parent().is_none() {
         return Some(UnsafeRoot::FilesystemRoot(root.to_path_buf()));
     }
 
-    if let Some(home) = home_dir() {
-        if platform::same_path(&home, root) {
+    if let Some(home) = home {
+        // Compare by device+inode, not by string: on a case-insensitive
+        // macOS volume, `--scope /users/me` names the same directory as
+        // `/Users/me` without comparing equal as strings, and whether
+        // Darwin's `realpath` case-corrects is not something a safety guard
+        // should bet on.
+        if platform::same_file(home, root) {
             return Some(UnsafeRoot::HomeDirectory(root.to_path_buf()));
+        }
+        // The parent of every user's home directory (`/home`, `/Users`,
+        // `C:\Users`) is not itself a home directory and typically holds no
+        // immediate Git repositories, so neither check above catches it —
+        // but scoping Glasshouse there is exactly as bad as scoping it to
+        // one user's home directory.
+        if let Some(home_parent) = home.parent() {
+            if platform::same_file(home_parent, root) {
+                return Some(UnsafeRoot::HomeDirectoryParent(root.to_path_buf()));
+            }
         }
     }
 
@@ -266,24 +331,89 @@ fn home_dir() -> Option<PathBuf> {
     Some(std::fs::canonicalize(&home).unwrap_or(home))
 }
 
-/// Names of immediate child directories that are Git repositories, stopping at
-/// `limit` so a large directory is not fully scanned.
+/// Depth to descend while looking for nested Git repositories. The common
+/// "container of containers" layout (`~/code/work/repoA`,
+/// `~/code/personal/repoB`) has zero repositories at depth 1, so depth 1
+/// alone accepts it as a single project. Two levels catches that layout while
+/// staying cheap.
+const REPOSITORY_SCAN_DEPTH: u32 = 2;
+
+/// Hard cap on directories visited while scanning for nested repositories,
+/// independent of how many are found. This bounds startup time even for a
+/// huge, repository-free tree, on top of the `limit` on repositories found.
+const REPOSITORY_SCAN_MAX_VISITS: usize = 4000;
+
+/// Names (or `parent/name` for depth-2 matches) of Git repositories found by
+/// scanning up to [`REPOSITORY_SCAN_DEPTH`] levels below `root`, stopping as
+/// soon as `limit` repositories are found.
 fn child_git_repositories(root: &Path, limit: usize) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return Vec::new();
-    };
     let mut found = Vec::new();
-    for entry in entries.flatten() {
-        if found.len() >= limit {
-            break;
-        }
-        let path = entry.path();
-        if path.is_dir() && is_git_root(&path) {
-            found.push(entry.file_name().to_string_lossy().into_owned());
-        }
-    }
+    let mut visited = 0usize;
+    scan_for_repositories(
+        root,
+        "",
+        REPOSITORY_SCAN_DEPTH,
+        limit,
+        &mut visited,
+        &mut found,
+    );
     found.sort();
     found
+}
+
+/// Recursive worker for [`child_git_repositories`]. `prefix` is the relative
+/// path already descended, used to label a depth-2 match as `parent/name`.
+fn scan_for_repositories(
+    dir: &Path,
+    prefix: &str,
+    remaining_depth: u32,
+    limit: usize,
+    visited: &mut usize,
+    found: &mut Vec<String>,
+) {
+    if found.len() >= limit || *visited >= REPOSITORY_SCAN_MAX_VISITS {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if found.len() >= limit || *visited >= REPOSITORY_SCAN_MAX_VISITS {
+            return;
+        }
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        *visited += 1;
+
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if is_scan_noise(&name) {
+            continue;
+        }
+        let label = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+
+        if is_git_root(&path) {
+            found.push(label);
+            // A repository's own contents (submodules, vendored checkouts)
+            // are not another container level to descend into.
+            continue;
+        }
+        if remaining_depth > 1 {
+            scan_for_repositories(&path, &label, remaining_depth - 1, limit, visited, found);
+        }
+    }
+}
+
+/// True for hidden directories (including `.git` itself) and common
+/// non-project noise that is never worth descending into while looking for
+/// nested repositories.
+fn is_scan_noise(name: &str) -> bool {
+    name.starts_with('.') || matches!(name, "node_modules" | "target")
 }
 
 /// True when `dir` holds a `.git` entry. A file is accepted because Git
@@ -386,6 +516,64 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_container_with_nested_repositories_two_levels_deep() {
+        // The common "container of containers" layout: zero repositories as
+        // immediate children, so a scan that only looked one level deep would
+        // accept this as a single project.
+        let tmp = tempfile::tempdir().unwrap();
+        let container = tmp.path().join("code");
+        for (group, name) in [("work", "repo-a"), ("personal", "repo-b")] {
+            let repo = container.join(group).join(name);
+            std::fs::create_dir_all(&repo).unwrap();
+            init_git_repo(&repo);
+        }
+
+        let err = Project::discover(&container, None, false).unwrap_err();
+        assert!(
+            err.to_string().contains("container for multiple projects"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn repository_scan_skips_hidden_and_noise_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let container = tmp.path().join("code");
+        // Two real nested repos, plus noise that must not be descended into.
+        for (group, name) in [("work", "repo-a"), ("personal", "repo-b")] {
+            let repo = container.join(group).join(name);
+            std::fs::create_dir_all(&repo).unwrap();
+            init_git_repo(&repo);
+        }
+        for noisy in [".hidden/should-not-count", "node_modules/should-not-count"] {
+            let repo = container.join(noisy);
+            std::fs::create_dir_all(&repo).unwrap();
+            init_git_repo(&repo);
+        }
+
+        let repos = child_git_repositories(&container, 10);
+        assert_eq!(repos, vec!["personal/repo-b", "work/repo-a"]);
+    }
+
+    #[test]
+    fn refuses_the_parent_of_the_home_directory() {
+        // `/home`, `/Users`, `C:\Users`: not the home directory itself, has a
+        // parent, and typically has no immediate repositories — but scoping
+        // Glasshouse there mixes every user's projects into one scope, just
+        // like scoping it to one user's home directory would.
+        let tmp = tempfile::tempdir().unwrap();
+        let users_dir = tmp.path().join("Users");
+        let home = users_dir.join("me");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let refusal = root_safety(&users_dir, false, Some(&home));
+        assert!(
+            matches!(refusal, Some(UnsafeRoot::HomeDirectoryParent(_))),
+            "{refusal:?}"
+        );
+    }
+
+    #[test]
     fn refuses_the_filesystem_root() {
         let root = Path::new(std::path::MAIN_SEPARATOR_STR);
         let err = Project::discover(root, Some(root), false).unwrap_err();
@@ -421,6 +609,14 @@ mod tests {
             id_a.as_str()
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        );
+
+        // 128-bit digest (32 hex chars), not the old 64-bit one.
+        let (_, digest) = id_a.as_str().rsplit_once('-').unwrap();
+        assert_eq!(
+            digest.len(),
+            32,
+            "expected a 128-bit digest, got `{digest}`"
         );
     }
 

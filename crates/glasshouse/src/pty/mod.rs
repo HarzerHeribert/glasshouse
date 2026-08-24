@@ -79,6 +79,11 @@ pub struct TerminalCommand {
     args: Vec<OsString>,
     cwd: PathBuf,
     env: Vec<(OsString, OsString)>,
+    /// Keys to strip from the child's inherited environment. Disjoint from
+    /// `env` by construction: `env` and `env_remove` each remove a key from
+    /// the other's list before recording their own operation, so a key is
+    /// never pending in both at once. See [`TerminalCommand::env_remove`].
+    env_removed: Vec<OsString>,
     size: TerminalSize,
 }
 
@@ -94,6 +99,7 @@ impl TerminalCommand {
             args: Vec::new(),
             cwd: cwd.into(),
             env: default_terminal_env(),
+            env_removed: Vec::new(),
             size: TerminalSize::default(),
         }
     }
@@ -117,10 +123,35 @@ impl TerminalCommand {
     /// The child inherits the Glasshouse environment; these are overrides on
     /// top of it. Launch profiles rely on this to point a harness at an
     /// alternate provider without touching the user's global configuration.
+    ///
+    /// Ordering with [`TerminalCommand::env_remove`]: whichever of the two
+    /// was called most recently for `key` wins. A key can never be both a
+    /// pending override and a pending removal at once, so this `env` call
+    /// always cancels out any earlier `env_remove` for the same key.
     pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
         let key = key.into();
         self.env.retain(|(k, _)| k != &key);
+        self.env_removed.retain(|k| k != &key);
         self.env.push((key, value.into()));
+        self
+    }
+
+    /// Remove an environment variable the child would otherwise inherit.
+    ///
+    /// Launch profiles need this to route a session through a gateway: the
+    /// child must not see a provider API key Glasshouse itself inherited,
+    /// not merely a different value for it. Unlike [`TerminalCommand::env`],
+    /// which only overrides what the child sees, this reaches into the
+    /// child's inherited environment and removes the key outright.
+    ///
+    /// Ordering with [`TerminalCommand::env`]: whichever of the two was
+    /// called most recently for `key` wins — see `env`'s doc comment for why
+    /// that is the whole ordering rule.
+    pub fn env_remove(mut self, key: impl Into<OsString>) -> Self {
+        let key = key.into();
+        self.env.retain(|(k, _)| k != &key);
+        self.env_removed.retain(|k| k != &key);
+        self.env_removed.push(key);
         self
     }
 
@@ -146,12 +177,24 @@ impl TerminalCommand {
         &self.env
     }
 
+    /// The environment variable names being stripped from the child's
+    /// inherited environment. See [`TerminalCommand::env_remove`].
+    pub fn env_removals(&self) -> &[OsString] {
+        &self.env_removed
+    }
+
     fn into_builder(self) -> (CommandBuilder, TerminalSize) {
         let mut builder = CommandBuilder::new(&self.program);
         builder.args(&self.args);
         builder.cwd(&self.cwd);
         for (key, value) in &self.env {
             builder.env(key, value);
+        }
+        // `env` and `env_removed` are disjoint (see the field doc comment),
+        // so applying removals after overrides — or before, it does not
+        // matter — never lets one undo the other for the same key.
+        for key in &self.env_removed {
+            builder.env_remove(key);
         }
         (builder, self.size)
     }
@@ -221,6 +264,14 @@ impl std::fmt::Display for ExitStatus {
 ///
 /// Handed out separately from [`PtyProcess`] so output can be streamed on its
 /// own thread while the process is still being written to and signalled.
+///
+/// This holds its own duplicate of the pty master's read fd, so it must be
+/// dropped with or before its `PtyProcess`, never after. On Unix, dropping
+/// `PtyProcess` closes the pty only once every dup of the master fd is gone;
+/// a `PtyOutput` kept alive past its `PtyProcess` is exactly such a dup, and
+/// a probe confirmed the effect: the child is left running (state `S`, no
+/// `SIGHUP`) rather than being torn down, because the hangup that would
+/// otherwise close it never fires.
 pub struct PtyOutput {
     inner: Box<dyn Read + Send>,
 }
@@ -240,12 +291,32 @@ impl std::fmt::Debug for PtyOutput {
 /// A running child process attached to a pseudo-terminal.
 pub struct PtyProcess {
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// Used only on Windows: Unix signals the child's process group directly
+    /// (see [`process::signal_process`]) and has no use for portable-pty's
+    /// killer handle at all.
+    #[cfg(windows)]
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    /// A Windows Job Object the child was placed in so that killing it also
+    /// reaches processes it spawned, not just itself. `None` when placing it
+    /// failed (see [`process::JobHandle::assign`]) — signalling then falls
+    /// back to the direct killer, which cannot reach grandchildren.
+    #[cfg(windows)]
+    job: Option<process::JobHandle>,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     size: TerminalSize,
     /// Cached once observed, because a process can only be reaped once and
     /// signalling a reaped pid could reach an unrelated process.
+    ///
+    /// The invariant this whole module depends on: nothing other than this
+    /// `PtyProcess` ever reaps this child (no background reaper, nothing
+    /// else calling `waitpid`/`GetExitCodeProcess` on it). That is what
+    /// makes an *unreaped* exited child still pin its pid — the operating
+    /// system cannot recycle it for an unrelated process until something
+    /// reaps it — which is the only reason `signal`'s `kill(-pgid, ...)` is
+    /// safe to call at all between the liveness check and the actual
+    /// syscall. If a background reaper is ever introduced, this reasoning
+    /// breaks and `signal` needs to be revisited.
     exit_status: Option<ExitStatus>,
 }
 
@@ -287,9 +358,33 @@ impl PtyProcess {
             )
         })?;
 
-        // The slave handle must be dropped here. While Glasshouse holds it open
-        // the pty never reaches end-of-file, so the output reader would block
-        // forever after the child exits instead of seeing EOF.
+        // The slave handle must be dropped here.
+        //
+        // On Unix this is what makes the output reader see EOF: the pty only
+        // reports end-of-file once every open fd for the slave side is
+        // closed, and this was the last one Glasshouse itself would
+        // otherwise still be holding.
+        //
+        // On Windows this line does *not* produce EOF. `ConPtySlavePty`
+        // shares an `Arc<Mutex<Inner>>` with the master, so dropping it
+        // closes no descriptor; the pipe's write end lives inside conhost
+        // and is released only by `ClosePseudoConsole`, which runs when the
+        // *master* — the `MasterPty` this `PtyProcess` owns — is dropped,
+        // not the slave. Dropping the slave here is still correct and
+        // necessary (a `SlavePty` has nothing left to do once
+        // `spawn_command` has returned, and Unix genuinely needs it gone),
+        // it just does not give Windows callers an EOF-based way to notice
+        // the child is done.
+        //
+        // Constraint this implies for a future interactive reader thread
+        // (Phase 4): it must not treat "no more bytes" as its stop
+        // condition, because on Windows that may never come while the pty is
+        // still held open. Treat "the process was observed to have exited"
+        // (`try_wait`/`wait`) as the authoritative stop condition on every
+        // platform instead. And because releasing the pty — dropping this
+        // `PtyProcess` — is what eventually lets `ClosePseudoConsole` run,
+        // and that call can block until buffered output has drained to a
+        // reader, that drop must never happen on a UI thread.
         drop(pair.slave);
 
         let reader = pair
@@ -300,7 +395,32 @@ impl PtyProcess {
             .master
             .take_writer()
             .context("could not write to the pseudo-terminal")?;
+
+        #[cfg(windows)]
         let killer = child.clone_killer();
+
+        // Put the child in a Job Object so that killing it also reaches
+        // whatever it spawned (Glasshouse's harnesses are npm `.cmd` shims,
+        // so the direct child is `cmd.exe` and the real process is a
+        // grandchild `node.exe`). This can legitimately fail — see
+        // `process::JobHandle::assign` — in which case signalling falls back
+        // to the direct killer, which is worse but not fatal, so a failure
+        // here must never fail the spawn itself.
+        #[cfg(windows)]
+        let job = match child.as_raw_handle() {
+            Some(handle) => match process::JobHandle::assign(handle) {
+                Ok(job) => Some(job),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "could not put the child process in a Windows Job Object; \
+                         terminating it will not reach anything it spawns"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
 
         tracing::debug!(
             program = %program.display(),
@@ -314,7 +434,10 @@ impl PtyProcess {
         Ok((
             Self {
                 child,
+                #[cfg(windows)]
                 killer,
+                #[cfg(windows)]
+                job,
                 master: pair.master,
                 writer,
                 size,
@@ -382,15 +505,23 @@ impl PtyProcess {
 
     /// Send a real process signal to the child and its descendants.
     pub fn signal(&mut self, signal: ProcessSignal) -> Result<(), SignalError> {
-        if self.exit_status.is_some() {
+        // `exit_status` only reflects what a *previous* `wait`/`try_wait`
+        // observed; nothing forces a poll on its own, so a session that
+        // exited on its own since the last check would otherwise still look
+        // signallable and this would return `Ok(())` without having
+        // terminated anything. Poll first so that never happens.
+        if self.try_wait().map_err(SignalError::Os)?.is_some() {
             return Err(SignalError::AlreadyExited);
         }
-        process::signal_process(
-            signal,
-            self.child.as_ref(),
-            self.master.as_ref(),
-            self.killer.as_mut(),
-        )
+
+        #[cfg(unix)]
+        {
+            process::signal_process(signal, self.child.as_ref())
+        }
+        #[cfg(windows)]
+        {
+            process::signal_process(signal, self.job.as_ref(), self.killer.as_mut())
+        }
     }
 
     /// Check whether the process has finished, without blocking.
@@ -428,6 +559,32 @@ impl PtyProcess {
     }
 }
 
+impl Drop for PtyProcess {
+    /// Never leave a session running or a pid unreaped just because nobody
+    /// remembered to call `signal` and `wait` before letting a `PtyProcess`
+    /// go out of scope. Without this, probes showed two separate leaks: an
+    /// exited-but-unwaited child stays a zombie forever (five spawn+drop
+    /// cycles left five permanent zombies), and a still-running child simply
+    /// keeps running, unreachable, once nothing references it any more.
+    ///
+    /// This cannot panic: `signal` and `wait` both return `Result`, and both
+    /// results are discarded rather than unwrapped. It cannot block
+    /// indefinitely either: `signal(Kill)` sends an unmaskable termination
+    /// (`SIGKILL` to the group on Unix, `TerminateJobObject`/
+    /// `TerminateProcess` on Windows) which a well-behaved kernel honours
+    /// promptly, and `wait` afterward only blocks for however long that
+    /// takes to land — it does not wait on anything Glasshouse controls. If
+    /// the process already exited, `signal` returns `AlreadyExited`
+    /// immediately (no signal sent) and `wait` returns just as fast, since
+    /// waiting on an already-terminated child never blocks.
+    fn drop(&mut self) {
+        if self.exit_status.is_none() {
+            let _ = self.signal(ProcessSignal::Kill);
+            let _ = self.child.wait();
+        }
+    }
+}
+
 /// Convenience for building an argument list from string-ish values.
 pub fn os_args<I, S>(args: I) -> Vec<OsString>
 where
@@ -462,6 +619,44 @@ mod tests {
             .collect();
         assert_eq!(foo.len(), 1);
         assert_eq!(foo[0].1, OsString::from("two"));
+    }
+
+    #[test]
+    fn a_later_env_call_wins_over_an_earlier_env_remove() {
+        let cmd = TerminalCommand::new("/bin/sh", "/tmp")
+            .env("FOO", "one")
+            .env_remove("FOO")
+            .env("FOO", "two");
+
+        assert!(cmd.env_removals().is_empty(), "{:?}", cmd.env_removals());
+        let foo: Vec<_> = cmd
+            .env_overrides()
+            .iter()
+            .filter(|(k, _)| k == "FOO")
+            .collect();
+        assert_eq!(foo.len(), 1);
+        assert_eq!(foo[0].1, OsString::from("two"));
+    }
+
+    #[test]
+    fn a_later_env_remove_call_wins_over_an_earlier_env() {
+        let cmd = TerminalCommand::new("/bin/sh", "/tmp")
+            .env("FOO", "one")
+            .env_remove("FOO");
+
+        assert!(cmd.env_overrides().iter().all(|(k, _)| k != "FOO"));
+        assert_eq!(cmd.env_removals(), &[OsString::from("FOO")]);
+    }
+
+    #[test]
+    fn env_remove_reaches_an_inherited_variable_not_just_overrides() {
+        // `into_builder`'s `CommandBuilder` starts from the real process
+        // environment. `PATH` is about as close to a universal inherited
+        // variable as exists, so removing it proves `env_remove` reaches
+        // into inherited state rather than only ever undoing a prior `.env`.
+        let cmd = TerminalCommand::new("/bin/sh", "/tmp").env_remove("PATH");
+        let (builder, _) = cmd.into_builder();
+        assert_eq!(builder.get_env("PATH"), None);
     }
 
     #[test]

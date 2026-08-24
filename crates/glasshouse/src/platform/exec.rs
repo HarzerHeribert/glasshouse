@@ -61,10 +61,34 @@ impl ResolvedExecutable {
     /// `(program, args)` the OS can actually spawn.
     ///
     /// For [`LaunchKind::Direct`] this is the resolved path and the given
-    /// arguments, unchanged. For [`LaunchKind::WindowsScript`] the program
-    /// becomes the command interpreter (`%COMSPEC%`, falling back to
-    /// `cmd.exe`) and the arguments become `["/C", <script path>, ...args]`,
-    /// which is how `.cmd`/`.bat` files are actually launched.
+    /// arguments, unchanged: no shell is involved in spawning a `Direct`
+    /// executable, so there is nothing to validate. For
+    /// [`LaunchKind::WindowsScript`] the program becomes the command
+    /// interpreter (`%COMSPEC%`, falling back to `cmd.exe`) and the
+    /// arguments become `["/D", "/C", <script path>, ...args]`, which is how
+    /// `.cmd`/`.bat` files are actually launched.
+    ///
+    /// # Why this can fail
+    ///
+    /// `cmd.exe /C` is a shell invocation, and portable-pty's
+    /// [`CommandBuilder`](https://docs.rs/portable-pty/latest/portable_pty/struct.CommandBuilder.html)
+    /// only applies the standard CRT `ArgvQuote` quoting rules (space, tab,
+    /// newline, VT, `"`) when it builds the process command line —
+    /// `cmd.exe` does not parse with those rules. An argument like
+    /// `--session=a&calc.exe` contains no CRT-quote trigger, reaches `cmd`
+    /// verbatim, and `&` starts a second command (this is the BatBadBut /
+    /// CVE-2024-24576 shape). `%`, `^`, `|`, `<`, `>`, and backtick are
+    /// equally unhandled.
+    ///
+    /// Escaping correctly through `cmd.exe` is notoriously unreliable, and
+    /// Glasshouse does not need to try: harness arguments are flags, paths,
+    /// model names, and session ids — prompts are typed into the PTY, never
+    /// passed as argv. So instead of a clever escaper, every argument (and
+    /// the script path itself) is validated up front and rejected outright
+    /// if it contains a cmd.exe metacharacter. Once validated, no
+    /// metacharacter can trigger command-chaining, so passing the script
+    /// path and arguments as separate argv entries — letting
+    /// `CommandBuilder` do its normal CRT quoting — is safe.
     ///
     /// This branch is deliberately not `#[cfg(windows)]`-gated: the classic
     /// deployment story for one of these launchers is npm-installed CLI
@@ -72,27 +96,116 @@ impl ResolvedExecutable {
     /// just when actually compiled for Windows. What *is* platform-specific
     /// is which files ever get classified as [`LaunchKind::WindowsScript`]
     /// in the first place — see [`classify_launch_kind`].
-    pub fn spawn_command<I, S>(&self, args: I) -> (PathBuf, Vec<OsString>)
+    pub fn spawn_command<I, S>(&self, args: I) -> Result<(PathBuf, Vec<OsString>), LaunchError>
     where
         I: IntoIterator<Item = S>,
         S: Into<OsString>,
     {
         match self.kind {
-            LaunchKind::Direct => (
+            // No shell parses a Direct executable's argv -- the OS execs the
+            // resolved path with the arguments passed through verbatim -- so
+            // there is no command-chaining risk here to validate against.
+            LaunchKind::Direct => Ok((
                 self.path.clone(),
                 args.into_iter().map(Into::into).collect(),
-            ),
+            )),
             LaunchKind::WindowsScript => {
+                validate_cmd_argument(self.path.as_os_str(), ArgumentPosition::ScriptPath)?;
+                let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+                for (index, arg) in args.iter().enumerate() {
+                    validate_cmd_argument(arg, ArgumentPosition::Argument(index))?;
+                }
+
                 let interpreter = std::env::var_os("COMSPEC")
                     .map(PathBuf::from)
                     .unwrap_or_else(|| PathBuf::from("cmd.exe"));
-                let mut full_args = Vec::with_capacity(2);
+                let mut full_args = Vec::with_capacity(3 + args.len());
+                full_args.push(OsString::from("/D"));
+                // `/D`: disable `HKCU\...\Command Processor\AutoRun` so a
+                // user's autorun script does not execute on every harness
+                // launch. No `/S`: that flag only changes quoting behavior
+                // for the single quoted-command-line form, which is exactly
+                // the form we are deliberately not building -- we pass the
+                // script path and arguments as separate argv entries
+                // instead, so `/S` would just be cargo-culted.
                 full_args.push(OsString::from("/C"));
                 full_args.push(self.path.clone().into_os_string());
-                full_args.extend(args.into_iter().map(Into::into));
-                (interpreter, full_args)
+                full_args.extend(args);
+                Ok((interpreter, full_args))
             }
         }
+    }
+}
+
+/// Where in a [`LaunchKind::WindowsScript`] invocation an unsafe
+/// `cmd.exe` metacharacter was found.
+///
+/// Kept separate from the offending value itself: harness arguments can
+/// carry secrets (session ids, tokens), so [`LaunchError`]'s message reports
+/// *where* the problem is and *which character* triggered it, never the
+/// full argument text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgumentPosition {
+    /// The resolved `.cmd`/`.bat` script path itself.
+    ScriptPath,
+    /// A caller-supplied argument, by its zero-based index in the argument
+    /// list passed to [`ResolvedExecutable::spawn_command`].
+    Argument(usize),
+}
+
+impl std::fmt::Display for ArgumentPosition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ArgumentPosition::ScriptPath => write!(f, "the script path"),
+            ArgumentPosition::Argument(index) => write!(f, "argument {}", index + 1),
+        }
+    }
+}
+
+/// Why a [`LaunchKind::WindowsScript`] command could not be safely
+/// assembled.
+#[derive(Debug, thiserror::Error)]
+pub enum LaunchError {
+    /// `cmd.exe /C` is a shell invocation with no reliable escaping story
+    /// (see [`ResolvedExecutable::spawn_command`]), so an argument
+    /// containing one of its metacharacters is rejected outright rather than
+    /// escaped.
+    #[error(
+        "{position} contains the character {character:?}, which cmd.exe treats specially and \
+         cannot be passed through `cmd.exe /C` safely; configure a direct executable path for \
+         this harness instead of relying on its `.cmd`/`.bat` shim"
+    )]
+    UnsafeCmdArgument {
+        position: ArgumentPosition,
+        character: char,
+    },
+}
+
+/// Characters that make `value` unsafe to hand to `cmd.exe /C` as a bare
+/// argv entry: cmd metacharacters (`& | < > ^ % ! "` and backtick, which
+/// PowerShell-flavored shims sometimes pass through) plus CR/LF/NUL, none of
+/// which CRT `ArgvQuote` quoting (see [`ResolvedExecutable::spawn_command`])
+/// ever escapes.
+const CMD_UNSAFE_CHARACTERS: &[char] = &[
+    '&', '|', '<', '>', '^', '%', '!', '"', '`', '\r', '\n', '\0',
+];
+
+/// Reject `value` if it contains any [`CMD_UNSAFE_CHARACTERS`].
+///
+/// `to_string_lossy` is used rather than requiring valid UTF-8: on Windows
+/// `OsString` is always representable as UTF-16 and lossy conversion never
+/// alters an ASCII metacharacter, so this cannot miss a real one.
+fn validate_cmd_argument(value: &OsStr, position: ArgumentPosition) -> Result<(), LaunchError> {
+    match value
+        .to_string_lossy()
+        .chars()
+        .find(|c| CMD_UNSAFE_CHARACTERS.contains(c))
+    {
+        Some(character) => Err(LaunchError::UnsafeCmdArgument {
+            position,
+            character,
+        }),
+        None => Ok(()),
     }
 }
 
@@ -218,6 +331,15 @@ fn resolve_with_interop_predicate(
     let mut usable = Vec::new();
     let mut interop_only = Vec::new();
     for candidate in candidates {
+        // `which_in_all` reports the raw PATH hit with no symlink
+        // resolution, so an ordinary-looking Linux path that is actually a
+        // symlink into `/mnt/<drive>` (e.g. an npm shim symlinked to a
+        // Windows-side install) would pass the interop filter unresolved.
+        // Canonicalize *before* classifying so the filter runs on the real
+        // target, not the symlink's apparent location. `unwrap_or` falls
+        // back to the raw candidate when canonicalization fails (e.g. a
+        // dangling symlink) rather than dropping it from consideration.
+        let candidate = std::fs::canonicalize(&candidate).unwrap_or(candidate);
         if platform == HostPlatform::Wsl && is_interop(platform, &candidate) {
             interop_only.push(candidate);
         } else {
@@ -240,12 +362,10 @@ fn resolve_with_interop_predicate(
         }
     };
 
-    let resolved = std::fs::canonicalize(&chosen).unwrap_or(chosen);
-    let kind = classify_launch_kind(platform, &resolved);
-    Ok(ResolvedExecutable {
-        path: resolved,
-        kind,
-    })
+    // Already canonicalized above, before classification -- no need to do
+    // it again here.
+    let kind = classify_launch_kind(platform, &chosen);
+    Ok(ResolvedExecutable { path: chosen, kind })
 }
 
 /// Classify how a resolved path must be spawned.
@@ -272,34 +392,33 @@ fn classify_launch_kind(platform: HostPlatform, path: &Path) -> LaunchKind {
 /// Heuristic for whether `path` sits in the Windows interoperability area of
 /// a WSL `PATH`.
 ///
-/// This is honestly a heuristic, not a precise classification:
+/// The signal is the well-known WSL drive-mount convention,
+/// `/mnt/<single-letter>/...` (e.g. `/mnt/c/Users/...`), which is where WSL
+/// exposes the Windows filesystem and where the Windows-appended `PATH`
+/// entries point. This is checked case-insensitively on the drive letter,
+/// matching how Windows drive letters work.
 ///
-/// - The primary signal is the well-known WSL drive-mount convention,
-///   `/mnt/<single-letter>/...` (e.g. `/mnt/c/Users/...`), which is where
-///   WSL exposes the Windows filesystem and where the Windows-appended
-///   `PATH` entries point. This is checked case-insensitively on the drive
-///   letter, matching how Windows drive letters work.
-/// - As a secondary signal, any `.exe` extension found while resolving under
-///   WSL is also treated as Windows-side, even outside `/mnt`, since WSL
-///   binaries essentially never carry that extension. This is deliberately
-///   broad: it will also flag a genuinely Linux-built cross-compiled `.exe`
-///   artifact (e.g. a MinGW build sitting in a build output directory) as
-///   Windows-interop even though it could, in principle, run fine as a Linux
-///   PE-loader oddity or simply be irrelevant noise on `PATH`. Given the
-///   product requirement, false positives here (treating something as
-///   Windows-side when it might be usable) are the safe failure mode;
-///   false negatives (silently launching a real Windows process into a
-///   Linux project's working directory) are the one this function exists to
-///   prevent.
+/// An earlier version of this function also treated any `.exe` extension as
+/// a secondary Windows-side signal, even outside `/mnt`. That rule was
+/// removed: `which` does not append `PATHEXT` on Linux, so it could only
+/// ever fire when the caller literally asked for a name ending in `.exe` —
+/// in which case the hit is almost always under `/mnt/<letter>` anyway and
+/// this rule alone already catches it — while it would wrongly reject a
+/// genuinely Linux-built cross-compiled `.exe` artifact (e.g. a MinGW build)
+/// sitting on `PATH`. Real WSL-interop coverage instead comes from
+/// canonicalizing each candidate before classification (see
+/// `resolve_with_interop_predicate`), which catches the much more common
+/// case this drive-mount check alone would miss: a Linux-looking symlink
+/// that actually resolves into `/mnt/<drive>`.
 ///
 /// Returns `false` outright for every platform other than
-/// [`HostPlatform::Wsl`]: `/mnt/c` and `.exe` have no special meaning on
-/// real Linux, macOS, or native Windows itself.
+/// [`HostPlatform::Wsl`]: `/mnt/c` has no special meaning on real Linux,
+/// macOS, or native Windows itself.
 pub(crate) fn is_windows_interop_path(platform: HostPlatform, path: &Path) -> bool {
     if platform != HostPlatform::Wsl {
         return false;
     }
-    is_under_windows_drive_mount(path) || has_windows_exe_extension(path)
+    is_under_windows_drive_mount(path)
 }
 
 fn is_under_windows_drive_mount(path: &Path) -> bool {
@@ -319,24 +438,35 @@ fn is_single_drive_letter(s: &OsStr) -> bool {
     }
 }
 
-fn has_windows_exe_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(OsStr::to_str)
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-}
-
 /// Whether the current user can execute `path`.
 ///
-/// On Unix this is the execute permission bit. On Windows, executability is
-/// governed by extension and ACLs rather than a permission bit, so existence
-/// as a regular file is what actually matters for spawning it.
+/// On Unix this asks the kernel the actual question via `access(2)` with
+/// `X_OK` -- the same check [`which`] uses when it walks `PATH` -- rather
+/// than inspecting the permission bits directly. `mode & 0o111 != 0` only
+/// asks "does *anyone* have an execute bit set", which can be true for a
+/// path this process cannot actually execute (e.g. a root-owned `0o700`
+/// file readable-but-not-executable by the current user): that combination
+/// would pass a mode-bit check here and then fail at spawn time with a
+/// confusing `EACCES`, instead of the clear [`ResolveError::NotExecutable`]
+/// this function exists to produce. On non-Unix, executability is governed
+/// by extension and ACLs rather than a permission bit, so existence as a
+/// regular file is what actually matters for spawning it.
 fn is_executable(path: &Path) -> bool {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(path)
-            .map(|meta| meta.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
+            // A path with an interior NUL can never be valid; report it as
+            // not executable rather than panicking on the CString::new
+            // failure.
+            return false;
+        };
+        // SAFETY: `c_path` is a valid, NUL-terminated C string that outlives
+        // this call, and `access` neither retains the pointer nor mutates
+        // through it.
+        unsafe { libc::access(c_path.as_ptr(), libc::X_OK) == 0 }
     }
     #[cfg(not(unix))]
     {
@@ -370,12 +500,25 @@ mod tests {
             path: PathBuf::from("/usr/bin/claude"),
             kind: LaunchKind::Direct,
         };
-        let (program, args) = resolved.spawn_command(["--resume", "abc"]);
+        let (program, args) = resolved.spawn_command(["--resume", "abc"]).unwrap();
         assert_eq!(program, PathBuf::from("/usr/bin/claude"));
         assert_eq!(
             args,
             vec![OsString::from("--resume"), OsString::from("abc")]
         );
+    }
+
+    #[test]
+    fn spawn_command_direct_passes_through_metacharacters_unchanged() {
+        // No shell parses Direct argv, so there is nothing to reject here —
+        // this is the control case proving validation is specific to
+        // WindowsScript, not blanket-applied.
+        let resolved = ResolvedExecutable {
+            path: PathBuf::from("/usr/bin/claude"),
+            kind: LaunchKind::Direct,
+        };
+        let (_program, args) = resolved.spawn_command(["--session=a&calc.exe"]).unwrap();
+        assert_eq!(args, vec![OsString::from("--session=a&calc.exe")]);
     }
 
     #[test]
@@ -385,15 +528,17 @@ mod tests {
             path: script.clone(),
             kind: LaunchKind::WindowsScript,
         };
-        let (program, args) = resolved.spawn_command(["--resume", "abc"]);
+        let (program, args) = resolved.spawn_command(["--resume", "abc"]).unwrap();
 
         let expected_interpreter = std::env::var_os("COMSPEC")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("cmd.exe"));
         assert_eq!(program, expected_interpreter);
+        // `/D` before `/C`, then the script path, then args in order — exactly.
         assert_eq!(
             args,
             vec![
+                OsString::from("/D"),
                 OsString::from("/C"),
                 script.into_os_string(),
                 OsString::from("--resume"),
@@ -408,10 +553,80 @@ mod tests {
             path: PathBuf::from(r"C:\tools\codex.bat"),
             kind: LaunchKind::WindowsScript,
         };
-        let (_program, args) = resolved.spawn_command(Vec::<OsString>::new());
-        assert_eq!(args[0], OsString::from("/C"));
-        assert_eq!(args[1], OsString::from(r"C:\tools\codex.bat"));
-        assert_eq!(args.len(), 2);
+        let (_program, args) = resolved.spawn_command(Vec::<OsString>::new()).unwrap();
+        assert_eq!(args[0], OsString::from("/D"));
+        assert_eq!(args[1], OsString::from("/C"));
+        assert_eq!(args[2], OsString::from(r"C:\tools\codex.bat"));
+        assert_eq!(args.len(), 3);
+    }
+
+    #[test]
+    fn spawn_command_windows_script_rejects_each_cmd_metacharacter() {
+        for character in CMD_UNSAFE_CHARACTERS {
+            let resolved = ResolvedExecutable {
+                path: PathBuf::from(r"C:\tools\codex.bat"),
+                kind: LaunchKind::WindowsScript,
+            };
+            let bad_arg = format!("--session=a{character}calc");
+            let err = resolved.spawn_command([bad_arg]).unwrap_err();
+            match err {
+                LaunchError::UnsafeCmdArgument {
+                    position,
+                    character: found,
+                } => {
+                    assert_eq!(position, ArgumentPosition::Argument(0));
+                    assert_eq!(found, *character, "wrong character reported");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_command_windows_script_rejects_a_metacharacter_in_the_script_path() {
+        let resolved = ResolvedExecutable {
+            path: PathBuf::from(r"C:\tools\codex&calc.bat"),
+            kind: LaunchKind::WindowsScript,
+        };
+        let err = resolved.spawn_command(Vec::<OsString>::new()).unwrap_err();
+        match err {
+            LaunchError::UnsafeCmdArgument { position, .. } => {
+                assert_eq!(position, ArgumentPosition::ScriptPath);
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_command_windows_script_reports_the_offending_argument_position() {
+        let resolved = ResolvedExecutable {
+            path: PathBuf::from(r"C:\tools\codex.bat"),
+            kind: LaunchKind::WindowsScript,
+        };
+        let err = resolved
+            .spawn_command(["--fine", "--also-fine", "--bad=x|y"])
+            .unwrap_err();
+        match err {
+            LaunchError::UnsafeCmdArgument { position, .. } => {
+                assert_eq!(position, ArgumentPosition::Argument(2));
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_command_windows_script_accepts_normal_flags_paths_and_uuids() {
+        let resolved = ResolvedExecutable {
+            path: PathBuf::from(r"C:\Users\me\AppData\Roaming\npm\claude.cmd"),
+            kind: LaunchKind::WindowsScript,
+        };
+        let (_program, args) = resolved
+            .spawn_command([
+                "--resume",
+                "550e8400-e29b-41d4-a716-446655440000",
+                "--base-url=https://api.example.com/v1",
+                r"C:\Users\me\project",
+                "--model=claude-3.7-sonnet",
+            ])
+            .expect("ordinary flag/path/uuid arguments must be accepted");
+        assert_eq!(args.len(), 3 + 5); // /D /C <script> + 5 args
     }
 
     // --- classify_launch_kind --------------------------------------------
@@ -482,18 +697,6 @@ mod tests {
         assert!(is_windows_interop_path(
             HostPlatform::Wsl,
             Path::new("/mnt/C/Windows/System32/tool.exe")
-        ));
-    }
-
-    #[test]
-    fn exe_extension_is_a_secondary_signal_under_wsl() {
-        assert!(is_windows_interop_path(
-            HostPlatform::Wsl,
-            Path::new("/home/user/bin/tool.exe")
-        ));
-        assert!(!is_windows_interop_path(
-            HostPlatform::Wsl,
-            Path::new("/home/user/bin/tool")
         ));
     }
 
@@ -585,6 +788,59 @@ mod tests {
         assert!(resolved.path().ends_with("claude"));
     }
 
+    #[test]
+    fn resolver_classifies_symlinks_by_their_canonicalized_target_not_the_raw_hit() {
+        // Regression test for the ordering bug in Finding 2: `which_in_all`
+        // reports the raw PATH hit with no symlink resolution, so
+        // classifying on the raw path would miss a symlink whose *target*
+        // is Windows-interop-shaped -- exactly the
+        // `/usr/local/bin/claude -> /mnt/c/.../claude.exe` case the module
+        // docs describe. This builds a real symlink on disk so the
+        // resolver's actual `std::fs::canonicalize` call is exercised, not
+        // a stand-in.
+        let dir = tempfile::tempdir().unwrap();
+
+        // The real target. Its path does not itself start with `/mnt/<x>`
+        // (tests cannot rely on a writable real `/mnt/c`), but that is not
+        // the point of this test: the predicate below identifies it by
+        // exact canonicalized identity, so what matters is only *which*
+        // path — raw symlink or resolved target — reaches the predicate.
+        let target_dir = dir.path().join("windows-side").join("c-drive-mount");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let target = target_dir.join("claude.exe");
+        write_file(&target);
+        #[cfg(unix)]
+        make_executable(&target);
+
+        // A separate "Linux-looking" bin directory holding only a symlink
+        // to that target — this is what `which_in_all` actually reports as
+        // the raw candidate.
+        let bin = dir.path().join("usr-local-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let symlink_path = bin.join("claude");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &symlink_path).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &symlink_path).unwrap();
+
+        let path_list = OsString::from(&bin);
+        let canonical_target = std::fs::canonicalize(&target).unwrap();
+
+        // This predicate matches only the canonicalized target, never the
+        // raw symlink path — so the resolver can only report it as interop
+        // if it canonicalizes each candidate *before* classifying it.
+        let err = resolve_with_interop_predicate(
+            HostPlatform::Wsl,
+            "claude",
+            &path_list,
+            dir.path(),
+            move |_platform, p| p == canonical_target,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ResolveError::WindowsInteropOnly { .. }));
+    }
+
     // --- resolve_explicit_with ---------------------------------------------
 
     #[test]
@@ -639,5 +895,32 @@ mod tests {
 
         let resolved = resolve_explicit_with(HostPlatform::Wsl, &path).unwrap();
         assert!(resolved.path().ends_with("tool.exe"));
+    }
+
+    // --- is_executable -----------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn is_executable_rejects_a_non_executable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.txt");
+        write_file(&path);
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        assert!(!is_executable(&path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_executable_accepts_an_executable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.sh");
+        write_file(&path);
+        make_executable(&path);
+
+        assert!(is_executable(&path));
     }
 }

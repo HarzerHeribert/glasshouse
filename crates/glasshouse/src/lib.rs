@@ -64,7 +64,7 @@ pub fn bootstrap(cli: &Cli, cwd: &Path) -> Result<Runtime> {
     let project = Project::discover(cwd, cli.scope.as_deref(), cli.allow_unsafe_scope)?;
 
     let state_dir = paths.project_state_dir(project.id().as_str());
-    std::fs::create_dir_all(&state_dir).with_context(|| {
+    create_state_dir(&state_dir).with_context(|| {
         format!(
             "could not create project state directory `{}`",
             state_dir.display()
@@ -76,6 +76,32 @@ pub fn bootstrap(cli: &Cli, cwd: &Path) -> Result<Runtime> {
         paths,
         state_dir,
     })
+}
+
+/// Create the project state directory, restricted to its owner on Unix.
+///
+/// This directory will hold session transcripts, project memory, and
+/// provider configuration — nothing world-readable belongs here. Plain
+/// `create_dir_all` yields `0o777 & !umask` (typically `0o755`), so the mode
+/// is set explicitly via `DirBuilder` instead.
+///
+/// `DirBuilder::mode` only applies to directories this call actually
+/// creates: a state directory left over from before this fix, or created by
+/// something else, keeps whatever permissions it already had. That is
+/// accepted rather than silently assumed — this call neither widens nor
+/// narrows a directory that already exists.
+#[cfg(unix)]
+fn create_state_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+}
+
+#[cfg(not(unix))]
+fn create_state_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::DirBuilder::new().recursive(true).create(dir)
 }
 
 #[cfg(test)]

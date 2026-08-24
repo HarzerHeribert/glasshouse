@@ -25,6 +25,15 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir()?;
     let runtime = glasshouse::bootstrap(cli, &cwd)?;
 
+    // `Project::discover` runs before logging is initialized below, and
+    // logging is off by default, so a `tracing::warn!` there can go
+    // completely unseen. An overridden safety refusal is user-facing, not
+    // diagnostics: it always gets a line on stderr, log or no log.
+    if let Some(refusal) = runtime.project().overridden_refusal() {
+        eprintln!("glasshouse: warning: {refusal}");
+        eprintln!("glasshouse: continuing because --allow-unsafe-scope was given");
+    }
+
     let log_config = logging::LogConfig::resolve(
         cli.log_level.as_deref(),
         cli.log_file.as_deref(),
@@ -38,7 +47,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
     tracing::info!(
         version = glasshouse::VERSION,
         project = %runtime.project().id(),
-        root = %runtime.project().root().display(),
+        root = %runtime.project().display_root().display(),
         "glasshouse started"
     );
 
@@ -53,7 +62,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             let project = runtime.project();
             println!("glasshouse {}", glasshouse::VERSION);
             println!("project     {}", project.name());
-            println!("root        {}", project.root().display());
+            println!("root        {}", project.display_root().display());
             println!("project id  {}", project.id());
             println!("scope from  {}", project.source());
             println!("state dir   {}", runtime.state_dir().display());
