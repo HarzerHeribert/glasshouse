@@ -96,35 +96,75 @@ fn shell_command(script: &str, cwd: &std::path::Path) -> TerminalCommand {
     }
 }
 
-/// Remove ANSI CSI sequences (`ESC [ ... final-byte`) from `text`.
+/// Remove ANSI escape sequences from `text`, leaving the child's real output.
 ///
-/// A Control Sequence Introducer is `ESC [` followed by any number of
-/// parameter/intermediate bytes and one final byte in `0x40..=0x7e`. ConPTY
-/// interleaves such sequences (notably its startup `ESC[6n` query) into the
-/// child's real output — potentially directly adjacent to it — so any test
-/// that parses paths out of a pty stream must strip them first or risk a
-/// poisoned match.
-fn strip_csi_sequences(text: &str) -> String {
+/// Two shapes matter here, and leaving either one in poisons a match:
+///
+/// - **CSI** — `ESC [`, then parameter/intermediate bytes, then one final byte
+///   in `0x40..=0x7e`. ConPTY interleaves these constantly, its startup
+///   `ESC[6n` query among them.
+/// - **OSC** — `ESC ]`, then a payload, terminated by `BEL` or by ST
+///   (`ESC \`). `cmd.exe` opens by setting the window title this way, and on
+///   `windows-latest` that sequence arrives glued directly to the front of the
+///   path the child prints:
+///
+///   ```text
+///   ESC]0;C:\Windows\system32\cmd.exeBELC:\Users\...\proj
+///   ```
+///
+///   Stripping only CSI leaves `ESC]0;...cmd.exeBEL` welded to the real path,
+///   so the line names no directory that exists and the match fails — which
+///   looked exactly like a launch that had started in the wrong place, and
+///   was not.
+fn strip_terminal_sequences(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next();
-            // Drop bytes up to and including the sequence's final byte. A
-            // truncated sequence at end-of-input is dropped with the rest.
-            let mut terminated = false;
-            for b in chars.by_ref() {
-                if ('\u{40}'..='\u{7e}').contains(&b) {
-                    terminated = true;
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('[') => {
+                chars.next();
+                // Drop bytes up to and including the sequence's final byte. A
+                // truncated sequence at end-of-input is dropped with the rest.
+                let mut terminated = false;
+                for b in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&b) {
+                        terminated = true;
+                        break;
+                    }
+                }
+                if !terminated {
                     break;
                 }
             }
-            if !terminated {
-                break;
+            Some(']') => {
+                chars.next();
+                let mut terminated = false;
+                while let Some(b) = chars.next() {
+                    if b == '\u{7}' {
+                        terminated = true;
+                        break;
+                    }
+                    // ST, the other legal terminator, is two characters.
+                    if b == '\x1b' {
+                        if chars.peek() == Some(&'\\') {
+                            chars.next();
+                            terminated = true;
+                        }
+                        break;
+                    }
+                }
+                if !terminated {
+                    break;
+                }
             }
-            continue;
+            // A lone ESC introducing neither is left alone rather than
+            // guessed at.
+            _ => out.push(c),
         }
-        out.push(c);
     }
     out
 }
@@ -776,7 +816,7 @@ fn a_fake_installed_harness_launches_inside_the_discovered_project_root() {
         // Parse the *stripped* stream: ConPTY may emit CSI sequences (its
         // `ESC[6n` startup query among them) directly adjacent to the path
         // the child printed, and those bytes would poison a same_file match.
-        let clean = strip_csi_sequences(&session.output());
+        let clean = strip_terminal_sequences(&session.output());
         reported = clean
             .lines()
             .map(str::trim)
@@ -811,28 +851,49 @@ fn a_fake_installed_harness_launches_inside_the_discovered_project_root() {
 }
 
 #[test]
-fn csi_stripper_rescues_a_path_adjacent_to_a_conpty_query() {
+fn stripper_rescues_a_path_welded_to_a_cmd_title_sequence() {
+    // Byte for byte what `windows-latest` actually produced, including the
+    // CSI preamble and the OSC window-title sequence cmd.exe emits on
+    // startup, with the child's real output glued straight onto the end.
+    let raw = "\x1b[6n\x1b[?9001h\x1b[?1004h\x1b[m\x1b]0;C:\\Windows\\system32\\cmd.exe\x07\
+               \x1b[?25hC:\\Users\\runneradmin\\AppData\\Local\\Temp\\.tmp1\\proj\r\n";
+    assert_eq!(
+        strip_terminal_sequences(raw),
+        "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\.tmp1\\proj\r\n"
+    );
+
+    // The other legal OSC terminator is ST (`ESC \`), not BEL.
+    assert_eq!(strip_terminal_sequences("\x1b]0;title\x1b\\after"), "after");
+    // An unterminated OSC swallows the rest rather than emitting garbage.
+    assert_eq!(strip_terminal_sequences("keep\x1b]0;never-ends"), "keep");
+}
+
+#[test]
+fn stripper_rescues_a_path_adjacent_to_a_conpty_query() {
     // Exactly the poisoning case: ConPTY's cursor-position query glued onto
     // the front of the child's own printed path must come out as that path.
-    assert_eq!(strip_csi_sequences("\x1b[6nC:\\proj\r\n"), "C:\\proj\r\n");
     assert_eq!(
-        strip_csi_sequences("\x1b[6n/var/folders/x/proj\n"),
+        strip_terminal_sequences("\x1b[6nC:\\proj\r\n"),
+        "C:\\proj\r\n"
+    );
+    assert_eq!(
+        strip_terminal_sequences("\x1b[6n/var/folders/x/proj\n"),
         "/var/folders/x/proj\n"
     );
 }
 
 #[test]
-fn csi_stripper_removes_ordinary_sequences_and_preserves_text() {
+fn stripper_removes_ordinary_sequences_and_preserves_text() {
     // Colour, cursor movement, and other ordinary CSI sequences disappear;
     // the surrounding text is untouched.
     assert_eq!(
-        strip_csi_sequences("before\x1b[1;32mbright\x1b[0mafter\x1b[2J\ndone"),
+        strip_terminal_sequences("before\x1b[1;32mbright\x1b[0mafter\x1b[2J\ndone"),
         "beforebrightafter\ndone"
     );
     // Text with no escape sequences at all passes through unchanged...
-    assert_eq!(strip_csi_sequences("plain text\n"), "plain text\n");
+    assert_eq!(strip_terminal_sequences("plain text\n"), "plain text\n");
     // ...as does a lone ESC that does not introduce a CSI sequence.
-    assert_eq!(strip_csi_sequences("a\x1bb"), "a\x1bb");
+    assert_eq!(strip_terminal_sequences("a\x1bb"), "a\x1bb");
 }
 
 /// Proves the responder itself works, not just that these tests stopped
@@ -1059,7 +1120,7 @@ fn the_launch_command_opens_the_configured_harness_inside_the_project_root() {
     let mut reported = None;
     while Instant::now() < deadline {
         session.answer_pending_queries();
-        let clean = strip_csi_sequences(&session.output());
+        let clean = strip_terminal_sequences(&session.output());
         if clean.contains(REAL_MARKER) {
             reported = clean
                 .lines()
@@ -1077,7 +1138,7 @@ fn the_launch_command_opens_the_configured_harness_inside_the_project_root() {
 
     let output = session.output();
     assert!(
-        !strip_csi_sequences(&output).contains(DECOY_MARKER),
+        !strip_terminal_sequences(&output).contains(DECOY_MARKER),
         "the user-level decoy executable ran, so the project level did not take \
          precedence.\n--- output ---\n{output}\n--- end ---"
     );
