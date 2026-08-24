@@ -31,6 +31,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use glasshouse::Project;
 use glasshouse::pty::{ProcessSignal, PtyOutput, PtyProcess, TerminalCommand, TerminalSize};
 
 /// Upper bound for any single wait in these tests. Generous enough for a loaded
@@ -80,13 +81,50 @@ const DSR_CURSOR_POSITION_REPLY: &[u8] = b"\x1b[1;1R";
 fn shell_command(script: &str, cwd: &std::path::Path) -> TerminalCommand {
     if cfg!(windows) {
         let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_owned());
+        // `/D` ignores AutoRun registry entries, `/Q` turns command echoing
+        // off: both keep unrelated output out of the child's stream.
         TerminalCommand::new(comspec, cwd)
+            .arg("/D")
+            .arg("/Q")
             .arg("/V:ON")
             .arg("/C")
             .arg(script)
     } else {
         TerminalCommand::new("/bin/sh", cwd).arg("-c").arg(script)
     }
+}
+
+/// Remove ANSI CSI sequences (`ESC [ ... final-byte`) from `text`.
+///
+/// A Control Sequence Introducer is `ESC [` followed by any number of
+/// parameter/intermediate bytes and one final byte in `0x40..=0x7e`. ConPTY
+/// interleaves such sequences (notably its startup `ESC[6n` query) into the
+/// child's real output — potentially directly adjacent to it — so any test
+/// that parses paths out of a pty stream must strip them first or risk a
+/// poisoned match.
+fn strip_csi_sequences(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            // Drop bytes up to and including the sequence's final byte. A
+            // truncated sequence at end-of-input is dropped with the rest.
+            let mut terminated = false;
+            for b in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&b) {
+                    terminated = true;
+                    break;
+                }
+            }
+            if !terminated {
+                break;
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Streaming counter for occurrences of a fixed byte pattern across a
@@ -291,10 +329,9 @@ impl Session {
         &mut self.process
     }
 
-    /// Only used by the Unix-only responder self-test below; gated the same
-    /// way so it is not dead code on platforms where that test does not
-    /// exist.
-    #[cfg(unix)]
+    /// The output captured so far. Cross-platform by design: any test that
+    /// needs to inspect what the child actually printed uses this, not just
+    /// Unix-only ones.
     fn output(&self) -> String {
         self.collector.text()
     }
@@ -630,6 +667,111 @@ fn the_child_starts_in_the_requested_working_directory() {
         .into_owned();
     session.expect(&expected);
     session.wait_for_exit();
+}
+
+/// The harness seam end to end: a real project is created and discovered, the
+/// platform shell is built through [`TerminalCommand::for_harness`] (the
+/// constructor future harness adapters must use), and the child's own report
+/// of its working directory must denote exactly the project root — compared
+/// with `platform::paths::same_file`, i.e. by asking the filesystem, not by
+/// weak basename or string matching.
+#[test]
+fn a_harness_command_runs_inside_the_discovered_project_root() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+
+    let project = Project::discover(&project_dir, None, false).expect("discover project");
+
+    // Built through the harness seam: no explicit cwd anywhere in this call.
+    let command = if cfg!(windows) {
+        let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_owned());
+        // `/D` ignores AutoRun registry entries, `/Q` turns command echoing
+        // off, matching the `shell_command` helper above.
+        TerminalCommand::for_harness(comspec, &project)
+            .arg("/D")
+            .arg("/Q")
+            .arg("/C")
+            .arg("cd")
+    } else {
+        TerminalCommand::for_harness("/bin/sh", &project)
+            .arg("-c")
+            .arg("/bin/pwd -P")
+    };
+
+    let mut session = Session::spawn(command);
+
+    // Poll for the reported path *before* waiting for exit, the way
+    // `Session::expect` polls: reading the collector only once after exit can
+    // race its background thread draining the final PTY bytes (and on Windows
+    // the PTY may not even be closed by then).
+    let deadline = Instant::now() + TIMEOUT;
+    let mut reported = None;
+    while Instant::now() < deadline {
+        session.answer_pending_queries();
+        // Parse the *stripped* stream: ConPTY may emit CSI sequences (its
+        // `ESC[6n` startup query among them) directly adjacent to the path
+        // the child printed, and those bytes would poison a same_file match.
+        let clean = strip_csi_sequences(&session.output());
+        reported = clean
+            .lines()
+            .map(str::trim)
+            .find(|line| {
+                !line.is_empty()
+                    && glasshouse::platform::paths::same_file(
+                        std::path::Path::new(line),
+                        project.root(),
+                    )
+            })
+            .map(str::to_owned);
+        if reported.is_some() {
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+    let Some(reported) = reported else {
+        panic!(
+            "the child never reported a directory naming the project root.\n\
+             --- raw output ---\n{}\n--- end ---",
+            session.output()
+        );
+    };
+
+    // The path has been observed; now the process is allowed to finish.
+    session.wait_for_exit();
+
+    // Belt and braces: the line that matched must still resolve to the same
+    // location from this process right now.
+    assert!(
+        glasshouse::platform::paths::same_file(std::path::Path::new(&reported), project.root()),
+        "reported cwd `{reported}` does not denote `{}`",
+        project.root().display()
+    );
+}
+
+#[test]
+fn csi_stripper_rescues_a_path_adjacent_to_a_conpty_query() {
+    // Exactly the poisoning case: ConPTY's cursor-position query glued onto
+    // the front of the child's own printed path must come out as that path.
+    assert_eq!(strip_csi_sequences("\x1b[6nC:\\proj\r\n"), "C:\\proj\r\n");
+    assert_eq!(
+        strip_csi_sequences("\x1b[6n/var/folders/x/proj\n"),
+        "/var/folders/x/proj\n"
+    );
+}
+
+#[test]
+fn csi_stripper_removes_ordinary_sequences_and_preserves_text() {
+    // Colour, cursor movement, and other ordinary CSI sequences disappear;
+    // the surrounding text is untouched.
+    assert_eq!(
+        strip_csi_sequences("before\x1b[1;32mbright\x1b[0mafter\x1b[2J\ndone"),
+        "beforebrightafter\ndone"
+    );
+    // Text with no escape sequences at all passes through unchanged...
+    assert_eq!(strip_csi_sequences("plain text\n"), "plain text\n");
+    // ...as does a lone ESC that does not introduce a CSI sequence.
+    assert_eq!(strip_csi_sequences("a\x1bb"), "a\x1bb");
 }
 
 /// Proves the responder itself works, not just that these tests stopped

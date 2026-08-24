@@ -18,6 +18,22 @@
 //! trait for one implementation would be abstraction without a second
 //! implementation to justify it.
 //!
+//! # Seam for future harness adapters
+//!
+//! [`TerminalCommand::for_harness`] is the project-bound seam for starting
+//! harness sessions: its working directory is derived there from the active
+//! [`Project`] alone — specifically via [`Project::display_root`], which
+//! denotes the canonical project root but is stripped of Windows' verbatim
+//! `\\?\` prefix so a process can actually be started there — and nothing on
+//! that path offers a way to set or change the directory. Future harness
+//! adapters are required to route through this constructor.
+//!
+//! This is a convention enforced *within the seam*, not universal compiler
+//! enforcement: [`TerminalCommand::new`] and [`PtyProcess::spawn`] remain
+//! public and accept fully generic commands with any working directory, so
+//! the project-root guarantee holds exactly as far as code actually goes
+//! through `for_harness`.
+//!
 //! # Constraint for whatever renders this process's output
 //!
 //! On Windows, ConPTY emits a Device Status Report query (`ESC[6n`, "where is
@@ -53,6 +69,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+
+use crate::Project;
 
 pub use process::{ProcessSignal, SignalError};
 
@@ -129,6 +147,25 @@ impl TerminalCommand {
             env_removed: Vec::new(),
             size: TerminalSize::default(),
         }
+    }
+
+    /// Describe a command for a harness process, tied to the active project.
+    ///
+    /// This is the project-bound seam future harness adapters are required to
+    /// route through. The working directory is derived here from the project
+    /// itself and nothing on this path exposes a way to set or mutate it; an
+    /// adapter can only escape that rule by leaving the seam for the generic
+    /// [`TerminalCommand::new`], which this module keeps public for
+    /// genuinely generic PTY/platform commands.
+    ///
+    /// The directory is [`Project::display_root`]: it denotes exactly the
+    /// canonical project root that access control and identity are built on,
+    /// but with Windows' verbatim `\\?\` prefix stripped, because
+    /// `CreateProcessW`'s `lpCurrentDirectory` does not reliably accept the
+    /// verbatim form (and `cmd.exe` refuses it outright). On every other
+    /// platform it *is* [`Project::root`].
+    pub fn for_harness(program: impl Into<PathBuf>, project: &Project) -> Self {
+        Self::new(program, project.display_root())
     }
 
     pub fn arg(mut self, arg: impl Into<OsString>) -> Self {
@@ -626,12 +663,29 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::paths as platform_paths;
 
     #[test]
     fn terminal_size_never_has_a_zero_dimension() {
         let size = TerminalSize::new(0, 0);
         assert_eq!(size.rows, 1);
         assert_eq!(size.cols, 1);
+    }
+
+    #[test]
+    fn for_harness_cwd_denotes_the_project_root_and_uses_display_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+
+        let project = Project::discover(&root, None, false).unwrap();
+        let command = TerminalCommand::for_harness("some-harness", &project);
+
+        // Exactly the display-root form (process-safe on Windows), ...
+        assert_eq!(command.cwd(), project.display_root());
+        // ... which denotes the very same filesystem location as the
+        // canonical root identity is built on.
+        assert!(platform_paths::same_file(command.cwd(), project.root()));
     }
 
     #[test]
