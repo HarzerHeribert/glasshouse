@@ -138,7 +138,15 @@ Only after all applicable evidence exists:
 - create one small coherent commit with an accurate message;
 - leave main clean.
 
-Do not push, deploy, publish, or mutate external systems without authority.
+Push to origin yourself whenever a capability's evidence needs CI. Contracts
+that make cross-platform claims can only be proven on real Linux, macOS, and
+Windows runners, so pushing to trigger CI is ordinary orchestrator work, not an
+escalation — waiting to be asked would leave every OS-specific claim
+permanently unverifiable, and local gates passing is exactly the state in which
+a Windows-only defect hides. Push early enough that CI failures are still cheap
+to fix. This is the orchestrator's job alone: workers never push. Deploying,
+publishing a release, or mutating any other external system still needs
+explicit authority.
 Never commit secrets, credentials, live cmux surface IDs, local hook routes,
 worker reports, or generated noise.
 

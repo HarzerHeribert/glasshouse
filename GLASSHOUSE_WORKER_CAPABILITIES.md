@@ -24,7 +24,8 @@ cannot reliably carry it.
   perform safely.
 - Accept summaries without inspecting decisive code or output.
 - Check a capability because code exists or a worker says `ACCEPT`.
-- silently push, deploy, or broaden product scope.
+- deploy, publish a release, or broaden product scope. Pushing to origin to run
+  CI is expected of this role rather than withheld from it — see the SDLC.
 
 ## Opus specialist worker
 

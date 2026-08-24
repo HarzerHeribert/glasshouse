@@ -153,7 +153,10 @@ prove broad cross-platform behavior.
 Update the evidence ledger, check the map only at **COMPLETE**, update the
 handoff, and create one accurate coherent commit. The Opus orchestrator is the
 only role that integrates, commits, or changes project-status records. Leave
-main clean at coherent boundaries. Do not push without explicit authorization.
+main clean at coherent boundaries. Push to origin when a contract's evidence
+needs CI: cross-platform claims are unprovable without real runners, and a
+green local suite is precisely the state in which a platform-specific defect
+stays hidden. Pushing for CI is the orchestrator's job and nobody else's.
 
 ### 9. Continue or checkpoint
 

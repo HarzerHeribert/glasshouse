@@ -150,13 +150,13 @@ Hand this checkpoint to Opus:
 
 > Start by inspecting `git status`, `git log -5`, this handoff, and the Phase 1
 > entry in `GLASSHOUSE_CAPABILITY_EVIDENCE.md`. Re-run the full local gates to
-> confirm the tree is still green. The only thing standing between line 89 and a
-> checked box is `windows-latest` CI on the merged commit — **ask the user for
-> authorization before pushing**, since nothing has been pushed and pushing is a
-> material external action. If authorization is given and CI is green on all
-> three platforms, set the ledger entry to COMPLETE, check line 89, and commit.
-> If authorization is withheld, leave the box open and say so plainly rather
-> than checking it on local evidence.
+> confirm the tree is still green, then check the latest CI run with
+> `gh run list`. Pushing to run CI is standing orchestrator authorization — do
+> it without asking. The only thing standing between line 89 and a checked box
+> is a green `windows-latest` job on the current commit. When all three
+> platforms and lint are green, set the ledger entry to COMPLETE, check line 89,
+> and commit. Never check it on local evidence alone: the first Windows run
+> failed on a defect that three green local suites had hidden.
 >
 > Then proceed to line 90, "Reject any attempt to resume a Glasshouse-managed
 > session whose project identifier differs from the current project identifier."

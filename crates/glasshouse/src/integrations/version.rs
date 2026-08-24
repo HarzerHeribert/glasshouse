@@ -483,6 +483,28 @@ mod tests {
         );
     }
 
+    /// Name of the file the probe below looks for, placed only in the project
+    /// root. Deliberately not a path: the probe checks for it *relatively*,
+    /// which is what makes finding it equivalent to "my working directory is
+    /// that project root".
+    const CWD_MARKER: &str = "glasshouse-probe-cwd-marker";
+
+    /// A probe that reports a version only when it can see [`CWD_MARKER`] in
+    /// its own working directory.
+    ///
+    /// An earlier version compared path *strings* — the child's `pwd` against
+    /// its own `$0/..`. That passed on Unix and failed on `windows-latest`,
+    /// because the two sides are not spelled the same way there: the script
+    /// path arrives canonicalized (potentially with a verbatim `\\?\` prefix)
+    /// while `%CD%` is the plain form, and a GitHub Windows runner's temporary
+    /// directory can additionally appear under an 8.3 short name
+    /// (`RUNNER~1`). Both spellings denote the same directory, so the
+    /// comparison was wrong even though the behaviour under test was right.
+    ///
+    /// Looking for a relative filename asks the filesystem instead of
+    /// comparing text, so it cannot be fooled by either spelling — and it is a
+    /// stronger statement of the property anyway: the child really is *in*
+    /// that directory, not merely naming it.
     #[cfg(unix)]
     fn install_cwd_checking_probe(bin_dir: &Path) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -490,7 +512,7 @@ mod tests {
         let path = bin_dir.join("cwd-version-probe");
         std::fs::write(
             &path,
-            "#!/bin/sh\nexpected=$(CDPATH= cd \"$(dirname \"$0\")/..\" && pwd -P)\n[ \"$(pwd -P)\" = \"$expected\" ] || exit 23\necho 9.8.7\n",
+            format!("#!/bin/sh\n[ -e ./{CWD_MARKER} ] || exit 23\necho 9.8.7\n"),
         )
         .unwrap();
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
@@ -499,12 +521,14 @@ mod tests {
         path
     }
 
+    /// Windows counterpart of the probe above; see its doc comment for why
+    /// this checks for a file rather than comparing paths.
     #[cfg(windows)]
     fn install_cwd_checking_probe(bin_dir: &Path) -> std::path::PathBuf {
         let path = bin_dir.join("cwd-version-probe.cmd");
         std::fs::write(
             &path,
-            "@echo off\r\nfor %%I in (\"%~dp0..\") do set \"EXPECTED=%%~fI\"\r\nif /I not \"%CD%\"==\"%EXPECTED%\" exit /b 23\r\necho 9.8.7\r\n",
+            format!("@echo off\r\nif not exist \"{CWD_MARKER}\" exit /b 23\r\necho 9.8.7\r\n"),
         )
         .unwrap();
         path
@@ -518,12 +542,38 @@ mod tests {
         let path = install_cwd_checking_probe(&bin_dir);
         let exe = exec::resolve_explicit(&path).unwrap();
 
+        // The marker goes in the project root and nowhere else, so the probe
+        // can only find it by actually having been started there. Note it is
+        // *not* placed in `bin_dir`, where the probe executable itself lives:
+        // a child that inherited the caller's directory, or that ran beside
+        // its own binary, finds nothing and exits 23.
+        std::fs::write(project.display_root().join(CWD_MARKER), b"").unwrap();
+
         let version = probe_version(&exe, "--version", &project, DEFAULT_PROBE_TIMEOUT)
             .unwrap()
             .expect("probe prints a version only when its cwd is the project root");
         assert_eq!(
             (version.major(), version.minor(), version.patch()),
             (9, 8, 7)
+        );
+    }
+
+    /// The other half of the claim: with no marker to find, the probe reports
+    /// nothing. Without this, the test above could pass for a probe that
+    /// printed a version unconditionally.
+    #[test]
+    fn the_cwd_checking_probe_reports_nothing_when_the_marker_is_absent() {
+        let (guard, project) = test_project();
+        let bin_dir = guard.path().join("bin");
+        std::fs::create_dir(&bin_dir).unwrap();
+        let path = install_cwd_checking_probe(&bin_dir);
+        let exe = exec::resolve_explicit(&path).unwrap();
+
+        // Deliberately no marker written.
+        let probed = probe_version(&exe, "--version", &project, DEFAULT_PROBE_TIMEOUT).unwrap();
+        assert!(
+            probed.is_none(),
+            "the probe must not report a version without the marker: {probed:?}"
         );
     }
 }
