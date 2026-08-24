@@ -215,8 +215,8 @@ fn render_summary(state: &WizardState, frame: &mut Frame, area: Rect) {
     lines.push(Line::from(""));
     lines.push(Line::from(
         "Provider, gateway, and routing-model configuration are not part of this \
-         setup yet; Glasshouse works fully with the harnesses enabled above and no \
-         API key is required to finish.",
+         setup yet. No Glasshouse API key is required to finish; enabled native \
+         harnesses keep using their existing authentication.",
     ));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }

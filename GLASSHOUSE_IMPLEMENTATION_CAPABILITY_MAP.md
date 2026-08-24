@@ -95,50 +95,50 @@ Phase 1 — Project-root detection and hard isolation
 
 Phase 2A — Cross-platform runtime
 
-☐ Support macOS as a first-class Glasshouse runtime.
+☑ Support macOS as a first-class Glasshouse runtime.
 ☑ Support Linux as a first-class Glasshouse runtime.
 ☐ Support native Windows as a first-class Glasshouse runtime where the selected harness is available.
 ☑ Treat WSL as a Linux runtime and do not silently mix Windows and WSL process namespaces.
 ☑ Hide platform-specific PTY behavior behind a common terminal-process interface.
 ☑ Use Unix PTY primitives on macOS and Linux through the selected PTY abstraction.
-☐ Use Windows ConPTY through the selected PTY abstraction on native Windows.
-☐ Hide platform-specific signal and process-termination behavior behind a common process-control interface.
-☐ Resolve executable names correctly across Unix executables, Windows .exe, .cmd, and .bat launchers.
+☑ Use Windows ConPTY through the selected PTY abstraction on native Windows.
+☑ Hide platform-specific signal and process-termination behavior behind a common process-control interface.
+☑ Resolve executable names correctly across Unix executables, Windows .exe, .cmd, and .bat launchers.
 ☑ Use the operating system’s conventional per-user application-data location for Glasshouse state.
 ☑ Allow the application-data location to be overridden explicitly for portable installations and tests.
 ☑ Keep project identifiers stable for a canonical project path within the same operating-system environment.
 ☑ Normalize path comparisons in a platform-correct way without weakening project-boundary checks.
 ☑ Add CI builds for macOS, Linux, and Windows before declaring cross-platform support stable.
-☐ Add platform-specific PTY smoke tests that start a simple interactive child process and verify input, output, resize, and exit handling.
+☑ Add platform-specific PTY smoke tests that start a simple interactive child process and verify input, output, resize, and exit handling.
 ☐ Make unsupported platform/harness combinations fail with a clear diagnostic rather than a partial broken session.
 
 Phase 2B — Agent and tool auto-detection
 
-☐ Add a non-destructive discovery pass that searches the current PATH for supported harness executables.
-☐ Detect Claude Code when a usable claude executable is present.
-☐ Detect Codex when a usable codex executable is present.
+☑ Add a non-destructive discovery pass that searches the current PATH for supported harness executables.
+☑ Detect Claude Code when a usable claude executable is present.
+☑ Detect Codex when a usable codex executable is present.
 ☐ Detect Antigravity when a supported Antigravity CLI executable is present.
-☐ Detect OpenCode when a usable opencode executable is present.
+☑ Detect OpenCode when a usable opencode executable is present.
 ☐ Detect cmux when a usable cmux executable or supported cmux control environment is present.
 ☐ Detect Ollama when a usable ollama executable or configured local endpoint is present.
-☐ Detect common llama.cpp server executables when they are available locally.
-☐ Read harness versions using non-interactive version commands when supported.
-☐ Never trigger an interactive login merely to determine whether a harness exists.
-☐ Never print discovered API-key values during detection.
-☐ Detect the presence of relevant provider environment variables without logging their secret contents.
-☐ Detect known provider configuration files only when doing so does not require importing or modifying them.
+☑ Detect common llama.cpp server executables when they are available locally.
+☑ Read harness versions using non-interactive version commands when supported.
+☑ Never trigger an interactive login merely to determine whether a harness exists.
+☑ Never print discovered API-key values during detection.
+☑ Detect the presence of relevant provider environment variables without logging their secret contents.
+☑ Detect known provider configuration files only when doing so does not require importing or modifying them.
 ☐ Mark every detected integration as available, configured, unconfigured, unsupported-version, or unknown.
-☐ Keep discovery results advisory so the user can manually add a harness that auto-detection missed.
-☐ Add glasshouse doctor output that reports discovered harnesses, versions, optional integrations, and actionable setup problems.
+☑ Keep discovery results advisory so the user can manually add a harness that auto-detection missed.
+☑ Add glasshouse doctor output that reports discovered harnesses, versions, optional integrations, and actionable setup problems.
 
 Phase 2C — First-run onboarding
 
-☐ Detect whether the current user has completed Glasshouse onboarding before opening the normal TUI for the first time.
-☐ Show a concise first-run wizard when onboarding has not been completed.
-☐ Show all automatically detected harnesses in the first-run wizard.
-☐ Allow the user to enable or ignore each detected harness.
-☐ Allow the user to add the path to a harness executable that was not detected automatically.
-☐ Explain that Glasshouse launches the user’s existing harness binaries rather than installing replacement copies.
+☑ Detect whether the current user has completed Glasshouse onboarding before opening the normal TUI for the first time.
+☑ Show a concise first-run wizard when onboarding has not been completed.
+☑ Show all automatically detected harnesses in the first-run wizard.
+☑ Allow the user to enable or ignore each detected harness.
+☑ Allow the user to add the path to a harness executable that was not detected automatically.
+☑ Explain that Glasshouse launches the user’s existing harness binaries rather than installing replacement copies.
 ☐ Offer provider and gateway configuration as an optional first-run step.
 ☐ Offer routing-model configuration as an optional first-run step after providers have been detected or configured.
 ☐ Offer an Automatic routing-model choice that selects the cheapest sufficiently fast configured resource.
@@ -148,9 +148,9 @@ Phase 2C — First-run onboarding
 ☐ Provide a clear Do later choice that completes onboarding without requiring any API keys.
 ☐ Allow Glasshouse to be fully useful with only native subscription-backed harnesses configured.
 ☐ Offer cmux integration only when cmux is detected or the user explicitly asks to configure it.
-☐ Show the project-isolation model during onboarding in one concise explanation.
-☐ Avoid requiring an account, cloud login, or Glasshouse-hosted service during onboarding.
-☐ Persist onboarding choices in user-level Glasshouse configuration.
+☑ Show the project-isolation model during onboarding in one concise explanation.
+☑ Avoid requiring an account, cloud login, or Glasshouse-hosted service during onboarding.
+☑ Persist onboarding choices in user-level Glasshouse configuration.
 ☐ Allow the onboarding wizard to be reopened later from settings.
 
 Phase 2D — Settings foundation
