@@ -1573,6 +1573,75 @@ Maybe I — Evaluation criteria for file coordination
 ☐ Measure how often users override warnings and whether those overrides later require reconciliation.
 ☐ Keep the feature experimental until conflict prevention provides a measurable benefit over ordinary Git-based reconciliation.
 
+Maybe J — Experimental agent diagnostic feedback bus
+
+Intent and scope
+
+☐ Treat this as an explicitly post-MVP experiment whose quality impact and latency cost must be measured before it can influence default behavior.
+☐ Use deterministic repository diagnostics to catch newly introduced mechanical errors before they survive until a CI run.
+☐ Target failures such as Ruff or other lint violations, syntax errors, unresolved imports, unknown identifiers, type errors, formatter failures, and project-specific deterministic policy violations.
+☐ Return concise structured diagnostics to the responsible agent while the edit is still recent enough to repair cheaply.
+☐ Treat visual squiggles as an optional human-facing projection of the same diagnostic records rather than as the canonical capability.
+☐ Keep the agent-facing diagnostic protocol useful in a terminal-only workflow even when Glasshouse has no source-code editor view.
+☐ Do not present diagnostics as proof that behavior, architecture, or requirements are correct merely because code compiles and lint passes.
+☐ Do not replace repository CI, task-boundary validation, tests, or human review.
+☐ Do not make this capability part of the MVP or a V1 completion requirement.
+
+Hook placement and validation tiers
+
+☐ Use PreToolUse only for checks that can be decided cheaply from the proposed operation, such as protected or generated files, project-scope escape, known file claims, obvious secret material, forbidden paths, or unexpectedly large edits.
+☐ Avoid running ordinary compilers or linters in PreToolUse because the proposed file state does not yet exist unless an adapter can safely construct a temporary overlay.
+☐ Use PostToolUse, a structured file-change event, or the closest reliable harness-specific equivalent for syntax, lint, type, import, and language-server diagnostics after an edit succeeds.
+☐ Allow PostToolUse diagnostics to be returned as concise model-visible feedback so the same agent can repair newly introduced problems.
+☐ Run cheap deterministic checks synchronously only when they remain inside a strict configurable latency budget.
+☐ Debounce and coalesce rapid successive edits before running semantic or project-aware diagnostics.
+☐ Run slower lint, typecheck, compiler, and test commands asynchronously when the result can safely arrive at the next agent decision point.
+☐ Reserve full-project validation and relevant test suites for semantic task boundaries, stop checks, explicit user requests, or pre-commit and pre-push gates.
+☐ Prefer persistent project-scoped language servers or validator processes when they materially reduce repeated startup cost.
+☐ Do not introduce a global validator daemon or allow diagnostic state to cross project boundaries.
+☐ Allow adapters for tools such as Ruff, ESLint, TypeScript language services, rust-analyzer, cargo check, and repository-defined validation commands without making any one tool mandatory.
+
+Diagnostic identity and delivery
+
+☐ Represent a diagnostic with project-relative file, line, column, severity, stable rule or error code when available, message, producing tool, observation time, and file revision or content hash.
+☐ Associate diagnostics with the Glasshouse session and edit event that caused their observation when attribution is reliable.
+☐ Distinguish diagnostics introduced by the current edit from pre-existing repository debt.
+☐ Prefer reporting newly introduced errors and relevant warnings instead of dumping the repository’s complete diagnostic backlog into agent context.
+☐ Discard, replace, or visibly mark diagnostics stale when their recorded file revision no longer matches the current file.
+☐ Prevent late asynchronous results from being attributed to a newer edit or a different worker.
+☐ Deduplicate repeated unchanged diagnostics across consecutive edits.
+☐ Keep model-visible feedback short and provide a separate inspectable view for full details.
+☐ Show optional squiggles only in a future Glasshouse diff or code view that can map diagnostics to exact source positions.
+☐ Fall back to a compact terminal list containing file, location, rule, and message when no visual code surface exists.
+☐ Never auto-apply a linter or compiler suggestion that changes source behavior without an explicit agent action or user-approved policy.
+
+Safety, gating, and latency targets
+
+☐ Keep diagnostic feedback advisory and non-blocking by default during the experiment.
+☐ Allow high-confidence deterministic errors to request immediate agent repair without silently undoing the completed edit.
+☐ Require explicit opt-in before a diagnostic class can block an edit, stop task completion, or prevent a commit or push.
+☐ Keep permission and security policy checks separate from ordinary code-quality warnings.
+☐ Target a warm PreToolUse policy-check overhead below 5 ms at p95 on representative projects.
+☐ Target synchronous per-edit syntax or incremental diagnostic overhead below 100 ms at p95 on representative projects.
+☐ Record cold-start cost separately from steady-state cost for language servers and validation tools.
+☐ Disable or demote a validator automatically for the current session when repeated timeouts or crashes make it disruptive, while surfacing the degradation.
+☐ Make per-validator timeout, debounce interval, severity threshold, and blocking policy configurable.
+☐ Ensure one slow validator cannot stall unrelated sessions or the whole Glasshouse instance.
+
+Evaluation criteria before promotion
+
+☐ Measure how many newly introduced lint, syntax, import, identifier, and type failures are caught before CI.
+☐ Measure the reduction in CI failures attributable to deterministic issues that the feedback bus was capable of detecting.
+☐ Measure how often an agent repairs a reported diagnostic successfully on its next edit.
+☐ Measure additional tool calls, tokens, and wall-clock time caused by diagnostic feedback.
+☐ Measure synchronous hook overhead and end-to-end turn overhead separately at p50, p95, and p99.
+☐ Measure cold-start overhead and steady-state overhead separately.
+☐ Measure false positives, stale-result delivery, incorrect edit attribution, duplicate feedback, and diagnostics ignored by agents.
+☐ Measure how often inherited repository debt is incorrectly presented as a regression caused by the active worker.
+☐ Measure whether immediate feedback improves task success rather than merely increasing lint-clean intermediate states.
+☐ Compare advisory-only, agent-repair, and blocking modes before enabling any gate by default.
+☐ Promote the capability beyond experimental status only if it measurably reduces avoidable failures without materially increasing turn latency, context noise, or agent repair loops.
+
 Explicit Non-Goals for V1
 
 ☐ Do not build a new coding model.
