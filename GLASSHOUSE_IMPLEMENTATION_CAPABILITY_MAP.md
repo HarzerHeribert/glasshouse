@@ -66,49 +66,49 @@ Implementation Order
 
 Phase 0 — Repository and executable foundation
 
-☐ Create Glasshouse as a Rust workspace that builds a single glasshouse executable.
-☐ Keep the initial dependency set limited to libraries required for async execution, terminal UI, PTYs, serialization, SQLite, and basic process control.
-☐ Make glasshouse run without requiring a global daemon, background service, Node installation, or Python environment.
-☐ Make all runtime paths configurable so the binary can be used from a user-owned tools directory without a package-manager installation.
-☐ Add a glasshouse --version command that prints the binary version.
-☐ Add a glasshouse --help command that documents the initial CLI surface.
-☐ Add structured application logging that can be enabled for debugging without polluting the interactive TUI.
-☐ Add a clean shutdown path that restores the terminal state after normal exit, panic, or interrupt.
+☑ Create Glasshouse as a Rust workspace that builds a single glasshouse executable.
+☑ Keep the initial dependency set limited to libraries required for async execution, terminal UI, PTYs, serialization, SQLite, and basic process control.
+☑ Make glasshouse run without requiring a global daemon, background service, Node installation, or Python environment.
+☑ Make all runtime paths configurable so the binary can be used from a user-owned tools directory without a package-manager installation.
+☑ Add a glasshouse --version command that prints the binary version.
+☑ Add a glasshouse --help command that documents the initial CLI surface.
+☑ Add structured application logging that can be enabled for debugging without polluting the interactive TUI.
+☑ Add a clean shutdown path that restores the terminal state after normal exit, panic, or interrupt.
 
 Phase 1 — Project-root detection and hard isolation
 
-☐ Resolve the current project root from the current working directory by using the containing Git repository when one exists.
-☐ Add glasshouse --scope <path> to explicitly select a project root when Git-based discovery is not appropriate.
-☐ Canonicalize the selected project root before using it for access-control decisions.
-☐ Refuse / as an implicit project root unless the user explicitly overrides the safety check.
-☐ Refuse the user home directory as an implicit project root unless the user explicitly overrides the safety check.
-☐ Refuse obvious multi-project container directories such as a directory containing multiple Git repositories unless the user explicitly selects a narrower scope.
-☐ Derive a stable project identifier from the canonical project-root path.
-☐ Store each project’s Glasshouse state in a physically separate project-specific state directory.
+☑ Resolve the current project root from the current working directory by using the containing Git repository when one exists.
+☑ Add glasshouse --scope <path> to explicitly select a project root when Git-based discovery is not appropriate.
+☑ Canonicalize the selected project root before using it for access-control decisions.
+☑ Refuse / as an implicit project root unless the user explicitly overrides the safety check.
+☑ Refuse the user home directory as an implicit project root unless the user explicitly overrides the safety check.
+☑ Refuse obvious multi-project container directories such as a directory containing multiple Git repositories unless the user explicitly selects a narrower scope.
+☑ Derive a stable project identifier from the canonical project-root path.
+☑ Store each project’s Glasshouse state in a physically separate project-specific state directory.
 ☐ Store each project’s memory in its own SQLite database instead of sharing one global memory database.
 ☐ Ensure every spawned harness process starts with its working directory set to the current project root.
 ☐ Reject any attempt to resume a Glasshouse-managed session whose project identifier differs from the current project identifier.
-☐ Add a canonical-path guard that rejects file paths resolving outside the current project root.
-☐ Apply the canonical-path guard after resolving symlinks so a project symlink cannot escape the project boundary.
+☑ Add a canonical-path guard that rejects file paths resolving outside the current project root.
+☑ Apply the canonical-path guard after resolving symlinks so a project symlink cannot escape the project boundary.
 ☐ Keep cross-project memory retrieval disabled by design rather than relying only on query filters.
 ☐ Display the active canonical project root prominently in the TUI.
 
 Phase 2A — Cross-platform runtime
 
 ☐ Support macOS as a first-class Glasshouse runtime.
-☐ Support Linux as a first-class Glasshouse runtime.
+☑ Support Linux as a first-class Glasshouse runtime.
 ☐ Support native Windows as a first-class Glasshouse runtime where the selected harness is available.
-☐ Treat WSL as a Linux runtime and do not silently mix Windows and WSL process namespaces.
-☐ Hide platform-specific PTY behavior behind a common terminal-process interface.
-☐ Use Unix PTY primitives on macOS and Linux through the selected PTY abstraction.
+☑ Treat WSL as a Linux runtime and do not silently mix Windows and WSL process namespaces.
+☑ Hide platform-specific PTY behavior behind a common terminal-process interface.
+☑ Use Unix PTY primitives on macOS and Linux through the selected PTY abstraction.
 ☐ Use Windows ConPTY through the selected PTY abstraction on native Windows.
 ☐ Hide platform-specific signal and process-termination behavior behind a common process-control interface.
 ☐ Resolve executable names correctly across Unix executables, Windows .exe, .cmd, and .bat launchers.
-☐ Use the operating system’s conventional per-user application-data location for Glasshouse state.
-☐ Allow the application-data location to be overridden explicitly for portable installations and tests.
-☐ Keep project identifiers stable for a canonical project path within the same operating-system environment.
-☐ Normalize path comparisons in a platform-correct way without weakening project-boundary checks.
-☐ Add CI builds for macOS, Linux, and Windows before declaring cross-platform support stable.
+☑ Use the operating system’s conventional per-user application-data location for Glasshouse state.
+☑ Allow the application-data location to be overridden explicitly for portable installations and tests.
+☑ Keep project identifiers stable for a canonical project path within the same operating-system environment.
+☑ Normalize path comparisons in a platform-correct way without weakening project-boundary checks.
+☑ Add CI builds for macOS, Linux, and Windows before declaring cross-platform support stable.
 ☐ Add platform-specific PTY smoke tests that start a simple interactive child process and verify input, output, resize, and exit handling.
 ☐ Make unsupported platform/harness combinations fail with a clear diagnostic rather than a partial broken session.
 
