@@ -362,6 +362,18 @@ mod tests {
             "unexpected translated argv: {:?}",
             command.args_slice()
         );
+        // The script path must reach cmd.exe in a form it can open. On
+        // Windows the resolved path is canonical and therefore verbatim, and
+        // cmd.exe rejects that outright — the failure this pins was a real
+        // `windows-latest` red, not a hypothetical. Off Windows there is no
+        // prefix to strip and the assertion simply holds.
+        assert!(
+            !command.args_slice()[2]
+                .to_string_lossy()
+                .starts_with(r"\\?\"),
+            "cmd.exe cannot open a verbatim path: {:?}",
+            command.args_slice()[2]
+        );
         assert_eq!(command.args_slice()[3], OsString::from("--flag=value"));
     }
 

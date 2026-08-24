@@ -110,7 +110,21 @@ impl ResolvedExecutable {
                 args.into_iter().map(Into::into).collect(),
             )),
             LaunchKind::WindowsScript => {
-                validate_cmd_argument(self.path.as_os_str(), ArgumentPosition::ScriptPath)?;
+                // `cmd.exe` cannot open a verbatim (`\\?\`) path: it prints
+                // "The system cannot find the path specified" and exits 1.
+                // Resolving an executable canonicalizes it, and on Windows
+                // canonicalization produces exactly that form, so the path
+                // has to be converted back before it becomes a `cmd.exe`
+                // argument. Without this, no harness installed as a `.cmd`
+                // shim can start at all -- which is how npm installs most of
+                // them.
+                //
+                // This mirrors what `Project::display_root` already does for
+                // the working directory. Both are the same rule: a verbatim
+                // path is fine as an identity, and unusable at the boundary
+                // where a process is actually started.
+                let script = plain_script_path(&self.path);
+                validate_cmd_argument(script.as_os_str(), ArgumentPosition::ScriptPath)?;
                 let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
                 for (index, arg) in args.iter().enumerate() {
                     validate_cmd_argument(arg, ArgumentPosition::Argument(index))?;
@@ -129,12 +143,38 @@ impl ResolvedExecutable {
                 // script path and arguments as separate argv entries
                 // instead, so `/S` would just be cargo-culted.
                 full_args.push(OsString::from("/C"));
-                full_args.push(self.path.clone().into_os_string());
+                full_args.push(script.into_os_string());
                 full_args.extend(args);
                 Ok((interpreter, full_args))
             }
         }
     }
+}
+
+/// Convert a resolved path into the form `cmd.exe` can actually open.
+///
+/// `\\?\C:\dir\x.cmd` becomes `C:\dir\x.cmd`, and the UNC spelling
+/// `\\?\UNC\server\share\x.cmd` becomes `\\server\share\x.cmd`. Anything
+/// else is returned unchanged.
+///
+/// Deliberately **not** `#[cfg(windows)]`-gated, unlike
+/// [`crate::platform::paths::strip_verbatim_prefix`], and the difference is
+/// the point. That function asks "how does *this host* spell paths?", which
+/// is a question about the running platform. This one asks "what will
+/// `cmd.exe` accept?", which is a property of the command line being built
+/// and is the same wherever it is built. Keeping it host-independent is what
+/// lets the translation be tested off Windows instead of being taken on
+/// trust until CI says otherwise — which is exactly how the missing
+/// conversion went unnoticed.
+fn plain_script_path(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
 }
 
 /// Where in a [`LaunchKind::WindowsScript`] invocation an unsafe
@@ -478,6 +518,40 @@ fn is_executable(path: &Path) -> bool {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// The regression behind a real `windows-latest` failure: a resolved
+    /// `.cmd` path is canonical, canonical means verbatim on Windows, and
+    /// `cmd.exe` answers a verbatim path with "The system cannot find the
+    /// path specified" and exit 1. Every `.cmd`-shimmed harness — which is
+    /// how npm installs them — was unlaunchable.
+    ///
+    /// Host-independent on purpose: `plain_script_path` transforms the path's
+    /// *spelling*, so this runs everywhere rather than only where the bug
+    /// reproduces.
+    #[test]
+    fn a_verbatim_script_path_is_converted_to_the_form_cmd_exe_accepts() {
+        assert_eq!(
+            plain_script_path(Path::new(r"\\?\C:\tools\claude.cmd")),
+            PathBuf::from(r"C:\tools\claude.cmd")
+        );
+        assert_eq!(
+            plain_script_path(Path::new(r"\\?\UNC\server\share\claude.cmd")),
+            PathBuf::from(r"\\server\share\claude.cmd")
+        );
+    }
+
+    /// Paths that were never verbatim must survive untouched — including
+    /// ordinary Unix paths, since this function is not host-gated.
+    #[test]
+    fn a_plain_script_path_is_left_alone() {
+        for path in [
+            r"C:\tools\claude.cmd",
+            r"\\server\share\x.cmd",
+            "/usr/bin/x",
+        ] {
+            assert_eq!(plain_script_path(Path::new(path)), PathBuf::from(path));
+        }
+    }
 
     #[cfg(unix)]
     fn make_executable(path: &Path) {
