@@ -86,7 +86,7 @@ Phase 1 — Project-root detection and hard isolation
 ☑ Derive a stable project identifier from the canonical project-root path.
 ☑ Store each project’s Glasshouse state in a physically separate project-specific state directory.
 ☑ Store each project’s memory in its own SQLite database instead of sharing one global memory database.
-☐ Ensure every spawned harness process starts with its working directory set to the current project root.
+☑ Ensure every spawned harness process starts with its working directory set to the current project root.
 ☐ Reject any attempt to resume a Glasshouse-managed session whose project identifier differs from the current project identifier.
 ☑ Add a canonical-path guard that rejects file paths resolving outside the current project root.
 ☑ Apply the canonical-path guard after resolving symlinks so a project symlink cannot escape the project boundary.

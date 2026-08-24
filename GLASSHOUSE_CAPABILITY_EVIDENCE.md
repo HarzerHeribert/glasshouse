@@ -55,7 +55,7 @@ Contract: Whenever Glasshouse invokes an installed harness—including discovery
 probes and interactive sessions—the child starts in the active canonical
 project root and never inherits an unrelated caller directory.
 
-State: LOCALLY VERIFIED
+State: COMPLETE
 
 Production evidence:
 
@@ -114,21 +114,35 @@ Non-vacuity (mutations actually run, each observed to fail the test):
 
 Platform/external evidence:
 
-- Local macOS: `cargo fmt --check`, `cargo clippy -D warnings`, 186 unit + 24
-  PTY smoke tests, MSRV 1.85.0 `cargo check --locked`, `git diff --check`, and
+- **CI run `32788123095` on commit `f3effe6` is green on `ubuntu-latest`,
+  `macos-latest`, and `windows-latest`, plus lint.** The Windows job was
+  confirmed to have *actually executed* the tests cited here — 186 lib tests
+  and 20 PTY smoke tests — rather than only reporting a green tick;
+  `the_launch_command_opens_the_configured_harness_inside_the_project_root`
+  and `a_fake_installed_harness_launches_inside_the_discovered_project_root`
+  both appear as `ok` in the Windows log.
+- Local macOS: `cargo fmt --check`, `cargo clippy -D warnings`, unit and PTY
+  smoke tests, MSRV 1.85.0 `cargo check --locked`, `git diff --check`, and
   live CLI probes of `glasshouse launch` (help, no-terminal refusal, unknown
   harness, non-harness integration).
-- An independent spawn-site inventory found three production spawn sites, all
-  project-bound, and zero production callers of the generic
-  `TerminalCommand::new`.
+- An independent spawn-site inventory, re-run after the merge, found three
+  production spawn sites, all project-bound, and zero production callers of
+  the generic `TerminalCommand::new`.
 
-Missing evidence:
+What CI caught that local evidence had not:
 
-- `windows-latest` CI on the merged commit. The contract makes OS-specific
-  claims — `cmd.exe /D /C` script translation and verbatim `\\?\` stripping at
-  the process boundary — and local macOS runs cannot stand in for them. The
-  commit has not been pushed.
+- `cmd.exe` cannot open the verbatim `\\?\` path that resolving an executable
+  produces on Windows, so **no `.cmd`-shimmed harness could start there at
+  all** — and npm installs most of them that way. Fixed in `4aa31ad`.
+- A prior revision of this entry cited a Windows job that had never run
+  `tests/pty_smoke.rs`: when the lib target fails, cargo never reaches the
+  integration tests, so the `.cmd` and verbatim-path claims were unproven
+  while the entry implied otherwise. Confirming *execution*, not just the
+  job's conclusion, is part of this evidence and not a formality.
 
-The authoritative Phase 1 checkbox therefore remains unchecked until that CI
-run is green.
+Remaining caveats (recorded, not blocking):
+
+- Native Windows UNC project roots are still refused rather than supported;
+  `cmd.exe` cannot reliably hold a UNC working directory. This is a
+  documented limitation of the contract, not a gap in it.
 
