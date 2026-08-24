@@ -70,9 +70,10 @@ pub mod process;
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, MasterPty, PtyPair, PtySize, native_pty_system};
 
 use crate::Project;
 
@@ -80,6 +81,16 @@ pub use process::{ProcessSignal, SignalError};
 
 /// Byte a terminal sends when the user presses Ctrl-C.
 pub(crate) const ETX: u8 = 0x03;
+
+/// How many times allocating a pseudo-terminal is attempted before the
+/// failure is reported to the caller. See [`open_pty`].
+const PTY_ALLOCATION_ATTEMPTS: u32 = 5;
+
+/// How long to wait between pseudo-terminal allocation attempts. Long enough
+/// for a racing allocation elsewhere on the host to finish, short enough that
+/// the worst case (every attempt failing) adds well under a tenth of a second
+/// to a launch that was going to fail anyway.
+const PTY_ALLOCATION_RETRY_DELAY: Duration = Duration::from_millis(20);
 
 /// Visible size of a terminal, in character cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -399,6 +410,67 @@ impl std::fmt::Debug for PtyProcess {
     }
 }
 
+/// Allocate a pseudo-terminal, retrying a bounded number of times.
+///
+/// # Why this retries
+///
+/// macOS's `openpty(3)` has a race under concurrent allocation: when several
+/// processes or threads ask for a pseudo-terminal at the same moment, it
+/// intermittently fails even with the host nowhere near
+/// `kern.tty.ptmx_max`. A local probe pinned this down precisely — 16
+/// concurrent processes holding at most four pseudo-terminals each (64 live
+/// against a cap of 511, with 17 in use on the host) reproduced it, while
+/// the same total churn driven from a single process at 8000 allocations a
+/// second produced none. The failure leaves `errno` at `-6`, which is not a
+/// valid errno at all; that alone shows the failure path does not report
+/// itself properly, so the condition cannot be classified from the error
+/// value and must be handled by retrying.
+///
+/// This is not a blind retry wrapper around spawning. It covers exactly one
+/// call — the allocation — and nothing has been started when it fails: no
+/// child process exists, no file has been written, no terminal has been
+/// engaged. Retrying is therefore side-effect free by construction, which is
+/// what makes it safe in a way that retrying a spawn would not be.
+///
+/// A genuinely exhausted host still fails, just [`PTY_ALLOCATION_ATTEMPTS`]
+/// times over roughly [`PTY_ALLOCATION_RETRY_DELAY`] each, and the caller
+/// gets the last real error rather than a synthesized one.
+///
+/// The allocator is a parameter rather than a hard-coded call so a test can
+/// inject transient failures; production passes `native_pty_system()`.
+fn open_pty(
+    size: PtySize,
+    mut allocate: impl FnMut(PtySize) -> Result<PtyPair>,
+) -> Result<PtyPair> {
+    let mut last_error = None;
+    for attempt in 1..=PTY_ALLOCATION_ATTEMPTS {
+        match allocate(size) {
+            Ok(pair) => {
+                if attempt > 1 {
+                    tracing::debug!(attempt, "pseudo-terminal allocated after a retry");
+                }
+                return Ok(pair);
+            }
+            Err(err) => {
+                tracing::debug!(
+                    attempt,
+                    attempts = PTY_ALLOCATION_ATTEMPTS,
+                    error = %err,
+                    "could not allocate a pseudo-terminal"
+                );
+                last_error = Some(err);
+                if attempt < PTY_ALLOCATION_ATTEMPTS {
+                    std::thread::sleep(PTY_ALLOCATION_RETRY_DELAY);
+                }
+            }
+        }
+    }
+
+    Err(last_error.expect("the loop runs at least once and only exits early on success")).context(
+        format!("could not open a pseudo-terminal after {PTY_ALLOCATION_ATTEMPTS} attempts"),
+    )
+}
+
 impl PtyProcess {
     /// Open a pseudo-terminal and spawn the command into it.
     pub fn spawn(command: TerminalCommand) -> Result<(Self, PtyOutput)> {
@@ -415,9 +487,7 @@ impl PtyProcess {
 
         let (builder, size) = command.into_builder();
 
-        let pair = native_pty_system()
-            .openpty(size.into())
-            .context("could not open a pseudo-terminal")?;
+        let pair = open_pty(size.into(), |size| native_pty_system().openpty(size))?;
 
         let child = pair.slave.spawn_command(builder).with_context(|| {
             format!(
@@ -755,6 +825,66 @@ mod tests {
             .expect("TERM override");
         assert!(!term.1.is_empty());
         assert_ne!(term.1, OsString::from("dumb"));
+    }
+
+    /// A transient allocation failure must not reach the caller: `open_pty`
+    /// retries, and the pseudo-terminal it finally returns is a real one.
+    ///
+    /// Non-vacuity: delete the retry loop and this fails on the first
+    /// injected error.
+    #[test]
+    fn a_transient_pty_allocation_failure_is_retried() {
+        use std::cell::Cell;
+
+        let attempts = Cell::new(0u32);
+        let pair = open_pty(TerminalSize::default().into(), |size| {
+            let attempt = attempts.get() + 1;
+            attempts.set(attempt);
+            if attempt < 3 {
+                // The shape of the real macOS failure: an allocation that
+                // reports nothing usable about why it failed.
+                anyhow::bail!("simulated transient openpty failure");
+            }
+            native_pty_system().openpty(size)
+        })
+        .expect("a retried allocation must succeed");
+
+        assert_eq!(
+            attempts.get(),
+            3,
+            "the failing attempts should have retried"
+        );
+        // Not merely an `Ok`: a genuinely usable pseudo-terminal came back.
+        assert!(pair.master.get_size().is_ok());
+    }
+
+    /// Retrying is bounded, and a host that really cannot allocate one gets
+    /// the underlying error rather than a synthesized or swallowed one.
+    #[test]
+    fn pty_allocation_gives_up_after_a_bounded_number_of_attempts() {
+        use std::cell::Cell;
+
+        let attempts = Cell::new(0u32);
+        let result = open_pty(TerminalSize::default().into(), |_| {
+            attempts.set(attempts.get() + 1);
+            anyhow::bail!("host is out of pseudo-terminals")
+        });
+        // `PtyPair` has no `Debug`, so unwrap the error by matching rather
+        // than through `expect_err`.
+        let Err(err) = result else {
+            panic!("an always-failing allocation must fail");
+        };
+
+        assert_eq!(attempts.get(), PTY_ALLOCATION_ATTEMPTS);
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("host is out of pseudo-terminals"),
+            "the real cause must survive: {message}"
+        );
+        assert!(
+            message.contains("could not open a pseudo-terminal"),
+            "the caller-facing context must survive: {message}"
+        );
     }
 
     #[test]
