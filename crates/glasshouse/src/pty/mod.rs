@@ -17,6 +17,33 @@
 //! already a common interface that hides every platform difference; adding a
 //! trait for one implementation would be abstraction without a second
 //! implementation to justify it.
+//!
+//! # Constraint for whatever renders this process's output
+//!
+//! On Windows, ConPTY emits a Device Status Report query (`ESC[6n`, "where is
+//! the cursor?") on the pty's output as part of bringing the pseudo-console
+//! up, and it blocks -- the child does not get to run, let alone produce any
+//! output of its own -- until something on the other end writes back
+//! `ESC[<row>;<col>R`. This is not a rendering glitch to clean up later: an
+//! unanswered query is a full hang, indistinguishable from the harness
+//! process itself having wedged, with nothing in the pty output to explain
+//! why.
+//!
+//! This module is deliberately not where that gets answered. `PtyProcess`
+//! only moves bytes in and out of the child; it has no notion of what a byte
+//! *means*, and answering a control sequence requires exactly that. The
+//! right place is Glasshouse's terminal-emulation layer (Phase 5 of the
+//! capability map, which renders a harness's output and is the one place
+//! that already parses the terminal control sequences flowing through this
+//! module) -- whoever builds it needs to answer this query as part of
+//! bringing a session up on Windows, or every Windows session will hang
+//! silently before producing a single rendered byte.
+//!
+//! `crates/glasshouse/tests/pty_smoke.rs` answers this query itself (see
+//! that file's module doc for how), which is the only reason its tests can
+//! exercise a real child process on Windows at all -- without it, every test
+//! needing child output or child exit hangs on exactly this handshake and
+//! times out.
 
 pub mod process;
 
