@@ -549,9 +549,43 @@ mod tests {
         // its own binary, finds nothing and exits 23.
         std::fs::write(project.display_root().join(CWD_MARKER), b"").unwrap();
 
-        let version = probe_version(&exe, "--version", &project, DEFAULT_PROBE_TIMEOUT)
-            .unwrap()
-            .expect("probe prints a version only when its cwd is the project root");
+        let probed = probe_version(&exe, "--version", &project, DEFAULT_PROBE_TIMEOUT).unwrap();
+
+        // A bare "expected Some, got None" here says nothing about *why* the
+        // child could not see the marker, and this test only runs on the
+        // platform whose behaviour is in question — so when it fails, it has
+        // to be able to explain itself from the CI log alone. Re-running the
+        // same invocation with captured output costs nothing on the passing
+        // path and is the difference between one diagnostic round trip and
+        // several.
+        let Some(version) = probed else {
+            let (program, args) = exe.spawn_command(["--version"]).expect("safe command line");
+            let output = std::process::Command::new(&program)
+                .args(&args)
+                .current_dir(project.display_root())
+                .output()
+                .expect("re-run the probe for diagnostics");
+            panic!(
+                "the probe reported no version, so its working directory was not the \
+                 project root.\n  \
+                 program:        {}\n  \
+                 args:           {:?}\n  \
+                 requested cwd:  {}\n  \
+                 canonical root: {}\n  \
+                 marker present: {}\n  \
+                 exit status:    {:?}\n  \
+                 stdout:         {:?}\n  \
+                 stderr:         {:?}",
+                program.display(),
+                args,
+                project.display_root().display(),
+                project.root().display(),
+                project.display_root().join(CWD_MARKER).is_file(),
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        };
         assert_eq!(
             (version.major(), version.minor(), version.patch()),
             (9, 8, 7)
