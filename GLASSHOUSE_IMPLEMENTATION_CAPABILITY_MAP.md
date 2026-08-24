@@ -101,15 +101,15 @@ Phase 2A — Cross-platform runtime
 ☑ Treat WSL as a Linux runtime and do not silently mix Windows and WSL process namespaces.
 ☑ Hide platform-specific PTY behavior behind a common terminal-process interface.
 ☑ Use Unix PTY primitives on macOS and Linux through the selected PTY abstraction.
-☑ Use Windows ConPTY through the selected PTY abstraction on native Windows.
-☑ Hide platform-specific signal and process-termination behavior behind a common process-control interface.
-☑ Resolve executable names correctly across Unix executables, Windows .exe, .cmd, and .bat launchers.
+☐ Use Windows ConPTY through the selected PTY abstraction on native Windows.
+☐ Hide platform-specific signal and process-termination behavior behind a common process-control interface.
+☐ Resolve executable names correctly across Unix executables, Windows .exe, .cmd, and .bat launchers.
 ☑ Use the operating system’s conventional per-user application-data location for Glasshouse state.
 ☑ Allow the application-data location to be overridden explicitly for portable installations and tests.
 ☑ Keep project identifiers stable for a canonical project path within the same operating-system environment.
 ☑ Normalize path comparisons in a platform-correct way without weakening project-boundary checks.
 ☑ Add CI builds for macOS, Linux, and Windows before declaring cross-platform support stable.
-☑ Add platform-specific PTY smoke tests that start a simple interactive child process and verify input, output, resize, and exit handling.
+☐ Add platform-specific PTY smoke tests that start a simple interactive child process and verify input, output, resize, and exit handling.
 ☐ Make unsupported platform/harness combinations fail with a clear diagnostic rather than a partial broken session.
 
 Phase 2B — Agent and tool auto-detection

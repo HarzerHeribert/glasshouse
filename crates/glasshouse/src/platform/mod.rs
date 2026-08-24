@@ -117,6 +117,9 @@ impl std::fmt::Display for HostPlatform {
 /// how the WSL kernel identifies itself in `uname -r` / `osrelease` across
 /// both WSL1 and WSL2. Factored out from [`HostPlatform::detect_uncached`] so
 /// it can be exercised without a real `/proc` or environment.
+// Only Linux builds ever ask this question, but the tests exercise it on every
+// platform so the logic stays covered wherever CI runs.
+#[cfg(any(target_os = "linux", test))]
 fn is_wsl(has_distro_env: bool, has_interop_env: bool, osrelease: &str) -> bool {
     if has_distro_env || has_interop_env {
         return true;

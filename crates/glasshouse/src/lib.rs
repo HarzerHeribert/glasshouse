@@ -6,6 +6,7 @@
 //! piece of state it keeps is physically separated per project.
 
 pub mod cli;
+pub mod integrations;
 pub mod logging;
 pub mod paths;
 pub mod platform;
@@ -17,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub use cli::Cli;
+pub use cli::{Cli, Command};
 pub use paths::RuntimePaths;
 pub use project::{Project, ProjectId, ProjectScope, RootSource};
 

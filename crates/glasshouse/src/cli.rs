@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 const AFTER_HELP: &str = "\
 ENVIRONMENT:
@@ -56,6 +56,19 @@ pub struct Cli {
     /// Write logs to stderr. Not usable while the interactive TUI is running.
     #[arg(long, global = true, conflicts_with = "log_file")]
     pub log_stderr: bool,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// Non-interactive commands.
+///
+/// Every one of these is project scoped: it operates on the project resolved
+/// from the working directory or `--scope`, never across projects.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Report detected harnesses, optional integrations, and setup problems.
+    Doctor,
 }
 
 #[cfg(test)]

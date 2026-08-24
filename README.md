@@ -25,6 +25,18 @@ cargo build --release
 The result is a single `glasshouse` executable with no daemon, background
 service, Node, or Python requirement.
 
+### Cross-platform checks
+
+Glasshouse targets macOS, Linux, and native Windows. CI builds and tests on all
+three, but most portability breakage (`cfg`-gated dead code, platform-only
+imports) is catchable locally without leaving Linux:
+
+```sh
+rustup target add x86_64-apple-darwin x86_64-pc-windows-msvc
+cargo check --workspace --all-targets --target x86_64-apple-darwin
+cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
+```
+
 ## Usage
 
 ```sh
