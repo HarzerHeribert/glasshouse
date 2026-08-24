@@ -8,7 +8,9 @@
 pub mod cli;
 pub mod logging;
 pub mod paths;
+pub mod platform;
 pub mod project;
+pub mod pty;
 pub mod shutdown;
 
 use std::path::{Path, PathBuf};

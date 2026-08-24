@@ -5,7 +5,6 @@
 //! [`ProjectId`] derived from that root, so cross-project access is prevented
 //! by physical separation rather than by query filters.
 
-pub mod platform;
 pub mod scope;
 
 use std::fmt;
@@ -13,6 +12,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
+
+use crate::platform::paths as platform;
 
 pub use scope::{ProjectScope, ScopeError};
 

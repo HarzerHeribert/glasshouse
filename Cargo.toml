@@ -20,6 +20,9 @@ hex = "0.4"
 sha2 = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+portable-pty = "0.9"
+which = "8"
+libc = "0.2"
 tempfile = "3"
 
 [profile.release]

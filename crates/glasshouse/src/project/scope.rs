@@ -7,7 +7,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use crate::project::platform;
+use crate::platform::paths as platform;
 
 /// A path was rejected because it does not resolve inside the project root.
 #[derive(Debug, thiserror::Error)]
