@@ -85,7 +85,7 @@ Phase 1 — Project-root detection and hard isolation
 ☑ Refuse obvious multi-project container directories such as a directory containing multiple Git repositories unless the user explicitly selects a narrower scope.
 ☑ Derive a stable project identifier from the canonical project-root path.
 ☑ Store each project’s Glasshouse state in a physically separate project-specific state directory.
-☐ Store each project’s memory in its own SQLite database instead of sharing one global memory database.
+☑ Store each project’s memory in its own SQLite database instead of sharing one global memory database.
 ☐ Ensure every spawned harness process starts with its working directory set to the current project root.
 ☐ Reject any attempt to resume a Glasshouse-managed session whose project identifier differs from the current project identifier.
 ☑ Add a canonical-path guard that rejects file paths resolving outside the current project root.
@@ -178,16 +178,16 @@ Phase 2D — Settings foundation
 
 Phase 2 — Persistent project state
 
-☐ Create the project-specific state directory automatically on first Glasshouse launch.
-☐ Create a project-specific SQLite database automatically on first Glasshouse launch.
+☑ Create the project-specific state directory automatically on first Glasshouse launch.
+☑ Create a project-specific SQLite database automatically on first Glasshouse launch.
 ☐ Persist Glasshouse session metadata independently from the native harness session files.
 ☐ Persist a mapping between Glasshouse session IDs and native harness session IDs when native IDs are available.
 ☐ Persist the harness type, creation time, last activity time, role, lifecycle state, and project identifier for every session.
 ☐ Persist the process presentation mode for every session.
 ☐ Persist enough metadata to distinguish active, resumable, closed, and failed sessions.
 ☐ Never store provider credentials directly in the project memory database.
-☐ Add a schema-version table so database migrations can be applied deterministically.
-☐ Add a small migration mechanism before introducing multiple schema versions.
+☑ Add a schema-version table so database migrations can be applied deterministically.
+☑ Add a small migration mechanism before introducing multiple schema versions.
 
 Phase 3 — TUI shell
 

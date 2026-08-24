@@ -7,6 +7,7 @@
 
 pub mod cli;
 pub mod config;
+mod database;
 pub mod integrations;
 pub mod logging;
 pub mod onboarding;
@@ -58,6 +59,16 @@ impl Runtime {
     pub fn log_dir(&self) -> PathBuf {
         self.state_dir.join("logs")
     }
+
+    /// The project database's path, for diagnostics only.
+    ///
+    /// This is always `<state_dir>/glasshouse.db`; the database module derives
+    /// it from the runtime and no public API accepts a different database
+    /// path. Nothing here holds an open connection: each launch validates and
+    /// migrates the file, then closes it until a component actually needs it.
+    pub fn database_path(&self) -> PathBuf {
+        self.state_dir.join(database::DATABASE_FILE_NAME)
+    }
 }
 
 /// Resolve the project and runtime paths, and create the project state
@@ -74,11 +85,19 @@ pub fn bootstrap(cli: &Cli, cwd: &Path) -> Result<Runtime> {
         )
     })?;
 
-    Ok(Runtime {
+    // First launch creates the project database; every later launch validates
+    // it. After this point a successful Runtime always has a valid, bound
+    // project database — the only place this project's memory may ever live.
+    // The runtime is built first so the database module derives both the path
+    // and the project identifier from it; nothing accepts them separately.
+    let runtime = Runtime {
         project,
         paths,
         state_dir,
-    })
+    };
+    database::ensure_ready(&runtime)?;
+
+    Ok(runtime)
 }
 
 /// Create the project state directory, restricted to its owner on Unix.
