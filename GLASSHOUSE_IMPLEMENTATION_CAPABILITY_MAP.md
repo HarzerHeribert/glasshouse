@@ -110,7 +110,7 @@ Phase 2A — Cross-platform runtime
 ☑ Normalize path comparisons in a platform-correct way without weakening project-boundary checks.
 ☑ Add CI builds for macOS, Linux, and Windows before declaring cross-platform support stable.
 ☑ Add platform-specific PTY smoke tests that start a simple interactive child process and verify input, output, resize, and exit handling.
-☐ Make unsupported platform/harness combinations fail with a clear diagnostic rather than a partial broken session.
+☑ Make unsupported platform/harness combinations fail with a clear diagnostic rather than a partial broken session.
 
 Phase 2B — Agent and tool auto-detection
 

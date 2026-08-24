@@ -236,3 +236,71 @@ Missing evidence:
 
 - None for the stated contract. Whether a configured endpoint is actually
   *reachable* is deliberately out of scope and would need a network probe.
+
+### Phase 2A — Make unsupported platform/harness combinations fail with a clear diagnostic rather than a partial broken session
+
+Contract: Given a platform and harness combination Glasshouse knows cannot
+work, when a session or probe would otherwise be started, Glasshouse refuses
+before any process exists and says what is wrong and what to do about it,
+rather than starting something that appears alive while operating on the wrong
+directory or the wrong process namespace.
+
+State: COMPLETE
+
+Production evidence — the combinations Glasshouse knows, and where each is
+refused:
+
+- **UNC project root + `.cmd`/`.bat` harness** — `launch::unsupported_combination`,
+  called by `HarnessLaunch::build_command` before the command is returned, so
+  `spawn` never reaches PTY creation. `cmd.exe` cannot hold a UNC working
+  directory and does not fail when asked to: it substitutes the Windows
+  directory and runs, so the session would have looked alive while operating
+  outside the project entirely.
+- **WSL + a Windows-interop executable** — `platform::exec::resolve_with`
+  filters `/mnt/c`-style hits and returns `ResolveError::WindowsInteropOnly`,
+  whose message explains that the child would run in the Windows process
+  namespace where the project's Linux path is meaningless.
+- **No usable executable** — `session::select::SelectionError::NotInstalled`
+  names the candidate names that were tried.
+- **A requested integration that is not a harness** —
+  `SelectionError::NotAHarness` names the category and lists the harnesses
+  that can be launched.
+- **A harness turned off in configuration** — `SelectionError::Disabled`.
+- **No terminal to attach to** — `session::attach::attach` refuses rather than
+  hanging on a pty query nothing can answer.
+
+Regression evidence:
+
+- `a_script_harness_in_a_unc_project_is_refused_with_a_diagnostic` asserts the
+  message names the directory, the reason, and the remedy — not merely that it
+  failed.
+- `every_other_combination_is_allowed` keeps the refusal narrow: a `Direct`
+  harness in a UNC directory, and a script harness in an ordinary local or
+  verbatim-drive directory, must all still launch.
+- `unc_detection_covers_both_spellings_but_not_a_verbatim_drive` pins that
+  `\\?\C:\...` is a local path despite also starting with two backslashes.
+- `cmd_and_bat_are_windows_scripts_only_on_windows`,
+  `a_nonsense_slug_is_unknown_and_names_the_valid_ones`, `cmux_is_not_a_harness`,
+  and `attaching_without_a_terminal_is_refused` cover the other refusals.
+
+Failure/isolation evidence:
+
+- The refusal happens in `build_command`, before `PtyProcess::spawn`, so no
+  process, pty, or terminal state exists when it fires. Non-vacuity (mutation
+  actually run): disabling the condition makes the refusal test fail.
+
+Platform/external evidence:
+
+- CI green on `ubuntu-latest`, `macos-latest`, `windows-latest`, and lint. The
+  check is a function of a path's shape and an executable's kind, with no
+  `cfg` gating, so all three platforms execute it.
+
+Honest limits:
+
+- No real UNC share was exercised. The *refusal* is platform-independent code
+  that CI runs everywhere; what is taken from documented Windows behaviour,
+  not from a live run, is the premise — that `cmd.exe` would substitute the
+  Windows directory rather than fail. That premise is why the refusal exists,
+  and it was already recorded as a known limitation before this change.
+- This capability covers the combinations Glasshouse currently knows about. A
+  newly discovered one would reopen it.
