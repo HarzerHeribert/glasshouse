@@ -1,6 +1,6 @@
 # Glasshouse implementation handoff
 
-Last updated: 2026-08-24 (Europe/Berlin)
+Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
@@ -24,6 +24,7 @@ Phase A reconciliation is complete. Phase B has completed the Phase 1 per-projec
 - The cwd smoke test answers ConPTY's startup DSR, strips CSI only for path parsing, retains raw output for failures, and polls before process exit to avoid racing the PTY collector. The focused test passed ten consecutive local runs.
 - `Discovery::run` now requires `&Project`, and the real doctor/setup version-probe subprocess sets `current_dir(project.display_root())`. A cross-platform fake resolved probe prints `9.8.7` only when its child cwd is the project root, so removing the binding makes the regression fail.
 - Windows-only tests pin verbatim drive and UNC prefix conversion, and the real fake-harness PTY smoke asserts its canonical Windows project root was verbatim before `display_root` stripped it at the child-process boundary.
+- The repository now documents a phase-independent spec-to-evidence SDLC, Opus/Sonnet/Ox worker boundaries, a safe project-local Claude Code/OpenCode hook protocol, a capability evidence ledger, a reusable Opus orchestrator prompt, and a minimal Claude Code bootstrap prompt.
 
 ## Unresolved loose ends
 
@@ -37,6 +38,7 @@ Phase A reconciliation is complete. Phase B has completed the Phase 1 per-projec
 - Native Windows UNC project roots remain an adapter-stage limitation: `cmd.exe` cannot use a UNC current directory reliably. Refuse unsupported cmd-mediated UNC launches with a clear diagnostic when the first adapter lands.
 - Strict rustdoc currently fails on 12 pre-existing intra-doc-link diagnostics in config, integrations, onboarding, platform execution, project scope, and PTY process documentation. The new launch module and the edited PTY module add no rustdoc diagnostic.
 - One Ox reviewer observed two transient parallel `pty_smoke` failures in `streams_output_and_reports_a_successful_exit`; both passed alone. The orchestrator then ran the complete 23-test PTY binary ten consecutive times with no failure. Treat this as an unresolved flake to reproduce and diagnose, not as justification for a blind retry wrapper.
+- The cross-harness completion protocol is design documentation only. Claude Code and OpenCode adapters, schema validation, safe parent-process detection, atomic reports, and end-to-end leaf-to-verifier-to-root tests remain unimplemented; use manual visible pane polling until they exist.
 
 ## Active worker tasks and results
 
@@ -49,6 +51,10 @@ Phase A reconciliation is complete. Phase B has completed the Phase 1 per-projec
 
 ## Commands run and outcome
 
+- Repository Markdown internal-link validation across all root `.md` files — pass; every referenced local file exists.
+- Code-fence balance validation for the new prompt/process documents — pass.
+- Generic-prompt phase-coupling scan — pass; `GLASSHOUSE_ORCHESTRATOR_PROMPT.md` and the Claude bootstrap contain no fixed phase, line number, or current starting point.
+- `git diff --check` after the orchestration-documentation batch — pass.
 - `cargo fmt --all -- --check` — pass.
 - `cargo check --workspace --all-targets` — pass.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings` — pass.
@@ -71,4 +77,4 @@ Hand this exact checkpoint to Opus:
 
 > Start by inspecting `git status`, `git log -5`, this handoff, and Phase 1 line 89. Re-run the focused launch/version/PTY tests and inspect the two production spawn sites. Do not add a superficial `glasshouse launch` command: a real interactive consumer must bridge terminal input/output, answer DSR, propagate exit, and restore terminal state, and must resolve enabled harnesses with project-over-user executable precedence before spawning exclusively through `HarnessLaunch`. First reproduce and diagnose the reported parallel PTY flake under stress. Then implement the smallest correct real session consumer and its lifecycle prerequisites, with fake installed harnesses only in automated tests. Keep line 89 unchecked until the production consumer exists and the current commit has passed `windows-latest`; do not silently push—ask before pushing if authorization is still absent. Once line 89 is verified, update the map/handoff, commit coherently, and proceed to line 90's cross-project resume rejection.
 
-Local worker worktrees remain at `/Users/eneas/projects/glasshouse-wt-named-consumer` (unmerged alternative probe-binding diff) and `/Users/eneas/projects/glasshouse-wt-windows-paths` (the already-integrated test-only diff). They are disposable after confirming no process still uses them. Global Ox completion routing remains unchanged; the proposed leaf-to-verifier hierarchy was reviewed but intentionally not installed before stopping.
+Local worker worktrees remain at `/Users/eneas/projects/glasshouse-wt-named-consumer` (unmerged alternative probe-binding diff) and `/Users/eneas/projects/glasshouse-wt-windows-paths` (the already-integrated test-only diff). They are disposable after confirming no process still uses them. Global Ox completion routing remains unchanged; the leaf-to-verifier hierarchy is now specified in `GLASSHOUSE_HARNESS_HOOK_PROTOCOL.md` but intentionally remains uninstalled until its safety tests exist.
