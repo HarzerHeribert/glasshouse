@@ -47,7 +47,7 @@ Missing evidence:
 - If later evidence contradicts an entry, downgrade it immediately and reopen
   the map checkbox if necessary.
 
-## Active reconciled example
+## Active entries
 
 ### Phase 1 — Ensure every spawned harness process starts with its working directory set to the current project root
 
@@ -55,44 +55,80 @@ Contract: Whenever Glasshouse invokes an installed harness—including discovery
 probes and interactive sessions—the child starts in the active canonical
 project root and never inherits an unrelated caller directory.
 
-State: PARTIALLY VERIFIED
+State: LOCALLY VERIFIED
 
 Production evidence:
 
-- `integrations::Discovery::run(&Project)` threads the active project into the
-  real `version::probe_version` production subprocess.
-- `version::probe_version` sets `Command::current_dir` from
+- `main::launch_session` is the production consumer: `glasshouse launch
+  [harness]` resolves a harness through `session::select::select` and starts it
+  through `launch::HarnessLaunch`, which is the only route that reaches PTY
+  spawn for a harness. This closes the gap recorded in the previous revision of
+  this entry, where `HarnessLaunch` had no production caller at all.
+- `session::attach::attach` runs the resulting session against the real
+  terminal: raw mode, input/output pumps, resize forwarding, exit propagation,
+  and restoration on every exit path.
+- `launch::HarnessLaunch::spawn` reaches PTY spawn only through
+  `TerminalCommand::for_harness`, which derives the directory from
+  `Project::display_root` and is `pub(crate)`.
+- `integrations::Discovery::run(&Project)` threads the active project into
+  `version::probe_version`, which sets `Command::current_dir` from
   `Project::display_root`.
-- `launch::HarnessLaunch::spawn` reaches PTY spawn through project-bound
-  `TerminalCommand::for_harness`, but currently lacks a production interactive
-  session consumer.
 
 Regression evidence:
 
+- `the_launch_command_opens_the_configured_harness_inside_the_project_root`
+  (pty_smoke, macOS) runs the *shipped binary* in a real pseudo-terminal and
+  matches the harness's own report of its working directory against the project
+  root by filesystem identity. Glasshouse itself is deliberately run from a
+  different directory, so an inherited cwd cannot pass.
+- `a_fake_installed_harness_launches_inside_the_discovered_project_root`
+  proves the same for the `HarnessLaunch` mechanism directly.
 - `version_probe_child_starts_in_the_active_project_root` uses a resolved fake
   probe that prints a version only in the correct child directory.
-- `a_fake_installed_harness_launches_inside_the_discovered_project_root` proves
-  the PTY launch mechanism by filesystem identity.
-- Windows-only drive/UNC prefix tests pin `strip_verbatim_prefix` behavior.
+- `project_configured_executable_wins_over_user_level` and the rest of
+  `session::select::tests` pin executable precedence and every refusal path.
+- Windows-only tests pin verbatim drive and UNC prefix conversion.
 
 Failure/isolation evidence:
 
-- The version-probe test fails with no parsed version if the child inherits the
-  test runner's directory.
+- The end-to-end test installs a *decoy* executable at the user level and the
+  real one at the project level; a precedence failure runs the decoy and fails
+  the test loudly rather than silently passing.
+- `a_failing_configured_executable_never_falls_back_to_path` proves a broken
+  configured path is an error, not a silent substitution of another binary.
+- `attaching_without_a_terminal_is_refused` fails closed rather than hanging on
+  a pty query nothing can answer.
+- `PtyProcess::spawn` refuses a working directory that does not exist instead
+  of starting the child somewhere else.
 - Unsafe Windows-script arguments are rejected before `HarnessLaunch` spawns.
+
+Non-vacuity (mutations actually run, each observed to fail the test):
+
+- Removing the project layer from `EffectiveConfig::executable` → the decoy
+  runs; the end-to-end test fails on precedence.
+- Making `TerminalCommand::for_harness` use the process cwd instead of the
+  project → no harness reports the project root; the test fails.
+- Making `exit_code_for` always return success → the test fails on exit-code
+  propagation.
+- Setting `PTY_ALLOCATION_ATTEMPTS` to 1 → the pty retry test fails.
 
 Platform/external evidence:
 
-- Local macOS gates are recorded in `GLASSHOUSE_HANDOFF.md`.
-- Earlier baseline CI predates the current commits and is not evidence for the
-  new Windows branches.
+- Local macOS: `cargo fmt --check`, `cargo clippy -D warnings`, 186 unit + 24
+  PTY smoke tests, MSRV 1.85.0 `cargo check --locked`, `git diff --check`, and
+  live CLI probes of `glasshouse launch` (help, no-terminal refusal, unknown
+  harness, non-harness integration).
+- An independent spawn-site inventory found three production spawn sites, all
+  project-bound, and zero production callers of the generic
+  `TerminalCommand::new`.
 
 Missing evidence:
 
-- A correct reachable production interactive-session consumer of
-  `HarnessLaunch`, including I/O, DSR, exit, signal, and terminal-restoration
-  lifecycle.
-- Current-commit `windows-latest` execution of the `.cmd` and verbatim-path
-  tests.
+- `windows-latest` CI on the merged commit. The contract makes OS-specific
+  claims — `cmd.exe /D /C` script translation and verbatim `\\?\` stripping at
+  the process boundary — and local macOS runs cannot stand in for them. The
+  commit has not been pushed.
 
-The authoritative Phase 1 checkbox therefore remains unchecked.
+The authoritative Phase 1 checkbox therefore remains unchecked until that CI
+run is green.
+

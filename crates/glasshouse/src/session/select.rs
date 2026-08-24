@@ -100,9 +100,10 @@ pub enum SelectionError {
     UnknownHarness { name: String },
 
     #[error(
-        "`{name}` is {}, which Glasshouse integrates with but cannot open sessions in — \
-         it is not a coding-agent harness; name a harness instead",
-        .id.display_name()
+        "`{name}` is {}, not a coding-agent harness Glasshouse can open a session in; \
+         name a harness instead ({})",
+        kind_noun(.id.kind()),
+        harness_slugs()
     )]
     NotAHarness { name: String, id: IntegrationId },
 
@@ -148,6 +149,17 @@ pub enum SelectionError {
         .id.executable_candidates().join(", ")
     )]
     NotInstalled { id: IntegrationId },
+}
+
+/// What an integration *is*, for a diagnostic that has to explain why a
+/// session cannot be opened in it. Naming the category is more useful than
+/// repeating the name the user just typed.
+fn kind_noun(kind: IntegrationKind) -> &'static str {
+    match kind {
+        IntegrationKind::Harness => "a coding-agent harness",
+        IntegrationKind::Multiplexer => "a terminal multiplexer",
+        IntegrationKind::LocalInference => "a local inference server",
+    }
 }
 
 /// Comma-separated list of the slugs a session can actually be opened in.
