@@ -238,6 +238,10 @@ Phase 6 — Harness adapter interface
 ☐ Make each adapter declare whether structured lifecycle hooks are available.
 ☐ Make each adapter declare whether native session IDs can be discovered.
 ☐ Make each adapter expose known capabilities such as code editing, shell access, browser use, MCP support, and native subagents when known.
+☐ Make each adapter declare which backend wire protocols and model-override mechanisms it supports.
+☐ Make each adapter declare whether backend selection is configured through child environment, command-line arguments, an isolated generated configuration, or another explicit launch mechanism.
+☐ Make each adapter declare which native communication-style mechanisms it supports and whether changing them requires a new or cleared native session.
+☐ Make each adapter identify the harness vendor independently from the model developer and serving provider.
 ☐ Make the generic PTY runtime independent from any specific harness adapter.
 ☐ Keep adapter-specific parsing isolated from the core Glasshouse session model.
 
@@ -280,16 +284,23 @@ Phase 9 — Antigravity adapter
 Phase 9A — Harness launch profiles
 
 ☐ Introduce a launch-profile abstraction that describes how Glasshouse starts a harness without changing the user’s global harness installation.
+☐ Require every interactive Glasshouse session to be operated by a real installed coding harness.
+☐ Define a launch profile as the combination of harness, backend resource, model selection, protocol compatibility, child-process configuration overlay, and response profile.
+☐ Treat a provider, direct API, router, or gateway as a backend resource for a harness rather than as an interactive coding harness by itself.
 ☐ Give every harness a Native launch profile that uses the harness’s normal first-party authentication and configuration.
 ☐ Allow additional launch profiles such as Claude / OpenRouter, Claude / NVIDIA, or Codex / Custom Provider.
 ☐ Store launch-profile configuration separately from project memory.
 ☐ Allow a launch profile to inject environment variables only into the child harness process.
 ☐ Allow a launch profile to inject command-line arguments only into the child harness process.
 ☐ Allow a launch profile to use an isolated generated configuration file when a harness requires file-based provider configuration.
+☐ Represent these mechanisms together as an ephemeral child-process launch overlay rather than assuming every harness can be redirected through environment variables alone.
+☐ Resolve the launch overlay through the selected HarnessAdapter and refuse unsupported combinations instead of inventing generic environment names.
 ☐ Never modify the user’s normal global Claude Code or Codex configuration merely to launch a Glasshouse profile.
 ☐ Prefer temporary or Glasshouse-owned generated configuration over editing third-party config files in place.
 ☐ Record the launch profile used by every session.
+☐ Record the resolved harness, backend resource, model, protocol, pairing class, and response profile used by every session.
 ☐ Show the active launch profile next to the harness in session details.
+☐ Show the resolved launch mechanism and overridden key names for diagnostics while redacting secret values.
 ☐ Allow the user to select a launch profile when creating a session manually.
 ☐ Allow the router to select among enabled launch profiles when automatic routing is enabled.
 ☐ Allow launch profiles to be marked native-subscription, direct-provider, or glasshouse-gateway.
@@ -366,11 +377,16 @@ Phase 9F — Direct provider launch profiles
 ☐ Support Codex custom-provider launch profiles using Glasshouse-owned configuration when the configured provider supports the wire API required by Codex.
 ☐ Avoid overwriting the user’s normal ~/.codex/config.toml to create a Glasshouse provider profile.
 ☐ Generate an isolated Codex configuration or environment for Glasshouse-managed custom-provider sessions where supported.
-☐ Verify the selected model/provider combination before starting an interactive session when a cheap capability check is available.
+☐ Verify the selected harness, model, provider, and protocol combination before starting an interactive session when a cheap capability check is available.
+☐ Require the selected coding harness executable to be installed and usable before offering an interactive direct-provider or gateway-backed launch profile.
+☐ Keep the real harness responsible for the agent loop, coding tools, permission flow, compaction, and native session semantics.
+☐ Treat environment variables, CLI overrides, and isolated generated configuration as adapter-specific ways to point that harness at the backend.
 ☐ Fall back to a clear launch error rather than silently using the native paid provider when a requested gateway profile cannot be configured.
 
 Phase 9G — Glasshouse local gateway process
 
+☐ Define the local Glasshouse gateway as an optional transport, credential, telemetry, reliability, and backend-routing proxy for requests originating from a real harness.
+☐ Never treat the local gateway as a coding harness, agent loop, interactive session owner, or replacement for native harness tools.
 ☐ Add an optional local Glasshouse gateway that binds only to loopback by default.
 ☐ Start the local gateway only when at least one active launch profile requires it.
 ☐ Use an ephemeral local port by default so multiple Glasshouse instances can coexist.
@@ -380,6 +396,7 @@ Phase 9G — Glasshouse local gateway process
 ☐ Expose an Anthropic Messages-compatible ingress for gateway-backed Claude Code profiles when implemented.
 ☐ Expose an OpenAI Responses-compatible ingress for gateway-backed Codex profiles when implemented.
 ☐ Expose an OpenAI Chat-compatible ingress for compatible disposable jobs and harnesses when implemented.
+☐ Require every interactive gateway ingress to be consumed through a compatible installed harness launch profile.
 ☐ Preserve streaming end-to-end through the gateway.
 ☐ Preserve tool-call payloads without lossy rewriting when the backend speaks the same protocol.
 ☐ Preserve provider error information in structured Glasshouse diagnostics while returning a compatible error to the harness.
@@ -388,14 +405,18 @@ Phase 9G — Glasshouse local gateway process
 ☐ Shut down the local gateway when the owning Glasshouse instance exits and no detached sessions depend on it.
 ☐ Make gateway logs opt-in and redact prompt bodies and secrets by default.
 
-Phase 9H — Sticky gateway routing for interactive sessions
+Phase 9H — Sticky gateway routing for harness-backed interactive sessions
 
-☐ Assign an interactive gateway-backed session to a provider and model when the session starts.
+☐ Assign an interactive harness-backed gateway session to a provider and model when the session starts.
+☐ Keep the harness identity and native session semantics explicit even when the backend is routed through a Glasshouse gateway.
+☐ Treat the gateway assignment as backend state belonging to the harness-backed session rather than as an independent agent session.
 ☐ Keep the provider/model assignment sticky across normal turns by default.
 ☐ Avoid per-turn model switching for interactive sessions solely because another free model is currently available.
 ☐ Preserve prompt-cache locality as a routing objective for gateway-backed sessions.
 ☐ Allow an explicit session migration to create a new provider/model assignment at a task boundary.
 ☐ Allow failover to a compatible backend after a real provider failure when the user or routing policy permits it.
+☐ Prefer failover within the same model family and tool semantics before considering a cross-model migration.
+☐ Treat a material model-family change as a migration decision rather than a transparent provider failover.
 ☐ Record when failover changes the provider or model serving a live session.
 ☐ Warn when failover is likely to invalidate provider-side prompt caching.
 ☐ Never fail over to a backend that cannot preserve the harness’s required protocol or tool semantics.
@@ -415,12 +436,93 @@ Phase 9I — Free-pool routing
 ☐ Allow the user to order, disable, or pin free resources from settings.
 ☐ Show whether a free resource is being used because of user preference, quota preservation, or fallback.
 
+Phase 9J — Harness-model pairing model
+
+Pairing identity
+
+☐ Store harness vendor independently from model developer, model family, serving provider, gateway, and wire protocol.
+☐ Avoid treating the serving provider or reseller as the model developer when they are different entities.
+☐ Represent pairing classes at least as vendor-native, vendor-supported, protocol-native, protocol-compatible, protocol-translated, or unknown.
+☐ Treat vendor-native as the harness operating a model family produced for that harness vendor’s own coding environment.
+☐ Treat vendor-supported as a pairing the harness vendor explicitly supports even when model and harness developers differ.
+☐ Treat protocol compatibility separately from model-behavior compatibility and tool-semantic compatibility.
+☐ Keep model developer and pairing class unknown for stealth or insufficiently attributed models rather than guessing from behavior or branding.
+☐ Allow users to correct or override pairing metadata without changing router code.
+☐ Keep pairing metadata declarative and independently updateable as harnesses add or remove official model support.
+
+Pairing prior and evidence
+
+☐ Give a compatible vendor-native harness-model pairing a positive initial routing prior for a fresh session with little local evidence.
+☐ Treat the native-pairing preference as a soft prior rather than a hard routing rule or proof of superior performance.
+☐ Apply hard protocol, tool, capability, privacy, and user constraints before applying the pairing prior.
+☐ Allow the value of a relevant warm session to outweigh the native-pairing prior when continuity evidence is stronger.
+☐ Reduce the influence of the pairing prior as reliable local observations accumulate for the exact harness, launch profile, model, and backend combination.
+☐ Allow observed task success, usable tool calls, repair rate, effective TTFC, reliability, and user overrides to outweigh the initial pairing prior.
+☐ Keep evidence for the same nominal model distinct across different harnesses, gateways, quantizations, model revisions, or protocol translations.
+☐ Avoid concluding that a cross-vendor pairing is poor solely because it is cross-vendor.
+☐ Avoid concluding that a native pairing is superior when current project evidence contradicts the prior.
+☐ Surface the pairing class, current evidence strength, and contribution of the pairing prior in routing explanations.
+☐ Allow users to prefer native pairing strongly, weakly, not at all, or as a hard pin for explicitly chosen sessions.
+
+Phase 9K — Harness-aware response profiles
+
+Profile model
+
+☐ Define response profiles as communication policy rather than model capability, reasoning effort, permission mode, task diligence, or validation policy.
+☐ Model verbosity independently as terse, concise, standard, or elaborate.
+☐ Model intended audience independently as plain, technical, or executive.
+☐ Model progress narration independently as silent, milestones, or detailed.
+☐ Model evidence presentation independently as minimal, standard, or audit.
+☐ Model final-answer format independently through options such as prose, bullets, or change-summary.
+☐ Allow named presets to combine these dimensions without forcing every harness to expose the same native vocabulary.
+☐ Provide a concise-technical preset that leads with outcomes, suppresses routine narration, and still reports changed files, verification, risks, and blockers.
+☐ Allow separate defaults for orchestrator, worker, reviewer, explainer, and ordinary interactive-session roles.
+☐ Resolve response-profile precedence as task override, session, role, project, user default, then harness default.
+☐ Keep project response-profile configuration inside the project scope and prevent it from contaminating unrelated projects.
+
+Harness-native application
+
+☐ Prefer a harness’s native output-style or communication-style mechanism when it can represent the selected profile without weakening coding instructions.
+☐ Let the HarnessAdapter translate a Glasshouse response profile into the closest safe native harness configuration.
+☐ Treat Claude Code output styles, Codex personalities, and future harness-native mechanisms as adapter examples rather than universal Glasshouse concepts.
+☐ Record which native mechanism, additive instruction, or fallback was actually applied.
+☐ Keep every spawned worker’s response profile explicit because subagents may not inherit the main harness session’s communication style.
+☐ Preserve native harness engineering, safety, permission, compaction, and tool-use instructions when applying a response profile.
+☐ Never replace the complete native harness system prompt merely to control verbosity, tone, or answer structure.
+☐ Do not make gateway-side system-prompt rewriting the default way Glasshouse applies a response profile.
+☐ Treat a user-configured gateway prompt transformation as explicit backend metadata and surface that it may interact with harness instructions.
+
+Additive fallback and cache behavior
+
+☐ Define a small stable additive response contract for harnesses that lack an adequate native communication-style mechanism.
+☐ Keep the fallback focused on user-facing communication and explicitly state that concision must not reduce analysis, verification, diagnostics, error reporting, or checkpoint completeness.
+☐ Inject the fallback through the safest adapter-supported session-start, append-system, instruction-message, hook-context, or equivalent mechanism.
+☐ Avoid repeatedly injecting an unchanged response contract on every turn when the harness already retains it.
+☐ Prefer selecting a response profile when a session is created so the session’s system-prefix and prompt-cache behavior remain stable.
+☐ Let adapters declare whether a live profile change is supported, delayed until a new session, or likely to invalidate prompt caching.
+☐ Warn before a profile change that requires clearing or recreating a valuable warm session.
+☐ Allow a lightweight in-session communication instruction for a one-turn override when supported without rewriting the system prefix.
+☐ Preserve raw native terminal output even when Glasshouse offers optional folding of verbose progress or detail sections.
+☐ Do not run a second language model to rewrite every final answer by default because it adds latency, cost, and risk of losing caveats.
+☐ Keep arbitrary custom prompt additions separate from named response profiles and require explicit user configuration for them.
+
+Evaluation and safeguards
+
+☐ Measure output-token reduction, time to actionable information, user steering, profile overrides, and perceived cognitive load.
+☐ Measure whether concise profiles hide relevant caveats, unresolved risks, verification failures, or required user decisions.
+☐ Measure whether elaborate profiles add useful explanation or merely increase token volume and reading time.
+☐ Measure profile behavior separately for each harness-model pairing because the same instruction can produce different effects across models.
+☐ Allow the user to disable Glasshouse response-profile injection and use the untouched harness default.
+☐ Keep the active response profile and application mechanism inspectable from session details.
+
 Phase 10 — Unified session model
 
 ☐ Represent every native harness execution as a first-class Glasshouse session.
 ☐ Assign every Glasshouse session a unique Glasshouse session ID.
 ☐ Store the harness type for every session.
 ☐ Store the native session ID separately from the Glasshouse session ID.
+☐ Store the harness, launch profile, backend resource, model, pairing class, protocol, and response profile as distinct session metadata.
+☐ Never represent a direct API or gateway backend as an interactive Glasshouse session without an owning real harness.
 ☐ Track session states including starting, running, idle, waiting for user, stopped, failed, and closed.
 ☐ Track the last known activity timestamp for every session.
 ☐ Track whether each session is embedded, headless, or externally presented.
@@ -1175,8 +1277,9 @@ Phase 34F — Model capability and tier calibration
 ☐ Allow users to manually override a model’s workload ceiling.
 ☐ Record successful and failed task outcomes by workload tier when enough evidence exists.
 ☐ Use observed outcomes to suggest calibration changes without silently rewriting the user’s model policy.
-☐ Keep capability calibration local to the configured provider/model pair because the same model may behave differently behind different gateways or quantizations.
-☐ Treat benchmark-derived capability metadata as a starting prior rather than proof of performance in the user’s harness.
+☐ Keep capability calibration local to the configured harness, launch profile, model, backend, and relevant protocol path because the same model may behave differently behind different harnesses, gateways, translations, or quantizations.
+☐ Store the harness-model pairing class and the current evidence strength alongside capability calibration.
+☐ Treat benchmark-derived capability metadata and same-vendor alignment as starting priors rather than proof of performance in the user’s harness.
 ☐ Keep local quantized-model capability profiles distinct from hosted versions of nominally the same model.
 
 Phase 35 — Lightweight task classification
@@ -1200,7 +1303,8 @@ Phase 35A — Candidate generation
 
 ☐ Generate routing candidates from relevant existing sessions before considering fresh sessions.
 ☐ Generate fresh native-subscription session candidates from enabled harness launch profiles.
-☐ Generate fresh gateway-backed session candidates only when their protocol and capability requirements match the requested harness.
+☐ Generate fresh gateway-backed session candidates only as installed-harness launch profiles whose protocol, model, tool semantics, and capability requirements match.
+☐ Never generate a direct API or gateway endpoint as a first-class interactive session candidate without an owning installed harness.
 ☐ Generate disposable-job candidates for tasks that do not need a first-class interactive session.
 ☐ Exclude candidates below the classified minimum workload tier.
 ☐ Exclude candidates missing a hard required capability.
@@ -1221,6 +1325,9 @@ Phase 35B — Candidate scoring
 ☐ Include provider health in candidate scoring.
 ☐ Include expected marginal cost in candidate scoring.
 ☐ Include expected latency in candidate scoring.
+☐ Include harness-model pairing as an inspectable soft prior for fresh sessions with limited local evidence.
+☐ Decay the pairing prior as reliable observations accumulate for the exact harness-profile-model-backend combination.
+☐ Prefer observed success and reliability over same-vendor alignment when evidence is sufficient.
 ☐ Prefer effective TTFC over raw TTFC for tool-using gateway routes when reliability evidence is sufficient.
 ☐ Include successful tool rounds per minute as supporting evidence without treating it as a universal quality score.
 ☐ Include cache affinity and the distinction between warm, cold, and unknown observations.
@@ -1294,11 +1401,13 @@ Phase 38 — Quota-preserving routing
 
 Phase 39 — Gateway-backed disposable jobs
 
+☐ Define disposable jobs as bounded internal LLM calls rather than native interactive sessions or coding harnesses.
 ☐ Add a simple provider interface for non-interactive disposable LLM jobs.
 ☐ Allow OpenAI-compatible gateways to be configured through the disposable-job interface.
 ☐ Allow local Ollama or llama.cpp endpoints to be configured through the disposable-job interface.
 ☐ Use disposable jobs for classification, memory extraction, reranking, and other bounded support tasks.
 ☐ Keep disposable jobs distinct from first-class interactive harness sessions.
+☐ Do not give disposable jobs an autonomous coding-agent loop, unrestricted repository tools, or native-session identity.
 ☐ Do not pretend a disposable API call is a user-enterable worker session.
 ☐ Record which resource performed important memory extraction or classification for debugging.
 
@@ -1328,6 +1437,7 @@ Phase 41 — Project overview
 ☐ Show whether each displayed capacity value is measured, estimated, manual, or unknown.
 ☐ Show the next known or estimated reset time for constrained resources.
 ☐ Show the currently selected routing model and its recent latency.
+☐ Show the harness, backend, model, pairing class, and response profile for active sessions when relevant.
 ☐ Show protected premium reserves when they influence routing.
 ☐ Keep the overview factual and derived from stored state rather than generating decorative AI commentary by default.
 
@@ -1437,6 +1547,9 @@ Phase 49 — Configuration
 ☐ Allow the user to configure protected reserve percentages for premium subscriptions.
 ☐ Allow the user to configure the routing-model fallback chain.
 ☐ Allow the user to configure workload-tier ceilings for individual models.
+☐ Allow the user to configure native-pairing preference strength without hard-coding vendor-specific routing rules.
+☐ Allow named response profiles and separate role defaults for orchestrator, worker, reviewer, explainer, and ordinary sessions.
+☐ Allow response-profile injection to be disabled independently from automatic routing and memory extraction.
 ☐ Allow cmux integration to be disabled even when cmux is detected.
 ☐ Keep configuration schema small until real usage demonstrates a need for additional options.
 
@@ -1477,6 +1590,10 @@ Phase 51 — Evaluation hooks
 ☐ Measure false alarms, unnecessary pauses, verification overhead, reviewer cost, and cases where the guardrail increases over-planning.
 ☐ Compare guardrails disabled, advisory, and risk-gated modes on comparable tasks.
 ☐ Measure whether fresh-session or cross-harness verification contributes independent evidence rather than agreement alone.
+☐ Measure native versus cross-vendor harness-model pairings by task success, usable tool calls, repair loops, effective TTFC, reliability, and user overrides.
+☐ Measure how quickly local pairing evidence becomes more predictive than the initial same-vendor prior.
+☐ Measure output-token reduction, time to actionable information, profile overrides, missing caveats, and additional steering for each response profile.
+☐ Measure response-profile effects separately by harness-model pairing and application mechanism.
 ☐ Measure routing latency added before interactive task execution.
 ☐ Measure whether effective TTFC predicts usable agent turns better than raw TTFC, TTFT, or decode throughput.
 ☐ Measure how often failure-domain evidence prevents a failover onto the same unhealthy upstream.
@@ -1516,6 +1633,8 @@ Phase 54A — Setup and portability completion criteria
 ☐ Consider onboarding usable when the user can skip all provider configuration and still use native detected harnesses.
 ☐ Consider settings usable when the user can return later and configure a provider without rerunning the entire setup.
 ☐ Consider launch profiles usable when the same installed Claude Code binary can be started natively or with an alternate compatible provider without modifying the user’s normal Claude configuration.
+☐ Consider interactive gateway use valid only when the session is operated by an installed compatible harness and Glasshouse does not create a replacement agent loop.
+☐ Consider response profiles minimally usable when at least one supported harness can apply a selected profile through a native mechanism or the bounded additive fallback while preserving coding instructions.
 ☐ Consider gateway mode usable when two concurrent Glasshouse instances can run isolated local gateways without port or credential collisions.
 ☐ Consider provider setup usable when OpenRouter, one generic OpenAI-compatible endpoint, and one generic Anthropic-compatible endpoint can be configured and tested.
 ☐ Consider free-pool support usable when at least one configured zero-cost or free-tier model can perform a disposable Glasshouse support job.
@@ -1528,6 +1647,9 @@ Phase 55 — V1 completion definition
 ☐ Consider V1 usable when Codex can run as a fully interactive embedded native session.
 ☐ Consider V1 usable when the user can switch between multiple live native sessions without restarting them.
 ☐ Consider V1 usable when one session can be designated as orchestrator and spawn at least one visible worker session.
+☐ Consider V1 usable when every interactive native, direct-provider, or gateway-backed session records a real owning harness and launch profile.
+☐ Consider V1 usable when a compatible vendor-native pairing receives an inspectable initial prior without overriding stronger observed evidence or user choice.
+☐ Consider V1 usable when a response profile can control user-facing communication without reducing verification or replacing native harness coding instructions.
 ☐ Consider V1 usable when a worker completion event can reliably wake or notify the orchestrator.
 ☐ Consider V1 usable when the user can enter and directly control any orchestrated worker.
 ☐ Consider V1 usable when project-specific durable memory can store the six initial memory kinds.
@@ -1788,6 +1910,9 @@ Explicit Non-Goals for V1
 Product Rules
 
 ☐ Every worker must remain a real session the user can enter.
+☐ Every interactive Glasshouse session must be operated by a real installed coding harness.
+☐ A provider, direct API, router, or gateway is a backend resource for a harness, not an interactive coding harness by itself.
+☐ Glasshouse must not build a replacement agent loop merely because a model is reached through an API or gateway.
 ☐ Native harness behavior must remain available unless Glasshouse has a concrete technical reason to intercept it.
 ☐ Project isolation must be enforced structurally rather than by convention.
 ☐ Durable memory must capture expensive-to-rediscover knowledge rather than conversation volume.
@@ -1805,6 +1930,9 @@ Product Rules
 ☐ Workload tier and hard capability requirements must be determined before price optimization.
 ☐ Free resources should be used aggressively for suitable work but never treated as equivalent merely because their monetary price is zero.
 ☐ Routing decisions must remain inspectable and manually overridable.
+☐ Same-vendor harness-model alignment is a useful initial prior, not proof of superior performance.
+☐ Local evidence for the exact harness-profile-model-backend combination should outweigh vendor alignment when sufficiently strong.
+☐ Response profiles control communication rather than reasoning effort, diligence, verification, permissions, or implementation quality.
 ☐ Model confidence, verbosity, repeated agreement, and reasoning length are not evidence that an implementation premise is correct.
 ☐ High-impact implementation premises should be tied to current evidence or an explicit bounded verification step before broad expansion.
 ☐ Token volume, context size, request count, and spend are resource measurements, not proxies for quality, progress, or agent productivity.
