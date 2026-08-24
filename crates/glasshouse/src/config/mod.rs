@@ -122,19 +122,29 @@ pub enum ConfigError {
 /// Per-integration configuration: whether the user turned it on, and an
 /// optional explicit executable path.
 ///
+/// `enabled` is genuinely tri-state per field: `None` means the user has
+/// never recorded a decision (the key is absent), while `Some(_)` records
+/// an explicit enable or disable. This distinction matters for layering —
+/// see [`IntegrationTable::is_enabled`] and [`EffectiveConfig::enabled`].
+///
 /// Deliberately has no other fields — see the module-level "No secrets
 /// here" section.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntegrationConfig {
-    #[serde(default)]
-    enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     executable: Option<PathBuf>,
 }
 
 impl IntegrationConfig {
-    pub fn enabled(&self) -> bool {
+    pub fn enabled(&self) -> Option<bool> {
         self.enabled
+    }
+
+    /// The recorded decision, or `default` when none was ever recorded.
+    pub fn enabled_or(&self, default: bool) -> bool {
+        self.enabled.unwrap_or(default)
     }
 
     pub fn executable(&self) -> Option<&Path> {
@@ -142,7 +152,7 @@ impl IntegrationConfig {
     }
 
     pub fn set_enabled(&mut self, enabled: bool) -> &mut Self {
-        self.enabled = enabled;
+        self.enabled = Some(enabled);
         self
     }
 
@@ -173,8 +183,8 @@ impl IntegrationTable {
         self.0.get(id.slug())
     }
 
-    /// Mutable access, creating a default (disabled, no explicit executable)
-    /// entry if `id` has no recorded configuration yet.
+    /// Mutable access, creating a default (no recorded decision, no explicit
+    /// executable) entry if `id` has no recorded configuration yet.
     pub fn entry(&mut self, id: IntegrationId) -> &mut IntegrationConfig {
         self.0.entry(id.slug().to_owned()).or_default()
     }
@@ -188,10 +198,12 @@ impl IntegrationTable {
     }
 
     /// Tri-state: `Some(true)`/`Some(false)` is an explicit user decision,
-    /// `None` means the user has never been asked about `id`. Onboarding
-    /// needs exactly this distinction to know whether to prompt.
+    /// `None` means the user has never been asked about `id` (including the
+    /// case where an entry exists but records only, say, an executable
+    /// override). Onboarding needs exactly this distinction to know whether
+    /// to prompt.
     pub fn is_enabled(&self, id: IntegrationId) -> Option<bool> {
-        self.get(id).map(IntegrationConfig::enabled)
+        self.get(id).and_then(IntegrationConfig::enabled)
     }
 
     /// Like [`IntegrationTable::is_enabled`], collapsing the never-asked
@@ -776,7 +788,7 @@ mod tests {
                 .iter()
                 .find(|(slug, _)| *slug == "a-future-harness-this-build-does-not-know")
                 .map(|(_, cfg)| cfg.enabled()),
-            Some(true)
+            Some(Some(true))
         );
     }
 
@@ -1032,6 +1044,133 @@ mod tests {
         assert!(!outside.join("config.toml").exists());
     }
 
+    #[test]
+    fn project_executable_only_override_falls_through_to_user_enabled_decision() {
+        let mut user = UserConfig::default();
+        user.integrations_mut()
+            .entry(IntegrationId::ClaudeCode)
+            .set_enabled(true);
+
+        let mut project = ProjectConfig::default();
+        project
+            .integrations_mut()
+            .entry(IntegrationId::ClaudeCode)
+            .set_executable(Some(PathBuf::from("/opt/bin/claude")));
+
+        let effective = EffectiveConfig::new(&user, Some(&project));
+
+        let enabled = effective.enabled(IntegrationId::ClaudeCode, true);
+        assert!(enabled.value);
+        assert_eq!(enabled.layer, Layer::User);
+
+        let executable = effective.executable(IntegrationId::ClaudeCode).unwrap();
+        assert_eq!(executable.value, PathBuf::from("/opt/bin/claude"));
+        assert_eq!(executable.layer, Layer::Project);
+    }
+
+    #[test]
+    fn explicit_project_disable_still_wins_over_user_enable() {
+        let mut user = UserConfig::default();
+        user.integrations_mut()
+            .entry(IntegrationId::ClaudeCode)
+            .set_enabled(true);
+
+        let mut project = ProjectConfig::default();
+        project
+            .integrations_mut()
+            .entry(IntegrationId::ClaudeCode)
+            .set_enabled(false);
+
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        let enabled = effective.enabled(IntegrationId::ClaudeCode, true);
+        assert!(!enabled.value);
+        assert_eq!(enabled.layer, Layer::Project);
+    }
+
+    #[test]
+    fn enabled_key_parses_to_some_and_its_absence_parses_to_none() {
+        let enabled_true: IntegrationConfig =
+            toml::from_str("enabled = true\nexecutable = \"/x/y\"").unwrap();
+        assert_eq!(enabled_true.enabled(), Some(true));
+
+        let explicit_false: ProjectConfig = toml::from_str(
+            r#"
+                [integrations.claude-code]
+                enabled = false
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            explicit_false
+                .integrations()
+                .is_enabled(IntegrationId::ClaudeCode),
+            Some(false)
+        );
+
+        let omitted: ProjectConfig = toml::from_str(
+            r#"
+                [integrations.claude-code]
+                executable = "/opt/bin/claude"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            omitted
+                .integrations()
+                .get(IntegrationId::ClaudeCode)
+                .unwrap()
+                .enabled(),
+            None
+        );
+        assert_eq!(
+            omitted.integrations().is_enabled(IntegrationId::ClaudeCode),
+            None,
+            "an entry without a recorded decision is None, not Some(false)"
+        );
+    }
+
+    #[test]
+    fn serializing_no_decision_omits_the_enabled_key() {
+        let no_decision = IntegrationConfig {
+            enabled: None,
+            executable: Some(PathBuf::from("/opt/bin/claude")),
+        };
+        let toml_text = toml::to_string_pretty(&no_decision).unwrap();
+        assert!(
+            !toml_text.contains("enabled"),
+            "no-decision entry must not serialize an `enabled` key:\n{toml_text}"
+        );
+
+        let explicit_false = IntegrationConfig {
+            enabled: Some(false),
+            executable: None,
+        };
+        let toml_text = toml::to_string_pretty(&explicit_false).unwrap();
+        assert!(
+            toml_text.contains("enabled = false"),
+            "explicit disable must serialize `enabled = false`:\n{toml_text}"
+        );
+    }
+
+    #[test]
+    fn enabled_or_returns_recorded_decision_or_supplied_default() {
+        let decided = IntegrationConfig {
+            enabled: Some(true),
+            executable: None,
+        };
+        assert!(decided.enabled_or(false));
+
+        let declined = IntegrationConfig {
+            enabled: Some(false),
+            executable: None,
+        };
+        assert!(!declined.enabled_or(true));
+
+        let undecided = IntegrationConfig::default();
+        assert!(undecided.enabled_or(true));
+        assert!(!undecided.enabled_or(false));
+    }
+
     /// Structural guard, not a string search: enumerate every field this
     /// module's config types can hold and assert none of them is
     /// credential-shaped. If a future edit adds a field, this test forces a
@@ -1042,7 +1181,7 @@ mod tests {
         // `IntegrationConfig` — the only per-item shape stored anywhere in
         // this module — has exactly these two fields.
         let cfg = IntegrationConfig {
-            enabled: true,
+            enabled: Some(true),
             executable: Some(PathBuf::from("/usr/bin/example")),
         };
         let value = toml::Value::try_from(&cfg).unwrap();
