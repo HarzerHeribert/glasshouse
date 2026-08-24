@@ -959,6 +959,61 @@ Phase 33 — Resource health
 ☐ Allow a resource to be temporarily marked degraded after repeated failures.
 ☐ Allow a degraded resource to recover after successful probes or requests.
 ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
+☐ Keep resource health separate from immediate availability so a healthy paced route can remain temporarily unschedulable without being scored as broken.
+☐ Record whether a health observation came from a real task, a retry, a repair attempt, or an explicit probe.
+
+Phase 33A — Routing evidence ledger
+
+☐ Store project-local routing observations as an append-oriented evidence ledger rather than only maintaining current aggregate counters.
+☐ Record provider, route, model identity, authenticated quota context, harness, request purpose, and observation timestamp for each measurable turn.
+☐ Record dispatch time, first-byte time, time to first real token, time to first tool call, and completion time when the protocol exposes them.
+☐ Do not treat whitespace padding, transport keepalives, or reasoning-only deltas as the first generated token.
+☐ Record input tokens, output tokens, cached-input tokens, and monetary cost only when they are actually exposed or can be estimated with an explicit confidence label.
+☐ Record successful tool rounds, retries, repairs, failovers, and the final user-visible outcome separately.
+☐ Preserve raw observations alongside rolling aggregates so a routing decision can be audited and aggregation logic can be recalibrated.
+☐ Compute robust rolling summaries such as median, tail latency, exponentially weighted averages, failure rates, and sample counts where useful.
+☐ Separate warm-context, cold-context, and unknown-context observations instead of averaging away cache effects.
+☐ Keep metrics distinct for materially different model versions, quantizations, routes, or changing stealth-model identities.
+☐ Attach source, observation window, sample size, freshness, and confidence to every aggregate used for routing.
+☐ Apply conservative priors or keep a metric unknown when the sample is too small to support a routing decision.
+☐ Decay or expire stale operational evidence without deleting durable raw observations prematurely.
+☐ Treat token volume, request count, context size, and spend as resource telemetry rather than evidence of quality or progress.
+☐ Keep the evidence ledger physically project-scoped and require explicit export before observations leave the project.
+
+Phase 33B — Reliability-adjusted agent performance
+
+☐ Treat time to first tool call, TTFC, as the primary responsiveness measure for tool-using agent work when structured tool events are available.
+☐ Keep TTFT as a separate measure of generation responsiveness rather than presenting it as agent productivity.
+☐ Keep decode tokens per second as a model-serving characteristic rather than presenting it as task progress.
+☐ Track successful tool rounds per minute of serving time as an outcome-adjacent agent-system measure.
+☐ Define effective TTFC as observed TTFC divided by one minus the relevant failure probability when enough observations exist.
+☐ Use reliability-adjusted latency in route comparison so a fast route that frequently fails is not ranked as genuinely fast.
+☐ Keep an additive failure penalty available because a failed turn can also stop a harness, lose user attention, or require recovery beyond elapsed time.
+☐ Count empty completions, unusable tool calls, stream aborts, and apparently successful but non-actionable turns as distinct unsuccessful outcomes.
+☐ Keep raw TTFC, effective TTFC, TTFT, throughput, and rounds per minute visible separately rather than collapsing them into one performance headline.
+☐ Avoid comparing TTFC across tasks with materially different tool requirements unless the comparison is explicitly normalized or segmented.
+☐ Allow configurable scoring weights and preserve the exact inputs and terms used for every important routing score.
+☐ Treat the OX gateway scoring model as implementation evidence and a configurable starting policy rather than a universal Glasshouse constant.
+☐ Fall back to coarser process-level latency and outcome observations when a native subscription harness exposes no structured token or tool events.
+☐ Never infer precise TTFC or token timing from terminal text when the adapter cannot distinguish protocol events reliably.
+
+Phase 33C — Failure, quota, and route correlation
+
+☐ Classify failures at least as throttle, exhausted quota, upstream 5xx, timeout, stream abort, empty completion, credential failure, request incompatibility, or unknown.
+☐ Keep temporary cadence throttling separate from exhausted long-window quota and from provider health failures.
+☐ Learn or parse provider cadence separately from Retry-After remainder values when evidence permits.
+☐ Reserve known paced capacity at dispatch so concurrent workers do not all consume the same apparent allowance.
+☐ Avoid retrying a paced route in place when the current cadence makes the retry predictably unavailable.
+☐ Reduce or suppress active probes when probing would consume a material fraction of a scarce request pool.
+☐ Measure temporally overlapping failures between routes rather than assuming different front doors are independent providers.
+☐ Represent a quota domain separately from a failure domain.
+☐ Treat uncorrelated account-level 429 events as evidence of separate quota buckets, not automatically as independent upstreams.
+☐ Treat correlated model-specific 5xx events, matching provider metadata, or matching serving behavior as evidence of a shared failure domain.
+☐ Preserve route-topology claims as confidence-weighted observations that can change when new evidence arrives.
+☐ Use failure-domain diversity when selecting failover candidates so a nominally different route does not provide fictitious resilience.
+☐ Require sufficient overlapping observations and expose sample size before presenting a route correlation as meaningful.
+☐ Record whether a routing benefit came from independent capacity, independent quota, independent failure handling, or merely a different queue onto the same upstream.
+☐ Keep correlation analysis optional for V1 routing and prevent absent evidence from being interpreted as independence.
 
 Phase 34 — Capability registry
 
@@ -1103,6 +1158,12 @@ Phase 35B — Candidate scoring
 ☐ Include provider health in candidate scoring.
 ☐ Include expected marginal cost in candidate scoring.
 ☐ Include expected latency in candidate scoring.
+☐ Prefer effective TTFC over raw TTFC for tool-using gateway routes when reliability evidence is sufficient.
+☐ Include successful tool rounds per minute as supporting evidence without treating it as a universal quality score.
+☐ Include cache affinity and the distinction between warm, cold, and unknown observations.
+☐ Include current cadence availability separately from general route health.
+☐ Include failure-domain diversity when ranking fallback and failover candidates.
+☐ Reduce the influence of performance observations with small samples, low confidence, or stale windows.
 ☐ Include time until quota reset in candidate scoring.
 ☐ Include protected-reserve policy in candidate scoring.
 ☐ Include session-switching and bootstrap cost in candidate scoring.
@@ -1278,6 +1339,13 @@ Phase 47 — Observability without spectacle
 ☐ Add a debug view showing which memories were retrieved for a routed task.
 ☐ Add a debug view showing estimated cache temperature and the evidence used for that estimate.
 ☐ Add a debug view showing quota information and whether it is measured, inferred, or unknown.
+☐ Add an optional compact route-evidence table showing sample count, TTFC, effective TTFC, TTFT, decode throughput, successful rounds per minute, and observation window when available.
+☐ Show failure counts by class instead of presenting one unexplained error percentage.
+☐ Show whether latency evidence came from warm, cold, or unknown context.
+☐ Show route health, immediate availability, cadence, quota reset, and failure-domain evidence as separate concepts.
+☐ Show the strongest measured factors behind the most recent routing decision in concise text.
+☐ Show correlations with their sample size and confidence instead of implying precise independence from sparse data.
+☐ Keep lifetime token and spend totals out of the default project overview and never present them as achievement counters.
 ☐ Add a debug view showing memory-extraction inputs and outputs when explicitly enabled.
 ☐ Keep diagnostic views optional and do not turn them into the normal user experience.
 ☐ Prefer inspectable text and tables over animated knowledge-graph visualizations.
@@ -1340,6 +1408,11 @@ Phase 51 — Evaluation hooks
 ☐ Measure the accuracy of estimated subscription headroom against observed throttling and resets.
 ☐ Measure how often protected quota remains available for high-tier tasks when needed.
 ☐ Measure routing latency added before interactive task execution.
+☐ Measure whether effective TTFC predicts usable agent turns better than raw TTFC, TTFT, or decode throughput.
+☐ Measure how often failure-domain evidence prevents a failover onto the same unhealthy upstream.
+☐ Measure how often nominally different routes provide separate quota capacity but not independent failure resilience.
+☐ Measure how much scarce capacity is consumed by probes and whether passive observations can replace them.
+☐ Measure how often sparse, stale, or incorrectly segmented evidence causes a poor routing decision.
 ☐ Measure estimated versus actual marginal token or request consumption when telemetry permits.
 ☐ Keep evaluation data local and project-scoped unless the user explicitly exports it.
 
@@ -1396,6 +1469,7 @@ Phase 55 — V1 completion definition
 ☐ Consider V1 usable when a configurable cheap/free/local routing model can assign workload tiers with deterministic fallback.
 ☐ Consider V1 usable when protected premium reserve can influence a routing decision.
 ☐ Consider V1 usable when routing explanations show workload tier, session affinity, resource capacity, and the primary reason for selection.
+☐ Consider V1 usable when at least one gateway-backed route records classified success and failure outcomes plus TTFT or TTFC and can cite that evidence in a routing explanation.
 ☐ Consider V1 usable when cmux integration can expose or spawn a session externally without being required for normal operation.
 ☐ Consider V1 complete only after project-isolation and cross-contamination tests pass.
 
@@ -1540,6 +1614,7 @@ Product Rules
 ☐ Workload tier and hard capability requirements must be determined before price optimization.
 ☐ Free resources should be used aggressively for suitable work but never treated as equivalent merely because their monetary price is zero.
 ☐ Routing decisions must remain inspectable and manually overridable.
+☐ Token volume, context size, request count, and spend are resource measurements, not proxies for quality, progress, or agent productivity.
 ☐ Native prompt compaction and project memory must remain separate concepts.
 ☐ User control must take precedence over automatic orchestration.
 ☐ Optional integrations must not become hidden hard dependencies.
