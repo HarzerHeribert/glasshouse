@@ -304,3 +304,67 @@ Honest limits:
   and it was already recorded as a known limitation before this change.
 - This capability covers the combinations Glasshouse currently knows about. A
   newly discovered one would reopen it.
+
+### Phase 2A — Support native Windows as a first-class Glasshouse runtime where the selected harness is available
+
+Contract: Given native Windows with an installed harness, everything Glasshouse
+can currently do — resolve a project, isolate its state, discover harnesses,
+probe versions, and open a real harness session inside the project root — works
+the same way it does on macOS and Linux, and any combination that cannot work
+is refused rather than half-started.
+
+State: COMPLETE
+
+This is a summary capability. It is checked because every capability it
+summarises is checked and because the same test suite that backs the macOS and
+Linux boxes now runs, and passes, on `windows-latest` — not because Windows was
+judged by a weaker standard than its siblings.
+
+Production evidence — the Windows-specific paths, all reachable in production:
+
+- `pty`: ConPTY through `portable-pty`, with `process::JobHandle` giving
+  Windows a kill-the-whole-tree equivalent that `TerminateProcess` alone does
+  not provide — which matters precisely because a `.cmd` harness makes the real
+  process a grandchild.
+- `platform::exec`: `.exe`/`.cmd`/`.bat` classification, `cmd.exe /D /C`
+  translation, `plain_script_path` conversion of the verbatim form `cmd.exe`
+  cannot open, and rejection of `cmd.exe` metacharacters in arguments.
+- `platform::paths::strip_verbatim_prefix` and `Project::display_root`: a
+  canonical Windows root is verbatim, which is correct as an identity and
+  unusable at a process boundary, so it is stripped there and only there.
+- `launch::unsupported_combination`: refuses the one combination known not to
+  work rather than starting a session that would run outside the project.
+
+Regression evidence actually executed on `windows-latest`:
+
+- CI run `32790669974` on `53e98f0`: **197 lib tests and 21 PTY smoke tests,
+  0 failures**, plus lint, alongside green `ubuntu-latest` and `macos-latest`.
+- `the_launch_command_opens_the_configured_harness_inside_the_project_root`
+  runs the shipped binary in a real ConPTY and confirms a `.cmd` harness
+  starts in the project root, with project-over-user executable precedence and
+  exit-code propagation.
+- `a_fake_installed_harness_launches_inside_the_discovered_project_root`
+  exercises the real `cmd.exe /D /C` translation and asserts the canonical root
+  was verbatim before `display_root` stripped it.
+- `a_direct_executable_launches_through_the_harness_seam` covers the `.exe`
+  branch, whose verbatim path had never been confirmed acceptable to
+  `CreateProcess`.
+- The PTY smoke suite proves output streaming, input, resize, and exit
+  detection against a real ConPTY child.
+
+Failure/isolation evidence:
+
+- Windows CI caught two defects local gates could not: `cmd.exe` refusing the
+  verbatim script path (so **no `.cmd` harness could start at all**), and a
+  test comparing Windows path spellings that differ while denoting the same
+  directory. Both are fixed and covered.
+- Project-root refusals, the canonical-path guard, and per-project database
+  isolation all execute in the Windows lib suite.
+
+Honest limits — these are true on every platform, not Windows-specific:
+
+- The interactive multi-session TUI does not exist yet (Phase 3), so
+  "first-class runtime" means parity with macOS and Linux in what Glasshouse
+  can do *today*, which is exactly the standard those two boxes were checked
+  against.
+- UNC project roots are refused for script harnesses rather than supported.

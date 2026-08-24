@@ -97,7 +97,7 @@ Phase 2A — Cross-platform runtime
 
 ☑ Support macOS as a first-class Glasshouse runtime.
 ☑ Support Linux as a first-class Glasshouse runtime.
-☐ Support native Windows as a first-class Glasshouse runtime where the selected harness is available.
+☑ Support native Windows as a first-class Glasshouse runtime where the selected harness is available.
 ☑ Treat WSL as a Linux runtime and do not silently mix Windows and WSL process namespaces.
 ☑ Hide platform-specific PTY behavior behind a common terminal-process interface.
 ☑ Use Unix PTY primitives on macOS and Linux through the selected PTY abstraction.

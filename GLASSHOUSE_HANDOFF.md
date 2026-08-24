@@ -4,15 +4,21 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 1 line 89 is COMPLETE and checked**: "Ensure every spawned harness
-process starts with its working directory set to the current project root."
-Its evidence-ledger entry is `COMPLETE`, backed by CI run `32788309876` on
-commit `e3295a7`, green on `ubuntu-latest`, `macos-latest`, `windows-latest`,
-and lint.
+Five capabilities were completed and checked this session, each with a
+`COMPLETE` ledger entry and green cross-platform CI:
 
-The next unchecked Phase 1 boxes — 90, 92, and 93 — are **all blocked on later
-phases**, which is a real ordering problem in the map rather than a reason to
-stop; see "Where to go next".
+1. **Phase 1** — every spawned harness process starts in the project root.
+2. **Phase 2A** — unsupported platform/harness combinations fail with a clear
+   diagnostic instead of half-starting.
+3. **Phase 2A** — native Windows is a first-class runtime.
+4. **Phase 2B** — cmux is detected via its control environment.
+5. **Phase 2B** — Ollama is detected via a configured endpoint.
+
+The checked count went from 58 to 63. `main` is clean and pushed, and the
+latest CI run is green on Linux, macOS, Windows, and lint.
+
+What remains nearby is **blocked, not merely unstarted** — see "Where to go
+next", which is the first thing to read.
 
 ## Verified completed work
 
@@ -40,6 +46,19 @@ stop; see "Where to go next".
   from one process at ~8,000/s produced none — and it leaves `errno` at `-6`,
   which is not a valid errno. `pty::open_pty` now retries the allocation only,
   five times, side-effect free by construction.
+
+- Discovery no longer gives up when an executable is absent. Both the cmux and
+  Ollama capability lines are an OR, and only the left half had been built, so
+  Glasshouse running *inside* cmux reported cmux as not found. Presence
+  evidence — cmux's control environment, Ollama's configured endpoint — is now
+  consulted in the not-found path only, reporting the integration as configured
+  with no executable, so `is_usable()` stays false and nothing tries to launch
+  it. Only variable *names* are ever recorded: a live `doctor` run with a
+  credential in `OLLAMA_HOST` shows zero occurrences of it.
+- A `.cmd` harness in a UNC project is refused before any process exists.
+  `cmd.exe` would not have failed there — it substitutes the Windows directory
+  and runs — so the session would have looked alive while operating outside the
+  project entirely.
 
 ### What CI caught the moment it was allowed to run
 
@@ -82,8 +101,13 @@ Two process lessons worth keeping:
   multi-session TUI will need a different input path.
 - Native Windows UNC project roots remain refused; `cmd.exe` cannot reliably
   hold a UNC working directory.
-- Antigravity detection lacks a real-install verification; cmux
-  control-environment and Ollama configured-endpoint detection are absent.
+- Antigravity detection lacks a real-install verification. cmux
+  control-environment and Ollama configured-endpoint detection are now
+  implemented and checked.
+- The UNC refusal's *premise* — that `cmd.exe` substitutes the Windows
+  directory rather than failing — is documented Windows behaviour, not
+  something a live run confirmed. No real UNC share was exercised; the refusal
+  itself is platform-independent and runs in CI everywhere.
 - `IntegrationId::minimum_version()` returns `None` for every integration, so
   unsupported-version classification exists but is unreachable. Declaring a
   real minimum needs verified release data this environment does not have.
@@ -98,31 +122,46 @@ Two process lessons worth keeping:
 
 ## Where to go next
 
-**Phase 1's three remaining boxes are each blocked on a later phase**, and the
-database confirms it: the only tables are `project_metadata` and
-`schema_migrations`.
+**The easy, unblocked work is now done.** Everything still unchecked nearby
+falls into one of three groups, and the next orchestrator's first job is to
+pick a group deliberately rather than work down the list.
 
-- Line 90 (reject a cross-project session resume) needs a sessions table and a
-  resume path — Phase 2.
-- Line 92 (cross-project memory retrieval disabled by design) needs the memory
-  table — Phase 20.
-- Line 93 (display the project root in the TUI) needs the TUI — Phase 3.
+**Group 1 — blocked on a later phase.** The database has only
+`project_metadata` and `schema_migrations`, which is what blocks these:
 
-So the map's stated order cannot be followed literally here. Do not fake any of
-them with a stub; decide deliberately whether to pull Phase 2's session
-metadata schema forward to unblock line 90, and record that decision.
+- Phase 1 line 90 (reject a cross-project session resume) needs a sessions
+  table and a resume path — Phase 2.
+- Phase 1 line 92 (cross-project memory retrieval disabled by design) needs the
+  memory table — Phase 20.
+- Phase 1 line 93 (display the project root in the TUI) needs the TUI —
+  Phase 3.
 
-The genuinely actionable work that needs no later phase is in Phase 2B:
+The map's order cannot be followed literally here. **Do not stub any of them.**
+The real decision is whether to pull Phase 2's session metadata schema forward
+to unblock line 90 — that is a product/architecture call worth making
+explicitly and recording.
 
-- "Detect cmux when a usable cmux executable **or supported cmux control
-  environment** is present" — the executable half already works; the missing
-  half is the `CMUX_*` control environment.
-- "Detect Ollama when a usable ollama executable **or configured local
-  endpoint** is present" — same shape, via `OLLAMA_HOST` or the conventional
-  local endpoint.
+**Group 2 — blocked on facts this environment does not have.**
 
-Both are well-scoped, testable without new architecture, and independent of
-everything blocked above.
+- "Detect Antigravity when a supported Antigravity CLI executable is present"
+  needs a real install to confirm the executable name. Guessing aliases is
+  worse than missing the detection: `ag` collides with the-silver-searcher and
+  would produce a confident, wrong detection.
+- "Mark every detected integration as available, configured, unconfigured,
+  unsupported-version, or unknown" is implemented for four of the five states.
+  `UnsupportedVersion` is unreachable only because `minimum_version()` returns
+  `None` everywhere, and inventing a minimum would produce false reports for
+  users on perfectly good installs. It needs verified release data, not code.
+
+**Group 3 — needs product decisions, and is a coherent block rather than
+individual boxes.** The Phase 2C onboarding items (provider and gateway
+configuration, the routing-model choices, Configure now / Do later) are
+interdependent and shape how providers and routing work for everything after
+them. Worth agreeing the shape with the user before implementing.
+
+If none of the above is desirable, Phase 2D (the settings view) and Phase 3
+(the TUI shell) are the natural forward path, and Phase 3 would also unblock
+line 93.
 
 ## Active worker tasks and results
 
@@ -178,10 +217,17 @@ Hand this checkpoint to Opus:
 > authorization; do it without asking, and treat a red Windows job as ordinary
 > work.
 >
-> Line 89 is done. Read "Where to go next" above before picking anything up:
-> the next three Phase 1 boxes are each blocked on a later phase, so the first
-> real decision is whether to pull Phase 2's session metadata schema forward to
-> unblock line 90, or to take the two unblocked Phase 2B detection capabilities
-> (cmux control environment, Ollama configured endpoint) first. Make that
-> decision explicitly and record it; do not stub a blocked capability to keep
-> the order looking intact.
+> Five capabilities were closed this session and the unblocked near-term work
+> is done. **Read "Where to go next" above before picking anything up** — what
+> remains nearby is blocked rather than merely unstarted, and it sorts into
+> three groups with different reasons. Working down the list in order will not
+> work.
+>
+> The first real decision is a product/architecture one: whether to pull
+> Phase 2's session metadata schema forward to unblock Phase 1 line 90, or to
+> move to Phase 2C onboarding (which needs the user's input on provider and
+> routing shape), or to start Phase 3's TUI shell (which would also unblock
+> line 93). Make that decision explicitly and record it. Do not stub a blocked
+> capability to keep the map's order looking intact, and do not guess an
+> Antigravity executable name or a minimum harness version — both would produce
+> confident, wrong results, which is worse than the gap they would close.
