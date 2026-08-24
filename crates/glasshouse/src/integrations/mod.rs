@@ -372,19 +372,28 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 /// one place total harness absence *is* treated as actionable is
 /// [`Discovery::problems`], at the whole-discovery level.
 fn detect_one(id: IntegrationId, home: Option<&Path>, project: &Project) -> DetectedIntegration {
-    detect_one_with(id, home, project, exec::resolve)
+    detect_one_with(
+        id,
+        home,
+        project,
+        exec::resolve,
+        presence_without_executable,
+    )
 }
 
-/// Core of [`detect_one`], with the executable resolver injected so tests
-/// can deterministically exercise the `NotFound` vs "found but unusable"
-/// branches without depending on what happens to be on the test machine's
-/// real `PATH` (see the `resolve_with_interop_predicate` test pattern in
-/// `platform::exec` for the same idea applied there).
+/// Core of [`detect_one`], with the executable resolver and the
+/// non-executable presence lookup both injected so tests can
+/// deterministically exercise the `NotFound` vs "found but unusable" vs
+/// "absent but present another way" branches without depending on what
+/// happens to be on the test machine's real `PATH` or environment (see the
+/// `resolve_with_interop_predicate` test pattern in `platform::exec` for the
+/// same idea applied there).
 fn detect_one_with(
     id: IntegrationId,
     home: Option<&Path>,
     project: &Project,
     resolver: impl Fn(&str) -> Result<ResolvedExecutable, ResolveError>,
+    presence: impl Fn(IntegrationId) -> Vec<String>,
 ) -> DetectedIntegration {
     let mut evidence = Vec::new();
     let mut problems = Vec::new();
@@ -395,9 +404,24 @@ fn detect_one_with(
                 "candidates tried: {}",
                 id.executable_candidates().join(", ")
             ));
+            // No executable anywhere, but the integration may still be
+            // demonstrably present another way (cmux running inside its own
+            // control environment; Ollama reachable at a configured local
+            // endpoint). When such evidence exists the integration is
+            // reported as `Configured` with no executable — visible, but
+            // never launchable (`is_usable()` stays false because
+            // `executable` is `None`). With no such evidence this arm
+            // behaves exactly as before: plain `NotFound`.
+            let presence_notes = presence(id);
+            let status = if presence_notes.is_empty() {
+                IntegrationStatus::NotFound
+            } else {
+                evidence.extend(presence_notes);
+                IntegrationStatus::Configured
+            };
             return DetectedIntegration {
                 id,
-                status: IntegrationStatus::NotFound,
+                status,
                 executable: None,
                 version: None,
                 evidence,
@@ -628,6 +652,67 @@ fn evidence_result(found: bool) -> ConfigEvidence {
     } else {
         ConfigEvidence::Unconfigured
     }
+}
+
+/// Evidence that an integration is present even though none of its
+/// executable candidates resolved on `PATH`.
+///
+/// This is the other half of each capability-map line's "OR": cmux is
+/// present when Glasshouse is running *inside* a cmux surface (its control
+/// environment variables are set), and Ollama is present when the user has
+/// configured a local endpoint for it — in both cases regardless of whether
+/// a matching binary happens to be on `PATH`.
+///
+/// SECURITY: like [`config_evidence`] (whose note style this follows), this
+/// only ever records the *names* of environment variables that are set and
+/// non-empty. It never reads, formats, logs, or stores any value: socket
+/// paths can be capability-bearing, endpoint URLs can carry credentials,
+/// and `CMUX_SURFACE_ID`/`CMUX_WORKSPACE_ID` are treated with the same
+/// name-only discipline. `CMUX_SOCKET_CAPABILITY` in particular is a
+/// capability token and is deliberately not consulted at all.
+fn presence_without_executable(id: IntegrationId) -> Vec<String> {
+    presence_without_executable_with(id, |name| std::env::var(name).ok())
+}
+
+/// Core of [`presence_without_executable`], with the variable lookup
+/// injected so tests can exercise the decision without ever mutating the
+/// real process environment (parallel test runs share it; mutation would
+/// corrupt unrelated tests). Mirrors the injected-resolver pattern of
+/// [`detect_one_with`] and [`resolve_first_usable_with`].
+fn presence_without_executable_with(
+    id: IntegrationId,
+    env: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    let env_set = |name: &str| env(name).is_some_and(|v| !v.is_empty());
+
+    match id {
+        // A set, non-empty `CMUX_SOCKET_PATH` means a usable cmux control
+        // environment. `CMUX_SURFACE_ID` / `CMUX_WORKSPACE_ID`, when also
+        // present, corroborate that this is a real cmux surface rather than
+        // a stray variable.
+        IntegrationId::Cmux => {
+            if env_set("CMUX_SOCKET_PATH") {
+                notes.push("CMUX_SOCKET_PATH is set".to_string());
+                for corroborating in ["CMUX_SURFACE_ID", "CMUX_WORKSPACE_ID"] {
+                    if env_set(corroborating) {
+                        notes.push(format!("{corroborating} is set"));
+                    }
+                }
+            }
+        }
+        // A set, non-empty `OLLAMA_HOST` means the user has configured a
+        // local Ollama endpoint. The condition is a match guard rather than
+        // an `if` inside the arm so that an Ollama install with no endpoint
+        // configured falls through to the catch-all, which is the same
+        // "nothing to report" answer every other integration gives.
+        IntegrationId::Ollama if env_set("OLLAMA_HOST") => {
+            notes.push("OLLAMA_HOST is set".to_string());
+        }
+        _ => {}
+    }
+
+    notes
 }
 
 /// Render a plain-text `glasshouse doctor` report: detected harnesses and
@@ -933,11 +1018,17 @@ mod tests {
     #[test]
     fn not_found_produces_no_problem_but_records_what_was_tried() {
         let (_guard, project) = test_project();
-        let d = detect_one_with(IntegrationId::Codex, None, &project, |name| {
-            Err(ResolveError::NotFound {
-                name: name.to_string(),
-            })
-        });
+        let d = detect_one_with(
+            IntegrationId::Codex,
+            None,
+            &project,
+            |name| {
+                Err(ResolveError::NotFound {
+                    name: name.to_string(),
+                })
+            },
+            |_| Vec::new(),
+        );
         assert_eq!(d.status(), IntegrationStatus::NotFound);
         assert!(d.executable().is_none());
         assert!(
@@ -951,15 +1042,164 @@ mod tests {
     #[test]
     fn interop_only_hit_is_unknown_with_an_actionable_problem() {
         let (_guard, project) = test_project();
-        let d = detect_one_with(IntegrationId::Codex, None, &project, |name| {
-            Err(ResolveError::WindowsInteropOnly {
-                name: name.to_string(),
-                found_at: vec![PathBuf::from("/mnt/c/codex.exe")],
-            })
-        });
+        let d = detect_one_with(
+            IntegrationId::Codex,
+            None,
+            &project,
+            |name| {
+                Err(ResolveError::WindowsInteropOnly {
+                    name: name.to_string(),
+                    found_at: vec![PathBuf::from("/mnt/c/codex.exe")],
+                })
+            },
+            |_| Vec::new(),
+        );
         assert_eq!(d.status(), IntegrationStatus::Unknown);
         assert!(d.executable().is_none());
         assert_eq!(d.problems().len(), 1);
+    }
+
+    // --- presence_without_executable_with --------------------------------
+
+    #[test]
+    fn cmux_socket_path_set_yields_evidence_naming_it() {
+        let notes = presence_without_executable_with(IntegrationId::Cmux, |name| match name {
+            "CMUX_SOCKET_PATH" => Some("/tmp/cmux-socket".to_string()),
+            _ => None,
+        });
+        assert!(!notes.is_empty());
+        assert!(notes.iter().any(|n| n.contains("CMUX_SOCKET_PATH")));
+    }
+
+    #[test]
+    fn cmux_corroborating_variables_are_also_named() {
+        let notes = presence_without_executable_with(IntegrationId::Cmux, |name| match name {
+            "CMUX_SOCKET_PATH" => Some("/tmp/cmux-socket".to_string()),
+            "CMUX_SURFACE_ID" => Some("surf".to_string()),
+            _ => None,
+        });
+        assert!(notes.iter().any(|n| n.contains("CMUX_SOCKET_PATH")));
+        assert!(notes.iter().any(|n| n.contains("CMUX_SURFACE_ID")));
+    }
+
+    #[test]
+    fn empty_cmux_socket_path_counts_as_unset() {
+        let notes = presence_without_executable_with(IntegrationId::Cmux, |name| match name {
+            "CMUX_SOCKET_PATH" => Some(String::new()),
+            _ => None,
+        });
+        assert!(
+            notes.is_empty(),
+            "an empty variable must count as unset, got: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn no_cmux_variables_yields_no_evidence() {
+        let notes = presence_without_executable_with(IntegrationId::Cmux, |_| None);
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn ollama_host_set_unset_and_empty() {
+        let set = presence_without_executable_with(IntegrationId::Ollama, |name| match name {
+            "OLLAMA_HOST" => Some("http://127.0.0.1:11434".to_string()),
+            _ => None,
+        });
+        assert!(!set.is_empty());
+        assert!(set.iter().any(|n| n.contains("OLLAMA_HOST")));
+
+        assert!(presence_without_executable_with(IntegrationId::Ollama, |_| None).is_empty());
+
+        let empty = presence_without_executable_with(IntegrationId::Ollama, |name| match name {
+            "OLLAMA_HOST" => Some(String::new()),
+            _ => None,
+        });
+        assert!(
+            empty.is_empty(),
+            "empty must count as unset, got: {empty:?}"
+        );
+    }
+
+    #[test]
+    fn evidence_notes_never_contain_a_value_only_names() {
+        // The security-critical assertion: with unmistakable sentinel values
+        // in every variable this function may consult, no produced note may
+        // contain any of them anywhere.
+        let sentinels = [
+            "SECRET-SOCKET-VALUE-12345",
+            "SECRET-SURFACE-VALUE-67890",
+            "SECRET-WORKSPACE-VALUE-24680",
+            "SECRET-ENDPOINT-VALUE-13579",
+        ];
+        let lookup = |name: &str| match name {
+            "CMUX_SOCKET_PATH" => Some("SECRET-SOCKET-VALUE-12345".to_string()),
+            "CMUX_SURFACE_ID" => Some("SECRET-SURFACE-VALUE-67890".to_string()),
+            "CMUX_WORKSPACE_ID" => Some("SECRET-WORKSPACE-VALUE-24680".to_string()),
+            "OLLAMA_HOST" => Some("SECRET-ENDPOINT-VALUE-13579".to_string()),
+            _ => None,
+        };
+        for id in [IntegrationId::Cmux, IntegrationId::Ollama] {
+            for note in presence_without_executable_with(id, lookup) {
+                for sentinel in sentinels {
+                    assert!(
+                        !note.contains(sentinel),
+                        "note leaked a value ({sentinel}): {note:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    // --- detect_one_with x presence wiring -------------------------------
+
+    #[test]
+    fn absent_executable_but_presence_evidence_is_configured_not_launchable() {
+        let (_guard, project) = test_project();
+        let d = detect_one_with(
+            IntegrationId::Ollama,
+            None,
+            &project,
+            |name| {
+                Err(ResolveError::NotFound {
+                    name: name.to_string(),
+                })
+            },
+            |id| {
+                assert_eq!(id, IntegrationId::Ollama);
+                vec!["OLLAMA_HOST is set".to_string()]
+            },
+        );
+        assert_eq!(d.status(), IntegrationStatus::Configured);
+        assert!(d.executable().is_none(), "no executable was resolved");
+        assert!(d.version().is_none());
+        assert!(
+            !d.is_usable(),
+            "detected-but-unlaunchable must never be mistaken for launchable"
+        );
+        assert!(d.problems().is_empty());
+        // Evidence shows BOTH the failed PATH search and why it is present.
+        assert!(d.evidence().iter().any(|e| e.contains("candidates tried")));
+        assert!(d.evidence().iter().any(|e| e.contains("OLLAMA_HOST")));
+    }
+
+    #[test]
+    fn absent_executable_with_no_presence_evidence_stays_not_found() {
+        let (_guard, project) = test_project();
+        let d = detect_one_with(
+            IntegrationId::Codex,
+            None,
+            &project,
+            |name| {
+                Err(ResolveError::NotFound {
+                    name: name.to_string(),
+                })
+            },
+            |_| Vec::new(),
+        );
+        assert_eq!(d.status(), IntegrationStatus::NotFound);
+        assert!(d.executable().is_none());
+        assert!(d.problems().is_empty());
     }
 
     // --- Discovery::run ------------------------------------------------
