@@ -31,8 +31,61 @@ use std::ffi::OsString;
 use anyhow::Context;
 
 use crate::Project;
-use crate::platform::exec::ResolvedExecutable;
+use std::path::Path;
+
+use crate::platform::exec::{LaunchKind, ResolvedExecutable};
 use crate::pty::{PtyOutput, PtyProcess, TerminalCommand, TerminalSize};
+
+/// Why a particular executable cannot be launched in a particular directory,
+/// or `None` when the combination is fine.
+///
+/// # The combination this exists for
+///
+/// `cmd.exe` cannot hold a UNC path as its working directory. Asked to, it
+/// does not fail: it prints a notice, silently substitutes the Windows
+/// directory, and carries on. So a `.cmd` harness — which is how npm installs
+/// most of them — started in a project on a network share would come up
+/// running in `C:\Windows` instead. That is not merely a broken session; it
+/// breaks the project-isolation guarantee the whole product rests on, and it
+/// does so quietly, which is the worst way for it to break.
+///
+/// Refusing with a diagnostic is strictly better than a session that looks
+/// alive and is operating on the wrong directory.
+///
+/// # Why this is not `cfg`-gated
+///
+/// Like [`crate::platform::exec`]'s script-path conversion, this asks about
+/// the *shape* of a path and the *kind* of an executable, not about the host.
+/// Keeping it host-independent is what makes it testable somewhere other than
+/// the platform where it matters — the same reasoning that would have caught
+/// the verbatim-path defect before CI did.
+fn unsupported_combination(kind: LaunchKind, cwd: &Path) -> Option<String> {
+    if kind == LaunchKind::WindowsScript && is_unc_path(cwd) {
+        return Some(format!(
+            "cannot start a Windows `.cmd`/`.bat` harness in `{}`: that is a UNC network \
+             path, and `cmd.exe` cannot use one as its working directory — it would \
+             silently run in the Windows directory instead of this project. Map the \
+             share to a drive letter and open the project from there, or use a harness \
+             executable that is not a script shim.",
+            cwd.display()
+        ));
+    }
+    None
+}
+
+/// Whether `path` is a UNC path (`\\server\share\...`).
+///
+/// The verbatim UNC spelling `\\?\UNC\server\share` counts too. A verbatim
+/// *drive* path (`\\?\C:\...`) does not, despite also starting with two
+/// backslashes — it names a perfectly ordinary local directory, and refusing
+/// it would reject the normal Windows case outright.
+fn is_unc_path(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    if text.starts_with(r"\\?\UNC\") {
+        return true;
+    }
+    text.starts_with(r"\\") && !text.starts_with(r"\\?\")
+}
 
 /// One recorded child-environment operation, in call order.
 ///
@@ -203,6 +256,12 @@ impl<'a> HarnessLaunch<'a> {
         let mut command = TerminalCommand::for_harness(program, self.project)
             .args(translated_args)
             .size(self.size);
+
+        // Refuse a combination that cannot work *before* a process exists,
+        // rather than starting one that silently runs somewhere else.
+        if let Some(reason) = unsupported_combination(self.executable.kind(), command.cwd()) {
+            anyhow::bail!(reason);
+        }
 
         // Replay in recorded order: this is what preserves last-call-wins
         // across mixed `env`/`env_remove` sequences. Values are never logged.
@@ -415,6 +474,55 @@ mod tests {
         assert!(rendered.contains("set"), "{rendered}");
         assert!(rendered.contains("GLASSHOUSE_REMOVED_KEY"), "{rendered}");
         assert!(rendered.contains("remove"), "{rendered}");
+    }
+
+    /// A `.cmd` harness in a UNC project must be refused, because `cmd.exe`
+    /// would not fail there — it would substitute the Windows directory and
+    /// run anyway, breaking project isolation silently.
+    #[test]
+    fn a_script_harness_in_a_unc_project_is_refused_with_a_diagnostic() {
+        let reason = unsupported_combination(
+            LaunchKind::WindowsScript,
+            Path::new(r"\\fileserver\team\project"),
+        )
+        .expect("a script harness in a UNC directory must be refused");
+
+        // The message has to say what is wrong *and* what to do about it;
+        // "unsupported" alone would leave the user nowhere.
+        assert!(reason.contains(r"\\fileserver\team\project"), "{reason}");
+        assert!(reason.contains("UNC"), "{reason}");
+        assert!(reason.contains("drive letter"), "{reason}");
+    }
+
+    /// The refusal must be narrow. A non-script harness has no `cmd.exe` in
+    /// the picture, and an ordinary local directory is the normal case — if
+    /// either were refused, the check would be worse than not having it.
+    #[test]
+    fn every_other_combination_is_allowed() {
+        for (kind, cwd) in [
+            (LaunchKind::Direct, r"\\fileserver\team\project"),
+            (LaunchKind::WindowsScript, r"C:\Users\me\project"),
+            (LaunchKind::WindowsScript, r"\\?\C:\Users\me\project"),
+            (LaunchKind::Direct, "/home/me/project"),
+            (LaunchKind::WindowsScript, "/home/me/project"),
+        ] {
+            assert!(
+                unsupported_combination(kind, Path::new(cwd)).is_none(),
+                "{kind:?} in {cwd} should be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn unc_detection_covers_both_spellings_but_not_a_verbatim_drive() {
+        assert!(is_unc_path(Path::new(r"\\server\share\p")));
+        // The verbatim UNC spelling denotes the same thing.
+        assert!(is_unc_path(Path::new(r"\\?\UNC\server\share\p")));
+        // A verbatim *drive* path also starts with two backslashes and is an
+        // ordinary local directory; refusing it would reject normal Windows.
+        assert!(!is_unc_path(Path::new(r"\\?\C:\p")));
+        assert!(!is_unc_path(Path::new(r"C:\p")));
+        assert!(!is_unc_path(Path::new("/home/me/p")));
     }
 
     #[test]
