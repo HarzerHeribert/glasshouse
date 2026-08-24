@@ -110,6 +110,21 @@ pub fn attach(launch: HarnessLaunch<'_>) -> Result<ExitStatus> {
     let process = Arc::new(Mutex::new(process));
     let output_drained = Arc::new(AtomicBool::new(false));
 
+    // A second interrupt forces Glasshouse down through `process::exit`, which
+    // runs no destructor — so without this the harness would be left running
+    // in its own session with nothing left to hang it up. Best effort by
+    // design: `try_lock` gives up rather than risk blocking the one path whose
+    // whole purpose is to always work. The guard unregisters on the way out,
+    // so the callback never outlives the session it refers to.
+    let _forced_exit = {
+        let process = Arc::clone(&process);
+        crate::shutdown::on_forced_exit(move || {
+            if let Ok(mut process) = process.try_lock() {
+                let _ = process.signal(ProcessSignal::Kill);
+            }
+        })
+    };
+
     {
         let output_drained = Arc::clone(&output_drained);
         std::thread::Builder::new()
