@@ -851,6 +851,36 @@ fn a_fake_installed_harness_launches_inside_the_discovered_project_root() {
 }
 
 #[test]
+fn a_direct_executable_launches_through_the_harness_seam() {
+    // The `WindowsScript` branch is covered by the fake `.cmd` harness above;
+    // this covers the other one. It matters for the same reason that branch
+    // needed fixing: resolving an executable canonicalizes it, and on Windows
+    // canonical means verbatim (`\\?\C:\...`). `cmd.exe` rejects that form
+    // outright, and nothing here had ever confirmed that `CreateProcess`
+    // accepts it — so a native `.exe` harness rested on an assumption no test
+    // had checked.
+    //
+    // The Glasshouse binary is itself a real Direct executable with a real
+    // `--version`, so it serves as the harness: no fixture to compile, and on
+    // Windows its resolved path is genuinely verbatim.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let project = Project::discover(&project_dir, None, false).expect("discover project");
+
+    let exe = exec::resolve_explicit(std::path::Path::new(env!("CARGO_BIN_EXE_glasshouse")))
+        .expect("resolve the glasshouse binary");
+    assert_eq!(exe.kind(), exec::LaunchKind::Direct);
+
+    let launch = HarnessLaunch::new(exe, &project).arg("--version");
+    let mut session = Session::spawn_harness(&launch);
+
+    session.expect(glasshouse::VERSION);
+    let status = session.wait_for_exit();
+    assert!(status.success(), "unexpected status: {status}");
+}
+
+#[test]
 fn stripper_rescues_a_path_welded_to_a_cmd_title_sequence() {
     // Byte for byte what `windows-latest` actually produced, including the
     // CSI preamble and the OSC window-title sequence cmd.exe emits on
