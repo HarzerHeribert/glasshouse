@@ -1579,7 +1579,7 @@ Intent and scope
 
 ☐ Treat this as an explicitly post-MVP experiment whose quality impact and latency cost must be measured before it can influence default behavior.
 ☐ Use deterministic repository diagnostics to catch newly introduced mechanical errors before they survive until a CI run.
-☐ Target failures such as Ruff or other lint violations, syntax errors, unresolved imports, unknown identifiers, type errors, formatter failures, and project-specific deterministic policy violations.
+☐ Target deterministic findings across source code, configuration, schemas, infrastructure definitions, queries, documentation, generated artifacts, dependency metadata, and repository-specific policy rather than assuming diagnostics are limited to conventional programming-language lint.
 ☐ Return concise structured diagnostics to the responsible agent while the edit is still recent enough to repair cheaply.
 ☐ Treat visual squiggles as an optional human-facing projection of the same diagnostic records rather than as the canonical capability.
 ☐ Keep the agent-facing diagnostic protocol useful in a terminal-only workflow even when Glasshouse has no source-code editor view.
@@ -1599,11 +1599,17 @@ Hook placement and validation tiers
 ☐ Reserve full-project validation and relevant test suites for semantic task boundaries, stop checks, explicit user requests, or pre-commit and pre-push gates.
 ☐ Prefer persistent project-scoped language servers or validator processes when they materially reduce repeated startup cost.
 ☐ Do not introduce a global validator daemon or allow diagnostic state to cross project boundaries.
-☐ Allow adapters for tools such as Ruff, ESLint, TypeScript language services, rust-analyzer, cargo check, and repository-defined validation commands without making any one tool mandatory.
+☐ Define a language-, tool-, and ecosystem-independent validator adapter interface rather than hard-coding a catalogue of linters or compilers.
+☐ Allow adapters to ingest Language Server Protocol diagnostics, SARIF, structured compiler or analyzer output, repository-defined machine-readable formats, and carefully configured command output parsers.
+☐ Support validators that report file ranges, whole-file findings, project-wide findings, cross-file relationships, or findings without a meaningful source location.
+☐ Discover candidate validators from explicit Glasshouse configuration and, when safe and unambiguous, from repository manifests, task runners, pre-commit configuration, and CI definitions.
+☐ Treat tools such as Ruff, ESLint, TypeScript language services, rust-analyzer, and cargo check only as examples and conformance fixtures for the generic adapter contract.
+☐ Allow the same adapter contract to cover languages, build systems, SQL and schema validation, API specifications, infrastructure as code, security and policy scanners, documentation checks, and project-specific deterministic validators.
+☐ Keep arbitrary repository commands opt-in, sandboxed through the active harness policy, time-bounded, and explicit about the files or project scope they inspect.
 
 Diagnostic identity and delivery
 
-☐ Represent a diagnostic with project-relative file, line, column, severity, stable rule or error code when available, message, producing tool, observation time, and file revision or content hash.
+☐ Represent a diagnostic with scope, severity, message, producing validator, observation time, stable rule or error code when available, optional project-relative file and source range, and the relevant file revision, content hash, or project revision when available.
 ☐ Associate diagnostics with the Glasshouse session and edit event that caused their observation when attribution is reliable.
 ☐ Distinguish diagnostics introduced by the current edit from pre-existing repository debt.
 ☐ Prefer reporting newly introduced errors and relevant warnings instead of dumping the repository’s complete diagnostic backlog into agent context.
@@ -1612,7 +1618,7 @@ Diagnostic identity and delivery
 ☐ Deduplicate repeated unchanged diagnostics across consecutive edits.
 ☐ Keep model-visible feedback short and provide a separate inspectable view for full details.
 ☐ Show optional squiggles only in a future Glasshouse diff or code view that can map diagnostics to exact source positions.
-☐ Fall back to a compact terminal list containing file, location, rule, and message when no visual code surface exists.
+☐ Fall back to a compact terminal list containing scope, optional file and location, rule, and message when no visual code surface exists.
 ☐ Never auto-apply a linter or compiler suggestion that changes source behavior without an explicit agent action or user-approved policy.
 
 Safety, gating, and latency targets
@@ -1630,7 +1636,7 @@ Safety, gating, and latency targets
 
 Evaluation criteria before promotion
 
-☐ Measure how many newly introduced lint, syntax, import, identifier, and type failures are caught before CI.
+☐ Measure how many newly introduced deterministic findings across supported validator families are caught before CI or another downstream validation gate.
 ☐ Measure the reduction in CI failures attributable to deterministic issues that the feedback bus was capable of detecting.
 ☐ Measure how often an agent repairs a reported diagnostic successfully on its next edit.
 ☐ Measure additional tool calls, tokens, and wall-clock time caused by diagnostic feedback.
@@ -1638,7 +1644,8 @@ Evaluation criteria before promotion
 ☐ Measure cold-start overhead and steady-state overhead separately.
 ☐ Measure false positives, stale-result delivery, incorrect edit attribution, duplicate feedback, and diagnostics ignored by agents.
 ☐ Measure how often inherited repository debt is incorrectly presented as a regression caused by the active worker.
-☐ Measure whether immediate feedback improves task success rather than merely increasing lint-clean intermediate states.
+☐ Measure coverage and usefulness separately across languages, configuration and schema validation, infrastructure, documentation, security and policy analysis, and repository-specific validators.
+☐ Measure whether immediate feedback improves task success rather than merely increasing diagnostically clean intermediate states.
 ☐ Compare advisory-only, agent-repair, and blocking modes before enabling any gate by default.
 ☐ Promote the capability beyond experimental status only if it measurably reduces avoidable failures without materially increasing turn latency, context noise, or agent repair loops.
 
