@@ -714,6 +714,69 @@ Phase 21J — Implementation review checklist
 ☐ Before marking a substantial implementation complete, check whether a clever optimization introduces complexity disproportionate to its demonstrated benefit.
 ☐ Record material architecture or performance decisions discovered during this review as current memories with rationale and scope.
 
+Phase 21K — Assumption-aware implementation guardrails
+
+Intent
+
+☐ Counter the model-independent failure mode in which an uncertain inference silently becomes a premise for a large implementation and is disproven only after substantial work.
+☐ Treat model confidence, repetition, eloquence, and reasoning length as presentation characteristics rather than evidence.
+☐ Require concise externalized assumptions and evidence without requesting or storing private chain-of-thought.
+☐ Reduce discarded implementation work and time-to-correction rather than attempting to eliminate all uncertainty.
+☐ Keep the mechanism harness- and model-independent so the same policy can apply to Claude Code, Codex, Antigravity, gateway-backed agents, and future harnesses.
+
+Risk-based activation
+
+☐ Classify an intended change by uncertainty, reversibility, blast radius, expected implementation cost, security or data-integrity impact, and dependency on unfamiliar behavior.
+☐ Let trivial, local, easily reversible edits proceed without an assumption gate.
+☐ Trigger a lightweight assumption preflight before substantial architecture changes, broad refactors, migrations, unfamiliar integrations, destructive operations, or changes whose premise is weakly evidenced.
+☐ Keep the preflight short enough that it does not become another source of speculative over-planning.
+☐ Allow the user to force, skip, or lower the guardrail for a specific task.
+☐ Never interpret a long plan as a substitute for validating the few premises on which the plan depends.
+
+Critical-assumption record
+
+☐ Ask for only the small set of critical assumptions whose falsity would materially change or invalidate the proposed implementation.
+☐ Represent each critical assumption with a concise claim, current evidence, evidence source, uncertainty, affected scope, and a practical falsification signal.
+☐ Distinguish observed facts, explicit user requirements, current repository evidence, externally verified facts, experiment results, and unverified inference.
+☐ Record the cheapest useful verification step when an assumption remains uncertain.
+☐ Keep transient task assumptions separate from durable project decisions until they have been supported and accepted.
+☐ Track task assumptions at least as proposed, probing, supported, refuted, unresolved, or waived-by-user.
+☐ Convert a refuted premise into a failed-approach record when preserving it can prevent future repetition.
+☐ Promote an assumption into durable project memory only when it becomes a decision, constraint, finding, or validated hypothesis worth retaining.
+
+Evidence before expansion
+
+☐ Prefer direct evidence from current requirements, source code, executable tests, configuration, schemas, runtime behavior, primary documentation, and bounded experiments over a model’s narrative explanation.
+☐ Require stronger evidence as implementation cost, irreversibility, security impact, data risk, or architectural blast radius increases.
+☐ Verify the highest-leverage premise before broadening an edit across many files or subsystems when verification is practical.
+☐ Prefer a read-only inspection, minimal reproduction, executable probe, failing test, walking skeleton, or narrow vertical slice before a large implementation.
+☐ Establish a relevant baseline before changing behavior when later success would otherwise be difficult to distinguish from pre-existing state.
+☐ Label unresolved inference honestly and time-box exploratory work when direct verification is unavailable.
+☐ Do not ask a second model merely whether the first model sounds correct; require a verifier to cite independent repository, runtime, test, or primary-source evidence.
+☐ Use a fresh session or different harness for high-impact adversarial verification when independence is worth its additional cost.
+☐ Treat reviewer agreement without new evidence as weak confirmation because different agents can share the same mistaken premise.
+
+Bounded implementation and correction
+
+☐ Create a recoverable checkpoint before a high-risk experiment or broad implementation begins.
+☐ Define an initial implementation budget using a coarse bound such as files touched, expected tool rounds, elapsed-time class, or milestone before re-evaluation.
+☐ Prefer the smallest implementation slice capable of confirming or falsifying the approach.
+☐ Re-evaluate critical assumptions when the planned footprint expands materially, verification results contradict the premise, or the initial budget is exceeded.
+☐ Pause expansion when an agent begins adding adapters, compatibility layers, or secondary mechanisms primarily to protect an unverified premise.
+☐ When a critical premise is refuted, stop compounding the implementation and explicitly choose rollback, repair, re-plan, preserve as an experiment, or ask the user.
+☐ Preserve useful evidence and a concise failed-approach record even when the implementation itself is discarded.
+☐ Never silently rewrite the task history to make a failed premise appear as though it had always been understood correctly.
+☐ Preserve user changes and unrelated worker changes when rolling back or isolating an invalidated experiment.
+
+User and orchestrator visibility
+
+☐ Surface critical assumptions, their evidence state, and unresolved high-impact premises in the task or session view without flooding the normal terminal experience.
+☐ Show when an assumption gate was triggered and which risk factor triggered it.
+☐ Notify the user or orchestrator when a critical premise becomes refuted or when the implementation budget is materially exceeded.
+☐ Offer inspect, continue, verify, checkpoint, handoff, re-plan, and stop as explicit responses to a guardrail event.
+☐ Keep advisory warnings non-blocking by default except for separately configured security, destructive-action, or data-integrity policies.
+☐ Make every automatic pause, reviewer spawn, or handoff attributable and manually overridable.
+
 Phase 22 — Memory lifecycle and supersession
 
 ☐ Allow a new memory to supersede an older memory.
@@ -1407,6 +1470,13 @@ Phase 51 — Evaluation hooks
 ☐ Measure how often a low-cost or free route succeeds compared with the premium route it displaced.
 ☐ Measure the accuracy of estimated subscription headroom against observed throttling and resets.
 ☐ Measure how often protected quota remains available for high-tier tasks when needed.
+☐ Measure how often a critical assumption is refuted before broad implementation versus after substantial edits.
+☐ Measure elapsed time, tool rounds, and changed-file churn between the first unsupported premise and its correction.
+☐ Measure how much implementation work is discarded or substantially rewritten after an assumption is invalidated.
+☐ Measure how often assumption preflights identify the actual premise that later determines success or failure.
+☐ Measure false alarms, unnecessary pauses, verification overhead, reviewer cost, and cases where the guardrail increases over-planning.
+☐ Compare guardrails disabled, advisory, and risk-gated modes on comparable tasks.
+☐ Measure whether fresh-session or cross-harness verification contributes independent evidence rather than agreement alone.
 ☐ Measure routing latency added before interactive task execution.
 ☐ Measure whether effective TTFC predicts usable agent turns better than raw TTFC, TTFT, or decode throughput.
 ☐ Measure how often failure-domain evidence prevents a failover onto the same unhealthy upstream.
@@ -1468,6 +1538,7 @@ Phase 55 — V1 completion definition
 ☐ Consider V1 usable when opaque subscription capacity can be represented as unknown or estimated without fabricating exact token counts.
 ☐ Consider V1 usable when a configurable cheap/free/local routing model can assign workload tiers with deterministic fallback.
 ☐ Consider V1 usable when protected premium reserve can influence a routing decision.
+☐ Consider V1 usable when a substantial high-risk task can record a small set of critical assumptions with evidence state and create a checkpoint before broad implementation.
 ☐ Consider V1 usable when routing explanations show workload tier, session affinity, resource capacity, and the primary reason for selection.
 ☐ Consider V1 usable when at least one gateway-backed route records classified success and failure outcomes plus TTFT or TTFC and can cite that evidence in a routing explanation.
 ☐ Consider V1 usable when cmux integration can expose or spawn a session externally without being required for normal operation.
@@ -1477,7 +1548,7 @@ Phase 55 — V1 completion definition
 
 Maybe / Experimental Capabilities
 
-These capabilities are intentionally outside the required V1 implementation path. They should only be implemented after normal multi-session orchestration is stable and real parallel-work conflicts have been observed.
+These capabilities are intentionally outside the required V1 implementation path. Each should be implemented only after its prerequisite core behavior is stable and real usage provides a measurable problem, baseline, and evaluation method.
 
 Maybe A — Cross-session file claims
 
@@ -1649,6 +1720,50 @@ Evaluation criteria before promotion
 ☐ Compare advisory-only, agent-repair, and blocking modes before enabling any gate by default.
 ☐ Promote the capability beyond experimental status only if it measurably reduces avoidable failures without materially increasing turn latency, context noise, or agent repair loops.
 
+Maybe K — Experimental session drift and rework detector
+
+Intent and boundaries
+
+☐ Experiment with detecting when an active agent session appears to be compounding an invalid premise, drifting from the requested task, or repeatedly repairing its own avoidable changes.
+☐ Base detection on observable project and lifecycle evidence rather than attempting to infer private model reasoning.
+☐ Keep detection model- and harness-independent and avoid naming any vendor model as the source of the general failure mode.
+☐ Treat the detector as an advisory early-warning system rather than an autonomous judge of implementation quality.
+☐ Do not make the detector part of MVP or a V1 completion requirement.
+
+Candidate observable signals
+
+☐ Consider repeated edits and reversions in the same files or symbols without corresponding acceptance-criterion progress.
+☐ Consider rapid growth in touched files, dependencies, abstractions, or compatibility layers beyond the task’s recorded initial scope.
+☐ Consider repeated test, compiler, diagnostic, or runtime failures that contradict the active approach rather than merely expose a local typo.
+☐ Consider multiple checkpoint summaries that materially change the claimed root cause or implementation direction.
+☐ Consider repeated attempts to preserve an assumption after direct repository or runtime evidence contradicts it.
+☐ Consider long sequences of tool activity without a successful probe, passing milestone, reduced uncertainty, or completed acceptance criterion.
+☐ Consider an implementation budget overrun together with unresolved critical assumptions as a stronger signal than either condition alone.
+☐ Keep each signal inspectable and avoid combining weak signals into an unexplained proprietary score.
+☐ Attribute observations to concrete revisions, tool events, tests, files, and checkpoints when possible.
+☐ Distinguish productive iteration on a difficult problem from circular churn by requiring multiple independent signals before escalating.
+
+Response policy
+
+☐ Start with a quiet session marker and concise evidence summary rather than interrupting the agent immediately.
+☐ Escalate to an orchestrator or user warning only when signal strength, accumulated cost, or risk crosses a configurable threshold.
+☐ Suggest the cheapest next action among verify premise, run a focused probe, inspect diff, checkpoint, ask user, obtain fresh review, hand off, re-plan, or stop.
+☐ Allow a fresh-context reviewer to examine the premise and current evidence without inheriting the original session’s full persuasive narrative.
+☐ Require any reviewer recommendation to cite observable evidence and identify what would falsify its conclusion.
+☐ Never discard, revert, kill, or migrate a session automatically solely because the detector reports likely drift.
+☐ Preserve the user’s ability to continue deliberately when exploration is expected or the detector is wrong.
+☐ Decay or clear drift state after a validated milestone, supported premise, successful correction, or explicit user acknowledgement.
+
+Evaluation before promotion
+
+☐ Measure precision and recall against human-labelled cases of genuine wasted rework, productive exploration, and ordinary debugging.
+☐ Measure how much earlier the detector identifies a refuted premise than the unassisted session does.
+☐ Measure avoided discarded work, wall-clock time, tool rounds, model usage, and changed-file churn.
+☐ Measure interruption cost, false alarms, ignored warnings, premature abandonment, and cases where intervention makes performance worse.
+☐ Measure whether detector explanations lead to successful verification or merely cause another model-generated planning loop.
+☐ Compare user-only review, same-session self-review, fresh-session review, cross-harness review, and deterministic evidence checks.
+☐ Promote the detector only if it reduces costly rework without materially suppressing useful exploration or increasing supervisory burden.
+
 Explicit Non-Goals for V1
 
 ☐ Do not build a new coding model.
@@ -1690,6 +1805,8 @@ Product Rules
 ☐ Workload tier and hard capability requirements must be determined before price optimization.
 ☐ Free resources should be used aggressively for suitable work but never treated as equivalent merely because their monetary price is zero.
 ☐ Routing decisions must remain inspectable and manually overridable.
+☐ Model confidence, verbosity, repeated agreement, and reasoning length are not evidence that an implementation premise is correct.
+☐ High-impact implementation premises should be tied to current evidence or an explicit bounded verification step before broad expansion.
 ☐ Token volume, context size, request count, and spend are resource measurements, not proxies for quality, progress, or agent productivity.
 ☐ Native prompt compaction and project memory must remain separate concepts.
 ☐ User control must take precedence over automatic orchestration.
