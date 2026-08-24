@@ -90,12 +90,12 @@ Two process lessons worth keeping:
 
 ## Unresolved loose ends
 
-- A second interrupt while a session is attached reaches `shutdown`'s force
-  path, which calls `process::exit` and so skips `PtyProcess`'s destructor,
-  orphaning the harness. The first interrupt is handled properly, and raw mode
-  means Ctrl-C never raises a signal at all, so this needs a deliberate
-  external `kill` twice. Fixing it means giving the global signal handler a way
-  to reach the active session.
+- The forced-exit orphan is **fixed**: an attached session registers a cleanup
+  that `shutdown`'s force path runs before `process::exit`. It is best effort
+  by construction (`try_lock`, never `lock`) because a cleanup that waits could
+  hang the one escape hatch whose purpose is to always work. If the lock is
+  held at that instant the harness is still orphaned — no worse than before,
+  and the alternative is a Glasshouse that will not die.
 - `session::attach` owns the process's terminal for its whole life: its stdin
   pump cannot be cancelled, so the process exits out from under it. The
   multi-session TUI will need a different input path.
