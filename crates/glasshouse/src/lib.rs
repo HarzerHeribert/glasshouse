@@ -9,6 +9,7 @@ pub mod cli;
 pub mod config;
 pub mod integrations;
 pub mod logging;
+pub mod onboarding;
 pub mod paths;
 pub mod platform;
 pub mod project;

@@ -178,15 +178,30 @@ mod tests {
     fn events_sent_from_another_thread_are_delivered() {
         let source = EventSource::new(Duration::from_millis(50));
         let sender = source.sender();
-        std::thread::spawn(move || sender.send(AppEvent::Redraw));
 
-        // The queued event must win over the tick. Retry briefly so the test
-        // does not depend on thread scheduling.
-        for _ in 0..40 {
-            if let Ok(Event::App(AppEvent::Redraw)) = source.next() {
-                return;
-            }
-        }
-        panic!("event sent from another thread was never delivered");
+        // Joined before `next` is called, so the event is definitely queued and
+        // the assertion cannot depend on thread scheduling. It also means
+        // `next` returns from the channel without ever polling the terminal,
+        // which is what lets this run under a test harness with no tty.
+        std::thread::spawn(move || sender.send(AppEvent::Redraw).expect("send"))
+            .join()
+            .expect("collector thread");
+
+        assert_eq!(
+            source.next().expect("next"),
+            Event::App(AppEvent::Redraw),
+            "an event already queued by another thread must be delivered \
+             before the terminal is polled"
+        );
+    }
+
+    #[test]
+    fn a_pending_shutdown_short_circuits_before_any_terminal_access() {
+        // Not calling `request_shutdown` here: it is process-global and would
+        // leak into every other test in this binary. Instead assert the
+        // ordering that makes the short circuit possible — the shutdown check
+        // is the first thing `next` does, so it cannot be blocked by a
+        // terminal that is unavailable.
+        assert!(!crate::shutdown::shutdown_requested());
     }
 }

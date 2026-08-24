@@ -69,6 +69,11 @@ pub struct Cli {
 pub enum Command {
     /// Report detected harnesses, optional integrations, and setup problems.
     Doctor,
+    /// Reopen the first-run setup wizard.
+    ///
+    /// Setup runs by itself the first time Glasshouse is used in an
+    /// interactive terminal; this is how to revisit those choices later.
+    Setup,
 }
 
 #[cfg(test)]
