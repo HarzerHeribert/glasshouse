@@ -6,6 +6,7 @@
 //! piece of state it keeps is physically separated per project.
 
 pub mod cli;
+pub mod config;
 pub mod integrations;
 pub mod logging;
 pub mod paths;
