@@ -119,8 +119,8 @@ Phase 2B — Agent and tool auto-detection
 ☑ Detect Codex when a usable codex executable is present.
 ☐ Detect Antigravity when a supported Antigravity CLI executable is present.
 ☑ Detect OpenCode when a usable opencode executable is present.
-☐ Detect cmux when a usable cmux executable or supported cmux control environment is present.
-☐ Detect Ollama when a usable ollama executable or configured local endpoint is present.
+☑ Detect cmux when a usable cmux executable or supported cmux control environment is present.
+☑ Detect Ollama when a usable ollama executable or configured local endpoint is present.
 ☑ Detect common llama.cpp server executables when they are available locally.
 ☑ Read harness versions using non-interactive version commands when supported.
 ☑ Never trigger an interactive login merely to determine whether a harness exists.
