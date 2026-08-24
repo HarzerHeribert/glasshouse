@@ -492,6 +492,29 @@ mod tests {
         writeln!(f, "#!/bin/sh\necho hi").unwrap();
     }
 
+    /// File name a PATH search for `stem` can actually find on this platform.
+    ///
+    /// Windows decides executability by extension via `PATHEXT`, so a file
+    /// named plainly `claude` is not a candidate there no matter how the
+    /// permissions look. Searching for the bare stem still finds it, because
+    /// that is exactly what `PATHEXT` expansion is for.
+    fn executable_name(stem: &str) -> String {
+        if cfg!(windows) {
+            format!("{stem}.exe")
+        } else {
+            stem.to_owned()
+        }
+    }
+
+    /// Create a findable fake executable named after `stem` inside `dir`.
+    fn write_executable(dir: &Path, stem: &str) -> PathBuf {
+        let path = dir.join(executable_name(stem));
+        write_file(&path);
+        #[cfg(unix)]
+        make_executable(&path);
+        path
+    }
+
     // --- spawn_command ---------------------------------------------------
 
     #[test]
@@ -738,13 +761,14 @@ mod tests {
         // resolver's aggregation/reporting behavior independently of the
         // real drive-mount heuristic.
         let dir = tempfile::tempdir().unwrap();
-        let candidate = dir.path().join("claude");
-        write_file(&candidate);
-        #[cfg(unix)]
-        make_executable(&candidate);
+        let candidate = write_executable(dir.path(), "claude");
 
         let path_list = OsString::from(dir.path());
-        let marked = candidate.clone();
+        // The resolver canonicalizes every candidate before classifying it, so
+        // the predicate has to compare against the canonical form. On macOS a
+        // temporary directory lives under `/var`, which is a symlink to
+        // `/private/var`, so the raw and canonical paths genuinely differ.
+        let marked = std::fs::canonicalize(&candidate).unwrap();
 
         let err = resolve_with_interop_predicate(
             HostPlatform::Wsl,
@@ -759,7 +783,7 @@ mod tests {
             ResolveError::WindowsInteropOnly { name, found_at } => {
                 assert_eq!(name, "claude");
                 assert_eq!(found_at.len(), 1);
-                assert!(found_at[0].ends_with("claude"));
+                assert!(found_at[0].ends_with(executable_name("claude")));
             }
             other => panic!("expected WindowsInteropOnly, got {other:?}"),
         }
@@ -768,10 +792,7 @@ mod tests {
     #[test]
     fn resolver_prefers_usable_hits_over_interop_hits() {
         let dir = tempfile::tempdir().unwrap();
-        let candidate = dir.path().join("claude");
-        write_file(&candidate);
-        #[cfg(unix)]
-        make_executable(&candidate);
+        write_executable(dir.path(), "claude");
 
         let path_list = OsString::from(dir.path());
 
@@ -785,9 +806,13 @@ mod tests {
             |_platform, _path| false,
         )
         .expect("should resolve the usable candidate");
-        assert!(resolved.path().ends_with("claude"));
+        assert!(resolved.path().ends_with(executable_name("claude")));
     }
 
+    // Unix only: the case this guards is a WSL PATH entry symlinked into the
+    // Windows filesystem, and creating a symlink on a Windows CI runner needs
+    // privileges it does not have.
+    #[cfg(unix)]
     #[test]
     fn resolver_classifies_symlinks_by_their_canonicalized_target_not_the_raw_hit() {
         // Regression test for the ordering bug in Finding 2: `which_in_all`
@@ -807,10 +832,7 @@ mod tests {
         // path — raw symlink or resolved target — reaches the predicate.
         let target_dir = dir.path().join("windows-side").join("c-drive-mount");
         std::fs::create_dir_all(&target_dir).unwrap();
-        let target = target_dir.join("claude.exe");
-        write_file(&target);
-        #[cfg(unix)]
-        make_executable(&target);
+        let target = write_executable(&target_dir, "claude");
 
         // A separate "Linux-looking" bin directory holding only a symlink
         // to that target — this is what `which_in_all` actually reports as
@@ -818,10 +840,7 @@ mod tests {
         let bin = dir.path().join("usr-local-bin");
         std::fs::create_dir_all(&bin).unwrap();
         let symlink_path = bin.join("claude");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&target, &symlink_path).unwrap();
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_file(&target, &symlink_path).unwrap();
 
         let path_list = OsString::from(&bin);
         let canonical_target = std::fs::canonicalize(&target).unwrap();

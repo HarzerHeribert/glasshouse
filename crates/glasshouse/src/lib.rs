@@ -13,6 +13,7 @@ pub mod platform;
 pub mod project;
 pub mod pty;
 pub mod shutdown;
+pub mod tui;
 
 use std::path::{Path, PathBuf};
 
