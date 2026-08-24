@@ -9,6 +9,7 @@ pub mod cli;
 pub mod config;
 mod database;
 pub mod integrations;
+pub mod launch;
 pub mod logging;
 pub mod onboarding;
 pub mod paths;

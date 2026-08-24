@@ -32,6 +32,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use glasshouse::Project;
+use glasshouse::launch::HarnessLaunch;
+use glasshouse::platform::{exec, paths};
 use glasshouse::pty::{ProcessSignal, PtyOutput, PtyProcess, TerminalCommand, TerminalSize};
 
 /// Upper bound for any single wait in these tests. Generous enough for a loaded
@@ -253,6 +255,18 @@ struct Session {
 impl Session {
     fn spawn(command: TerminalCommand) -> Self {
         let (process, output) = PtyProcess::spawn(command).expect("spawn");
+        Self::from_parts(process, output)
+    }
+
+    /// Start a harness through the sanctioned [`HarnessLaunch`] seam — the
+    /// same `PtyProcess` machinery, entered the way production code enters
+    /// it.
+    fn spawn_harness(launch: &HarnessLaunch<'_>) -> Self {
+        let (process, output) = launch.spawn().expect("harness spawn");
+        Self::from_parts(process, output)
+    }
+
+    fn from_parts(process: PtyProcess, output: PtyOutput) -> Self {
         let collector = Collector::start(output);
         let mut session = Self {
             process,
@@ -669,37 +683,76 @@ fn the_child_starts_in_the_requested_working_directory() {
     session.wait_for_exit();
 }
 
-/// The harness seam end to end: a real project is created and discovered, the
-/// platform shell is built through [`TerminalCommand::for_harness`] (the
-/// constructor future harness adapters must use), and the child's own report
-/// of its working directory must denote exactly the project root — compared
-/// with `platform::paths::same_file`, i.e. by asking the filesystem, not by
-/// weak basename or string matching.
+/// Write a fake installed harness into `bin_dir` and return its path.
+///
+/// Windows: a `.cmd` script, so the resolver classifies it as
+/// `WindowsScript` and the launch really goes through `cmd.exe /D /C`.
+#[cfg(windows)]
+fn install_fake_harness(bin_dir: &std::path::Path) -> std::path::PathBuf {
+    let path = bin_dir.join("fake-harness.cmd");
+    std::fs::write(&path, "@echo off\r\ncd\r\n").expect("write fake harness");
+    path
+}
+
+/// Unix: a plain executable shell script printing its physical cwd.
+#[cfg(unix)]
+fn install_fake_harness(bin_dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join("fake-harness");
+    std::fs::write(&path, "#!/bin/sh\nexec /bin/pwd -P\n").expect("write fake harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// The harness launch seam end to end, with a *fake installed harness*: a
+/// real executable file on disk is resolved through
+/// [`glasshouse::platform::exec::resolve_explicit`], launched through
+/// [`HarnessLaunch`] (the sanctioned production route — no explicit cwd or
+/// program appears anywhere in this test), and the child's own report of its
+/// working directory must denote exactly the project root — compared with
+/// `platform::paths::same_file`, i.e. by asking the filesystem, not by weak
+/// basename or string matching.
+///
+/// On Windows the fake harness is a `.cmd` script, so this exercises
+/// `ResolvedExecutable::spawn_command`'s `WindowsScript` branch (`cmd.exe
+/// /D /C <script>`) for real. The project and the fake install live in a
+/// tempdir while the Glasshouse process stays wherever the test runner put
+/// it — no global cwd mutation — and a sanity check asserts those two
+/// locations really are different.
 #[test]
-fn a_harness_command_runs_inside_the_discovered_project_root() {
+fn a_fake_installed_harness_launches_inside_the_discovered_project_root() {
     let tmp = tempfile::tempdir().expect("tempdir");
+
+    // The project and the fake harness install are separate directories,
+    // both distinct from the Glasshouse process's own cwd.
     let project_dir = tmp.path().join("proj");
     std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("create bin dir");
 
+    // Install the fake harness. On Windows a `.cmd` script is what makes the
+    // resolver classify it as WindowsScript; elsewhere a plain executable
+    // shell script that prints its physical working directory. Split into
+    // cfg-attributed helpers so each platform compiles only its own branch
+    // (`cfg!` would still type-check both).
+    let harness_path = install_fake_harness(&bin_dir);
+
+    let resolved = exec::resolve_explicit(&harness_path).expect("resolve fake harness");
     let project = Project::discover(&project_dir, None, false).expect("discover project");
 
-    // Built through the harness seam: no explicit cwd anywhere in this call.
-    let command = if cfg!(windows) {
-        let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_owned());
-        // `/D` ignores AutoRun registry entries, `/Q` turns command echoing
-        // off, matching the `shell_command` helper above.
-        TerminalCommand::for_harness(comspec, &project)
-            .arg("/D")
-            .arg("/Q")
-            .arg("/C")
-            .arg("cd")
-    } else {
-        TerminalCommand::for_harness("/bin/sh", &project)
-            .arg("-c")
-            .arg("/bin/pwd -P")
-    };
+    // Sanity: the project root is genuinely elsewhere from the process cwd,
+    // so only a correctly derived child cwd can match below.
+    let process_cwd = std::env::current_dir().expect("process cwd");
+    assert!(
+        !paths::same_file(&process_cwd, project.root()),
+        "test setup is degenerate: the process already runs in the project root"
+    );
 
-    let mut session = Session::spawn(command);
+    let launch = HarnessLaunch::new(resolved, &project);
+    let mut session = Session::spawn_harness(&launch);
 
     // Poll for the reported path *before* waiting for exit, the way
     // `Session::expect` polls: reading the collector only once after exit can
@@ -717,11 +770,7 @@ fn a_harness_command_runs_inside_the_discovered_project_root() {
             .lines()
             .map(str::trim)
             .find(|line| {
-                !line.is_empty()
-                    && glasshouse::platform::paths::same_file(
-                        std::path::Path::new(line),
-                        project.root(),
-                    )
+                !line.is_empty() && paths::same_file(std::path::Path::new(line), project.root())
             })
             .map(str::to_owned);
         if reported.is_some() {
@@ -731,19 +780,20 @@ fn a_harness_command_runs_inside_the_discovered_project_root() {
     }
     let Some(reported) = reported else {
         panic!(
-            "the child never reported a directory naming the project root.\n\
+            "the fake harness never reported a directory naming the project root.\n\
              --- raw output ---\n{}\n--- end ---",
             session.output()
         );
     };
 
     // The path has been observed; now the process is allowed to finish.
-    session.wait_for_exit();
+    let status = session.wait_for_exit();
+    assert!(status.success(), "fake harness reported: {status}");
 
     // Belt and braces: the line that matched must still resolve to the same
     // location from this process right now.
     assert!(
-        glasshouse::platform::paths::same_file(std::path::Path::new(&reported), project.root()),
+        paths::same_file(std::path::Path::new(&reported), project.root()),
         "reported cwd `{reported}` does not denote `{}`",
         project.root().display()
     );

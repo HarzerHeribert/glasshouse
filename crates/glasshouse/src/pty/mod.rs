@@ -18,21 +18,25 @@
 //! trait for one implementation would be abstraction without a second
 //! implementation to justify it.
 //!
-//! # Seam for future harness adapters
+//! # Seam for harness launches
 //!
-//! [`TerminalCommand::for_harness`] is the project-bound seam for starting
-//! harness sessions: its working directory is derived there from the active
-//! [`Project`] alone — specifically via [`Project::display_root`], which
-//! denotes the canonical project root but is stripped of Windows' verbatim
-//! `\\?\` prefix so a process can actually be started there — and nothing on
-//! that path offers a way to set or change the directory. Future harness
-//! adapters are required to route through this constructor.
+//! Production code does not assemble harness commands by hand:
+//! [`crate::launch::HarnessLaunch`] is the sanctioned route, and it derives
+//! the child's working directory through `TerminalCommand::for_harness`
+//! from the active [`Project`] alone — specifically via
+//! [`Project::display_root`], which denotes the canonical project root but is
+//! stripped of Windows' verbatim `\\?\` prefix so a process can actually be
+//! started there. `for_harness` is `pub(crate)` for exactly that reason: no
+//! external caller can build a "harness" command with an arbitrary directory,
+//! and no path on [`crate::launch::HarnessLaunch`] exposes a way to set or
+//! change one.
 //!
-//! This is a convention enforced *within the seam*, not universal compiler
-//! enforcement: [`TerminalCommand::new`] and [`PtyProcess::spawn`] remain
-//! public and accept fully generic commands with any working directory, so
-//! the project-root guarantee holds exactly as far as code actually goes
-//! through `for_harness`.
+//! This is structure within the sanctioned harness API, not a sandbox.
+//! [`TerminalCommand::new`] and [`PtyProcess::spawn`] remain public for
+//! genuinely generic PTY/platform commands (tests, tooling), and Rust cannot
+//! identify misuse of those generic APIs: the project-root guarantee holds
+//! for whatever goes through [`crate::launch::HarnessLaunch`], and only for
+//! that.
 //!
 //! # Constraint for whatever renders this process's output
 //!
@@ -151,12 +155,13 @@ impl TerminalCommand {
 
     /// Describe a command for a harness process, tied to the active project.
     ///
-    /// This is the project-bound seam future harness adapters are required to
-    /// route through. The working directory is derived here from the project
-    /// itself and nothing on this path exposes a way to set or mutate it; an
-    /// adapter can only escape that rule by leaving the seam for the generic
-    /// [`TerminalCommand::new`], which this module keeps public for
-    /// genuinely generic PTY/platform commands.
+    /// Crate-only by design: the sanctioned production caller is
+    /// [`crate::launch::HarnessLaunch`], which derives everything from the
+    /// resolved executable and the active project. The working directory
+    /// comes from `project` and nothing on this path exposes a way to set or
+    /// mutate it; an external caller cannot reach this seam at all, and
+    /// in-crate callers can only escape its rule by using the generic
+    /// [`TerminalCommand::new`] instead.
     ///
     /// The directory is [`Project::display_root`]: it denotes exactly the
     /// canonical project root that access control and identity are built on,
@@ -164,7 +169,7 @@ impl TerminalCommand {
     /// `CreateProcessW`'s `lpCurrentDirectory` does not reliably accept the
     /// verbatim form (and `cmd.exe` refuses it outright). On every other
     /// platform it *is* [`Project::root`].
-    pub fn for_harness(program: impl Into<PathBuf>, project: &Project) -> Self {
+    pub(crate) fn for_harness(program: impl Into<PathBuf>, project: &Project) -> Self {
         Self::new(program, project.display_root())
     }
 
