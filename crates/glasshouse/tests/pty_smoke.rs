@@ -915,3 +915,188 @@ fn pattern_scanner_recovers_after_a_partial_match_that_fails() {
     // mid-match from the failed attempt.
     assert_eq!(scanner.feed(b"\x1b[6X\x1b[6n"), 1);
 }
+
+/// Write a fake harness that prints a fixed marker, its physical working
+/// directory, and then exits with `exit_code`.
+///
+/// Windows gets a `.cmd` script so the launch really goes through
+/// `cmd.exe /D /C`, exactly as a real npm-installed harness shim would.
+#[cfg(windows)]
+fn install_marker_harness(
+    bin_dir: &std::path::Path,
+    name: &str,
+    marker: &str,
+    exit_code: u8,
+) -> std::path::PathBuf {
+    let path = bin_dir.join(format!("{name}.cmd"));
+    std::fs::write(
+        &path,
+        format!("@echo off\r\necho {marker}\r\ncd\r\nexit /b {exit_code}\r\n"),
+    )
+    .expect("write fake harness");
+    path
+}
+
+#[cfg(unix)]
+fn install_marker_harness(
+    bin_dir: &std::path::Path,
+    name: &str,
+    marker: &str,
+    exit_code: u8,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join(name);
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\necho {marker}\n/bin/pwd -P\nexit {exit_code}\n"),
+    )
+    .expect("write fake harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// The whole production consumer, end to end: the real `glasshouse` binary,
+/// running `glasshouse launch`, inside a real pseudo-terminal.
+///
+/// This is the test that makes the Phase 1 working-directory claim about
+/// *production* rather than about a mechanism a test drove by hand. Nothing
+/// here constructs a `HarnessLaunch`, a `TerminalCommand`, or a working
+/// directory: it sets up configuration on disk, runs the shipped executable,
+/// and reads what the harness itself reports.
+///
+/// Four separate claims are proved at once, each of which would otherwise
+/// need its own scaffolding:
+///
+/// 1. **Project binding** — the harness's own report of its working
+///    directory denotes the project root, compared with `same_file` (asking
+///    the filesystem) rather than by string equality. Glasshouse itself is
+///    deliberately run from a *different* directory, so inheriting a cwd
+///    cannot produce a pass.
+/// 2. **Project-over-user executable precedence** — two different fake
+///    harnesses are installed and configured, a decoy at the user level and
+///    the real one at the project level. The decoy prints an unmistakable
+///    marker, so a precedence bug cannot pass silently: it fails loudly with
+///    the decoy's own output as the evidence.
+/// 3. **Exit propagation** — the harness exits with a distinctive code and
+///    Glasshouse must exit with the same one, not with a generic success or
+///    failure.
+/// 4. **The terminal bridge works at all** — output reaches the terminal
+///    through the attach pumps, which is the only reason claims 1 and 2 are
+///    observable from out here.
+#[test]
+fn the_launch_command_opens_the_configured_harness_inside_the_project_root() {
+    /// Exit code the fake harness ends with. Deliberately not 0 or 1, so a
+    /// generic success or generic failure cannot be mistaken for propagation.
+    const HARNESS_EXIT_CODE: u8 = 7;
+    const DECOY_MARKER: &str = "GLASSHOUSE-DECOY-HARNESS-RAN";
+    const REAL_MARKER: &str = "GLASSHOUSE-REAL-HARNESS-RAN";
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&state_dir).expect("create state dir");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+    // The decoy must never run. It is configured at the user level, which the
+    // project level has to override.
+    let decoy = install_marker_harness(&bin_dir, "decoy-harness", DECOY_MARKER, 0);
+    let real = install_marker_harness(&bin_dir, "real-harness", REAL_MARKER, HARNESS_EXIT_CODE);
+
+    // TOML needs its backslashes escaped, which matters only on Windows but
+    // is harmless everywhere.
+    let toml_path = |p: &std::path::Path| p.display().to_string().replace('\\', "\\\\");
+
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n",
+            toml_path(&decoy)
+        ),
+    )
+    .expect("write user config");
+
+    std::fs::create_dir_all(project_dir.join(".glasshouse")).expect("create project config dir");
+    std::fs::write(
+        project_dir.join(".glasshouse").join("config.toml"),
+        format!(
+            "version = 1\n\n[integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n",
+            toml_path(&real)
+        ),
+    )
+    .expect("write project config");
+
+    // Glasshouse runs from somewhere that is emphatically not the project, so
+    // only a working directory it derived from the project can match below.
+    let elsewhere = std::env::temp_dir();
+    assert!(
+        !paths::same_file(&elsewhere, &project_dir),
+        "test setup is degenerate: Glasshouse would already run in the project root"
+    );
+
+    let command = TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), &elsewhere)
+        .arg("--scope")
+        .arg(&project_dir)
+        .arg("--data-dir")
+        .arg(&state_dir)
+        .arg("--config-dir")
+        .arg(&config_dir)
+        .arg("launch")
+        .arg("claude-code");
+
+    let mut session = Session::spawn(command);
+
+    // Poll for the harness's own report while it is still running, the same
+    // way the other launch smoke does: reading only after exit can race the
+    // collector draining the last bytes.
+    let deadline = Instant::now() + TIMEOUT;
+    let mut reported = None;
+    while Instant::now() < deadline {
+        session.answer_pending_queries();
+        let clean = strip_csi_sequences(&session.output());
+        if clean.contains(REAL_MARKER) {
+            reported = clean
+                .lines()
+                .map(str::trim)
+                .find(|line| {
+                    !line.is_empty() && paths::same_file(std::path::Path::new(line), &project_dir)
+                })
+                .map(str::to_owned);
+            if reported.is_some() {
+                break;
+            }
+        }
+        std::thread::sleep(POLL);
+    }
+
+    let output = session.output();
+    assert!(
+        !strip_csi_sequences(&output).contains(DECOY_MARKER),
+        "the user-level decoy executable ran, so the project level did not take \
+         precedence.\n--- output ---\n{output}\n--- end ---"
+    );
+    let Some(reported) = reported else {
+        panic!(
+            "`glasshouse launch` never started a harness reporting the project root.\n\
+             --- output ---\n{output}\n--- end ---"
+        );
+    };
+    assert!(
+        paths::same_file(std::path::Path::new(&reported), &project_dir),
+        "reported cwd `{reported}` does not denote `{}`",
+        project_dir.display()
+    );
+
+    let status = session.wait_for_exit();
+    assert_eq!(
+        status.code(),
+        u32::from(HARNESS_EXIT_CODE),
+        "glasshouse did not propagate the harness's exit code; it reported: {status}"
+    );
+}

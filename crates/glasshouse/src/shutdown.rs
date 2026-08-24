@@ -112,6 +112,52 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// RAII ownership of the terminal in raw mode only, with no alternate
+/// screen.
+///
+/// This is what a session attached directly to the user's terminal needs.
+/// [`TerminalGuard`] is wrong for that job: a harness draws its own TUI and
+/// usually enters the alternate screen itself, so wrapping it in a second
+/// one would put the session's own output on a screen that is thrown away
+/// when Glasshouse leaves it — the user would watch their session scroll by
+/// and then see it vanish on exit.
+///
+/// Raw mode is what the session genuinely does need: it stops the local line
+/// discipline from buffering lines, echoing keystrokes, and — the part that
+/// matters most — turning Ctrl-C into a signal for *Glasshouse*. In raw mode
+/// Ctrl-C arrives as a plain `0x03` byte that gets forwarded to the harness,
+/// which is exactly where it belongs while a session owns the terminal.
+///
+/// Restoration goes through the same [`restore_terminal`] and
+/// `TERMINAL_ENGAGED` flag as [`TerminalGuard`], so a panic or a signal
+/// restores a raw-mode session just as reliably as a full-screen one.
+///
+/// That shared path also emits `LeaveAlternateScreen` on the way out, which
+/// this guard never entered. That is deliberate, not an oversight to tidy
+/// away: the *harness* very likely entered one, and a harness that dies
+/// without leaving it would otherwise strand the user on a screen they
+/// cannot get off. Sending it unconditionally repairs that case and costs
+/// nothing in the case where no alternate screen was ever entered.
+#[derive(Debug)]
+pub struct RawModeGuard {
+    _private: (),
+}
+
+impl RawModeGuard {
+    /// Put the terminal into raw mode.
+    pub fn acquire() -> Result<Self> {
+        terminal::enable_raw_mode().context("could not enable raw terminal mode")?;
+        TERMINAL_ENGAGED.store(true, Ordering::SeqCst);
+        Ok(Self { _private: () })
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

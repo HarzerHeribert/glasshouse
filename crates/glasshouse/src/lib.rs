@@ -16,6 +16,7 @@ pub mod paths;
 pub mod platform;
 pub mod project;
 pub mod pty;
+pub mod session;
 pub mod shutdown;
 pub mod tui;
 

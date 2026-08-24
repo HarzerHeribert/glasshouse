@@ -74,6 +74,27 @@ pub enum Command {
     /// Setup runs by itself the first time Glasshouse is used in an
     /// interactive terminal; this is how to revisit those choices later.
     Setup,
+    /// Open a session in an installed harness, inside this project.
+    ///
+    /// The harness runs in a pseudo-terminal whose working directory is this
+    /// project's root, attached directly to the current terminal: its own
+    /// interface, its own key bindings, its own session. Glasshouse starts it
+    /// and stays out of the way.
+    Launch {
+        /// Which harness to open, by its identifier — for example
+        /// `claude-code`, `codex`, or `opencode`.
+        ///
+        /// Optional when exactly one harness is enabled. With several
+        /// enabled, Glasshouse asks rather than guessing.
+        harness: Option<String>,
+
+        /// Arguments passed straight through to the harness, after `--`.
+        ///
+        /// Glasshouse does not interpret these; `glasshouse launch
+        /// claude-code -- --resume` starts the harness with `--resume`.
+        #[arg(last = true, allow_hyphen_values = true)]
+        harness_args: Vec<String>,
+    },
 }
 
 #[cfg(test)]
@@ -108,6 +129,44 @@ mod tests {
         assert_eq!(cli.scope, Some(PathBuf::from("/tmp/p")));
         assert_eq!(cli.log_level.as_deref(), Some("debug"));
         assert!(cli.log_stderr);
+    }
+
+    #[test]
+    fn parses_launch_with_a_named_harness_and_passthrough_arguments() {
+        let cli = Cli::try_parse_from([
+            "glasshouse",
+            "launch",
+            "claude-code",
+            "--",
+            "--resume",
+            "--model=x",
+        ])
+        .unwrap();
+        let Some(Command::Launch {
+            harness,
+            harness_args,
+        }) = cli.command
+        else {
+            panic!("expected a launch command");
+        };
+        assert_eq!(harness.as_deref(), Some("claude-code"));
+        // Hyphenated arguments after `--` reach the harness untouched rather
+        // than being parsed as Glasshouse options.
+        assert_eq!(harness_args, vec!["--resume", "--model=x"]);
+    }
+
+    #[test]
+    fn launch_without_a_harness_name_is_allowed() {
+        let cli = Cli::try_parse_from(["glasshouse", "launch"]).unwrap();
+        let Some(Command::Launch {
+            harness,
+            harness_args,
+        }) = cli.command
+        else {
+            panic!("expected a launch command");
+        };
+        assert_eq!(harness, None);
+        assert!(harness_args.is_empty());
     }
 
     #[test]

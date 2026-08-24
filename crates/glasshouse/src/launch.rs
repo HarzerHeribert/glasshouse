@@ -32,7 +32,7 @@ use anyhow::Context;
 
 use crate::Project;
 use crate::platform::exec::ResolvedExecutable;
-use crate::pty::{PtyOutput, PtyProcess, TerminalCommand};
+use crate::pty::{PtyOutput, PtyProcess, TerminalCommand, TerminalSize};
 
 /// One recorded child-environment operation, in call order.
 ///
@@ -63,6 +63,7 @@ pub struct HarnessLaunch<'a> {
     project: &'a Project,
     args: Vec<OsString>,
     env_changes: Vec<EnvChange>,
+    size: TerminalSize,
 }
 
 impl std::fmt::Debug for HarnessLaunch<'_> {
@@ -81,6 +82,7 @@ impl std::fmt::Debug for HarnessLaunch<'_> {
             .field("project", &self.project.name())
             .field("arg_count", &self.args.len())
             .field("env_operations", &env_operations)
+            .field("size", &self.size)
             .finish()
     }
 }
@@ -113,6 +115,7 @@ impl<'a> HarnessLaunch<'a> {
             project,
             args: Vec::new(),
             env_changes: Vec::new(),
+            size: TerminalSize::default(),
         }
     }
 
@@ -157,6 +160,22 @@ impl<'a> HarnessLaunch<'a> {
         self
     }
 
+    /// Set the terminal size the harness starts with.
+    ///
+    /// Harness TUIs lay themselves out from the size they see at startup, so
+    /// a session attached to a real terminal must pass that terminal's size
+    /// here rather than let the child come up at the default 24x80 and be
+    /// resized afterwards — the first frame would otherwise be drawn for the
+    /// wrong geometry.
+    ///
+    /// Unlike the working directory, size is not derived from the project:
+    /// it belongs to whatever surface is displaying the session, which the
+    /// project knows nothing about. Defaults to [`TerminalSize::default`].
+    pub fn size(mut self, size: TerminalSize) -> Self {
+        self.size = size;
+        self
+    }
+
     /// Assemble the concrete [`TerminalCommand`] this launch describes.
     ///
     /// Split from [`HarnessLaunch::spawn`] so tests can inspect the assembled
@@ -181,7 +200,9 @@ impl<'a> HarnessLaunch<'a> {
             )
         })?;
 
-        let mut command = TerminalCommand::for_harness(program, self.project).args(translated_args);
+        let mut command = TerminalCommand::for_harness(program, self.project)
+            .args(translated_args)
+            .size(self.size);
 
         // Replay in recorded order: this is what preserves last-call-wins
         // across mixed `env`/`env_remove` sequences. Values are never logged.
