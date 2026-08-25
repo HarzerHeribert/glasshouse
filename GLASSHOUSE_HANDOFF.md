@@ -553,11 +553,12 @@ have required a magic clamp.
 
 ## Unresolved loose ends
 
-- **The user's `~/.claude.json` still carries the `fullscreenAutoDisabled`
-  record this defect caused.** The cause is fixed, but Glasshouse will not edit
-  a harness's own configuration, so clearing it is the user's to do:
-  `/tui fullscreen` in any Claude Code session resets it, and it also resets on
-  the next update.
+- The `fullscreenAutoDisabled` record this defect left in the user's
+  `~/.claude.json` is **cleared**. `/tui fullscreen` was run in a real Claude
+  Code session at the user's explicit request — they could not run it
+  themselves, being on Remote Control, where `/tui` is unavailable — and Claude
+  Code confirmed "Using flicker-free rendering". The fix and the repair are
+  both verified; nothing edited the configuration file directly.
 - **The terminal handshake is verified on macOS only.** The queries and replies
   are platform-independent and their tests run everywhere, but no real harness
   has been driven through the viewport on Windows.
