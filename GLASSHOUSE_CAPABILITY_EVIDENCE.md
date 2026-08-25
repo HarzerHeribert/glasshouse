@@ -49,6 +49,116 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 7 — Add a Claude Code adapter that starts the real claude executable inside the current project root
+
+Contract: Given a project and an enabled Claude Code, when the user opens a
+session, Glasshouse starts the user's own installed `claude` with its working
+directory set to the project root, while never substituting a different
+program or a different directory.
+
+State: COMPLETE.
+
+Production evidence:
+- `harness/claude_code.rs: ClaudeCode` — names `claude`, and `start()` is bare
+  because `claude` run with no arguments "starts an interactive session by
+  default".
+- `session/select.rs: select` → `HarnessSelection::adapter` — resolves that
+  name, or an explicitly configured path, refusing ambiguity.
+- `main.rs: launch_session` and `shell/mod.rs: start_session` — both build the
+  command through `HarnessSelection::start_args` and `launch::HarnessLaunch`,
+  which derives the working directory from the active project and offers no
+  way to override it.
+
+Regression evidence:
+- `a_claude_code_session_is_launched_and_recorded_under_one_identifier` (PTY
+  smoke, Unix) — runs the shipped binary with `launch claude-code` and reads
+  the argument list back from the harness itself.
+- `the_working_directory_of_a_launched_harness_is_the_project_root` and the
+  existing Phase 1 marker-harness smokes — the child's own `pwd` is the
+  project root, on all three platforms in CI.
+- `the_executable_names_match_the_installed_binaries` — the name is `claude`.
+
+Platform/external evidence:
+- `glasshouse doctor` on this machine resolves the real Claude Code 2.1.245 at
+  its installed path and reads its version.
+
+Missing evidence:
+- None. Note that "the real claude executable" means whatever the user's
+  configuration or `PATH` resolves; Glasshouse deliberately never bundles or
+  substitutes one.
+
+### Phase 7 — Capture the native Claude Code session identifier when it can be obtained reliably
+
+Contract: Given a new Claude Code session, when Glasshouse starts it,
+Glasshouse knows that session's native identifier and records it against the
+session, while never recording an identifier the harness did not receive.
+
+State: PARTIALLY VERIFIED — **box deliberately unchecked**, pending one
+runtime probe named below.
+
+Production evidence:
+- `harness/mod.rs: HarnessAdapter::assign_session_id` — the contract. Assigning
+  beats discovering: an identifier chosen before the process exists survives a
+  harness that dies during startup, needs no filesystem watching and no
+  parsing, and cannot be confused with a session started at the same moment.
+- `harness/claude_code.rs: assign_session_id` — `--session-id <uuid>`.
+- `session/store.rs: SessionStore::new_native_session_id` and
+  `uuid_v4_from_hex` — mints an RFC 4122 version-4 UUID from SQLite's
+  randomness, the same source the store already uses for its own identifiers.
+  Deliberately *not* derived from the Glasshouse session identifier: the two
+  identifier spaces are independent by design.
+- `session/select.rs: HarnessSelection::start_args` /
+  `assigns_native_session_id`, and both production start paths, which mint the
+  identifier, record it on the `NewSession`, and pass it to the harness.
+
+Regression evidence:
+- `a_claude_code_session_is_launched_and_recorded_under_one_identifier` (PTY
+  smoke, Unix) — the shipped binary launches a harness that reports its own
+  argument list, and the identifier found there is compared with the one read
+  back from the store. **Mutation-checked twice, in both directions**: handing
+  the identifier over without recording it fails, and recording it without
+  handing it over fails. Either alone would be useless — an unrecorded
+  identifier cannot be resumed, and an unhanded one names a conversation that
+  does not exist.
+- `assignment_agrees_with_the_declaration` — an adapter cannot hand out
+  `--session-id` arguments while declaring its identifiers are only
+  discoverable, or the reverse.
+- `claude_code_assigns_the_identifier_its_binary_demands` and
+  `a_harness_that_cannot_be_told_its_identifier_assigns_none`.
+- `a_minted_native_identifier_is_a_valid_version_4_uuid`,
+  `minted_native_identifiers_do_not_repeat`, and
+  `the_uuid_formatter_only_overwrites_the_version_and_variant` — the last
+  pins that 122 of the 128 bits survive, so the identifier keeps the
+  randomness it was given.
+- `launching_a_harness_records_a_session_that_a_later_command_reads_back` — a
+  cleanly stopped Claude Code session now reads as **resumable**, the first
+  time any session reaches that disposition in production. It read `closed`
+  before, which was correct then and is wrong now.
+
+Platform/external evidence:
+- Claude Code 2.1.245 **rejects** a non-UUID outright: `claude --session-id
+  not-a-uuid` answers "Error: Invalid session ID. Must be a valid UUID." The
+  requirement is enforced by the binary, not merely documented, which is why
+  the minted identifier is a strictly valid version-4 UUID rather than merely
+  UUID-shaped.
+- Claude Code 2.1.245 **accepts** a Glasshouse-minted identifier: started in a
+  pseudo-terminal with one, it came up and ran normally until killed, where an
+  invalid one exits immediately.
+
+Missing evidence:
+- **That the conversation is actually stored under the assigned identifier.**
+  Claude Code writes a session transcript only once a turn has happened — a
+  session started and killed without submitting anything leaves no file — so
+  this cannot be observed without one real turn against the user's account.
+- The exact probe: in a scratch directory, run `claude --session-id <uuid> -p
+  "hi"`, then check that `~/.claude/projects/<slugged-cwd>/<uuid>.jsonl`
+  exists. That transcripts are named after the session identifier is already
+  established from real transcripts on this machine; what is unproven is only
+  that an *assigned* identifier becomes the conversation's own.
+- Until then the box stays unchecked. The mechanism is complete and the
+  binary's acceptance is verified; what is missing is the last link, and
+  assuming it is exactly the kind of step this project has been burned by.
+
 ### Phase 6 — the harness adapter interface (eleven of twelve)
 
 Contract: Given a harness Glasshouse supports, when anything in core needs to

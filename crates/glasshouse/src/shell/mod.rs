@@ -349,7 +349,13 @@ fn start_session(
         session::select::select(None, EffectiveConfig::new(&user, project_config.as_ref()))?;
 
     let store = sessions.store();
-    let record = store.create(NewSession::embedded(selection.id().slug()))?;
+    let native = selection
+        .assigns_native_session_id()
+        .then(|| store.new_native_session_id())
+        .transpose()?;
+    let record = store.create(
+        NewSession::embedded(selection.id().slug()).with_native_session_id(native.clone()),
+    )?;
 
     tracing::info!(
         session = %record.id,
@@ -361,7 +367,7 @@ fn start_session(
 
     // No user arguments here: the shell's `n` opens a session, and anything
     // extra would be a Glasshouse invention rather than something asked for.
-    let args = selection.start_args(Vec::<String>::new());
+    let args = selection.start_args(native.as_deref(), Vec::<String>::new());
     let launch = HarnessLaunch::new(selection.into_executable(), app_runtime.project())
         .args(args)
         .size(size);

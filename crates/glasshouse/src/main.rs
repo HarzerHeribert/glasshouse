@@ -138,7 +138,15 @@ fn launch_session(
     // for is worse than not starting one.
     let sessions = ProjectSessions::open(runtime)?;
     let store = sessions.store();
-    let record = store.create(NewSession::embedded(selection.id().slug()))?;
+    // Minted before the process exists, for a harness that accepts one, so
+    // the session is identifiable even if the harness dies during startup.
+    let native = selection
+        .assigns_native_session_id()
+        .then(|| store.new_native_session_id())
+        .transpose()?;
+    let record = store.create(
+        NewSession::embedded(selection.id().slug()).with_native_session_id(native.clone()),
+    )?;
 
     tracing::info!(
         session = %record.id,
@@ -155,7 +163,7 @@ fn launch_session(
 
     // The adapter decides how its harness is opened; the user's own `--`
     // arguments follow it.
-    let args = selection.start_args(harness_args.iter().map(String::as_str));
+    let args = selection.start_args(native.as_deref(), harness_args.iter().map(String::as_str));
     let launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
 
     // From here on, a bookkeeping failure must never change what the user

@@ -62,6 +62,19 @@ impl HarnessAdapter for ClaudeCode {
         Invocation::bare()
     }
 
+    fn assign_session_id(&self, native_session: &str) -> Option<Invocation> {
+        // `--session-id <uuid>` — "Use a specific session ID for the
+        // conversation (must be a valid UUID)". The requirement is enforced by
+        // the binary, not merely documented: `claude --session-id not-a-uuid`
+        // answers "Error: Invalid session ID. Must be a valid UUID." before
+        // doing anything else.
+        //
+        // Claude Code names each conversation's transcript after this
+        // identifier, so assigning it is also what lets Glasshouse find the
+        // transcript of a session it started.
+        Some(Invocation::of(["--session-id", native_session]))
+    }
+
     fn resume(&self, native_session: &str) -> Option<Invocation> {
         // `-r, --resume [value]` — "Resume a conversation by session ID, or
         // open interactive picker with optional search term". The identifier

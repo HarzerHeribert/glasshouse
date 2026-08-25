@@ -286,6 +286,49 @@ impl NewSession {
         self.presentation = presentation;
         self
     }
+
+    /// Record the harness's native identifier from the start.
+    ///
+    /// Only for a harness that lets Glasshouse *assign* one: the identifier
+    /// is then known before the process exists, so a session that dies during
+    /// startup still has one, and nothing has to be discovered afterwards.
+    pub fn with_native_session_id(mut self, native: Option<String>) -> Self {
+        self.native_session_id = native;
+        self
+    }
+}
+
+/// Format 32 hex characters as an RFC 4122 version-4 UUID.
+///
+/// Six of the 128 bits are overwritten — four for the version, two for the
+/// variant — which is what makes the result *valid* rather than merely
+/// UUID-shaped, and leaves 122 random bits. A strict validator rejects an
+/// 8-4-4-4-12 string whose version nibble is not `4`, and Glasshouse cannot
+/// tell in advance which harnesses validate strictly.
+///
+/// Panics if `hex` is not exactly 32 hex characters; its only caller is the
+/// SQL above, which cannot produce anything else.
+fn uuid_v4_from_hex(hex: &str) -> String {
+    assert_eq!(hex.len(), 32, "a 16-byte blob is 32 hex characters");
+    let mut chars: Vec<char> = hex.chars().collect();
+    // Version 4.
+    chars[12] = '4';
+    // Variant: the top two bits are `10`, so the nibble is one of 8, 9, a, b.
+    chars[16] = match chars[16] {
+        '0' | '4' | '8' | 'c' => '8',
+        '1' | '5' | '9' | 'd' => '9',
+        '2' | '6' | 'a' | 'e' => 'a',
+        _ => 'b',
+    };
+    let s: String = chars.into_iter().collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &s[0..8],
+        &s[8..12],
+        &s[12..16],
+        &s[16..20],
+        &s[20..32]
+    )
 }
 
 /// Everything a resume needs, once the record has been proven to belong here.
@@ -520,6 +563,29 @@ impl<'a> SessionStore<'a> {
             })?;
 
         Ok(record)
+    }
+
+    /// Mint an identifier for a harness that lets Glasshouse choose one.
+    ///
+    /// Formatted as an RFC 4122 version-4 UUID because that is what the
+    /// harnesses which accept an assigned identifier demand — Claude Code
+    /// refuses anything else outright ("Invalid session ID. Must be a valid
+    /// UUID"). The randomness is SQLite's, the same source this store already
+    /// uses for its own identifiers, so no second generator has to be trusted.
+    ///
+    /// Deliberately *not* derived from the Glasshouse session identifier.
+    /// The two identifier spaces are independent by design — see
+    /// [`SessionId`] — and a session's own name must stay meaningful after
+    /// the harness's history is gone.
+    pub fn new_native_session_id(&self) -> Result<String, SessionStoreError> {
+        let hex: String = self
+            .conn
+            .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))
+            .map_err(|source| SessionStoreError::Sql {
+                action: "generate a native session identifier",
+                source,
+            })?;
+        Ok(uuid_v4_from_hex(&hex))
     }
 
     fn generate_id(&self) -> Result<String, SessionStoreError> {
@@ -1660,6 +1726,88 @@ mod tests {
             first < 32_000_000_000,
             "seconds, not milliseconds or nanoseconds"
         );
+    }
+
+    // --- assigned native identifiers -------------------------------------
+
+    #[test]
+    fn a_minted_native_identifier_is_a_valid_version_4_uuid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let store = fixture.store();
+        for _ in 0..64 {
+            let id = store.new_native_session_id().unwrap();
+            assert_eq!(id.len(), 36, "{id}");
+            let groups: Vec<&str> = id.split('-').collect();
+            assert_eq!(
+                groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
+                vec![8, 4, 4, 4, 12],
+                "{id}"
+            );
+            assert!(
+                id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+                "{id}"
+            );
+            // The two things a strict validator checks beyond the shape.
+            assert_eq!(groups[2].chars().next(), Some('4'), "version nibble: {id}");
+            assert!(
+                matches!(groups[3].chars().next(), Some('8' | '9' | 'a' | 'b')),
+                "variant nibble: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn minted_native_identifiers_do_not_repeat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let store = fixture.store();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..256 {
+            assert!(
+                seen.insert(store.new_native_session_id().unwrap()),
+                "a minted identifier repeated"
+            );
+        }
+    }
+
+    #[test]
+    fn the_uuid_formatter_only_overwrites_the_version_and_variant() {
+        // Every other nibble survives, so the identifier keeps 122 bits of
+        // the randomness it was given rather than being quietly reshaped.
+        let hex = "0123456789abcdef0123456789abcdef";
+        let uuid = uuid_v4_from_hex(hex);
+        assert_eq!(uuid, "01234567-89ab-4def-8123-456789abcdef");
+
+        let plain: String = uuid.chars().filter(|c| *c != '-').collect();
+        let differences = hex
+            .chars()
+            .zip(plain.chars())
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        assert_eq!(differences, vec![12, 16], "only these two nibbles may move");
+    }
+
+    #[test]
+    fn a_session_can_be_recorded_with_its_native_identifier_from_the_start() {
+        // The point of assignment: the record carries the identifier before
+        // the harness has produced any output at all, so a session that dies
+        // during startup is still resumable rather than anonymous.
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let store = fixture.store();
+        let native = store.new_native_session_id().unwrap();
+        let record = store
+            .create(
+                NewSession::embedded("claude-code").with_native_session_id(Some(native.clone())),
+            )
+            .unwrap();
+        assert_eq!(record.native_session_id.as_deref(), Some(native.as_str()));
+
+        let read_back = store.get(&record.id).unwrap().expect("the session");
+        assert_eq!(read_back.native_session_id, Some(native));
     }
 }
 

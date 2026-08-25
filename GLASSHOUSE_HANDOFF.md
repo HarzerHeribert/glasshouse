@@ -4,13 +4,21 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 6 — the harness adapter interface — is eleven of twelve.** The checked
-count went from 107 to 119: eleven Phase 6 lines, plus the Phase 2B Antigravity
-detection line that had been blocked for want of a real install.
+**Phase 6 is eleven of twelve and Phase 7 has begun.** The checked count went
+from 107 to 120.
 
 - **Phase 2B** — Antigravity detection: **closed**, against a real CLI.
 - **Phase 6** — harness adapters: eleven of twelve. The communication-style
   line is deliberately unchecked; see the loose ends.
+- **Phase 7** — Claude Code adapter: its first line is closed. Glasshouse now
+  **assigns** Claude Code its native session identifier with `--session-id`,
+  mints it as a valid version-4 UUID, and records it before the process
+  exists. The capture line's box stays unchecked pending one runtime probe —
+  see the loose ends.
+
+**Sessions reach `Resumable` in production for the first time.** A cleanly
+stopped Claude Code session now has something to resume to, which closes a
+loose end that had been open since Phase 2.
 
 Glasshouse now reaches every supported harness through one contract.
 `glasshouse doctor` prints what each adapter declares — vendor, resume
@@ -55,6 +63,40 @@ list was carefully reasoned, documented at length, and pinned by a test — and
 simply wrong, because no reference install had ever been inspected.
 
 ## Verified completed work
+
+### This session — assigned native session identifiers (Phase 7)
+
+- `HarnessAdapter::assign_session_id` is how a harness says it will take an
+  identifier rather than invent one. Assigning beats discovering: the
+  identifier exists before the process does, so a harness that dies during
+  startup still leaves a named session, and nothing has to be parsed or
+  watched for afterwards.
+- `SessionStore::new_native_session_id` mints a valid RFC 4122 version-4 UUID
+  from SQLite's randomness — the same source the store already uses. It is
+  deliberately **not** derived from the Glasshouse session identifier: the two
+  identifier spaces are independent by design, and a session's own name has to
+  stay meaningful after the harness's history is gone.
+- Both production start paths mint it, record it on the `NewSession`, and pass
+  it to the harness. `a_claude_code_session_is_launched_and_recorded_under_one_identifier`
+  runs the shipped binary and compares the identifier the harness *received*
+  with the one Glasshouse *recorded*. **Mutation-checked in both directions** —
+  either half alone is useless, and either half alone now fails.
+- Claude Code's own binary enforces the format: `--session-id not-a-uuid`
+  answers "Error: Invalid session ID. Must be a valid UUID." A minted
+  identifier is accepted and the harness runs normally.
+
+**A test's expectation changed for a good reason.** A cleanly stopped session
+used to read `closed`, because nothing ever gave a session a native identifier.
+It now reads `resumable`, which is the point of the work. The test asserts the
+new truth and records why the old one was right at the time.
+
+**Two smoke tests had to stop using a plain shell as Claude Code.** Glasshouse
+now hands that harness `--session-id <uuid>`, and `/bin/sh` answers by printing
+its usage. One test was re-registered under Codex — which names its own
+sessions and so is started bare — because it is about resize reaching the
+child, not about arguments. Worth knowing: **anything configured as
+`claude-code` now receives that flag**, so a user's wrapper script has to pass
+its arguments through.
 
 ### This session — the harness adapter interface
 
@@ -330,6 +372,27 @@ have required a magic clamp.
 
 ## Unresolved loose ends
 
+- **Phase 7's capture line needs one runtime probe.** Claude Code writes a
+  transcript only after a turn has happened, so a session started and killed
+  without submitting anything leaves no file, and nothing here can observe
+  that an *assigned* identifier becomes the conversation's own. The probe: in
+  a scratch directory run `claude --session-id <uuid> -p "hi"`, then check
+  that `~/.claude/projects/<slugged-cwd>/<uuid>.jsonl` exists. It costs one
+  small turn against the user's account, which is why it was not run
+  unasked. Everything else is proven: the binary rejects a non-UUID, accepts
+  a minted one, and the identifier handed over is the identifier recorded.
+- **Anything configured as `claude-code` now receives `--session-id`.** Before
+  this session Glasshouse passed no arguments at all, so any executable
+  worked. A user pointing that integration at a wrapper script now needs the
+  wrapper to pass its arguments through. This is correct — the flag belongs to
+  the harness the user named — but it is a real change in blast radius.
+- **A stopped session reads as resumable on the strength of an assigned
+  identifier**, not on proof that a conversation exists. If a harness starts
+  and dies before creating one, `glasshouse resume` will hand the identifier
+  over and the harness will refuse it. That is a clear failure from the
+  harness rather than lost state, and `Failed` sessions are never resumable —
+  but it is optimism, and worth remembering when the resume command lands.
+
 - **Phase 6's communication-style line stays unchecked.** Six of seven
   adapters declare `Unverified` because their installed binaries document no
   such mechanism — Codex 0.149.0 in particular exposes no "personality",
@@ -501,12 +564,12 @@ surface before sending anything to it.
 
 - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
   --all-features -- -D warnings`, `cargo test --workspace --all-features`
-  (356 lib + 2 bin + 41 PTY smoke + 4 settings), `rustup run 1.85.0 cargo
+  (363 lib + 2 bin + 42 PTY smoke + 4 settings), `rustup run 1.85.0 cargo
   check --locked --workspace --all-targets`, `git diff --check` — all pass.
 - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` — 23
   diagnostics, exactly the baseline measured at `HEAD` in a throwaway
   worktree. None added.
-- Six mutations, each observed to fail the test it targets. None passed.
+- Eight mutations, each observed to fail the test it targets. None passed.
 - CI `32835774698` green on Linux, macOS, Windows and lint, with the Windows
   job confirmed to have executed 346 lib, 2 bin, 33 PTY and 4 settings tests
   rather than merely reporting green.

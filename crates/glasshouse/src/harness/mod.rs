@@ -466,6 +466,26 @@ pub trait HarnessAdapter: std::fmt::Debug + Send + Sync {
     /// Arguments that start a new native session.
     fn start(&self) -> Invocation;
 
+    /// Arguments that assign `native_session` to a session being started,
+    /// or `None` when this harness does not let Glasshouse choose its
+    /// identifier.
+    ///
+    /// Assigning beats discovering. An identifier chosen before the process
+    /// exists is known even if the harness dies during startup, needs no
+    /// filesystem watching and no parsing, and cannot be confused with
+    /// another session started at the same moment. A harness that returns
+    /// `None` here has to have its identifier found afterwards, which is
+    /// strictly more work and strictly less certain.
+    ///
+    /// Must agree with [`HarnessDescription::session_ids`]: returning
+    /// `Some` here and declaring anything but [`SessionIds::Assigned`] is a
+    /// contradiction, and `assignment_agrees_with_the_declaration` fails on
+    /// it.
+    fn assign_session_id(&self, native_session: &str) -> Option<Invocation> {
+        let _ = native_session;
+        None
+    }
+
     /// Arguments that resume `native_session`, or `None` when this harness has
     /// no verified resume mechanism.
     ///
@@ -830,6 +850,65 @@ mod tests {
                 .executable_candidates(),
             &["cursor-agent"]
         );
+    }
+
+    // --- assigned identifiers -------------------------------------------
+
+    #[test]
+    fn assignment_agrees_with_the_declaration() {
+        // An adapter that hands out `--session-id` arguments while declaring
+        // that its identifiers can only be discovered, or the reverse, is
+        // telling two different stories about the same harness. Phase 7 acts
+        // on the declaration and Phase 7 builds the arguments, so the two
+        // disagreeing would strand a session with an identifier nothing
+        // recorded.
+        for adapter in all() {
+            let declared_assigned = matches!(
+                adapter.describe().session_ids.value(),
+                Some(SessionIds::Assigned { .. })
+            );
+            let assigns = adapter.assign_session_id("some-id").is_some();
+            assert_eq!(
+                declared_assigned,
+                assigns,
+                "{} declares assigned={declared_assigned} but assigns={assigns}",
+                adapter.id().slug()
+            );
+        }
+    }
+
+    #[test]
+    fn claude_code_assigns_the_identifier_its_binary_demands() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let invocation = adapter
+            .assign_session_id("9f1c0b2e-0000-4000-8000-0123456789ab")
+            .expect("Claude Code accepts an assigned identifier");
+        let args: Vec<String> = invocation
+            .args()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec!["--session-id", "9f1c0b2e-0000-4000-8000-0123456789ab"]
+        );
+    }
+
+    #[test]
+    fn a_harness_that_cannot_be_told_its_identifier_assigns_none() {
+        // Codex, Antigravity, OpenCode, Cursor, Pi and Hermes all name their
+        // own sessions. Pretending otherwise would put a flag on a command
+        // line that the harness does not have.
+        for adapter in all() {
+            if adapter.id() == IntegrationId::ClaudeCode {
+                continue;
+            }
+            assert!(
+                adapter.assign_session_id("some-id").is_none(),
+                "{} claims it can be told its own session identifier",
+                adapter.id().slug()
+            );
+        }
     }
 
     // --- messaging and interrupting -------------------------------------

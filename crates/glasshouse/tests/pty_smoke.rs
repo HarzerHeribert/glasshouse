@@ -1302,12 +1302,21 @@ fn launching_a_harness_records_a_session_that_a_later_command_reads_back() {
         .find(|row| row.contains("codex"))
         .unwrap_or_else(|| panic!("no row for the failed session:\n{text}"));
 
-    // The harness's outcome reached the record. A harness that exited cleanly
-    // is over; one that exited badly is distinguishable from it, which is what
-    // makes the four dispositions worth storing.
+    // The harness's outcome reached the record, and so did its identity.
+    //
+    // This row used to read `closed`, because nothing gave a session a native
+    // identifier and a stopped session without one has nothing to resume to.
+    // Glasshouse now assigns Claude Code its identifier before the process
+    // exists, so a cleanly stopped session is genuinely resumable — the first
+    // time any session reaches that disposition in production.
+    //
+    // Codex still reads `failed` below rather than `resumable`: it names its
+    // own sessions, so Glasshouse has nothing to record for it yet, and a
+    // failed session is failed regardless.
     assert!(
-        claude_row.contains("closed"),
-        "a harness that exited cleanly should read as closed:\n{claude_row}"
+        claude_row.contains("resumable"),
+        "a cleanly stopped session with an assigned identifier should read as \
+         resumable:\n{claude_row}"
     );
     assert!(
         codex_row.contains("failed"),
@@ -2261,10 +2270,16 @@ fn resizing_the_shell_reaches_the_harness_terminal() {
     std::fs::create_dir_all(&config_dir).expect("create config dir");
 
     // A plain shell is the harness: it can be asked its terminal size.
+    //
+    // Registered as Codex, not Claude Code: Glasshouse assigns Claude Code a
+    // native session identifier, and `/bin/sh --session-id <uuid>` prints its
+    // usage instead of running. Codex names its own sessions, so it is started
+    // bare — which is what this test needs, since it is about resize reaching
+    // the child and not about arguments.
     std::fs::write(
         config_dir.join("config.toml"),
         "version = 1\n\n[onboarding]\ncompleted = true\n\n\
-         [integrations.claude-code]\nenabled = true\nexecutable = \"/bin/sh\"\n",
+         [integrations.codex]\nenabled = true\nexecutable = \"/bin/sh\"\n",
     )
     .expect("write user config");
 
@@ -2284,7 +2299,7 @@ fn resizing_the_shell_reaches_the_harness_terminal() {
 
     shell.expect("root ");
     shell.send("n");
-    shell.expect("claude-code");
+    shell.expect("codex");
     shell.send("\r");
     shell.expect("ctrl-]");
 
@@ -2480,4 +2495,122 @@ fn an_embedded_session_answers_the_cursor_position_query_itself() {
     );
 
     runtime.close(&id).expect("close");
+}
+
+/// A harness that reports the arguments it was given, so a test can read the
+/// command line Glasshouse actually built rather than the one it meant to.
+#[cfg(unix)]
+fn install_argv_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join(name);
+    std::fs::write(&path, "#!/bin/sh\necho \"ARGV:$*\"\nexit 0\n").expect("write fake harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Glasshouse assigns Claude Code its native session identifier, and records
+/// the same one it handed over.
+///
+/// Both halves matter and only together. An identifier on the command line
+/// that was never recorded cannot be resumed; a recorded identifier the
+/// harness never received names a conversation that does not exist. This runs
+/// the shipped binary, reads the argument list from the harness itself, and
+/// then reads the record back through the same store production writes to.
+///
+/// Unix only for the harness script; the assignment itself is
+/// platform-independent and covered by the adapter's own tests everywhere.
+#[cfg(unix)]
+#[test]
+fn a_claude_code_session_is_launched_and_recorded_under_one_identifier() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    let bin_dir = tmp.path().join("bin");
+    for dir in [&state_dir, &config_dir, &bin_dir] {
+        std::fs::create_dir_all(dir).expect("create dir");
+    }
+
+    let harness = install_argv_harness(&bin_dir, "fake-claude");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n",
+            harness.display()
+        ),
+    )
+    .expect("write user config");
+
+    let mut session = Session::spawn(
+        TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path())
+            .arg("--scope")
+            .arg(&project_dir)
+            .arg("--data-dir")
+            .arg(&state_dir)
+            .arg("--config-dir")
+            .arg(&config_dir)
+            .arg("launch")
+            .arg("claude-code"),
+    );
+
+    let deadline = Instant::now() + TIMEOUT;
+    let mut argv = None;
+    while Instant::now() < deadline {
+        session.answer_pending_queries();
+        let clean = strip_terminal_sequences(&session.output());
+        if let Some(line) = clean.lines().find(|line| line.contains("ARGV:")) {
+            argv = Some(line.trim().to_owned());
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+    let argv = argv.unwrap_or_else(|| {
+        panic!(
+            "the harness never reported its arguments\n--- output ---\n{}\n--- end ---",
+            session.output()
+        )
+    });
+    let _ = session.wait_for_exit();
+
+    // What Glasshouse put on the command line.
+    let handed_over = argv
+        .split("--session-id")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no --session-id in the harness's arguments: {argv}"))
+        .split_whitespace()
+        .next()
+        .unwrap_or_else(|| panic!("--session-id had no value: {argv}"))
+        .to_owned();
+    assert_eq!(handed_over.len(), 36, "not a UUID: {handed_over}");
+
+    // What Glasshouse wrote down, read back the way production reads it.
+    use clap::Parser as _;
+    let cli = glasshouse::Cli::try_parse_from([
+        "glasshouse",
+        "--scope",
+        project_dir.to_str().unwrap(),
+        "--data-dir",
+        state_dir.to_str().unwrap(),
+        "--config-dir",
+        config_dir.to_str().unwrap(),
+    ])
+    .expect("cli");
+    let runtime = glasshouse::bootstrap(&cli, tmp.path()).expect("bootstrap");
+    let sessions = glasshouse::session::ProjectSessions::open(&runtime).expect("open sessions");
+    let records = sessions.store().list().expect("list sessions");
+    assert_eq!(
+        records.len(),
+        1,
+        "expected exactly one session: {records:?}"
+    );
+
+    assert_eq!(
+        records[0].native_session_id.as_deref(),
+        Some(handed_over.as_str()),
+        "the identifier Glasshouse handed the harness is not the one it recorded"
+    );
 }

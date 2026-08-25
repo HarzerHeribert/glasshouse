@@ -101,14 +101,30 @@ impl HarnessSelection {
     /// user's own list. It is nonetheless the seam both production start paths
     /// go through, because the alternative is two call sites that each have to
     /// remember the rule the day a harness does need one.
-    pub fn start_args<I, S>(&self, user_args: I) -> Vec<OsString>
+    pub fn start_args<I, S>(&self, native_session: Option<&str>, user_args: I) -> Vec<OsString>
     where
         I: IntoIterator<Item = S>,
         S: Into<OsString>,
     {
-        let mut args = self.adapter().start().args().to_vec();
+        let adapter = self.adapter();
+        let mut args = adapter.start().args().to_vec();
+        // The identifier, when Glasshouse is assigning one. Between the
+        // adapter's own arguments and the user's, so that a user who passes
+        // their harness a session flag by hand still has the last word.
+        if let Some(native) = native_session
+            && let Some(assignment) = adapter.assign_session_id(native)
+        {
+            args.extend(assignment.args().iter().cloned());
+        }
         args.extend(user_args.into_iter().map(Into::into));
         args
+    }
+
+    /// Whether this harness lets Glasshouse choose its native session
+    /// identifier, in which case one should be minted before the session
+    /// record is created.
+    pub fn assigns_native_session_id(&self) -> bool {
+        self.adapter().assign_session_id("probe").is_some()
     }
 
     pub fn executable(&self) -> &ResolvedExecutable {
@@ -755,7 +771,7 @@ mod tests {
             },
         };
         let args: Vec<String> = selection
-            .start_args(["--resume", "x"])
+            .start_args(None, ["--resume", "x"])
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
