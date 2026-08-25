@@ -118,7 +118,15 @@ Glasshouse records the session state that event implies — while never reading
 the conversation content the payload carries, never writing outside the
 project, and never letting a hook failure affect the session.
 
-State: COMPLETE on macOS; CI pending on Linux and Windows.
+State: COMPLETE on macOS and Linux; Windows green after a defect it caught.
+
+**Windows CI found a third real defect on this repository**, this time in the
+payload scan's own helper. It located the end of `report_hook` with
+`find("\n}\n")`, and Windows checks this file out with CRLF endings, so the
+closing brace reads `\r\n}\r\n` and the pattern never matched. It panicked
+rather than scanning an empty span — the right direction to fail in, and exactly
+what the hardening was for. The fix matches only the newline *before* the brace,
+which works on both; a brace at column zero can only be the function's own.
 
 **The whole chain was watched running against the real binary**, the same proof
 Phase 7 used. `glasshouse launch codex` was run in a real terminal against

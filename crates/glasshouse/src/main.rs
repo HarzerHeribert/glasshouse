@@ -623,8 +623,13 @@ mod tests {
             .find("fn report_hook(")
             .expect("report_hook must exist in this file");
         let after_start = &full[start..];
+        // `"\n}"` rather than `"\n}\n"`: on Windows this file is checked out
+        // with CRLF endings, so the closing brace reads `\r\n}\r\n` and a
+        // pattern demanding `\n` on both sides never matches. Windows CI caught
+        // exactly that. Matching only the newline *before* the brace works on
+        // both, and a brace at column zero can only be this function's own.
         let end = after_start
-            .find("\n}\n")
+            .find("\n}")
             .expect("report_hook must have a top-level closing brace");
         let body = &after_start[..end];
         // The slice must be the real function, not an empty or truncated one.
