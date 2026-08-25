@@ -49,6 +49,61 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 2D — the Providers and Launch Profiles settings sections (four lines)
+
+Contract: Given a user in the settings view, when they manage providers or
+launch profiles, Glasshouse lets them add, edit, disable, duplicate and remove
+those entries — while preserving: **no secret value is ever displayed**,
+user-level defaults stay visually distinct from project-level overrides, a
+project-level write still needs explicit confirmation, and disabling is
+reversible without retyping anything.
+
+State: **COMPLETE** for the four settings lines. Phase 9D line 426 (provider
+connectivity testing) stays **open** — see below.
+
+#### Line 426 stopped exactly where the packet told it to
+
+Glasshouse has no HTTP client on the branch this batch was cut from, and the
+packet forbade adding one because the concurrent gateway batch was introducing
+`ureq`. So the "test" affordance is a **reachability precondition check** —
+provider resolves, protocol declared, base URL non-empty, credential variable
+present — named honestly in the UI as such, and the line is left unchecked.
+`ureq` is now on `main`, so a follow-up can make it a real request.
+
+#### The orchestrator's mutation found a weak test, not a weak mutation
+
+Acceptance test 7 asked that no credential value ever render. The test plants a
+real environment variable, drives nine settings screens and asserts `!contains`.
+It looked thorough. **It passed a mutation that renders the credential's value
+instead of `set`/`not set`.**
+
+The reason is the finding: at the test's 100-column render the providers row is
+**truncated**, so a leaked 46-character value was clipped off-screen. The test
+was passing for a reason that had nothing to do with the code. Re-rendered at
+400 columns with the same mutation, it fails.
+
+Every snapshot in that test is now captured at **both** a realistic and a wide
+size, and the mutation is caught. Verified in both directions: hardened test +
+mutation → FAILED; hardened test + clean code → ok.
+
+**The general lesson, which is new to this project's practice:** a test that
+asserts the *absence* of a string in rendered output is only as strong as the
+viewport it renders into. Truncation makes absence trivially true.
+
+#### Three defects found by running the binary, which is why the packet demands it
+
+- **A stale test-result banner shadowed the profile wizard**, leaving it
+  silently un-drivable. Fixed twice over so the two fixes do not depend on each
+  other.
+- **`cmux`, Ollama and llama.cpp were accepted as launch-profile harnesses**,
+  because validation used `IntegrationId::ALL` rather than filtering to
+  `IntegrationKind::Harness`.
+- **A long refusal message rendered off-screen.** The input panel's height was a
+  fixed `2`, and the harness hint wraps on a realistic width.
+  `Paragraph::line_count` turned out to be gated behind an unstable upstream
+  feature the packet forbade enabling, so the batch wrote a small tested
+  word-wrap counter instead of guessing.
+
 ### Phase 9G — the Anthropic Messages ingress, and a credential the child never sees (ten lines)
 
 Contract: Given a Claude Code session launched under a gateway-backed profile,

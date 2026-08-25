@@ -62,6 +62,8 @@ fn cancelling_a_project_level_save_creates_no_file_and_no_directory() {
                 executable_layer: None,
             }],
             Vec::new(),
+            Vec::new(),
+            Vec::new(),
         );
 
         // Stage a real edit, so there is genuinely something a save could write,
@@ -79,7 +81,7 @@ fn cancelling_a_project_level_save_creates_no_file_and_no_directory() {
         ] {
             if state.handle_key(key) == Action::SaveProjectSettings {
                 asked_to_write = true;
-                let _ = shell::save_project_settings(&runtime, &state.settings_edits());
+                let _ = shell::save_project_settings(&runtime, &state.settings_edits(), &[], &[]);
             }
         }
 
@@ -108,7 +110,7 @@ fn confirming_a_project_level_save_creates_exactly_one_file_that_parses_back() {
         executable: Some(Some(std::path::PathBuf::from("/opt/bin/claude"))),
     }];
 
-    let path = shell::save_project_settings(&runtime, &edits).expect("save must succeed");
+    let path = shell::save_project_settings(&runtime, &edits, &[], &[]).expect("save must succeed");
     // Compared against the runtime's own (canonicalized) display root rather
     // than `workspace.path()` directly: on macOS `/tmp` is itself a symlink
     // to `/private/tmp`, and `Project::discover` canonicalizes the root —
@@ -163,7 +165,7 @@ fn a_user_level_save_never_writes_inside_the_project_root() {
         enabled: Some(false),
         executable: None,
     }];
-    shell::save_user_settings(&runtime, &edits).expect("save must succeed");
+    shell::save_user_settings(&runtime, &edits, &[], &[]).expect("save must succeed");
 
     assert!(
         !workspace.path().join(".glasshouse").exists(),
@@ -200,7 +202,7 @@ fn a_save_only_touches_the_fields_an_edit_actually_named() {
         enabled: Some(false),
         executable: None,
     }];
-    shell::save_user_settings(&runtime, &edits).expect("save must succeed");
+    shell::save_user_settings(&runtime, &edits, &[], &[]).expect("save must succeed");
 
     let loaded = glasshouse::config::UserConfig::load(runtime.paths()).unwrap();
     assert_eq!(

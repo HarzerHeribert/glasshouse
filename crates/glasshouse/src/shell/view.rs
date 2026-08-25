@@ -293,8 +293,8 @@ fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
         (Mode::Session, _) => "SESSION MODE -- keys go to the session -- ctrl-] for glasshouse",
         (Mode::Control, Some(Overlay::Overview)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::Settings)) => {
-            "tab section   up/down move   space toggle   enter edit path   w save (user)   \
-             W save (project)   r reopen setup wizard   esc close"
+            "tab section   up/down move   space toggle   enter/a/e/c/b/p/u/d/t edit   \
+             w save   W save-project   r setup   esc close"
         }
         (Mode::Control, None) => "tab session   enter session   n new   o overview   q quit",
     };
@@ -406,13 +406,39 @@ fn render_settings(state: &ShellState, frame: &mut Frame, area: Rect) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    let bottom_height = if settings.path_input().is_some() {
-        2
+    // An active input always outranks the passive reachability-check
+    // banner: `SettingsState::handle_key` clears that banner on every key
+    // its general dispatcher handles (which is how a wizard ever gets to
+    // open in the first place), but checking `provider_input`/
+    // `profile_input` first here too means this priority holds regardless
+    // of that clearing — two independent reasons the banner never shadows
+    // an editor, not one relying on the other.
+    let bottom_lines: Vec<Line> = if let Some(input) = settings.path_input() {
+        settings_path_input_lines(&input)
     } else if settings.confirming_project_write() {
-        3
+        project_write_confirm_lines(state)
+    } else if let Some(input) = settings.provider_input() {
+        labeled_text_input_lines(&input.label, input.buffer, input.error)
+    } else if let Some(input) = settings.profile_input() {
+        labeled_text_input_lines(&input.label, input.buffer, input.error)
+    } else if let Some((name, outcome)) = settings.provider_test_result() {
+        provider_test_result_lines(name, outcome)
     } else {
-        0
+        Vec::new()
     };
+
+    // Measured, not guessed: a fixed constant here is exactly what let an
+    // earlier version of this panel silently clip its own error line
+    // whenever the label above it (the Providers/Launch-Profiles inputs can
+    // run to a long, name-enumerating prompt) wrapped onto a second line by
+    // itself, leaving no room left for the one after it. `wrapped_height`
+    // wraps the same way the `Paragraph` below actually renders (`Wrap {
+    // trim: false }`), so the height asked for and the height used never
+    // drift apart. Capped to the panel's own available height so an
+    // absurdly narrow terminal shrinks the list above rather than
+    // requesting more room than `inner` has to give.
+    let bottom_height = wrapped_height(&bottom_lines, inner.width).min(inner.height);
+
     let regions = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -429,12 +455,15 @@ fn render_settings(state: &ShellState, frame: &mut Frame, area: Rect) {
     match settings.section() {
         SettingsSection::Harnesses => render_harness_rows(settings, frame, list_area),
         SettingsSection::Integrations => render_integration_rows(settings, frame, list_area),
+        SettingsSection::Providers => render_provider_rows(settings, frame, list_area),
+        SettingsSection::LaunchProfiles => render_profile_rows(settings, frame, list_area),
     }
 
-    if let Some(input) = settings.path_input() {
-        render_settings_path_input(&input, frame, bottom_area);
-    } else if settings.confirming_project_write() {
-        render_project_write_confirm(state, frame, bottom_area);
+    if !bottom_lines.is_empty() {
+        frame.render_widget(
+            Paragraph::new(bottom_lines).wrap(Wrap { trim: false }),
+            bottom_area,
+        );
     }
 }
 
@@ -459,6 +488,16 @@ fn render_settings_tabs(settings: &SettingsState, frame: &mut Frame, area: Rect)
         tab(
             "Integrations",
             settings.section() == SettingsSection::Integrations,
+        ),
+        Span::raw(" "),
+        tab(
+            "Providers",
+            settings.section() == SettingsSection::Providers,
+        ),
+        Span::raw(" "),
+        tab(
+            "Launch Profiles",
+            settings.section() == SettingsSection::LaunchProfiles,
         ),
     ];
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -546,7 +585,181 @@ fn render_integration_rows(settings: &SettingsState, frame: &mut Frame, area: Re
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn render_settings_path_input(input: &SettingsPathInputView<'_>, frame: &mut Frame, area: Rect) {
+/// The Settings "Providers" section. Every credential status shown is
+/// `set`/`not set` only, read with [`std::env::var_os`] — never
+/// [`std::env::var`], and never the value itself. See the module-level rule
+/// this mirrors in `integrations::write_provider_report`.
+fn render_provider_rows(settings: &SettingsState, frame: &mut Frame, area: Rect) {
+    let mut lines = Vec::new();
+    if settings.providers().is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No providers configured.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (index, row) in settings.providers().iter().enumerate() {
+        let selected = index == settings.selected_provider();
+        let cursor = if selected { "> " } else { "  " };
+        let mut style = Style::default();
+        if selected {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+
+        let enabled = format!(
+            "{} {}",
+            if row.config.enabled() {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            layer_label(row.layer),
+        );
+
+        let (base_url, credential) = match row.config.to_provider(&row.name) {
+            Ok(provider) => {
+                let base_url = provider
+                    .protocols
+                    .first()
+                    .map(|p| p.base_url.as_str())
+                    .filter(|url| !url.is_empty())
+                    .unwrap_or("(no base URL)")
+                    .to_owned();
+                let credential = if provider.credential_env.is_empty() {
+                    "no credential variable".to_owned()
+                } else {
+                    provider
+                        .credential_env
+                        .iter()
+                        .map(|var| {
+                            // `var_os` only: presence must never decode a value.
+                            let set = std::env::var_os(var).is_some();
+                            format!("{var} ({})", if set { "set" } else { "not set" })
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                (base_url, credential)
+            }
+            Err(err) => (format!("invalid template: {err}"), "-".to_owned()),
+        };
+
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{cursor}{:<14} {:<14} {enabled:<16} {base_url}",
+                row.name,
+                row.config.template(),
+            ),
+            style,
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("      credential: {credential}"),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The Settings "Launch Profiles" section.
+fn render_profile_rows(settings: &SettingsState, frame: &mut Frame, area: Rect) {
+    let mut lines = Vec::new();
+    if settings.profiles().is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No launch profiles configured.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (index, row) in settings.profiles().iter().enumerate() {
+        let selected = index == settings.selected_profile();
+        let cursor = if selected { "> " } else { "  " };
+        let mut style = Style::default();
+        if selected {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+
+        let backend = match row.config.backend() {
+            crate::config::ProfileBackend::Native => "native".to_owned(),
+            crate::config::ProfileBackend::DirectProvider { provider } => {
+                format!("provider:{provider}")
+            }
+            crate::config::ProfileBackend::GlasshouseGateway => "gateway".to_owned(),
+        };
+        let model = row.config.model().unwrap_or("(default)");
+        let approval = match row.config.approval() {
+            crate::config::ProfileApproval::Default => "default",
+            crate::config::ProfileApproval::AutomaticReview => "automatic-review",
+            crate::config::ProfileApproval::Bypass => "bypass",
+        };
+        let enabled = format!(
+            "{} {}",
+            if row.config.enabled() {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            layer_label(row.layer),
+        );
+
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{cursor}{:<14} {:<11} {backend:<16} {model:<14} {approval:<16} {enabled}",
+                row.name,
+                row.config.harness_slug(),
+            ),
+            style,
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// A single labeled text field with an optional error line, shared by every
+/// Providers/Launch-Profiles inline input — see
+/// [`crate::shell::state::ProviderInputView`] and
+/// [`crate::shell::state::ProfileInputView`]. Returns lines rather than
+/// rendering directly, so [`render_settings`] can measure the wrapped height
+/// this content actually needs before it decides how tall to make the panel
+/// — see that function's own comment on why a fixed guess is not enough.
+fn labeled_text_input_lines(label: &str, buffer: &str, error: Option<&str>) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(format!("{label}: {buffer}_"))];
+    if let Some(error) = error {
+        lines.push(Line::from(Span::styled(
+            error.to_owned(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines
+}
+
+/// Line 5's connectivity check result. Named honestly as a precondition
+/// check, never as proof the network is reachable — see
+/// [`crate::shell::state::ReachabilityCheck`]'s own doc for exactly what is
+/// and is not established.
+fn provider_test_result_lines(
+    name: &str,
+    outcome: &crate::shell::state::ReachabilityCheck,
+) -> Vec<Line<'static>> {
+    use crate::shell::state::ReachabilityCheck;
+
+    let (message, color) = match outcome {
+        ReachabilityCheck::PreconditionsMet { protocol, base_url } => (
+            format!("`{name}`: reachability preconditions met for {protocol} at {base_url}"),
+            Color::Green,
+        ),
+        ReachabilityCheck::Failed(reason) => (
+            format!("`{name}`: reachability precondition failed — {reason}"),
+            Color::Red,
+        ),
+    };
+    vec![
+        Line::from(Span::styled(message, Style::default().fg(color))),
+        Line::from(Span::styled(
+            "Precondition check only — not a real network request; Glasshouse has no HTTP \
+             client yet.",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ]
+}
+
+fn settings_path_input_lines(input: &SettingsPathInputView<'_>) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(format!(
         "Path to {} executable: {}_",
         input.harness_name, input.buffer
@@ -557,23 +770,73 @@ fn render_settings_path_input(input: &SettingsPathInputView<'_>, frame: &mut Fra
             Style::default().fg(Color::Red),
         )));
     }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    lines
 }
 
 /// The design decision requires naming the exact path before a project-level
 /// write, so this is not a generic "are you sure": it spells out
 /// `<project root>/.glasshouse/config.toml` and says the file lands inside
 /// the repository.
-fn render_project_write_confirm(state: &ShellState, frame: &mut Frame, area: Rect) {
+fn project_write_confirm_lines(state: &ShellState) -> Vec<Line<'static>> {
     let path = state.project_root().join(".glasshouse").join("config.toml");
-    let lines = vec![
+    vec![
         Line::from(Span::styled(
             format!("Write project settings to {}?", path.display()),
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from("This file is inside your project repository. y/Enter confirms, Esc/n cancels."),
-    ];
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    ]
+}
+
+/// Total rows `lines` need once word-wrapped to `width` columns, the same
+/// way [`Wrap`] `{ trim: false }` wraps them when actually drawn — see
+/// [`render_settings`]'s comment on why this has to match rather than guess.
+fn wrapped_height(lines: &[Line], width: u16) -> u16 {
+    lines
+        .iter()
+        .map(|line| wrapped_row_count(&String::from(line.clone()), width))
+        .sum::<usize>()
+        .min(u16::MAX as usize) as u16
+}
+
+/// Rows `text` needs word-wrapped to `width` columns: whole words packed
+/// onto a row, a new row started only when the next word would not fit —
+/// the same rule [`ratatui`]'s own word-wrapper follows for `Wrap { trim:
+/// false }`.
+///
+/// Not [`ratatui::widgets::Paragraph::line_count`] — that method carries an
+/// upstream `instability::unstable` marker, which makes it private outside
+/// its own crate without a feature flag this workspace has no path to
+/// enabling (Cargo manifests are a forbidden file for this packet). This is
+/// this module's own small stand-in, used only to size a panel this module
+/// already renders with that exact wrap setting — never to change what is
+/// actually drawn.
+///
+/// A single word wider than `width` still costs only one row here, never a
+/// loop: nothing this module ever wraps contains a word anywhere near a
+/// realistic terminal's width, and undercounting by a row on an
+/// unrealistically narrow terminal is the same accepted degradation the
+/// rest of this file's absurd-size tests already tolerate — clipped
+/// content, never a panic.
+fn wrapped_row_count(text: &str, width: u16) -> usize {
+    let width = usize::from(width.max(1));
+    let mut rows: usize = 1;
+    let mut current: usize = 0;
+    for word in text.split(' ') {
+        let word_len = word.chars().count();
+        if current == 0 {
+            current = word_len;
+            continue;
+        }
+        let needed = current + 1 + word_len;
+        if needed <= width {
+            current = needed;
+        } else {
+            rows += 1;
+            current = word_len;
+        }
+    }
+    rows
 }
 
 /// A rectangle covering `percent_x` by `percent_y` of `area`, centred.
@@ -808,6 +1071,76 @@ mod tests {
         let text = truncate_start("/päth/tö/pröject", 8);
         assert_eq!(text.chars().count(), 8, "counted characters, not bytes");
         assert!(text.ends_with("öject"));
+    }
+
+    #[test]
+    fn wrapped_row_count_matches_simple_word_wrap() {
+        assert_eq!(wrapped_row_count("hello world", 20), 1);
+        assert_eq!(
+            wrapped_row_count("hello world", 5),
+            2,
+            "each word wraps to its own row"
+        );
+        assert_eq!(
+            wrapped_row_count("", 20),
+            1,
+            "an empty line still occupies one row"
+        );
+        assert_eq!(
+            wrapped_row_count("a b c d", 3),
+            2,
+            "\"a b\" then \"c d\" at width 3"
+        );
+        assert_eq!(
+            wrapped_row_count("a b c d", 1000),
+            1,
+            "a generous width never wraps"
+        );
+        // Never panics or loops forever even at the narrowest width.
+        assert!(wrapped_row_count("a fairly long sentence indeed", 0) > 0);
+        assert!(wrapped_row_count("a fairly long sentence indeed", 1) > 0);
+    }
+
+    #[test]
+    fn wrapped_height_sums_every_lines_own_row_count() {
+        let lines = vec![
+            Line::from("hello world"),
+            Line::from("a somewhat longer second line here"),
+        ];
+        let narrow = wrapped_height(&lines, 5);
+        let wide = wrapped_height(&lines, 200);
+        assert_eq!(wide, 2, "a generous width needs exactly one row per line");
+        assert!(
+            narrow > wide,
+            "a narrower width must never need fewer rows: narrow={narrow} wide={wide}"
+        );
+        assert_eq!(wrapped_height(&[], 80), 0, "no lines needs no height");
+    }
+
+    /// The regression this function exists to prevent: a long label that
+    /// wraps by itself must not leave the error line beneath it with no
+    /// room, the way a fixed `2` did before `wrapped_height` replaced it —
+    /// found by driving the real binary, not by a unit test.
+    #[test]
+    fn wrapped_height_leaves_room_for_a_wrapped_label_and_its_error_line() {
+        let label_line = Line::from(
+            "Harness for `custom` (claude-code, codex, antigravity, opencode, cursor, pi, \
+             hermes): not-a-real-harness_",
+        );
+        let error_line = Line::from(
+            "`not-a-real-harness` is not a harness Glasshouse knows; known harnesses are: \
+             claude-code, codex, antigravity, opencode, cursor, pi, hermes",
+        );
+        let width = 88;
+        let height = wrapped_height(&[label_line.clone(), error_line.clone()], width);
+        let label_rows = wrapped_row_count(&String::from(label_line), width);
+        let error_rows = wrapped_row_count(&String::from(error_line), width);
+        assert!(label_rows > 1, "the label alone must wrap in this scenario");
+        assert_eq!(
+            height as usize,
+            label_rows + error_rows,
+            "the error line's rows must be included, not clipped by a fixed height"
+        );
     }
 
     /// The bottom bar carries the key bindings on every screen, including from
@@ -1048,12 +1381,13 @@ mod tests {
 
 #[cfg(test)]
 mod settings_tests {
+    use crate::config::{ProfileConfig, ProviderConfig};
     use crate::integrations::{IntegrationId, IntegrationStatus};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use super::super::state::{HarnessRow, IntegrationRow};
+    use super::super::state::{HarnessRow, IntegrationRow, ProfileRow, ProviderRow};
     use super::*;
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -1091,7 +1425,7 @@ mod settings_tests {
 
     fn state_with_settings_open() -> ShellState {
         let mut state = ShellState::new("glasshouse", "/work/glasshouse", "0.1.0", Vec::new());
-        state.open_settings(harness_rows(), integration_rows());
+        state.open_settings(harness_rows(), integration_rows(), Vec::new(), Vec::new());
         state
     }
 
@@ -1231,5 +1565,236 @@ mod settings_tests {
                 panic!("a decorative block element ({found:?}) was drawn:\n{screen}");
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 2D: Providers and Launch Profiles.
+    // -----------------------------------------------------------------
+
+    fn provider_rows() -> Vec<ProviderRow> {
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_base_url(Some("https://mirror.example.com/v1".to_owned()));
+        vec![ProviderRow {
+            name: "my-router".to_owned(),
+            config,
+            layer: Layer::User,
+        }]
+    }
+
+    fn profile_rows() -> Vec<ProfileRow> {
+        vec![ProfileRow {
+            name: "fast".to_owned(),
+            config: ProfileConfig::new(IntegrationId::ClaudeCode),
+            layer: Layer::User,
+        }]
+    }
+
+    fn state_with_full_settings_open() -> ShellState {
+        let mut state = ShellState::new("glasshouse", "/work/glasshouse", "0.1.0", Vec::new());
+        state.open_settings(
+            harness_rows(),
+            integration_rows(),
+            provider_rows(),
+            profile_rows(),
+        );
+        state
+    }
+
+    /// Acceptance 1 (the render half): an empty Providers section shows an
+    /// explanatory empty state rather than a blank list, and nothing panics.
+    #[test]
+    fn an_empty_providers_section_renders_an_empty_state() {
+        let mut state = state_with_settings_open();
+        state.handle_key(press(KeyCode::Tab));
+        state.handle_key(press(KeyCode::Tab));
+        let text = rendered(&state, 100, 30);
+        assert!(text.contains("No providers configured."), "got:\n{text}");
+        assert!(
+            text.contains("Providers"),
+            "the tab label must show:\n{text}"
+        );
+
+        for (w, h) in [(1, 1), (1, 40), (40, 1), (3, 3), (200, 60)] {
+            rendered(&state, w, h);
+        }
+    }
+
+    /// The Launch Profiles counterpart to the test above.
+    #[test]
+    fn an_empty_launch_profiles_section_renders_an_empty_state() {
+        let mut state = state_with_settings_open();
+        for _ in 0..3 {
+            state.handle_key(press(KeyCode::Tab));
+        }
+        let text = rendered(&state, 100, 30);
+        assert!(
+            text.contains("No launch profiles configured."),
+            "got:\n{text}"
+        );
+        assert!(text.contains("Launch Profiles"), "got:\n{text}");
+
+        for (w, h) in [(1, 1), (1, 40), (40, 1), (3, 3), (200, 60)] {
+            rendered(&state, w, h);
+        }
+    }
+
+    #[test]
+    fn providers_and_profiles_appear_in_their_sections() {
+        let mut state = state_with_full_settings_open();
+        state.handle_key(press(KeyCode::Tab));
+        state.handle_key(press(KeyCode::Tab));
+        let text = rendered(&state, 100, 30);
+        assert!(text.contains("my-router"), "got:\n{text}");
+        assert!(text.contains("openrouter"), "got:\n{text}");
+        assert!(
+            text.contains("https://mirror.example.com/v1"),
+            "got:\n{text}"
+        );
+
+        state.handle_key(press(KeyCode::Tab));
+        let text = rendered(&state, 100, 30);
+        assert!(text.contains("fast"), "got:\n{text}");
+        assert!(text.contains("claude-code"), "got:\n{text}");
+    }
+
+    /// Acceptance 7 — the one test this file exists to make pass for
+    /// providers and launch profiles: a credential variable set to an
+    /// unmistakable secret-shaped value must never appear on any Settings
+    /// screen this phase adds, across every section and every inline editor,
+    /// while its NAME must. Asserted with `!contains`, never `assert_eq!` on
+    /// the secret material itself — see `integrations`'s
+    /// `the_doctor_report_names_variable_names_and_never_values`, which this
+    /// mirrors for the TUI.
+    #[test]
+    fn no_credential_value_is_ever_rendered_across_every_settings_screen() {
+        const VAR: &str = "GLASSHOUSE_VIEW_TEST_ONLY_SECRET_VAR";
+        const SECRET_VALUE: &str = "sk-view-test-totally-real-looking-secret-xyz123";
+
+        // SAFETY: `VAR` is unique to this test and is removed again below,
+        // including before every early return this test has (it has none).
+        unsafe {
+            std::env::set_var(VAR, SECRET_VALUE);
+        }
+
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_credential_env(vec![VAR.to_owned()]);
+        let rows = vec![ProviderRow {
+            name: "secret-test".to_owned(),
+            config,
+            layer: Layer::User,
+        }];
+
+        let mut state = ShellState::new("glasshouse", "/work/glasshouse", "0.1.0", Vec::new());
+        state.open_settings(harness_rows(), integration_rows(), rows, profile_rows());
+
+        // Every screen is captured at a realistic width AND at a wide one.
+        // At 100 columns the providers row is truncated, so a rendering that
+        // leaked the credential's value would be clipped off-screen and this
+        // test would pass for the wrong reason — verified by mutation: render
+        // the value instead of set/not-set and only the wide capture fails.
+        let mut screens = Vec::new();
+
+        // Harnesses (the default section).
+        screens.push(rendered(&state, 100, 30));
+        screens.push(rendered(&state, 400, 60));
+
+        // Integrations.
+        state.handle_key(press(KeyCode::Tab));
+        screens.push(rendered(&state, 100, 30));
+        screens.push(rendered(&state, 400, 60));
+
+        // Providers — the row itself must name the variable.
+        state.handle_key(press(KeyCode::Tab));
+        let providers_screen = rendered(&state, 100, 30);
+        screens.push(rendered(&state, 400, 60));
+        assert!(
+            providers_screen.contains(VAR),
+            "the variable NAME must be shown: {providers_screen}"
+        );
+        screens.push(providers_screen);
+
+        // The "add a provider" wizard, both steps.
+        state.handle_key(press(KeyCode::Char('a')));
+        for c in "another".chars() {
+            state.handle_key(press(KeyCode::Char(c)));
+        }
+        screens.push(rendered(&state, 100, 30));
+        screens.push(rendered(&state, 400, 60));
+        state.handle_key(press(KeyCode::Enter));
+        for c in "openrouter".chars() {
+            state.handle_key(press(KeyCode::Char(c)));
+        }
+        screens.push(rendered(&state, 100, 30));
+        screens.push(rendered(&state, 400, 60));
+        state.handle_key(press(KeyCode::Enter));
+
+        // Editing the credential variable names of the original row ("another"
+        // now sorts first, so one Down reaches "secret-test").
+        state.handle_key(press(KeyCode::Down));
+        state.handle_key(press(KeyCode::Char('c')));
+        screens.push(rendered(&state, 100, 30));
+        screens.push(rendered(&state, 400, 60));
+        state.handle_key(press(KeyCode::Esc));
+
+        // The reachability precondition test — its result names the
+        // provider and protocol but must never carry the credential's value.
+        state.handle_key(press(KeyCode::Char('t')));
+        let test_screen = rendered(&state, 100, 30);
+        screens.push(rendered(&state, 400, 60));
+        assert!(
+            test_screen.contains("preconditions met")
+                || test_screen.contains("precondition failed"),
+            "the test result must say something about the check: {test_screen}"
+        );
+        screens.push(test_screen);
+
+        // Launch Profiles.
+        state.handle_key(press(KeyCode::Tab));
+        screens.push(rendered(&state, 100, 30));
+        screens.push(rendered(&state, 400, 60));
+
+        // The project-write confirmation.
+        state.handle_key(press(KeyCode::Char('W')));
+        screens.push(rendered(&state, 100, 30));
+        screens.push(rendered(&state, 400, 60));
+
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+
+        for screen in &screens {
+            assert!(
+                !screen.contains(SECRET_VALUE),
+                "a credential value was rendered on screen:\n{screen}"
+            );
+        }
+    }
+
+    /// Found running the real binary: refusing an unknown harness produces a
+    /// long label (a name-enumerating prompt) that wraps by itself on a
+    /// realistic terminal width, and a fixed bottom-panel height clipped the
+    /// error line beneath it into invisibility. This renders the exact
+    /// scenario and asserts the error text is actually on screen.
+    #[test]
+    fn an_unknown_harness_error_is_visible_not_clipped_by_a_wrapped_label() {
+        let mut state = state_with_settings_open();
+        state.handle_key(press(KeyCode::Tab));
+        state.handle_key(press(KeyCode::Tab));
+        state.handle_key(press(KeyCode::Tab));
+        state.handle_key(press(KeyCode::Char('a')));
+        for c in "custom".chars() {
+            state.handle_key(press(KeyCode::Char(c)));
+        }
+        state.handle_key(press(KeyCode::Enter));
+        for c in "not-a-real-harness".chars() {
+            state.handle_key(press(KeyCode::Char(c)));
+        }
+        state.handle_key(press(KeyCode::Enter));
+
+        let text = rendered(&state, 100, 30);
+        assert!(
+            text.contains("not a harness Glasshouse knows"),
+            "the refusal error must actually be visible on screen, not clipped:\n{text}"
+        );
     }
 }

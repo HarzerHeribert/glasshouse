@@ -16,9 +16,10 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
 
-use crate::config::Layer;
-use crate::integrations::{IntegrationId, IntegrationStatus};
+use crate::config::{Layer, ProfileApproval, ProfileBackend, ProfileConfig, ProviderConfig};
+use crate::integrations::{IntegrationId, IntegrationKind, IntegrationStatus};
 use crate::platform::exec;
+use crate::secret::{EnvironmentSecretStore, SecretStore};
 use crate::session::SessionRecord;
 
 /// A Glasshouse-owned screen drawn over the session viewport.
@@ -341,9 +342,16 @@ impl ShellState {
         &mut self,
         harnesses: Vec<HarnessRow>,
         integrations: Vec<IntegrationRow>,
+        providers: Vec<ProviderRow>,
+        profiles: Vec<ProfileRow>,
     ) -> Action {
         self.overlay = Some(Overlay::Settings);
-        self.settings = Some(SettingsState::new(harnesses, integrations));
+        self.settings = Some(SettingsState::new(
+            harnesses,
+            integrations,
+            providers,
+            profiles,
+        ));
         Action::Redraw
     }
 
@@ -354,19 +362,39 @@ impl ShellState {
         &mut self,
         harnesses: Vec<HarnessRow>,
         integrations: Vec<IntegrationRow>,
+        providers: Vec<ProviderRow>,
+        profiles: Vec<ProfileRow>,
     ) {
         if let Some(settings) = self.settings.as_mut() {
-            settings.replace_rows(harnesses, integrations);
+            settings.replace_rows(harnesses, integrations, providers, profiles);
         }
     }
 
-    /// Every pending, unsaved Settings edit, for the run loop to apply to
-    /// whichever configuration layer is being saved. Empty when Settings is
-    /// not open or nothing has been edited yet.
+    /// Every pending, unsaved harness Settings edit, for the run loop to
+    /// apply to whichever configuration layer is being saved. Empty when
+    /// Settings is not open or nothing has been edited yet.
     pub fn settings_edits(&self) -> Vec<SettingsEdit> {
         self.settings
             .as_ref()
             .map(SettingsState::edits)
+            .unwrap_or_default()
+    }
+
+    /// Every pending, unsaved provider Settings edit — see
+    /// [`ShellState::settings_edits`]'s own doc.
+    pub fn settings_provider_edits(&self) -> Vec<ProviderSettingsEdit> {
+        self.settings
+            .as_ref()
+            .map(SettingsState::provider_edits)
+            .unwrap_or_default()
+    }
+
+    /// Every pending, unsaved launch-profile Settings edit — see
+    /// [`ShellState::settings_edits`]'s own doc.
+    pub fn settings_profile_edits(&self) -> Vec<ProfileSettingsEdit> {
+        self.settings
+            .as_ref()
+            .map(SettingsState::profile_edits)
             .unwrap_or_default()
     }
 
@@ -512,23 +540,44 @@ impl ShellState {
 
 /// Which section of the Settings overlay has the cursor.
 ///
-/// Exactly two, per the design decision: Harnesses and Integrations are the
-/// only sections whose feature exists yet. Do not add a third here without
-/// first shipping the feature it would configure.
+/// Harnesses and Integrations shipped first, per the design decision: build
+/// only the section whose feature exists. Phase 2D adds Providers and Launch
+/// Profiles beside them, now that [`crate::config::ProviderConfig`] and
+/// [`crate::config::ProfileConfig`] both exist. Do not add a fifth here
+/// without first shipping the feature it would configure — Routing needs a
+/// routing-model configuration field nobody has designed yet, and Memory is
+/// Phase 20.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
     Harnesses,
     Integrations,
+    Providers,
+    LaunchProfiles,
 }
 
 impl SettingsSection {
-    /// With exactly two sections, moving either direction lands on the other
-    /// one, so Tab and Shift-Tab share this.
-    fn other(self) -> Self {
-        match self {
-            SettingsSection::Harnesses => SettingsSection::Integrations,
-            SettingsSection::Integrations => SettingsSection::Harnesses,
-        }
+    /// Tab order. `next`/`previous` cycle through this, so adding a section
+    /// only ever means inserting it here.
+    const ORDER: [SettingsSection; 4] = [
+        SettingsSection::Harnesses,
+        SettingsSection::Integrations,
+        SettingsSection::Providers,
+        SettingsSection::LaunchProfiles,
+    ];
+
+    fn index(self) -> usize {
+        Self::ORDER
+            .iter()
+            .position(|&section| section == self)
+            .expect("every variant appears in ORDER")
+    }
+
+    fn next(self) -> Self {
+        Self::ORDER[(self.index() + 1) % Self::ORDER.len()]
+    }
+
+    fn previous(self) -> Self {
+        Self::ORDER[(self.index() + Self::ORDER.len() - 1) % Self::ORDER.len()]
     }
 }
 
@@ -569,6 +618,36 @@ pub struct IntegrationRow {
     pub status: IntegrationStatus,
 }
 
+/// One row of the Settings "Providers" section: a provider configured on
+/// either layer. Unlike [`HarnessRow`], there is no implied entry for a
+/// built-in template with nothing configured — see
+/// [`crate::config::EffectiveConfig::provider_names`]'s own doc for why.
+///
+/// Holds the whole [`ProviderConfig`] rather than duplicating its fields:
+/// every field that type can hold is already guaranteed non-secret (see its
+/// module documentation's "No secrets here"), so embedding it here adds no
+/// new surface for a credential to leak through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRow {
+    pub name: String,
+    pub config: ProviderConfig,
+    /// Which layer this whole entry came from. A provider is atomic — one
+    /// name resolves to exactly one layer's definition, project winning over
+    /// user, matching [`crate::config::EffectiveConfig::configured_provider`]
+    /// — so one tag covers every field, unlike [`HarnessRow`], where
+    /// `enabled` and `executable` can come from different layers.
+    pub layer: Layer,
+}
+
+/// One row of the Settings "Launch Profiles" section, matching
+/// [`ProviderRow`]'s shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileRow {
+    pub name: String,
+    pub config: ProfileConfig,
+    pub layer: Layer,
+}
+
 /// One edit made to a [`HarnessRow`] this Settings session, not yet written
 /// anywhere. `None` in a field means that field was never touched this
 /// session; `Some(None)` in `executable` would mean "clear it", though
@@ -589,6 +668,26 @@ pub struct SettingsEdit {
     pub executable: Option<Option<PathBuf>>,
 }
 
+/// One staged edit to a provider this Settings session, not yet written
+/// anywhere. Unlike [`SettingsEdit`], this carries the whole
+/// [`ProviderConfig`] rather than per-field changes: every provider edit —
+/// add, edit a field, toggle enabled — already produces a complete new value,
+/// so there is no partial-field state worth tracking separately.
+#[derive(Debug, Clone)]
+pub struct ProviderSettingsEdit {
+    pub name: String,
+    /// `Some` to add or replace this provider's configuration; `None` to
+    /// remove it.
+    pub upsert: Option<ProviderConfig>,
+}
+
+/// A [`ProfileConfig`] counterpart to [`ProviderSettingsEdit`].
+#[derive(Debug, Clone)]
+pub struct ProfileSettingsEdit {
+    pub name: String,
+    pub upsert: Option<ProfileConfig>,
+}
+
 /// The inline path editor's state while it is open, for the selected
 /// harness row. Mirrors `onboarding::state`'s `PathInput` — same sub-mode,
 /// same validate-on-`Enter` behavior via [`exec::resolve_explicit`], same
@@ -605,6 +704,169 @@ pub struct SettingsPathInputView<'a> {
     pub harness_name: &'static str,
     pub buffer: &'a str,
     pub error: Option<&'a str>,
+}
+
+/// What a single Providers-section text input is for. Every editable
+/// provider field — a brand new provider's name, then its template, or an
+/// existing one's base URL or credential variable names — goes through one
+/// [`ProviderTextInput`]; only the purpose and what Enter does with the typed
+/// text differ. Mirrors [`SettingsPathInput`]'s "type, validate on Enter, Esc
+/// cancels without changing anything" shape, generalized to more than one
+/// field and chained for the two-step "add a provider" flow.
+#[derive(Debug, Clone)]
+enum ProviderInputPurpose {
+    /// Adding a new provider: this is the name, typed first.
+    NewName,
+    /// Second step of adding a new provider: which built-in template it is
+    /// based on, for the name already accepted in [`ProviderInputPurpose::NewName`].
+    NewTemplate {
+        name: String,
+    },
+    EditBaseUrl {
+        name: String,
+    },
+    EditCredentialEnv {
+        name: String,
+    },
+}
+
+#[derive(Debug)]
+struct ProviderTextInput {
+    purpose: ProviderInputPurpose,
+    buffer: String,
+    error: Option<String>,
+}
+
+/// Read-only view of the active Providers-section text input, for rendering.
+pub struct ProviderInputView<'a> {
+    pub label: String,
+    pub buffer: &'a str,
+    pub error: Option<&'a str>,
+}
+
+/// The Launch-Profiles-section counterpart to [`ProviderInputPurpose`].
+#[derive(Debug, Clone)]
+enum ProfileInputPurpose {
+    NewName,
+    /// Second step of adding a new profile: which harness it applies to, by
+    /// slug — see [`IntegrationId::slug`] — for the name already accepted in
+    /// [`ProfileInputPurpose::NewName`]. Typed rather than picked from a
+    /// list so an unknown harness can be refused with a message naming it,
+    /// the same way [`ProviderInputPurpose::NewTemplate`] refuses an unknown
+    /// template.
+    NewHarness {
+        name: String,
+    },
+    EditModel {
+        name: String,
+    },
+    /// `native`, or the name of a configured provider — see
+    /// [`crate::config::ProfileBackend::DirectProvider`].
+    EditBackend {
+        name: String,
+    },
+    /// Duplicating an existing profile: the new name, typed once; the
+    /// profile named `source` is cloned under it, independent of the
+    /// original from the moment it is created.
+    Duplicate {
+        source: String,
+    },
+}
+
+#[derive(Debug)]
+struct ProfileTextInput {
+    purpose: ProfileInputPurpose,
+    buffer: String,
+    error: Option<String>,
+}
+
+/// Read-only view of the active Launch-Profiles-section text input, for
+/// rendering.
+pub struct ProfileInputView<'a> {
+    pub label: String,
+    pub buffer: &'a str,
+    pub error: Option<&'a str>,
+}
+
+/// The outcome of Line 5's connectivity check.
+///
+/// **This is a precondition check, not a network request.** Glasshouse has
+/// no HTTP client dependency yet — another worker is adding one for the
+/// gateway on a separate branch — so this proves only what can be proven
+/// without one: the provider resolves to a real template, it declares at
+/// least one protocol, that protocol's base URL is non-empty, and (when the
+/// provider names any credential variables at all) at least one of them is
+/// currently set. [`ReachabilityCheck::PreconditionsMet`] is never proof the
+/// network is reachable, and the view names it as a precondition check for
+/// exactly that reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReachabilityCheck {
+    PreconditionsMet {
+        protocol: &'static str,
+        base_url: String,
+    },
+    Failed(String),
+}
+
+/// Every [`IntegrationId`] a launch profile may actually name, in
+/// [`IntegrationId::ALL`]'s own order.
+///
+/// Narrower than [`IntegrationId::ALL`] on purpose: `cmux`, Ollama and
+/// llama.cpp are real integrations but not launchable coding harnesses — a
+/// `ProfileConfig` naming one would be structurally accepted and
+/// semantically meaningless, the exact class of mistake "an unknown harness
+/// is refused" exists to catch. Found by driving the real binary: an
+/// earlier version of this module validated against every
+/// [`IntegrationId::ALL`] entry, so typing `cmux` here was silently
+/// accepted as a profile's harness.
+fn known_launch_harnesses() -> impl Iterator<Item = IntegrationId> {
+    IntegrationId::ALL
+        .iter()
+        .copied()
+        .filter(|id| id.kind() == IntegrationKind::Harness)
+}
+
+/// Check `config`'s reachability *preconditions* for the provider named
+/// `name` — see [`ReachabilityCheck`]'s own doc for exactly what is and is
+/// not established here.
+///
+/// Presence is checked with [`SecretStore::is_present`], never
+/// [`SecretStore::resolve`]: this function has no need to hold a credential's
+/// value even transiently, so it never asks for one.
+fn check_provider_reachability(
+    name: &str,
+    config: &ProviderConfig,
+    secrets: &dyn SecretStore,
+) -> ReachabilityCheck {
+    let provider = match config.to_provider(name) {
+        Ok(provider) => provider,
+        Err(err) => return ReachabilityCheck::Failed(err.to_string()),
+    };
+    let Some(support) = provider.protocols.first() else {
+        return ReachabilityCheck::Failed(format!("provider `{name}` declares no protocol"));
+    };
+    if support.base_url.is_empty() {
+        return ReachabilityCheck::Failed(format!(
+            "provider `{name}` has no base URL configured for {}",
+            support.protocol
+        ));
+    }
+    if !provider.credential_env.is_empty() {
+        let present = provider
+            .secret_refs()
+            .iter()
+            .any(|reference| secrets.is_present(reference));
+        if !present {
+            return ReachabilityCheck::Failed(format!(
+                "none of provider `{name}`'s credential variable(s) ({}) is set",
+                provider.credential_env.join(", ")
+            ));
+        }
+    }
+    ReachabilityCheck::PreconditionsMet {
+        protocol: support.protocol.slug(),
+        base_url: support.base_url.clone(),
+    }
 }
 
 /// What [`SettingsState::handle_key`] wants
@@ -647,27 +909,59 @@ pub struct SettingsState {
     section: SettingsSection,
     harnesses: Vec<HarnessRow>,
     integrations: Vec<IntegrationRow>,
+    providers: Vec<ProviderRow>,
+    profiles: Vec<ProfileRow>,
     selected_harness: usize,
     selected_integration: usize,
+    selected_provider: usize,
+    selected_profile: usize,
     edits: HashMap<IntegrationId, PendingEdit>,
+    /// Staged provider edits this session, keyed by name — `Some(config)` to
+    /// add/replace, `None` to remove. See [`ProviderSettingsEdit`].
+    provider_edits: HashMap<String, Option<ProviderConfig>>,
+    /// Staged profile edits this session, keyed by name — see
+    /// [`ProfileSettingsEdit`].
+    profile_edits: HashMap<String, Option<ProfileConfig>>,
     path_input: Option<SettingsPathInput>,
     /// Whether the `W` confirmation prompt (design decision: "first shows
     /// the exact path to be created and requires a distinct confirmation")
     /// is currently showing.
     confirm_project_write: bool,
+    provider_input: Option<ProviderTextInput>,
+    profile_input: Option<ProfileTextInput>,
+    /// The last connectivity-precondition check run this session, and which
+    /// provider it was for — see [`ReachabilityCheck`]. Cleared by any other
+    /// key the general dispatcher in [`SettingsState::handle_key`] handles —
+    /// exactly like the status note in the outer shell footer — so it can
+    /// never shadow a wizard or field editor that opens afterward.
+    provider_test_result: Option<(String, ReachabilityCheck)>,
 }
 
 impl SettingsState {
-    fn new(harnesses: Vec<HarnessRow>, integrations: Vec<IntegrationRow>) -> Self {
+    fn new(
+        harnesses: Vec<HarnessRow>,
+        integrations: Vec<IntegrationRow>,
+        providers: Vec<ProviderRow>,
+        profiles: Vec<ProfileRow>,
+    ) -> Self {
         Self {
             section: SettingsSection::Harnesses,
             harnesses,
             integrations,
+            providers,
+            profiles,
             selected_harness: 0,
             selected_integration: 0,
+            selected_provider: 0,
+            selected_profile: 0,
             edits: HashMap::new(),
+            provider_edits: HashMap::new(),
+            profile_edits: HashMap::new(),
             path_input: None,
             confirm_project_write: false,
+            provider_input: None,
+            profile_input: None,
+            provider_test_result: None,
         }
     }
 
@@ -683,12 +977,28 @@ impl SettingsState {
         &self.integrations
     }
 
+    pub fn providers(&self) -> &[ProviderRow] {
+        &self.providers
+    }
+
+    pub fn profiles(&self) -> &[ProfileRow] {
+        &self.profiles
+    }
+
     pub fn selected_harness(&self) -> usize {
         self.selected_harness
     }
 
     pub fn selected_integration(&self) -> usize {
         self.selected_integration
+    }
+
+    pub fn selected_provider(&self) -> usize {
+        self.selected_provider
+    }
+
+    pub fn selected_profile(&self) -> usize {
+        self.selected_profile
     }
 
     pub fn confirming_project_write(&self) -> bool {
@@ -706,7 +1016,65 @@ impl SettingsState {
         })
     }
 
-    /// Every pending edit, for the run loop to apply when saving.
+    /// The active Providers-section text input, if any — a new provider's
+    /// name then template, or an existing one's base URL or credential
+    /// variable names.
+    pub fn provider_input(&self) -> Option<ProviderInputView<'_>> {
+        let input = self.provider_input.as_ref()?;
+        let label = match &input.purpose {
+            ProviderInputPurpose::NewName => "New provider name".to_owned(),
+            ProviderInputPurpose::NewTemplate { name } => {
+                format!("Template for `{name}` (openrouter, zai, openai-compatible, ...)")
+            }
+            ProviderInputPurpose::EditBaseUrl { name } => format!("Base URL for `{name}`"),
+            ProviderInputPurpose::EditCredentialEnv { name } => {
+                format!("Credential variable name(s) for `{name}`, comma-separated")
+            }
+        };
+        Some(ProviderInputView {
+            label,
+            buffer: input.buffer.as_str(),
+            error: input.error.as_deref(),
+        })
+    }
+
+    /// The most recent connectivity-precondition check, if one has been run
+    /// this Settings session — see [`ReachabilityCheck`].
+    pub fn provider_test_result(&self) -> Option<(&str, &ReachabilityCheck)> {
+        self.provider_test_result
+            .as_ref()
+            .map(|(name, outcome)| (name.as_str(), outcome))
+    }
+
+    /// The active Launch-Profiles-section text input, if any — a new
+    /// profile's name then harness, or an existing one's model or backend.
+    pub fn profile_input(&self) -> Option<ProfileInputView<'_>> {
+        let input = self.profile_input.as_ref()?;
+        let label = match &input.purpose {
+            ProfileInputPurpose::NewName => "New launch profile name".to_owned(),
+            ProfileInputPurpose::NewHarness { name } => format!(
+                "Harness for `{name}` ({})",
+                known_launch_harnesses()
+                    .map(|id| id.slug())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            ProfileInputPurpose::EditModel { name } => format!("Model override for `{name}`"),
+            ProfileInputPurpose::EditBackend { name } => {
+                format!("Backend for `{name}`: `native` or a configured provider name")
+            }
+            ProfileInputPurpose::Duplicate { source } => {
+                format!("New name for a copy of `{source}`")
+            }
+        };
+        Some(ProfileInputView {
+            label,
+            buffer: input.buffer.as_str(),
+            error: input.error.as_deref(),
+        })
+    }
+
+    /// Every pending harness edit, for the run loop to apply when saving.
     fn edits(&self) -> Vec<SettingsEdit> {
         self.edits
             .iter()
@@ -718,23 +1086,65 @@ impl SettingsState {
             .collect()
     }
 
+    /// Every pending provider edit, for the run loop to apply when saving.
+    fn provider_edits(&self) -> Vec<ProviderSettingsEdit> {
+        self.provider_edits
+            .iter()
+            .map(|(name, upsert)| ProviderSettingsEdit {
+                name: name.clone(),
+                upsert: upsert.clone(),
+            })
+            .collect()
+    }
+
+    /// Every pending profile edit, for the run loop to apply when saving.
+    fn profile_edits(&self) -> Vec<ProfileSettingsEdit> {
+        self.profile_edits
+            .iter()
+            .map(|(name, upsert)| ProfileSettingsEdit {
+                name: name.clone(),
+                upsert: upsert.clone(),
+            })
+            .collect()
+    }
+
     /// Replace the rows with freshly loaded ones (after a successful save)
     /// and clear every pending edit. The catalog is fixed-size, so the
     /// cursor is only ever clamped, never reset, and always stays on a real
     /// row.
-    fn replace_rows(&mut self, harnesses: Vec<HarnessRow>, integrations: Vec<IntegrationRow>) {
+    fn replace_rows(
+        &mut self,
+        harnesses: Vec<HarnessRow>,
+        integrations: Vec<IntegrationRow>,
+        providers: Vec<ProviderRow>,
+        profiles: Vec<ProfileRow>,
+    ) {
         self.selected_harness = self.selected_harness.min(harnesses.len().saturating_sub(1));
         self.selected_integration = self
             .selected_integration
             .min(integrations.len().saturating_sub(1));
+        self.selected_provider = self
+            .selected_provider
+            .min(providers.len().saturating_sub(1));
+        self.selected_profile = self.selected_profile.min(profiles.len().saturating_sub(1));
         self.harnesses = harnesses;
         self.integrations = integrations;
+        self.providers = providers;
+        self.profiles = profiles;
         self.edits.clear();
+        self.provider_edits.clear();
+        self.profile_edits.clear();
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> SettingsAction {
         if self.path_input.is_some() {
             return self.handle_path_input_key(key);
+        }
+        if self.provider_input.is_some() {
+            return self.handle_provider_input_key(key);
+        }
+        if self.profile_input.is_some() {
+            return self.handle_profile_input_key(key);
         }
         if self.confirm_project_write {
             return match key.code {
@@ -752,6 +1162,15 @@ impl SettingsState {
             };
         }
 
+        // A stale reachability-check banner must not permanently shadow
+        // another bottom-panel view — the wizard/field editors this session
+        // opens afterward all render in that same area — so any key that
+        // reaches this general dispatcher clears it first, exactly like the
+        // outer shell's own status note clears on the next keystroke. The
+        // `t` arm below sets it again in the same keypress when that is what
+        // was actually pressed.
+        self.provider_test_result = None;
+
         match key.code {
             KeyCode::Esc => SettingsAction::Close,
             KeyCode::Char('w') => SettingsAction::SaveUser,
@@ -760,8 +1179,12 @@ impl SettingsState {
                 SettingsAction::Redraw
             }
             KeyCode::Char('r') => SettingsAction::ReopenOnboarding,
-            KeyCode::Tab | KeyCode::Right | KeyCode::BackTab | KeyCode::Left => {
-                self.section = self.section.other();
+            KeyCode::Tab | KeyCode::Right => {
+                self.section = self.section.next();
+                SettingsAction::Redraw
+            }
+            KeyCode::BackTab | KeyCode::Left => {
+                self.section = self.section.previous();
                 SettingsAction::Redraw
             }
             KeyCode::Up => {
@@ -780,6 +1203,66 @@ impl SettingsState {
                 if self.harnesses.get(self.selected_harness).is_some() {
                     self.path_input = Some(SettingsPathInput::default());
                 }
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('a') if self.section == SettingsSection::Providers => {
+                self.provider_input = Some(ProviderTextInput {
+                    purpose: ProviderInputPurpose::NewName,
+                    buffer: String::new(),
+                    error: None,
+                });
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('e') if self.section == SettingsSection::Providers => {
+                self.start_edit_provider_base_url();
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('c') if self.section == SettingsSection::Providers => {
+                self.start_edit_provider_credential_env();
+                SettingsAction::Redraw
+            }
+            KeyCode::Char(' ') if self.section == SettingsSection::Providers => {
+                self.toggle_selected_provider();
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('d') if self.section == SettingsSection::Providers => {
+                self.remove_selected_provider();
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('t') if self.section == SettingsSection::Providers => {
+                self.test_selected_provider();
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('a') if self.section == SettingsSection::LaunchProfiles => {
+                self.profile_input = Some(ProfileTextInput {
+                    purpose: ProfileInputPurpose::NewName,
+                    buffer: String::new(),
+                    error: None,
+                });
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('e') if self.section == SettingsSection::LaunchProfiles => {
+                self.start_edit_profile_model();
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('b') if self.section == SettingsSection::LaunchProfiles => {
+                self.start_edit_profile_backend();
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('p') if self.section == SettingsSection::LaunchProfiles => {
+                self.cycle_selected_profile_approval();
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('u') if self.section == SettingsSection::LaunchProfiles => {
+                self.start_duplicate_profile();
+                SettingsAction::Redraw
+            }
+            KeyCode::Char(' ') if self.section == SettingsSection::LaunchProfiles => {
+                self.toggle_selected_profile();
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('d') if self.section == SettingsSection::LaunchProfiles => {
+                self.remove_selected_profile();
                 SettingsAction::Redraw
             }
             _ => SettingsAction::None,
@@ -804,6 +1287,22 @@ impl SettingsState {
                 self.selected_integration =
                     (self.selected_integration as i32 + delta).clamp(0, last) as usize;
             }
+            SettingsSection::Providers => {
+                if self.providers.is_empty() {
+                    return;
+                }
+                let last = self.providers.len() as i32 - 1;
+                self.selected_provider =
+                    (self.selected_provider as i32 + delta).clamp(0, last) as usize;
+            }
+            SettingsSection::LaunchProfiles => {
+                if self.profiles.is_empty() {
+                    return;
+                }
+                let last = self.profiles.len() as i32 - 1;
+                self.selected_profile =
+                    (self.selected_profile as i32 + delta).clamp(0, last) as usize;
+            }
         }
     }
 
@@ -814,6 +1313,426 @@ impl SettingsState {
         row.enabled = !row.enabled;
         row.enabled_layer = Layer::User;
         self.edits.entry(row.id).or_default().enabled = Some(row.enabled);
+    }
+
+    // -------------------------------------------------------------
+    // Providers
+    // -------------------------------------------------------------
+
+    fn start_edit_provider_base_url(&mut self) {
+        let Some(row) = self.providers.get(self.selected_provider) else {
+            return;
+        };
+        self.provider_input = Some(ProviderTextInput {
+            purpose: ProviderInputPurpose::EditBaseUrl {
+                name: row.name.clone(),
+            },
+            buffer: row.config.base_url().unwrap_or_default().to_owned(),
+            error: None,
+        });
+    }
+
+    fn start_edit_provider_credential_env(&mut self) {
+        let Some(row) = self.providers.get(self.selected_provider) else {
+            return;
+        };
+        self.provider_input = Some(ProviderTextInput {
+            purpose: ProviderInputPurpose::EditCredentialEnv {
+                name: row.name.clone(),
+            },
+            buffer: row.config.credential_env().join(","),
+            error: None,
+        });
+    }
+
+    fn toggle_selected_provider(&mut self) {
+        let Some(row) = self.providers.get_mut(self.selected_provider) else {
+            return;
+        };
+        row.config.set_enabled(!row.config.enabled());
+        row.layer = Layer::User;
+        self.provider_edits
+            .insert(row.name.clone(), Some(row.config.clone()));
+    }
+
+    fn remove_selected_provider(&mut self) {
+        if self.selected_provider >= self.providers.len() {
+            return;
+        }
+        let row = self.providers.remove(self.selected_provider);
+        self.provider_edits.insert(row.name, None);
+        self.selected_provider = self
+            .selected_provider
+            .min(self.providers.len().saturating_sub(1));
+        self.provider_test_result = None;
+    }
+
+    fn test_selected_provider(&mut self) {
+        let Some(row) = self.providers.get(self.selected_provider) else {
+            return;
+        };
+        let outcome =
+            check_provider_reachability(&row.name, &row.config, &EnvironmentSecretStore::new());
+        self.provider_test_result = Some((row.name.clone(), outcome));
+    }
+
+    fn handle_provider_input_key(&mut self, key: KeyEvent) -> SettingsAction {
+        match key.code {
+            KeyCode::Esc => {
+                self.provider_input = None;
+                SettingsAction::Redraw
+            }
+            KeyCode::Enter => {
+                self.confirm_provider_input();
+                SettingsAction::Redraw
+            }
+            KeyCode::Backspace => {
+                if let Some(input) = self.provider_input.as_mut() {
+                    input.buffer.pop();
+                    input.error = None;
+                }
+                SettingsAction::Redraw
+            }
+            KeyCode::Char(c) => {
+                if let Some(input) = self.provider_input.as_mut() {
+                    input.buffer.push(c);
+                    input.error = None;
+                }
+                SettingsAction::Redraw
+            }
+            _ => SettingsAction::None,
+        }
+    }
+
+    /// Apply the typed text for whichever [`ProviderInputPurpose`] is
+    /// active. On success this closes the input (`self.provider_input =
+    /// None`, already true from the `take()` below unless a validation
+    /// failure re-opens it with an error attached); on failure it re-opens
+    /// the same input with `error` set, so Esc still cancels and the buffer
+    /// is not lost.
+    fn confirm_provider_input(&mut self) {
+        let Some(input) = self.provider_input.take() else {
+            return;
+        };
+        let typed = input.buffer.trim().to_owned();
+        match input.purpose {
+            ProviderInputPurpose::NewName => {
+                if typed.is_empty() {
+                    self.provider_input = Some(ProviderTextInput {
+                        purpose: ProviderInputPurpose::NewName,
+                        buffer: input.buffer,
+                        error: Some("a provider needs a name".to_owned()),
+                    });
+                    return;
+                }
+                if self.providers.iter().any(|row| row.name == typed) {
+                    self.provider_input = Some(ProviderTextInput {
+                        purpose: ProviderInputPurpose::NewName,
+                        buffer: input.buffer,
+                        error: Some(format!("a provider named `{typed}` already exists")),
+                    });
+                    return;
+                }
+                self.provider_input = Some(ProviderTextInput {
+                    purpose: ProviderInputPurpose::NewTemplate { name: typed },
+                    buffer: String::new(),
+                    error: None,
+                });
+            }
+            ProviderInputPurpose::NewTemplate { name } => {
+                if crate::provider::template(&typed).is_none() {
+                    let known: Vec<String> = crate::provider::templates()
+                        .into_iter()
+                        .map(|p| p.name)
+                        .collect();
+                    self.provider_input = Some(ProviderTextInput {
+                        purpose: ProviderInputPurpose::NewTemplate { name },
+                        buffer: input.buffer,
+                        error: Some(format!(
+                            "`{typed}` is not a known provider template; known templates are: {}",
+                            known.join(", ")
+                        )),
+                    });
+                    return;
+                }
+                let config = ProviderConfig::new(typed);
+                self.providers.push(ProviderRow {
+                    name: name.clone(),
+                    config: config.clone(),
+                    layer: Layer::User,
+                });
+                self.providers.sort_by(|a, b| a.name.cmp(&b.name));
+                self.selected_provider = self
+                    .providers
+                    .iter()
+                    .position(|row| row.name == name)
+                    .unwrap_or(0);
+                self.provider_edits.insert(name, Some(config));
+            }
+            ProviderInputPurpose::EditBaseUrl { name } => {
+                let value = (!typed.is_empty()).then_some(typed);
+                if let Some(row) = self.providers.iter_mut().find(|row| row.name == name) {
+                    row.config.set_base_url(value);
+                    row.layer = Layer::User;
+                    self.provider_edits.insert(name, Some(row.config.clone()));
+                }
+            }
+            ProviderInputPurpose::EditCredentialEnv { name } => {
+                let names: Vec<String> = typed
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                if let Some(row) = self.providers.iter_mut().find(|row| row.name == name) {
+                    row.config.set_credential_env(names);
+                    row.layer = Layer::User;
+                    self.provider_edits.insert(name, Some(row.config.clone()));
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------
+    // Launch profiles
+    // -------------------------------------------------------------
+
+    fn start_edit_profile_model(&mut self) {
+        let Some(row) = self.profiles.get(self.selected_profile) else {
+            return;
+        };
+        self.profile_input = Some(ProfileTextInput {
+            purpose: ProfileInputPurpose::EditModel {
+                name: row.name.clone(),
+            },
+            buffer: row.config.model().unwrap_or_default().to_owned(),
+            error: None,
+        });
+    }
+
+    fn start_edit_profile_backend(&mut self) {
+        let Some(row) = self.profiles.get(self.selected_profile) else {
+            return;
+        };
+        let buffer = match row.config.backend() {
+            ProfileBackend::Native => "native".to_owned(),
+            ProfileBackend::DirectProvider { provider } => provider.clone(),
+            ProfileBackend::GlasshouseGateway => String::new(),
+        };
+        self.profile_input = Some(ProfileTextInput {
+            purpose: ProfileInputPurpose::EditBackend {
+                name: row.name.clone(),
+            },
+            buffer,
+            error: None,
+        });
+    }
+
+    fn start_duplicate_profile(&mut self) {
+        let Some(row) = self.profiles.get(self.selected_profile) else {
+            return;
+        };
+        self.profile_input = Some(ProfileTextInput {
+            purpose: ProfileInputPurpose::Duplicate {
+                source: row.name.clone(),
+            },
+            buffer: String::new(),
+            error: None,
+        });
+    }
+
+    fn toggle_selected_profile(&mut self) {
+        let Some(row) = self.profiles.get_mut(self.selected_profile) else {
+            return;
+        };
+        row.config.set_enabled(!row.config.enabled());
+        row.layer = Layer::User;
+        self.profile_edits
+            .insert(row.name.clone(), Some(row.config.clone()));
+    }
+
+    fn remove_selected_profile(&mut self) {
+        if self.selected_profile >= self.profiles.len() {
+            return;
+        }
+        let row = self.profiles.remove(self.selected_profile);
+        self.profile_edits.insert(row.name, None);
+        self.selected_profile = self
+            .selected_profile
+            .min(self.profiles.len().saturating_sub(1));
+    }
+
+    fn cycle_selected_profile_approval(&mut self) {
+        let Some(row) = self.profiles.get_mut(self.selected_profile) else {
+            return;
+        };
+        let next = match row.config.approval() {
+            ProfileApproval::Default => ProfileApproval::AutomaticReview,
+            ProfileApproval::AutomaticReview => ProfileApproval::Bypass,
+            ProfileApproval::Bypass => ProfileApproval::Default,
+        };
+        row.config.set_approval(next);
+        row.layer = Layer::User;
+        self.profile_edits
+            .insert(row.name.clone(), Some(row.config.clone()));
+    }
+
+    fn handle_profile_input_key(&mut self, key: KeyEvent) -> SettingsAction {
+        match key.code {
+            KeyCode::Esc => {
+                self.profile_input = None;
+                SettingsAction::Redraw
+            }
+            KeyCode::Enter => {
+                self.confirm_profile_input();
+                SettingsAction::Redraw
+            }
+            KeyCode::Backspace => {
+                if let Some(input) = self.profile_input.as_mut() {
+                    input.buffer.pop();
+                    input.error = None;
+                }
+                SettingsAction::Redraw
+            }
+            KeyCode::Char(c) => {
+                if let Some(input) = self.profile_input.as_mut() {
+                    input.buffer.push(c);
+                    input.error = None;
+                }
+                SettingsAction::Redraw
+            }
+            _ => SettingsAction::None,
+        }
+    }
+
+    /// Apply the typed text for whichever [`ProfileInputPurpose`] is active
+    /// — see [`SettingsState::confirm_provider_input`]'s doc for the
+    /// success/failure shape this mirrors.
+    fn confirm_profile_input(&mut self) {
+        let Some(input) = self.profile_input.take() else {
+            return;
+        };
+        let typed = input.buffer.trim().to_owned();
+        match input.purpose {
+            ProfileInputPurpose::NewName => {
+                if typed.is_empty() {
+                    self.profile_input = Some(ProfileTextInput {
+                        purpose: ProfileInputPurpose::NewName,
+                        buffer: input.buffer,
+                        error: Some("a launch profile needs a name".to_owned()),
+                    });
+                    return;
+                }
+                if self.profiles.iter().any(|row| row.name == typed) {
+                    self.profile_input = Some(ProfileTextInput {
+                        purpose: ProfileInputPurpose::NewName,
+                        buffer: input.buffer,
+                        error: Some(format!("a launch profile named `{typed}` already exists")),
+                    });
+                    return;
+                }
+                self.profile_input = Some(ProfileTextInput {
+                    purpose: ProfileInputPurpose::NewHarness { name: typed },
+                    buffer: String::new(),
+                    error: None,
+                });
+            }
+            ProfileInputPurpose::NewHarness { name } => {
+                let Some(harness) = known_launch_harnesses().find(|id| id.slug() == typed) else {
+                    let known: Vec<&str> = known_launch_harnesses().map(|id| id.slug()).collect();
+                    self.profile_input = Some(ProfileTextInput {
+                        purpose: ProfileInputPurpose::NewHarness { name },
+                        buffer: input.buffer,
+                        error: Some(format!(
+                            "`{typed}` is not a harness Glasshouse knows; known harnesses are: {}",
+                            known.join(", ")
+                        )),
+                    });
+                    return;
+                };
+                let config = ProfileConfig::new(harness);
+                self.profiles.push(ProfileRow {
+                    name: name.clone(),
+                    config: config.clone(),
+                    layer: Layer::User,
+                });
+                self.profiles.sort_by(|a, b| a.name.cmp(&b.name));
+                self.selected_profile = self
+                    .profiles
+                    .iter()
+                    .position(|row| row.name == name)
+                    .unwrap_or(0);
+                self.profile_edits.insert(name, Some(config));
+            }
+            ProfileInputPurpose::EditModel { name } => {
+                let value = (!typed.is_empty()).then_some(typed);
+                if let Some(row) = self.profiles.iter_mut().find(|row| row.name == name) {
+                    row.config.set_model(value);
+                    row.layer = Layer::User;
+                    self.profile_edits.insert(name, Some(row.config.clone()));
+                }
+            }
+            ProfileInputPurpose::EditBackend { name } => {
+                let backend = if typed.is_empty() || typed.eq_ignore_ascii_case("native") {
+                    Some(ProfileBackend::Native)
+                } else if self.providers.iter().any(|row| row.name == typed) {
+                    Some(ProfileBackend::DirectProvider {
+                        provider: typed.clone(),
+                    })
+                } else {
+                    None
+                };
+                let Some(backend) = backend else {
+                    self.profile_input = Some(ProfileTextInput {
+                        purpose: ProfileInputPurpose::EditBackend { name },
+                        buffer: input.buffer,
+                        error: Some(format!(
+                            "`{typed}` is not `native` or a configured provider name"
+                        )),
+                    });
+                    return;
+                };
+                if let Some(row) = self.profiles.iter_mut().find(|row| row.name == name) {
+                    row.config.set_backend(backend);
+                    row.layer = Layer::User;
+                    self.profile_edits.insert(name, Some(row.config.clone()));
+                }
+            }
+            ProfileInputPurpose::Duplicate { source } => {
+                if typed.is_empty() {
+                    self.profile_input = Some(ProfileTextInput {
+                        purpose: ProfileInputPurpose::Duplicate { source },
+                        buffer: input.buffer,
+                        error: Some("a new profile needs a name".to_owned()),
+                    });
+                    return;
+                }
+                if self.profiles.iter().any(|row| row.name == typed) {
+                    self.profile_input = Some(ProfileTextInput {
+                        purpose: ProfileInputPurpose::Duplicate { source },
+                        buffer: input.buffer,
+                        error: Some(format!("a launch profile named `{typed}` already exists")),
+                    });
+                    return;
+                }
+                let Some(source_row) = self.profiles.iter().find(|row| row.name == source) else {
+                    return;
+                };
+                let config = source_row.config.clone();
+                self.profiles.push(ProfileRow {
+                    name: typed.clone(),
+                    config: config.clone(),
+                    layer: Layer::User,
+                });
+                self.profiles.sort_by(|a, b| a.name.cmp(&b.name));
+                self.selected_profile = self
+                    .profiles
+                    .iter()
+                    .position(|row| row.name == typed)
+                    .unwrap_or(0);
+                self.profile_edits.insert(typed, Some(config));
+            }
+        }
     }
 
     fn handle_path_input_key(&mut self, key: KeyEvent) -> SettingsAction {
@@ -1621,6 +2540,30 @@ mod settings_tests {
         }]
     }
 
+    fn sample_provider_rows() -> Vec<ProviderRow> {
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_base_url(Some("https://mirror.example.com/v1".to_owned()));
+        vec![ProviderRow {
+            name: "my-router".to_owned(),
+            config,
+            layer: Layer::User,
+        }]
+    }
+
+    fn sample_profile_rows() -> Vec<ProfileRow> {
+        vec![ProfileRow {
+            name: "fast".to_owned(),
+            config: ProfileConfig::new(IntegrationId::ClaudeCode),
+            layer: Layer::User,
+        }]
+    }
+
+    fn type_text(state: &mut ShellState, text: &str) {
+        for c in text.chars() {
+            state.handle_key(press(KeyCode::Char(c)));
+        }
+    }
+
     // Invariant 1 (design note): opening settings does not disturb the
     // session, and leaving it returns to the mode the user was in.
     #[test]
@@ -1638,7 +2581,12 @@ mod settings_tests {
             "opening settings needs data only the run loop can gather"
         );
 
-        state.open_settings(sample_harness_rows(), sample_integration_rows());
+        state.open_settings(
+            sample_harness_rows(),
+            sample_integration_rows(),
+            Vec::new(),
+            Vec::new(),
+        );
         assert_eq!(state.overlay(), Some(Overlay::Settings));
         assert_eq!(state.mode(), Mode::Control);
 
@@ -1674,7 +2622,12 @@ mod settings_tests {
     #[test]
     fn tab_moves_between_sections_and_up_down_moves_within_one() {
         let mut state = state_with_a_session();
-        state.open_settings(sample_harness_rows(), sample_integration_rows());
+        state.open_settings(
+            sample_harness_rows(),
+            sample_integration_rows(),
+            Vec::new(),
+            Vec::new(),
+        );
         assert_eq!(
             state.settings().unwrap().section(),
             SettingsSection::Harnesses
@@ -1707,7 +2660,7 @@ mod settings_tests {
     #[test]
     fn space_toggles_enabled_on_the_selected_harness_and_stages_the_user_layer() {
         let mut state = state_with_a_session();
-        state.open_settings(sample_harness_rows(), Vec::new());
+        state.open_settings(sample_harness_rows(), Vec::new(), Vec::new(), Vec::new());
         let before = state.settings().unwrap().harnesses()[0].enabled;
 
         state.handle_key(press(KeyCode::Char(' ')));
@@ -1724,7 +2677,7 @@ mod settings_tests {
     #[test]
     fn esc_in_the_path_editor_cancels_without_changing_anything() {
         let mut state = state_with_a_session();
-        state.open_settings(sample_harness_rows(), Vec::new());
+        state.open_settings(sample_harness_rows(), Vec::new(), Vec::new(), Vec::new());
         let before = state.settings().unwrap().harnesses()[0].clone();
 
         state.handle_key(press(KeyCode::Enter));
@@ -1760,7 +2713,7 @@ mod settings_tests {
         }
 
         let mut state = state_with_a_session();
-        state.open_settings(sample_harness_rows(), Vec::new());
+        state.open_settings(sample_harness_rows(), Vec::new(), Vec::new(), Vec::new());
         state.handle_key(press(KeyCode::Enter));
         for c in exe.to_str().unwrap().chars() {
             state.handle_key(press(KeyCode::Char(c)));
@@ -1780,7 +2733,7 @@ mod settings_tests {
     #[test]
     fn an_invalid_explicit_path_surfaces_an_error_and_keeps_the_editor_open() {
         let mut state = state_with_a_session();
-        state.open_settings(sample_harness_rows(), Vec::new());
+        state.open_settings(sample_harness_rows(), Vec::new(), Vec::new(), Vec::new());
         state.handle_key(press(KeyCode::Enter));
         for c in "/definitely/not/a/real/executable".chars() {
             state.handle_key(press(KeyCode::Char(c)));
@@ -1795,7 +2748,7 @@ mod settings_tests {
     #[test]
     fn lowercase_w_signals_an_immediate_user_level_save() {
         let mut state = state_with_a_session();
-        state.open_settings(sample_harness_rows(), Vec::new());
+        state.open_settings(sample_harness_rows(), Vec::new(), Vec::new(), Vec::new());
         state.handle_key(press(KeyCode::Char(' ')));
         assert_eq!(
             state.handle_key(press(KeyCode::Char('w'))),
@@ -1808,7 +2761,7 @@ mod settings_tests {
     #[test]
     fn shift_w_requires_a_separate_explicit_confirmation() {
         let mut state = state_with_a_session();
-        state.open_settings(sample_harness_rows(), Vec::new());
+        state.open_settings(sample_harness_rows(), Vec::new(), Vec::new(), Vec::new());
 
         assert_eq!(state.handle_key(press(KeyCode::Char('W'))), Action::Redraw);
         assert!(state.settings().unwrap().confirming_project_write());
@@ -1826,7 +2779,7 @@ mod settings_tests {
     #[test]
     fn enter_on_the_confirmation_also_proceeds() {
         let mut state = state_with_a_session();
-        state.open_settings(sample_harness_rows(), Vec::new());
+        state.open_settings(sample_harness_rows(), Vec::new(), Vec::new(), Vec::new());
         state.handle_key(press(KeyCode::Char('W')));
         assert_eq!(
             state.handle_key(press(KeyCode::Enter)),
@@ -1838,7 +2791,7 @@ mod settings_tests {
     fn esc_or_n_cancels_the_confirmation_without_leaving_settings() {
         for cancel in [press(KeyCode::Esc), press(KeyCode::Char('n'))] {
             let mut state = state_with_a_session();
-            state.open_settings(sample_harness_rows(), Vec::new());
+            state.open_settings(sample_harness_rows(), Vec::new(), Vec::new(), Vec::new());
             state.handle_key(press(KeyCode::Char('W')));
 
             assert_eq!(state.handle_key(cancel), Action::Redraw);
@@ -1850,18 +2803,460 @@ mod settings_tests {
     #[test]
     fn refresh_settings_clears_pending_edits_and_keeps_the_cursor() {
         let mut state = state_with_a_session();
-        state.open_settings(sample_harness_rows(), Vec::new());
+        state.open_settings(sample_harness_rows(), Vec::new(), Vec::new(), Vec::new());
         state.handle_key(press(KeyCode::Down));
         state.handle_key(press(KeyCode::Char(' ')));
         assert!(!state.settings_edits().is_empty());
         assert_eq!(state.settings().unwrap().selected_harness(), 1);
 
-        state.refresh_settings(sample_harness_rows(), Vec::new());
+        state.refresh_settings(sample_harness_rows(), Vec::new(), Vec::new(), Vec::new());
         assert!(state.settings_edits().is_empty());
         assert_eq!(
             state.settings().unwrap().selected_harness(),
             1,
             "the cursor position is preserved across a refresh"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 2D: Providers and Launch Profiles.
+    // -----------------------------------------------------------------
+
+    fn to_providers(mut state: ShellState) -> ShellState {
+        state.handle_key(press(KeyCode::Tab));
+        state.handle_key(press(KeyCode::Tab));
+        assert_eq!(
+            state.settings().unwrap().section(),
+            SettingsSection::Providers
+        );
+        state
+    }
+
+    fn to_launch_profiles(mut state: ShellState) -> ShellState {
+        state.handle_key(press(KeyCode::Tab));
+        state.handle_key(press(KeyCode::Tab));
+        state.handle_key(press(KeyCode::Tab));
+        assert_eq!(
+            state.settings().unwrap().section(),
+            SettingsSection::LaunchProfiles
+        );
+        state
+    }
+
+    /// Acceptance 1: an empty Providers section must not panic on
+    /// navigation or any of its keys.
+    #[test]
+    fn an_empty_providers_section_does_not_panic_on_navigation_or_actions() {
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        state = to_providers(state);
+        assert!(state.settings().unwrap().providers().is_empty());
+
+        for key in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Char(' '),
+            KeyCode::Char('d'),
+            KeyCode::Char('t'),
+        ] {
+            state.handle_key(press(key));
+        }
+        assert!(state.settings().unwrap().providers().is_empty());
+    }
+
+    /// Acceptance 2 (the staging half — see `shell::tests` for the
+    /// save/reload half): adding a provider from a built-in template stages
+    /// it at the user layer.
+    #[test]
+    fn adding_a_provider_from_a_template_stages_it_at_the_user_layer() {
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        state = to_providers(state);
+
+        assert_eq!(state.handle_key(press(KeyCode::Char('a'))), Action::Redraw);
+        assert!(state.settings().unwrap().provider_input().is_some());
+        type_text(&mut state, "my-router");
+        state.handle_key(press(KeyCode::Enter));
+        assert!(
+            state.settings().unwrap().provider_input().is_some(),
+            "the wizard's second step (template) must still be open"
+        );
+        type_text(&mut state, "openrouter");
+        state.handle_key(press(KeyCode::Enter));
+
+        assert!(state.settings().unwrap().provider_input().is_none());
+        let providers = state.settings().unwrap().providers();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].name, "my-router");
+        assert_eq!(providers[0].config.template(), "openrouter");
+        assert_eq!(providers[0].layer, Layer::User);
+
+        let edits = state.settings_provider_edits();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].name, "my-router");
+        assert!(edits[0].upsert.is_some());
+    }
+
+    /// An unknown template is refused with a message naming it, mirroring
+    /// how an unknown harness is refused for a launch profile.
+    #[test]
+    fn adding_a_provider_with_an_unknown_template_is_refused_with_a_message_naming_it() {
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        state = to_providers(state);
+
+        state.handle_key(press(KeyCode::Char('a')));
+        type_text(&mut state, "my-router");
+        state.handle_key(press(KeyCode::Enter));
+        type_text(&mut state, "not-a-real-template");
+        assert_eq!(state.handle_key(press(KeyCode::Enter)), Action::Redraw);
+
+        let input = state
+            .settings()
+            .unwrap()
+            .provider_input()
+            .expect("still open on error");
+        let error = input.error.expect("an error must be shown");
+        assert!(
+            error.contains("not-a-real-template"),
+            "the error must name the template: {error}"
+        );
+        assert!(state.settings().unwrap().providers().is_empty());
+    }
+
+    /// Acceptance 3 (the staging half): editing a provider's base URL
+    /// persists in the row and the staged edit.
+    #[test]
+    fn editing_a_providers_base_url_persists_in_the_row_and_the_staged_edit() {
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), sample_provider_rows(), Vec::new());
+        state = to_providers(state);
+
+        let backspaces = {
+            assert_eq!(state.handle_key(press(KeyCode::Char('e'))), Action::Redraw);
+            let input = state
+                .settings()
+                .unwrap()
+                .provider_input()
+                .expect("base url editor open");
+            assert_eq!(input.buffer, "https://mirror.example.com/v1");
+            input.buffer.chars().count()
+        };
+        for _ in 0..backspaces {
+            state.handle_key(press(KeyCode::Backspace));
+        }
+        type_text(&mut state, "https://new.example.com/v1");
+        state.handle_key(press(KeyCode::Enter));
+
+        let row = &state.settings().unwrap().providers()[0];
+        assert_eq!(row.config.base_url(), Some("https://new.example.com/v1"));
+        assert_eq!(row.layer, Layer::User);
+
+        let edits = state.settings_provider_edits();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(
+            edits[0].upsert.as_ref().unwrap().base_url(),
+            Some("https://new.example.com/v1")
+        );
+    }
+
+    /// Acceptance 4: removing a provider removes it; disabling one keeps its
+    /// configuration intact and reversible. Both halves are asserted.
+    #[test]
+    fn removing_a_provider_removes_it_and_disabling_keeps_it_reversible() {
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), sample_provider_rows(), Vec::new());
+        state = to_providers(state);
+
+        // Disable half.
+        let before = state.settings().unwrap().providers()[0].config.clone();
+        assert!(before.enabled());
+        state.handle_key(press(KeyCode::Char(' ')));
+        let disabled = state.settings().unwrap().providers()[0].config.clone();
+        assert!(!disabled.enabled(), "the provider must be disabled");
+        assert_eq!(
+            disabled.base_url(),
+            before.base_url(),
+            "disabling must not touch other fields"
+        );
+        // Reversible without retyping anything.
+        state.handle_key(press(KeyCode::Char(' ')));
+        let re_enabled = state.settings().unwrap().providers()[0].config.clone();
+        assert!(re_enabled.enabled());
+        assert_eq!(re_enabled.base_url(), before.base_url());
+
+        // Remove half.
+        assert_eq!(state.handle_key(press(KeyCode::Char('d'))), Action::Redraw);
+        assert!(
+            state.settings().unwrap().providers().is_empty(),
+            "removing must actually remove the row"
+        );
+        let edits = state.settings_provider_edits();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].name, "my-router");
+        assert!(
+            edits[0].upsert.is_none(),
+            "a removal edit carries no config to upsert"
+        );
+    }
+
+    /// Acceptance 5 (the staging half): duplicating a launch profile
+    /// produces an independent copy — editing the copy must not change the
+    /// original.
+    #[test]
+    fn duplicating_a_profile_produces_an_independent_copy() {
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), Vec::new(), sample_profile_rows());
+        state = to_launch_profiles(state);
+
+        assert_eq!(state.handle_key(press(KeyCode::Char('u'))), Action::Redraw);
+        type_text(&mut state, "fast-copy");
+        state.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(state.settings().unwrap().profiles().len(), 2);
+        let copy_index = state
+            .settings()
+            .unwrap()
+            .profiles()
+            .iter()
+            .position(|row| row.name == "fast-copy")
+            .expect("the copy exists");
+        assert_eq!(state.settings().unwrap().selected_profile(), copy_index);
+
+        // Edit the copy's model.
+        assert_eq!(state.handle_key(press(KeyCode::Char('e'))), Action::Redraw);
+        type_text(&mut state, "claude-opus");
+        state.handle_key(press(KeyCode::Enter));
+
+        let original = state
+            .settings()
+            .unwrap()
+            .profiles()
+            .iter()
+            .find(|row| row.name == "fast")
+            .unwrap();
+        let copy = state
+            .settings()
+            .unwrap()
+            .profiles()
+            .iter()
+            .find(|row| row.name == "fast-copy")
+            .unwrap();
+        assert_eq!(
+            original.config.model(),
+            None,
+            "editing the copy must not change the original"
+        );
+        assert_eq!(copy.config.model(), Some("claude-opus"));
+    }
+
+    /// Acceptance 6: creating a profile that names an unknown harness is
+    /// refused with a message naming the harness.
+    #[test]
+    fn creating_a_profile_naming_an_unknown_harness_is_refused_with_a_message_naming_it() {
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        state = to_launch_profiles(state);
+
+        state.handle_key(press(KeyCode::Char('a')));
+        type_text(&mut state, "custom");
+        state.handle_key(press(KeyCode::Enter));
+        type_text(&mut state, "not-a-real-harness");
+        assert_eq!(state.handle_key(press(KeyCode::Enter)), Action::Redraw);
+
+        let input = state
+            .settings()
+            .unwrap()
+            .profile_input()
+            .expect("still open on error");
+        let error = input.error.expect("an error must be shown");
+        assert!(
+            error.contains("not-a-real-harness"),
+            "the error must name the harness: {error}"
+        );
+        assert!(
+            state.settings().unwrap().profiles().is_empty(),
+            "no profile must have been created"
+        );
+    }
+
+    /// Found running the real binary: `cmux`, Ollama and llama.cpp are real
+    /// integration slugs, but none is a launchable coding harness — naming
+    /// one for a launch profile must be refused exactly like a truly unknown
+    /// slug, not silently accepted because it happens to appear in
+    /// `IntegrationId::ALL`.
+    #[test]
+    fn creating_a_profile_naming_a_non_harness_integration_is_also_refused() {
+        for slug in ["cmux", "ollama", "llama-cpp"] {
+            let mut state = state_with_a_session();
+            state.open_settings(Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            state = to_launch_profiles(state);
+
+            state.handle_key(press(KeyCode::Char('a')));
+            type_text(&mut state, "custom");
+            state.handle_key(press(KeyCode::Enter));
+            type_text(&mut state, slug);
+            state.handle_key(press(KeyCode::Enter));
+
+            let input = state
+                .settings()
+                .unwrap()
+                .profile_input()
+                .unwrap_or_else(|| panic!("`{slug}` must be refused, not accepted"));
+            assert!(input.error.is_some(), "`{slug}` must be refused");
+            assert!(state.settings().unwrap().profiles().is_empty());
+        }
+    }
+
+    /// Removing a launch profile stages its removal, matching
+    /// [`removing_a_provider_removes_it_and_disabling_keeps_it_reversible`].
+    #[test]
+    fn removing_a_profile_stages_its_removal() {
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), Vec::new(), sample_profile_rows());
+        state = to_launch_profiles(state);
+
+        assert_eq!(state.handle_key(press(KeyCode::Char('d'))), Action::Redraw);
+        assert!(state.settings().unwrap().profiles().is_empty());
+        let edits = state.settings_profile_edits();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].name, "fast");
+        assert!(edits[0].upsert.is_none());
+    }
+
+    /// Disabling a launch profile is reversible without retyping, matching
+    /// the provider half of acceptance 4.
+    #[test]
+    fn disabling_a_profile_keeps_it_reversible() {
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), Vec::new(), sample_profile_rows());
+        state = to_launch_profiles(state);
+
+        assert!(state.settings().unwrap().profiles()[0].config.enabled());
+        state.handle_key(press(KeyCode::Char(' ')));
+        assert!(!state.settings().unwrap().profiles()[0].config.enabled());
+        state.handle_key(press(KeyCode::Char(' ')));
+        assert!(state.settings().unwrap().profiles()[0].config.enabled());
+    }
+
+    /// Acceptance 9: Line 5's check reports failure without disabling the
+    /// provider. Uses a uniquely named, never-set variable rather than any
+    /// built-in template's real one, so the test cannot pass by accident
+    /// because of something set in the ambient environment.
+    #[test]
+    fn a_failed_reachability_check_reports_failure_without_disabling_the_provider() {
+        const VAR: &str = "GLASSHOUSE_SETTINGS_TEST_ONLY_MISSING_CRED_VAR";
+        // SAFETY: `VAR` is unique to this test and is not set by anything
+        // else; removed again below regardless of how the test proceeds.
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_credential_env(vec![VAR.to_owned()]);
+        let rows = vec![ProviderRow {
+            name: "unset-cred".to_owned(),
+            config,
+            layer: Layer::User,
+        }];
+
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());
+        state = to_providers(state);
+
+        assert_eq!(state.handle_key(press(KeyCode::Char('t'))), Action::Redraw);
+        let (name, outcome) = state
+            .settings()
+            .unwrap()
+            .provider_test_result()
+            .expect("a test ran");
+        assert_eq!(name, "unset-cred");
+        match outcome {
+            ReachabilityCheck::Failed(reason) => assert!(
+                reason.contains(VAR),
+                "the failure must name the missing variable: {reason}"
+            ),
+            other => panic!("expected a failure, got {other:?}"),
+        }
+        assert!(
+            state.settings().unwrap().providers()[0].config.enabled(),
+            "a failed test must not disable the provider"
+        );
+    }
+
+    /// The positive counterpart: every precondition holds, and the result
+    /// names the protocol and base URL actually resolved — never a real
+    /// network request, just what `check_provider_reachability` can prove
+    /// without one.
+    #[test]
+    fn a_passing_reachability_precondition_check_names_the_protocol_and_base_url() {
+        const VAR: &str = "GLASSHOUSE_SETTINGS_TEST_ONLY_PRESENT_CRED_VAR";
+        // SAFETY: `VAR` is unique to this test and is removed again below.
+        unsafe {
+            std::env::set_var(VAR, "sk-fabricated-test-value-not-a-real-credential");
+        }
+
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_credential_env(vec![VAR.to_owned()]);
+        let rows = vec![ProviderRow {
+            name: "set-cred".to_owned(),
+            config,
+            layer: Layer::User,
+        }];
+
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());
+        state = to_providers(state);
+        state.handle_key(press(KeyCode::Char('t')));
+
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+
+        let (_, outcome) = state
+            .settings()
+            .unwrap()
+            .provider_test_result()
+            .expect("a test ran");
+        match outcome {
+            ReachabilityCheck::PreconditionsMet { protocol, base_url } => {
+                assert!(!protocol.is_empty());
+                assert!(!base_url.is_empty());
+            }
+            other => panic!("expected preconditions met, got {other:?}"),
+        }
+    }
+
+    /// Found running the real binary: a reachability-check result must not
+    /// permanently shadow the bottom panel. Any other key clears it, and an
+    /// active Launch-Profiles input takes priority over it even if it did
+    /// not — see `SettingsState::handle_key`'s clearing line and
+    /// `render_settings`'s panel-priority comment in `view.rs`.
+    #[test]
+    fn a_stale_reachability_result_does_not_shadow_a_later_profile_input() {
+        let mut state = state_with_a_session();
+        state.open_settings(
+            Vec::new(),
+            Vec::new(),
+            sample_provider_rows(),
+            sample_profile_rows(),
+        );
+        state = to_providers(state);
+        state.handle_key(press(KeyCode::Char('t')));
+        assert!(state.settings().unwrap().provider_test_result().is_some());
+
+        // Move to Launch Profiles and open the "add" wizard.
+        state.handle_key(press(KeyCode::Tab));
+        assert_eq!(
+            state.settings().unwrap().section(),
+            SettingsSection::LaunchProfiles
+        );
+        assert!(
+            state.settings().unwrap().provider_test_result().is_none(),
+            "switching sections must clear the stale banner"
+        );
+        state.handle_key(press(KeyCode::Char('a')));
+        assert!(state.settings().unwrap().profile_input().is_some());
+        assert!(state.settings().unwrap().provider_test_result().is_none());
     }
 }

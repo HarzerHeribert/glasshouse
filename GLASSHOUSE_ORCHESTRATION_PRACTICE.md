@@ -406,3 +406,27 @@ So, for any mutation runner:
 
 A mutation verdict from a stale binary is worse than no mutation testing at all,
 because it is indistinguishable from a real one in the report.
+
+
+## 17. An absence assertion is only as strong as the viewport it renders into
+
+A settings test planted a real credential in the environment, drove nine
+screens, and asserted with `!contains` that the value never appeared. It looked
+thorough and it was **passing for a reason that had nothing to do with the
+code**: at its 100-column render the providers row was truncated, so a leaked
+46-character value was clipped off-screen.
+
+The mutation that exposed it — render the credential's value instead of
+`set`/`not set` — survived. Re-rendered at 400 columns, the same mutation fails.
+
+**Truncation makes absence trivially true.** So whenever a test asserts that
+something is *not* in rendered output:
+
+- capture at a **wide** size as well as a realistic one, and assert over both;
+- and prove it, in both directions: hardened test + mutation must FAIL, and
+  hardened test + clean code must pass. One of those alone proves nothing.
+
+The same shape applies beyond a TUI — any assertion over truncated, paginated
+or elided output. This is the third distinct way this project has produced a
+test that passed for the wrong reason, after the vacuous poll loop and the
+mutation run against a cached binary.

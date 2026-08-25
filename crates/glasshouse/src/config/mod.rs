@@ -330,6 +330,16 @@ pub struct ProfileConfig {
     expected_protocol: Option<String>,
     #[serde(default, skip_serializing_if = "is_default_approval")]
     approval: ProfileApproval,
+    /// Whether this launch profile is currently enabled. Disabling is not
+    /// removal — see [`ProfileConfig::set_enabled`] and the "disable is not
+    /// delete" rule Phase 2D's Settings behavioural contract requires: every
+    /// other field stays exactly as configured, and re-enabling needs no
+    /// retyping.
+    #[serde(
+        default = "enabled_by_default",
+        skip_serializing_if = "is_enabled_by_default"
+    )]
+    enabled: bool,
 }
 
 fn is_native_backend(backend: &ProfileBackend) -> bool {
@@ -338,6 +348,17 @@ fn is_native_backend(backend: &ProfileBackend) -> bool {
 
 fn is_default_approval(approval: &ProfileApproval) -> bool {
     matches!(approval, ProfileApproval::Default)
+}
+
+/// The default for [`ProviderConfig::enabled`] and [`ProfileConfig::enabled`]
+/// — a config file written before either field existed still loads every
+/// entry as enabled.
+fn enabled_by_default() -> bool {
+    true
+}
+
+fn is_enabled_by_default(enabled: &bool) -> bool {
+    *enabled
 }
 
 /// Why a stored [`ProfileConfig`] could not be turned into a
@@ -364,6 +385,7 @@ impl ProfileConfig {
             model: None,
             expected_protocol: None,
             approval: ProfileApproval::default(),
+            enabled: true,
         }
     }
 
@@ -404,6 +426,20 @@ impl ProfileConfig {
 
     pub fn set_approval(&mut self, approval: ProfileApproval) -> &mut Self {
         self.approval = approval;
+        self
+    }
+
+    /// Whether this launch profile is currently enabled. `true` for a
+    /// profile no one has ever disabled, including one loaded from a file
+    /// written before this field existed.
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Disabling keeps every other field untouched and is fully reversible —
+    /// see the field's own doc comment.
+    pub fn set_enabled(&mut self, enabled: bool) -> &mut Self {
+        self.enabled = enabled;
         self
     }
 
@@ -513,6 +549,18 @@ pub struct ProviderConfig {
     /// [`ProviderConfig::credential_env`]'s own replace-not-merge rule.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     headers: Vec<(String, String)>,
+    /// Whether this provider is currently enabled. Disabling is not
+    /// removal — see [`ProviderConfig::set_enabled`] and the "disable is not
+    /// delete" rule Phase 2D's Settings behavioural contract requires: every
+    /// other field stays exactly as configured, and re-enabling needs no
+    /// retyping. Deciding whether routing may actually use a disabled
+    /// provider is a later phase's job; [`ProviderConfig::to_provider`]
+    /// never consults this field.
+    #[serde(
+        default = "enabled_by_default",
+        skip_serializing_if = "is_enabled_by_default"
+    )]
+    enabled: bool,
 }
 
 /// Why a stored [`ProviderConfig`] could not be turned into a
@@ -560,6 +608,7 @@ impl ProviderConfig {
             base_url: None,
             credential_env: Vec::new(),
             headers: Vec::new(),
+            enabled: true,
         }
     }
 
@@ -596,6 +645,20 @@ impl ProviderConfig {
 
     pub fn set_headers(&mut self, headers: Vec<(String, String)>) -> &mut Self {
         self.headers = headers;
+        self
+    }
+
+    /// Whether this provider is currently enabled. `true` for a provider no
+    /// one has ever disabled, including one loaded from a file written
+    /// before this field existed.
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Disabling keeps every other field untouched and is fully reversible —
+    /// see the field's own doc comment.
+    pub fn set_enabled(&mut self, enabled: bool) -> &mut Self {
+        self.enabled = enabled;
         self
     }
 
@@ -2206,6 +2269,53 @@ mod tests {
         );
     }
 
+    /// Phase 2D: "disable is not delete" for launch profiles too — disabling
+    /// keeps every other field intact and is reversible without retyping.
+    /// Both halves are asserted.
+    #[test]
+    fn disabling_a_launch_profile_keeps_its_configuration_and_is_reversible() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
+
+        assert!(
+            ProfileConfig::new(IntegrationId::ClaudeCode).enabled(),
+            "a freshly created profile is enabled by default"
+        );
+
+        let mut profile = ProfileConfig::new(IntegrationId::ClaudeCode);
+        profile.set_model(Some("claude-opus".to_owned()));
+
+        let mut user = UserConfig::default();
+        let mut disabled = profile.clone();
+        disabled.set_enabled(false);
+        user.profiles_mut().set("fast", disabled);
+        user.save(&paths).unwrap();
+
+        let loaded = UserConfig::load(&paths).unwrap();
+        let loaded_profile = loaded.profiles().get("fast").unwrap();
+        assert!(!loaded_profile.enabled(), "the profile must be disabled");
+        assert_eq!(
+            loaded_profile.model(),
+            Some("claude-opus"),
+            "disabling must not touch the model"
+        );
+        assert_eq!(loaded_profile.harness_slug(), "claude-code");
+
+        let mut re_enabled = loaded_profile.clone();
+        re_enabled.set_enabled(true);
+        let mut user = loaded;
+        user.profiles_mut().set("fast", re_enabled);
+        user.save(&paths).unwrap();
+        let reloaded = UserConfig::load(&paths).unwrap();
+        let reloaded_profile = reloaded.profiles().get("fast").unwrap();
+        assert!(reloaded_profile.enabled());
+        assert_eq!(
+            reloaded_profile.model(),
+            Some("claude-opus"),
+            "re-enabling must not have required retyping the model"
+        );
+    }
+
     #[test]
     fn an_unknown_profile_name_lists_the_known_names() {
         let user = UserConfig::default();
@@ -2450,6 +2560,81 @@ mod tests {
         );
     }
 
+    /// Phase 2D: "disable is not delete" — disabling a provider keeps every
+    /// other field intact and is reversible without retyping anything, and
+    /// the decision survives a save/load round trip. Both halves are
+    /// asserted: the disabled state, and that nothing else moved.
+    #[test]
+    fn disabling_a_provider_keeps_its_configuration_and_is_reversible() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
+
+        let mut user = UserConfig::default();
+        assert!(
+            ProviderConfig::new("openrouter").enabled(),
+            "a freshly created provider is enabled by default"
+        );
+
+        let mut provider = ProviderConfig::new("openrouter");
+        provider
+            .set_base_url(Some("https://mirror.example.com/v1".to_owned()))
+            .set_credential_env(vec!["OPENROUTER_API_KEY".to_owned()]);
+        user.providers_mut().set("my-router", provider.clone());
+
+        // Disable: the rest of the configuration must not move.
+        let mut disabled = provider.clone();
+        disabled.set_enabled(false);
+        user.providers_mut().set("my-router", disabled.clone());
+        user.save(&paths).unwrap();
+
+        let loaded = UserConfig::load(&paths).unwrap();
+        let loaded_provider = loaded.providers().get("my-router").unwrap();
+        assert!(!loaded_provider.enabled(), "the provider must be disabled");
+        assert_eq!(
+            loaded_provider.base_url(),
+            Some("https://mirror.example.com/v1"),
+            "disabling must not touch the base URL"
+        );
+        assert_eq!(
+            loaded_provider.credential_env(),
+            &["OPENROUTER_API_KEY".to_owned()],
+            "disabling must not touch the credential variable names"
+        );
+
+        // Re-enable: reversible without retyping anything already configured.
+        let mut re_enabled = loaded_provider.clone();
+        re_enabled.set_enabled(true);
+        let mut user = loaded;
+        user.providers_mut().set("my-router", re_enabled);
+        user.save(&paths).unwrap();
+        let reloaded = UserConfig::load(&paths).unwrap();
+        let reloaded_provider = reloaded.providers().get("my-router").unwrap();
+        assert!(reloaded_provider.enabled());
+        assert_eq!(
+            reloaded_provider.base_url(),
+            Some("https://mirror.example.com/v1"),
+            "re-enabling must not have required retyping the base URL"
+        );
+    }
+
+    /// A file written before `enabled` existed has no `enabled` key at all —
+    /// it must still load as enabled, not as a parse failure or a silent
+    /// disable.
+    #[test]
+    fn a_provider_with_no_enabled_key_loads_as_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
+        std::fs::create_dir_all(paths.config_dir()).unwrap();
+        std::fs::write(
+            paths.user_config_file(),
+            "version = 1\n[providers.legacy]\ntemplate = \"openrouter\"\n",
+        )
+        .unwrap();
+
+        let loaded = UserConfig::load(&paths).unwrap();
+        assert!(loaded.providers().get("legacy").unwrap().enabled());
+    }
+
     #[test]
     fn a_configured_base_url_override_is_what_reaches_a_launched_child_process() {
         // Line 423, all the way through: a base-URL override is not just a
@@ -2673,7 +2858,10 @@ mod tests {
             })
             .set_model(Some("claude-opus".to_owned()))
             .set_expected_protocol(Some("anthropic-messages".to_owned()))
-            .set_approval(ProfileApproval::Bypass);
+            .set_approval(ProfileApproval::Bypass)
+            // Non-default, so the field actually appears below — see
+            // `enabled_by_default`/`is_enabled_by_default`.
+            .set_enabled(false);
         let profile_value = toml::Value::try_from(&profile_cfg).unwrap();
         let profile_table = profile_value.as_table().unwrap();
         let mut profile_keys: Vec<&str> = profile_table.keys().map(String::as_str).collect();
@@ -2683,6 +2871,7 @@ mod tests {
             vec![
                 "approval",
                 "backend",
+                "enabled",
                 "expected_protocol",
                 "harness",
                 "model"
@@ -2743,14 +2932,23 @@ mod tests {
         provider_cfg
             .set_base_url(Some("https://mirror.example.com/v1".to_owned()))
             .set_credential_env(vec!["OPENROUTER_API_KEY".to_owned()])
-            .set_headers(vec![("X-Org-Id".to_owned(), "acme".to_owned())]);
+            .set_headers(vec![("X-Org-Id".to_owned(), "acme".to_owned())])
+            // Non-default, so the field actually appears below — see
+            // `enabled_by_default`/`is_enabled_by_default`.
+            .set_enabled(false);
         let provider_value = toml::Value::try_from(&provider_cfg).unwrap();
         let provider_table = provider_value.as_table().unwrap();
         let mut provider_keys: Vec<&str> = provider_table.keys().map(String::as_str).collect();
         provider_keys.sort_unstable();
         assert_eq!(
             provider_keys,
-            vec!["base_url", "credential_env", "headers", "template"],
+            vec![
+                "base_url",
+                "credential_env",
+                "enabled",
+                "headers",
+                "template"
+            ],
             "ProviderConfig grew a field — confirm it cannot hold a credential value \
              (as opposed to a variable name) before widening this list. `headers` holds \
              name/value pairs that are themselves configuration, never a credential — see \
@@ -2758,7 +2956,7 @@ mod tests {
         );
 
         // `ProviderTable` itself adds nothing beyond the map: every entry it
-        // can hold is one of the four fields just checked.
+        // can hold is one of the five fields just checked.
         let mut table = ProviderTable::default();
         table.set("mine", provider_cfg);
         let table_value = toml::Value::try_from(&table).unwrap();
@@ -2772,7 +2970,13 @@ mod tests {
         entry_keys.sort_unstable();
         assert_eq!(
             entry_keys,
-            vec!["base_url", "credential_env", "headers", "template"]
+            vec![
+                "base_url",
+                "credential_env",
+                "enabled",
+                "headers",
+                "template"
+            ]
         );
     }
 }

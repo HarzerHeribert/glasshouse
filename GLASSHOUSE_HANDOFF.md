@@ -4,11 +4,11 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 9G is seventeen of nineteen; Phase 9 five of seven; 2C fifteen of
-nineteen;
+**Phase 9G is seventeen of nineteen; 2D six of nineteen; Phase 9 five of
+seven; 2C fifteen of nineteen;
 9F eleven of thirteen; 9D eleven of fourteen; 9A nineteen of twenty-six;
 9E eight of thirteen; 9C eleven of twelve; 9B eight of nine.
-193 -> 234 checked boxes (18%).**
+193 -> 238 checked boxes (18%).**
 
 **One thing needs the user.** A real conversation identifier of theirs is
 committed in git history (one identifier, one commit, working tree already
@@ -40,6 +40,32 @@ session came up and showed Codex's own trust prompt — and the end-to-end PTY
 test asserts the exact argv.
 
 ## Verified completed work
+
+### This session — settings that manage providers and profiles, and a test that was passing for the wrong reason
+
+Four Phase 2D lines: Providers and Launch Profiles sections, with add, edit,
+disable, duplicate, remove. Phase 9D's connectivity-test line stays **open** —
+the branch had no HTTP client and the packet forbade adding one while the
+gateway batch was introducing `ureq`, so the affordance is an honest
+precondition check and says so on screen.
+
+**The orchestrator's own mutation found a weak test.** Acceptance test 7 plants
+a real credential, drives nine settings screens and asserts the value never
+appears. It survived a mutation that renders the value instead of
+`set`/`not set` — because at 100 columns the providers row is **truncated**, so
+a leaked 46-character value was clipped off-screen. The test was passing for a
+reason unrelated to the code. Every snapshot is now captured at a realistic
+*and* a wide size, and the mutation is caught in both directions.
+
+**A test that asserts the absence of a string in rendered output is only as
+strong as the viewport it renders into.** Truncation makes absence trivially
+true. That is new to this project's practice and now written down.
+
+**Three defects came from running the binary**, which is why the packet demands
+it: a stale banner left the profile wizard silently un-drivable, `cmux` was
+accepted as a launch-profile harness because validation used every integration
+rather than only harnesses, and a long refusal message rendered off-screen
+because the input panel's height was a fixed constant.
 
 ### This session — a gateway that holds the key, so the harness never has to
 

@@ -47,7 +47,8 @@ use crate::session::{
 use crate::tui::{AppEvent, DEFAULT_TICK, Event, EventSource, Screen};
 
 pub use state::{
-    Action, HarnessRow, IntegrationRow, Mode, Overlay, SettingsEdit, ShellState, ViewportGrid,
+    Action, HarnessRow, IntegrationRow, Mode, Overlay, ProfileRow, ProfileSettingsEdit,
+    ProviderRow, ProviderSettingsEdit, SettingsEdit, ShellState, ViewportGrid,
 };
 
 /// Open the shell and run it until the user leaves.
@@ -119,8 +120,8 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                         }
                     },
                     Action::OpenSettings => match build_settings(runtime) {
-                        Ok((harnesses, integrations)) => {
-                            state.open_settings(harnesses, integrations);
+                        Ok((harnesses, integrations, providers, profiles)) => {
+                            state.open_settings(harnesses, integrations, providers, profiles);
                         }
                         Err(err) => {
                             tracing::warn!(error = %err, "could not open settings");
@@ -128,10 +129,20 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                         }
                     },
                     Action::SaveUserSettings => {
-                        let edits = state.settings_edits();
-                        if edits.is_empty() {
+                        let harness_edits = state.settings_edits();
+                        let provider_edits = state.settings_provider_edits();
+                        let profile_edits = state.settings_profile_edits();
+                        if harness_edits.is_empty()
+                            && provider_edits.is_empty()
+                            && profile_edits.is_empty()
+                        {
                             state.set_status("no settings changes to save");
-                        } else if let Err(err) = save_user_settings(runtime, &edits) {
+                        } else if let Err(err) = save_user_settings(
+                            runtime,
+                            &harness_edits,
+                            &provider_edits,
+                            &profile_edits,
+                        ) {
                             tracing::warn!(error = %err, "could not save user settings");
                             state.set_status(format!("could not save settings: {err:#}"));
                         } else {
@@ -140,11 +151,21 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                         }
                     }
                     Action::SaveProjectSettings => {
-                        let edits = state.settings_edits();
-                        if edits.is_empty() {
+                        let harness_edits = state.settings_edits();
+                        let provider_edits = state.settings_provider_edits();
+                        let profile_edits = state.settings_profile_edits();
+                        if harness_edits.is_empty()
+                            && provider_edits.is_empty()
+                            && profile_edits.is_empty()
+                        {
                             state.set_status("no settings changes to save");
                         } else {
-                            match save_project_settings(runtime, &edits) {
+                            match save_project_settings(
+                                runtime,
+                                &harness_edits,
+                                &provider_edits,
+                                &profile_edits,
+                            ) {
                                 Ok(path) => {
                                     state.set_status(format!("saved to {}", path.display()));
                                     refresh_settings_after_save(runtime, &mut state);
@@ -485,6 +506,15 @@ fn reopen_onboarding(runtime: &Runtime) -> anyhow::Result<onboarding::Outcome> {
     onboarding::run(runtime, &discovery, config)
 }
 
+/// Every row every Settings section shows, in the order
+/// [`build_settings`] returns them.
+type SettingsRows = (
+    Vec<HarnessRow>,
+    Vec<IntegrationRow>,
+    Vec<ProviderRow>,
+    Vec<ProfileRow>,
+);
+
 /// Build the rows the Settings overlay shows, from a fresh [`Discovery`]
 /// pass and the configuration currently on disk.
 ///
@@ -492,7 +522,7 @@ fn reopen_onboarding(runtime: &Runtime) -> anyhow::Result<onboarding::Outcome> {
 /// `SettingsState` never run discovery or read a configuration file
 /// themselves — that would put file I/O in `shell/state.rs`, which the
 /// module keeps free of it by design.
-fn build_settings(runtime: &Runtime) -> anyhow::Result<(Vec<HarnessRow>, Vec<IntegrationRow>)> {
+fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
     let discovery = Discovery::run(runtime.project());
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
@@ -525,7 +555,61 @@ fn build_settings(runtime: &Runtime) -> anyhow::Result<(Vec<HarnessRow>, Vec<Int
             }
         }
     }
-    Ok((harnesses, integrations))
+
+    // Providers are atomic per name — see `ProviderRow::layer`'s own doc —
+    // so each row's whole configuration and layer come from whichever table
+    // actually holds that name, project winning over user, matching
+    // `EffectiveConfig::configured_provider`.
+    let mut providers = Vec::new();
+    for name in effective.provider_names() {
+        let found = project
+            .as_ref()
+            .and_then(|p| p.providers().get(&name))
+            .map(|cfg| (cfg, config::Layer::Project))
+            .or_else(|| {
+                user.providers()
+                    .get(&name)
+                    .map(|cfg| (cfg, config::Layer::User))
+            });
+        if let Some((provider_config, layer)) = found {
+            providers.push(ProviderRow {
+                name,
+                config: provider_config.clone(),
+                layer,
+            });
+        }
+    }
+
+    // `EffectiveConfig::profile_names` also lists the implied Native
+    // profile, which has no `ProfileConfig` behind it — see
+    // `crate::profile::NATIVE_PROFILE_NAME`'s own doc — so the merge is
+    // built directly from the two tables instead of reusing that method.
+    let mut profile_names: std::collections::BTreeSet<String> =
+        user.profiles().names().map(str::to_owned).collect();
+    if let Some(project) = project.as_ref() {
+        profile_names.extend(project.profiles().names().map(str::to_owned));
+    }
+    let mut profiles = Vec::new();
+    for name in profile_names {
+        let found = project
+            .as_ref()
+            .and_then(|p| p.profiles().get(&name))
+            .map(|cfg| (cfg, config::Layer::Project))
+            .or_else(|| {
+                user.profiles()
+                    .get(&name)
+                    .map(|cfg| (cfg, config::Layer::User))
+            });
+        if let Some((profile_config, layer)) = found {
+            profiles.push(ProfileRow {
+                name,
+                config: profile_config.clone(),
+                layer,
+            });
+        }
+    }
+
+    Ok((harnesses, integrations, providers, profiles))
 }
 
 /// Re-read Settings' rows after a successful save and hand them to
@@ -535,7 +619,9 @@ fn build_settings(runtime: &Runtime) -> anyhow::Result<(Vec<HarnessRow>, Vec<Int
 /// the same non-fatal way as everything else in this module.
 fn refresh_settings_after_save(runtime: &Runtime, state: &mut ShellState) {
     match build_settings(runtime) {
-        Ok((harnesses, integrations)) => state.refresh_settings(harnesses, integrations),
+        Ok((harnesses, integrations, providers, profiles)) => {
+            state.refresh_settings(harnesses, integrations, providers, profiles)
+        }
         Err(err) => {
             tracing::warn!(error = %err, "could not refresh settings after saving");
         }
@@ -558,12 +644,47 @@ fn apply_settings_edits(table: &mut config::IntegrationTable, edits: &[SettingsE
     }
 }
 
+/// Apply every pending provider edit onto `table` — an add/replace for
+/// `Some`, a removal for `None`. Unlike [`apply_settings_edits`], each edit
+/// already carries a complete [`config::ProviderConfig`], since every
+/// provider edit in the Settings overlay produces (or removes) the whole
+/// value rather than one field of it.
+fn apply_provider_edits(table: &mut config::ProviderTable, edits: &[ProviderSettingsEdit]) {
+    for edit in edits {
+        match &edit.upsert {
+            Some(provider_config) => table.set(edit.name.clone(), provider_config.clone()),
+            None => {
+                table.remove(&edit.name);
+            }
+        }
+    }
+}
+
+/// The [`config::ProfileTable`] counterpart to [`apply_provider_edits`].
+fn apply_profile_edits(table: &mut config::ProfileTable, edits: &[ProfileSettingsEdit]) {
+    for edit in edits {
+        match &edit.upsert {
+            Some(profile_config) => table.set(edit.name.clone(), profile_config.clone()),
+            None => {
+                table.remove(&edit.name);
+            }
+        }
+    }
+}
+
 /// Write every pending Settings edit to the user-level configuration file.
 /// Never touches the project root — see the design decision's "writes
 /// default to the user layer".
-pub fn save_user_settings(runtime: &Runtime, edits: &[SettingsEdit]) -> anyhow::Result<()> {
+pub fn save_user_settings(
+    runtime: &Runtime,
+    harness_edits: &[SettingsEdit],
+    provider_edits: &[ProviderSettingsEdit],
+    profile_edits: &[ProfileSettingsEdit],
+) -> anyhow::Result<()> {
     let mut config = UserConfig::load(runtime.paths())?;
-    apply_settings_edits(config.integrations_mut(), edits);
+    apply_settings_edits(config.integrations_mut(), harness_edits);
+    apply_provider_edits(config.providers_mut(), provider_edits);
+    apply_profile_edits(config.profiles_mut(), profile_edits);
     config.save(runtime.paths())?;
     Ok(())
 }
@@ -577,10 +698,14 @@ pub fn save_user_settings(runtime: &Runtime, edits: &[SettingsEdit]) -> anyhow::
 /// line.
 pub fn save_project_settings(
     runtime: &Runtime,
-    edits: &[SettingsEdit],
+    harness_edits: &[SettingsEdit],
+    provider_edits: &[ProviderSettingsEdit],
+    profile_edits: &[ProfileSettingsEdit],
 ) -> anyhow::Result<std::path::PathBuf> {
     let mut project_config = config::load_project_config(runtime.project())?.unwrap_or_default();
-    apply_settings_edits(project_config.integrations_mut(), edits);
+    apply_settings_edits(project_config.integrations_mut(), harness_edits);
+    apply_provider_edits(project_config.providers_mut(), provider_edits);
+    apply_profile_edits(project_config.profiles_mut(), profile_edits);
     config::write_project_config_with_consent(runtime.project(), &project_config)?;
     Ok(runtime
         .project()
@@ -681,5 +806,312 @@ mod tests {
         assert_eq!(grid.cols(), 10);
         assert_eq!(grid.cell(0, 0).unwrap().0, "");
         assert_eq!(grid.cursor(), Some((0, 0)));
+    }
+}
+
+/// Phase 2D: Settings' save/reload behaviour for Providers and Launch
+/// Profiles, exercised through a real [`Runtime`] and real files — the
+/// staging half (which row/edit changes when a key is pressed) is
+/// `shell::state`'s own tests; this is the write half.
+#[cfg(test)]
+mod settings_persistence_tests {
+    use super::*;
+    use crate::config::{Layer as ConfigLayer, ProfileConfig, ProviderConfig};
+
+    /// Bootstrap a `Runtime` over fresh, isolated data/config/workspace
+    /// directories, matching `integrations::tests::bootstrapped_runtime`.
+    fn bootstrapped_runtime() -> (tempfile::TempDir, tempfile::TempDir, crate::Runtime) {
+        use clap::Parser;
+
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join(".git")).unwrap();
+
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+            "--config-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, workspace.path()).unwrap();
+        (data, workspace, runtime)
+    }
+
+    /// Acceptance 2: adding a provider from a built-in template persists it
+    /// to the user layer, and it survives a reload.
+    #[test]
+    fn adding_a_provider_from_a_template_persists_to_the_user_layer_and_survives_reload() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let edit = ProviderSettingsEdit {
+            name: "my-router".to_owned(),
+            upsert: Some(ProviderConfig::new("openrouter")),
+        };
+        save_user_settings(&runtime, &[], &[edit], &[]).expect("save must succeed");
+
+        // Reload from disk — a fresh read, not the in-memory value just
+        // written — to prove this is a persistence test and not a tautology.
+        let (harnesses, integrations, providers, profiles) =
+            build_settings(&runtime).expect("settings must rebuild after the save");
+        let _ = (harnesses, integrations, profiles);
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].name, "my-router");
+        assert_eq!(providers[0].config.template(), "openrouter");
+        assert_eq!(providers[0].layer, ConfigLayer::User);
+
+        // And directly against `UserConfig`, independent of `build_settings`.
+        let reloaded = UserConfig::load(runtime.paths()).unwrap();
+        assert_eq!(
+            reloaded.providers().get("my-router").unwrap().template(),
+            "openrouter"
+        );
+    }
+
+    /// Acceptance 3: editing a provider's base URL persists, and the edited
+    /// value is what a launch would actually use — proven by resolving the
+    /// saved configuration into a real `Provider` and reading its protocol's
+    /// base URL, the exact value `crate::launch` would send a harness to.
+    #[test]
+    fn an_edited_base_url_persists_and_is_what_a_launch_would_use() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_base_url(Some("https://mirror.example.com/v1".to_owned()));
+        let edit = ProviderSettingsEdit {
+            name: "my-router".to_owned(),
+            upsert: Some(config),
+        };
+        save_user_settings(&runtime, &[], &[edit], &[]).expect("save must succeed");
+
+        let reloaded = UserConfig::load(runtime.paths()).unwrap();
+        let effective = config::EffectiveConfig::new(&reloaded, None);
+        let resolved = effective
+            .configured_provider("my-router")
+            .expect("the provider must resolve");
+        let openai_chat = resolved
+            .value
+            .protocols
+            .iter()
+            .find(|p| p.protocol == crate::harness::WireProtocol::OpenAiChat)
+            .expect("openrouter serves openai-chat");
+        assert_eq!(
+            openai_chat.base_url, "https://mirror.example.com/v1",
+            "the edited base URL must be exactly what a launch would use"
+        );
+    }
+
+    /// Acceptance 4 (the full write path): disabling a provider through
+    /// `save_user_settings` persists the disabled state and every other
+    /// field, and re-enabling needs no retyping.
+    #[test]
+    fn disabling_a_provider_through_the_save_path_persists_and_is_reversible() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_base_url(Some("https://mirror.example.com/v1".to_owned()));
+        config.set_enabled(false);
+        let edit = ProviderSettingsEdit {
+            name: "my-router".to_owned(),
+            upsert: Some(config),
+        };
+        save_user_settings(&runtime, &[], &[edit], &[]).unwrap();
+
+        let reloaded = UserConfig::load(runtime.paths()).unwrap();
+        let provider = reloaded.providers().get("my-router").unwrap();
+        assert!(!provider.enabled());
+        assert_eq!(
+            provider.base_url(),
+            Some("https://mirror.example.com/v1"),
+            "disabling must not touch other fields"
+        );
+
+        let mut re_enabled = provider.clone();
+        re_enabled.set_enabled(true);
+        let edit = ProviderSettingsEdit {
+            name: "my-router".to_owned(),
+            upsert: Some(re_enabled),
+        };
+        save_user_settings(&runtime, &[], &[edit], &[]).unwrap();
+        let reloaded_again = UserConfig::load(runtime.paths()).unwrap();
+        let provider_again = reloaded_again.providers().get("my-router").unwrap();
+        assert!(provider_again.enabled());
+        assert_eq!(
+            provider_again.base_url(),
+            Some("https://mirror.example.com/v1")
+        );
+    }
+
+    /// Removing a provider through the save path actually removes the
+    /// entry — the other half of acceptance 4.
+    #[test]
+    fn removing_a_provider_through_the_save_path_removes_it() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let edit = ProviderSettingsEdit {
+            name: "my-router".to_owned(),
+            upsert: Some(ProviderConfig::new("openrouter")),
+        };
+        save_user_settings(&runtime, &[], &[edit], &[]).unwrap();
+        assert!(
+            UserConfig::load(runtime.paths())
+                .unwrap()
+                .providers()
+                .get("my-router")
+                .is_some()
+        );
+
+        let removal = ProviderSettingsEdit {
+            name: "my-router".to_owned(),
+            upsert: None,
+        };
+        save_user_settings(&runtime, &[], &[removal], &[]).unwrap();
+        assert!(
+            UserConfig::load(runtime.paths())
+                .unwrap()
+                .providers()
+                .get("my-router")
+                .is_none()
+        );
+    }
+
+    /// Acceptance 5 (the full write path): a duplicated launch profile is an
+    /// independent entry once saved — editing the copy's stored
+    /// configuration must never touch the original's file record.
+    #[test]
+    fn a_duplicated_profile_persists_as_an_independent_entry() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let original = ProfileConfig::new(crate::integrations::IntegrationId::ClaudeCode);
+        save_user_settings(
+            &runtime,
+            &[],
+            &[],
+            &[ProfileSettingsEdit {
+                name: "fast".to_owned(),
+                upsert: Some(original),
+            }],
+        )
+        .unwrap();
+
+        let mut copy = ProfileConfig::new(crate::integrations::IntegrationId::ClaudeCode);
+        copy.set_model(Some("claude-opus".to_owned()));
+        save_user_settings(
+            &runtime,
+            &[],
+            &[],
+            &[ProfileSettingsEdit {
+                name: "fast-copy".to_owned(),
+                upsert: Some(copy),
+            }],
+        )
+        .unwrap();
+
+        let reloaded = UserConfig::load(runtime.paths()).unwrap();
+        assert_eq!(reloaded.profiles().get("fast").unwrap().model(), None);
+        assert_eq!(
+            reloaded.profiles().get("fast-copy").unwrap().model(),
+            Some("claude-opus")
+        );
+    }
+
+    /// Acceptance 8: `save_user_settings` never touches the project root,
+    /// and only `save_project_settings` — reached only after the Settings
+    /// overlay's own explicit `W` confirmation (see `state`'s
+    /// `shift_w_requires_a_separate_explicit_confirmation`) — writes
+    /// `.glasshouse/config.toml`. This is the write half of that guarantee;
+    /// the confirmation-gating half is `state`'s.
+    #[test]
+    fn saving_user_settings_never_creates_a_project_config_file() {
+        let (_data, workspace, runtime) = bootstrapped_runtime();
+        let project_config_path = workspace.path().join(".glasshouse").join("config.toml");
+
+        let edit = ProviderSettingsEdit {
+            name: "my-router".to_owned(),
+            upsert: Some(ProviderConfig::new("openrouter")),
+        };
+        save_user_settings(&runtime, &[], &[edit], &[]).unwrap();
+
+        assert!(
+            !project_config_path.exists(),
+            "a user-layer save must never create the project config file"
+        );
+    }
+
+    /// The other side of acceptance 8: `save_project_settings` does write
+    /// exactly `<project root>/.glasshouse/config.toml`, and the provider
+    /// edit lands in the project layer, not the user layer.
+    #[test]
+    fn saving_project_settings_writes_the_project_layer_only() {
+        let (_data, workspace, runtime) = bootstrapped_runtime();
+
+        let edit = ProviderSettingsEdit {
+            name: "my-router".to_owned(),
+            upsert: Some(ProviderConfig::new("openrouter")),
+        };
+        let path = save_project_settings(&runtime, &[], &[edit], &[]).unwrap();
+
+        assert!(path.exists());
+        // Canonicalize before comparing: on macOS `TempDir` paths run through
+        // `/tmp`, a symlink to `/private/tmp`, and the runtime's own scope
+        // resolution follows it — a portability quirk of the test fixture,
+        // not of `save_project_settings` itself.
+        assert_eq!(
+            std::fs::canonicalize(&path).unwrap(),
+            std::fs::canonicalize(workspace.path().join(".glasshouse").join("config.toml"))
+                .unwrap()
+        );
+
+        let project_config = config::load_project_config(runtime.project())
+            .unwrap()
+            .expect("the project config file must now exist");
+        assert_eq!(
+            project_config
+                .providers()
+                .get("my-router")
+                .unwrap()
+                .template(),
+            "openrouter"
+        );
+        assert!(
+            UserConfig::load(runtime.paths())
+                .unwrap()
+                .providers()
+                .get("my-router")
+                .is_none(),
+            "a project-layer save must not also write the user layer"
+        );
+    }
+
+    /// `build_settings` must read a disabled provider or profile back
+    /// without panicking or dropping the disabled state — the same rows the
+    /// Settings overlay renders.
+    #[test]
+    fn build_settings_reflects_a_disabled_provider_and_profile() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let mut provider = ProviderConfig::new("openrouter");
+        provider.set_enabled(false);
+        let mut profile = ProfileConfig::new(crate::integrations::IntegrationId::ClaudeCode);
+        profile.set_enabled(false);
+
+        save_user_settings(
+            &runtime,
+            &[],
+            &[ProviderSettingsEdit {
+                name: "my-router".to_owned(),
+                upsert: Some(provider),
+            }],
+            &[ProfileSettingsEdit {
+                name: "fast".to_owned(),
+                upsert: Some(profile),
+            }],
+        )
+        .unwrap();
+
+        let (_, _, providers, profiles) = build_settings(&runtime).unwrap();
+        assert!(!providers[0].config.enabled());
+        assert!(!profiles[0].config.enabled());
     }
 }

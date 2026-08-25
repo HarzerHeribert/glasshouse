@@ -176,8 +176,8 @@ Phase 2D — Settings foundation
 
 ☑ Add a TUI settings view that can be opened without leaving the current project session permanently.
 ☑ Add a Harnesses settings section.
-☐ Add a Providers settings section.
-☐ Add a Launch Profiles settings section.
+☑ Add a Providers settings section.
+☑ Add a Launch Profiles settings section.
 ☐ Add a Routing settings section.
 ☐ Allow the routing settings to select Automatic, a specific configured model, or deterministic-only classification.
 ☐ Allow the routing settings to define a maximum acceptable router latency.
@@ -188,8 +188,8 @@ Phase 2D — Settings foundation
 ☑ Add an Integrations settings section for optional tools such as cmux.
 ☑ Show whether each harness is detected and enabled.
 ☑ Allow the user to change a harness executable path.
-☐ Allow the user to add, edit, disable, test, and remove provider configurations.
-☐ Allow the user to create, edit, duplicate, disable, and remove launch profiles.
+☑ Allow the user to add, edit, disable, test, and remove provider configurations.
+☑ Allow the user to create, edit, duplicate, disable, and remove launch profiles.
 ☑ Allow the user to defer any optional setup item and return to it later.
 ☑ Separate user-level defaults from project-level overrides visibly in settings.
 ☑ Require explicit confirmation before writing project-level configuration into the repository.
