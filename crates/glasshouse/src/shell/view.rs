@@ -1010,9 +1010,18 @@ mod settings_tests {
         let mut state = state_with_settings_open();
         state.handle_key(press(KeyCode::Char('W')));
         let text = rendered(&state, 100, 30);
+
+        // Built with `join`, exactly as `render_project_write_confirmation`
+        // builds it. A hard-coded `/work/glasshouse/.glasshouse/config.toml`
+        // passed everywhere except Windows, where `join` yields backslashes —
+        // a test-portability fault, not a product one, but it turned CI red.
+        let expected = std::path::Path::new("/work/glasshouse")
+            .join(".glasshouse")
+            .join("config.toml");
+        let expected = expected.display().to_string();
         assert!(
-            text.contains("/work/glasshouse/.glasshouse/config.toml"),
-            "the exact path must be shown:\n{text}"
+            text.contains(&expected),
+            "the exact path `{expected}` must be shown:\n{text}"
         );
         assert!(
             text.to_lowercase().contains("repository"),
