@@ -2087,6 +2087,18 @@ fn keystrokes_reach_the_focused_session() {
 /// A keystroke typed into the real shell reaching a real harness, and the
 /// harness's answer coming back to the viewport.
 ///
+/// Unix only, and the reason is worth recording rather than hiding behind the
+/// `cfg`. The Windows fake harness reads its input with `set /p`, which wants a
+/// CRLF, while a real Enter key is a bare carriage return and that is what
+/// `encode` sends. Making `encode` emit CRLF to satisfy it would be wrong: it
+/// would give every Unix harness a spurious extra newline per keystroke. The
+/// forwarding path itself is covered on Windows by
+/// `keystrokes_reach_the_focused_session`, which drives the same
+/// `write_to_focused` at the runtime layer. Whether a bare carriage return
+/// satisfies a real Windows harness is an open question recorded in the
+/// handoff — the harnesses Glasshouse actually targets read raw input and
+/// accept it, but that is reasoning, not evidence.
+///
 /// Everything else about the wiring is unit-tested against a `ShellState` with
 /// no processes behind it. This is the one test that proves the whole chain
 /// exists in the shipped binary: `glasshouse` with no arguments opens the
@@ -2096,6 +2108,7 @@ fn keystrokes_reach_the_focused_session() {
 ///
 /// It also proves the mode split does what it is for: `q` is typed while in
 /// session mode and must reach the harness rather than quitting Glasshouse.
+#[cfg(unix)]
 #[test]
 fn a_keystroke_typed_into_the_shell_reaches_a_real_harness_and_comes_back() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -2159,6 +2172,70 @@ fn a_keystroke_typed_into_the_shell_reaches_a_real_harness_and_comes_back() {
         status.success(),
         "the shell should still exit cleanly on `q` after a session: {status}\n\
          --- output ---\n{}\n--- end ---",
+        shell.output()
+    );
+}
+
+/// The shell's mode machinery, in a real terminal, on every platform.
+///
+/// Separated from the round-trip above so Windows keeps coverage of the part
+/// that does not depend on how a fake `.cmd` harness reads its input: the shell
+/// opens, `n` starts a real harness, Enter hands the keyboard to it, `Ctrl-]`
+/// takes it back, and `q` then quits Glasshouse rather than reaching the
+/// harness. If the escape chord did not match — as it did not, before a real
+/// terminal was used to check — `q` would go to the harness and this would hang.
+#[test]
+fn the_shell_enters_and_leaves_session_mode_in_a_real_terminal() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&state_dir).expect("create state dir");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+    // Stays alive, so the escape chord is genuinely what returns control rather
+    // than the session ending underneath the test.
+    let harness = install_sleep_harness(&bin_dir, "lingering", 20);
+    let toml_path = |p: &std::path::Path| p.display().to_string().replace('\\', "\\\\");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[onboarding]\ncompleted = true\n\n\
+             [integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n",
+            toml_path(&harness)
+        ),
+    )
+    .expect("write user config");
+
+    let mut shell = Session::spawn(
+        TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path()).args([
+            "--scope".to_owned(),
+            project_dir.display().to_string(),
+            "--data-dir".to_owned(),
+            state_dir.display().to_string(),
+            "--config-dir".to_owned(),
+            config_dir.display().to_string(),
+        ]),
+    );
+
+    shell.expect("root ");
+    shell.send("n");
+    shell.expect("claude-code");
+    shell.send("\r");
+    shell.expect("ctrl-]");
+
+    // Back to control mode, then quit. `q` only quits if the escape landed.
+    shell.send("\x1d");
+    shell.send("q");
+
+    let status = shell.wait_for_exit();
+    assert!(
+        status.success(),
+        "the shell did not quit after leaving session mode, so the escape chord \
+         never matched: {status}\n--- output ---\n{}\n--- end ---",
         shell.output()
     );
 }
