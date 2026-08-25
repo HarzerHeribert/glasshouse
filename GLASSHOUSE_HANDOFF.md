@@ -25,7 +25,7 @@ keyboard reaches it.
 3. **Phase 4 next**, as recorded when Phase 3 closed: the keystone that three
    Phase 3 boxes and all of Phase 5 and 11 were waiting on.
 4. **Two keyboard modes**, recorded in
-   `.agent-runtime/design-shell-session-modes.md`. Single-key bindings and
+   `GLASSHOUSE_DESIGN_DECISIONS.md`. Single-key bindings and
    forwarding every keystroke to a harness cannot both be true. Control mode
    keeps the bindings; session mode forwards everything; `Ctrl-]` returns. One
    chord rather than a prefix, because the thing being escaped may be a
@@ -269,7 +269,7 @@ have required a magic clamp.
   mode machinery by `the_shell_enters_and_leaves_session_mode_in_a_real_terminal`.
 - `session::runtime` (`SessionRuntime`) exists and is proven against real
   processes on all three platforms, but **has no production caller yet**, so
-  seven Phase 4 boxes stay unchecked. `.agent-runtime/design-shell-session-modes.md`
+  seven Phase 4 boxes stay unchecked. `GLASSHOUSE_DESIGN_DECISIONS.md`
   records the decision that unblocks it: the shell's single-key bindings cannot
   coexist with forwarding every keystroke to a harness, so control mode and
   session mode split, with `Ctrl-]` as a single-chord escape.

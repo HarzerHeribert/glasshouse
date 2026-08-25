@@ -10,6 +10,7 @@ working as the primary orchestrator, read these files completely in this order:
 5. `GLASSHOUSE_HARNESS_HOOK_PROTOCOL.md`
 6. `GLASSHOUSE_CAPABILITY_EVIDENCE.md`
 7. `GLASSHOUSE_ORCHESTRATOR_PROMPT.md`
+8. `GLASSHOUSE_DESIGN_DECISIONS.md`
 
 The capability map is authoritative. Work in its stated order. Do not check a
 box until its evidence-ledger entry is `COMPLETE`. Only the primary Opus
