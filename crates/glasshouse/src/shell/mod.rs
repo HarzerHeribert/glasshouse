@@ -17,16 +17,21 @@
 //! divided between Glasshouse and the focused session's PTY — [`state::Mode`]
 //! is the switch it hangs on.
 //!
-//! The viewport shows the focused session's own scrollback once it has
-//! produced any — raw bytes, not a rendered terminal, since Glasshouse does
-//! not emulate one yet (see [`crate::session::runtime::Scrollback`]'s doc
-//! comment). That emulation is Phase 5; this is only the plumbing that gets
-//! keystrokes and output flowing in both directions.
+//! The viewport shows the focused session's own screen, converted each tick
+//! from its `vt100::Parser` into a [`state::ViewportGrid`] — see
+//! [`build_viewport_grid`] — and drawn cell by cell by
+//! [`view::render_viewport`]. The run loop is also the one place that
+//! answers a session's cursor-position queries (see
+//! [`crate::session::runtime::SessionRuntime::answer_terminal_queries`]'s doc
+//! comment on why an embedded session must, unlike `session::attach`) and
+//! that tells a session's pseudo-terminal and emulator the viewport's own
+//! size rather than the terminal's outer one — see [`view::viewport_slot`].
 
 pub mod state;
 pub mod view;
 
 use anyhow::Result;
+use ratatui::layout::Rect;
 
 use crate::Runtime;
 use crate::config::{self, EffectiveConfig, UserConfig};
@@ -34,11 +39,13 @@ use crate::integrations::{Discovery, IntegrationId, IntegrationKind, Integration
 use crate::launch::HarnessLaunch;
 use crate::pty::TerminalSize;
 use crate::session::{
-    self, LiveSession, NewSession, ProjectSessions, RuntimeError, SessionLifecycle, SessionRuntime,
+    self, NewSession, ProjectSessions, RuntimeError, SessionLifecycle, SessionRuntime,
 };
 use crate::tui::{AppEvent, DEFAULT_TICK, Event, EventSource, Screen};
 
-pub use state::{Action, HarnessRow, IntegrationRow, Mode, Overlay, SettingsEdit, ShellState};
+pub use state::{
+    Action, HarnessRow, IntegrationRow, Mode, Overlay, SettingsEdit, ShellState, ViewportGrid,
+};
 
 /// Open the shell and run it until the user leaves.
 ///
@@ -87,7 +94,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                         runtime,
                         &mut live,
                         &sessions,
-                        screen.size().unwrap_or_default(),
+                        viewport_terminal_size(&screen),
                     ) {
                         Ok(()) => {
                             if let Ok(records) = sessions.store().list() {
@@ -150,10 +157,15 @@ pub fn run(runtime: &Runtime) -> Result<()> {
             }
             Event::Resize(cols, rows) => {
                 screen.on_resize(cols, rows)?;
-                if let Some(id) = live.focused().cloned()
-                    && let Err(err) = live.resize(&id, TerminalSize::new(rows, cols))
-                {
-                    tracing::warn!(session = %id, %err, "could not resize the focused session");
+                if let Some(id) = live.focused().cloned() {
+                    // The viewport's own inner size, not the terminal's outer
+                    // one — see `view::viewport_slot`'s doc comment. A
+                    // harness resized to the terminal's full size would draw
+                    // for space Glasshouse's chrome has already claimed.
+                    let slot = view::viewport_slot(Rect::new(0, 0, cols, rows));
+                    if let Err(err) = live.resize(&id, TerminalSize::new(slot.height, slot.width)) {
+                        tracing::warn!(session = %id, %err, "could not resize the focused session");
+                    }
                 }
                 screen.draw(|frame| view::render(&state, frame))?;
             }
@@ -164,6 +176,13 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                 if crate::shutdown::shutdown_requested() {
                     return Ok(());
                 }
+
+                // An embedded session has no real terminal behind it to
+                // answer its own `ESC[6n` — Glasshouse is the terminal, so
+                // Glasshouse must answer, every tick, or a harness waiting
+                // on the reply hangs looking exactly like one that started
+                // and did nothing. See `SessionRuntime::answer_terminal_queries`.
+                live.answer_terminal_queries();
 
                 let mut redraw = false;
                 for (id, status) in live.poll_exits() {
@@ -184,13 +203,13 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     }
                 }
 
-                let text = state
+                let grid = state
                     .active_session()
                     .and_then(|record| live.get(&record.id))
-                    .map(LiveSession::scrollback)
+                    .map(|session| session.with_screen(build_viewport_grid))
                     .unwrap_or_default();
-                if text != state.viewport() {
-                    state.set_viewport(text);
+                if grid != *state.viewport_grid() {
+                    state.set_viewport_grid(grid);
                     redraw = true;
                 }
 
@@ -233,17 +252,91 @@ fn sync_focus(live: &mut SessionRuntime, state: &ShellState) {
     }
 }
 
+/// The viewport's own inner size, in the shape a freshly spawned session's
+/// pseudo-terminal needs — not the terminal's outer size. See
+/// `view::viewport_slot`'s doc comment.
+fn viewport_terminal_size(screen: &Screen) -> TerminalSize {
+    let outer = screen.size().unwrap_or_default();
+    let slot = view::viewport_slot(Rect::new(0, 0, outer.cols, outer.rows));
+    TerminalSize::new(slot.height, slot.width)
+}
+
+/// Convert `vt100`'s colour model to Ratatui's — the one place either module
+/// needs to know about the other's colour type.
+///
+/// `Default` becomes `None`, meaning "inherit whatever is already there"
+/// rather than any specific colour, so a cell whose fore/background was
+/// never set keeps the terminal's own default instead of being forced to a
+/// literal black or white.
+fn convert_color(color: vt100::Color) -> Option<ratatui::style::Color> {
+    match color {
+        vt100::Color::Default => None,
+        vt100::Color::Idx(index) => Some(ratatui::style::Color::Indexed(index)),
+        vt100::Color::Rgb(r, g, b) => Some(ratatui::style::Color::Rgb(r, g, b)),
+    }
+}
+
+/// The Ratatui style a single `vt100` cell should be drawn with.
+fn cell_style(cell: &vt100::Cell) -> ratatui::style::Style {
+    let mut style = ratatui::style::Style::default();
+    if let Some(fg) = convert_color(cell.fgcolor()) {
+        style = style.fg(fg);
+    }
+    if let Some(bg) = convert_color(cell.bgcolor()) {
+        style = style.bg(bg);
+    }
+    let mut modifier = ratatui::style::Modifier::empty();
+    if cell.bold() {
+        modifier |= ratatui::style::Modifier::BOLD;
+    }
+    if cell.italic() {
+        modifier |= ratatui::style::Modifier::ITALIC;
+    }
+    if cell.underline() {
+        modifier |= ratatui::style::Modifier::UNDERLINED;
+    }
+    if cell.inverse() {
+        modifier |= ratatui::style::Modifier::REVERSED;
+    }
+    style.add_modifier(modifier)
+}
+
+/// Walk a session's emulated screen into the [`ViewportGrid`]
+/// [`view::render_viewport`] draws. The only place `vt100` and Ratatui's
+/// colour and modifier types meet — see [`convert_color`].
+fn build_viewport_grid(screen: &vt100::Screen) -> ViewportGrid {
+    let (rows, cols) = screen.size();
+    let mut cells = Vec::with_capacity(usize::from(rows) * usize::from(cols));
+    for row in 0..rows {
+        for col in 0..cols {
+            let (text, style) = match screen.cell(row, col) {
+                Some(cell) => (cell.contents().to_owned(), cell_style(cell)),
+                None => (String::new(), ratatui::style::Style::default()),
+            };
+            cells.push((text, style));
+        }
+    }
+    // vt100 tracks whether the cursor should be hidden (`ESC[?25l`) — a
+    // harness that has hidden its own cursor should not get one drawn back
+    // in for it.
+    let cursor = (!screen.hide_cursor()).then(|| screen.cursor_position());
+    ViewportGrid::new(rows, cols, cells, cursor)
+}
+
 /// Resolve a harness, record a new session, and start it — the same
 /// selection seam `main.rs: launch_session` uses for `glasshouse launch`,
 /// minus attaching to this process's own terminal: the shell attaches by
 /// giving the session the viewport once its output starts arriving, instead.
 ///
-/// `size` is the shell's own terminal size at the moment `n` was pressed, not
-/// the default `HarnessLaunch` would otherwise use: a harness TUI lays itself
-/// out from the size it sees at startup, so starting it at 24x80 and resizing
-/// afterwards would draw its first frame for the wrong geometry — see
-/// `HarnessLaunch::size`'s doc comment, which names this exact failure mode
-/// for the single-session `attach` path that this mirrors.
+/// `size` is the viewport's own inner size at the moment `n` was pressed —
+/// see `view::viewport_slot`'s doc comment for why that, and not the
+/// terminal's outer size, is what a harness must be told it has — rather
+/// than the default `HarnessLaunch` would otherwise use: a harness TUI lays
+/// itself out from the size it sees at startup, so starting it at the wrong
+/// geometry and resizing afterwards would draw its first frame for space it
+/// does not have — see `HarnessLaunch::size`'s doc comment, which names this
+/// exact failure mode for the single-session `attach` path that this
+/// mirrors.
 fn start_session(
     app_runtime: &Runtime,
     live: &mut SessionRuntime,
@@ -383,4 +476,99 @@ pub fn save_project_settings(
         .display_root()
         .join(".glasshouse")
         .join("config.toml"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::{Color, Modifier};
+
+    /// Colours, bold/inverse, and cursor position must all survive the walk
+    /// from a `vt100::Screen` into a [`ViewportGrid`] — the design decision's
+    /// invariant that "colours, cursor position and line wrapping survive a
+    /// round trip through the emulator into Ratatui cells."
+    #[test]
+    fn colours_bold_inverse_and_cursor_position_survive_the_conversion() {
+        let mut parser = vt100::Parser::new(3, 10, 0);
+        // Bold, indexed red-on-blue "hi", then inverse-video "x".
+        parser.process(b"\x1b[1;31;44mhi\x1b[0m\x1b[7mx\x1b[0m");
+        parser.process(b"\x1b[2;3H"); // move to row 2, col 3 (1-based)
+
+        let grid = build_viewport_grid(parser.screen());
+
+        let (text, style) = grid.cell(0, 0).expect("cell (0,0) exists");
+        assert_eq!(text, "h");
+        assert_eq!(
+            style.fg,
+            Some(Color::Indexed(1)),
+            "fg 31 is ANSI red, index 1"
+        );
+        assert_eq!(
+            style.bg,
+            Some(Color::Indexed(4)),
+            "bg 44 is ANSI blue, index 4"
+        );
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+
+        let (_, inverse_style) = grid.cell(0, 2).expect("cell (0,2) exists");
+        assert!(inverse_style.add_modifier.contains(Modifier::REVERSED));
+
+        let (_, default_style) = grid.cell(1, 0).expect("cell (1,0) exists");
+        assert_eq!(
+            default_style.fg, None,
+            "an untouched cell's colour must inherit, not be forced to a literal colour"
+        );
+
+        assert_eq!(
+            grid.cursor(),
+            Some((1, 2)),
+            "vt100 reports zero-based; row 2 col 3 one-based is (1, 2)"
+        );
+    }
+
+    /// A hidden cursor (`ESC[?25l`) must not be drawn back in.
+    #[test]
+    fn a_hidden_cursor_is_not_shown() {
+        let mut parser = vt100::Parser::new(2, 5, 0);
+        parser.process(b"\x1b[?25l");
+        let grid = build_viewport_grid(parser.screen());
+        assert_eq!(grid.cursor(), None);
+    }
+
+    /// Text that overruns a row must wrap onto the next one exactly as
+    /// `vt100` lays it out — the grid is a direct walk of the screen, so this
+    /// is really a proof that the walk visits cells in the right order.
+    #[test]
+    fn line_wrapping_is_preserved_in_the_grid() {
+        let mut parser = vt100::Parser::new(2, 5, 0);
+        parser.process(b"abcdefghij"); // 10 characters into a 5-wide screen
+        assert!(
+            parser.screen().row_wrapped(0),
+            "the first row must have wrapped for this test to mean anything"
+        );
+
+        let grid = build_viewport_grid(parser.screen());
+        let row = |r: u16| -> String {
+            (0..5u16)
+                .map(|c| grid.cell(r, c).expect("cell exists").0.clone())
+                .collect()
+        };
+        assert_eq!(row(0), "abcde");
+        assert_eq!(row(1), "fghij");
+    }
+
+    /// A screen with nothing drawn on it yet is still a valid, non-empty
+    /// grid — every cell is blank, not absent — which is what lets the view
+    /// tell "no live session" apart from "a live session with a blank
+    /// screen".
+    #[test]
+    fn a_fresh_screen_converts_to_a_full_grid_of_blank_cells() {
+        let parser = vt100::Parser::new(4, 10, 0);
+        let grid = build_viewport_grid(parser.screen());
+        assert!(!grid.is_empty());
+        assert_eq!(grid.rows(), 4);
+        assert_eq!(grid.cols(), 10);
+        assert_eq!(grid.cell(0, 0).unwrap().0, "");
+        assert_eq!(grid.cursor(), Some((0, 0)));
+    }
 }

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::Style;
 
 use crate::config::Layer;
 use crate::integrations::{IntegrationId, IntegrationStatus};
@@ -86,6 +87,71 @@ pub enum Action {
     SaveProjectSettings,
 }
 
+/// A session's screen, as a terminal would have drawn it, ready to draw.
+///
+/// Built once per tick in `shell::build_viewport_grid` from the focused
+/// session's `vt100::Screen` and handed here via
+/// [`ShellState::set_viewport_grid`] — this module never touches `vt100`
+/// itself, the same way it never touches a [`crate::session::SessionRuntime`].
+/// `cells` is row-major: the cell at `(row, col)` lives at
+/// `row * cols + col`.
+///
+/// Empty — `rows` or `cols` is zero — when no live session has produced a
+/// screen yet, which [`super::view::render_viewport`] takes as its signal to
+/// fall back to the placeholder.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ViewportGrid {
+    rows: u16,
+    cols: u16,
+    cells: Vec<(String, Style)>,
+    cursor: Option<(u16, u16)>,
+}
+
+impl ViewportGrid {
+    pub fn new(
+        rows: u16,
+        cols: u16,
+        cells: Vec<(String, Style)>,
+        cursor: Option<(u16, u16)>,
+    ) -> Self {
+        Self {
+            rows,
+            cols,
+            cells,
+            cursor,
+        }
+    }
+
+    /// True when there is no screen to draw — no live session has produced
+    /// one yet.
+    pub fn is_empty(&self) -> bool {
+        self.rows == 0 || self.cols == 0
+    }
+
+    pub fn rows(&self) -> u16 {
+        self.rows
+    }
+
+    pub fn cols(&self) -> u16 {
+        self.cols
+    }
+
+    /// The cell at `(row, col)`, or `None` outside the grid — the view clips
+    /// to this rather than trusting `rows`/`cols` to match the render area.
+    pub fn cell(&self, row: u16, col: u16) -> Option<&(String, Style)> {
+        if row >= self.rows || col >= self.cols {
+            return None;
+        }
+        self.cells
+            .get(usize::from(row) * usize::from(self.cols) + usize::from(col))
+    }
+
+    /// The cursor's `(row, col)`, if the session's screen has one to show.
+    pub fn cursor(&self) -> Option<(u16, u16)> {
+        self.cursor
+    }
+}
+
 /// Everything the shell displays.
 pub struct ShellState {
     project_name: String,
@@ -104,10 +170,11 @@ pub struct ShellState {
     status: Option<String>,
     /// Who currently owns the keyboard. See [`Mode`].
     mode: Mode,
-    /// The text shown in the session viewport — the focused session's
-    /// scrollback, set by the run loop via [`ShellState::set_viewport`]. Not
-    /// the runtime itself: see the module doc.
-    viewport: String,
+    /// The screen shown in the session viewport — the focused session's
+    /// `vt100` screen, converted by the run loop and set via
+    /// [`ShellState::set_viewport_grid`]. Not the runtime itself: see the
+    /// module doc.
+    viewport_grid: ViewportGrid,
     /// The Settings overlay's own data, or `None` when it is not open. Kept
     /// separate from `overlay` because it carries real data (rows, pending
     /// edits, sub-mode) that a plain `Copy` marker cannot.
@@ -130,7 +197,7 @@ impl ShellState {
             overlay: None,
             status: None,
             mode: Mode::Control,
-            viewport: String::new(),
+            viewport_grid: ViewportGrid::default(),
             settings: None,
         }
     }
@@ -185,17 +252,18 @@ impl ShellState {
         self.mode
     }
 
-    /// The text currently shown in the session viewport. Empty until the run
-    /// loop has set it, which [`super::view::render`] uses to decide whether
-    /// to show it in place of the placeholder.
-    pub fn viewport(&self) -> &str {
-        &self.viewport
+    /// The screen currently shown in the session viewport. Empty until the
+    /// run loop has set it, which [`super::view::render_viewport`] uses to
+    /// decide whether to draw it in place of the placeholder.
+    pub fn viewport_grid(&self) -> &ViewportGrid {
+        &self.viewport_grid
     }
 
-    /// Replace the viewport text. The run loop calls this with the focused
-    /// session's scrollback whenever it changes.
-    pub fn set_viewport(&mut self, text: String) {
-        self.viewport = text;
+    /// Replace the viewport grid. The run loop calls this with the focused
+    /// session's screen, rebuilt from its `vt100::Parser`, whenever it
+    /// changes.
+    pub fn set_viewport_grid(&mut self, grid: ViewportGrid) {
+        self.viewport_grid = grid;
     }
 
     /// Present the next session, wrapping at the end.
@@ -1178,16 +1246,18 @@ mod tests {
         );
 
         let mut state = state_with(1);
-        state.set_viewport("growing...".to_owned());
+        let growing = ViewportGrid::new(1, 1, vec![("g".to_owned(), Style::default())], None);
+        state.set_viewport_grid(growing.clone());
         state.handle_key(press(KeyCode::Enter));
         assert_eq!(state.mode(), Mode::Session);
-        assert_eq!(state.viewport(), "growing...");
+        assert_eq!(state.viewport_grid(), &growing);
 
-        state.set_viewport("growing... more".to_owned());
+        let grown = ViewportGrid::new(1, 1, vec![("m".to_owned(), Style::default())], None);
+        state.set_viewport_grid(grown.clone());
         let escape = KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL);
         state.handle_key(escape);
         assert_eq!(state.mode(), Mode::Control);
-        assert_eq!(state.viewport(), "growing... more");
+        assert_eq!(state.viewport_grid(), &grown);
 
         assert_eq!(
             child.id(),

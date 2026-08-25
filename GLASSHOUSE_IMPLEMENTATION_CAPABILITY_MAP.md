@@ -260,13 +260,13 @@ Fixed architectural requirements
 - Glasshouse embeds the native harness terminal experience instead of replacing it with a Glasshouse chat composer.
 - Native commands, permission flows, model controls, compaction, resume behavior, and tool interfaces remain owned by the harness.
 
-☐ Render ANSI terminal output from the active PTY faithfully enough for native Claude Code and Codex TUIs to remain usable.
-☐ Preserve native colors, cursor position, line wrapping, and basic terminal control sequences required by supported harnesses.
+☑ Render ANSI terminal output from the active PTY faithfully enough for native Claude Code and Codex TUIs to remain usable.
+☑ Preserve native colors, cursor position, line wrapping, and basic terminal control sequences required by supported harnesses.
 ☑ Preserve native harness input behavior instead of replacing it with a Glasshouse chat composer.
 ☑ Allow native slash commands to pass directly to the underlying harness.
-☐ Allow native permission prompts to remain interactive.
-☐ Allow native compact, resume, model-selection, and tool interfaces to remain accessible when the harness provides them.
-☐ Make the embedded native product visually dominant while Glasshouse chrome remains minimal.
+☑ Allow native permission prompts to remain interactive.
+☑ Allow native compact, resume, model-selection, and tool interfaces to remain accessible when the harness provides them.
+☑ Make the embedded native product visually dominant while Glasshouse chrome remains minimal.
 ☑ Add an escape key sequence that temporarily captures input for Glasshouse-level navigation without permanently stealing input from the harness.
 
 Phase 6 — Harness adapter interface

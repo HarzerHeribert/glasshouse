@@ -10,22 +10,25 @@
 //! the bottom render at 1x1 to keep it honest.
 
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 
 use crate::config::Layer;
 use crate::session::{SessionDisposition, SessionRecord};
 
 use super::state::{
-    Mode, Overlay, SettingsPathInputView, SettingsSection, SettingsState, ShellState,
+    Mode, Overlay, SettingsPathInputView, SettingsSection, SettingsState, ShellState, ViewportGrid,
 };
 
-/// Draw the shell.
-pub fn render(state: &ShellState, frame: &mut Frame) {
-    let area = frame.area();
-    let [title_area, root_area, bar_area, viewport_area, footer_area] = Layout::default()
+/// The shell's fixed vertical chrome: title, root, session bar, viewport,
+/// footer, in that order. The one place this split is computed, so
+/// [`viewport_slot`] can hand the run loop the same rectangle [`render`]
+/// hands [`render_viewport`] without the two ever drifting apart.
+fn regions(area: Rect) -> [Rect; 5] {
+    Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
@@ -34,7 +37,24 @@ pub fn render(state: &ShellState, frame: &mut Frame) {
             Constraint::Min(0),
             Constraint::Length(1),
         ])
-        .areas(area);
+        .areas(area)
+}
+
+/// The rectangle [`render`] reserves for the session viewport, before any
+/// border the viewport itself draws.
+///
+/// The run loop uses this — not the terminal's outer size — to tell a
+/// session's pseudo-terminal and its `vt100` emulator how large a screen
+/// they actually have: whichever chrome surrounds the viewport must be
+/// excluded first, or the harness draws for space it does not have.
+pub fn viewport_slot(area: Rect) -> Rect {
+    regions(area)[3]
+}
+
+/// Draw the shell.
+pub fn render(state: &ShellState, frame: &mut Frame) {
+    let area = frame.area();
+    let [title_area, root_area, bar_area, viewport_area, footer_area] = regions(area);
 
     render_title(state, frame, title_area);
     render_root(state, frame, root_area);
@@ -130,18 +150,93 @@ fn render_session_bar(state: &ShellState, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// Draws a [`ViewportGrid`] cell by cell into whatever area it is given.
+///
+/// A plain [`Widget`] rather than a free function taking `&mut Buffer`
+/// directly, so [`render_viewport`] can hand it to [`Frame::render_widget`]
+/// exactly like every other widget in this module.
+struct GridView<'a> {
+    grid: &'a ViewportGrid,
+    /// Only in [`Mode::Session`] is the keyboard actually reaching this
+    /// screen, so only then does the cursor mean anything to point at — a
+    /// blinking cursor while Glasshouse itself owns the keyboard would be
+    /// showing where nothing is being typed.
+    show_cursor: bool,
+}
+
+impl Widget for GridView<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        // Clip to whichever is smaller: the render area or the screen the
+        // session actually has. The two should agree — the run loop resizes the
+        // emulator to match the viewport — but a resize in flight should not be
+        // drawing past either one.
+        //
+        // Honest about what this is worth: it is cheap insurance, not the thing
+        // keeping the frame intact. `Buffer::cell_mut` already refuses anything
+        // outside the buffer, and the chrome below the viewport is drawn after
+        // it, so removing this clamp changes no rendered frame — verified by
+        // mutation. It is kept because bounding a loop by the space it was
+        // given is right regardless, and because the render order it currently
+        // relies on is not a property this widget can see or enforce.
+        let rows = area.height.min(self.grid.rows());
+        let cols = area.width.min(self.grid.cols());
+        for row in 0..rows {
+            for col in 0..cols {
+                let Some((text, style)) = self.grid.cell(row, col) else {
+                    continue;
+                };
+                let Some(cell) = buf.cell_mut((area.x + col, area.y + row)) else {
+                    continue;
+                };
+                cell.set_symbol(if text.is_empty() { " " } else { text.as_str() });
+                cell.set_style(*style);
+            }
+        }
+
+        if !self.show_cursor {
+            return;
+        }
+        let Some((row, col)) = self.grid.cursor() else {
+            return;
+        };
+        if row >= rows || col >= cols {
+            return;
+        }
+        if let Some(cell) = buf.cell_mut((area.x + col, area.y + row)) {
+            cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+        }
+    }
+}
+
 /// The region reserved for the active session's terminal.
 ///
-/// Once the run loop has handed over any scrollback via
-/// [`ShellState::set_viewport`], that text fills the space — the last lines
-/// that fit, most recent at the bottom. Raw bytes, not a rendered terminal:
-/// Glasshouse does not emulate one yet (see
-/// [`crate::session::runtime::Scrollback`]'s doc comment), so escape
-/// sequences show up as themselves. Until then, or for a session that has
-/// produced nothing yet, the placeholder below explains what will occupy the
-/// space rather than faking a terminal that would suggest more is attached
-/// than really is.
+/// Once the run loop has converted the focused session's `vt100` screen to a
+/// [`ViewportGrid`] via [`ShellState::set_viewport_grid`], that grid is drawn
+/// cell by cell — colours, bold/italic/underline/inverse, and the cursor all
+/// carried over from the emulator. A session that has not produced one yet,
+/// or none is active, falls back to the placeholder below, which explains
+/// what will occupy the space rather than faking a terminal that would
+/// suggest more is attached than really is.
+///
+/// A live grid gets the *whole* area, with no border: Phase 5 requires the
+/// embedded harness to stay visually dominant while Glasshouse's own chrome
+/// stays minimal, and a border spends one row and two columns of every frame
+/// on Glasshouse instead of the product it is hosting. The placeholder keeps
+/// its border and title, since there is no harness screen yet for a border
+/// to compete with.
 fn render_viewport(state: &ShellState, frame: &mut Frame, area: Rect) {
+    let grid = state.viewport_grid();
+    if !grid.is_empty() {
+        frame.render_widget(
+            GridView {
+                grid,
+                show_cursor: state.mode() == Mode::Session,
+            },
+            area,
+        );
+        return;
+    }
+
     let block = Block::default().borders(Borders::ALL).title(
         state
             .active_session()
@@ -150,14 +245,6 @@ fn render_viewport(state: &ShellState, frame: &mut Frame, area: Rect) {
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
-    if !state.viewport().is_empty() {
-        let all: Vec<&str> = state.viewport().lines().collect();
-        let start = all.len().saturating_sub(usize::from(inner.height));
-        let lines: Vec<Line> = all[start..].iter().map(|line| Line::from(*line)).collect();
-        frame.render_widget(Paragraph::new(lines), inner);
-        return;
-    }
 
     let lines = match state.active_session() {
         Some(session) => vec![
@@ -805,62 +892,125 @@ mod tests {
     // The viewport and the session-mode footer.
     // -----------------------------------------------------------------
 
+    /// Build a plain, unstyled grid from lines of ASCII text, padding every
+    /// row to the widest one with blanks — good enough for rendering tests,
+    /// which are about placement and clipping, not about `vt100` conversion
+    /// (that lives in `shell::mod`'s own tests, against a real parser).
+    fn grid_from_lines(lines: &[&str]) -> ViewportGrid {
+        let rows = lines.len() as u16;
+        let cols = lines
+            .iter()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0) as u16;
+        let mut cells = Vec::with_capacity(usize::from(rows) * usize::from(cols));
+        for line in lines {
+            let chars: Vec<char> = line.chars().collect();
+            for col in 0..usize::from(cols) {
+                let ch = chars.get(col).copied().unwrap_or(' ');
+                cells.push((ch.to_string(), Style::default()));
+            }
+        }
+        ViewportGrid::new(rows, cols, cells, None)
+    }
+
     #[test]
-    fn the_viewport_shows_the_set_text_once_non_empty() {
+    fn the_viewport_shows_the_set_grid_once_non_empty() {
         let mut state = sample();
-        state.set_viewport("first line\nsecond line\nthird line".to_owned());
+        state.set_viewport_grid(grid_from_lines(&[
+            "first line",
+            "second line",
+            "third line",
+        ]));
         let text = rendered(&state, 100, 24);
         assert!(text.contains("first line"), "got:\n{text}");
         assert!(text.contains("second line"), "got:\n{text}");
         assert!(text.contains("third line"), "got:\n{text}");
         assert!(
             !text.contains("This viewport is reserved"),
-            "the placeholder must not show once there is real output:\n{text}"
+            "the placeholder must not show once there is a live screen:\n{text}"
         );
     }
 
-    /// Only the lines that fit are shown, most recent at the bottom.
+    /// A screen taller than the render area is clipped, not overflowed — the
+    /// top of the screen stays visible, since a `vt100` screen has no notion
+    /// of "the most recent lines" the way raw scrollback text did.
     #[test]
-    fn the_viewport_shows_only_the_most_recent_lines_that_fit() {
+    fn a_grid_taller_than_the_area_is_clipped_not_overflowed() {
         let mut state = sample();
         let lines: Vec<String> = (0..50).map(|i| format!("line-{i}")).collect();
-        state.set_viewport(lines.join("\n"));
+        let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
+        state.set_viewport_grid(grid_from_lines(&borrowed));
 
         let text = rendered(&state, 100, 10);
         assert!(
-            text.contains("line-49"),
-            "the most recent line must be visible:\n{text}"
-        );
-        assert!(
-            !text.contains("line-0"),
-            "the oldest lines should have scrolled off:\n{text}"
+            text.contains("line-0"),
+            "the top of the screen must stay visible:\n{text}"
         );
     }
 
     /// "Keep the existing placeholder for the no-session case" — and for the
     /// active-but-silent-so-far case too: the placeholder is only replaced
-    /// once there is real output to show.
+    /// once a live session has a screen to show.
     #[test]
     fn an_empty_viewport_keeps_the_existing_placeholder() {
         let state = sample();
-        assert_eq!(state.viewport(), "");
+        assert!(state.viewport_grid().is_empty());
         let text = rendered(&state, 100, 24);
         assert!(text.contains("This viewport is reserved"), "got:\n{text}");
     }
 
-    /// A viewport full of real output, at sizes much smaller than the
-    /// content, must not panic the slicing that keeps it bounded to what
-    /// fits.
+    /// A live grid gets the whole viewport area with no border, so the
+    /// harness it belongs to is the dominant thing on screen; the
+    /// placeholder keeps its border since there is no harness screen yet to
+    /// compete with it.
     #[test]
-    fn the_viewport_does_not_panic_with_real_output_at_absurd_sizes() {
+    fn the_viewport_border_is_dropped_once_a_live_grid_is_shown() {
+        let mut state = sample();
+        let placeholder = rendered(&state, 40, 10);
+        assert!(
+            placeholder.contains('┌'),
+            "the placeholder keeps its border:\n{placeholder}"
+        );
+
+        state.set_viewport_grid(grid_from_lines(&["hello"]));
+        let live = rendered(&state, 40, 10);
+        assert!(
+            !live.contains('┌'),
+            "a live session's screen must not be boxed in:\n{live}"
+        );
+        assert!(live.contains("hello"), "got:\n{live}");
+    }
+
+    /// A grid full of real content, at sizes much smaller than the content,
+    /// must not panic the clipping that keeps it bounded to the area.
+    #[test]
+    fn the_viewport_does_not_panic_with_a_real_grid_at_absurd_sizes() {
         let mut state = sample();
         let lines: Vec<String> = (0..500)
             .map(|i| format!("line-{i}-{}", "x".repeat(i % 50)))
             .collect();
-        state.set_viewport(lines.join("\n"));
+        let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
+        state.set_viewport_grid(grid_from_lines(&borrowed));
         for (w, h) in [(1, 1), (1, 40), (40, 1), (3, 3), (200, 60)] {
             rendered(&state, w, h);
         }
+    }
+
+    /// A cursor position the emulator reports but that the render area
+    /// cannot contain (a resize race) must be ignored, not panic.
+    #[test]
+    fn a_cursor_outside_the_render_area_does_not_panic() {
+        let mut state = sample();
+        state.set_viewport_grid(ViewportGrid::new(
+            1,
+            1,
+            vec![("x".to_owned(), Style::default())],
+            Some((99, 99)),
+        ));
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(state.mode(), Mode::Session);
+        rendered(&state, 1, 1);
     }
 
     /// The design note: "A user who cannot see how to get out is the

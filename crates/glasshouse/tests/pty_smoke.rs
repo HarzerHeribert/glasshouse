@@ -1457,18 +1457,16 @@ fn the_shell_opens_in_a_real_terminal_and_answers_the_keyboard() {
 // is never lost while a session is unfocused, and exit is detected from the
 // process rather than from output going quiet.
 //
-// `SessionRuntime` does not itself answer the ConPTY startup handshake (see
-// the module doc on `glasshouse::pty`) -- that is a deliberately deferred
-// responsibility, not a bug in `runtime.rs`. So the tests below answer it
-// themselves via `DsrTracker`, the same way `Session` above does for the raw
-// `PtyProcess` tests, just driven through `SessionRuntime`'s own API
-// (`scrollback()`, `send_text`) instead of a private `Collector`.
-
-/// Tracks, per session, how many ConPTY startup Device Status Report queries
-/// (see [`DSR_CURSOR_POSITION_QUERY`] and the module doc on
-/// `glasshouse::pty`) have already been answered, so a runtime-driven test
-/// can act like a real terminal without hanging on Windows before a single
-/// byte of real output arrives.
+// `SessionRuntime` answers the ConPTY startup handshake itself for embedded
+// sessions -- but only when whoever owns the runtime calls
+// `answer_terminal_queries`, because the reader thread cannot write to the
+// child. In the shipped product that caller is `shell::run`'s tick. These tests
+// own the runtime directly, so they answer on its behalf, the same way
+// `Session` above does for the raw `PtyProcess` tests.
+//
+// `an_embedded_session_answers_the_cursor_position_query_itself` is the test
+// that proves the production responder works; this helper exists so the other
+// runtime tests are not each blocked on a handshake they are not about.
 #[derive(Default)]
 struct DsrTracker(std::collections::HashMap<SessionId, usize>);
 

@@ -49,6 +49,73 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 5 — native terminal embedding (complete, 8 of 8)
+
+Contract: Given a live harness session, when Glasshouse draws it, the harness's
+own interface appears as it drew it — colours, cursor, wrapping and control
+sequences intact — and the harness's own commands, prompts and controls keep
+working, while Glasshouse's chrome stays out of the way.
+
+State: COMPLETE
+
+Production evidence:
+- `crates/glasshouse/src/session/runtime.rs`: each `LiveSession` owns a
+  `vt100::Parser` fed by the reader thread; `answer_terminal_queries` replies to
+  `ESC[6n`; `resize` moves the emulator grid and the child's pseudo-terminal
+  together.
+- `crates/glasshouse/src/shell/mod.rs`: `build_viewport_grid`, `cell_style` and
+  `convert_color` — the single place vt100's colour model meets Ratatui's.
+  The tick rebuilds the grid, answers terminal queries, and sizes the child from
+  the viewport's inner rect rather than the outer terminal.
+- `crates/glasshouse/src/shell/view.rs`: `GridView` draws the grid cell by cell.
+  The border is dropped once a live grid exists, so the harness gets the whole
+  area — the chrome is four rows and the harness's name is already in the title.
+
+Regression evidence:
+- `an_embedded_session_answers_the_cursor_position_query_itself` — a real
+  harness asks, and receives exactly `ESC[1;1R`.
+- `colours_bold_inverse_and_cursor_position_survive_the_conversion`,
+  `line_wrapping_is_preserved_in_the_grid`, `a_hidden_cursor_is_not_shown`,
+  `a_fresh_screen_converts_to_a_full_grid_of_blank_cells`.
+- `the_viewport_border_is_dropped_once_a_live_grid_is_shown`,
+  `the_viewport_does_not_panic_with_a_real_grid_at_absurd_sizes`,
+  `a_cursor_outside_the_render_area_does_not_panic`.
+- The cursor-query scanner is tested at every one of the five possible read
+  splits, one byte at a time, on a near miss, and on `ESC ESC [ 6 n`.
+
+Failure/isolation evidence — mutations, each observed to fail its target:
+- Nothing answers the cursor query: the harness hangs for the full timeout.
+- The reply uses vt100's zero-based cursor: emits `ESC[0;0R`, not a position.
+- The scanner forgets a byte that begins a fresh match.
+- Every colour converts to default; every modifier is dropped.
+
+**Two findings worth recording.**
+
+*The responder had no production caller.* It shipped in `a1fa6c0` called only
+from its own test — exactly the standard applied to Phase 1 line 90 and to the
+runtime boxes, missed by the orchestrator who wrote it and caught by the worker
+implementing the rendering. An embedded harness sending `ESC[6n` at startup
+would have hung in the real shell while every test passed. It now runs on the
+tick.
+
+*The viewport's clipping clamp is not observable.* Removing
+`area.height.min(grid.rows())` changes no rendered frame: `Buffer::cell_mut`
+refuses anything outside the buffer, and the chrome below the viewport is drawn
+after it. A containment test written to catch this passed for the wrong reason —
+render order, not clipping — and was deleted rather than kept. The clamp stays,
+with a comment saying plainly that it is cheap insurance rather than the thing
+keeping the frame intact, because the render order it currently relies on is not
+a property the widget can see.
+
+Platform/external evidence:
+- CI on this batch's commit.
+
+Missing evidence:
+- Fidelity is asserted against synthetic escape sequences, not against Claude
+  Code's or Codex's real TUI. The stated bar is "usable", which only a real
+  harness can settle. `vt100` was chosen partly because swapping to
+  `alacritty_terminal` is a bounded change if it proves insufficient.
+
 ### Phase 2D — the settings view (nine of twenty lines)
 
 Contract: Given a project session, when the user opens settings, they can see
