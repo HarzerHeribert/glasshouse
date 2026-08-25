@@ -110,6 +110,45 @@ Missing evidence:
 - Selecting a mode is Phase 9A, and unimplemented. This line is the declaration
   half only.
 
+### Phase 8 — Record observed Codex compaction events or compaction-related state when available
+
+Contract: Given a Codex session that compacts its context, when Glasshouse is
+asked about that session afterwards, it can say that a compaction happened —
+without replacing the harness's own compaction mechanism.
+
+State: **BLOCKED on Phase 30, and deliberately not forced.**
+
+What is established:
+- Codex exposes `PreCompact` and `PostCompact` in the hook catalogue read from
+  its own review screen, so unlike Claude Code — which exposes no compaction
+  hook at all, and whose equivalent line is blocked for that reason — the
+  events are genuinely *available* here.
+- Codex has a `/compact` command ("summarize conversation to prevent hitting
+  the context limit"), so a compaction can be triggered deliberately rather
+  than waited for. Observing these events is therefore cheap, which is not the
+  usual situation with compaction.
+- Requesting them is two lines in `REPORTED_EVENTS`.
+
+Why the box is not checked anyway:
+- `lifecycle_for` maps a harness event to a `SessionLifecycle`, and compaction
+  **is not a lifecycle state** — a session that compacts was running before and
+  is running after. Mapping it to one would be a lie of convenience.
+- So "record" has to mean durable state of some other kind, and that state is
+  **Phase 30's line: "Track the number of observed compactions for a session
+  when known."** Phase 30 is unimplemented and far later in map order.
+- Requesting the events and writing only a log line would satisfy "observed"
+  while quietly failing "record". A log is not state, and checking the box on
+  it would be exactly the confusion between code presence and product behaviour
+  this ledger exists to prevent.
+
+The honest shape: this line is the observation half of a capability whose
+storage half belongs to Phase 30, the same way Phase 1 line 90 sat complete and
+unreachable until an adapter existed to feed it. When Phase 30 adds the counter,
+this becomes a two-line change plus one `/compact` against the real binary.
+
+Missing evidence:
+- Phase 30's per-session compaction count. Everything else is ready.
+
 ### Phase 8 — Detect Codex waiting-for-user and permission states structurally when possible
 
 Contract: Given a Codex session Glasshouse started, when Codex stops to ask the
