@@ -49,6 +49,92 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 9B — scoped harness wrappers and shims (nine of nine, COMPLETE)
+
+Contract: Given a launch profile, when the user starts a harness from the shell
+— through `glasshouse run` or a shim they asked Glasshouse to generate — the
+harness runs with exactly the profile behaviour it would have had from the TUI,
+with every override confined to that process tree, while Glasshouse never
+touches a shell startup file and deleting a generated shim is enough to remove
+it.
+
+State: **COMPLETE.**
+
+Production evidence:
+- `cli.rs` — `Command::Run` (fields identical to `Command::Launch`) and
+  `Command::Shim { harness, --profile, --dir, --name, --force }`.
+- `main.rs` — `Command::Launch { .. } | Command::Run { .. }` share **one**
+  dispatch arm calling `launch_session`. The or-pattern only type-checks while
+  both variants declare identical fields, so a divergence is a compile error
+  rather than a review miss. That is line 390 made structural.
+- `shim.rs` — `ShimRequest`, `ShimError`, `render`/`default_file_name` keyed
+  off the injected `HostPlatform` (never `#[cfg]`, so the Windows `.cmd` shape
+  is exercised on every runner), and `generate`, the only function in the
+  module that touches a filesystem and which writes exactly one file inside
+  `request.dir`.
+
+Regression evidence — the twelve named acceptance tests, plus one added by the
+orchestrator:
+- `glasshouse_run_and_glasshouse_launch_take_the_same_path`,
+  `a_profile_behaves_identically_from_run_and_from_launch`
+- `an_override_reaches_the_spawned_process_and_not_the_parent`,
+  `the_users_environment_survives_except_for_explicit_overrides` — both spawn
+  a real env-dumping child and confirm `PATH`, which no launch names, arrives
+  unchanged beside the one explicit override.
+- `a_generated_shim_contains_no_secret_and_no_url`,
+  `a_generated_shim_calls_glasshouse_run`,
+  `a_shim_is_written_only_inside_the_user_selected_directory`,
+  `a_windows_shim_is_a_cmd_file_and_a_unix_shim_is_a_shell_script`,
+  `generating_a_shim_never_touches_a_shell_startup_file`,
+  `deleting_a_generated_shim_leaves_nothing_behind`,
+  `an_existing_file_is_not_overwritten_without_force`
+- `a_generated_shim_actually_starts_the_harness` — end-to-end: generates a shim
+  through the real subcommand, then executes **only the generated file**, and
+  asserts the harness received the native profile's `--permission-mode auto`.
+  Unix-only, flagged, with precedent in this file.
+- `a_shell_unsafe_name_is_refused_before_any_file_is_written` — **added by the
+  orchestrator.** See below.
+
+**A profile name is untrusted input reaching a command line.** The generated
+shim interpolates the harness and profile names into a script, and a profile
+name is user-chosen. The worker flagged that it had quoted but not escaped
+them, and judged a general shell-escaper out of scope — correctly, because the
+right answer here is not escaping. This codebase already answers this class of
+problem by **refusing**: `platform::exec` rejects `cmd.exe` metacharacters in
+harness arguments rather than trying to quote them
+(`spawn_command_windows_script_rejects_each_cmd_metacharacter`). So
+`check_name` now refuses any name outside `[A-Za-z0-9._-]`, before a path is
+computed or a byte written, and says which character it objected to. An
+allow-list is right by construction where an escaper has to be right about two
+shells forever, and a profile name is a TOML table key, so nothing legitimate
+is lost.
+
+Non-vacuity: **six mutations, six kills** — the unsafe-name check removed; a
+provider URL embedded in the shim; a shell-startup-file write added; the
+overwrite guard removed; Windows rendering the Unix script; and a second
+`launch_session` call site introduced. The last verdict was re-verified by
+reading the **bin** target's own result line after the first reading showed
+only the lib target's, which had filtered the test out.
+
+Platform/external evidence — the real binary:
+- `glasshouse shim claude-code --profile native --dir <tools>` wrote a
+  125-byte, mode-0755 file whose entire contents are
+  `#!/bin/sh` and one `exec "<glasshouse>" run "claude-code" --profile
+  "native" -- "$@"` — no secret, no URL, no routing logic, no duplicated
+  adapter argument. It printed the exact path and the line saying that
+  deleting the file is all it takes.
+- `glasshouse shim claude-code --profile 'evil"; id; echo "'` was refused:
+  "refusing to generate a shim for profile `…`: it contains `"`, which a shell
+  would interpret rather than pass through."
+
+Missing evidence:
+- `a_generated_shim_actually_starts_the_harness` is Unix-only; the Windows
+  `.cmd` *content* is covered everywhere by
+  `a_windows_shim_is_a_cmd_file_and_a_unix_shim_is_a_shell_script`, but
+  actually executing a generated `.cmd` on native Windows is unproven.
+- `glasshouse shim` does not create `--dir` if it is missing, by design; that
+  failure path has no dedicated test.
+
 ### Phase 9A — harness launch profiles (seventeen of twenty-six)
 
 Contract: Given a harness and a selected launch profile, when the user starts a

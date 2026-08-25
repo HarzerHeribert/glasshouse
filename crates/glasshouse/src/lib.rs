@@ -20,6 +20,7 @@ pub mod project;
 pub mod pty;
 pub mod session;
 pub mod shell;
+pub mod shim;
 pub mod shutdown;
 pub mod tui;
 

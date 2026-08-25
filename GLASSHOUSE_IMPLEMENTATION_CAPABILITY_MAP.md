@@ -379,15 +379,15 @@ Fixed architectural requirements
 - Environment variables, CLI arguments, and generated configuration apply only to the launched process tree.
 - Glasshouse must not mutate the user's global harness installation or persistent global harness configuration as a side effect of selecting a profile.
 
-☐ Add glasshouse run <harness> --profile <profile> to launch a real harness with a selected Glasshouse launch profile outside the full Glasshouse TUI.
-☐ Make glasshouse run inject configuration only into the spawned process and its descendants.
-☐ Preserve the user’s existing shell environment except for explicit launch-profile overrides.
-☐ Add an optional command for generating a lightweight user-owned shim such as claude-glasshouse when the user explicitly requests one.
-☐ Make generated shims call glasshouse run instead of duplicating provider secrets or routing logic.
-☐ Never create shell aliases or modify .zshrc, .bashrc, PowerShell profiles, or other shell startup files without explicit user action.
-☐ Allow generated shims to live in a user-selected tools directory instead of requiring a system-wide install.
-☐ Make deleting a generated shim sufficient to remove that convenience entry point.
-☐ Keep the same launch-profile behavior whether a session is started from the TUI, glasshouse run, or an optional shim.
+☑ Add glasshouse run <harness> --profile <profile> to launch a real harness with a selected Glasshouse launch profile outside the full Glasshouse TUI.
+☑ Make glasshouse run inject configuration only into the spawned process and its descendants.
+☑ Preserve the user’s existing shell environment except for explicit launch-profile overrides.
+☑ Add an optional command for generating a lightweight user-owned shim such as claude-glasshouse when the user explicitly requests one.
+☑ Make generated shims call glasshouse run instead of duplicating provider secrets or routing logic.
+☑ Never create shell aliases or modify .zshrc, .bashrc, PowerShell profiles, or other shell startup files without explicit user action.
+☑ Allow generated shims to live in a user-selected tools directory instead of requiring a system-wide install.
+☑ Make deleting a generated shim sufficient to remove that convenience entry point.
+☑ Keep the same launch-profile behavior whether a session is started from the TUI, glasshouse run, or an optional shim.
 
 Phase 9C — Provider protocol model
 

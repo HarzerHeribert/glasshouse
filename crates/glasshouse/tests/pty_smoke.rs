@@ -2719,6 +2719,106 @@ fn an_environment_override_reaches_a_real_child() {
     );
 }
 
+/// A harness that dumps its whole received environment, one `KEY=value` pair
+/// per line, so a test can search for exactly the pairs it cares about
+/// without having to name every variable in advance.
+#[cfg(windows)]
+fn install_env_dump_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let path = bin_dir.join(format!("{name}.cmd"));
+    std::fs::write(&path, "@echo off\r\nset\r\n").expect("write fake harness");
+    path
+}
+
+#[cfg(unix)]
+fn install_env_dump_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join(name);
+    std::fs::write(&path, "#!/bin/sh\nenv\n").expect("write fake harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// An environment override applied through [`HarnessLaunch`] — the same seam
+/// `LaunchOverlay::apply` (Phase 9A) uses to put a resolved profile's
+/// environment operations onto a launch — reaches the spawned harness and
+/// nothing else.
+///
+/// No launch profile can produce an environment operation yet (every current
+/// overlay only ever adds *arguments* — see `profile::resolve`'s
+/// `BackendUnavailable` refusal, which is what stands between here and a
+/// provider-backed profile in Phase 9C/9D), so this goes straight at the
+/// seam a profile's overlay would use, through the real `HarnessLaunch` the
+/// production launch path builds. This is Phase 9B's own claim, proved
+/// rather than re-plumbed: "every override reaches only the child through
+/// `HarnessLaunch`".
+#[test]
+fn an_override_reaches_the_spawned_process_and_not_the_parent() {
+    const KEY: &str = "GLASSHOUSE_SHIM_OVERRIDE_TEST";
+    const VALUE: &str = "child-only-value";
+
+    assert!(
+        std::env::var(KEY).is_err(),
+        "test setup is degenerate: {KEY} is already set in this process"
+    );
+
+    let fixture = RuntimeFixture::new();
+    let path = install_env_dump_harness(&fixture.bin_dir, "env-dump-override");
+    let launch = fixture.launch(&path).env(KEY, VALUE);
+    let mut session = Session::spawn_harness(&launch);
+
+    session.expect(&format!("{KEY}={VALUE}"));
+    let status = session.wait_for_exit();
+    assert!(status.success(), "{status}");
+
+    // The override can only ever reach the child `HarnessLaunch::spawn`
+    // started -- an `env` call recorded on the launch builder has no way
+    // back into this process's own environment.
+    assert!(
+        std::env::var(KEY).is_err(),
+        "the override leaked into the parent process's own environment"
+    );
+}
+
+/// Everything the harness inherits and the launch profile never names keeps
+/// reaching it exactly as the user's own shell already has it --
+/// `TerminalCommand` inherits the whole environment, and only the overlay's
+/// explicit operations (applied through `HarnessLaunch::env`) ever touch any
+/// of it.
+#[test]
+fn the_users_environment_survives_except_for_explicit_overrides() {
+    const KEY: &str = "GLASSHOUSE_SHIM_ANOTHER_OVERRIDE_TEST";
+    const VALUE: &str = "only-this-one-changed";
+
+    let expected_path =
+        std::env::var("PATH").expect("PATH must be set in this process to run this test");
+
+    let fixture = RuntimeFixture::new();
+    let path = install_env_dump_harness(&fixture.bin_dir, "env-dump-survives");
+    let launch = fixture.launch(&path).env(KEY, VALUE);
+    let mut session = Session::spawn_harness(&launch);
+    let status = session.wait_for_exit();
+    assert!(status.success(), "{status}");
+
+    let output = strip_terminal_sequences(&session.output());
+    let output_upper = output.to_ascii_uppercase();
+
+    assert!(
+        output.contains(&format!("{KEY}={VALUE}")),
+        "the explicit override never reached the child:\n{output}"
+    );
+    // `PATH` is never named by this launch, so it must reach the child
+    // exactly as this process already has it -- inherited, not copied by
+    // hand. Compared case-insensitively on the variable *name* only (`set`
+    // reports it as `Path=` on Windows), never on the value.
+    assert!(
+        output_upper.contains(&format!("PATH={expected_path}").to_ascii_uppercase()),
+        "a variable the launch never named did not survive unchanged:\n{output}"
+    );
+}
+
 /// An embedded session answers the cursor-position query itself.
 ///
 /// This is the rule `session::attach` inverts. `attach` is a pass-through and
@@ -2913,6 +3013,96 @@ fn a_claude_code_session_is_launched_and_recorded_under_one_identifier() {
         records[0].native_session_id.as_deref(),
         Some(handed_over.as_str()),
         "the identifier Glasshouse handed the harness is not the one it recorded"
+    );
+}
+
+/// The whole shim mechanism, end to end: generate one through the real
+/// `glasshouse shim` subcommand, then run *only that file* -- never
+/// `glasshouse run` or `glasshouse launch` by name -- and check the harness
+/// it starts receives the resolved profile's arguments.
+///
+/// This is the proof that a shim someone put on their own `PATH` genuinely
+/// behaves like `glasshouse launch`: the shim carries no `--scope`,
+/// `--data-dir`, or `--config-dir` of its own (see `shim.rs`'s module doc --
+/// it embeds only a harness name, a profile name, and this executable's own
+/// path), so it is run from inside the project directory with
+/// `GLASSHOUSE_DATA_DIR`/`GLASSHOUSE_CONFIG_DIR` set the way a real shell
+/// already would have them, exactly as `glasshouse shim`'s own
+/// `AFTER_HELP` documents. Unix only: the shim it generates on this host is
+/// a `#!/bin/sh` script, and exec'ing one needs a real Unix process.
+#[cfg(unix)]
+#[test]
+fn a_generated_shim_actually_starts_the_harness() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    let shims_dir = tmp.path().join("shims");
+    for dir in [&state_dir, &config_dir, &shims_dir] {
+        std::fs::create_dir_all(dir).expect("create dir");
+    }
+
+    let harness = install_argv_harness(&bin_dir, "fake-claude-for-shim");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n",
+            harness.display()
+        ),
+    )
+    .expect("write user config");
+
+    // Generate the shim through the real subcommand -- not by constructing
+    // `shim::generate` by hand -- so this exercises the actual CLI wiring.
+    let generate = std::process::Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+        .arg("--scope")
+        .arg(&project_dir)
+        .arg("--data-dir")
+        .arg(&state_dir)
+        .arg("--config-dir")
+        .arg(&config_dir)
+        .arg("shim")
+        .arg("claude-code")
+        .arg("--profile")
+        .arg("native")
+        .arg("--dir")
+        .arg(&shims_dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run glasshouse shim");
+    assert!(
+        generate.status.success(),
+        "glasshouse shim failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&generate.stdout),
+        String::from_utf8_lossy(&generate.stderr)
+    );
+
+    let shim_path = shims_dir.join("claude-code");
+    assert!(
+        shim_path.is_file(),
+        "the shim was not written to --dir: {}",
+        shim_path.display()
+    );
+
+    // Run only the generated file, with none of Glasshouse's own `--scope`
+    // etc. flags, from inside the project directory -- exactly the way a
+    // user's shell would after adding `shims_dir` to `PATH`.
+    let command = TerminalCommand::new(&shim_path, &project_dir)
+        .env(glasshouse::paths::ENV_DATA_DIR, state_dir.as_os_str())
+        .env(glasshouse::paths::ENV_CONFIG_DIR, config_dir.as_os_str());
+    let mut session = Session::spawn(command);
+
+    session.expect("ARGV:");
+    let status = session.wait_for_exit();
+    assert!(status.success(), "{status}");
+
+    let output = strip_terminal_sequences(&session.output());
+    assert!(
+        output.contains("--permission-mode auto"),
+        "the harness never received the native profile's resolved arguments:\n{output}"
     );
 }
 

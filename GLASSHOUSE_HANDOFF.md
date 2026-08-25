@@ -4,25 +4,48 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 9A is seventeen of twenty-six. 138 -> 155 checked boxes.** `main`
-clean. Phase 8 is nine of ten, Phase 6 twelve of thirteen.
+**Phase 9B is complete; Phase 9A is seventeen of twenty-six. 138 -> 164
+checked boxes.** `main` clean. Phase 8 is nine of ten, Phase 6 twelve of
+thirteen.
 
-The nine open Phase 9A lines are open for recorded reasons, not for lack of
-effort: **350** needs response profiles (9K); **353** needs provider templates
-(9C/9D); **355**, **359**, **360** and **363** need generated configuration and
-direct providers (9F); **365** needs pairing class and response profile
-(9J/9K); **369** needs the router (34-37). Each is in the evidence ledger with
-the phase that unblocks it.
+Phase 9A's nine open lines are open for recorded reasons, each with the phase
+that unblocks it: **350** (9K), **353** (9C/9D), **355**, **359**, **360**,
+**363** (9F), **365** (9J/9K), **369** (34-37).
 
 **A behaviour change worth stating plainly.** Every Codex session Glasshouse
 starts now carries `--approve-for-me`, and every Claude Code session
 `--permission-mode auto`, because the default launch profile selects the
-harness's own automatic-review mode. That is the recorded "Approvals"
-decision taking effect. It was verified against the real Codex — the session
-came up and showed Codex's own trust prompt — and the end-to-end PTY test now
-asserts the exact argv rather than the previous "no arguments at all".
+harness's own automatic-review mode. Verified against the real Codex — the
+session came up and showed Codex's own trust prompt — and the end-to-end PTY
+test asserts the exact argv.
 
 ## Verified completed work
+
+### This session — wrappers and shims, and a name that reaches a command line
+
+Phase 9B closed whole. `glasshouse run` and `glasshouse launch` share **one**
+dispatch arm through an or-pattern, so line 390's "same behaviour from the TUI,
+`glasshouse run`, or a shim" is a compile error to violate rather than a
+review note. `glasshouse shim` writes one small file into a directory the user
+names, containing nothing but an `exec` back into `glasshouse run`.
+
+**The real binary:** a 125-byte, mode-0755 shim whose entire contents are
+`#!/bin/sh` and one `exec` line — no secret, no URL, no routing logic — and a
+message saying the exact path and that deleting it is all it takes.
+
+**A profile name is untrusted input reaching a command line.** The worker
+flagged that it had quoted but not escaped the names it interpolates, and
+judged a general shell-escaper out of scope. That judgement was right and the
+answer was not escaping: this codebase already **refuses** this class of input,
+in `platform::exec`'s rejection of `cmd.exe` metacharacters. `check_name` now
+refuses anything outside `[A-Za-z0-9._-]` before a byte is written, and names
+the offending character. Verified against the binary:
+`--profile 'evil"; id; echo "'` is refused.
+
+**Six mutations, six kills.** One verdict had to be re-read: the first pass
+showed the lib target's result line, which had filtered the test out, while the
+kill was in the **bin** target. Read the named test's own line, in the target
+that actually runs it.
 
 ### This session — launch profiles, and a vertical slice that reaches production
 

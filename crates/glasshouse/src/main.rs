@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::ExitCode;
 
 use std::io::IsTerminal;
@@ -6,9 +7,11 @@ use glasshouse::config::{self, EffectiveConfig, UserConfig};
 use glasshouse::integrations::Discovery;
 use glasshouse::launch::HarnessLaunch;
 use glasshouse::onboarding;
+use glasshouse::platform::HostPlatform;
 use glasshouse::pty::ExitStatus;
 use glasshouse::session;
 use glasshouse::session::{NewSession, ProjectSessions, SessionDisposition, SessionLifecycle};
+use glasshouse::shim::{self, ShimRequest};
 use glasshouse::{Cli, Command, Runtime, logging, shutdown};
 
 use clap::Parser;
@@ -72,7 +75,15 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         Some(Command::Sessions) => {
             print!("{}", session_report(&runtime)?);
         }
+        // `run` and `launch` dispatch through this one arm on purpose — see
+        // `Command::Run`'s doc. A change to how a launch is assembled can
+        // only ever be made here, once, so the two can never diverge.
         Some(Command::Launch {
+            harness,
+            profile,
+            harness_args,
+        })
+        | Some(Command::Run {
             harness,
             profile,
             harness_args,
@@ -92,6 +103,15 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         }
         Some(Command::Hook { session, event }) => {
             report_hook(&runtime, session, event);
+        }
+        Some(Command::Shim {
+            harness,
+            profile,
+            dir,
+            name,
+            force,
+        }) => {
+            return run_shim(harness, profile, dir, name.as_deref(), *force);
         }
         None => {
             // Setup runs by itself the first time, so a new user does not have
@@ -261,6 +281,48 @@ fn launch_session(
         eprintln!("glasshouse: the harness {status}");
     }
     Ok(exit_code_for(&status))
+}
+
+/// Generate one file that `exec`s `glasshouse run <harness> --profile
+/// <name>`, forwarding its own arguments.
+///
+/// The generated file is the entire mechanism — see [`glasshouse::shim`]'s
+/// module doc. This function only resolves *this* executable's own path and
+/// the host platform; [`shim::generate`] is the only thing that writes
+/// anything, and it writes exactly one file, inside `dir` and nowhere else.
+fn run_shim(
+    harness: &str,
+    profile: &str,
+    dir: &Path,
+    name: Option<&str>,
+    force: bool,
+) -> anyhow::Result<ExitCode> {
+    let glasshouse_exe = std::env::current_exe().map_err(|err| {
+        anyhow::anyhow!("could not determine the Glasshouse executable's own path: {err}")
+    })?;
+    let request = ShimRequest {
+        harness,
+        profile,
+        glasshouse_exe: &glasshouse_exe,
+        dir,
+        name,
+        force,
+    };
+
+    match shim::generate(HostPlatform::detect(), &request) {
+        Ok(path) => {
+            println!("wrote {}", path.display());
+            println!(
+                "deleting that file is all it takes to remove the shim; Glasshouse writes \
+                 nothing else on its behalf."
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(err) => {
+            eprintln!("glasshouse: {err}");
+            Ok(ExitCode::FAILURE)
+        }
+    }
 }
 
 /// A one-line summary of a resolved overlay's mechanisms, for the "opening a
@@ -664,6 +726,43 @@ fn setup(runtime: &Runtime, trigger: SetupTrigger) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This file's own source, with its `#[cfg(test)]` block (and `//`
+    /// comments) stripped — the same idiom as
+    /// `harness::resolving_a_launch_profile_touches_no_files`'s
+    /// `production_code` helper, used here to prove structure rather than to
+    /// forbid a name.
+    fn production_code(source: &str) -> String {
+        source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split always yields at least one part")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// `glasshouse run` exists only so a generated shim has a stable name to
+    /// `exec` into (see `glasshouse::shim`'s module doc); Phase 9B's
+    /// guarantee is that it behaves exactly like `glasshouse launch`. The
+    /// guarantee is structural, not merely observed: `run` and `launch`
+    /// match together in one arm in `run()` above and call `launch_session`
+    /// from there, so there is exactly one call site in production code for
+    /// this test to find — a second one would mean the two commands had
+    /// drifted onto separate paths.
+    #[test]
+    fn glasshouse_run_and_glasshouse_launch_take_the_same_path() {
+        let code = production_code(include_str!("main.rs"));
+        // `return launch_session(` matches only an actual call, never the
+        // `fn launch_session(` definition line itself.
+        let call_sites = code.matches("return launch_session(").count();
+        assert_eq!(
+            call_sites, 1,
+            "`glasshouse run` and `glasshouse launch` must dispatch through exactly one call \
+             to `launch_session` so they cannot diverge; found {call_sites} call sites"
+        );
+    }
 
     // --- a refused profile starts no process and records no session -------
 
