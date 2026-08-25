@@ -81,7 +81,9 @@ assumed.
 Regression evidence:
 - `a_recorded_codex_session_is_resumed_through_its_own_subcommand` (PTY smoke,
   **executed on macOS, Linux and Windows** — deliberately not `#[cfg]`-gated,
-  because Windows CI found a real defect on this exact fixture path for line 2).
+  because Windows CI found a real defect on this exact fixture path for line 2.
+  Confirmed by name in CI `32854403090`'s Windows and Linux job output, not
+  inferred from a green tick; the Windows PTY count went 35 -> 36).
   Drives the shipped binary end to end: `glasshouse launch codex` against a
   fake harness that writes a real rollout header under an isolated `CODEX_HOME`
   and echoes its own argv; asserts the launch argv is **bare**; takes the
