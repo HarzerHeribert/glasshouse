@@ -35,6 +35,9 @@ use glasshouse::Project;
 use glasshouse::launch::HarnessLaunch;
 use glasshouse::platform::{exec, paths};
 use glasshouse::pty::{ProcessSignal, PtyOutput, PtyProcess, TerminalCommand, TerminalSize};
+use glasshouse::session::{
+    LiveSession, RuntimeError, Scrollback, SessionId, SessionPresentation, SessionRuntime,
+};
 
 /// Upper bound for any single wait in these tests. Generous enough for a loaded
 /// CI runner, short enough that a genuine hang fails instead of stalling.
@@ -1440,4 +1443,643 @@ fn the_shell_opens_in_a_real_terminal_and_answers_the_keyboard() {
         output.contains("\x1b[?1049l") || !output.contains("\x1b[?1049h"),
         "the alternate screen was entered and never left:\n{output:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// SessionRuntime: several live harness sessions at once
+// ---------------------------------------------------------------------------
+//
+// Everything above exercises one child process through the raw PTY layer.
+// What follows exercises `glasshouse::session::runtime::SessionRuntime`,
+// which holds several such children at once, each in its own pseudo-terminal
+// with its own reader thread filling its own bounded `Scrollback`. See that
+// module's doc comment for the properties these tests exist to prove: output
+// is never lost while a session is unfocused, and exit is detected from the
+// process rather than from output going quiet.
+//
+// `SessionRuntime` does not itself answer the ConPTY startup handshake (see
+// the module doc on `glasshouse::pty`) -- that is a deliberately deferred
+// responsibility, not a bug in `runtime.rs`. So the tests below answer it
+// themselves via `DsrTracker`, the same way `Session` above does for the raw
+// `PtyProcess` tests, just driven through `SessionRuntime`'s own API
+// (`scrollback()`, `send_text`) instead of a private `Collector`.
+
+/// Tracks, per session, how many ConPTY startup Device Status Report queries
+/// (see [`DSR_CURSOR_POSITION_QUERY`] and the module doc on
+/// `glasshouse::pty`) have already been answered, so a runtime-driven test
+/// can act like a real terminal without hanging on Windows before a single
+/// byte of real output arrives.
+#[derive(Default)]
+struct DsrTracker(std::collections::HashMap<SessionId, usize>);
+
+impl DsrTracker {
+    /// Reply to any newly seen queries in `id`'s scrollback. Safe to call on
+    /// every poll of every session in play: on any platform other than
+    /// Windows the query never appears, so this is just a cheap scan of text
+    /// that never matches.
+    fn answer(&mut self, runtime: &mut SessionRuntime, id: &SessionId) {
+        let Some(session) = runtime.get(id) else {
+            return;
+        };
+        let query = std::str::from_utf8(DSR_CURSOR_POSITION_QUERY).expect("query is ascii");
+        let seen = session.with_scrollback(|scrollback| scrollback.text().matches(query).count());
+        let answered = self.0.entry(id.clone()).or_insert(0);
+        while *answered < seen {
+            let reply = std::str::from_utf8(DSR_CURSOR_POSITION_REPLY).expect("reply is ascii");
+            // Best effort: if the session has already exited there is
+            // nothing left to answer for, and the next poll will simply see
+            // no further queries either.
+            let _ = runtime.send_text(id, reply);
+            *answered += 1;
+        }
+    }
+
+    fn has_replied(&self, id: &SessionId) -> bool {
+        self.0.get(id).is_some_and(|count| *count > 0)
+    }
+}
+
+/// Wait until `id`'s first ConPTY handshake query has been answered, the way
+/// `Session::spawn`'s internal wait does for the raw `PtyProcess` tests above.
+///
+/// Needed only by tests that write input to a session before ever waiting for
+/// output from it: without this, a `send_text` issued before the handshake
+/// completes would race the reply this same test still owes on Windows.
+/// Elsewhere (waiting for output, waiting for exit) the polling loop answers
+/// the query as a side effect, so callers that only ever wait need not call
+/// this separately.
+fn settle(runtime: &mut SessionRuntime, id: &SessionId, dsr: &mut DsrTracker) {
+    let deadline = Instant::now() + SETTLE;
+    loop {
+        dsr.answer(runtime, id);
+        if dsr.has_replied(id) || Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// Wait until `needle` appears in `id`'s scrollback (after stripping terminal
+/// control sequences, the same way `Session::expect` does above), answering
+/// the ConPTY handshake along the way via `dsr`. Returns the stripped
+/// scrollback so callers can make further assertions against it. Panics with
+/// the raw scrollback if `needle` never appears within `TIMEOUT`.
+fn wait_for_text(
+    runtime: &mut SessionRuntime,
+    id: &SessionId,
+    dsr: &mut DsrTracker,
+    needle: &str,
+) -> String {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        dsr.answer(runtime, id);
+        let raw = runtime
+            .get(id)
+            .map(LiveSession::scrollback)
+            .unwrap_or_default();
+        let clean = strip_terminal_sequences(&raw);
+        if clean.contains(needle) {
+            return clean;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for {needle:?} in session `{id}`'s scrollback.\n\
+                 --- scrollback ---\n{raw}\n--- end ---"
+            );
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// A project and an install directory for the runtime tests to drop fake
+/// harnesses into, built exactly the way
+/// `a_direct_executable_launches_through_the_harness_seam` builds its own: a
+/// real `Project` discovered from a real (empty) `.git` directory, so every
+/// `HarnessLaunch` built from it derives a real, project-bound working
+/// directory rather than a stand-in.
+struct RuntimeFixture {
+    _tmp: tempfile::TempDir,
+    project: Project,
+    bin_dir: std::path::PathBuf,
+}
+
+impl RuntimeFixture {
+    fn new() -> Self {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_dir = tmp.path().join("proj");
+        std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let project = Project::discover(&project_dir, None, false).expect("discover project");
+        Self {
+            _tmp: tmp,
+            project,
+            bin_dir,
+        }
+    }
+
+    /// A `HarnessLaunch` for the executable at `path`, resolved through the
+    /// same seam production code uses -- no explicit cwd or program appears
+    /// anywhere in a test that uses this.
+    fn launch(&self, path: &std::path::Path) -> HarnessLaunch<'_> {
+        let resolved = exec::resolve_explicit(path).expect("resolve fake harness");
+        HarnessLaunch::new(resolved, &self.project)
+    }
+}
+
+/// Write a fake installed harness that reads one line from its input and
+/// echoes it back prefixed with `GOT:` -- used to prove that specific
+/// keystrokes reached a specific session.
+#[cfg(windows)]
+fn install_echo_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let path = bin_dir.join(format!("{name}.cmd"));
+    // Plain sequential lines, not one line joined with `&`: cmd.exe parses
+    // and executes each line of a script *file* in turn, so `%line%` on the
+    // line after `set /p` already sees the value just read -- no delayed
+    // expansion needed here, unlike `shell_command`'s single-line form.
+    std::fs::write(&path, "@echo off\r\nset /p line=\r\necho GOT:%line%\r\n")
+        .expect("write echo harness");
+    path
+}
+
+#[cfg(unix)]
+fn install_echo_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join(name);
+    std::fs::write(&path, "#!/bin/sh\nread line\necho GOT:$line\n").expect("write echo harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Write a fake installed harness that prints nothing at all and exits with
+/// `exit_code` -- used to prove that exit detection depends on the process
+/// itself, never on anything appearing in its output.
+#[cfg(windows)]
+fn install_silent_harness(
+    bin_dir: &std::path::Path,
+    name: &str,
+    exit_code: u8,
+) -> std::path::PathBuf {
+    let path = bin_dir.join(format!("{name}.cmd"));
+    std::fs::write(&path, format!("@echo off\r\nexit /b {exit_code}\r\n"))
+        .expect("write silent harness");
+    path
+}
+
+#[cfg(unix)]
+fn install_silent_harness(
+    bin_dir: &std::path::Path,
+    name: &str,
+    exit_code: u8,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\nexit {exit_code}\n")).expect("write silent harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Write a fake installed harness that stays alive doing nothing for roughly
+/// `seconds` -- used where a test needs a session it can still observe as
+/// running after acting on a different one.
+#[cfg(windows)]
+fn install_sleep_harness(
+    bin_dir: &std::path::Path,
+    name: &str,
+    seconds: u32,
+) -> std::path::PathBuf {
+    let path = bin_dir.join(format!("{name}.cmd"));
+    std::fs::write(
+        &path,
+        format!("@echo off\r\nping -n {seconds} 127.0.0.1 > nul\r\n"),
+    )
+    .expect("write sleep harness");
+    path
+}
+
+#[cfg(unix)]
+fn install_sleep_harness(
+    bin_dir: &std::path::Path,
+    name: &str,
+    seconds: u32,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\nsleep {seconds}\n")).expect("write sleep harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Write a fake installed harness that prints `lines` short lines and exits
+/// -- enough output, at any reasonable `lines` count, to overflow a small
+/// scrollback bound many times over.
+#[cfg(windows)]
+fn install_flood_harness(bin_dir: &std::path::Path, name: &str, lines: u32) -> std::path::PathBuf {
+    let path = bin_dir.join(format!("{name}.cmd"));
+    std::fs::write(
+        &path,
+        format!(
+            "@echo off\r\nfor /L %%i in (1,1,{lines}) do echo flood-line-%%i-0123456789012345678901234567890123456789\r\n"
+        ),
+    )
+    .expect("write flood harness");
+    path
+}
+
+#[cfg(unix)]
+fn install_flood_harness(bin_dir: &std::path::Path, name: &str, lines: u32) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join(name);
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\ni=0\nwhile [ $i -lt {lines} ]; do\n  echo \"flood-line-$i-0123456789012345678901234567890123456789\"\n  i=$((i+1))\ndone\n"
+        ),
+    )
+    .expect("write flood harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Two sessions started in one runtime run at the same time, each filling its
+/// own scrollback: one session's output must never appear in the other's,
+/// which is the entire reason `SessionRuntime` gives each session its own
+/// `Scrollback` instead of sharing one stream.
+#[test]
+fn two_sessions_run_concurrently_with_independent_scrollback() {
+    const MARKER_A: &str = "GLASSHOUSE-RUNTIME-MARKER-A";
+    const MARKER_B: &str = "GLASSHOUSE-RUNTIME-MARKER-B";
+
+    let fixture = RuntimeFixture::new();
+    let harness_a = install_marker_harness(&fixture.bin_dir, "runtime-a", MARKER_A, 0);
+    let harness_b = install_marker_harness(&fixture.bin_dir, "runtime-b", MARKER_B, 0);
+    let launch_a = fixture.launch(&harness_a);
+    let launch_b = fixture.launch(&harness_b);
+
+    let mut runtime = SessionRuntime::new();
+    let id_a = SessionId::new("runtime-a");
+    let id_b = SessionId::new("runtime-b");
+    runtime
+        .start(id_a.clone(), SessionPresentation::Embedded, &launch_a)
+        .expect("start a");
+    runtime
+        .start(id_b.clone(), SessionPresentation::Embedded, &launch_b)
+        .expect("start b");
+
+    let mut dsr = DsrTracker::default();
+    let text_a = wait_for_text(&mut runtime, &id_a, &mut dsr, MARKER_A);
+    let text_b = wait_for_text(&mut runtime, &id_b, &mut dsr, MARKER_B);
+
+    assert!(
+        !text_a.contains(MARKER_B),
+        "session a's scrollback leaked session b's marker:\n{text_a}"
+    );
+    assert!(
+        !text_b.contains(MARKER_A),
+        "session b's scrollback leaked session a's marker:\n{text_b}"
+    );
+
+    runtime.close(&id_a).expect("close a");
+    runtime.close(&id_b).expect("close b");
+}
+
+/// Sending text to a session that does not have focus still reaches it: focus
+/// is only a statement about which session the keyboard currently reaches,
+/// never about which sessions are allowed to receive anything at all -- see
+/// `SessionRuntime::send_text`'s doc comment.
+#[test]
+fn an_unfocused_session_still_receives_sent_text() {
+    let fixture = RuntimeFixture::new();
+    let holder_harness = install_sleep_harness(&fixture.bin_dir, "focus-holder", 20);
+    let echo_harness = install_echo_harness(&fixture.bin_dir, "unfocused-echo");
+    let holder_launch = fixture.launch(&holder_harness);
+    let echo_launch = fixture.launch(&echo_harness);
+
+    let mut runtime = SessionRuntime::new();
+    let id_holder = SessionId::new("focus-holder");
+    let id_target = SessionId::new("unfocused-target");
+    runtime
+        .start(
+            id_holder.clone(),
+            SessionPresentation::Embedded,
+            &holder_launch,
+        )
+        .expect("start holder");
+    runtime
+        .start(
+            id_target.clone(),
+            SessionPresentation::Embedded,
+            &echo_launch,
+        )
+        .expect("start target");
+
+    let mut dsr = DsrTracker::default();
+    settle(&mut runtime, &id_holder, &mut dsr);
+    settle(&mut runtime, &id_target, &mut dsr);
+
+    runtime.focus(&id_holder).expect("focus holder");
+    assert_eq!(runtime.focused(), Some(&id_holder));
+
+    runtime
+        .send_text(&id_target, "hello\r\n")
+        .expect("send to the unfocused session");
+    wait_for_text(&mut runtime, &id_target, &mut dsr, "GOT:hello");
+
+    assert_eq!(
+        runtime.focused(),
+        Some(&id_holder),
+        "sending text to another session must not move focus"
+    );
+
+    runtime.close(&id_holder).expect("close holder");
+    runtime.close(&id_target).expect("close target");
+}
+
+/// Moving focus back and forth changes nothing about either process: both
+/// keep the same pid and keep running throughout, because focus only records
+/// which session the keyboard reaches and never touches a process -- see
+/// `SessionRuntime::focus`'s doc comment.
+#[test]
+fn focus_changes_nothing_but_focus() {
+    let fixture = RuntimeFixture::new();
+    let harness_a = install_sleep_harness(&fixture.bin_dir, "steady-a", 20);
+    let harness_b = install_sleep_harness(&fixture.bin_dir, "steady-b", 20);
+    let launch_a = fixture.launch(&harness_a);
+    let launch_b = fixture.launch(&harness_b);
+
+    let mut runtime = SessionRuntime::new();
+    let id_a = SessionId::new("steady-a");
+    let id_b = SessionId::new("steady-b");
+    runtime
+        .start(id_a.clone(), SessionPresentation::Embedded, &launch_a)
+        .expect("start a");
+    runtime
+        .start(id_b.clone(), SessionPresentation::Embedded, &launch_b)
+        .expect("start b");
+
+    let mut dsr = DsrTracker::default();
+    settle(&mut runtime, &id_a, &mut dsr);
+    settle(&mut runtime, &id_b, &mut dsr);
+
+    let pid_a = runtime.get(&id_a).and_then(LiveSession::process_id);
+    let pid_b = runtime.get(&id_b).and_then(LiveSession::process_id);
+
+    for _ in 0..5 {
+        runtime.focus(&id_a).expect("focus a");
+        runtime.focus(&id_b).expect("focus b");
+    }
+    runtime.focus(&id_a).expect("focus a again");
+
+    assert_eq!(runtime.get(&id_a).and_then(LiveSession::process_id), pid_a);
+    assert_eq!(runtime.get(&id_b).and_then(LiveSession::process_id), pid_b);
+    assert!(runtime.get(&id_a).expect("a present").is_running());
+    assert!(runtime.get(&id_b).expect("b present").is_running());
+    assert_eq!(runtime.focused(), Some(&id_a));
+
+    runtime.close(&id_a).expect("close a");
+    runtime.close(&id_b).expect("close b");
+}
+
+/// A headless session runs exactly like any other -- it still fills its own
+/// scrollback -- but has no viewport to bring forward: `SessionRuntime::focus`
+/// must refuse it with `RuntimeError::Headless` rather than silently doing
+/// nothing, and it must never take focus on its own at start either.
+#[test]
+fn a_headless_session_runs_but_cannot_be_focused() {
+    const MARKER: &str = "GLASSHOUSE-HEADLESS-MARKER";
+
+    let fixture = RuntimeFixture::new();
+    let harness = install_marker_harness(&fixture.bin_dir, "headless", MARKER, 0);
+    let launch = fixture.launch(&harness);
+
+    let mut runtime = SessionRuntime::new();
+    let id = SessionId::new("headless-session");
+    runtime
+        .start(id.clone(), SessionPresentation::Headless, &launch)
+        .expect("start headless");
+
+    assert_eq!(
+        runtime.focused(),
+        None,
+        "a headless session must never take focus on its own"
+    );
+    assert!(matches!(
+        runtime.focus(&id),
+        Err(RuntimeError::Headless { .. })
+    ));
+
+    let mut dsr = DsrTracker::default();
+    let text = wait_for_text(&mut runtime, &id, &mut dsr, MARKER);
+    assert!(text.contains(MARKER));
+
+    runtime.close(&id).expect("close headless");
+}
+
+/// A session's exit is detected from the process itself, never inferred from
+/// its output: this harness prints nothing at all, and
+/// `SessionRuntime::poll_exits` must still notice it ended and report exactly
+/// the exit code it used -- proving exit detection does not depend on output
+/// the way it would if it merely watched for the pty to go quiet.
+#[test]
+fn exit_is_detected_with_no_output_at_all() {
+    const SILENT_EXIT_CODE: u8 = 42;
+
+    let fixture = RuntimeFixture::new();
+    let harness = install_silent_harness(&fixture.bin_dir, "silent", SILENT_EXIT_CODE);
+    let launch = fixture.launch(&harness);
+
+    let mut runtime = SessionRuntime::new();
+    let id = SessionId::new("silent-session");
+    runtime
+        .start(id.clone(), SessionPresentation::Embedded, &launch)
+        .expect("start silent");
+
+    let mut dsr = DsrTracker::default();
+    settle(&mut runtime, &id, &mut dsr);
+
+    let deadline = Instant::now() + TIMEOUT;
+    let mut ended = None;
+    while ended.is_none() && Instant::now() < deadline {
+        for (ended_id, status) in runtime.poll_exits() {
+            if ended_id == id {
+                ended = Some(status);
+            }
+        }
+        if ended.is_none() {
+            std::thread::sleep(POLL);
+        }
+    }
+    let status = ended.unwrap_or_else(|| {
+        let scrollback = runtime
+            .get(&id)
+            .map(LiveSession::scrollback)
+            .unwrap_or_default();
+        panic!(
+            "poll_exits never reported session `{id}` exiting.\n\
+             --- scrollback ---\n{scrollback}\n--- end ---"
+        );
+    });
+
+    assert_eq!(status.code(), u32::from(SILENT_EXIT_CODE));
+
+    runtime.close(&id).expect("close silent");
+}
+
+/// The scrollback stays within its configured bound even under real output
+/// from a real process: `SessionRuntime::with_scrollback_bytes` caps memory
+/// per session regardless of how much a harness prints, and the discarded
+/// count grows to say so.
+#[test]
+fn scrollback_stays_bounded_under_real_output() {
+    const CAP: usize = 2048;
+
+    let fixture = RuntimeFixture::new();
+    // 3000 lines of ~55 bytes each is well over 100KB -- dozens of times CAP.
+    let harness = install_flood_harness(&fixture.bin_dir, "flood", 3000);
+    let launch = fixture.launch(&harness);
+
+    let mut runtime = SessionRuntime::with_scrollback_bytes(CAP);
+    let id = SessionId::new("flood-session");
+    runtime
+        .start(id.clone(), SessionPresentation::Embedded, &launch)
+        .expect("start flood");
+
+    let mut dsr = DsrTracker::default();
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        dsr.answer(&mut runtime, &id);
+        let len = runtime
+            .get(&id)
+            .map(|session| session.with_scrollback(Scrollback::len))
+            .unwrap_or(0);
+        assert!(
+            len <= CAP,
+            "scrollback exceeded its cap mid-stream: {len} > {CAP}"
+        );
+        if runtime.poll_exits().iter().any(|(ended, _)| ended == &id) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "flood harness never exited");
+        std::thread::sleep(POLL);
+    }
+
+    let (len, dropped) = runtime
+        .get(&id)
+        .map(|session| session.with_scrollback(|s| (s.len(), s.dropped())))
+        .expect("session still present");
+    assert!(len <= CAP, "scrollback grew past its bound: {len} > {CAP}");
+    assert!(dropped > 0, "expected some output to have been discarded");
+
+    runtime.close(&id).expect("close flood");
+}
+
+/// Closing one session removes only that one: the runtime keeps the others
+/// running untouched, and if the closed session held focus it moves to a
+/// live, focusable survivor rather than vanishing -- see the focus-recovery
+/// logic in `SessionRuntime::close`.
+#[test]
+fn closing_one_session_leaves_the_others_running() {
+    let fixture = RuntimeFixture::new();
+    let harness_a = install_sleep_harness(&fixture.bin_dir, "closing-a", 20);
+    let harness_b = install_sleep_harness(&fixture.bin_dir, "surviving-b", 20);
+    let launch_a = fixture.launch(&harness_a);
+    let launch_b = fixture.launch(&harness_b);
+
+    let mut runtime = SessionRuntime::new();
+    let id_a = SessionId::new("closing-a");
+    let id_b = SessionId::new("surviving-b");
+    runtime
+        .start(id_a.clone(), SessionPresentation::Embedded, &launch_a)
+        .expect("start a");
+    runtime
+        .start(id_b.clone(), SessionPresentation::Embedded, &launch_b)
+        .expect("start b");
+
+    let mut dsr = DsrTracker::default();
+    settle(&mut runtime, &id_a, &mut dsr);
+    settle(&mut runtime, &id_b, &mut dsr);
+
+    assert_eq!(
+        runtime.focused(),
+        Some(&id_a),
+        "the first focusable session should hold focus"
+    );
+
+    runtime.close(&id_a).expect("close a");
+
+    assert_eq!(runtime.len(), 1);
+
+    // Ask the operating system, repeatedly, over a window long enough for a
+    // signal sent during `close` to have landed. `is_running()` alone cannot
+    // show this: it reads the status cached by the last `poll_exits`, so a
+    // survivor that had just been killed would still report itself running.
+    // Mutating `close` to kill every session left this test green until the
+    // poll below was added.
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < deadline {
+        let ended = runtime.poll_exits();
+        assert!(
+            !ended.iter().any(|(id, _)| id == &id_b),
+            "closing one session killed a different one: {ended:?}"
+        );
+        std::thread::sleep(POLL);
+    }
+
+    let survivor = runtime.get(&id_b).expect("survivor still present");
+    assert!(
+        survivor.is_running(),
+        "the surviving session must still be running"
+    );
+    assert_eq!(
+        runtime.focused(),
+        Some(&id_b),
+        "focus should move to the surviving session"
+    );
+
+    runtime.close(&id_b).expect("close b");
+}
+
+/// `SessionRuntime::write_to_focused` reaches whichever session currently
+/// holds focus: it is the path every real keystroke from a real terminal
+/// takes, so it has to actually reach the child process, not just record that
+/// it tried.
+#[test]
+fn keystrokes_reach_the_focused_session() {
+    let fixture = RuntimeFixture::new();
+    let harness = install_echo_harness(&fixture.bin_dir, "focused-echo");
+    let launch = fixture.launch(&harness);
+
+    let mut runtime = SessionRuntime::new();
+    let id = SessionId::new("focused-echo-session");
+    runtime
+        .start(id.clone(), SessionPresentation::Embedded, &launch)
+        .expect("start echo");
+
+    let mut dsr = DsrTracker::default();
+    settle(&mut runtime, &id, &mut dsr);
+    assert_eq!(runtime.focused(), Some(&id));
+
+    let wrote = runtime
+        .write_to_focused(b"hello\r\n")
+        .expect("write to the focused session");
+    assert!(
+        wrote,
+        "write_to_focused should report it had a session to send bytes to"
+    );
+
+    wait_for_text(&mut runtime, &id, &mut dsr, "GOT:hello");
+
+    runtime.close(&id).expect("close echo");
 }

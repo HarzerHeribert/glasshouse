@@ -206,14 +206,14 @@ Phase 3 — TUI shell
 
 Phase 4 — Generic PTY session runtime
 
-☐ Implement a generic PTY-backed child-process abstraction for interactive harnesses.
+☑ Implement a generic PTY-backed child-process abstraction for interactive harnesses.
 ☐ Allow the PTY runtime to spawn a command with an explicit working directory and environment.
 ☐ Stream PTY output continuously into an in-memory terminal buffer.
 ☐ Forward user keystrokes from the active Glasshouse session to the active PTY.
 ☐ Forward terminal resize events from Glasshouse to the child PTY.
 ☐ Support sending text programmatically to a PTY session without requiring the user to focus it.
 ☐ Support sending interrupt signals to a PTY session.
-☐ Detect process exit independently from textual terminal output.
+☑ Detect process exit independently from textual terminal output.
 ☐ Preserve a bounded terminal scrollback buffer for each live session.
 ☐ Keep inactive PTY sessions running while the user views another session.
 ☐ Ensure switching sessions changes only the presentation focus and does not restart the underlying process.

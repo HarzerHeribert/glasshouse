@@ -17,10 +17,12 @@
 //! directory from the active project and offers no way to override it.
 
 pub mod attach;
+pub mod runtime;
 pub mod select;
 pub mod store;
 
 pub use attach::attach;
+pub use runtime::{LiveSession, RuntimeError, Scrollback, SessionRuntime};
 pub use select::{ExecutableSource, HarnessSelection, SelectionError, select};
 pub use store::{
     NewSession, ProjectSessions, ResumableSession, SessionDisposition, SessionId, SessionLifecycle,
