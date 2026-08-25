@@ -917,3 +917,107 @@ mod escape_chord_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod native_input_tests {
+    use super::*;
+    use crate::session::{
+        SessionId, SessionLifecycle, SessionPresentation, SessionRecord, SessionRole,
+    };
+
+    fn session_state() -> ShellState {
+        let record = SessionRecord {
+            id: SessionId::new("live"),
+            project_id: "p".to_owned(),
+            harness: "claude-code".to_owned(),
+            native_session_id: None,
+            role: SessionRole::Normal,
+            lifecycle: SessionLifecycle::Running,
+            presentation: SessionPresentation::Embedded,
+            created_at: 0,
+            last_activity_at: 0,
+        };
+        let mut state = ShellState::new("p", "/p", "0.1.0", vec![record]);
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(state.mode(), Mode::Session);
+        state
+    }
+
+    /// A harness's own slash commands must reach it verbatim. Glasshouse never
+    /// interprets `/`, so `/compact` or `/model` is typed at the harness the
+    /// same way it would be with no Glasshouse in between.
+    #[test]
+    fn a_slash_command_passes_straight_through_to_the_harness() {
+        let mut state = session_state();
+        let mut sent = Vec::new();
+        for key in "/compact".chars() {
+            match state.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE)) {
+                Action::Forward(bytes) => sent.extend(bytes),
+                other => panic!("`{key}` was intercepted as {other:?} instead of forwarded"),
+            }
+        }
+        assert_eq!(String::from_utf8(sent).unwrap(), "/compact");
+        assert_eq!(state.mode(), Mode::Session, "typing must not change mode");
+    }
+
+    /// There is no Glasshouse composer: input is forwarded key by key as the
+    /// harness's own interface expects, so its editing, history, and completion
+    /// all keep working. Every key Glasshouse binds in control mode must be
+    /// forwarded here instead.
+    #[test]
+    fn keys_glasshouse_binds_elsewhere_belong_to_the_harness_in_session_mode() {
+        for (code, expected) in [
+            (KeyCode::Char('q'), vec![b'q']),
+            (KeyCode::Char('n'), vec![b'n']),
+            (KeyCode::Char('o'), vec![b'o']),
+            (KeyCode::Char('i'), vec![b'i']),
+            (KeyCode::Tab, vec![b'\t']),
+            (KeyCode::Esc, vec![0x1b]),
+            (KeyCode::Enter, vec![b'\r']),
+            (KeyCode::Backspace, vec![0x7f]),
+            (KeyCode::Up, b"\x1b[A".to_vec()),
+        ] {
+            let mut state = session_state();
+            assert_eq!(
+                state.handle_key(KeyEvent::new(code, KeyModifiers::NONE)),
+                Action::Forward(expected),
+                "{code:?} must reach the harness in session mode"
+            );
+            assert_eq!(state.mode(), Mode::Session);
+        }
+    }
+
+    /// The escape captures input for Glasshouse only until the user hands it
+    /// back, which is what "temporarily, without permanently stealing" means:
+    /// the session is untouched and re-entering resumes forwarding.
+    #[test]
+    fn the_escape_captures_input_only_until_it_is_handed_back() {
+        let mut state = session_state();
+        let before = state.sessions().to_vec();
+
+        state.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
+        assert_eq!(state.mode(), Mode::Control);
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)),
+            Action::Redraw,
+            "control mode's own bindings work again"
+        );
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            state.mode(),
+            Mode::Session,
+            "input goes back to the harness"
+        );
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Action::Forward(vec![b'q'])
+        );
+        assert_eq!(
+            state.sessions(),
+            before.as_slice(),
+            "no session was touched"
+        );
+    }
+}

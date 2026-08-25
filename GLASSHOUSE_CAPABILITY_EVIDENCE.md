@@ -49,6 +49,61 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 5 — the input half of native terminal embedding
+
+Lines: "Preserve native harness input behavior instead of replacing it with a
+Glasshouse chat composer"; "Allow native slash commands to pass directly to the
+underlying harness"; "Add an escape key sequence that temporarily captures input
+for Glasshouse-level navigation without permanently stealing input from the
+harness".
+
+Contract: Given a session on screen, when the user types, every keystroke
+reaches the harness as the bytes its own interface expects — including the keys
+Glasshouse binds for itself — while one reserved chord borrows input for
+Glasshouse and hands it straight back.
+
+State: COMPLETE
+
+These three are satisfied by the session-mode design (see
+`GLASSHOUSE_DESIGN_DECISIONS.md`) rather than by new work, and are checked here
+as reconciliation. The rest of Phase 5 is the *rendering* half and needs a
+terminal emulator.
+
+Production evidence:
+- `crates/glasshouse/src/shell/state.rs: handle_key`, `encode` — in session
+  mode the mode is consulted before any binding, and every key is encoded to
+  the bytes a terminal would send. Glasshouse has no composer, no input buffer,
+  and no interpretation of `/`.
+- `crates/glasshouse/src/shell/state.rs: is_session_escape` — one chord,
+  `Ctrl-]`, both platform spellings.
+
+Regression evidence:
+- `a_slash_command_passes_straight_through_to_the_harness` — every character of
+  `/compact` forwarded verbatim.
+- `keys_glasshouse_binds_elsewhere_belong_to_the_harness_in_session_mode` —
+  `q`, `n`, `o`, `i`, Tab, Esc, Enter, Backspace and Up all reach the harness.
+- `the_escape_captures_input_only_until_it_is_handed_back` — control mode's
+  bindings work again, then input returns to the harness, with no session
+  touched. "Temporarily" and "without permanently stealing", asserted.
+- `the_shell_enters_and_leaves_session_mode_in_a_real_terminal` — the same
+  round trip through the shipped binary on all three platforms.
+
+Failure/isolation evidence:
+- Mutation: consulting bindings before the mode makes `q` quit instead of
+  reaching the harness.
+- Mutation: accepting only one spelling of the escape chord fails the
+  real-terminal test — the defect that shipped past a full unit-test suite.
+
+Platform/external evidence:
+- CI `32821964808` on `f77b9c8` — Linux, macOS, Windows and lint.
+
+Missing evidence:
+- The rendering half of Phase 5 is untouched. The viewport prints raw bytes, so
+  escape sequences are shown rather than obeyed. Until an emulator exists,
+  "native permission prompts remain interactive" and the colour/cursor/wrapping
+  line stay unchecked — a prompt the user cannot read is not interactive, even
+  if the keystrokes would reach it.
+
 ### Phase 3 — return from overlays to the active native session, and propagate resize to it
 
 Lines: "Allow the user to return from Glasshouse overlays to the active native
