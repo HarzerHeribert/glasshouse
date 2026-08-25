@@ -13,11 +13,14 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
+use crate::config::Layer;
 use crate::session::{SessionDisposition, SessionRecord};
 
-use super::state::{Mode, Overlay, ShellState};
+use super::state::{
+    Mode, Overlay, SettingsPathInputView, SettingsSection, SettingsState, ShellState,
+};
 
 /// Draw the shell.
 pub fn render(state: &ShellState, frame: &mut Frame) {
@@ -39,8 +42,10 @@ pub fn render(state: &ShellState, frame: &mut Frame) {
     render_viewport(state, frame, viewport_area);
     render_footer(state, frame, footer_area);
 
-    if let Some(Overlay::Overview) = state.overlay() {
-        render_overview(state, frame, area);
+    match state.overlay() {
+        Some(Overlay::Overview) => render_overview(state, frame, area),
+        Some(Overlay::Settings) => render_settings(state, frame, area),
+        None => {}
     }
 }
 
@@ -200,6 +205,10 @@ fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
     let hint = match (state.mode(), state.overlay()) {
         (Mode::Session, _) => "SESSION MODE -- keys go to the session -- ctrl-] for glasshouse",
         (Mode::Control, Some(Overlay::Overview)) => "esc back to session   q quit",
+        (Mode::Control, Some(Overlay::Settings)) => {
+            "tab section   up/down move   space toggle   enter edit path   w save (user)   \
+             W save (project)   esc close"
+        }
         (Mode::Control, None) => "tab session   enter session   n new   o overview   q quit",
     };
     let mut spans = vec![Span::styled(hint, Style::default().fg(Color::DarkGray))];
@@ -286,6 +295,198 @@ fn disposition_label(session: &SessionRecord) -> &'static str {
 
 fn short_id(session: &SessionRecord) -> String {
     session.id.as_str().chars().take(12).collect()
+}
+
+/// The Settings overlay: Harnesses and Integrations, drawn over the shell
+/// exactly like the Overview — see its doc comment for why "over", not
+/// "instead of".
+///
+/// Unlike the Overview, this overlay owns every key while open (see
+/// `ShellState::handle_settings_key`), so nothing underneath it is reachable
+/// while it is shown — there is no passthrough navigation to account for
+/// here.
+fn render_settings(state: &ShellState, frame: &mut Frame, area: Rect) {
+    let Some(settings) = state.settings() else {
+        return;
+    };
+    let popup = centered(area, 90, 80);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" settings ")
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let bottom_height = if settings.path_input().is_some() {
+        2
+    } else if settings.confirming_project_write() {
+        3
+    } else {
+        0
+    };
+    let regions = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(bottom_height),
+        ])
+        .split(inner);
+    let tabs_area = regions[0];
+    let list_area = regions[1];
+    let bottom_area = regions[2];
+
+    render_settings_tabs(settings, frame, tabs_area);
+    match settings.section() {
+        SettingsSection::Harnesses => render_harness_rows(settings, frame, list_area),
+        SettingsSection::Integrations => render_integration_rows(settings, frame, list_area),
+    }
+
+    if let Some(input) = settings.path_input() {
+        render_settings_path_input(&input, frame, bottom_area);
+    } else if settings.confirming_project_write() {
+        render_project_write_confirm(state, frame, bottom_area);
+    }
+}
+
+fn render_settings_tabs(settings: &SettingsState, frame: &mut Frame, area: Rect) {
+    let tab = |label: &str, active: bool| {
+        let style = if active {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        Span::styled(format!(" {label} "), style)
+    };
+    let spans = vec![
+        tab(
+            "Harnesses",
+            settings.section() == SettingsSection::Harnesses,
+        ),
+        Span::raw(" "),
+        tab(
+            "Integrations",
+            settings.section() == SettingsSection::Integrations,
+        ),
+    ];
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Text for a value's provenance — the design decision's "provenance is
+/// shown, not inferred".
+fn layer_label(layer: Layer) -> &'static str {
+    match layer {
+        Layer::Project => "(project)",
+        Layer::User => "(user)",
+        Layer::Default => "(default)",
+    }
+}
+
+fn render_harness_rows(settings: &SettingsState, frame: &mut Frame, area: Rect) {
+    let mut lines = Vec::new();
+    if settings.harnesses().is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No harnesses known.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (index, row) in settings.harnesses().iter().enumerate() {
+        let selected = index == settings.selected_harness();
+        let cursor = if selected { "> " } else { "  " };
+        let mut style = Style::default();
+        if selected {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        let detected = if row.detected {
+            "detected"
+        } else {
+            "not detected"
+        };
+        let enabled = format!(
+            "{} {}",
+            if row.enabled { "enabled" } else { "disabled" },
+            layer_label(row.enabled_layer)
+        );
+        let path = match (&row.executable, row.executable_layer) {
+            (Some(path), Some(layer)) => format!("{} {}", path.display(), layer_label(layer)),
+            _ => "no explicit path".to_owned(),
+        };
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{cursor}{:<14} {detected:<13} {enabled:<22} {path}",
+                row.id.display_name(),
+            ),
+            style,
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_integration_rows(settings: &SettingsState, frame: &mut Frame, area: Rect) {
+    let mut lines = Vec::new();
+    if settings.integrations().is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No optional integrations known.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for (index, row) in settings.integrations().iter().enumerate() {
+        let selected = index == settings.selected_integration();
+        let cursor = if selected { "> " } else { "  " };
+        let mut style = Style::default();
+        if selected {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        let detected = if row.detected {
+            "detected"
+        } else {
+            "not detected"
+        };
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{cursor}{:<14} {detected:<13} {}",
+                row.id.display_name(),
+                row.status
+            ),
+            style,
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_settings_path_input(input: &SettingsPathInputView<'_>, frame: &mut Frame, area: Rect) {
+    let mut lines = vec![Line::from(format!(
+        "Path to {} executable: {}_",
+        input.harness_name, input.buffer
+    ))];
+    if let Some(error) = input.error {
+        lines.push(Line::from(Span::styled(
+            error.to_owned(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+/// The design decision requires naming the exact path before a project-level
+/// write, so this is not a generic "are you sure": it spells out
+/// `<project root>/.glasshouse/config.toml` and says the file lands inside
+/// the repository.
+fn render_project_write_confirm(state: &ShellState, frame: &mut Frame, area: Rect) {
+    let path = state.project_root().join(".glasshouse").join("config.toml");
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("Write project settings to {}?", path.display()),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("This file is inside your project repository. y/Enter confirms, Esc/n cancels."),
+    ];
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
 /// A rectangle covering `percent_x` by `percent_y` of `area`, centred.
@@ -690,5 +891,184 @@ mod tests {
         let bottom = last_row(&state, 100, 24).to_lowercase();
         assert!(!bottom.contains("session mode"), "got: `{bottom}`");
         assert!(bottom.contains("quit"), "got: `{bottom}`");
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use crate::integrations::{IntegrationId, IntegrationStatus};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::super::state::{HarnessRow, IntegrationRow};
+    use super::*;
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn harness_rows() -> Vec<HarnessRow> {
+        vec![
+            HarnessRow {
+                id: IntegrationId::ClaudeCode,
+                detected: true,
+                enabled: true,
+                enabled_layer: Layer::Project,
+                executable: Some("/opt/bin/claude".into()),
+                executable_layer: Some(Layer::User),
+            },
+            HarnessRow {
+                id: IntegrationId::Codex,
+                detected: false,
+                enabled: false,
+                enabled_layer: Layer::Default,
+                executable: None,
+                executable_layer: None,
+            },
+        ]
+    }
+
+    fn integration_rows() -> Vec<IntegrationRow> {
+        vec![IntegrationRow {
+            id: IntegrationId::Ollama,
+            detected: false,
+            status: IntegrationStatus::NotFound,
+        }]
+    }
+
+    fn state_with_settings_open() -> ShellState {
+        let mut state = ShellState::new("glasshouse", "/work/glasshouse", "0.1.0", Vec::new());
+        state.open_settings(harness_rows(), integration_rows());
+        state
+    }
+
+    fn rendered(state: &ShellState, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| render(state, frame))
+            .expect("draw must not panic");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn settings_shows_both_section_labels_and_the_harness_rows() {
+        let state = state_with_settings_open();
+        let text = rendered(&state, 100, 30);
+        assert!(text.contains("Harnesses"), "got:\n{text}");
+        assert!(text.contains("Integrations"), "got:\n{text}");
+        assert!(text.contains("Claude Code"), "got:\n{text}");
+    }
+
+    /// The design decision: "provenance is shown, not inferred" — every
+    /// displayed value must carry a layer tag.
+    #[test]
+    fn every_harness_value_shown_carries_its_layer() {
+        let state = state_with_settings_open();
+        let text = rendered(&state, 100, 30);
+        assert!(text.contains("(project)"), "enabled layer missing:\n{text}");
+        assert!(text.contains("(user)"), "executable layer missing:\n{text}");
+        assert!(
+            text.contains("(default)"),
+            "the never-configured row's layer must still show:\n{text}"
+        );
+    }
+
+    #[test]
+    fn switching_to_the_integrations_section_shows_its_rows() {
+        let mut state = state_with_settings_open();
+        state.handle_key(press(KeyCode::Tab));
+        let text = rendered(&state, 100, 30);
+        assert!(text.contains("Ollama"), "got:\n{text}");
+        assert!(text.contains("not found"), "got:\n{text}");
+    }
+
+    #[test]
+    fn the_path_editor_renders_the_typed_buffer() {
+        let mut state = state_with_settings_open();
+        state.handle_key(press(KeyCode::Enter));
+        for c in "/opt/bin".chars() {
+            state.handle_key(press(KeyCode::Char(c)));
+        }
+        let text = rendered(&state, 100, 30);
+        assert!(text.contains("/opt/bin"), "got:\n{text}");
+    }
+
+    /// The confirmation must name the exact path the design decision
+    /// requires, not a generic "are you sure".
+    #[test]
+    fn the_project_write_confirmation_names_the_exact_path() {
+        let mut state = state_with_settings_open();
+        state.handle_key(press(KeyCode::Char('W')));
+        let text = rendered(&state, 100, 30);
+        assert!(
+            text.contains("/work/glasshouse/.glasshouse/config.toml"),
+            "the exact path must be shown:\n{text}"
+        );
+        assert!(
+            text.to_lowercase().contains("repository"),
+            "must say the file is inside the repository:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_footer_names_the_settings_bindings() {
+        let state = state_with_settings_open();
+        let bottom = rendered(&state, 100, 30)
+            .lines()
+            .last()
+            .unwrap()
+            .trim_end()
+            .to_owned();
+        assert!(bottom.contains("save"), "got: `{bottom}`");
+        assert!(bottom.contains("toggle"), "got: `{bottom}`");
+    }
+
+    #[test]
+    fn settings_renders_without_panicking_at_absurd_sizes() {
+        let mut state = state_with_settings_open();
+        for (w, h) in [(1, 1), (1, 40), (40, 1), (3, 3), (200, 60)] {
+            rendered(&state, w, h);
+        }
+        state.handle_key(press(KeyCode::Enter));
+        for (w, h) in [(1, 1), (1, 40), (40, 1), (3, 3)] {
+            rendered(&state, w, h);
+        }
+        state.handle_key(press(KeyCode::Esc));
+        state.handle_key(press(KeyCode::Char('W')));
+        for (w, h) in [(1, 1), (1, 40), (40, 1), (3, 3)] {
+            rendered(&state, w, h);
+        }
+    }
+
+    /// Same design-first guarantee as the rest of the shell: no decorative
+    /// block-element glyphs anywhere in the Settings overlay.
+    #[test]
+    fn settings_draws_with_no_decorative_block_elements() {
+        let mut state = state_with_settings_open();
+        let mut screens = vec![rendered(&state, 100, 30)];
+        state.handle_key(press(KeyCode::Tab));
+        screens.push(rendered(&state, 100, 30));
+        state.handle_key(press(KeyCode::BackTab));
+        state.handle_key(press(KeyCode::Enter));
+        screens.push(rendered(&state, 100, 30));
+
+        for screen in screens {
+            if let Some(found) = screen
+                .chars()
+                .find(|c| ('\u{2580}'..='\u{259F}').contains(c))
+            {
+                panic!("a decorative block element ({found:?}) was drawn:\n{screen}");
+            }
+        }
     }
 }

@@ -174,8 +174,8 @@ Phase 2C — First-run onboarding
 
 Phase 2D — Settings foundation
 
-☐ Add a TUI settings view that can be opened without leaving the current project session permanently.
-☐ Add a Harnesses settings section.
+☑ Add a TUI settings view that can be opened without leaving the current project session permanently.
+☑ Add a Harnesses settings section.
 ☐ Add a Providers settings section.
 ☐ Add a Launch Profiles settings section.
 ☐ Add a Routing settings section.
@@ -185,15 +185,15 @@ Phase 2D — Settings foundation
 ☐ Allow the routing settings to prefer free resources for routing when they satisfy health and rate-limit requirements.
 ☐ Allow the routing settings to reserve premium subscription capacity below a configurable remaining-capacity threshold.
 ☐ Add a Memory settings section.
-☐ Add an Integrations settings section for optional tools such as cmux.
-☐ Show whether each harness is detected and enabled.
-☐ Allow the user to change a harness executable path.
+☑ Add an Integrations settings section for optional tools such as cmux.
+☑ Show whether each harness is detected and enabled.
+☑ Allow the user to change a harness executable path.
 ☐ Allow the user to add, edit, disable, test, and remove provider configurations.
 ☐ Allow the user to create, edit, duplicate, disable, and remove launch profiles.
-☐ Allow the user to defer any optional setup item and return to it later.
-☐ Separate user-level defaults from project-level overrides visibly in settings.
-☐ Require explicit confirmation before writing project-level configuration into the repository.
-☐ Never expose stored secret values in full in the settings UI.
+☑ Allow the user to defer any optional setup item and return to it later.
+☑ Separate user-level defaults from project-level overrides visibly in settings.
+☑ Require explicit confirmation before writing project-level configuration into the repository.
+☑ Never expose stored secret values in full in the settings UI.
 
 Phase 2 — Persistent project state
 

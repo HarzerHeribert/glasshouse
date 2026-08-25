@@ -30,6 +30,7 @@ use anyhow::Result;
 
 use crate::Runtime;
 use crate::config::{self, EffectiveConfig, UserConfig};
+use crate::integrations::{Discovery, IntegrationId, IntegrationKind, IntegrationStatus};
 use crate::launch::HarnessLaunch;
 use crate::pty::TerminalSize;
 use crate::session::{
@@ -37,7 +38,7 @@ use crate::session::{
 };
 use crate::tui::{AppEvent, DEFAULT_TICK, Event, EventSource, Screen};
 
-pub use state::{Action, Mode, Overlay, ShellState};
+pub use state::{Action, HarnessRow, IntegrationRow, Mode, Overlay, SettingsEdit, ShellState};
 
 /// Open the shell and run it until the user leaves.
 ///
@@ -98,6 +99,49 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                             state.set_status(format!("could not start a session: {err:#}"));
                         }
                     },
+                    Action::OpenSettings => match build_settings(runtime) {
+                        Ok((harnesses, integrations)) => {
+                            state.open_settings(harnesses, integrations);
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, "could not open settings");
+                            state.set_status(format!("could not open settings: {err:#}"));
+                        }
+                    },
+                    Action::SaveUserSettings => {
+                        let edits = state.settings_edits();
+                        if edits.is_empty() {
+                            state.set_status("no settings changes to save");
+                        } else if let Err(err) = save_user_settings(runtime, &edits) {
+                            tracing::warn!(error = %err, "could not save user settings");
+                            state.set_status(format!("could not save settings: {err:#}"));
+                        } else {
+                            state.set_status("saved to user configuration");
+                            refresh_settings_after_save(runtime, &mut state);
+                        }
+                    }
+                    Action::SaveProjectSettings => {
+                        let edits = state.settings_edits();
+                        if edits.is_empty() {
+                            state.set_status("no settings changes to save");
+                        } else {
+                            match save_project_settings(runtime, &edits) {
+                                Ok(path) => {
+                                    state.set_status(format!("saved to {}", path.display()));
+                                    refresh_settings_after_save(runtime, &mut state);
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        error = %err,
+                                        "could not save project settings"
+                                    );
+                                    state.set_status(format!(
+                                        "could not save project settings: {err:#}"
+                                    ));
+                                }
+                            }
+                        }
+                    }
                 }
                 sync_focus(&mut live, &state);
                 if !matches!(action, Action::None) {
@@ -235,4 +279,108 @@ fn start_session(
     }
 
     Ok(())
+}
+
+/// Build the rows the Settings overlay shows, from a fresh [`Discovery`]
+/// pass and the configuration currently on disk.
+///
+/// This is the only place that combines them: [`state::ShellState`] and its
+/// `SettingsState` never run discovery or read a configuration file
+/// themselves — that would put file I/O in `shell/state.rs`, which the
+/// module keeps free of it by design.
+fn build_settings(runtime: &Runtime) -> anyhow::Result<(Vec<HarnessRow>, Vec<IntegrationRow>)> {
+    let discovery = Discovery::run(runtime.project());
+    let user = UserConfig::load(runtime.paths())?;
+    let project = config::load_project_config(runtime.project())?;
+    let effective = EffectiveConfig::new(&user, project.as_ref());
+
+    let mut harnesses = Vec::new();
+    let mut integrations = Vec::new();
+    for &id in IntegrationId::ALL {
+        let detected = discovery.get(id);
+        let is_detected = detected.is_some_and(|d| d.executable().is_some());
+        match id.kind() {
+            IntegrationKind::Harness => {
+                let enabled = effective.enabled(id, false);
+                let executable = effective.executable(id);
+                harnesses.push(HarnessRow {
+                    id,
+                    detected: is_detected,
+                    enabled: enabled.value,
+                    enabled_layer: enabled.layer,
+                    executable: executable.as_ref().map(|e| e.value.clone()),
+                    executable_layer: executable.map(|e| e.layer),
+                });
+            }
+            IntegrationKind::Multiplexer | IntegrationKind::LocalInference => {
+                integrations.push(IntegrationRow {
+                    id,
+                    detected: is_detected,
+                    status: detected.map_or(IntegrationStatus::NotFound, |d| d.status()),
+                });
+            }
+        }
+    }
+    Ok((harnesses, integrations))
+}
+
+/// Re-read Settings' rows after a successful save and hand them to
+/// [`state::ShellState::refresh_settings`], which is also what clears the
+/// edits that just landed on disk. A failure here is not the save failing —
+/// the write already succeeded — so it only costs a stale display, reported
+/// the same non-fatal way as everything else in this module.
+fn refresh_settings_after_save(runtime: &Runtime, state: &mut ShellState) {
+    match build_settings(runtime) {
+        Ok((harnesses, integrations)) => state.refresh_settings(harnesses, integrations),
+        Err(err) => {
+            tracing::warn!(error = %err, "could not refresh settings after saving");
+        }
+    }
+}
+
+/// Apply every pending Settings edit onto `table`, leaving any field an edit
+/// never touched exactly as it was. This is what keeps a save from silently
+/// promoting a value that was only ever a project or default layer into the
+/// layer being written, when the user never actually changed it.
+fn apply_settings_edits(table: &mut config::IntegrationTable, edits: &[SettingsEdit]) {
+    for edit in edits {
+        let entry = table.entry(edit.id);
+        if let Some(enabled) = edit.enabled {
+            entry.set_enabled(enabled);
+        }
+        if let Some(executable) = &edit.executable {
+            entry.set_executable(executable.clone());
+        }
+    }
+}
+
+/// Write every pending Settings edit to the user-level configuration file.
+/// Never touches the project root — see the design decision's "writes
+/// default to the user layer".
+pub fn save_user_settings(runtime: &Runtime, edits: &[SettingsEdit]) -> anyhow::Result<()> {
+    let mut config = UserConfig::load(runtime.paths())?;
+    apply_settings_edits(config.integrations_mut(), edits);
+    config.save(runtime.paths())?;
+    Ok(())
+}
+
+/// Write every pending Settings edit to
+/// `<project root>/.glasshouse/config.toml` via
+/// [`config::write_project_config_with_consent`] — the only writer. The
+/// consent it requires is obtained by the Settings overlay's own `W`
+/// confirmation, before [`Action::SaveProjectSettings`] is ever produced —
+/// see `state::SettingsState`. Returns the path written, for the status
+/// line.
+pub fn save_project_settings(
+    runtime: &Runtime,
+    edits: &[SettingsEdit],
+) -> anyhow::Result<std::path::PathBuf> {
+    let mut project_config = config::load_project_config(runtime.project())?.unwrap_or_default();
+    apply_settings_edits(project_config.integrations_mut(), edits);
+    config::write_project_config_with_consent(runtime.project(), &project_config)?;
+    Ok(runtime
+        .project()
+        .display_root()
+        .join(".glasshouse")
+        .join("config.toml"))
 }

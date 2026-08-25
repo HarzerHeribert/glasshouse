@@ -10,10 +10,14 @@
 //! the capability: a user flipping through sessions must never be terminating
 //! them.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::config::Layer;
+use crate::integrations::{IntegrationId, IntegrationStatus};
+use crate::platform::exec;
 use crate::session::SessionRecord;
 
 /// A Glasshouse-owned screen drawn over the session viewport.
@@ -25,6 +29,10 @@ use crate::session::SessionRecord;
 pub enum Overlay {
     /// Every session in the project, with the detail the bar has no room for.
     Overview,
+    /// Harnesses and Integrations configuration. See [`SettingsState`] for
+    /// the data behind it — this marker carries none of it, the same way
+    /// [`Overlay::Overview`] carries none of the session list it shows.
+    Settings,
 }
 
 /// Who currently owns the keyboard.
@@ -63,6 +71,19 @@ pub enum Action {
     /// all need machinery this module deliberately does not hold, so the run
     /// loop does the work and reports failure back with `set_status`.
     StartSession,
+    /// Open Settings. Running discovery and reading `UserConfig`/
+    /// `ProjectConfig` is file I/O this module deliberately does not hold —
+    /// the run loop builds the rows and calls [`ShellState::open_settings`],
+    /// reporting failure back with `set_status` exactly like
+    /// [`Action::StartSession`].
+    OpenSettings,
+    /// Persist every pending Settings edit to the user-level configuration
+    /// file. The run loop performs the write and refreshes the rows shown.
+    SaveUserSettings,
+    /// Persist every pending Settings edit to the project-level
+    /// configuration file. Only ever produced after the user has explicitly
+    /// confirmed inside the Settings overlay — see [`SettingsState`].
+    SaveProjectSettings,
 }
 
 /// Everything the shell displays.
@@ -87,6 +108,10 @@ pub struct ShellState {
     /// scrollback, set by the run loop via [`ShellState::set_viewport`]. Not
     /// the runtime itself: see the module doc.
     viewport: String,
+    /// The Settings overlay's own data, or `None` when it is not open. Kept
+    /// separate from `overlay` because it carries real data (rows, pending
+    /// edits, sub-mode) that a plain `Copy` marker cannot.
+    settings: Option<SettingsState>,
 }
 
 impl ShellState {
@@ -106,6 +131,7 @@ impl ShellState {
             status: None,
             mode: Mode::Control,
             viewport: String::new(),
+            settings: None,
         }
     }
 
@@ -221,7 +247,51 @@ impl ShellState {
             return Action::None;
         }
         self.overlay = None;
+        self.settings = None;
         Action::Redraw
+    }
+
+    /// Every row and pending edit currently shown in the Settings overlay, or
+    /// `None` when Settings is not open.
+    pub fn settings(&self) -> Option<&SettingsState> {
+        self.settings.as_ref()
+    }
+
+    /// Open the Settings overlay with rows the run loop already built from a
+    /// fresh [`crate::integrations::Discovery`] pass and the configuration
+    /// currently on disk. This module never runs that discovery or reads a
+    /// configuration file itself — see the module documentation.
+    pub fn open_settings(
+        &mut self,
+        harnesses: Vec<HarnessRow>,
+        integrations: Vec<IntegrationRow>,
+    ) -> Action {
+        self.overlay = Some(Overlay::Settings);
+        self.settings = Some(SettingsState::new(harnesses, integrations));
+        Action::Redraw
+    }
+
+    /// Replace the Settings rows after a successful save, clearing every
+    /// pending edit — it is now reflected on disk — while keeping the cursor
+    /// in place. A no-op when Settings is not open.
+    pub fn refresh_settings(
+        &mut self,
+        harnesses: Vec<HarnessRow>,
+        integrations: Vec<IntegrationRow>,
+    ) {
+        if let Some(settings) = self.settings.as_mut() {
+            settings.replace_rows(harnesses, integrations);
+        }
+    }
+
+    /// Every pending, unsaved Settings edit, for the run loop to apply to
+    /// whichever configuration layer is being saved. Empty when Settings is
+    /// not open or nothing has been edited yet.
+    pub fn settings_edits(&self) -> Vec<SettingsEdit> {
+        self.settings
+            .as_ref()
+            .map(SettingsState::edits)
+            .unwrap_or_default()
     }
 
     /// Replace the session list, keeping the same session presented if it is
@@ -258,6 +328,14 @@ impl ShellState {
             return self.handle_session_key(key);
         }
 
+        // Settings owns every key while it is open — Tab/Left/Right/Up/Down
+        // mean something completely different there than session
+        // navigation, unlike the read-only Overview below, whose passive
+        // popup lets ordinary navigation keep working underneath it.
+        if self.overlay == Some(Overlay::Settings) {
+            return self.handle_settings_key(key);
+        }
+
         // An overlay takes the keys it understands before anything else, so
         // Escape means "leave this overlay" while one is open and "leave
         // Glasshouse" only when none is.
@@ -273,11 +351,31 @@ impl ShellState {
             KeyCode::Tab | KeyCode::Right => self.next_session(),
             KeyCode::BackTab | KeyCode::Left => self.previous_session(),
             KeyCode::Char('o') => self.open_overview(),
+            KeyCode::Char('s') => Action::OpenSettings,
             KeyCode::Enter | KeyCode::Char('i') => self.enter_session_mode(),
             KeyCode::Char('n') => Action::StartSession,
             // Clearing a note is itself a visible change.
             _ if had_status => Action::Redraw,
             _ => Action::None,
+        }
+    }
+
+    /// Answer one key while the Settings overlay is open. Everything is
+    /// handled here rather than falling through to the bindings above: Tab,
+    /// the arrows, and Enter all mean something different inside Settings.
+    fn handle_settings_key(&mut self, key: KeyEvent) -> Action {
+        let Some(settings) = self.settings.as_mut() else {
+            // Defensive: the overlay marker outlived its data somehow. Leave
+            // rather than answering keys with nothing behind them.
+            self.overlay = None;
+            return Action::Redraw;
+        };
+        match settings.handle_key(key) {
+            SettingsAction::None => Action::None,
+            SettingsAction::Redraw => Action::Redraw,
+            SettingsAction::Close => self.close_overlay(),
+            SettingsAction::SaveUser => Action::SaveUserSettings,
+            SettingsAction::SaveProject => Action::SaveProjectSettings,
         }
     }
 
@@ -326,6 +424,363 @@ impl ShellState {
             Action::Redraw
         } else {
             Action::None
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Settings — see `GLASSHOUSE_DESIGN_DECISIONS.md`'s "Settings" section for
+// the invariants this data model exists to hold to.
+// -----------------------------------------------------------------------
+
+/// Which section of the Settings overlay has the cursor.
+///
+/// Exactly two, per the design decision: Harnesses and Integrations are the
+/// only sections whose feature exists yet. Do not add a third here without
+/// first shipping the feature it would configure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsSection {
+    Harnesses,
+    Integrations,
+}
+
+impl SettingsSection {
+    /// With exactly two sections, moving either direction lands on the other
+    /// one, so Tab and Shift-Tab share this.
+    fn other(self) -> Self {
+        match self {
+            SettingsSection::Harnesses => SettingsSection::Integrations,
+            SettingsSection::Integrations => SettingsSection::Harnesses,
+        }
+    }
+}
+
+/// One row of the Settings "Harnesses" section.
+///
+/// `enabled`/`executable` are the live, possibly-edited values shown and
+/// acted on; `enabled_layer`/`executable_layer` name which configuration
+/// layer supplied them, per the design decision's "provenance is shown, not
+/// inferred". Editing a row updates both the value and its layer to
+/// [`Layer::User`] immediately, since that is where an edit lands once saved
+/// with the default `w` — see [`SettingsState`]'s documentation for why
+/// nothing here waits for the actual write to relabel itself.
+///
+/// Deliberately holds nothing that could be a secret: a boolean, a
+/// filesystem path, and a [`Layer`] tag are everything
+/// [`crate::config::IntegrationConfig`] itself is able to store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessRow {
+    pub id: IntegrationId,
+    /// Whether `Discovery` found a usable executable for this harness.
+    pub detected: bool,
+    pub enabled: bool,
+    pub enabled_layer: Layer,
+    /// An explicit executable override, if any layer has recorded one. Not
+    /// the auto-discovered `PATH` resolution — only a value some
+    /// configuration layer actually supplied has a layer to show alongside
+    /// it (see [`crate::config::EffectiveConfig::executable`]'s own doc for
+    /// why there is no "default" case for this field).
+    pub executable: Option<PathBuf>,
+    pub executable_layer: Option<Layer>,
+}
+
+/// One row of the read-only Settings "Integrations" section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationRow {
+    pub id: IntegrationId,
+    pub detected: bool,
+    pub status: IntegrationStatus,
+}
+
+/// One edit made to a [`HarnessRow`] this Settings session, not yet written
+/// anywhere. `None` in a field means that field was never touched this
+/// session; `Some(None)` in `executable` would mean "clear it", though
+/// nothing in this module's keymap produces that today — only setting an
+/// explicit path does.
+#[derive(Debug, Default)]
+struct PendingEdit {
+    enabled: Option<bool>,
+    executable: Option<Option<PathBuf>>,
+}
+
+/// A [`PendingEdit`] together with the harness it belongs to, in the shape
+/// the run loop applies to a [`crate::config::IntegrationTable`] when saving.
+#[derive(Debug, Clone)]
+pub struct SettingsEdit {
+    pub id: IntegrationId,
+    pub enabled: Option<bool>,
+    pub executable: Option<Option<PathBuf>>,
+}
+
+/// The inline path editor's state while it is open, for the selected
+/// harness row. Mirrors `onboarding::state`'s `PathInput` — same sub-mode,
+/// same validate-on-`Enter` behavior via [`exec::resolve_explicit`], same
+/// "Esc cancels without changing anything".
+#[derive(Debug, Default)]
+struct SettingsPathInput {
+    buffer: String,
+    error: Option<String>,
+}
+
+/// Read-only view of the active path-input sub-mode, for rendering.
+#[derive(Debug, Clone, Copy)]
+pub struct SettingsPathInputView<'a> {
+    pub harness_name: &'static str,
+    pub buffer: &'a str,
+    pub error: Option<&'a str>,
+}
+
+/// What [`SettingsState::handle_key`] wants
+/// [`ShellState::handle_settings_key`] to do. Kept separate from [`Action`]
+/// because opening and saving Settings need the run loop's file I/O, while
+/// everything else here is answered entirely from this module's own data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsAction {
+    None,
+    Redraw,
+    /// Leave the Settings overlay entirely, discarding any unsaved edits —
+    /// nothing here asks "are you sure", exactly like leaving the Overview.
+    Close,
+    /// `w`: apply every pending edit to the user-level configuration.
+    SaveUser,
+    /// The confirmed half of `W`: apply every pending edit to the
+    /// project-level configuration. Only ever produced after the user
+    /// answered the confirmation with `y` or `Enter`.
+    SaveProject,
+}
+
+/// Everything the Settings overlay displays and edits.
+///
+/// # Why an edit shows `Layer::User` before anything is saved
+///
+/// The design decision says "edits stage in memory and apply to the user
+/// layer when saved with `w`" — `w` is the default, one-key save; `W`
+/// (project) is the deliberately heavier action requiring confirmation. So
+/// the moment a row is edited, it is shown as destined for the user layer,
+/// even though nothing has been written yet. If the user instead saves with
+/// `W`, the row's layer is corrected the next time the run loop calls
+/// [`SettingsState::replace_rows`] after that write succeeds — which is also
+/// what clears `edits`, since by then every pending change has actually
+/// landed on disk and a fresh read is the honest source of truth for "which
+/// layer supplied this value" from then on.
+#[derive(Debug)]
+pub struct SettingsState {
+    section: SettingsSection,
+    harnesses: Vec<HarnessRow>,
+    integrations: Vec<IntegrationRow>,
+    selected_harness: usize,
+    selected_integration: usize,
+    edits: HashMap<IntegrationId, PendingEdit>,
+    path_input: Option<SettingsPathInput>,
+    /// Whether the `W` confirmation prompt (design decision: "first shows
+    /// the exact path to be created and requires a distinct confirmation")
+    /// is currently showing.
+    confirm_project_write: bool,
+}
+
+impl SettingsState {
+    fn new(harnesses: Vec<HarnessRow>, integrations: Vec<IntegrationRow>) -> Self {
+        Self {
+            section: SettingsSection::Harnesses,
+            harnesses,
+            integrations,
+            selected_harness: 0,
+            selected_integration: 0,
+            edits: HashMap::new(),
+            path_input: None,
+            confirm_project_write: false,
+        }
+    }
+
+    pub fn section(&self) -> SettingsSection {
+        self.section
+    }
+
+    pub fn harnesses(&self) -> &[HarnessRow] {
+        &self.harnesses
+    }
+
+    pub fn integrations(&self) -> &[IntegrationRow] {
+        &self.integrations
+    }
+
+    pub fn selected_harness(&self) -> usize {
+        self.selected_harness
+    }
+
+    pub fn selected_integration(&self) -> usize {
+        self.selected_integration
+    }
+
+    pub fn confirming_project_write(&self) -> bool {
+        self.confirm_project_write
+    }
+
+    /// The active "add an explicit path" sub-mode, if any.
+    pub fn path_input(&self) -> Option<SettingsPathInputView<'_>> {
+        let input = self.path_input.as_ref()?;
+        let harness_name = self.harnesses.get(self.selected_harness)?.id.display_name();
+        Some(SettingsPathInputView {
+            harness_name,
+            buffer: input.buffer.as_str(),
+            error: input.error.as_deref(),
+        })
+    }
+
+    /// Every pending edit, for the run loop to apply when saving.
+    fn edits(&self) -> Vec<SettingsEdit> {
+        self.edits
+            .iter()
+            .map(|(&id, edit)| SettingsEdit {
+                id,
+                enabled: edit.enabled,
+                executable: edit.executable.clone(),
+            })
+            .collect()
+    }
+
+    /// Replace the rows with freshly loaded ones (after a successful save)
+    /// and clear every pending edit. The catalog is fixed-size, so the
+    /// cursor is only ever clamped, never reset, and always stays on a real
+    /// row.
+    fn replace_rows(&mut self, harnesses: Vec<HarnessRow>, integrations: Vec<IntegrationRow>) {
+        self.selected_harness = self.selected_harness.min(harnesses.len().saturating_sub(1));
+        self.selected_integration = self
+            .selected_integration
+            .min(integrations.len().saturating_sub(1));
+        self.harnesses = harnesses;
+        self.integrations = integrations;
+        self.edits.clear();
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> SettingsAction {
+        if self.path_input.is_some() {
+            return self.handle_path_input_key(key);
+        }
+        if self.confirm_project_write {
+            return match key.code {
+                KeyCode::Enter | KeyCode::Char('y') => {
+                    self.confirm_project_write = false;
+                    SettingsAction::SaveProject
+                }
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    self.confirm_project_write = false;
+                    SettingsAction::Redraw
+                }
+                // Anything else is swallowed: the design decision requires
+                // an explicit y/Enter or Esc/n, not "any key dismisses".
+                _ => SettingsAction::None,
+            };
+        }
+
+        match key.code {
+            KeyCode::Esc => SettingsAction::Close,
+            KeyCode::Char('w') => SettingsAction::SaveUser,
+            KeyCode::Char('W') => {
+                self.confirm_project_write = true;
+                SettingsAction::Redraw
+            }
+            KeyCode::Tab | KeyCode::Right | KeyCode::BackTab | KeyCode::Left => {
+                self.section = self.section.other();
+                SettingsAction::Redraw
+            }
+            KeyCode::Up => {
+                self.move_selection(-1);
+                SettingsAction::Redraw
+            }
+            KeyCode::Down => {
+                self.move_selection(1);
+                SettingsAction::Redraw
+            }
+            KeyCode::Char(' ') if self.section == SettingsSection::Harnesses => {
+                self.toggle_selected_harness();
+                SettingsAction::Redraw
+            }
+            KeyCode::Enter if self.section == SettingsSection::Harnesses => {
+                if self.harnesses.get(self.selected_harness).is_some() {
+                    self.path_input = Some(SettingsPathInput::default());
+                }
+                SettingsAction::Redraw
+            }
+            _ => SettingsAction::None,
+        }
+    }
+
+    fn move_selection(&mut self, delta: i32) {
+        match self.section {
+            SettingsSection::Harnesses => {
+                if self.harnesses.is_empty() {
+                    return;
+                }
+                let last = self.harnesses.len() as i32 - 1;
+                self.selected_harness =
+                    (self.selected_harness as i32 + delta).clamp(0, last) as usize;
+            }
+            SettingsSection::Integrations => {
+                if self.integrations.is_empty() {
+                    return;
+                }
+                let last = self.integrations.len() as i32 - 1;
+                self.selected_integration =
+                    (self.selected_integration as i32 + delta).clamp(0, last) as usize;
+            }
+        }
+    }
+
+    fn toggle_selected_harness(&mut self) {
+        let Some(row) = self.harnesses.get_mut(self.selected_harness) else {
+            return;
+        };
+        row.enabled = !row.enabled;
+        row.enabled_layer = Layer::User;
+        self.edits.entry(row.id).or_default().enabled = Some(row.enabled);
+    }
+
+    fn handle_path_input_key(&mut self, key: KeyEvent) -> SettingsAction {
+        match key.code {
+            KeyCode::Esc => {
+                self.path_input = None;
+                SettingsAction::Redraw
+            }
+            KeyCode::Enter => {
+                let typed = {
+                    let input = self.path_input.as_ref().expect("checked above");
+                    PathBuf::from(input.buffer.trim())
+                };
+                match exec::resolve_explicit(&typed) {
+                    Ok(resolved) => {
+                        let index = self.selected_harness;
+                        if let Some(row) = self.harnesses.get_mut(index) {
+                            let path = resolved.path().to_path_buf();
+                            row.executable = Some(path.clone());
+                            row.executable_layer = Some(Layer::User);
+                            self.edits.entry(row.id).or_default().executable = Some(Some(path));
+                        }
+                        self.path_input = None;
+                    }
+                    Err(err) => {
+                        if let Some(input) = self.path_input.as_mut() {
+                            input.error = Some(err.to_string());
+                        }
+                    }
+                }
+                SettingsAction::Redraw
+            }
+            KeyCode::Backspace => {
+                if let Some(input) = self.path_input.as_mut() {
+                    input.buffer.pop();
+                    input.error = None;
+                }
+                SettingsAction::Redraw
+            }
+            KeyCode::Char(c) => {
+                if let Some(input) = self.path_input.as_mut() {
+                    input.buffer.push(c);
+                    input.error = None;
+                }
+                SettingsAction::Redraw
+            }
+            _ => SettingsAction::None,
         }
     }
 }
@@ -1018,6 +1473,307 @@ mod native_input_tests {
             state.sessions(),
             before.as_slice(),
             "no session was touched"
+        );
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+    use crate::session::{SessionId, SessionLifecycle, SessionPresentation, SessionRole};
+
+    fn record(id: &str) -> SessionRecord {
+        SessionRecord {
+            id: SessionId::new(id),
+            project_id: "p".to_owned(),
+            harness: "claude-code".to_owned(),
+            native_session_id: None,
+            role: SessionRole::Normal,
+            lifecycle: SessionLifecycle::Running,
+            presentation: SessionPresentation::Embedded,
+            created_at: 0,
+            last_activity_at: 0,
+        }
+    }
+
+    fn state_with_a_session() -> ShellState {
+        ShellState::new("p", "/p", "0.1.0", vec![record("only")])
+    }
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn sample_harness_rows() -> Vec<HarnessRow> {
+        vec![
+            HarnessRow {
+                id: IntegrationId::ClaudeCode,
+                detected: true,
+                enabled: true,
+                enabled_layer: Layer::User,
+                executable: Some(PathBuf::from("/usr/bin/claude")),
+                executable_layer: Some(Layer::User),
+            },
+            HarnessRow {
+                id: IntegrationId::Codex,
+                detected: false,
+                enabled: false,
+                enabled_layer: Layer::Default,
+                executable: None,
+                executable_layer: None,
+            },
+        ]
+    }
+
+    fn sample_integration_rows() -> Vec<IntegrationRow> {
+        vec![IntegrationRow {
+            id: IntegrationId::Ollama,
+            detected: false,
+            status: IntegrationStatus::NotFound,
+        }]
+    }
+
+    // Invariant 1 (design note): opening settings does not disturb the
+    // session, and leaving it returns to the mode the user was in.
+    #[test]
+    fn opening_and_closing_settings_leaves_mode_and_session_untouched() {
+        let mut state = state_with_a_session();
+        let before = state.sessions().to_vec();
+
+        assert_eq!(
+            state.handle_key(press(KeyCode::Char('s'))),
+            Action::OpenSettings
+        );
+        assert_eq!(
+            state.overlay(),
+            None,
+            "opening settings needs data only the run loop can gather"
+        );
+
+        state.open_settings(sample_harness_rows(), sample_integration_rows());
+        assert_eq!(state.overlay(), Some(Overlay::Settings));
+        assert_eq!(state.mode(), Mode::Control);
+
+        assert_eq!(state.handle_key(press(KeyCode::Esc)), Action::Redraw);
+        assert_eq!(state.overlay(), None);
+        assert_eq!(
+            state.mode(),
+            Mode::Control,
+            "closing settings must not disturb the mode"
+        );
+        assert_eq!(
+            state.sessions(),
+            before.as_slice(),
+            "no session was touched"
+        );
+    }
+
+    /// `s` is an ordinary character to a harness in session mode: it must
+    /// not open settings out from under it.
+    #[test]
+    fn s_is_forwarded_to_the_harness_in_session_mode_not_intercepted() {
+        let mut state = state_with_a_session();
+        state.handle_key(press(KeyCode::Enter));
+        assert_eq!(state.mode(), Mode::Session);
+
+        assert_eq!(
+            state.handle_key(press(KeyCode::Char('s'))),
+            Action::Forward(b"s".to_vec())
+        );
+        assert_eq!(state.overlay(), None);
+    }
+
+    #[test]
+    fn tab_moves_between_sections_and_up_down_moves_within_one() {
+        let mut state = state_with_a_session();
+        state.open_settings(sample_harness_rows(), sample_integration_rows());
+        assert_eq!(
+            state.settings().unwrap().section(),
+            SettingsSection::Harnesses
+        );
+
+        state.handle_key(press(KeyCode::Tab));
+        assert_eq!(
+            state.settings().unwrap().section(),
+            SettingsSection::Integrations
+        );
+        state.handle_key(press(KeyCode::Left));
+        assert_eq!(
+            state.settings().unwrap().section(),
+            SettingsSection::Harnesses
+        );
+
+        assert_eq!(state.settings().unwrap().selected_harness(), 0);
+        state.handle_key(press(KeyCode::Down));
+        assert_eq!(state.settings().unwrap().selected_harness(), 1);
+        state.handle_key(press(KeyCode::Down));
+        assert_eq!(
+            state.settings().unwrap().selected_harness(),
+            1,
+            "selection clamps at the last row"
+        );
+        state.handle_key(press(KeyCode::Up));
+        assert_eq!(state.settings().unwrap().selected_harness(), 0);
+    }
+
+    #[test]
+    fn space_toggles_enabled_on_the_selected_harness_and_stages_the_user_layer() {
+        let mut state = state_with_a_session();
+        state.open_settings(sample_harness_rows(), Vec::new());
+        let before = state.settings().unwrap().harnesses()[0].enabled;
+
+        state.handle_key(press(KeyCode::Char(' ')));
+
+        let row = &state.settings().unwrap().harnesses()[0];
+        assert_eq!(row.enabled, !before);
+        assert_eq!(row.enabled_layer, Layer::User);
+        assert_eq!(state.settings_edits().len(), 1);
+        assert_eq!(state.settings_edits()[0].id, IntegrationId::ClaudeCode);
+        assert_eq!(state.settings_edits()[0].enabled, Some(!before));
+    }
+
+    /// "Esc in the editor cancels without changing anything."
+    #[test]
+    fn esc_in_the_path_editor_cancels_without_changing_anything() {
+        let mut state = state_with_a_session();
+        state.open_settings(sample_harness_rows(), Vec::new());
+        let before = state.settings().unwrap().harnesses()[0].clone();
+
+        state.handle_key(press(KeyCode::Enter));
+        assert!(state.settings().unwrap().path_input().is_some());
+        for c in "/bogus/path".chars() {
+            state.handle_key(press(KeyCode::Char(c)));
+        }
+
+        assert_eq!(state.handle_key(press(KeyCode::Esc)), Action::Redraw);
+        assert!(state.settings().unwrap().path_input().is_none());
+        assert_eq!(
+            state.settings().unwrap().harnesses()[0],
+            before,
+            "cancelling the editor must not change the row"
+        );
+        assert!(state.settings_edits().is_empty());
+        assert_eq!(
+            state.overlay(),
+            Some(Overlay::Settings),
+            "Esc in the editor only closes the editor, not all of settings"
+        );
+    }
+
+    #[test]
+    fn a_valid_explicit_path_is_recorded_with_the_user_layer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("my-claude");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let mut state = state_with_a_session();
+        state.open_settings(sample_harness_rows(), Vec::new());
+        state.handle_key(press(KeyCode::Enter));
+        for c in exe.to_str().unwrap().chars() {
+            state.handle_key(press(KeyCode::Char(c)));
+        }
+        state.handle_key(press(KeyCode::Enter));
+
+        assert!(state.settings().unwrap().path_input().is_none());
+        let row = &state.settings().unwrap().harnesses()[0];
+        assert_eq!(
+            std::fs::canonicalize(row.executable.as_ref().unwrap()).unwrap(),
+            std::fs::canonicalize(&exe).unwrap()
+        );
+        assert_eq!(row.executable_layer, Some(Layer::User));
+        assert_eq!(state.settings_edits().len(), 1);
+    }
+
+    #[test]
+    fn an_invalid_explicit_path_surfaces_an_error_and_keeps_the_editor_open() {
+        let mut state = state_with_a_session();
+        state.open_settings(sample_harness_rows(), Vec::new());
+        state.handle_key(press(KeyCode::Enter));
+        for c in "/definitely/not/a/real/executable".chars() {
+            state.handle_key(press(KeyCode::Char(c)));
+        }
+        assert_eq!(state.handle_key(press(KeyCode::Enter)), Action::Redraw);
+
+        let input = state.settings().unwrap().path_input().expect("still open");
+        assert!(input.error.is_some());
+        assert!(state.settings_edits().is_empty());
+    }
+
+    #[test]
+    fn lowercase_w_signals_an_immediate_user_level_save() {
+        let mut state = state_with_a_session();
+        state.open_settings(sample_harness_rows(), Vec::new());
+        state.handle_key(press(KeyCode::Char(' ')));
+        assert_eq!(
+            state.handle_key(press(KeyCode::Char('w'))),
+            Action::SaveUserSettings
+        );
+    }
+
+    /// "It must first show a confirmation ... Only an explicit `y` (or
+    /// Enter on the confirm) proceeds; `Esc`/`n` cancels."
+    #[test]
+    fn shift_w_requires_a_separate_explicit_confirmation() {
+        let mut state = state_with_a_session();
+        state.open_settings(sample_harness_rows(), Vec::new());
+
+        assert_eq!(state.handle_key(press(KeyCode::Char('W'))), Action::Redraw);
+        assert!(state.settings().unwrap().confirming_project_write());
+
+        // An unrelated key does not proceed.
+        assert_eq!(state.handle_key(press(KeyCode::Char('z'))), Action::None);
+        assert!(state.settings().unwrap().confirming_project_write());
+
+        assert_eq!(
+            state.handle_key(press(KeyCode::Char('y'))),
+            Action::SaveProjectSettings
+        );
+    }
+
+    #[test]
+    fn enter_on_the_confirmation_also_proceeds() {
+        let mut state = state_with_a_session();
+        state.open_settings(sample_harness_rows(), Vec::new());
+        state.handle_key(press(KeyCode::Char('W')));
+        assert_eq!(
+            state.handle_key(press(KeyCode::Enter)),
+            Action::SaveProjectSettings
+        );
+    }
+
+    #[test]
+    fn esc_or_n_cancels_the_confirmation_without_leaving_settings() {
+        for cancel in [press(KeyCode::Esc), press(KeyCode::Char('n'))] {
+            let mut state = state_with_a_session();
+            state.open_settings(sample_harness_rows(), Vec::new());
+            state.handle_key(press(KeyCode::Char('W')));
+
+            assert_eq!(state.handle_key(cancel), Action::Redraw);
+            assert!(!state.settings().unwrap().confirming_project_write());
+            assert_eq!(state.overlay(), Some(Overlay::Settings));
+        }
+    }
+
+    #[test]
+    fn refresh_settings_clears_pending_edits_and_keeps_the_cursor() {
+        let mut state = state_with_a_session();
+        state.open_settings(sample_harness_rows(), Vec::new());
+        state.handle_key(press(KeyCode::Down));
+        state.handle_key(press(KeyCode::Char(' ')));
+        assert!(!state.settings_edits().is_empty());
+        assert_eq!(state.settings().unwrap().selected_harness(), 1);
+
+        state.refresh_settings(sample_harness_rows(), Vec::new());
+        assert!(state.settings_edits().is_empty());
+        assert_eq!(
+            state.settings().unwrap().selected_harness(),
+            1,
+            "the cursor position is preserved across a refresh"
         );
     }
 }

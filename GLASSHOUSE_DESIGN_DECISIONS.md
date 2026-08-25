@@ -87,3 +87,64 @@ exists to prevent, shipped past a full unit-test suite, and caught only by
 driving the real binary through a real pseudo-terminal.
 
 `is_session_escape` accepts both spellings. Do not "tidy" it to one.
+
+---
+
+## Settings — what a settings view may contain before the settings exist
+
+### The conflict
+
+Phase 2D lists twenty settings capabilities: Harnesses, Providers, Launch
+Profiles, Routing, Memory, Integrations. Four of those six sections configure
+features that do not exist — providers are Phase 9C, launch profiles 9A,
+routing 9I-9K, memory Phase 20. A settings view containing all six sections
+would be four-sixths empty shells.
+
+### The decision: build only the sections whose feature exists
+
+The settings view ships with **Harnesses** and **Integrations**, and nothing
+else. The remaining four sections arrive with the features they configure, and
+their map boxes stay unchecked until then.
+
+An empty "Providers" section is worse than an absent one. It tells the user a
+capability exists, invites them to look for it, and leaves the next
+implementer a shape to fill rather than a design to make — which is exactly how
+a settings screen accumulates dead controls.
+
+### The decision: writes default to the user layer, and the project layer needs consent
+
+Glasshouse's project-level file lives at `<root>/.glasshouse/config.toml`, which
+is **inside the user's repository** and will be seen by their version control,
+their diffs, and their colleagues. Writing there is not a preference change; it
+is a modification to their project.
+
+So:
+
+- Every edit in settings applies to the **user** layer by default.
+- Writing the project layer is a separate, explicit action that first shows the
+  exact path to be created and requires a distinct confirmation.
+- Cancelling leaves no file. Not an empty file, not a directory — nothing.
+
+`config::write_project_config_with_consent` is the only writer, and its name is
+a contract with the caller: the consent is the *caller's* job to obtain, and
+this design says where.
+
+### The decision: provenance is shown, not inferred
+
+`config::Layer` already distinguishes `Project`, `User`, and `Default`. The
+settings view shows which layer supplied each value, because "why is this
+harness pointing somewhere unexpected" is the question a settings screen exists
+to answer, and a value with no provenance cannot answer it.
+
+### Invariants a test must hold to
+
+1. Opening settings does not disturb the session: same process, still running,
+   and leaving settings returns to the mode the user was in.
+2. Cancelling a project-level write creates **no** file and no directory.
+3. Confirming a project-level write calls
+   `write_project_config_with_consent` and creates exactly that one file.
+4. A user-level edit never writes into the project root.
+5. Every displayed value carries its layer.
+6. No secret value is rendered — structurally guaranteed, since no
+   configuration type has a field able to hold one.
+

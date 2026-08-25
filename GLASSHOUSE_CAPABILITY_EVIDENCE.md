@@ -49,6 +49,66 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 2D — the settings view (nine of twenty lines)
+
+Contract: Given a project session, when the user opens settings, they can see
+and change which harnesses are enabled and where their executables are, with
+each value's originating configuration layer shown, while leaving settings
+returns them to exactly the session and mode they came from and nothing is
+written into the repository without a distinct confirmation.
+
+State: COMPLETE for the nine lines checked; the other eleven configure features
+that do not exist.
+
+Production evidence:
+- `crates/glasshouse/src/shell/state.rs`: `Overlay::Settings`,
+  `SettingsSection`, `HarnessRow`, `IntegrationRow`, `SettingsEdit`. Opened
+  with `s` from control mode, closed with `Esc`, mode untouched by either.
+  `state.rs` remains I/O-free; it returns `Action::SaveUserSettings` /
+  `Action::SaveProjectSettings` and `shell/mod.rs` acts.
+- `crates/glasshouse/src/shell/mod.rs`: `build_settings`,
+  `apply_settings_edits`, `save_user_settings`, `save_project_settings` — the
+  last going only through `config::write_project_config_with_consent`.
+- `crates/glasshouse/src/shell/view.rs`: `render_settings`, showing each value's
+  `config::Layer` as `(project)` / `(user)` / `(default)`.
+
+Regression evidence:
+- `shell::state::settings_tests` (12) — keymap and in-memory model, including
+  that opening and closing settings leaves mode and session untouched.
+- `shell::view::settings_tests` (8) — every displayed value carries a layer
+  tag; the confirmation names the exact path; no decorative block elements.
+- `tests/settings_persistence.rs` (4) — real filesystem, real `Runtime`.
+
+Failure/isolation evidence — mutations, each observed to fail its target:
+- `W` saving immediately with no confirmation.
+- The confirmed save not calling the writer.
+- A user-level save also writing into the project root.
+
+**The cancel test was vacuous as first written, and this is the interesting
+part.** It asserted that an untouched workspace contained no `.glasshouse`
+directory without ever invoking the cancel path — the comment even said so.
+Mutating `W` to save with no confirmation left it green. Rewritten to drive the
+keys and act on the result, it still passed, because it kept only the answer to
+the *cancel* key and discarded the answer to `W` — which is exactly where a
+missing confirmation saves. Only when it acts on **every** action, as the run
+loop does, does the mutation fail it. Two rounds of a test that looked right
+and proved nothing.
+
+Secrets: no configuration type has a field able to hold one
+(`config::tests::serialized_form_has_no_secret_capable_field`), so the settings
+view cannot render a secret value. Structural, not a display rule.
+
+Platform/external evidence:
+- CI on this batch's commit.
+
+Missing evidence:
+- Eleven lines unchecked: Providers, Launch Profiles, Routing (six lines) and
+  Memory sections, and provider/launch-profile management. Each configures a
+  feature that does not exist (Phases 9C, 9A, 9I-9K, 20). Building the sections
+  now would ship dead controls — see `GLASSHOUSE_DESIGN_DECISIONS.md`.
+- The settings view has no end-to-end test through the shipped binary. The same
+  differential-repaint limit that blocked the multi-session test applies.
+
 ### Phase 5 — the input half of native terminal embedding
 
 Lines: "Preserve native harness input behavior instead of replacing it with a
