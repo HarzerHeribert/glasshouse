@@ -230,6 +230,23 @@ have required a magic clamp.
   `ShellState::refresh` are the seam, and `refresh` already reconciles by
   identifier rather than index.
 - The viewport is reserved and empty. Phase 5 fills it.
+- `session::runtime` (`SessionRuntime`) exists and is proven against real
+  processes on all three platforms, but **has no production caller yet**, so
+  seven Phase 4 boxes stay unchecked. `.agent-runtime/design-shell-session-modes.md`
+  records the decision that unblocks it: the shell's single-key bindings cannot
+  coexist with forwarding every keystroke to a harness, so control mode and
+  session mode split, with `Ctrl-]` as a single-chord escape.
+- `SessionRuntime::is_running()` reports the status cached by the last
+  `poll_exits`, not a fresh answer from the operating system. That is honest —
+  it is documented as observation-based — but it caught a test out: a mutation
+  killing every session on `close` stayed green because the survivor had not
+  been polled since. Any test asserting liveness must poll first.
+- Exit detection cannot currently be proven independent of output *on macOS*.
+  The discriminating case needs a process that exits while its output stream
+  stays open, and a direct probe showed macOS reports end-of-file on the
+  pseudo-terminal master as soon as the foreground child exits, even with a
+  background child still holding the slave. The capability's real risk — a
+  silent-but-running harness mistaken for a finished one — is covered.
 
 - **Nothing calls `open_for_resume` in production.** The cross-project resume
   guard is implemented, structurally enforced, and mutation-proven, but there

@@ -200,23 +200,23 @@ Phase 3 — TUI shell
 ☑ Allow the user to move to the next session with a keyboard shortcut.
 ☑ Allow the user to open a session overview from the keyboard.
 ☐ Allow the user to open a project-memory view from the keyboard.
-☐ Allow the user to return from Glasshouse overlays to the active native session without terminating it.
-☐ Preserve terminal resize events and propagate the new dimensions to the active embedded terminal.
+☑ Allow the user to return from Glasshouse overlays to the active native session without terminating it.
+☑ Preserve terminal resize events and propagate the new dimensions to the active embedded terminal.
 ☑ Keep the visual design text-first and avoid decorative graph visualizations that do not expose actionable state.
 
 Phase 4 — Generic PTY session runtime
 
 ☑ Implement a generic PTY-backed child-process abstraction for interactive harnesses.
-☐ Allow the PTY runtime to spawn a command with an explicit working directory and environment.
-☐ Stream PTY output continuously into an in-memory terminal buffer.
-☐ Forward user keystrokes from the active Glasshouse session to the active PTY.
-☐ Forward terminal resize events from Glasshouse to the child PTY.
+☑ Allow the PTY runtime to spawn a command with an explicit working directory and environment.
+☑ Stream PTY output continuously into an in-memory terminal buffer.
+☑ Forward user keystrokes from the active Glasshouse session to the active PTY.
+☑ Forward terminal resize events from Glasshouse to the child PTY.
 ☐ Support sending text programmatically to a PTY session without requiring the user to focus it.
 ☐ Support sending interrupt signals to a PTY session.
 ☑ Detect process exit independently from textual terminal output.
-☐ Preserve a bounded terminal scrollback buffer for each live session.
-☐ Keep inactive PTY sessions running while the user views another session.
-☐ Ensure switching sessions changes only the presentation focus and does not restart the underlying process.
+☑ Preserve a bounded terminal scrollback buffer for each live session.
+☑ Keep inactive PTY sessions running while the user views another session.
+☑ Ensure switching sessions changes only the presentation focus and does not restart the underlying process.
 ☐ Add a headless presentation mode in which a PTY continues running without occupying the visible session viewport.
 
 Phase 5 — Native terminal embedding

@@ -17,7 +17,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::session::{SessionDisposition, SessionRecord};
 
-use super::state::{Overlay, ShellState};
+use super::state::{Mode, Overlay, ShellState};
 
 /// Draw the shell.
 pub fn render(state: &ShellState, frame: &mut Frame) {
@@ -127,10 +127,15 @@ fn render_session_bar(state: &ShellState, frame: &mut Frame, area: Rect) {
 
 /// The region reserved for the active session's terminal.
 ///
-/// Reserved, not yet filled: embedding a live harness terminal here is Phase 5,
-/// and this deliberately does not fake it. It says what will occupy the space
-/// and what the user can do meanwhile, rather than drawing a convincing empty
-/// terminal that would suggest a session is attached when none is.
+/// Once the run loop has handed over any scrollback via
+/// [`ShellState::set_viewport`], that text fills the space — the last lines
+/// that fit, most recent at the bottom. Raw bytes, not a rendered terminal:
+/// Glasshouse does not emulate one yet (see
+/// [`crate::session::runtime::Scrollback`]'s doc comment), so escape
+/// sequences show up as themselves. Until then, or for a session that has
+/// produced nothing yet, the placeholder below explains what will occupy the
+/// space rather than faking a terminal that would suggest more is attached
+/// than really is.
 fn render_viewport(state: &ShellState, frame: &mut Frame, area: Rect) {
     let block = Block::default().borders(Borders::ALL).title(
         state
@@ -140,6 +145,14 @@ fn render_viewport(state: &ShellState, frame: &mut Frame, area: Rect) {
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
+
+    if !state.viewport().is_empty() {
+        let all: Vec<&str> = state.viewport().lines().collect();
+        let start = all.len().saturating_sub(usize::from(inner.height));
+        let lines: Vec<Line> = all[start..].iter().map(|line| Line::from(*line)).collect();
+        frame.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
 
     let lines = match state.active_session() {
         Some(session) => vec![
@@ -172,17 +185,22 @@ fn render_viewport(state: &ShellState, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// The bottom status bar: Glasshouse's own key bindings, plus a note when the
-/// last key needs explaining.
+/// The bottom status bar: which mode owns the keyboard, Glasshouse's own key
+/// bindings, plus a note when the last key needs explaining.
 ///
-/// Both on one compact row. A note takes the right-hand side rather than
+/// All on one compact row. A note takes the right-hand side rather than
 /// replacing the hints, so learning the keys and being told why one did nothing
 /// are not mutually exclusive.
+///
+/// In session mode this is the *only* thing on screen that says how to get
+/// back — see the design note: "A user who cannot see how to get out is the
+/// failure this design exists to prevent." so the escape chord is shown here
+/// on every frame session mode is active, not just the first.
 fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
-    let hint = if state.overlay().is_some() {
-        "esc back to session   q quit"
-    } else {
-        "tab/shift-tab session   o overview   q quit"
+    let hint = match (state.mode(), state.overlay()) {
+        (Mode::Session, _) => "SESSION MODE -- keys go to the session -- ctrl-] for glasshouse",
+        (Mode::Control, Some(Overlay::Overview)) => "esc back to session   q quit",
+        (Mode::Control, None) => "tab session   enter session   n new   o overview   q quit",
     };
     let mut spans = vec![Span::styled(hint, Style::default().fg(Color::DarkGray))];
 
@@ -580,5 +598,97 @@ mod tests {
                 panic!("a decorative block element ({found:?}) was drawn:\n{screen}");
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // The viewport and the session-mode footer.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn the_viewport_shows_the_set_text_once_non_empty() {
+        let mut state = sample();
+        state.set_viewport("first line\nsecond line\nthird line".to_owned());
+        let text = rendered(&state, 100, 24);
+        assert!(text.contains("first line"), "got:\n{text}");
+        assert!(text.contains("second line"), "got:\n{text}");
+        assert!(text.contains("third line"), "got:\n{text}");
+        assert!(
+            !text.contains("This viewport is reserved"),
+            "the placeholder must not show once there is real output:\n{text}"
+        );
+    }
+
+    /// Only the lines that fit are shown, most recent at the bottom.
+    #[test]
+    fn the_viewport_shows_only_the_most_recent_lines_that_fit() {
+        let mut state = sample();
+        let lines: Vec<String> = (0..50).map(|i| format!("line-{i}")).collect();
+        state.set_viewport(lines.join("\n"));
+
+        let text = rendered(&state, 100, 10);
+        assert!(
+            text.contains("line-49"),
+            "the most recent line must be visible:\n{text}"
+        );
+        assert!(
+            !text.contains("line-0"),
+            "the oldest lines should have scrolled off:\n{text}"
+        );
+    }
+
+    /// "Keep the existing placeholder for the no-session case" — and for the
+    /// active-but-silent-so-far case too: the placeholder is only replaced
+    /// once there is real output to show.
+    #[test]
+    fn an_empty_viewport_keeps_the_existing_placeholder() {
+        let state = sample();
+        assert_eq!(state.viewport(), "");
+        let text = rendered(&state, 100, 24);
+        assert!(text.contains("This viewport is reserved"), "got:\n{text}");
+    }
+
+    /// A viewport full of real output, at sizes much smaller than the
+    /// content, must not panic the slicing that keeps it bounded to what
+    /// fits.
+    #[test]
+    fn the_viewport_does_not_panic_with_real_output_at_absurd_sizes() {
+        let mut state = sample();
+        let lines: Vec<String> = (0..500)
+            .map(|i| format!("line-{i}-{}", "x".repeat(i % 50)))
+            .collect();
+        state.set_viewport(lines.join("\n"));
+        for (w, h) in [(1, 1), (1, 40), (40, 1), (3, 3), (200, 60)] {
+            rendered(&state, w, h);
+        }
+    }
+
+    /// The design note: "A user who cannot see how to get out is the
+    /// failure this design exists to prevent" — so the mode and the escape
+    /// chord are on screen in session mode at all times.
+    #[test]
+    fn the_status_bar_names_session_mode_and_the_escape_chord() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(state.mode(), Mode::Session);
+
+        let bottom = last_row(&state, 100, 24).to_lowercase();
+        assert!(
+            bottom.contains("session"),
+            "the active mode must be named: `{bottom}`"
+        );
+        assert!(
+            bottom.contains("ctrl-]"),
+            "the escape chord must always be on screen in session mode: `{bottom}`"
+        );
+    }
+
+    /// Control mode's own footer must not claim to be session mode.
+    #[test]
+    fn the_status_bar_shows_control_mode_bindings_by_default() {
+        let state = sample();
+        assert_eq!(state.mode(), Mode::Control);
+        let bottom = last_row(&state, 100, 24).to_lowercase();
+        assert!(!bottom.contains("session mode"), "got: `{bottom}`");
+        assert!(bottom.contains("quit"), "got: `{bottom}`");
     }
 }

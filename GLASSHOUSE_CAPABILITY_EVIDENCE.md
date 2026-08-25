@@ -49,6 +49,55 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 3 — return from overlays to the active native session, and propagate resize to it
+
+Lines: "Allow the user to return from Glasshouse overlays to the active native
+session without terminating it" and "Preserve terminal resize events and
+propagate the new dimensions to the active embedded terminal".
+
+Contract: Given an overlay open over a live harness session, when the user
+leaves it, they are returned to that same session still running, and a resize
+of Glasshouse's window reaches that session's own terminal.
+
+State: COMPLETE
+
+Both lines were blocked until this session, for the same reason: there was no
+live native session to return to or to resize. `session::runtime` supplies one
+and `shell::run` drives it.
+
+Production evidence:
+- `crates/glasshouse/src/shell/state.rs: close_overlay`, `enter_session_mode` —
+  leaving an overlay restores the previous mode; entering session mode closes
+  any open overlay. Neither touches a process.
+- `crates/glasshouse/src/shell/mod.rs: run` — `Event::Resize` calls
+  `screen.on_resize` and `SessionRuntime::resize` for the focused session.
+
+Regression evidence:
+- `leaving_an_overlay_returns_to_the_active_session_without_ending_it`
+- `entering_session_mode_closes_any_open_overlay`
+- `entering_and_leaving_session_mode_never_touches_a_real_process` — spawns a
+  real child and checks its pid and liveness across the switch.
+- `resizing_the_shell_reaches_the_harness_terminal` (Unix, tests/pty_smoke.rs)
+  — the harness is asked `stty size` before and after Glasshouse's own terminal
+  is resized, through the shipped binary.
+
+Failure/isolation evidence:
+- Mutation: making Escape always quit fails the overlay-first test.
+- The resize test initially failed for two different reasons, both instructive:
+  first because it asked before the SIGWINCH had travelled (a test timing
+  fault, not a defect), and then because the escape chord never matched — see
+  the Phase 4 entry.
+
+Platform/external evidence:
+- CI on this batch's commit. The resize test is Unix-only: `stty` is the
+  portable way for a shell harness to report its terminal size and Windows has
+  no equivalent a `.cmd` harness can run. The underlying `PtyProcess::resize`
+  is covered on all three platforms by `resize_reaches_the_operating_system`
+  and `a_resize_is_visible_to_the_child_process`.
+
+Missing evidence:
+- none.
+
 ### Phase 4 — the multi-session PTY runtime (covers seven map lines)
 
 Lines: stream PTY output into an in-memory buffer; send text programmatically
@@ -61,9 +110,13 @@ is acted on, it runs, buffers its own output within a fixed bound, and accepts
 text or an interrupt whether or not it is the one on screen, while changing
 which session is on screen never starts, stops, or signals any process.
 
-State: PARTIALLY VERIFIED
+State: COMPLETE for six of the seven lines; see Missing evidence.
 
 Production evidence:
+- `crates/glasshouse/src/shell/mod.rs: run` — **the production consumer.** The
+  shell owns a `SessionRuntime`, starts sessions with `n`, forwards keystrokes
+  in session mode, forwards resize events to the focused session, polls exits
+  on every tick, and renders the focused session's scrollback in the viewport.
 - `crates/glasshouse/src/session/runtime.rs: SessionRuntime`, `LiveSession`,
   `Scrollback` — each session gets its own reader thread and its own bounded
   buffer; focus is a field, and `focus()` touches nothing else.
@@ -114,13 +167,50 @@ Two mutations did **not** fail, and both were acted on:
   one, is covered by `exit_is_detected_from_the_process_not_from_quiet_output`.
 
 Platform/external evidence:
-- CI on this batch's commit.
+- CI `32819167010` on `bb4c383` — green on Linux, macOS, Windows and lint, with
+  the Windows job confirmed to have executed 267 lib and 31 PTY tests including
+  every multi-session test by name. Several concurrent ConPTY sessions with
+  independent scrollbacks work, which was the platform risk worth checking.
+
+End-to-end evidence through the shipped binary (tests/pty_smoke.rs):
+- `a_keystroke_typed_into_the_shell_reaches_a_real_harness_and_comes_back` —
+  `glasshouse` with no arguments, `n` starts a real harness, session mode hands
+  it the keyboard, the typed bytes arrive and its reply is drained into the
+  scrollback and drawn. The payload begins with `q` on purpose: in session mode
+  that belongs to the harness, so a broken mode split would quit instead.
+  Mutations caught: swallowing the bytes before `write_to_focused`; never
+  refreshing the viewport from the scrollback.
+- `resizing_the_shell_reaches_the_harness_terminal` (Unix) — asks the harness
+  `stty size`, resizes Glasshouse's own terminal, asks again. Proves the chain
+  from Crossterm's resize event to the child's pseudo-terminal is joined up,
+  which nothing previously did.
+
+**A real defect this found, that unit tests could not.** The session-mode
+escape chord was implemented as `Ctrl` + `']'`, matching the synthetic
+`KeyEvent` its unit tests constructed. Crossterm's Unix parser decodes the
+control range `0x1C..=0x1F` arithmetically, so a real terminal's `Ctrl-]`
+arrives as `Ctrl` + `'5'` and never matched — leaving the user in session mode
+**with no way back**, which is precisely the failure the single-chord escape
+exists to prevent. `is_session_escape` now accepts both spellings, with the
+Windows path (virtual key codes, `']'`) and the Unix path (`'5'`) documented
+and separately tested. Reverting to the single spelling fails the resize test.
 
 Missing evidence:
-- A production consumer. Wiring the runtime into the shell is the next batch,
-  and it needs the keyboard-ownership decision recorded in
-  `.agent-runtime/design-shell-session-modes.md`: the shell's single-key
-  bindings cannot coexist with forwarding every keystroke to a harness.
+- Three of the twelve Phase 4 lines stay unchecked, all for the same reason —
+  no production caller: sending text to an **unfocused** session and sending an
+  **interrupt** are both orchestrator operations (Phase 14), and nothing yet
+  creates a **headless** session, because the shell always starts sessions
+  embedded. The runtime supports all three and each is tested against real
+  processes; what is missing is a caller, not a mechanism.
+- The shell's own multi-session switching has no end-to-end test. One was
+  written and removed: a full-screen Ratatui application repaints
+  differentially, so a captured pseudo-terminal stream cannot be sliced back
+  into frames without a real terminal emulator, and an assertion about "the
+  viewport" silently reads every viewport ever drawn. Phase 5 needs an emulator
+  anyway; that is when this becomes testable. Meanwhile the behaviour is proven
+  at the runtime layer against real processes
+  (`focus_changes_nothing_but_focus` records pids across five switches), and
+  the shell's only route to switching is through that layer.
 
 ### Phase 4 — Implement a generic PTY-backed child-process abstraction for interactive harnesses
 

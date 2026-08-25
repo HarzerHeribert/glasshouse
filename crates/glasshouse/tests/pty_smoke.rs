@@ -2083,3 +2083,247 @@ fn keystrokes_reach_the_focused_session() {
 
     runtime.close(&id).expect("close echo");
 }
+
+/// A keystroke typed into the real shell reaching a real harness, and the
+/// harness's answer coming back to the viewport.
+///
+/// Everything else about the wiring is unit-tested against a `ShellState` with
+/// no processes behind it. This is the one test that proves the whole chain
+/// exists in the shipped binary: `glasshouse` with no arguments opens the
+/// shell, `n` starts a real harness in a real pseudo-terminal, session mode
+/// hands the keyboard to it, the bytes arrive, and its reply is drained into
+/// the session's scrollback and drawn.
+///
+/// It also proves the mode split does what it is for: `q` is typed while in
+/// session mode and must reach the harness rather than quitting Glasshouse.
+#[test]
+fn a_keystroke_typed_into_the_shell_reaches_a_real_harness_and_comes_back() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&state_dir).expect("create state dir");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+    // Reads one line and echoes it back with a prefix, so the reply proves the
+    // input travelled the whole way rather than being echoed by the terminal.
+    let harness = install_echo_harness(&bin_dir, "echoing");
+    let toml_path = |p: &std::path::Path| p.display().to_string().replace('\\', "\\\\");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[onboarding]\ncompleted = true\n\n\
+             [integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n",
+            toml_path(&harness)
+        ),
+    )
+    .expect("write user config");
+
+    let mut shell = Session::spawn(
+        TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path()).args([
+            "--scope".to_owned(),
+            project_dir.display().to_string(),
+            "--data-dir".to_owned(),
+            state_dir.display().to_string(),
+            "--config-dir".to_owned(),
+            config_dir.display().to_string(),
+        ]),
+    );
+
+    // The shell is up once it has drawn the project root.
+    shell.expect("root ");
+
+    // `n` starts a real harness; the session bar names it once it exists.
+    shell.send("n");
+    shell.expect("claude-code");
+
+    // Enter session mode, then type. `q` is deliberately part of the payload:
+    // in session mode it belongs to the harness, and if the mode split were
+    // wrong it would quit Glasshouse instead and the expect below would time
+    // out on a dead process.
+    shell.send("\r");
+    shell.expect("ctrl-]");
+    shell.send("quiet\r");
+
+    shell.expect("GOT:quiet");
+
+    // Leave session mode and quit through Glasshouse's own binding.
+    shell.send("\x1d");
+    shell.send("q");
+
+    let status = shell.wait_for_exit();
+    assert!(
+        status.success(),
+        "the shell should still exit cleanly on `q` after a session: {status}\n\
+         --- output ---\n{}\n--- end ---",
+        shell.output()
+    );
+}
+
+/// A resize of Glasshouse's own terminal reaching the harness's.
+///
+/// The mechanism (`PtyProcess::resize`) has its own tests, and the shell calls
+/// it on every `Event::Resize`, but nothing proved the two were joined up. This
+/// asks the harness itself, twice, through the keystroke path proved above:
+/// `stty size` before and after the outer terminal changes shape. If the event
+/// were dropped anywhere between Crossterm and the child's pseudo-terminal, the
+/// second answer would equal the first.
+///
+/// Unix only: `stty` is the portable way to ask a terminal its size from
+/// inside a shell, and Windows has no equivalent a `.cmd` harness can run.
+#[cfg(unix)]
+#[test]
+fn resizing_the_shell_reaches_the_harness_terminal() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&state_dir).expect("create state dir");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+    // A plain shell is the harness: it can be asked its terminal size.
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "version = 1\n\n[onboarding]\ncompleted = true\n\n\
+         [integrations.claude-code]\nenabled = true\nexecutable = \"/bin/sh\"\n",
+    )
+    .expect("write user config");
+
+    let start = TerminalSize::new(24, 80);
+    let mut shell = Session::spawn(
+        TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path())
+            .size(start)
+            .args([
+                "--scope".to_owned(),
+                project_dir.display().to_string(),
+                "--data-dir".to_owned(),
+                state_dir.display().to_string(),
+                "--config-dir".to_owned(),
+                config_dir.display().to_string(),
+            ]),
+    );
+
+    shell.expect("root ");
+    shell.send("n");
+    shell.expect("claude-code");
+    shell.send("\r");
+    shell.expect("ctrl-]");
+
+    // The harness's view of its own terminal, before anything moves. It is
+    // smaller than Glasshouse's, because the viewport is inset by the top bar,
+    // session bar, status bar and border — the exact figures are the shell's
+    // business, so this only asserts that they change.
+    shell.send("stty size > /tmp/gh-size-1 2>&1\r");
+    let first = read_when_written("/tmp/gh-size-1", &mut shell);
+
+    // Now change the outer terminal, exactly as a window manager would.
+    shell
+        .process()
+        .resize(TerminalSize::new(40, 120))
+        .expect("resize the shell's terminal");
+
+    // Give the SIGWINCH time to become a Crossterm event, be handled, and
+    // reach the child's pseudo-terminal before asking.
+    let settle = Instant::now() + Duration::from_millis(600);
+    while Instant::now() < settle {
+        shell.answer_pending_queries();
+        std::thread::sleep(POLL);
+    }
+
+    shell.send("stty size > /tmp/gh-size-2 2>&1\r");
+    let second = read_when_written("/tmp/gh-size-2", &mut shell);
+
+    assert_ne!(
+        first.trim(),
+        second.trim(),
+        "the harness saw the same terminal size before and after the shell was \
+         resized, so the event never reached its pseudo-terminal"
+    );
+
+    shell.send("\x1d");
+    let back = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < back {
+        shell.answer_pending_queries();
+        std::thread::sleep(POLL);
+    }
+    shell.send("q");
+    let status = shell.wait_for_exit();
+    assert!(
+        status.success(),
+        "the shell must still quit while a session is live: {status}"
+    );
+    let _ = std::fs::remove_file("/tmp/gh-size-1");
+    let _ = std::fs::remove_file("/tmp/gh-size-2");
+}
+
+/// Wait for a file the harness is writing, keeping the session serviced while
+/// polling so a handshake query never blocks it.
+#[cfg(unix)]
+fn read_when_written(path: &str, session: &mut Session) -> String {
+    let _ = std::fs::remove_file(path);
+    let deadline = Instant::now() + TIMEOUT;
+    while Instant::now() < deadline {
+        session.answer_pending_queries();
+        if let Ok(text) = std::fs::read_to_string(path)
+            && !text.trim().is_empty()
+        {
+            return text;
+        }
+        std::thread::sleep(POLL);
+    }
+    panic!(
+        "the harness never wrote {path}\n--- shell output ---\n{}\n--- end ---",
+        session.output()
+    );
+}
+
+/// An environment override reaching a real child, not just the command builder.
+///
+/// `TerminalCommand`'s `env`/`env_remove` ordering has unit tests, but those
+/// inspect the builder's own record of what it would do. This spawns a real
+/// process and asks it what it actually received, which is the difference
+/// between "the struct holds the right value" and "the child got it" — the
+/// same gap that hid a Windows-only launch defect earlier in this project.
+///
+/// Both halves are exercised without touching this process's own environment:
+/// one variable is set, and a second is set and then removed, so the removal
+/// is observable in the child without a `set_var` that would race the other
+/// tests sharing this process.
+#[test]
+fn an_environment_override_reaches_a_real_child() {
+    const KEPT: &str = "GLASSHOUSE_ENV_KEPT";
+    const DROPPED: &str = "GLASSHOUSE_ENV_DROPPED";
+    const VALUE: &str = "reached-the-child";
+    const GONE: &str = "should-not-survive";
+
+    let cwd = std::env::temp_dir();
+    let script = if cfg!(windows) {
+        format!("echo kept=%{KEPT}% dropped=[%{DROPPED}%]")
+    } else {
+        format!("echo kept=${KEPT} dropped=[${DROPPED}]")
+    };
+
+    let command = shell_command(&script, &cwd)
+        .env(KEPT, VALUE)
+        .env(DROPPED, GONE)
+        .env_remove(DROPPED);
+    let mut session = Session::spawn(command);
+
+    session.expect("kept=");
+    let status = session.wait_for_exit();
+    assert!(status.success(), "{status}");
+
+    let output = strip_terminal_sequences(&session.output());
+    assert!(
+        output.contains(&format!("kept={VALUE}")),
+        "the override never reached the child:\n{output}"
+    );
+    assert!(
+        !output.contains(GONE),
+        "a variable removed after being set still reached the child:\n{output}"
+    );
+}
