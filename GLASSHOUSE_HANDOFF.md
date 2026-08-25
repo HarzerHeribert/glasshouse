@@ -761,6 +761,18 @@ have required a magic clamp.
 
 ## Unresolved loose ends
 
+- **The user's own gateway keys are available for Glasshouse, on one
+  condition.** `~/projects/openrouter-clis` holds working credentials for
+  eight gateways (OpenRouter, UnoRouter, AnyRouter, Z.ai, OpenCode Zen, and
+  keys-without-verified-endpoints for Kilo, Nous and RouterAI). The user
+  offered them for Glasshouse's own testing **provided only free models are
+  used**. Full inventory — names, endpoints and env-var *names*, never a value
+  — is in `GLASSHOUSE_DESIGN_DECISIONS.md`. Four map lines were added for what
+  this exposed: naming the three missing services, key *pools* rather than
+  duplicate provider instances, per-credential quota tracking, and the
+  free-models-only rule for automated runs. Nothing is implemented yet; it
+  lands with Phases 9C-9E and 9I.
+
 - **`glasshouse hook` blocks forever if its stdin never reaches EOF.**
   `report_hook` drains stdin with `std::io::copy(stdin, sink)` — deliberately,
   so a harness is never left writing into a closed pipe — but that read is

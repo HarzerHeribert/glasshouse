@@ -938,6 +938,86 @@ anyone notices.
 
 ---
 
+## The gateways this user already has, and what Glasshouse owes them
+
+### Why this is written down
+
+The user keeps a working multi-gateway setup in `~/projects/openrouter-clis`
+(the `ox` gateway). It is the concrete answer to a question Phases 9C-9I would
+otherwise have to guess at: *which* providers, *which* endpoints, and what the
+credential situation actually looks like on a real machine. Rediscovering it
+means reading someone else's 100 KB gateway script again, so it is recorded
+here once.
+
+**No key value appears in this repository, in any form, ever.** What follows is
+names, endpoints and environment-variable *names* — the same class of
+information `glasshouse doctor` already prints. The values live in that
+project's gitignored `.env` and were never read.
+
+### The inventory (2026-08-25)
+
+| Gateway | Endpoint | Credential env name | Endpoint implemented in `ox`? |
+|---|---|---|---|
+| OpenRouter | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` | yes |
+| UnoRouter | `https://api.unorouter.com/v1` | `UNOROUTER_API_KEY` | yes |
+| AnyRouter | `https://anyrouter.dev/api/v1` | `ANYROUTER_API_KEY` | yes |
+| Z.ai | `https://api.z.ai/api/paas/v4` | `ZAI_API_KEY` | yes |
+| OpenCode Zen | `https://opencode.ai/zen/v1` (and `/zen/go/v1`) | — | yes |
+| Kilo | not established | `KILO_API_KEY` | no |
+| Nous | not established | `NOUS_API_KEY` | no |
+| RouterAI | not established | `ROUTERAI_API_KEY` | no |
+
+**A key held is not an endpoint verified.** Three of the eight have a
+credential on this machine and no endpoint in the reference implementation.
+Glasshouse must not invent base URLs for them — that is the same failure as
+inventing an environment-variable name, which Phase 9A already refuses to do.
+They stay configurable through the generic OpenAI-compatible template until
+someone reads a real endpoint from the service's own documentation.
+
+Free capacity is real here: the reference gateway routes models such as
+`ox-alpha:free` and treats Zen's free endpoint as a first-class route — while
+recording that it "returns 503 under load", which is exactly the kind of
+free-tier health signal Phase 9I's cooldown lines exist for.
+
+### What the map already covered, and what it did not
+
+Most of this was already specified, which is worth stating rather than
+re-specifying: Phase 9D already named UnoRouter, AnyRouter, Kilo and Nous;
+Phase 9E already allowed multiple credentials per provider; Phase 9I already
+covered marking models free and applying cooldowns; Phase 39 already defined
+disposable one-shot jobs over OpenAI-compatible gateways.
+
+Four things were genuinely missing, and were added as an explicit
+specification change:
+
+1. **RouterAI, Z.ai and OpenCode Zen** were not named among the services the
+   generic templates should cover. Now they are.
+2. **A key pool is not the same as a second provider instance.** Phase 9E's
+   existing line allows several credentials only by configuring the provider
+   twice. The user asked for multiple keys *per router*, which is a pool.
+3. **Quota is per credential, not per provider.** Two keys for the same router
+   are two separate allowances, and a router whose first key is exhausted is
+   not an exhausted router. Without this, a rate-limited key would take a
+   healthy provider out of routing.
+4. **Glasshouse's own tests may spend free capacity, and only free capacity.**
+   The user offered these keys for testing on the condition that free models
+   are used. That condition is now a rule rather than a memory: an automated
+   evaluation run may use configured zero-cost models and must never reach a
+   metered resource without an explicit opt-in.
+
+### The boundary this does not move
+
+These gateways are **backend resources**, never interactive harnesses — the
+distinction Phase 9A already enforces in the type system. A key for OpenRouter
+does not make OpenRouter a coding agent; it makes it something an installed
+harness can be pointed at through a launch profile, or something a bounded
+disposable job can call. Nothing here weakens that, and nothing here weakens
+the secret boundary: credentials remain outside project memory, tracked
+configuration, checkpoints, event payloads and diagnostics, and Glasshouse
+stores references rather than values.
+
+---
+
 ## Codex lifecycle hooks — a second destination, and a payload not to read
 
 ### The conflict

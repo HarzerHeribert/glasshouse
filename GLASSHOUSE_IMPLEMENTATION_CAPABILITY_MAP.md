@@ -418,7 +418,7 @@ Phase 9D — Built-in provider templates
 ☐ Add a built-in llama.cpp provider template.
 ☐ Add a generic OpenAI-compatible provider template.
 ☐ Add a generic Anthropic-compatible provider template.
-☐ Allow providers such as UnoRouter, AnyRouter, Kilo, Nous, Cerebras, Groq, or future services to be configured through generic templates when their API shape is compatible.
+☐ Allow providers such as UnoRouter, AnyRouter, Kilo, Nous, RouterAI, Z.ai, OpenCode Zen, Cerebras, Groq, or future services to be configured through generic templates when their API shape is compatible.
 ☐ Keep provider templates declarative so adding a known service does not require branching throughout the core router.
 ☐ Keep service-specific default URLs and headers overridable by the user.
 ☐ Allow a provider template to define required environment-variable names without storing the secret in project memory.
@@ -445,6 +445,7 @@ Fixed architectural requirements
 ☐ Redact recognized secrets from diagnostic output.
 ☐ Allow the user to delete a stored provider credential from settings.
 ☐ Allow multiple credentials for the same provider through distinct provider instances.
+☐ Allow several credentials for one provider to be held as a pool rather than only as separate provider instances, so a user who has more than one key for the same router can configure them together.
 
 Phase 9F — Direct provider launch profiles
 
@@ -533,6 +534,9 @@ Fixed architectural requirements
 ☐ Avoid consuming scarce free requests on health probes when actual workload can provide health signals.
 ☐ Apply cooldowns to free models or providers that repeatedly return rate-limit or capacity failures.
 ☐ Allow the user to order, disable, or pin free resources from settings.
+☐ Rotate among a provider's configured credentials when one is rate-limited or exhausted, and treat a single key's exhaustion as that key's limit rather than the provider's.
+☐ Track request-pool and quota state per credential rather than only per provider, because two keys for the same router are two separate allowances.
+☐ Allow Glasshouse's own automated evaluation and test runs to use configured zero-cost models, and never a metered resource without an explicit opt-in.
 ☐ Show whether a free resource is being used because of user preference, quota preservation, or fallback.
 
 Phase 9J — Harness-model pairing model
