@@ -24,6 +24,10 @@ The implementation-quality principle is:
 
 > **Prefer the simplest secure and scalable implementation that satisfies the current requirements; revisit stale rules instead of building complexity around them.**
 
+The architectural-decision principle is:
+
+> **When a phase records a fixed architectural requirement, implementations must not silently substitute a different architecture. A deviation requires an explicit specification change that records the reason, impact, and migration consequences before implementation.**
+
 The isolation principle is:
 
 > **One Glasshouse instance operates on exactly one project root and must not retrieve memory or session state from another project.**
@@ -66,6 +70,11 @@ Implementation Order
 
 Phase 0 — Repository and executable foundation
 
+Fixed architectural requirements
+
+- Glasshouse remains a Rust workspace that produces one primary `glasshouse` executable for V1.
+- Do not introduce a web frontend, Electron shell, distributed service topology, or parallel application runtime as an alternative core architecture without an explicit specification revision.
+
 ☑ Create Glasshouse as a Rust workspace that builds a single glasshouse executable.
 ☑ Keep the initial dependency set limited to libraries required for async execution, terminal UI, PTYs, serialization, SQLite, and basic process control.
 ☑ Make glasshouse run without requiring a global daemon, background service, Node installation, or Python environment.
@@ -76,6 +85,11 @@ Phase 0 — Repository and executable foundation
 ☑ Add a clean shutdown path that restores the terminal state after normal exit, panic, or interrupt.
 
 Phase 1 — Project-root detection and hard isolation
+
+Fixed architectural requirements
+
+- One running Glasshouse instance belongs to exactly one canonical project root.
+- Cross-project isolation must be structural through project-scoped state and storage, not merely a query filter or prompt convention.
 
 ☑ Resolve the current project root from the current working directory by using the containing Git repository when one exists.
 ☑ Add glasshouse --scope <path> to explicitly select a project root when Git-based discovery is not appropriate.
@@ -94,6 +108,11 @@ Phase 1 — Project-root detection and hard isolation
 ☑ Display the active canonical project root prominently in the TUI.
 
 Phase 2A — Cross-platform runtime
+
+Fixed architectural requirements
+
+- Platform-specific PTY, signal, and process behavior must remain behind stable runtime interfaces.
+- Native Windows and WSL are separate runtime environments; Glasshouse must not silently mix their paths, executables, process namespaces, or session state.
 
 ☑ Support macOS as a first-class Glasshouse runtime.
 ☑ Support Linux as a first-class Glasshouse runtime.
@@ -178,6 +197,11 @@ Phase 2D — Settings foundation
 
 Phase 2 — Persistent project state
 
+Fixed architectural requirements
+
+- V1 uses a project-local SQLite database for durable operational state; it does not require a server database.
+- Session metadata, project memory, configuration, and credentials are separate domains even when some non-secret records share the same SQLite deployment.
+
 ☑ Create the project-specific state directory automatically on first Glasshouse launch.
 ☑ Create a project-specific SQLite database automatically on first Glasshouse launch.
 ☑ Persist Glasshouse session metadata independently from the native harness session files.
@@ -190,6 +214,11 @@ Phase 2 — Persistent project state
 ☑ Add a small migration mechanism before introducing multiple schema versions.
 
 Phase 3 — TUI shell
+
+Fixed architectural requirements
+
+- The primary V1 product interface is a Ratatui/Crossterm terminal application.
+- A browser UI or desktop web container may be considered later but must not become a hidden prerequisite for the core runtime.
 
 ☑ Build the main interactive interface with Ratatui and Crossterm.
 ☑ Create a persistent top bar that shows the project name, project root, and active session.
@@ -206,6 +235,11 @@ Phase 3 — TUI shell
 
 Phase 4 — Generic PTY session runtime
 
+Fixed architectural requirements
+
+- Interactive harnesses run as real child processes attached to PTYs or the platform-equivalent terminal abstraction.
+- Switching the visible session changes presentation focus only; it must not recreate, emulate, or restart the underlying harness process.
+
 ☑ Implement a generic PTY-backed child-process abstraction for interactive harnesses.
 ☑ Allow the PTY runtime to spawn a command with an explicit working directory and environment.
 ☑ Stream PTY output continuously into an in-memory terminal buffer.
@@ -221,6 +255,11 @@ Phase 4 — Generic PTY session runtime
 
 Phase 5 — Native terminal embedding
 
+Fixed architectural requirements
+
+- Glasshouse embeds the native harness terminal experience instead of replacing it with a Glasshouse chat composer.
+- Native commands, permission flows, model controls, compaction, resume behavior, and tool interfaces remain owned by the harness.
+
 ☐ Render ANSI terminal output from the active PTY faithfully enough for native Claude Code and Codex TUIs to remain usable.
 ☐ Preserve native colors, cursor position, line wrapping, and basic terminal control sequences required by supported harnesses.
 ☐ Preserve native harness input behavior instead of replacing it with a Glasshouse chat composer.
@@ -231,6 +270,11 @@ Phase 5 — Native terminal embedding
 ☐ Add an escape key sequence that temporarily captures input for Glasshouse-level navigation without permanently stealing input from the harness.
 
 Phase 6 — Harness adapter interface
+
+Fixed architectural requirements
+
+- Glasshouse core depends on a common `HarnessAdapter` contract, not on harness-specific implementation details.
+- Commands, lifecycle parsing, hooks, model overrides, protocol declarations, and configuration mechanisms remain isolated inside adapters.
 
 ☐ Define a common HarnessAdapter interface for starting, resuming, messaging, interrupting, observing, and describing a harness session.
 ☐ Make each adapter expose the executable command used to start a new native session.
@@ -247,6 +291,10 @@ Phase 6 — Harness adapter interface
 
 Phase 7 — Claude Code adapter
 
+Fixed architectural requirements
+
+- The adapter launches the installed first-party `claude` executable; Glasshouse does not reimplement Claude Code's agent loop or terminal UI.
+
 ☐ Add a Claude Code adapter that starts the real claude executable inside the current project root.
 ☐ Capture the native Claude Code session identifier when it can be obtained reliably.
 ☐ Support resuming a known Claude Code session through Claude Code’s native resume mechanism.
@@ -259,6 +307,10 @@ Phase 7 — Claude Code adapter
 ☐ Keep terminal-text parsing only as a fallback for state that cannot be obtained structurally.
 
 Phase 8 — Codex adapter
+
+Fixed architectural requirements
+
+- The adapter launches the installed first-party `codex` executable; Glasshouse does not reimplement Codex's agent loop or couple core behavior to Codex-internal crates.
 
 ☐ Add a Codex adapter that starts the real codex executable inside the current project root.
 ☐ Capture the native Codex thread or session identifier when it can be obtained reliably.
@@ -273,6 +325,10 @@ Phase 8 — Codex adapter
 
 Phase 9 — Antigravity adapter
 
+Fixed architectural requirements
+
+- The adapter launches the real supported Antigravity executable and preserves its native interaction model rather than emulating it.
+
 ☐ Add an Antigravity adapter that starts the real supported Antigravity CLI command inside the current project root.
 ☐ Capture the native Antigravity conversation identifier when it can be obtained reliably.
 ☐ Support resuming a known Antigravity conversation through its native mechanism when available.
@@ -282,6 +338,11 @@ Phase 9 — Antigravity adapter
 ☐ Treat unsupported lifecycle information as unknown instead of fabricating certainty from terminal text.
 
 Phase 9A — Harness launch profiles
+
+Fixed architectural requirements
+
+- A launch profile is the authoritative composition of harness, backend resource, model, wire-protocol compatibility, ephemeral child-process overlay, and response profile.
+- A provider, direct API, router, or gateway is a backend resource for an installed harness and is never an interactive coding agent by itself.
 
 ☐ Introduce a launch-profile abstraction that describes how Glasshouse starts a harness without changing the user’s global harness installation.
 ☐ Require every interactive Glasshouse session to be operated by a real installed coding harness.
@@ -310,6 +371,11 @@ Phase 9A — Harness launch profiles
 
 Phase 9B — Scoped harness wrappers and shims
 
+Fixed architectural requirements
+
+- Environment variables, CLI arguments, and generated configuration apply only to the launched process tree.
+- Glasshouse must not mutate the user's global harness installation or persistent global harness configuration as a side effect of selecting a profile.
+
 ☐ Add glasshouse run <harness> --profile <profile> to launch a real harness with a selected Glasshouse launch profile outside the full Glasshouse TUI.
 ☐ Make glasshouse run inject configuration only into the spawned process and its descendants.
 ☐ Preserve the user’s existing shell environment except for explicit launch-profile overrides.
@@ -321,6 +387,11 @@ Phase 9B — Scoped harness wrappers and shims
 ☐ Keep the same launch-profile behavior whether a session is started from the TUI, glasshouse run, or an optional shim.
 
 Phase 9C — Provider protocol model
+
+Fixed architectural requirements
+
+- Protocol compatibility is modeled explicitly and verified before launch.
+- V1 prefers protocol pass-through; broad universal protocol translation is not part of the base architecture and requires an explicit pair-specific adapter and tests.
 
 ☐ Represent provider compatibility explicitly as anthropic-messages, openai-responses, openai-chat, or another named protocol.
 ☐ Allow a provider to support more than one protocol.
@@ -354,6 +425,11 @@ Phase 9D — Built-in provider templates
 
 Phase 9E — Secret storage
 
+Fixed architectural requirements
+
+- Credentials remain outside project memory, tracked configuration, checkpoints, event payloads, and diagnostic logs.
+- Secret storage is accessed through a dedicated `SecretStore` abstraction, preferring native OS-backed secure storage when available.
+
 ☐ Define a SecretStore abstraction independent from project memory and provider configuration.
 ☐ Prefer the macOS Keychain for user-entered provider secrets on macOS when available.
 ☐ Prefer Windows Credential Manager for user-entered provider secrets on Windows when available.
@@ -368,6 +444,11 @@ Phase 9E — Secret storage
 ☐ Allow multiple credentials for the same provider through distinct provider instances.
 
 Phase 9F — Direct provider launch profiles
+
+Fixed architectural requirements
+
+- Direct-provider and gateway-backed interactive sessions still run through a real installed coding harness.
+- Glasshouse configures the harness's backend but does not take ownership of its agent loop, tools, permissions, compaction, or native session semantics.
 
 ☐ Support launching Claude Code directly against a configured Anthropic-compatible gateway by injecting the required child-process environment.
 ☐ Support ANTHROPIC_BASE_URL injection for Claude Code launch profiles that use a compatible gateway.
@@ -384,6 +465,11 @@ Phase 9F — Direct provider launch profiles
 ☐ Fall back to a clear launch error rather than silently using the native paid provider when a requested gateway profile cannot be configured.
 
 Phase 9G — Glasshouse local gateway process
+
+Fixed architectural requirements
+
+- The local gateway is an optional loopback transport, credential, telemetry, reliability, and backend-routing proxy.
+- It is not a coding harness, does not own interactive sessions, and must not acquire an autonomous coding loop, repository tool surface, permission system, or compaction system.
 
 ☐ Define the local Glasshouse gateway as an optional transport, credential, telemetry, reliability, and backend-routing proxy for requests originating from a real harness.
 ☐ Never treat the local gateway as a coding harness, agent loop, interactive session owner, or replacement for native harness tools.
@@ -407,6 +493,11 @@ Phase 9G — Glasshouse local gateway process
 
 Phase 9H — Sticky gateway routing for harness-backed interactive sessions
 
+Fixed architectural requirements
+
+- Interactive sessions are sticky to a compatible model and backend by default to preserve prompt-cache locality, context continuity, and tool semantics.
+- A material model-family change is an explicit migration decision, not transparent per-turn failover.
+
 ☐ Assign an interactive harness-backed gateway session to a provider and model when the session starts.
 ☐ Keep the harness identity and native session semantics explicit even when the backend is routed through a Glasshouse gateway.
 ☐ Treat the gateway assignment as backend state belonging to the harness-backed session rather than as an independent agent session.
@@ -424,6 +515,11 @@ Phase 9H — Sticky gateway routing for harness-backed interactive sessions
 
 Phase 9I — Free-pool routing
 
+Fixed architectural requirements
+
+- Interactive harness routing and bounded internal support jobs are separate policy classes.
+- Free capacity may back an interactive profile only when the selected installed harness, protocol, and tool semantics remain compatible.
+
 ☐ Allow provider instances to mark selected models as free-tier or zero-marginal-cost resources.
 ☐ Track request-pool limits separately from token-priced limits when a provider exposes request quotas.
 ☐ Track per-model free-tier health independently when a router exposes multiple free models.
@@ -437,6 +533,11 @@ Phase 9I — Free-pool routing
 ☐ Show whether a free resource is being used because of user preference, quota preservation, or fallback.
 
 Phase 9J — Harness-model pairing model
+
+Fixed architectural requirements
+
+- Vendor alignment is an inspectable positive initial soft prior, never proof of quality or a hard routing requirement.
+- Reliable local measurements for the exact harness, launch profile, model, backend, and protocol combination must be able to outweigh the prior.
 
 Pairing identity
 
@@ -465,6 +566,11 @@ Pairing prior and evidence
 ☐ Allow users to prefer native pairing strongly, weakly, not at all, or as a hard pin for explicitly chosen sessions.
 
 Phase 9K — Harness-aware response profiles
+
+Fixed architectural requirements
+
+- Response profiles govern user-facing communication only and remain independent from reasoning depth, diligence, validation, permissions, safety, and tool use.
+- They must prefer native harness mechanisms, must not replace the complete native system prompt, and must not use concision to suppress diagnostics, evidence, or verification.
 
 Profile model
 
@@ -517,6 +623,11 @@ Evaluation and safeguards
 
 Phase 10 — Unified session model
 
+Fixed architectural requirements
+
+- Every interactive Glasshouse session is owned by a real harness.
+- Harness, launch profile, backend, provider, gateway, model, protocol, pairing class, and response profile remain separately represented rather than collapsed into one ambiguous agent identifier.
+
 ☐ Represent every native harness execution as a first-class Glasshouse session.
 ☐ Assign every Glasshouse session a unique Glasshouse session ID.
 ☐ Store the harness type for every session.
@@ -546,6 +657,11 @@ Phase 11 — Session overview
 ☐ Allow the user to interrupt a running session from the overview.
 
 Phase 12 — Unified lifecycle event bus
+
+Fixed architectural requirements
+
+- There is one normalized core lifecycle-event stream shared by the TUI, router, memory, API, and MCP surfaces.
+- Adapters translate native observations into core events; consumers must not create competing harness-specific lifecycle architectures.
 
 ☐ Define a harness-independent Glasshouse lifecycle-event enum.
 ☐ Record every translated lifecycle event with session ID and timestamp.
@@ -616,6 +732,11 @@ Phase 17 — cmux optional integration
 
 Phase 18 — Raw event recording
 
+Fixed architectural requirements
+
+- Raw observations remain available as diagnostic source evidence while normalized and derived records remain distinguishable from them.
+- Derived interpretation must not overwrite or masquerade as the original event.
+
 ☐ Create an append-only project event log for important Glasshouse and harness events.
 ☐ Record session creation events.
 ☐ Record session resume events.
@@ -628,6 +749,11 @@ Phase 18 — Raw event recording
 ☐ Treat the raw event stream as reconstructable source material rather than directly injecting it into agent prompts.
 
 Phase 19 — Portable session checkpoints
+
+Fixed architectural requirements
+
+- Glasshouse checkpoints contain portable Glasshouse metadata and bounded handoff context.
+- They do not attempt to clone or replace proprietary native harness session formats.
 
 ☐ Define a provider-independent checkpoint format for transferring active work between sessions.
 ☐ Include the current objective in every checkpoint.
@@ -645,6 +771,11 @@ Phase 19 — Portable session checkpoints
 ☐ Allow a checkpoint created by one harness to bootstrap a fresh session in another harness.
 
 Phase 20 — Minimal durable project memory
+
+Fixed architectural requirements
+
+- Durable memory is project-scoped, minimal, provenance-aware, and stored locally in SQLite for V1.
+- It is not a complete transcript archive and must not treat every extracted statement as an enduring requirement.
 
 ☐ Create a memory table in the project-specific SQLite database.
 ☐ Support the memory kind decision.
@@ -682,6 +813,11 @@ Phase 21 — Memory extraction
 ☐ Keep memory-extraction failure non-fatal to the coding session.
 
 Phase 21A — Memory authority classes
+
+Fixed architectural requirements
+
+- Hard invariants, accepted decisions, working assumptions, experiments, user preferences, and historical ideas are distinct authority classes.
+- Retrieval and injection must preserve those distinctions instead of flattening all memories into equally authoritative text.
 
 ☐ Classify durable memory by authority rather than treating every remembered statement as an equally strong rule.
 ☐ Support the authority class invariant for facts or requirements that should not be violated without explicit review.
@@ -737,6 +873,11 @@ Phase 21D — Memory age and relevance decay
 ☐ Keep historical memories available through explicit history search even when they are excluded from automatic context injection.
 
 Phase 21E — Decision ladder and conflict handling
+
+Fixed architectural requirements
+
+- Recency alone does not determine authority.
+- Conflicts are resolved using explicit invariants, current scope, provenance, validity conditions, evidence, and user overrides; uncertain conflicts are surfaced rather than silently guessed.
 
 ☐ Build a decision ladder that ranks current instructions by authority, validity, recency, evidence, and scope.
 ☐ Place explicit current user requirements above historical implementation decisions.
@@ -893,6 +1034,11 @@ Phase 22 — Memory lifecycle and supersession
 
 Phase 23 — Memory full-text search
 
+Fixed architectural requirements
+
+- Initial retrieval uses SQLite full-text search over project-local memory.
+- V1 must not introduce a vector database merely as speculative infrastructure.
+
 ☐ Add an SQLite FTS5 index over memory subjects and bodies.
 ☐ Add a Glasshouse command for searching project memory with free-form text.
 ☐ Rank initial memory results with FTS/BM25-style lexical relevance.
@@ -902,6 +1048,11 @@ Phase 23 — Memory full-text search
 ☐ Do not introduce a vector database until lexical retrieval is shown to be insufficient in real usage.
 
 Phase 24 — Memory reranking
+
+Fixed architectural requirements
+
+- Reranking is a bounded, replaceable stage after deterministic candidate retrieval.
+- It must preserve source provenance and may not turn a low-authority or invalid memory into a binding instruction merely because it is semantically similar.
 
 ☐ Allow the top lexical memory candidates to be reranked by a cheap language model.
 ☐ Keep reranking optional so memory search still works offline without an LLM.
@@ -933,6 +1084,11 @@ Phase 26 — Memory query for agents
 ☐ Include provenance with machine-retrieved memory so an agent can verify important claims against source or code.
 
 Phase 27 — Context injection
+
+Fixed architectural requirements
+
+- Memory injection is selective, relevance-ranked, authority-aware, and budgeted.
+- Glasshouse must not dump the entire memory store into prompts or permanently rewrite native harness system instructions.
 
 ☐ Add a context-selection step before Glasshouse automatically sends a routed task to a session.
 ☐ Query project memory for memories relevant to the routed task.
@@ -988,6 +1144,10 @@ Phase 31 — Compaction-aware behavior
 
 Phase 32 — Resource registry
 
+Fixed architectural requirements
+
+- Subscriptions, metered APIs, free pools, local inference, and gateways are normalized through one resource model without pretending that their native quota semantics are identical.
+
 ☐ Create a registry describing model resources available to Glasshouse.
 ☐ Represent native subscriptions separately from API-key or gateway resources.
 ☐ Represent local inference resources separately from remote resources.
@@ -1026,6 +1186,11 @@ Phase 32A — Unified quota and capacity model
 ☐ Never discard raw telemetry merely because Glasshouse also computes a normalized capacity score.
 
 Phase 32B — Quota telemetry sources
+
+Fixed architectural requirements
+
+- Provider-reported measurements, locally observed measurements, and inferred estimates remain explicitly distinguishable.
+- Estimated capacity must never be presented as exact provider truth.
 
 ☐ Define quota telemetry sources as authoritative, observed, estimated, manual, or unknown.
 ☐ Prefer authoritative provider or harness usage telemetry when it is available.
@@ -1208,6 +1373,11 @@ Phase 34A — Workload tiers
 
 Phase 34B — Routing-model role
 
+Fixed architectural requirements
+
+- The routing model is a cheap, fast, replaceable decision component, not the orchestrator and not a hidden agent hierarchy.
+- It receives a bounded routing schema and cannot independently acquire repository tools or an open-ended coding loop.
+
 ☐ Define a dedicated routing_model role separate from interactive coding sessions and memory-extraction models.
 ☐ Allow the routing model to be a remote paid model.
 ☐ Allow the routing model to be a free-tier remote model.
@@ -1301,6 +1471,11 @@ Phase 35 — Lightweight task classification
 
 Phase 35A — Candidate generation
 
+Fixed architectural requirements
+
+- Candidate generation applies hard compatibility and policy constraints before scoring.
+- A backend without an owning installed harness, required protocol, required tools, or security compatibility is not a valid interactive candidate regardless of price or capacity.
+
 ☐ Generate routing candidates from relevant existing sessions before considering fresh sessions.
 ☐ Generate fresh native-subscription session candidates from enabled harness launch profiles.
 ☐ Generate fresh gateway-backed session candidates only as installed-harness launch profiles whose protocol, model, tool semantics, and capability requirements match.
@@ -1314,6 +1489,11 @@ Phase 35A — Candidate generation
 ☐ Keep at least one deterministic fallback candidate when a usable native session exists.
 
 Phase 35B — Candidate scoring
+
+Fixed architectural requirements
+
+- Cost, free capacity, and vendor pairing are soft signals after hard constraints.
+- Observed task success, tool behavior, effective TTFC, reliability, and user pins may outweigh vendor alignment and nominal token abundance.
 
 ☐ Score every routing candidate using an inspectable weighted function.
 ☐ Include workload-tier fit in candidate scoring.
@@ -1401,6 +1581,11 @@ Phase 38 — Quota-preserving routing
 
 Phase 39 — Gateway-backed disposable jobs
 
+Fixed architectural requirements
+
+- Disposable jobs are bounded internal model calls for support functions such as classification, extraction, or reranking.
+- They are not interactive Glasshouse sessions, hidden harnesses, or autonomous coding workers and receive no unrestricted repository tool surface.
+
 ☐ Define disposable jobs as bounded internal LLM calls rather than native interactive sessions or coding harnesses.
 ☐ Add a simple provider interface for non-interactive disposable LLM jobs.
 ☐ Allow OpenAI-compatible gateways to be configured through the disposable-job interface.
@@ -1412,6 +1597,11 @@ Phase 39 — Gateway-backed disposable jobs
 ☐ Record which resource performed important memory extraction or classification for debugging.
 
 Phase 40 — Fresh-session handoff
+
+Fixed architectural requirements
+
+- A fresh-session migration uses an explicit bounded handoff with provenance and current task state.
+- Glasshouse must not simulate native resume semantics by blindly copying complete transcripts between different harnesses or models.
 
 ☐ Allow the router or user to create a fresh session from an existing portable checkpoint.
 ☐ Include the checkpoint as explicit handoff context rather than replaying the complete old conversation.
@@ -1443,6 +1633,11 @@ Phase 41 — Project overview
 
 Phase 42 — External control API
 
+Fixed architectural requirements
+
+- The external API controls the same core session, routing, memory, and event services as the TUI.
+- It must not introduce a second session manager, duplicate state machine, or alternate agent loop.
+
 ☐ Expose a local project-scoped control API for Glasshouse operations.
 ☐ Allow the API to list sessions.
 ☐ Allow the API to spawn sessions.
@@ -1459,6 +1654,11 @@ Phase 42 — External control API
 
 Phase 43 — MCP surface for orchestrators
 
+Fixed architectural requirements
+
+- The MCP surface is a controlled interface to existing Glasshouse core capabilities.
+- It does not create a parallel orchestration runtime or bypass project isolation, session ownership, permissions, or routing constraints.
+
 ☐ Expose selected Glasshouse control operations as MCP tools for compatible orchestrator harnesses.
 ☐ Expose session listing through MCP.
 ☐ Expose worker spawning through MCP.
@@ -1472,6 +1672,11 @@ Phase 43 — MCP surface for orchestrators
 
 Phase 44 — User control and override
 
+Fixed architectural requirements
+
+- Routing and automation remain visible, explainable, and overridable.
+- Explicit user pins, exclusions, and manual selections are binding constraints until the user changes them or they become technically impossible, in which case Glasshouse must report the conflict.
+
 ☐ Allow the user to disable automatic routing for the current Glasshouse instance.
 ☐ Allow the user to pin a task to a specific harness.
 ☐ Allow the user to pin a task to a specific existing session.
@@ -1483,6 +1688,11 @@ Phase 44 — User control and override
 ☐ Surface automation decisions instead of silently moving work between sessions.
 
 Phase 45 — Failure handling
+
+Fixed architectural requirements
+
+- Glasshouse fails closed for incompatible protocols, missing harnesses, unsafe secret handling, and invalid launch profiles.
+- It must not silently fall back to a paid native backend, materially different model family, or weaker tool semantics.
 
 ☐ Detect child-process crashes and mark the corresponding session failed.
 ☐ Preserve terminal output and event history after a worker crashes.
@@ -1506,6 +1716,11 @@ Phase 46 — Security and contamination tests
 ☐ Add automated tests proving a project-state deletion removes only that project’s Glasshouse state.
 
 Phase 47 — Observability without spectacle
+
+Fixed architectural requirements
+
+- Telemetry exists for diagnosis, routing, reliability analysis, and product evaluation rather than token-spend gamification.
+- Raw token counts, cost, TTFT, TTFC, throughput, errors, outages, and correlations remain measurable, while inferred quality conclusions remain labeled as derived evidence.
 
 ☐ Add a debug view showing why the router chose a session or resource.
 ☐ Add a debug view showing recent lifecycle events for a session.
@@ -1554,6 +1769,11 @@ Phase 49 — Configuration
 ☐ Keep configuration schema small until real usage demonstrates a need for additional options.
 
 Phase 50 — Tracked project knowledge as an optional feature
+
+Fixed architectural requirements
+
+- Git-tracked project knowledge is optional and contains only explicitly approved portable knowledge.
+- Operational SQLite state, secrets, private raw transcripts, and unredacted event data do not become tracked files.
 
 ☐ Keep runtime memory outside the source repository by default.
 ☐ Add an explicit opt-in command for creating tracked .glasshouse project knowledge.
@@ -1605,6 +1825,11 @@ Phase 51 — Evaluation hooks
 
 Phase 52 — Criteria before adding semantic/vector retrieval
 
+Fixed architectural requirements
+
+- Semantic or vector infrastructure is deferred until measured retrieval failures demonstrate that SQLite full-text search and reranking are insufficient.
+- It must not be added solely for hypothetical scale or architectural fashion.
+
 ☐ Do not add vector retrieval until FTS5 retrieval failures are observed and recorded in real projects.
 ☐ Define concrete retrieval cases that lexical search cannot solve before selecting an embedding system.
 ☐ If semantic retrieval is added, combine it with lexical retrieval rather than replacing lexical retrieval.
@@ -1614,6 +1839,11 @@ Phase 52 — Criteria before adding semantic/vector retrieval
 
 Phase 53 — Criteria before adding graph storage
 
+Fixed architectural requirements
+
+- Graph storage is deferred until concrete multi-hop relationship queries cannot be served adequately by the existing relational model.
+- No graph database is introduced as speculative infrastructure.
+
 ☐ Do not add a graph database solely to visualize project memory.
 ☐ Add explicit typed relationships in SQLite first when relationships become useful.
 ☐ Introduce relationships such as supersedes, affects, and implemented_by only when they improve real queries.
@@ -1621,6 +1851,11 @@ Phase 53 — Criteria before adding graph storage
 ☐ Keep the user-facing project-knowledge view useful even if no graph database is ever added.
 
 Phase 54 — Criteria before deeper cmux coupling
+
+Fixed architectural requirements
+
+- cmux remains an optional presentation integration.
+- Core session ownership, PTY management, routing, memory, and lifecycle semantics must not depend on cmux.
 
 ☐ Keep cmux optional until repeated usage proves external-pane workflows are essential.
 ☐ Avoid depending on undocumented cmux internals when a stable command or API surface exists.
@@ -1641,6 +1876,11 @@ Phase 54A — Setup and portability completion criteria
 ☐ Consider cross-platform support stable only after PTY/session smoke tests pass on macOS, Linux, and native Windows CI runners.
 
 Phase 55 — V1 completion definition
+
+Fixed architectural requirements
+
+- V1 remains a local terminal control plane built around installed native harnesses, project-local SQLite, adapter boundaries, PTY sessions, and basic evidence-aware routing.
+- V1 does not require a Glasshouse cloud service, replacement coding harness, browser frontend, microservice topology, vector database, graph database, or broad protocol-translation layer.
 
 ☐ Consider V1 usable when Glasshouse can start in a Git project and isolate all state to that project.
 ☐ Consider V1 usable when Claude Code can run as a fully interactive embedded native session.
