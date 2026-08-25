@@ -347,3 +347,31 @@ wrong. *Check a declaration against the use* applies to the practice file too.
 
 The rule still stands for the next scan someone writes: `lines`, and a CRLF
 copy in the test.
+
+
+## 15. Reproduce a Windows line-ending failure locally, in four commands
+
+Two CI round-trips went into one CRLF bug on 2026-08-26 — the second because
+the *guard* written for the first depended on the checkout it was guarding
+against. There is no need for a third, ever: the failure reproduces on macOS.
+
+```sh
+cp crates/…/file.rs /tmp/file.orig                       # back up ONE file
+python3 -c "import pathlib; p=pathlib.Path('crates/…/file.rs'); \
+  p.write_bytes(p.read_bytes().replace(b'\r\n',b'\n').replace(b'\n',b'\r\n'))"
+cargo test --lib --all-features <the test> < /dev/null    # must still pass
+cp /tmp/file.orig crates/…/file.rs                        # restore, then `diff -q`
+```
+
+Used exactly this way it did two jobs: it proved the fix holds under real CRLF,
+and — with the pre-fix guard restored under the same CRLF — it reproduced CI's
+failure with the **identical assertion message**, which is what makes the
+reproduction trustworthy rather than merely green.
+
+**The deeper rule, which is not about line endings.** The first guard built its
+CRLF copy from `SOURCE` directly, so its input varied with how the file happened
+to be checked out. An assertion whose input depends on the environment is a
+flake generator, and it will find the environment you did not test on. Build
+both sides from a normalised base. A subcontractor taught this project the same
+lesson one batch earlier with a test that scanned a randomly generated token and
+failed 45 times in 100.
