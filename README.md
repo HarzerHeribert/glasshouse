@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`██████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 216 / 1267 mandatory capabilities (17%)
+`███████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 222 / 1267 mandatory capabilities (17%)
 
 <details>
 <summary>Per-phase breakdown (4 of 103 phases complete)</summary>
@@ -30,7 +30,7 @@ the authoritative specification and tracks what is done.
 | Phase 1 — Project-root detection and hard isolation | 14/15 |
 | Phase 2A — Cross-platform runtime | 16/16 ✅ |
 | Phase 2B — Agent and tool auto-detection | 15/16 |
-| Phase 2C — First-run onboarding | 9/19 |
+| Phase 2C — First-run onboarding | 15/19 |
 | Phase 2D — Settings foundation | 9/20 |
 | Phase 2 — Persistent project state | 10/10 ✅ |
 | Phase 3 — TUI shell | 11/12 |

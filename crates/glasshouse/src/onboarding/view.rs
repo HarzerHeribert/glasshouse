@@ -13,9 +13,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::integrations::{IntegrationKind, IntegrationStatus};
+use crate::integrations::{IntegrationId, IntegrationKind, IntegrationStatus};
 
-use super::state::{PathInputView, RowView, Step, WizardState};
+use super::state::{
+    BypassRowView, PathInputView, ProviderRow, ProviderStepView, ProviderTemplateRow, RowView,
+    Step, WizardState,
+};
 
 /// Draw the current step of `state` into `frame`.
 ///
@@ -40,6 +43,8 @@ pub fn render(state: &WizardState, frame: &mut Frame) {
     match state.step() {
         Step::Welcome => render_welcome(state, frame, body_area),
         Step::Harnesses => render_harnesses(state, frame, body_area),
+        Step::Bypass => render_bypass_step(state, frame, body_area),
+        Step::Provider => render_provider_step(state, frame, body_area),
         Step::Summary => render_summary(state, frame, body_area),
     }
     render_footer(state, frame, footer_area);
@@ -49,6 +54,8 @@ fn render_title(state: &WizardState, frame: &mut Frame, area: Rect) {
     let label = match state.step() {
         Step::Welcome => "Glasshouse setup — welcome",
         Step::Harnesses => "Glasshouse setup — harnesses & integrations",
+        Step::Bypass => "Glasshouse setup — bypass acknowledgement (optional)",
+        Step::Provider => "Glasshouse setup — provider (optional)",
         Step::Summary => "Glasshouse setup — review",
     };
     frame.render_widget(
@@ -194,12 +201,170 @@ fn describe_status(status: IntegrationStatus, usable: bool) -> &'static str {
     }
 }
 
+/// The optional bypass-acknowledgement step ([`Step::Bypass`]).
+///
+/// Shows each qualifying harness's own declared description and argv —
+/// never a paraphrase, per Amendment 1 line 2 — so the user sees exactly
+/// what will be passed to the harness before acknowledging anything.
+fn render_bypass_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(
+            "Optional, off by default: a harness with no automatic-review mode can \
+             only run unattended with a blanket approval bypass, which skips every \
+             check entirely. Acknowledging is per harness and changes nothing else — \
+             declining is fine, and every enabled harness keeps working exactly as it \
+             already does.",
+        ),
+        Line::from(""),
+    ];
+
+    let rows: Vec<_> = state.bypass_rows().collect();
+    if rows.is_empty() {
+        lines.push(Line::from(
+            "No known harness needs this — nothing to decide here.",
+        ));
+    } else {
+        for row in rows {
+            lines.push(bypass_row_line(row));
+            lines.push(Line::from(Span::styled(
+                format!("        argv: {}", row.args.join(" ")),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+fn bypass_row_line(row: BypassRowView<'_>) -> Line<'static> {
+    let cursor = if row.selected { "> " } else { "  " };
+    let mark = if row.acknowledged { "[x]" } else { "[ ]" };
+    let mark_color = if row.acknowledged {
+        Color::Green
+    } else {
+        Color::DarkGray
+    };
+    let mut style = Style::default();
+    if row.selected {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    Line::from(vec![
+        Span::styled(cursor.to_owned(), style),
+        Span::styled(format!("{mark} "), Style::default().fg(mark_color)),
+        Span::styled(format!("{:<14}", row.id.display_name()), style),
+        Span::raw(format!(" {}", row.description)),
+    ])
+}
+
 fn render_path_input(input: &PathInputView<'_>, frame: &mut Frame, area: Rect) {
     let mut lines = vec![Line::from(format!(
         "Path to {} executable: {}_",
         input.integration_name, input.buffer
     ))];
     if let Some(error) = input.error {
+        lines.push(Line::from(Span::styled(
+            error.to_owned(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+/// The optional provider step ([`Step::Provider`]): "Configure now" against
+/// "Do later", and whichever sub-screen "Configure now" opened.
+fn render_provider_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    match state.provider_step() {
+        ProviderStepView::Choice {
+            configure_now_selected,
+            providers,
+        } => render_provider_choice(configure_now_selected, &providers, frame, area),
+        ProviderStepView::PickTemplate { options } => {
+            render_provider_templates(&options, frame, area)
+        }
+        ProviderStepView::BaseUrlInput {
+            template,
+            buffer,
+            error,
+        } => render_provider_base_url(&template, &buffer, error.as_deref(), frame, area),
+    }
+}
+
+fn render_provider_choice(
+    configure_now_selected: bool,
+    providers: &[ProviderRow],
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(
+            "Provider and gateway configuration is optional. Every native, \
+             subscription-backed harness enabled on the previous step already works \
+             without it, and finishing with \"Do later\" asks for no API key of any kind.",
+        ),
+        Line::from(""),
+        choice_line("Configure now", configure_now_selected),
+        choice_line("Do later", !configure_now_selected),
+    ];
+
+    if !providers.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Already configured",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        for provider in providers {
+            let url = provider.base_url.as_deref().unwrap_or("template default");
+            lines.push(Line::from(format!(
+                "  {:<16} template {:<20} {url}",
+                provider.name, provider.template
+            )));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+fn choice_line(label: &str, selected: bool) -> Line<'static> {
+    let cursor = if selected { "> " } else { "  " };
+    let mut style = Style::default();
+    if selected {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    Line::from(Span::styled(format!("{cursor}{label}"), style))
+}
+
+fn render_provider_templates(options: &[ProviderTemplateRow], frame: &mut Frame, area: Rect) {
+    let mut lines = vec![Line::from("Choose a provider template:"), Line::from("")];
+    for option in options {
+        let cursor = if option.selected { "> " } else { "  " };
+        let url = if option.base_url.is_empty() {
+            "(you supply the base URL)".to_owned()
+        } else {
+            option.base_url.clone()
+        };
+        let mut style = Style::default();
+        if option.selected {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        lines.push(Line::from(Span::styled(
+            format!("{cursor}{:<20} {:<24} {url}", option.name, option.protocols),
+            style,
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+fn render_provider_base_url(
+    template: &str,
+    buffer: &str,
+    error: Option<&str>,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let mut lines = vec![Line::from(format!("Base URL for `{template}`: {buffer}_"))];
+    if let Some(error) = error {
         lines.push(Line::from(Span::styled(
             error.to_owned(),
             Style::default().fg(Color::Red),
@@ -232,11 +397,44 @@ fn render_summary(state: &WizardState, frame: &mut Frame, area: Rect) {
             row.id.display_name()
         )));
     }
+
+    let acknowledged: Vec<&str> = state
+        .bypass_rows()
+        .filter(|row| row.acknowledged)
+        .map(|row| row.id.display_name())
+        .collect();
+    if !acknowledged.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!(
+            "Bypass acknowledged: {}",
+            acknowledged.join(", ")
+        )));
+    }
+
+    lines.push(Line::from(""));
+    let providers = state.configured_providers();
+    if providers.is_empty() {
+        lines.push(Line::from(
+            "No provider is configured. No Glasshouse API key is required to finish; \
+             enabled native harnesses keep using their existing authentication.",
+        ));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "Providers",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        for provider in &providers {
+            let url = provider.base_url.as_deref().unwrap_or("template default");
+            lines.push(Line::from(format!(
+                "  {:<16} template {:<20} {url}",
+                provider.name, provider.template
+            )));
+        }
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(
-        "Provider, gateway, and routing-model configuration are not part of this \
-         setup yet. No Glasshouse API key is required to finish; enabled native \
-         harnesses keep using their existing authentication.",
+        "The Glasshouse gateway and routing-model configuration are not part of this \
+         setup yet.",
     ));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
@@ -248,8 +446,21 @@ fn render_footer(state: &WizardState, frame: &mut Frame, area: Rect) {
         match state.step() {
             Step::Welcome => "Enter / Tab continue   Esc cancel",
             Step::Harnesses => {
-                "↑/↓ or j/k move   Space/Enter toggle or add path   Tab continue   Esc cancel"
+                if state.rows().any(|row| row.id == IntegrationId::Cmux) {
+                    "↑/↓ or j/k move   Space/Enter toggle or add path   Tab continue   Esc cancel"
+                } else {
+                    "↑/↓ or j/k move   Space/Enter toggle or add path   c add cmux   Tab \
+                     continue   Esc cancel"
+                }
             }
+            Step::Bypass => "↑/↓ or j/k move   Space/Enter toggle   Tab continue   Esc cancel",
+            Step::Provider => match state.provider_step() {
+                ProviderStepView::Choice { .. } => {
+                    "↑/↓ choose   Enter/Space select   Tab skip   Esc cancel"
+                }
+                ProviderStepView::PickTemplate { .. } => "↑/↓ move   Enter/Space choose   Esc back",
+                ProviderStepView::BaseUrlInput { .. } => "Type URL   Enter confirm   Esc back",
+            },
             Step::Summary => "Enter / Tab finish   Esc cancel",
         }
     };
@@ -422,7 +633,114 @@ mod tests {
             crossterm::event::KeyCode::Tab,
             crossterm::event::KeyModifiers::NONE,
         ));
-        render_at(&state, 80, 24);
+        render_at(&state, 80, 24); // Step::Bypass
+
+        state.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Tab,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        render_at(&state, 80, 24); // Step::Provider, Choice sub-mode
+
+        state.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Up,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        state.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        render_at(&state, 80, 24); // PickTemplate sub-mode
+
+        state.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Tab,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        render_at(&state, 80, 24); // Step::Summary
+    }
+
+    /// Every sub-screen of the optional provider step, including the
+    /// base-URL text input, renders without panicking at every terminal
+    /// size this module already tests every other step at.
+    #[test]
+    fn every_provider_sub_screen_renders_without_panicking_at_every_size() {
+        for (width, height) in [(80, 24), (20, 5), (300, 100), (0, 0)] {
+            let mut state = advance_to_harnesses(sample_state());
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Tab,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            assert_eq!(state.step(), Step::Bypass);
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Tab,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            assert_eq!(state.step(), Step::Provider);
+            render_at(&state, width, height); // Choice
+
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Up,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            render_at(&state, width, height); // PickTemplate
+
+            // Move onto a generic template so the base-URL sub-mode is
+            // reachable too.
+            let generic_index = crate::provider::templates()
+                .iter()
+                .position(|p| crate::provider::GENERIC_TEMPLATE_NAMES.contains(&p.name.as_str()))
+                .expect("a generic template exists");
+            for _ in 0..generic_index {
+                state.handle_key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Down,
+                    crossterm::event::KeyModifiers::NONE,
+                ));
+            }
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            render_at(&state, width, height); // BaseUrlInput, empty
+
+            for c in "https://gateway.example/v1".chars() {
+                state.handle_key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(c),
+                    crossterm::event::KeyModifiers::NONE,
+                ));
+            }
+            render_at(&state, width, height); // BaseUrlInput, filled
+
+            // An empty confirm surfaces the inline error state too.
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Backspace,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+    }
+
+    /// The optional bypass-acknowledgement step, toggled and untouched,
+    /// renders without panicking at every terminal size this module already
+    /// tests every other step at.
+    #[test]
+    fn every_bypass_row_renders_without_panicking_at_every_size() {
+        for (width, height) in [(80, 24), (20, 5), (300, 100), (0, 0)] {
+            let mut state = advance_to_harnesses(sample_state());
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Tab,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            assert_eq!(state.step(), Step::Bypass);
+            render_at(&state, width, height); // untouched, default declined
+
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(' '),
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            render_at(&state, width, height); // acknowledged
+        }
     }
 
     #[test]

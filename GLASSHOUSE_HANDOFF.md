@@ -4,10 +4,10 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 9G is seven of nineteen; 9F eleven of thirteen; 9D eleven of
-fourteen; 9A nineteen of twenty-six. Phase 9 is three of seven; 9E eight of
-thirteen; 9C eleven of twelve; 9B eight of nine. 193 -> 216 checked boxes
-(17%).**
+**Phase 2C is fifteen of nineteen; 9G seven of nineteen; 9F eleven of
+thirteen; 9D eleven of fourteen; 9A nineteen of twenty-six. Phase 9 is three of
+seven; 9E eight of thirteen; 9C eleven of twelve; 9B eight of nine.
+193 -> 222 checked boxes (17%).**
 
 Three workers now run concurrently, partitioned by the files they touch —
 see `GLASSHOUSE_ORCHESTRATION_MEASUREMENTS.md`, which is a standing inherited

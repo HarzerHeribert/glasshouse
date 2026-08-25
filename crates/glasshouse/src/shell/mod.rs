@@ -37,6 +37,7 @@ use crate::Runtime;
 use crate::config::{self, EffectiveConfig, UserConfig};
 use crate::integrations::{Discovery, IntegrationId, IntegrationKind, IntegrationStatus};
 use crate::launch::HarnessLaunch;
+use crate::onboarding;
 use crate::pty::TerminalSize;
 use crate::session::{
     self, NewSession, ProjectSessions, RuntimeError, SessionLifecycle, SessionRuntime,
@@ -148,6 +149,30 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                                 }
                             }
                         }
+                    }
+                    Action::ReopenOnboarding => {
+                        // The wizard drives its own `Screen`, so this
+                        // shell's must be released first and reacquired once
+                        // it returns — the two never hold the terminal at
+                        // once. Sessions already running keep running; only
+                        // which screen is drawn changes for the moment the
+                        // wizard has it.
+                        drop(screen);
+                        let outcome = reopen_onboarding(runtime);
+                        screen = Screen::acquire()?;
+                        match outcome {
+                            Ok(onboarding::Outcome::Completed(_)) => {
+                                state.set_status("setup wizard updated your configuration");
+                            }
+                            Ok(onboarding::Outcome::Cancelled) => {
+                                state.set_status("setup wizard cancelled; nothing changed");
+                            }
+                            Err(err) => {
+                                tracing::warn!(error = %err, "could not reopen the setup wizard");
+                                state.set_status(format!("could not reopen setup: {err:#}"));
+                            }
+                        }
+                        state.close_overlay();
                     }
                 }
                 sync_focus(&mut live, &state);
@@ -418,6 +443,22 @@ fn start_session(
     }
 
     Ok(())
+}
+
+/// Reopen the first-run wizard for a "reconfigure" invocation from the
+/// Settings overlay — Phase 2C: "Allow the onboarding wizard to be reopened
+/// later from settings."
+///
+/// Loads `UserConfig` fresh from disk, not whatever unsaved Settings edits
+/// happen to be staged in `state` — reopening the wizard and saving Settings
+/// are two separate, independent write paths, exactly as they already are
+/// for the user- versus project-level saves. [`onboarding::run`] seeds every
+/// screen from what it is handed, so it shows the user's persisted choices
+/// (including any previously configured provider) instead of a blank wizard.
+fn reopen_onboarding(runtime: &Runtime) -> anyhow::Result<onboarding::Outcome> {
+    let config = UserConfig::load(runtime.paths())?;
+    let discovery = Discovery::run(runtime.project());
+    onboarding::run(runtime, &discovery, config)
 }
 
 /// Build the rows the Settings overlay shows, from a fresh [`Discovery`]

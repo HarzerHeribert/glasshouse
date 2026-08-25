@@ -49,6 +49,67 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 2C — first-run onboarding, and the acknowledgement `setup` had been promising (six lines, plus a 9A gap closed)
+
+Contract: Given a first run, when the user reaches the provider step,
+Glasshouse offers provider configuration as an **optional** step with a clear
+"Configure now" and an equally clear "Do later" — while preserving: "Do later"
+completes onboarding with no API key of any kind and leaves a Glasshouse that
+works against native subscription-backed harnesses; cmux is offered only when
+detected or explicitly asked for; and reopening the wizard preserves prior
+choices.
+
+State: **COMPLETE** for the six lines. The four routing-model lines stay
+unchecked — each needs a routing-model configuration field, and `config/mod.rs`
+was owned by a concurrent worker.
+
+#### The gap this batch closed, which was a promise the product did not keep
+
+`profile::Refusal::BypassNotAcknowledged` told users, verbatim, to "acknowledge
+the risk once (in `glasshouse setup`)" — and **`setup` had no such step**;
+`grep -rn "bypass" src/onboarding/ src/shell/` returned nothing. Phase 9A's
+resolution half was built and its human half never was. That is the fifth time
+on this project a declaration has not matched its use.
+
+The step now lists the harnesses that declare a bypass and **no**
+automatic-review mode — derived from the adapters
+(`approvals.automatic_review` unverified, `approvals.bypass` present), never a
+hard-coded list, so it cannot rot when an adapter changes. It shows each
+harness's **own declared argv and description**, defaults to not acknowledged,
+and writes to the **user layer only**.
+
+#### Regression evidence
+
+`only_a_harness_with_a_bypass_and_no_automatic_review_is_offered_bypass_acknowledgement`,
+`declining_leaves_bypass_acknowledged_unset_and_the_profile_still_refused`,
+`the_bypass_step_is_skippable_and_onboarding_completes_without_it`, plus the
+provider-step, cmux-detection and reopen-preserves-choices tests.
+
+#### A survived mutation that was the mutation's fault, twice
+
+The orchestrator's own non-vacuity check on the security-relevant line took
+three attempts, and the practice file's rule held exactly:
+
+- seeding the row from `Some(true)` instead of from config — **survived**; the
+  decline test does not depend on the seed.
+- forcing `set_bypass_acknowledged(true)` *inside* the `row.acknowledged !=
+  row.seeded` guard — **survived**, because on a decline from a fresh config
+  that guard is false and the write is unreachable.
+- removing the guard and acknowledging **every offered harness** — **KILLED**,
+  by two tests.
+
+So silence genuinely cannot become consent. *"A `SURVIVED` mutation is more
+often a weak mutation than a weak test"* — rewritten twice before the code was
+doubted, and the code was right both times.
+
+#### Judgement the worker got right against its own packet
+
+It **did not build a gateway configuration screen.** `BackendResource::GlasshouseGateway`
+is still refused by `profile::resolve`, so a gateway step would have been a
+button leading nowhere. The Provider step configures providers, and the Summary
+says so plainly. It also flagged that the module's own "out of scope" doc was
+stale — providers had been built by 9C/9D/9F since it was written.
+
 ### Phase 9G — the local gateway process (seven of nineteen)
 
 Contract: Given a Glasshouse instance whose active launch profiles include one

@@ -294,7 +294,7 @@ fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
         (Mode::Control, Some(Overlay::Overview)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::Settings)) => {
             "tab section   up/down move   space toggle   enter edit path   w save (user)   \
-             W save (project)   esc close"
+             W save (project)   r reopen setup wizard   esc close"
         }
         (Mode::Control, None) => "tab session   enter session   n new   o overview   q quit",
     };

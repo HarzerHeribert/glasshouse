@@ -85,6 +85,14 @@ pub enum Action {
     /// configuration file. Only ever produced after the user has explicitly
     /// confirmed inside the Settings overlay — see [`SettingsState`].
     SaveProjectSettings,
+    /// Reopen the first-run wizard for a "reconfigure" invocation (Phase 2C:
+    /// "Allow the onboarding wizard to be reopened later from settings").
+    /// Discovery and reading `UserConfig` are file I/O this module
+    /// deliberately does not hold, and driving `crate::onboarding::run`
+    /// needs the terminal this shell's own [`crate::tui::Screen`] already
+    /// holds — both are the run loop's job, exactly like
+    /// [`Action::OpenSettings`].
+    ReopenOnboarding,
 }
 
 /// A session's screen, as a terminal would have drawn it, ready to draw.
@@ -444,6 +452,7 @@ impl ShellState {
             SettingsAction::Close => self.close_overlay(),
             SettingsAction::SaveUser => Action::SaveUserSettings,
             SettingsAction::SaveProject => Action::SaveProjectSettings,
+            SettingsAction::ReopenOnboarding => Action::ReopenOnboarding,
         }
     }
 
@@ -615,6 +624,8 @@ enum SettingsAction {
     /// project-level configuration. Only ever produced after the user
     /// answered the confirmation with `y` or `Enter`.
     SaveProject,
+    /// `r`: reopen the first-run wizard. See [`Action::ReopenOnboarding`].
+    ReopenOnboarding,
 }
 
 /// Everything the Settings overlay displays and edits.
@@ -748,6 +759,7 @@ impl SettingsState {
                 self.confirm_project_write = true;
                 SettingsAction::Redraw
             }
+            KeyCode::Char('r') => SettingsAction::ReopenOnboarding,
             KeyCode::Tab | KeyCode::Right | KeyCode::BackTab | KeyCode::Left => {
                 self.section = self.section.other();
                 SettingsAction::Redraw
