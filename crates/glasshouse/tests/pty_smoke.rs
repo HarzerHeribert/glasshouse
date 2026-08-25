@@ -2614,3 +2614,234 @@ fn a_claude_code_session_is_launched_and_recorded_under_one_identifier() {
         "the identifier Glasshouse handed the harness is not the one it recorded"
     );
 }
+
+/// The whole resume path, through the shipped binary: launch a session, let it
+/// stop, then reopen it and check the harness was handed the same
+/// conversation.
+///
+/// This is what Phase 6's adapter and Phase 7's assigned identifier were both
+/// for, and nothing before it could be tested end to end — until an adapter
+/// existed there was no resume command to run, and until an identifier was
+/// assigned there was never anything to resume to.
+#[cfg(unix)]
+#[test]
+fn a_recorded_session_is_resumed_under_the_identifier_it_was_given() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    let bin_dir = tmp.path().join("bin");
+    for dir in [&state_dir, &config_dir, &bin_dir] {
+        std::fs::create_dir_all(dir).expect("create dir");
+    }
+
+    let harness = install_argv_harness(&bin_dir, "fake-claude");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n",
+            harness.display()
+        ),
+    )
+    .expect("write user config");
+
+    let glasshouse = |args: &[&str]| {
+        let mut command = TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path())
+            .arg("--scope")
+            .arg(&project_dir)
+            .arg("--data-dir")
+            .arg(&state_dir)
+            .arg("--config-dir")
+            .arg(&config_dir);
+        for arg in args {
+            command = command.arg(arg);
+        }
+        command
+    };
+
+    let read_argv = |session: &mut Session| -> String {
+        let deadline = Instant::now() + TIMEOUT;
+        while Instant::now() < deadline {
+            session.answer_pending_queries();
+            let clean = strip_terminal_sequences(&session.output());
+            if let Some(line) = clean.lines().find(|line| line.contains("ARGV:")) {
+                return line.trim().to_owned();
+            }
+            std::thread::sleep(POLL);
+        }
+        panic!(
+            "the harness never reported its arguments\n--- output ---\n{}\n--- end ---",
+            session.output()
+        )
+    };
+
+    // Start one, and let it finish.
+    let mut first = Session::spawn(glasshouse(&["launch", "claude-code"]));
+    let started = read_argv(&mut first);
+    let _ = first.wait_for_exit();
+
+    let assigned = started
+        .split("--session-id")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no --session-id when launching: {started}"))
+        .split_whitespace()
+        .next()
+        .expect("an identifier")
+        .to_owned();
+
+    // The short form is the only identifier the listing shows, so it is the
+    // one a user would type — and therefore the one this test uses.
+    let mut listing = Session::spawn(glasshouse(&["sessions"]));
+    let _ = listing.wait_for_exit();
+    let text = strip_terminal_sequences(&listing.output());
+    let row = text
+        .lines()
+        .find(|line| line.contains("resumable"))
+        .unwrap_or_else(|| panic!("no resumable session in the listing:\n{text}"));
+    let short = row.split_whitespace().next().expect("an identifier column");
+    assert_eq!(short.len(), 12, "the listing's short form changed: {row}");
+
+    // Reopen it.
+    let mut second = Session::spawn(glasshouse(&["resume", short]));
+    let resumed = read_argv(&mut second);
+    let _ = second.wait_for_exit();
+
+    assert!(
+        resumed.contains("--resume"),
+        "resuming did not use the harness's own resume mechanism: {resumed}"
+    );
+    assert!(
+        resumed.contains(&assigned),
+        "resumed a different conversation:\n  assigned {assigned}\n  resumed  {resumed}"
+    );
+    assert!(
+        !resumed.contains("--session-id"),
+        "a resumed session must not also be assigned a fresh identifier: {resumed}"
+    );
+}
+
+/// Resuming something this project never recorded is refused, and says so.
+#[cfg(unix)]
+#[test]
+fn resuming_an_unknown_session_is_refused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    for dir in [&state_dir, &config_dir] {
+        std::fs::create_dir_all(dir).expect("create dir");
+    }
+
+    let mut session = Session::spawn(
+        TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path())
+            .arg("--scope")
+            .arg(&project_dir)
+            .arg("--data-dir")
+            .arg(&state_dir)
+            .arg("--config-dir")
+            .arg(&config_dir)
+            .arg("resume")
+            .arg("ffffffffffff"),
+    );
+    let status = session.wait_for_exit();
+    assert!(!status.success(), "resuming nothing must not succeed");
+
+    let text = strip_terminal_sequences(&session.output());
+    assert!(
+        text.contains("no session"),
+        "the refusal must say what was wrong:\n{text}"
+    );
+}
+
+/// A session with nothing to resume to is refused, by name, rather than
+/// reopened as something blank.
+///
+/// Codex names its own sessions, so Glasshouse has no identifier for one it
+/// started — which makes a cleanly stopped Codex session `closed`, not
+/// `resumable`. Reopening it would produce a fresh, empty conversation
+/// wearing an old session's identity, which is precisely what the store's
+/// resume guard exists to prevent.
+///
+/// This is the test that reaches that guard on the production path: an
+/// unknown identifier is refused earlier, by the resolver, so it proves
+/// nothing about the guard at all.
+#[cfg(unix)]
+#[test]
+fn resuming_a_session_with_no_conversation_is_refused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    let bin_dir = tmp.path().join("bin");
+    for dir in [&state_dir, &config_dir, &bin_dir] {
+        std::fs::create_dir_all(dir).expect("create dir");
+    }
+
+    let harness = install_argv_harness(&bin_dir, "fake-codex");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[integrations.codex]\nenabled = true\nexecutable = \"{}\"\n",
+            harness.display()
+        ),
+    )
+    .expect("write user config");
+
+    let glasshouse = |args: &[&str]| {
+        let mut command = TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path())
+            .arg("--scope")
+            .arg(&project_dir)
+            .arg("--data-dir")
+            .arg(&state_dir)
+            .arg("--config-dir")
+            .arg(&config_dir);
+        for arg in args {
+            command = command.arg(arg);
+        }
+        command
+    };
+
+    let mut first = Session::spawn(glasshouse(&["launch", "codex"]));
+    let deadline = Instant::now() + TIMEOUT;
+    while Instant::now() < deadline {
+        first.answer_pending_queries();
+        if strip_terminal_sequences(&first.output()).contains("ARGV:") {
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+    let _ = first.wait_for_exit();
+
+    let mut listing = Session::spawn(glasshouse(&["sessions"]));
+    let _ = listing.wait_for_exit();
+    let text = strip_terminal_sequences(&listing.output());
+    let row = text
+        .lines()
+        .find(|line| line.contains("codex"))
+        .unwrap_or_else(|| panic!("no codex session in the listing:\n{text}"));
+    assert!(
+        row.contains("closed"),
+        "a harness that names its own sessions leaves nothing to resume to: {row}"
+    );
+    let short = row.split_whitespace().next().expect("an identifier column");
+
+    let mut second = Session::spawn(glasshouse(&["resume", short]));
+    let status = second.wait_for_exit();
+    assert!(
+        !status.success(),
+        "resuming a session with no conversation must not succeed"
+    );
+
+    let refusal = strip_terminal_sequences(&second.output());
+    assert!(
+        refusal.contains("closed"),
+        "the refusal must say why the session cannot be resumed:\n{refusal}"
+    );
+    assert!(
+        !refusal.contains("ARGV:"),
+        "the harness must never be started for a session with nothing to resume:\n{refusal}"
+    );
+}

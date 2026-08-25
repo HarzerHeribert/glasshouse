@@ -10,7 +10,9 @@ from 107 to 120.
 - **Phase 2B** — Antigravity detection: **closed**, against a real CLI.
 - **Phase 6** — harness adapters: eleven of twelve. The communication-style
   line is deliberately unchecked; see the loose ends.
-- **Phase 7** — Claude Code adapter: two of ten lines closed. Glasshouse
+- **Phase 1 line 90** — the cross-project resume guard: **closed after three
+  sessions blocked.** `glasshouse resume` is its production caller.
+- **Phase 7** — Claude Code adapter: three of ten lines closed. Glasshouse
   **assigns** Claude Code its native session identifier with `--session-id`,
   mints it as a valid version-4 UUID, and records it before the process
   exists — and the whole chain is verified against the real binary.
@@ -62,6 +64,41 @@ list was carefully reasoned, documented at length, and pinned by a test — and
 simply wrong, because no reference install had ever been inspected.
 
 ## Verified completed work
+
+### This session — `glasshouse resume`
+
+- `glasshouse resume <session>` reopens a recorded session in the harness that
+  created it — not whichever harness is configured now, because resuming a
+  Codex conversation in Claude Code would be nonsense.
+- **The identifier resolver accepts any leading part of an identifier**, and
+  that is a requirement rather than a nicety: `glasshouse sessions` prints only
+  the first twelve characters, so the short form is the *only* identifier a
+  user can copy off the screen. Running the shipped binary is what made that
+  obvious. Ambiguity is refused and names every candidate.
+- Matching uses `substr`, not `LIKE`. Under `LIKE` a bare `%` typed by the user
+  would match every session in the project, and "resume whichever came first"
+  is precisely the wrong answer.
+- The order in `resume_session` is the safety property: the store decides
+  whether the session may be resumed *at all* — right project, not still
+  running, something to resume to — before a harness is selected and long
+  before a process exists.
+
+**A mutation that passed, and what it exposed.** Bypassing `open_for_resume`
+entirely left `resuming_an_unknown_session_is_refused` green, because the
+identifier resolver turns an unknown identifier away before the guard is ever
+reached. That test proved nothing about the guard.
+`resuming_a_session_with_no_conversation_is_refused` was written to reach it —
+a Codex session, which has no identifier to resume to — and the same mutation
+now fails. This is the fourth time a passing mutation has been information
+about the tests rather than the code.
+
+**One unreproduced failure, recorded rather than dismissed.** The resume smoke
+test failed once, on the run that first compiled it, while clippy, rustdoc and
+an MSRV check were building concurrently. It has not failed since in 23 further
+runs (15 targeted, 8 full-suite). That matches the macOS `openpty` allocation
+race this project already diagnosed and retried around, rather than anything in
+the resume path, but it is written down because an unexplained failure that is
+merely rare is not the same as one that is understood.
 
 ### This session — assigned native session identifiers (Phase 7)
 
@@ -569,12 +606,14 @@ surface before sending anything to it.
 
 - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
   --all-features -- -D warnings`, `cargo test --workspace --all-features`
-  (363 lib + 2 bin + 42 PTY smoke + 4 settings), `rustup run 1.85.0 cargo
+  (369 lib + 2 bin + 45 PTY smoke + 4 settings), `rustup run 1.85.0 cargo
   check --locked --workspace --all-targets`, `git diff --check` — all pass.
 - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` — 23
   diagnostics, exactly the baseline measured at `HEAD` in a throwaway
   worktree. None added.
-- Eight mutations, each observed to fail the test it targets. None passed.
+- Eleven mutations. Ten failed the test they targeted; one **passed**, and
+  exposed a test that could not reach the guard it was supposed to cover. A
+  test was written to reach it, and the mutation now fails.
 - CI `32835774698` green on Linux, macOS, Windows and lint, with the Windows
   job confirmed to have executed 346 lib, 2 bin, 33 PTY and 4 settings tests
   rather than merely reporting green.

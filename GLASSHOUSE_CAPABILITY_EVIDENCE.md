@@ -49,6 +49,56 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 7 — Support resuming a known Claude Code session through Claude Code's native resume mechanism
+
+Contract: Given a recorded session that has a conversation to return to, when
+the user resumes it, Glasshouse reopens that same conversation in the harness
+that created it, while refusing anything it cannot honestly reopen.
+
+State: COMPLETE.
+
+Production evidence:
+- `cli.rs: Command::Resume` and `main.rs: resume_session` — the command.
+- `session/store.rs: SessionStore::resolve_id` — accepts any leading part of an
+  identifier. Not a convenience: `glasshouse sessions` prints only the first
+  twelve characters, so the short form is the *only* identifier a user can copy
+  from the screen, and a command demanding all thirty-two would be unusable
+  with what Glasshouse itself shows. Ambiguity is refused and names every
+  candidate.
+- `session/select.rs: HarnessSelection::resume_args` — the adapter's start
+  arguments, then its resume invocation, then the user's own.
+- `harness/claude_code.rs: resume` — `--resume <id>`.
+- The harness is whichever one the *record* names, not whichever is configured
+  now: resuming a Codex conversation in Claude Code would be nonsense.
+
+Regression evidence:
+- `a_recorded_session_is_resumed_under_the_identifier_it_was_given` (PTY smoke,
+  Unix) — launches through the shipped binary, reads the assigned identifier
+  from the harness's own arguments, takes the *short* identifier out of
+  `glasshouse sessions`, resumes with it, and asserts the harness was handed
+  `--resume` with that same identifier and **not** a fresh `--session-id`.
+  **Mutation-checked**: resuming a different conversation fails it.
+- `resuming_a_session_with_no_conversation_is_refused` — see the Phase 1 entry
+  above; the harness is never started.
+- `resuming_an_unknown_session_is_refused`.
+- `the_short_form_the_listing_prints_is_enough_to_resolve`,
+  `an_ambiguous_prefix_is_refused_and_names_its_candidates`,
+  `a_wildcard_cannot_be_smuggled_into_the_lookup` — the last because
+  identifiers are matched with `substr` and not `LIKE`, under which a bare `%`
+  would match every session in the project.
+
+Platform/external evidence:
+- Against the real binary: `claude --resume <assigned-uuid>` reopened the
+  conversation with its earlier turn replayed, and `claude --resume
+  00000000-0000-4000-8000-000000000000` answered "No conversation found with
+  session ID: …" and exited. Neither cost a model turn.
+
+Missing evidence:
+- A session that started and died before its harness created a conversation
+  still reads as resumable, and resuming it will be refused by the *harness*
+  rather than by Glasshouse. That is a clear message rather than lost state,
+  and it is recorded as a loose end.
+
 ### Phase 7 — Add a Claude Code adapter that starts the real claude executable inside the current project root
 
 Contract: Given a project and an enabled Claude Code, when the user opens a
@@ -1300,16 +1350,20 @@ active project's, when anything attempts to resume it, Glasshouse refuses and
 names both projects, while leaving the record untouched and while the database
 itself refuses to store such a record in the first place.
 
-State: PARTIALLY VERIFIED
+State: COMPLETE.
 
 Production evidence:
-- `crates/glasshouse/src/session/store.rs: SessionStore::open_for_resume` — the
-  only resume entry point in the codebase; compares the stored project
-  identifier against the active one before returning anything actionable.
-- `crates/glasshouse/src/database.rs: MIGRATIONS[1]` — `BEFORE INSERT` and
-  `BEFORE UPDATE OF project_id` triggers abort any row whose `project_id` is
-  not the identifier bound in `project_metadata`. Structural, so no present or
-  future query has to remember to filter by project.
+- `session/store.rs: SessionStore::open_for_resume` — compares the stored
+  project identifier against the active one before returning anything
+  actionable.
+- `main.rs: resume_session` — **the production caller this entry waited three
+  sessions for.** `glasshouse resume` resolves an identifier and then goes
+  through `open_for_resume` *before* a harness is selected and long before any
+  process exists, so a refusal costs nothing and cannot half-start a session.
+- `database.rs: MIGRATIONS[1]` — `BEFORE INSERT` and `BEFORE UPDATE OF
+  project_id` triggers abort any row whose `project_id` is not the identifier
+  bound in `project_metadata`. Structural, so no present or future query has to
+  remember to filter by project.
 
 Regression evidence:
 - `resuming_a_session_belonging_to_another_project_is_refused` — the error names
@@ -1319,6 +1373,13 @@ Regression evidence:
 - `a_stopped_session_of_this_project_can_be_resumed` — the permitted case, so
   the refusals above are not merely "resume never works".
 - `two_projects_have_independent_session_lists`
+- `resuming_a_session_with_no_conversation_is_refused` (PTY smoke, Unix) — the
+  shipped binary refuses a session that has nothing to resume to, and the
+  harness is never started. This is the test that reaches `open_for_resume` on
+  the production path; `resuming_an_unknown_session_is_refused` does not,
+  because the identifier resolver turns it away first.
+- `a_recorded_session_is_resumed_under_the_identifier_it_was_given` (PTY smoke,
+  Unix) — the permitted case end to end through the shipped binary.
 
 Failure/isolation evidence:
 - Mutation: removing the project comparison in `open_for_resume` fails the
@@ -1328,6 +1389,11 @@ Failure/isolation evidence:
   `a_session_write_is_refused_when_the_project_binding_is_missing`, which is
   what proves the guard fails closed rather than silently passing a NULL
   comparison.
+- Mutation: making `resume_session` read the record directly instead of through
+  `open_for_resume` fails `resuming_a_session_with_no_conversation_is_refused`.
+  **This mutation initially passed**, which is how it was discovered that the
+  unknown-identifier test proved nothing about the guard — the resolver refuses
+  first. The test above was written specifically to reach it.
 
 Platform/external evidence:
 - CI `32815286487` on `3d606e3` — green on Linux, macOS, Windows and lint,
@@ -1336,15 +1402,12 @@ Platform/external evidence:
   cargo never reaches the integration tests).
 
 Missing evidence:
-- **No production caller.** There is no `glasshouse resume`, because resuming a
-  harness needs an adapter that knows the harness's own resume mechanism
-  (Phase 6/7/8), and no adapter captures a native session identifier yet. The
-  guard is implemented, structurally enforced, and mutation-proven at the only
-  layer a resume can pass through — but the capability says "reject any attempt
-  to resume", and today no attempt can be made. The map box stays unchecked
-  until a real resume path exists to reject. Do not close this by adding a
-  `resume` command that can only ever report "not resumable"; that would be a
-  stub dressed as a capability.
+- None. Note that the cross-project case cannot be reached end to end through
+  the binary, because the migration triggers refuse to store such a row in the
+  first place — reaching it at all requires the test to plant one by tampering,
+  which `resuming_a_session_belonging_to_another_project_is_refused` does. That
+  is the guard being defence in depth, not a gap: the structural refusal is the
+  first line and the comparison is the second.
 
 ### Phase 1 — Ensure every spawned harness process starts with its working directory set to the current project root
 

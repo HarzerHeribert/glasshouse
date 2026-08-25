@@ -78,6 +78,12 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         }) => {
             return launch_session(&runtime, harness.as_deref(), harness_args);
         }
+        Some(Command::Resume {
+            session,
+            harness_args,
+        }) => {
+            return resume_session(&runtime, session, harness_args);
+        }
         None => {
             // Setup runs by itself the first time, so a new user does not have
             // to know a command exists before Glasshouse is useful.
@@ -194,6 +200,91 @@ fn launch_session(
         // The harness failing is not Glasshouse failing, so this is a plain
         // note on stderr rather than an error: the exit code below already
         // carries the outcome to whatever invoked Glasshouse.
+        eprintln!("glasshouse: the harness {status}");
+    }
+    Ok(exit_code_for(&status))
+}
+
+/// Reopen a recorded session in its own harness.
+///
+/// The order here is the safety property. The store decides whether this
+/// session may be resumed *at all* — it belongs to this project, it is not
+/// still running, and it has a native identifier to resume to — before any
+/// harness is selected and long before any process exists. A refusal costs
+/// nothing; a session opened against the wrong project would be a breach of
+/// the isolation the whole product rests on.
+///
+/// The harness is then whichever one the record names, not whichever one is
+/// configured now: resuming a Codex conversation in Claude Code would be
+/// nonsense, so a record's own harness is what gets selected.
+fn resume_session(
+    runtime: &Runtime,
+    session: &str,
+    harness_args: &[String],
+) -> anyhow::Result<ExitCode> {
+    let sessions = ProjectSessions::open(runtime)?;
+    let store = sessions.store();
+
+    // Both of these refuse rather than guess: an ambiguous prefix names its
+    // candidates, and `open_for_resume` carries the project-isolation check.
+    let id = store.resolve_id(session)?;
+    let resumable = store.open_for_resume(&id)?;
+
+    let user = UserConfig::load(runtime.paths())?;
+    let project = config::load_project_config(runtime.project())?;
+    let selection = session::select::select(
+        Some(resumable.harness.as_str()),
+        EffectiveConfig::new(&user, project.as_ref()),
+    )?;
+
+    let Some(args) = selection.resume_args(
+        &resumable.native_session_id,
+        harness_args.iter().map(String::as_str),
+    ) else {
+        anyhow::bail!(
+            "{} has no resume mechanism Glasshouse has verified, so session `{}` cannot be \
+             reopened. Start a new session instead.",
+            selection.id().display_name(),
+            short_id(&resumable.id)
+        );
+    };
+
+    tracing::info!(
+        session = %resumable.id,
+        harness = selection.id().slug(),
+        executable = %selection.executable().path().display(),
+        source = %selection.source(),
+        // The native identifier is not a secret — it names a conversation in
+        // the user's own harness history, and it is the one fact that makes a
+        // failed resume diagnosable.
+        native_session = %resumable.native_session_id,
+        "resuming a harness session"
+    );
+
+    let launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
+
+    note_lifecycle(&store, &resumable.id, SessionLifecycle::Running);
+    let status = match session::attach(launch) {
+        Ok(status) => status,
+        Err(err) => {
+            note_lifecycle(&store, &resumable.id, SessionLifecycle::Failed);
+            return Err(err);
+        }
+    };
+    note_lifecycle(
+        &store,
+        &resumable.id,
+        if status.success() {
+            SessionLifecycle::Stopped
+        } else {
+            SessionLifecycle::Failed
+        },
+    );
+
+    if !status.success() {
+        // A harness that refuses the identifier — "No conversation found with
+        // session ID: …" is Claude Code's answer — exits non-zero, and that
+        // is the honest outcome to pass on rather than dress up.
         eprintln!("glasshouse: the harness {status}");
     }
     Ok(exit_code_for(&status))

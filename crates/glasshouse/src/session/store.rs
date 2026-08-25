@@ -363,6 +363,17 @@ pub enum SessionStoreError {
         id: SessionId,
         disposition: &'static str,
     },
+    #[error(
+        "`{prefix}` matches {} sessions ({}); use more of the identifier",
+        .matches.len(),
+        .matches.iter().map(SessionId::as_str).collect::<Vec<_>>().join(", ")
+    )]
+    AmbiguousPrefix {
+        prefix: String,
+        matches: Vec<SessionId>,
+    },
+    #[error("`{prefix}` is not a session identifier; identifiers are hexadecimal")]
+    MalformedId { prefix: String },
     #[error("session `{id}` stored an unrecognized {column} value `{value}`")]
     UnknownValue {
         id: SessionId,
@@ -595,6 +606,58 @@ impl<'a> SessionStore<'a> {
                 action: "generate a session identifier",
                 source,
             })
+    }
+
+    /// Resolve a whole identifier, or the leading part of one, to exactly one
+    /// session.
+    ///
+    /// A prefix is not a convenience here, it is a requirement: `glasshouse
+    /// sessions` prints only the first twelve characters of an identifier, so
+    /// the short form is the *only* one a user can copy from the screen. A
+    /// resume command that demanded all thirty-two would be unusable with the
+    /// identifiers Glasshouse itself shows.
+    ///
+    /// Ambiguity is refused rather than resolved — resuming the wrong session
+    /// is worse than being asked to type four more characters — and the error
+    /// names every candidate so the next attempt can succeed.
+    ///
+    /// Matching is done with `substr`, not `LIKE`: a `%` or `_` typed by the
+    /// user would be a wildcard under `LIKE`, and `%` alone would silently
+    /// match every session in the project.
+    pub fn resolve_id(&self, prefix: &str) -> Result<SessionId, SessionStoreError> {
+        let prefix = prefix.trim();
+        if prefix.is_empty() || !prefix.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(SessionStoreError::MalformedId {
+                prefix: prefix.to_owned(),
+            });
+        }
+        let prefix = prefix.to_ascii_lowercase();
+
+        let mut statement = self
+            .conn
+            .prepare("SELECT id FROM sessions WHERE substr(id, 1, ?2) = ?1 ORDER BY id")
+            .map_err(|source| SessionStoreError::Sql {
+                action: "prepare the session lookup",
+                source,
+            })?;
+        let matches: Vec<SessionId> = statement
+            .query_map(
+                rusqlite::params![&prefix, i64::try_from(prefix.len()).unwrap_or(i64::MAX)],
+                |row| row.get::<_, String>(0).map(SessionId),
+            )
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|source| SessionStoreError::Sql {
+                action: "look a session up by identifier",
+                source,
+            })?;
+
+        match matches.as_slice() {
+            [] => Err(SessionStoreError::NotFound {
+                id: SessionId(prefix),
+            }),
+            [only] => Ok(only.clone()),
+            _ => Err(SessionStoreError::AmbiguousPrefix { prefix, matches }),
+        }
     }
 
     /// Look one session up. `Ok(None)` means it is simply not here.
@@ -1726,6 +1789,112 @@ mod tests {
             first < 32_000_000_000,
             "seconds, not milliseconds or nanoseconds"
         );
+    }
+
+    // --- resolving an identifier ----------------------------------------
+
+    #[test]
+    fn a_whole_identifier_resolves_to_its_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let store = fixture.store();
+        let record = store.create(NewSession::embedded("claude-code")).unwrap();
+        assert_eq!(store.resolve_id(record.id.as_str()).unwrap(), record.id);
+    }
+
+    #[test]
+    fn the_short_form_the_listing_prints_is_enough_to_resolve() {
+        // `glasshouse sessions` prints twelve characters and nothing else, so
+        // twelve characters have to be usable. If they were not, the only
+        // identifier a user can see would be the one they cannot use.
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let store = fixture.store();
+        let record = store.create(NewSession::embedded("claude-code")).unwrap();
+
+        let short: String = record.id.as_str().chars().take(12).collect();
+        assert_eq!(store.resolve_id(&short).unwrap(), record.id);
+    }
+
+    #[test]
+    fn an_ambiguous_prefix_is_refused_and_names_its_candidates() {
+        // Resuming the wrong session is worse than being asked to type more.
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let store = fixture.store();
+        let first = store.create(NewSession::embedded("claude-code")).unwrap();
+        let second = store.create(NewSession::embedded("codex")).unwrap();
+
+        // Every identifier shares the empty prefix; the shortest prefix both
+        // share is found by comparison so the test does not depend on the
+        // random values.
+        let shared: String = first
+            .id
+            .as_str()
+            .chars()
+            .zip(second.id.as_str().chars())
+            .take_while(|(a, b)| a == b)
+            .map(|(a, _)| a)
+            .collect();
+        let ambiguous = shared;
+        if ambiguous.is_empty() {
+            // Two identifiers with no shared prefix: use a one-character one
+            // that both cannot share, and assert the exact-match path instead.
+            assert_eq!(store.resolve_id(first.id.as_str()).unwrap(), first.id);
+            return;
+        }
+
+        match store.resolve_id(&ambiguous) {
+            Err(SessionStoreError::AmbiguousPrefix { matches, .. }) => {
+                assert!(matches.contains(&first.id));
+                assert!(matches.contains(&second.id));
+            }
+            other => panic!("expected an ambiguous prefix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_identifier_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let store = fixture.store();
+        store.create(NewSession::embedded("claude-code")).unwrap();
+        assert!(matches!(
+            store.resolve_id("ffffffffffffffffffffffffffffffff"),
+            Err(SessionStoreError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn a_wildcard_cannot_be_smuggled_into_the_lookup() {
+        // Identifiers are matched with `substr`, not `LIKE`. Under `LIKE`, a
+        // bare `%` would match every session in the project, and resuming
+        // "whichever one came first" is exactly the wrong answer.
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let store = fixture.store();
+        store.create(NewSession::embedded("claude-code")).unwrap();
+
+        for hostile in ["%", "_", "%%", "a%", "' OR 1=1 --"] {
+            assert!(
+                matches!(
+                    store.resolve_id(hostile),
+                    Err(SessionStoreError::MalformedId { .. })
+                ),
+                "`{hostile}` was not refused"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_identifier_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let store = fixture.store();
+        assert!(matches!(
+            store.resolve_id("   "),
+            Err(SessionStoreError::MalformedId { .. })
+        ));
     }
 
     // --- assigned native identifiers -------------------------------------

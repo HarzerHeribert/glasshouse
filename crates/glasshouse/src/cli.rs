@@ -80,6 +80,23 @@ pub enum Command {
     /// from whatever session files the harness writes for itself, so the list
     /// is the same whether or not a harness kept its own history.
     Sessions,
+    /// Resume a recorded session in its own harness, inside this project.
+    ///
+    /// Only a session this project recorded, and only one that has something
+    /// to resume to: a harness that never produced an identifier, or one that
+    /// is still running, is refused rather than reopened as something blank.
+    Resume {
+        /// Which session, by the identifier `glasshouse sessions` prints.
+        ///
+        /// The listing shows the first twelve characters, and that short form
+        /// is enough — any leading part of an identifier works, as long as it
+        /// picks out exactly one session.
+        session: String,
+
+        /// Arguments passed straight through to the harness, after `--`.
+        #[arg(last = true, allow_hyphen_values = true)]
+        harness_args: Vec<String>,
+    },
     /// Open a session in an installed harness, inside this project.
     ///
     /// The harness runs in a pseudo-terminal whose working directory is this

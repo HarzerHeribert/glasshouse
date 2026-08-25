@@ -120,6 +120,25 @@ impl HarnessSelection {
         args
     }
 
+    /// The arguments that resume `native_session`, or `None` when this
+    /// harness has no verified resume mechanism.
+    ///
+    /// The adapter's own start arguments come first, exactly as for a new
+    /// session, because resuming is still starting the harness — it is only
+    /// the conversation that is continued.
+    pub fn resume_args<I, S>(&self, native_session: &str, user_args: I) -> Option<Vec<OsString>>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+    {
+        let adapter = self.adapter();
+        let resume = adapter.resume(native_session)?;
+        let mut args = adapter.start().args().to_vec();
+        args.extend(resume.args().iter().cloned());
+        args.extend(user_args.into_iter().map(Into::into));
+        Some(args)
+    }
+
     /// Whether this harness lets Glasshouse choose its native session
     /// identifier, in which case one should be minted before the session
     /// record is created.
