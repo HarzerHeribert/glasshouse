@@ -104,6 +104,33 @@ Line 3 was additionally proved by hand against the built binary in a real PTY
 before any test existed: a launched session listed as `resumable`, and
 `glasshouse resume <short>` producing `--conversation <id>`.
 
+#### CI evidence — and two red Windows runs on the way to it
+
+**CI `32908006880` green on Linux, macOS, Windows and lint** at `63e0053`, with
+the two decisive tests confirmed **by name in the Windows job's own log**:
+`the_shared_index_code_path_never_mentions_the_directory_walk` (the guard that
+the shared-index path can never open a conversation database) and
+`a_shared_index_entry_that_did_not_change_is_never_captured` (the stale-entry
+rule).
+
+Getting there cost two red Windows runs, and neither was a product defect:
+
+1. The scan located a function body by searching for a literal
+   newline-brace-newline. `include_str!` reads the file exactly as checked out,
+   and where Git converts line endings that literal is absent — so the guard
+   **panicked** instead of asserting. Now scanned with `str::lines`, which
+   strips the carriage return, making it CRLF-agnostic by construction.
+2. The regression guard written for (1) built its CRLF copy with
+   `SOURCE.replace('\n', "\r\n")` — but on Windows `SOURCE` is *already*
+   CRLF, so that produced `\r\r\n` and `lines` strips only one. **The guard
+   depended on the checkout it was guarding against.** Both copies now come
+   from a normalised base.
+
+The second fix was verified locally rather than on a third round-trip: the file
+was converted to real CRLF, the suite run, the pre-fix guard restored under the
+same CRLF to reproduce CI's failure with the **identical assertion message**,
+and the file restored. That recipe is now practice §15.
+
 #### `home_env` is `None`, and that is a finding
 
 The design left the variable name open ("`GEMINI_DIR` or whatever agy
