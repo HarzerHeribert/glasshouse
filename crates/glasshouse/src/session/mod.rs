@@ -17,11 +17,13 @@
 //! directory from the active project and offers no way to override it.
 
 pub mod attach;
+pub mod lifecycle;
 pub mod runtime;
 pub mod select;
 pub mod store;
 
 pub use attach::attach;
+pub use lifecycle::{lifecycle_for, may_apply};
 pub use runtime::{LiveSession, RuntimeError, Scrollback, SessionRuntime};
 pub use select::{ExecutableSource, HarnessSelection, SelectionError, select};
 pub use store::{

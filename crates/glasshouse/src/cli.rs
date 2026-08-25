@@ -80,6 +80,21 @@ pub enum Command {
     /// from whatever session files the harness writes for itself, so the list
     /// is the same whether or not a harness kept its own history.
     Sessions,
+    /// Report a harness lifecycle event. Run by harnesses, not by people.
+    ///
+    /// Glasshouse installs hooks that invoke this command, so a session's
+    /// state comes from the harness saying what happened rather than from
+    /// Glasshouse reading its terminal and guessing.
+    #[command(hide = true)]
+    Hook {
+        /// The Glasshouse session the event belongs to.
+        #[arg(long)]
+        session: String,
+
+        /// The harness's own name for the event.
+        #[arg(long)]
+        event: String,
+    },
     /// Resume a recorded session in its own harness, inside this project.
     ///
     /// Only a session this project recorded, and only one that has something

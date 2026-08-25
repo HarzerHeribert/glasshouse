@@ -367,7 +367,30 @@ fn start_session(
 
     // No user arguments here: the shell's `n` opens a session, and anything
     // extra would be a Glasshouse invention rather than something asked for.
-    let args = selection.start_args(native.as_deref(), Vec::<String>::new());
+    let mut args = selection.start_args(native.as_deref(), Vec::<String>::new());
+    // Best effort: a session that reports nothing is still a session, and is
+    // a far smaller loss than refusing to start one the user asked for.
+    let hook_args = std::env::current_exe()
+        .map_err(anyhow::Error::from)
+        .and_then(|program| {
+            selection.install_hooks(
+                &program,
+                record.id.as_str(),
+                &app_runtime.session_dir(record.id.as_str()),
+                app_runtime.project().root(),
+                app_runtime.paths().data_dir(),
+                app_runtime.paths().config_dir(),
+            )
+        });
+    match hook_args {
+        Ok(Some(hook_args)) => {
+            args.splice(0..0, hook_args);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::warn!(session = %record.id, error = %err, "could not install lifecycle hooks");
+        }
+    }
     let launch = HarnessLaunch::new(selection.into_executable(), app_runtime.project())
         .args(args)
         .size(size);

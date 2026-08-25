@@ -300,7 +300,7 @@ Fixed architectural requirements
 ☑ Support resuming a known Claude Code session through Claude Code’s native resume mechanism.
 ☐ Preserve the complete native Claude Code TUI inside the Glasshouse PTY.
 ☐ Add Claude Code lifecycle-hook integration for events that Claude exposes structurally.
-☐ Translate supported Claude lifecycle events into Glasshouse lifecycle events.
+☑ Translate supported Claude lifecycle events into Glasshouse lifecycle events.
 ☐ Detect when Claude Code requires user input or permission through structured events when possible.
 ☐ Detect normal Claude turn completion through hooks rather than terminal-text heuristics when possible.
 ☐ Record Claude compaction events when they can be observed reliably.

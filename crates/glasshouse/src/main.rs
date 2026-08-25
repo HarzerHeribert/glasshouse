@@ -84,6 +84,9 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         }) => {
             return resume_session(&runtime, session, harness_args);
         }
+        Some(Command::Hook { session, event }) => {
+            report_hook(&runtime, session, event);
+        }
         None => {
             // Setup runs by itself the first time, so a new user does not have
             // to know a command exists before Glasshouse is useful.
@@ -169,7 +172,8 @@ fn launch_session(
 
     // The adapter decides how its harness is opened; the user's own `--`
     // arguments follow it.
-    let args = selection.start_args(native.as_deref(), harness_args.iter().map(String::as_str));
+    let mut args = selection.start_args(native.as_deref(), harness_args.iter().map(String::as_str));
+    args.splice(0..0, install_hooks(runtime, &selection, &record.id));
     let launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
 
     // From here on, a bookkeeping failure must never change what the user
@@ -203,6 +207,92 @@ fn launch_session(
         eprintln!("glasshouse: the harness {status}");
     }
     Ok(exit_code_for(&status))
+}
+
+/// Install lifecycle hooks for a session that is about to start, returning
+/// the arguments that make the harness read them.
+///
+/// Best effort by construction. A harness that reports nothing is a harness
+/// Glasshouse knows less about, which is a smaller loss than refusing to start
+/// a session the user asked for because a configuration file could not be
+/// written.
+fn install_hooks(
+    runtime: &Runtime,
+    selection: &session::HarnessSelection,
+    id: &session::SessionId,
+) -> Vec<std::ffi::OsString> {
+    let program = match std::env::current_exe() {
+        Ok(program) => program,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not find the Glasshouse executable for hooks");
+            return Vec::new();
+        }
+    };
+    match selection.install_hooks(
+        &program,
+        id.as_str(),
+        &runtime.session_dir(id.as_str()),
+        runtime.project().root(),
+        runtime.paths().data_dir(),
+        runtime.paths().config_dir(),
+    ) {
+        Ok(Some(args)) => args,
+        Ok(None) => Vec::new(),
+        Err(err) => {
+            tracing::warn!(session = %id, error = %err, "could not install lifecycle hooks");
+            Vec::new()
+        }
+    }
+}
+
+/// Record a lifecycle event a harness reported about one of its sessions.
+///
+/// # This function may never fail
+///
+/// It is run *by the harness*, inside the user's session, and Claude Code
+/// treats a hook's non-zero exit as a veto: a `UserPromptSubmit` hook that
+/// exits non-zero blocks the prompt outright, with the user's own words
+/// echoed back at them and nothing sent. That was observed directly, not
+/// assumed.
+///
+/// So every failure here is swallowed into the log. A database that cannot be
+/// opened, a session that is not in it, an event nobody recognises — none of
+/// them is worth costing the user a turn. Glasshouse's bookkeeping is never
+/// more important than the session it is keeping books about.
+fn report_hook(runtime: &Runtime, session: &str, event: &str) {
+    let Some(next) = session::lifecycle_for(event) else {
+        // An event this build does not recognise. Harnesses gain events
+        // between releases, and guessing a state from an unfamiliar name
+        // would be worse than ignoring it.
+        tracing::debug!(event, "ignoring an unrecognised harness event");
+        return;
+    };
+
+    let outcome = (|| -> anyhow::Result<()> {
+        let sessions = ProjectSessions::open(runtime)?;
+        let store = sessions.store();
+        let id = store.resolve_id(session)?;
+        let record = store
+            .get(&id)?
+            .ok_or_else(|| anyhow::anyhow!("session `{id}` is not in this project"))?;
+
+        if !session::may_apply(record.lifecycle, next) {
+            tracing::debug!(
+                session = %id,
+                from = record.lifecycle.as_str(),
+                to = next.as_str(),
+                "not applying a harness event to a session in this state"
+            );
+            return Ok(());
+        }
+        store.set_lifecycle(&id, next)?;
+        tracing::info!(session = %id, event, state = next.as_str(), "harness reported an event");
+        Ok(())
+    })();
+
+    if let Err(err) = outcome {
+        tracing::warn!(error = %err, event, "could not record a harness event");
+    }
 }
 
 /// Reopen a recorded session in its own harness.

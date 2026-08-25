@@ -353,6 +353,103 @@ pub struct HarnessDescription {
     pub communication_style: Declared<CommunicationStyle>,
 }
 
+/// The command a harness should run to report one lifecycle event.
+///
+/// Glasshouse reports to *itself*: the program is the running Glasshouse
+/// executable and the arguments name the session and the event. That is
+/// deliberate — a shell one-liner appending to a file would need different
+/// quoting on every platform, and a harness's configuration is not the place
+/// to hide shell portability.
+#[derive(Debug, Clone)]
+pub struct HookCommand {
+    program: std::path::PathBuf,
+    session: String,
+    directory: std::path::PathBuf,
+    scope: std::path::PathBuf,
+    data_dir: std::path::PathBuf,
+    config_dir: std::path::PathBuf,
+}
+
+/// Wrap `value` in single quotes for a POSIX shell.
+fn quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+impl HookCommand {
+    /// `program` is the Glasshouse executable, `session` the session it should
+    /// report against, and `directory` the Glasshouse-owned place its
+    /// configuration document will be written — the adapter needs that to name
+    /// the file in its own arguments.
+    pub fn new(
+        program: impl Into<std::path::PathBuf>,
+        session: impl Into<String>,
+        directory: impl Into<std::path::PathBuf>,
+        scope: impl Into<std::path::PathBuf>,
+        data_dir: impl Into<std::path::PathBuf>,
+        config_dir: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            program: program.into(),
+            session: session.into(),
+            directory: directory.into(),
+            scope: scope.into(),
+            data_dir: data_dir.into(),
+            config_dir: config_dir.into(),
+        }
+    }
+
+    /// Where a document named `file_name` will be written.
+    pub fn file(&self, file_name: &str) -> std::path::PathBuf {
+        self.directory.join(file_name)
+    }
+
+    /// The command line that reports `event`, quoted for a shell.
+    ///
+    /// **Every path is pinned explicitly.** A hook runs as a fresh process
+    /// with whatever working directory and environment the harness gives it,
+    /// so a command that relied on discovering the project from its
+    /// surroundings would report into whichever project it happened to land
+    /// in — or into the user's real data directory while the session lived in
+    /// a temporary one. That was not a hypothetical: the first version omitted
+    /// them, ran cleanly, exited zero, and silently updated nothing.
+    ///
+    /// Paths are quoted; the session identifier is hexadecimal and the event
+    /// name comes from the adapter's own constant list, so neither can carry a
+    /// space. A single quote inside a path is escaped the POSIX way.
+    pub fn shell_command(&self, event: &str) -> String {
+        format!(
+            "{program} --scope {scope} --data-dir {data} --config-dir {config} \
+             hook --session {session} --event {event}",
+            program = quote(&self.program.display().to_string()),
+            scope = quote(&self.scope.display().to_string()),
+            data = quote(&self.data_dir.display().to_string()),
+            config = quote(&self.config_dir.display().to_string()),
+            session = self.session,
+        )
+    }
+
+    pub fn session(&self) -> &str {
+        &self.session
+    }
+}
+
+/// A harness's lifecycle hooks, ready to install for one session.
+///
+/// The document's *shape* is the harness's own business — Claude Code reads a
+/// settings JSON, Codex reads a `hooks.json` inside the project — so the
+/// adapter builds it and core only writes it down and passes the arguments.
+#[derive(Debug, Clone)]
+pub struct HookInstallation {
+    /// What to call the file Glasshouse writes.
+    pub file_name: &'static str,
+    /// Its contents.
+    pub contents: String,
+    /// Arguments that make the harness read it, for this session only.
+    pub args: Invocation,
+    /// The events this installation asked for, in the order declared.
+    pub events: &'static [&'static str],
+}
+
 /// Arguments that start or resume a native session.
 ///
 /// The program itself is never in here. It comes from
@@ -483,6 +580,18 @@ pub trait HarnessAdapter: std::fmt::Debug + Send + Sync {
     /// it.
     fn assign_session_id(&self, native_session: &str) -> Option<Invocation> {
         let _ = native_session;
+        None
+    }
+
+    /// A lifecycle-hook installation for one session, or `None` when this
+    /// harness has no verified hook mechanism.
+    ///
+    /// Glasshouse writes the returned document somewhere it owns and passes
+    /// the returned arguments. It never edits the harness's own global
+    /// configuration: a Glasshouse session must leave the user's `claude` or
+    /// `codex` exactly as it found it.
+    fn hook_installation(&self, report: &HookCommand) -> Option<HookInstallation> {
+        let _ = report;
         None
     }
 
@@ -936,6 +1045,142 @@ mod tests {
                 adapter.id().slug()
             );
         }
+    }
+
+    // --- lifecycle hooks -------------------------------------------------
+
+    fn hook_command() -> HookCommand {
+        HookCommand::new(
+            "/opt/glass house/glasshouse",
+            "0123456789abcdef0123456789abcdef",
+            "/state/sessions/0123456789abcdef0123456789abcdef",
+            "/work/project",
+            "/state",
+            "/config",
+        )
+    }
+
+    #[test]
+    fn claude_code_is_the_only_harness_with_a_verified_hook_installation() {
+        // The others declare hooks or do not, but none has a *verified* way to
+        // install them for one session without editing the user's own
+        // configuration — which Glasshouse will not do.
+        for adapter in all() {
+            let installed = adapter.hook_installation(&hook_command()).is_some();
+            assert_eq!(
+                installed,
+                adapter.id() == IntegrationId::ClaudeCode,
+                "{} disagrees about installing hooks",
+                adapter.id().slug()
+            );
+        }
+    }
+
+    #[test]
+    fn the_generated_settings_document_is_valid_json_in_the_verified_shape() {
+        let installation = adapter_for(IntegrationId::ClaudeCode)
+            .expect("a harness")
+            .hook_installation(&hook_command())
+            .expect("an installation");
+
+        let parsed: serde_json::Value = serde_json::from_str(&installation.contents)
+            .unwrap_or_else(|err| panic!("not valid JSON: {err}\n{}", installation.contents));
+
+        let hooks = parsed
+            .get("hooks")
+            .and_then(|h| h.as_object())
+            .expect("a hooks object");
+
+        for event in installation.events {
+            let entries = hooks
+                .get(*event)
+                .and_then(|e| e.as_array())
+                .unwrap_or_else(|| panic!("no entry for {event}"));
+            let inner = entries[0]
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .expect("an inner hooks array");
+            // The shape a real Claude Code settings document uses: a list of
+            // entries, each holding a list of {type, command, timeout}. None
+            // of these is a tool event, so none carries a `matcher`.
+            assert_eq!(inner[0]["type"], "command");
+            assert!(inner[0]["timeout"].is_number());
+            assert!(entries[0].get("matcher").is_none());
+
+            let command = inner[0]["command"].as_str().expect("a command string");
+            assert!(command.contains("hook"), "{command}");
+            assert!(command.contains(&format!("--event {event}")), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_hook_command_pins_every_path_it_needs() {
+        // A hook runs as a fresh process wherever the harness puts it. Left to
+        // discover its own project it would report into the wrong one — which
+        // is exactly what the first version did, exiting zero and updating
+        // nothing.
+        let command = hook_command().shell_command("Stop");
+        for required in [
+            "--scope",
+            "--data-dir",
+            "--config-dir",
+            "--session",
+            "--event",
+        ] {
+            assert!(command.contains(required), "{required} missing: {command}");
+        }
+    }
+
+    #[test]
+    fn a_hook_command_survives_a_space_in_a_path() {
+        let command = hook_command().shell_command("Stop");
+        assert!(
+            command.contains("'/opt/glass house/glasshouse'"),
+            "an unquoted path with a space would run the wrong program: {command}"
+        );
+    }
+
+    #[test]
+    fn a_generated_document_escapes_backslashes() {
+        // A Windows executable path is full of them, and emitting them raw
+        // would produce a document Claude Code cannot parse.
+        let report = HookCommand::new(
+            r"C:\Program Files\glasshouse.exe",
+            "abcdef",
+            r"C:\state",
+            r"C:\project",
+            r"C:\state",
+            r"C:\config",
+        );
+        let installation = adapter_for(IntegrationId::ClaudeCode)
+            .expect("a harness")
+            .hook_installation(&report)
+            .expect("an installation");
+        let parsed: serde_json::Value = serde_json::from_str(&installation.contents)
+            .unwrap_or_else(|err| panic!("not valid JSON: {err}\n{}", installation.contents));
+        let command = parsed["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("a command");
+        assert!(
+            command.contains(r"C:\Program Files\glasshouse.exe"),
+            "the path did not survive a JSON round trip: {command}"
+        );
+    }
+
+    #[test]
+    fn session_start_is_not_among_the_reported_events() {
+        // Claude Code 2.1.245 does not fire it. A settings document declaring
+        // one was installed and the hook never ran, while `UserPromptSubmit`
+        // from the same document did. Adding it back would be a hook that
+        // silently never reports.
+        let installation = adapter_for(IntegrationId::ClaudeCode)
+            .expect("a harness")
+            .hook_installation(&hook_command())
+            .expect("an installation");
+        assert!(
+            !installation.events.contains(&"SessionStart"),
+            "SessionStart does not fire in this version"
+        );
     }
 
     // --- the architecture the map fixes ---------------------------------

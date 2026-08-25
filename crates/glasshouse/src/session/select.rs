@@ -14,12 +14,13 @@
 //! already do, and nothing logs or formats anything but paths and
 //! integration names.
 
+use anyhow::Context as _;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::config::{EffectiveConfig, Layer};
-use crate::harness::HarnessAdapter;
+use crate::harness::{HarnessAdapter, HookCommand};
 use crate::integrations::{IntegrationId, IntegrationKind};
 use crate::platform::exec::{self, ResolveError, ResolvedExecutable};
 
@@ -137,6 +138,44 @@ impl HarnessSelection {
         args.extend(resume.args().iter().cloned());
         args.extend(user_args.into_iter().map(Into::into));
         Some(args)
+    }
+
+    /// Install lifecycle hooks for `session`, returning the arguments that
+    /// make the harness read them.
+    ///
+    /// The document goes in a directory Glasshouse owns, inside the project's
+    /// own state — never into the harness's own configuration. A Glasshouse
+    /// session must leave the user's `claude` exactly as it found it, which is
+    /// the whole reason the harness is handed a per-session file instead.
+    ///
+    /// `Ok(None)` means this harness has no verified hook mechanism, which is
+    /// not a failure: most of them do not, and a session without lifecycle
+    /// reporting is a perfectly good session.
+    pub fn install_hooks(
+        &self,
+        program: &Path,
+        session: &str,
+        directory: &Path,
+        scope: &Path,
+        data_dir: &Path,
+        config_dir: &Path,
+    ) -> anyhow::Result<Option<Vec<OsString>>> {
+        let report = HookCommand::new(program, session, directory, scope, data_dir, config_dir);
+        let Some(installation) = self.adapter().hook_installation(&report) else {
+            return Ok(None);
+        };
+
+        std::fs::create_dir_all(directory).with_context(|| {
+            format!(
+                "could not create the session directory `{}`",
+                directory.display()
+            )
+        })?;
+        let path = directory.join(installation.file_name);
+        std::fs::write(&path, installation.contents.as_bytes())
+            .with_context(|| format!("could not write `{}`", path.display()))?;
+
+        Ok(Some(installation.args.args().to_vec()))
     }
 
     /// Whether this harness lets Glasshouse choose its native session

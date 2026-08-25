@@ -2845,3 +2845,217 @@ fn resuming_a_session_with_no_conversation_is_refused() {
         "the harness must never be started for a session with nothing to resume:\n{refusal}"
     );
 }
+
+/// A harness that stays alive long enough to be observed, and reports the
+/// arguments it was given.
+#[cfg(unix)]
+fn install_lingering_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join(name);
+    std::fs::write(&path, "#!/bin/sh\necho \"ARGV:$*\"\nsleep 20\nexit 0\n")
+        .expect("write fake harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// The hooks Glasshouse installs move a live session's state.
+///
+/// The command line is not re-derived here: it is read out of the settings
+/// document Glasshouse generated and run exactly as written, through a shell,
+/// which is how Claude Code runs it. That makes this a test of the quoting as
+/// much as of the reporting — an executable path with a space in it would
+/// break the hook and nothing else would notice.
+///
+/// No model turn is involved. Claude Code's own firing of these hooks is
+/// verified separately by a runtime probe recorded in the evidence ledger;
+/// what is proved here is every part Glasshouse owns.
+#[cfg(unix)]
+#[test]
+fn an_installed_hook_moves_the_session_state() {
+    use clap::Parser as _;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    let bin_dir = tmp.path().join("bin");
+    for dir in [&state_dir, &config_dir, &bin_dir] {
+        std::fs::create_dir_all(dir).expect("create dir");
+    }
+
+    let harness = install_lingering_harness(&bin_dir, "fake-claude");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n",
+            harness.display()
+        ),
+    )
+    .expect("write user config");
+
+    let mut session = Session::spawn(
+        TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path())
+            .arg("--scope")
+            .arg(&project_dir)
+            .arg("--data-dir")
+            .arg(&state_dir)
+            .arg("--config-dir")
+            .arg(&config_dir)
+            .arg("launch")
+            .arg("claude-code"),
+    );
+
+    // Wait until the harness is up and has told us its arguments.
+    let deadline = Instant::now() + TIMEOUT;
+    let mut argv = None;
+    while Instant::now() < deadline {
+        session.answer_pending_queries();
+        let clean = strip_terminal_sequences(&session.output());
+        if let Some(line) = clean.lines().find(|line| line.contains("ARGV:")) {
+            argv = Some(line.trim().to_owned());
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+    let argv = argv.unwrap_or_else(|| {
+        panic!(
+            "the harness never started\n--- output ---\n{}\n--- end ---",
+            session.output()
+        )
+    });
+    assert!(
+        argv.contains("--settings"),
+        "Glasshouse did not install any hooks: {argv}"
+    );
+
+    let cli = glasshouse::Cli::try_parse_from([
+        "glasshouse",
+        "--scope",
+        project_dir.to_str().unwrap(),
+        "--data-dir",
+        state_dir.to_str().unwrap(),
+        "--config-dir",
+        config_dir.to_str().unwrap(),
+    ])
+    .expect("cli");
+    let runtime = glasshouse::bootstrap(&cli, tmp.path()).expect("bootstrap");
+
+    let record = {
+        let sessions = glasshouse::session::ProjectSessions::open(&runtime).expect("sessions");
+        let records = sessions.store().list().expect("list");
+        records.into_iter().next().expect("one session")
+    };
+    assert_eq!(
+        record.lifecycle,
+        glasshouse::session::SessionLifecycle::Running,
+        "a launched harness should be running"
+    );
+
+    // The settings document Glasshouse wrote, read back and used verbatim.
+    let settings_path = runtime
+        .session_dir(record.id.as_str())
+        .join("claude-settings.json");
+    let settings = std::fs::read_to_string(&settings_path)
+        .unwrap_or_else(|err| panic!("no settings at {}: {err}", settings_path.display()));
+
+    let command = settings
+        .lines()
+        .find(|line| line.contains("PermissionRequest"))
+        .and(
+            settings
+                .split("\"PermissionRequest\"")
+                .nth(1)
+                .and_then(|rest| rest.split("\"command\": \"").nth(1))
+                .and_then(|rest| rest.split('"').next()),
+        )
+        .unwrap_or_else(|| panic!("no PermissionRequest command in:\n{settings}"))
+        .replace("\\\"", "\"")
+        .replace("\\\\", "\\");
+
+    let status = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&command)
+        .status()
+        .expect("run the hook command");
+    assert!(
+        status.success(),
+        "a hook must always succeed, or Claude Code treats it as a veto: {command}"
+    );
+
+    let after = {
+        let sessions = glasshouse::session::ProjectSessions::open(&runtime).expect("sessions");
+        sessions
+            .store()
+            .get(&record.id)
+            .expect("get")
+            .expect("the session")
+    };
+    assert_eq!(
+        after.lifecycle,
+        glasshouse::session::SessionLifecycle::WaitingForUser,
+        "the harness said it was asking permission, and the record did not follow"
+    );
+
+    session.send("\x03");
+    let _ = session.wait_for_exit();
+}
+
+/// A hook that cannot do its job still succeeds.
+///
+/// Claude Code treats a hook's non-zero exit as a veto: a `UserPromptSubmit`
+/// hook that exits non-zero blocks the prompt outright, with the user's words
+/// echoed back and nothing sent. That was observed directly against the real
+/// binary, which is why this is a test and not a preference.
+///
+/// So every way a report can fail — a session that is not there, a database
+/// that cannot be opened, an event nobody recognises — has to end in exit 0.
+/// Glasshouse's bookkeeping is never worth costing the user a turn.
+#[cfg(unix)]
+#[test]
+fn a_hook_that_cannot_report_still_exits_zero() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    for dir in [&state_dir, &config_dir] {
+        std::fs::create_dir_all(dir).expect("create dir");
+    }
+
+    let cases: [(&str, &str); 3] = [
+        // A session this project has never heard of.
+        ("ffffffffffffffffffffffffffffffff", "Stop"),
+        // Something that is not an identifier at all.
+        ("not-an-identifier", "Stop"),
+        // An event this build does not recognise.
+        ("ffffffffffffffffffffffffffffffff", "SomeFutureEvent"),
+    ];
+
+    for (session, event) in cases {
+        let status = std::process::Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+            .args([
+                "--scope",
+                project_dir.to_str().unwrap(),
+                "--data-dir",
+                state_dir.to_str().unwrap(),
+                "--config-dir",
+                config_dir.to_str().unwrap(),
+                "hook",
+                "--session",
+                session,
+                "--event",
+                event,
+            ])
+            .status()
+            .expect("run the hook");
+        assert!(
+            status.success(),
+            "reporting `{event}` for `{session}` exited {status}; Claude Code would have \
+             treated that as a veto and blocked the user's prompt"
+        );
+    }
+}

@@ -59,6 +59,16 @@ impl Runtime {
         &self.state_dir
     }
 
+    /// Directory holding Glasshouse's own files for one session.
+    ///
+    /// Inside the project's state directory, which is Glasshouse's alone: a
+    /// harness's generated configuration lives here rather than anywhere the
+    /// harness itself owns, so a Glasshouse session never edits the user's
+    /// installation.
+    pub fn session_dir(&self, session: &str) -> PathBuf {
+        self.state_dir.join("sessions").join(session)
+    }
+
     /// Directory holding logs for the active project.
     pub fn log_dir(&self) -> PathBuf {
         self.state_dir.join("logs")

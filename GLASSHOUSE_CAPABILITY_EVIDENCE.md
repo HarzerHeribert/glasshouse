@@ -49,6 +49,93 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 7 — Claude Code lifecycle hooks (one line closed, three pending one probe)
+
+Contract: Given a running Claude Code session, when the harness reaches a
+point it reports structurally — a prompt submitted, permission asked, a turn
+ended — Glasshouse records the matching session state, while never editing the
+user's own Claude Code configuration and never costing the user a turn if the
+reporting fails.
+
+State: **Translation is COMPLETE** (its map box is checked). Hook
+*integration*, permission detection and turn-completion detection are
+PARTIALLY VERIFIED and their boxes stay unchecked — see the missing evidence.
+
+Production evidence:
+- `harness/mod.rs: HookCommand`, `HookInstallation`,
+  `HarnessAdapter::hook_installation` — the contract. The adapter builds the
+  document because its *shape* is the harness's own business.
+- `harness/claude_code.rs: hook_installation` — generates a settings document
+  declaring `UserPromptSubmit`, `PermissionRequest`, `Stop` and `StopFailure`,
+  installed with `--settings`, which loads *additional* settings so the user's
+  own hooks keep running.
+- `session/lifecycle.rs: lifecycle_for` / `may_apply` — the translation, and
+  the only place that knows both vocabularies.
+- `main.rs: report_hook` and the hidden `glasshouse hook` command — what the
+  harness actually runs.
+- `session/select.rs: HarnessSelection::install_hooks` — writes the document
+  into a directory Glasshouse owns inside the project's own state. It never
+  touches `~/.claude`.
+
+Regression evidence:
+- `an_installed_hook_moves_the_session_state` (PTY smoke, Unix) — launches
+  through the shipped binary, reads the `PermissionRequest` command *out of the
+  document Glasshouse generated*, runs it through a shell exactly as Claude
+  Code would, and asserts the session moved to `WaitingForUser`. This is a test
+  of the quoting as much as of the reporting. **Mutation-checked**: dropping
+  the pinned paths from the command fails it.
+- `a_hook_that_cannot_report_still_exits_zero` — an unknown session, a
+  malformed identifier and an unrecognised event all exit 0.
+  **Mutation-checked**: exiting non-zero on failure fails it.
+- `the_generated_settings_document_is_valid_json_in_the_verified_shape` —
+  parsed with `serde_json` and checked field by field against the shape read
+  from a real Claude Code settings document.
+- `a_hook_command_pins_every_path_it_needs`,
+  `a_hook_command_survives_a_space_in_a_path`,
+  `a_generated_document_escapes_backslashes`.
+- `claude_codes_events_translate_to_the_states_they_mean`,
+  `a_failed_turn_leaves_the_session_alive`,
+  `an_unfamiliar_event_changes_nothing`,
+  `a_finished_session_is_never_revived_by_a_late_hook` (**mutation-checked**),
+  `a_live_session_follows_its_harness`.
+
+Failure/isolation evidence:
+- A hook **must** exit 0. Claude Code treats a non-zero exit as a veto: a
+  `UserPromptSubmit` hook that exits non-zero blocks the prompt outright, with
+  the user's own words echoed back and nothing sent. Observed directly against
+  the real binary, which is why `report_hook` swallows every failure into the
+  log.
+- A late hook cannot revive a finished session: hook processes outlive their
+  harness, and `may_apply` requires the current state to be live.
+- An unrecognised event changes nothing rather than guessing a state.
+
+Platform/external evidence:
+- Claude Code 2.1.245 **fires hooks from a `--settings` document**: a
+  hand-written document with a `UserPromptSubmit` hook ran its command and,
+  by exiting non-zero, blocked the prompt — so the mechanism was proven
+  without spending a turn.
+- Claude Code 2.1.245 **does not fire `SessionStart`**: a document declaring
+  one was installed and never ran, while `UserPromptSubmit` from the same
+  document did. That is why `SessionStart` is not among the reported events,
+  pinned by `session_start_is_not_among_the_reported_events`.
+- Claude Code 2.1.245 **accepts the document Glasshouse generates**: started
+  with one, it parsed it and reached its workspace-trust prompt.
+
+Missing evidence:
+- **Claude Code firing the generated document's hooks, observed.** Everything
+  around it is proven — the mechanism fires for a document of this shape, the
+  generated document is asserted to have that shape and parses, the real
+  binary accepts it, and the command it contains moves the session state when
+  run. What has not been watched happen is Claude Code running *this* file's
+  hooks, and inferring it is exactly the step this project keeps getting
+  burned by.
+- The probe: launch a Glasshouse session against the real `claude`, submit one
+  prompt, and check the session record moves to `Running` and then `Idle`. It
+  costs one turn against the user's account.
+- Hook firing is verified on macOS only. The generated document and the
+  reporting command are platform-independent and covered everywhere by the
+  tests above, but Claude Code's own hook execution on Windows is unverified.
+
 ### Phase 7 — Support resuming a known Claude Code session through Claude Code's native resume mechanism
 
 Contract: Given a recorded session that has a conversation to return to, when

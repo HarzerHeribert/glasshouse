@@ -12,7 +12,7 @@ from 107 to 120.
   line is deliberately unchecked; see the loose ends.
 - **Phase 1 line 90** — the cross-project resume guard: **closed after three
   sessions blocked.** `glasshouse resume` is its production caller.
-- **Phase 7** — Claude Code adapter: three of ten lines closed. Glasshouse
+- **Phase 7** — Claude Code adapter: four of ten lines closed, with three more built and awaiting one probe. Glasshouse
   **assigns** Claude Code its native session identifier with `--session-id`,
   mints it as a valid version-4 UUID, and records it before the process
   exists — and the whole chain is verified against the real binary.
@@ -64,6 +64,45 @@ list was carefully reasoned, documented at length, and pinned by a test — and
 simply wrong, because no reference install had ever been inspected.
 
 ## Verified completed work
+
+### This session — Claude Code lifecycle hooks
+
+Glasshouse installs per-session hooks so a session's state comes from the
+harness saying what happened, not from reading its terminal and guessing.
+
+- The adapter builds the settings document, because its shape is the harness's
+  own business. Glasshouse writes it into a directory it owns inside the
+  project's state and passes `--settings` — which loads *additional* settings,
+  so the user's own hooks keep running and their `~/.claude` is never touched.
+- The hooks invoke Glasshouse itself (`glasshouse hook --session … --event …`)
+  rather than a shell one-liner, because a one-liner would need different
+  quoting on every platform and a harness's configuration is not the place to
+  hide shell portability.
+- `session/lifecycle.rs` is the only place that knows both vocabularies. An
+  unfamiliar event changes nothing, and a late hook cannot revive a finished
+  session — hook processes outlive their harness.
+
+**A hook must always exit 0, and that is not a preference.** Claude Code treats
+a non-zero exit as a veto: a `UserPromptSubmit` hook that exits non-zero blocks
+the prompt outright, with the user's own words echoed back and nothing sent.
+That was observed directly — and it is also what made the whole hook mechanism
+verifiable *without spending a turn*, since a deliberately failing hook proves
+firing while cancelling the API call.
+
+**Two facts read from the real binary, not assumed:**
+
+- `SessionStart` **does not fire** in Claude Code 2.1.245. A document declaring
+  one was installed and its hook never ran, while `UserPromptSubmit` from the
+  same document did. It is deliberately not among the reported events, and a
+  test pins that.
+- The hook schema was read out of a real settings document rather than
+  recalled: entries hold `{type, command, timeout}`, and only tool events carry
+  a `matcher`.
+
+**A defect that only appeared by running it.** The first version of the hook
+command carried no paths, so it discovered its own project from wherever the
+harness happened to run it. It exited 0, looked healthy, and silently updated
+nothing. Every path is pinned now, and dropping them fails two tests.
 
 ### This session — `glasshouse resume`
 
@@ -421,6 +460,21 @@ have required a magic clamp.
 
 ## Unresolved loose ends
 
+- **Three Phase 7 hook lines are built but unchecked**, pending one probe:
+  watching Claude Code fire the hooks in the document Glasshouse generated.
+  Everything around it is proven — the mechanism fires for a document of this
+  shape, the generated document has that shape and parses, the real binary
+  accepts it, and the command it contains moves the session state when run.
+  The probe costs one turn: launch a session against the real `claude`, submit
+  one prompt, and watch the record move to `Running` and then `Idle`.
+- **Hook firing is verified on macOS only.** The document and the reporting
+  command are platform-independent and tested everywhere; Claude Code's own
+  hook execution on Windows is not.
+- **A new project directory makes Claude Code ask the user to trust the
+  workspace.** An embedded session will show that prompt in the viewport,
+  which is correct — native prompts stay interactive — but it means a session's
+  first screen may be a question rather than a prompt box.
+
 - **Anything configured as `claude-code` now receives `--session-id`.** Before
   this session Glasshouse passed no arguments at all, so any executable
   worked. A user pointing that integration at a wrapper script now needs the
@@ -606,14 +660,16 @@ surface before sending anything to it.
 
 - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
   --all-features -- -D warnings`, `cargo test --workspace --all-features`
-  (369 lib + 2 bin + 45 PTY smoke + 4 settings), `rustup run 1.85.0 cargo
+  (380 lib + 2 bin + 47 PTY smoke + 4 settings), `rustup run 1.85.0 cargo
   check --locked --workspace --all-targets`, `git diff --check` — all pass.
 - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` — 23
   diagnostics, exactly the baseline measured at `HEAD` in a throwaway
   worktree. None added.
-- Eleven mutations. Ten failed the test they targeted; one **passed**, and
-  exposed a test that could not reach the guard it was supposed to cover. A
-  test was written to reach it, and the mutation now fails.
+- Fifteen mutations. Fourteen failed the test they targeted; one **passed**,
+  and exposed a test that could not reach the guard it was supposed to cover.
+  A test was written to reach it, and the mutation now fails. Two further
+  mutation attempts produced *no output at all* — a build failure, not a
+  result — and were redone properly rather than counted.
 - CI `32835774698` green on Linux, macOS, Windows and lint, with the Windows
   job confirmed to have executed 346 lib, 2 bin, 33 PTY and 4 settings tests
   rather than merely reporting green.
