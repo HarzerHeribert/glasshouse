@@ -317,9 +317,9 @@ Fixed architectural requirements
 ☑ Capture the native Codex thread or session identifier when it can be obtained reliably.
 ☑ Support resuming a known Codex session through Codex’s native resume mechanism.
 ☑ Preserve the complete native Codex TUI inside the Glasshouse PTY.
-☐ Integrate structured Codex events or hooks wherever the installed Codex version exposes them.
-☐ Translate supported Codex lifecycle events into Glasshouse lifecycle events.
-☐ Detect Codex turn completion structurally when possible.
+☑ Integrate structured Codex events or hooks wherever the installed Codex version exposes them.
+☑ Translate supported Codex lifecycle events into Glasshouse lifecycle events.
+☑ Detect Codex turn completion structurally when possible.
 ☐ Detect Codex waiting-for-user and permission states structurally when possible.
 ☐ Record observed Codex compaction events or compaction-related state when available.
 ☑ Avoid coupling Glasshouse core logic to Codex-internal Rust crates.

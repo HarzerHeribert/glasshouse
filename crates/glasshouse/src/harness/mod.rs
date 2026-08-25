@@ -474,9 +474,23 @@ impl HookCommand {
         }
     }
 
-    /// Where a document named `file_name` will be written.
+    /// Where a document named `file_name` will be written, inside the
+    /// Glasshouse-owned directory this command reports against.
     pub fn file(&self, file_name: &str) -> std::path::PathBuf {
         self.directory.join(file_name)
+    }
+
+    /// The Glasshouse-owned directory itself, for a
+    /// [`HookDestination::GlasshouseOwned`] installation that needs to create
+    /// it before [`HookCommand::file`] can be written into it.
+    pub fn directory(&self) -> &std::path::Path {
+        &self.directory
+    }
+
+    /// The project root, for a [`HookDestination::ProjectLocal`] installation
+    /// that needs to resolve its `relative_path` against it.
+    pub fn scope(&self) -> &std::path::Path {
+        &self.scope
     }
 
     /// The command line that reports `event`, quoted for a shell.
@@ -509,6 +523,26 @@ impl HookCommand {
     }
 }
 
+/// Where a harness insists on reading its hooks from.
+///
+/// Claude Code's `--settings` flag means Glasshouse can put its hook document
+/// anywhere and simply point the harness at it. Codex has no such flag: it
+/// reads hooks from exactly one place, and that place is inside the user's
+/// own project. The two cases need different handling — a `GlasshouseOwned`
+/// document is always written, a `ProjectLocal` one only with the user's
+/// explicit consent — and this is what lets [`mod@crate::session::select`]
+/// enforce that rule in one place rather than trusting every adapter to ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookDestination {
+    /// A directory Glasshouse owns, inside the project's own state. The
+    /// harness is pointed at it by the installation's own `args`, and
+    /// nothing of the user's is touched.
+    GlasshouseOwned,
+    /// Inside the user's project, at this relative path, because the
+    /// harness reads hooks from nowhere else. Requires explicit consent.
+    ProjectLocal { relative_path: &'static str },
+}
+
 /// A harness's lifecycle hooks, ready to install for one session.
 ///
 /// The document's *shape* is the harness's own business — Claude Code reads a
@@ -524,6 +558,54 @@ pub struct HookInstallation {
     pub args: Invocation,
     /// The events this installation asked for, in the order declared.
     pub events: &'static [&'static str],
+    /// Where this document must be written — see [`HookDestination`].
+    pub destination: HookDestination,
+}
+
+/// Render `value` as a JSON string literal.
+///
+/// Hand-written rather than pulled from `serde_json` because the only values
+/// passed here are an event name from an adapter's own constant list and a
+/// command line built from an executable path — but a Windows path is full
+/// of backslashes, and emitting those unescaped would produce a document the
+/// harness cannot parse.
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Build the `{"hooks": {...}}` document both Claude Code and Codex read:
+/// each of `events` maps to a single entry holding one
+/// `{type: "command", command, timeout}` hook. Shared because the shape is
+/// identical between the two harnesses — only the event list, the reporting
+/// command, and the timeout differ, and those are exactly this function's
+/// parameters.
+fn hooks_document(events: &[&'static str], report: &HookCommand, timeout_seconds: u32) -> String {
+    let entries: Vec<String> = events
+        .iter()
+        .map(|event| {
+            format!(
+                "    {}: [\n      {{ \"hooks\": [ {{ \"type\": \"command\", \
+                 \"command\": {}, \"timeout\": {timeout_seconds} }} ] }}\n    ]",
+                json_string(event),
+                json_string(&report.shell_command(event)),
+            )
+        })
+        .collect();
+    format!("{{\n  \"hooks\": {{\n{}\n  }}\n}}\n", entries.join(",\n"))
 }
 
 /// Arguments that start or resume a native session.
@@ -686,10 +768,15 @@ pub trait HarnessAdapter: std::fmt::Debug + Send + Sync {
     /// A lifecycle-hook installation for one session, or `None` when this
     /// harness has no verified hook mechanism.
     ///
-    /// Glasshouse writes the returned document somewhere it owns and passes
-    /// the returned arguments. It never edits the harness's own global
-    /// configuration: a Glasshouse session must leave the user's `claude` or
-    /// `codex` exactly as it found it.
+    /// The installation's [`HookInstallation::destination`] says where
+    /// Glasshouse writes the returned document: a
+    /// [`HookDestination::GlasshouseOwned`] one is always written, and the
+    /// returned `args` point the harness at it; a
+    /// [`HookDestination::ProjectLocal`] one is written only with the user's
+    /// explicit consent, because it lands inside their own project. Either
+    /// way, this never edits the harness's own *global* configuration: a
+    /// Glasshouse session must leave the user's `claude` or `codex` exactly
+    /// as it found it.
     fn hook_installation(&self, report: &HookCommand) -> Option<HookInstallation> {
         let _ = report;
         None
@@ -1265,19 +1352,34 @@ mod tests {
     }
 
     #[test]
-    fn claude_code_is_the_only_harness_with_a_verified_hook_installation() {
-        // The others declare hooks or do not, but none has a *verified* way to
-        // install them for one session without editing the user's own
+    fn claude_code_and_codex_are_the_harnesses_with_a_verified_hook_installation() {
+        // The others declare hooks or do not, but neither has a *verified* way
+        // to install them for one session without editing the user's own
         // configuration — which Glasshouse will not do.
         for adapter in all() {
             let installed = adapter.hook_installation(&hook_command()).is_some();
+            let expected = matches!(
+                adapter.id(),
+                IntegrationId::ClaudeCode | IntegrationId::Codex
+            );
             assert_eq!(
                 installed,
-                adapter.id() == IntegrationId::ClaudeCode,
+                expected,
                 "{} disagrees about installing hooks",
                 adapter.id().slug()
             );
         }
+    }
+
+    #[test]
+    fn claude_codes_installation_still_goes_to_glasshouse_owned_state() {
+        // Codex gaining a project-local destination must not change where
+        // Claude Code's own installation lands.
+        let installation = adapter_for(IntegrationId::ClaudeCode)
+            .expect("a harness")
+            .hook_installation(&hook_command())
+            .expect("an installation");
+        assert_eq!(installation.destination, HookDestination::GlasshouseOwned);
     }
 
     #[test]

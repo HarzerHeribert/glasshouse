@@ -7,8 +7,9 @@
 
 use super::{
     ApprovalModes, BackendSelection, Backends, Capabilities, Declared, HarnessAdapter,
-    HarnessDescription, Hooks, Invocation, ModelOverride, NativeSessionKind, NativeSessionRecord,
-    NativeSessionSource, SessionIds, Vendor, WireProtocol,
+    HarnessDescription, HookCommand, HookDestination, HookInstallation, Hooks, Invocation,
+    ModelOverride, NativeSessionKind, NativeSessionRecord, NativeSessionSource, SessionIds, Vendor,
+    WireProtocol,
 };
 use crate::integrations::IntegrationId;
 
@@ -40,6 +41,32 @@ const HOOK_EVENTS: &[&str] = &[
     "SubagentStop",
     "Stop",
 ];
+/// The events Glasshouse asks Codex to report.
+///
+/// A subset of [`HOOK_EVENTS`], deliberately not the per-tool events
+/// (`PreToolUse`/`PostToolUse`/`PreCompact`/`PostCompact`/`SubagentStart`/
+/// `SubagentStop`): those fire many times per turn and say nothing about a
+/// *session's* state, the same reasoning Claude Code's adapter applies.
+/// `SessionEnd` is asked for here even though `session/lifecycle.rs`
+/// deliberately never maps it to a state — Codex still reports it, and
+/// declining to *ask* for it would be a second, redundant way of encoding
+/// the same decision.
+const REPORTED_EVENTS: &[&str] = &[
+    "SessionStart",
+    "UserPromptSubmit",
+    "PermissionRequest",
+    "Stop",
+    "SessionEnd",
+];
+
+/// Seconds a reporting hook may take before Codex abandons it.
+///
+/// Codex clamps a declared timeout to 3 seconds — a real installation
+/// declaring 10 produced `⚠ clamping SessionEnd hook timeout to 3s in
+/// <project>/.codex/hooks.json`. Declaring 3 here means a real installation
+/// produces no warning the user has to wonder about.
+const HOOK_TIMEOUT_SECONDS: u32 = 3;
+
 const PROTOCOLS: &[WireProtocol] = &[WireProtocol::OpenAiResponses];
 
 const MODEL_OVERRIDE: &[ModelOverride] = &[
@@ -90,6 +117,25 @@ impl HarnessAdapter for Codex {
             subdirectory: "sessions",
             file_prefix: "rollout-",
             file_extension: "jsonl",
+        })
+    }
+
+    /// Codex reads hooks from exactly one place — `<project>/.codex/hooks.json`
+    /// — with no `--settings`-equivalent flag to point it elsewhere. `args`
+    /// is therefore empty: Codex finds the file itself, once it exists.
+    ///
+    /// That path is inside the user's own repository, so
+    /// [`mod@crate::session::select`] must never write it without the user's
+    /// explicit consent — see [`HookDestination::ProjectLocal`].
+    fn hook_installation(&self, report: &HookCommand) -> Option<HookInstallation> {
+        Some(HookInstallation {
+            file_name: "hooks.json",
+            contents: super::hooks_document(REPORTED_EVENTS, report, HOOK_TIMEOUT_SECONDS),
+            args: Invocation::bare(),
+            events: REPORTED_EVENTS,
+            destination: HookDestination::ProjectLocal {
+                relative_path: ".codex/hooks.json",
+            },
         })
     }
 
@@ -370,5 +416,81 @@ mod tests {
     fn rejects_garbage() {
         assert!(parse_rfc3339_utc("not a timestamp").is_none());
         assert!(parse_rfc3339_utc("").is_none());
+    }
+
+    // --- lifecycle hooks -------------------------------------------------
+
+    fn hook_command() -> HookCommand {
+        HookCommand::new(
+            "/opt/glasshouse/glasshouse",
+            "0123456789abcdef0123456789abcdef",
+            "/state/sessions/0123456789abcdef0123456789abcdef",
+            "/work/project",
+            "/state",
+            "/config",
+        )
+    }
+
+    #[test]
+    fn codex_declares_a_project_local_destination() {
+        // Codex has no `--settings`-equivalent flag, so its installation must
+        // ask to be written inside the project itself, at the one path Codex
+        // actually reads.
+        let installation = Codex
+            .hook_installation(&hook_command())
+            .expect("an installation");
+        assert_eq!(
+            installation.destination,
+            HookDestination::ProjectLocal {
+                relative_path: ".codex/hooks.json",
+            }
+        );
+        assert!(
+            installation.args.is_bare(),
+            "Codex finds the file itself; no argument should point it there"
+        );
+    }
+
+    #[test]
+    fn a_codex_hook_declares_a_timeout_codex_will_not_clamp() {
+        // Codex clamps a declared timeout to 3s and announces it when it
+        // does. Every declared timeout must already be at or under that, so
+        // a real installation never produces the warning.
+        let installation = Codex
+            .hook_installation(&hook_command())
+            .expect("an installation");
+        let parsed: serde_json::Value = serde_json::from_str(&installation.contents)
+            .unwrap_or_else(|err| panic!("not valid JSON: {err}\n{}", installation.contents));
+        let hooks = parsed["hooks"].as_object().expect("a hooks object");
+        assert!(!hooks.is_empty());
+        for (event, entries) in hooks {
+            let timeout = entries[0]["hooks"][0]["timeout"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{event} declares no numeric timeout"));
+            assert!(
+                timeout <= 3,
+                "{event} declares timeout {timeout}, which Codex would clamp to 3"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_reports_exactly_the_five_session_level_events() {
+        // Not the per-tool events (`PreToolUse`/`PostToolUse`/...): those
+        // fire many times per turn and say nothing about a session's state.
+        let installation = Codex
+            .hook_installation(&hook_command())
+            .expect("an installation");
+        let mut events: Vec<&str> = installation.events.to_vec();
+        events.sort_unstable();
+        let mut expected = vec![
+            "SessionStart",
+            "UserPromptSubmit",
+            "PermissionRequest",
+            "Stop",
+            "SessionEnd",
+        ];
+        expected.sort_unstable();
+        assert_eq!(events, expected);
     }
 }

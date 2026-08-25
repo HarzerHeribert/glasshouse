@@ -1,10 +1,16 @@
 //! Turning a harness's own lifecycle events into Glasshouse's.
 //!
-//! A harness reports what happened in its own vocabulary — Claude Code says
-//! `UserPromptSubmit`, Codex says `user_prompt_submit` — and Glasshouse
+//! A harness reports what happened in its own vocabulary, and Glasshouse
 //! records one of a handful of states that mean something to a session
-//! overview. This module is the translation, and it is deliberately the only
-//! place that knows both vocabularies at once.
+//! overview. Claude Code and Codex happen to spell every shared event
+//! identically — both say `UserPromptSubmit`, not `user_prompt_submit`. An
+//! earlier revision of this module claimed Codex used snake_case, citing the
+//! wrong artifact: Codex's `config.toml` records hook *trust* under
+//! snake_case keys, but the `hooks.json` document it actually reads is
+//! PascalCase, per its own hook review screen. That agreement is why most of
+//! this translation works untouched for either harness — but it is a fact
+//! about the two installed binaries, not a guarantee, so this module is
+//! deliberately the only place that knows either vocabulary at all.
 //!
 //! # Why an unknown event changes nothing
 //!
@@ -28,7 +34,12 @@ use crate::session::SessionLifecycle;
 /// Event names are the harness's own, exactly as its adapter declares them.
 pub fn lifecycle_for(event: &str) -> Option<SessionLifecycle> {
     match event {
-        // Claude Code. A prompt was submitted, so the session is working.
+        // Codex only: the harness itself starting a session. Claude Code
+        // 2.1.245 does not fire this event at all, so it never reaches this
+        // function from that harness — see `session_start_is_not_among_the_
+        // reported_events` in `harness/mod.rs`.
+        "SessionStart" => Some(SessionLifecycle::Running),
+        // A prompt was submitted, so the session is working.
         "UserPromptSubmit" => Some(SessionLifecycle::Running),
         // The harness is asking the user to allow something and will not
         // proceed until they answer.
@@ -38,6 +49,14 @@ pub fn lifecycle_for(event: &str) -> Option<SessionLifecycle> {
         // *session* has not failed, and recording it as failed would make a
         // perfectly usable session look dead.
         "Stop" | "StopFailure" => Some(SessionLifecycle::Idle),
+        // Codex only, and deliberately NOT mapped to `SessionLifecycle::
+        // Stopped` or anything else. The operating system reporting the
+        // child process exiting is the authority for a session ending; a
+        // hook saying the same thing only adds a race against it, one this
+        // separate hook process could lose by arriving late. Named
+        // explicitly, rather than falling through to the wildcard below, so
+        // the omission reads as a decision and not an oversight.
+        "SessionEnd" => None,
         _ => None,
     }
 }
@@ -77,11 +96,35 @@ mod tests {
     }
 
     #[test]
+    fn codex_events_translate_to_the_states_they_mean() {
+        assert_eq!(
+            lifecycle_for("SessionStart"),
+            Some(SessionLifecycle::Running)
+        );
+        assert_eq!(
+            lifecycle_for("UserPromptSubmit"),
+            Some(SessionLifecycle::Running)
+        );
+        assert_eq!(
+            lifecycle_for("PermissionRequest"),
+            Some(SessionLifecycle::WaitingForUser)
+        );
+        assert_eq!(lifecycle_for("Stop"), Some(SessionLifecycle::Idle));
+        // Deliberately unmapped — see `lifecycle_for`'s own comment on this
+        // arm for why the operating system, not this hook, is the authority
+        // for a session having ended.
+        assert_eq!(lifecycle_for("SessionEnd"), None);
+    }
+
+    #[test]
     fn an_unfamiliar_event_changes_nothing() {
         // Harnesses gain events between releases. Guessing a state from an
         // unfamiliar name would show a session as idle while it works, or
-        // working while it waits for the user.
-        for unknown in ["SessionStart", "PreToolUse", "Notification", "", "stop"] {
+        // working while it waits for the user. `PreToolUse` and `PreCompact`
+        // are real Codex events (see `harness/codex.rs: HOOK_EVENTS`) that
+        // this translator still does not recognise, since neither says
+        // anything about a *session's* state.
+        for unknown in ["PreToolUse", "PreCompact", "Notification", "", "stop"] {
             assert_eq!(lifecycle_for(unknown), None, "{unknown}");
         }
     }

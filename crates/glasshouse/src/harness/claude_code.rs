@@ -7,8 +7,8 @@
 
 use super::{
     ApprovalModes, BackendSelection, Backends, Capabilities, CommunicationStyle, Declared,
-    HarnessAdapter, HarnessDescription, HookCommand, HookInstallation, Hooks, Invocation,
-    ModelOverride, SessionIds, StyleChange, Vendor, WireProtocol,
+    HarnessAdapter, HarnessDescription, HookCommand, HookDestination, HookInstallation, Hooks,
+    Invocation, ModelOverride, SessionIds, StyleChange, Vendor, WireProtocol,
 };
 use crate::integrations::IntegrationId;
 
@@ -55,31 +55,6 @@ const REPORTED_EVENTS: &[&str] = &[
 /// making the user wait.
 const HOOK_TIMEOUT_SECONDS: u32 = 5;
 
-/// Render `value` as a JSON string literal.
-///
-/// Hand-written rather than pulled from `serde_json` because the only values
-/// passed here are an event name from the constant list above and a command
-/// line built from an executable path — but a Windows path is full of
-/// backslashes, and emitting those unescaped would produce a document Claude
-/// Code cannot parse.
-fn json_string(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for c in value.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 const PROTOCOLS: &[WireProtocol] = &[WireProtocol::AnthropicMessages];
 
 const MODEL_OVERRIDE: &[ModelOverride] = &[
@@ -116,22 +91,10 @@ impl HarnessAdapter for ClaudeCode {
         // each event maps to a list of entries, each entry holds a list of
         // `{type, command, timeout}` hooks. Tool events additionally carry a
         // `matcher`; none of the events below is a tool event, so none does.
-        let entries: Vec<String> = REPORTED_EVENTS
-            .iter()
-            .map(|event| {
-                format!(
-                    "    {}: [\n      {{ \"hooks\": [ {{ \"type\": \"command\", \
-                     \"command\": {}, \"timeout\": {HOOK_TIMEOUT_SECONDS} }} ] }}\n    ]",
-                    json_string(event),
-                    json_string(&report.shell_command(event)),
-                )
-            })
-            .collect();
-
         let file_name = "claude-settings.json";
         Some(HookInstallation {
             file_name,
-            contents: format!("{{\n  \"hooks\": {{\n{}\n  }}\n}}\n", entries.join(",\n")),
+            contents: super::hooks_document(REPORTED_EVENTS, report, HOOK_TIMEOUT_SECONDS),
             // `--settings` loads *additional* settings, so the user's own
             // hooks keep running alongside these rather than being replaced.
             args: Invocation::of([
@@ -139,6 +102,9 @@ impl HarnessAdapter for ClaudeCode {
                 report.file(file_name).into_os_string(),
             ]),
             events: REPORTED_EVENTS,
+            // Claude Code's `--settings` flag points the harness at a file
+            // Glasshouse chooses; nothing of the user's project is touched.
+            destination: HookDestination::GlasshouseOwned,
         })
     }
 

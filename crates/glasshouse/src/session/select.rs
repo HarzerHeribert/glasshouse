@@ -20,7 +20,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::config::{EffectiveConfig, Layer};
-use crate::harness::{HarnessAdapter, HookCommand};
+use crate::harness::{HarnessAdapter, HookCommand, HookDestination};
 use crate::integrations::{IntegrationId, IntegrationKind};
 use crate::platform::exec::{self, ResolveError, ResolvedExecutable};
 
@@ -143,35 +143,60 @@ impl HarnessSelection {
     /// Install lifecycle hooks for `session`, returning the arguments that
     /// make the harness read them.
     ///
-    /// The document goes in a directory Glasshouse owns, inside the project's
-    /// own state — never into the harness's own configuration. A Glasshouse
-    /// session must leave the user's `claude` exactly as it found it, which is
-    /// the whole reason the harness is handed a per-session file instead.
+    /// Where the document goes depends on the adapter's declared
+    /// [`HookDestination`]:
     ///
-    /// `Ok(None)` means this harness has no verified hook mechanism, which is
-    /// not a failure: most of them do not, and a session without lifecycle
-    /// reporting is a perfectly good session.
+    /// - [`GlasshouseOwned`](HookDestination::GlasshouseOwned) — a directory
+    ///   Glasshouse owns, inside the project's own state, never the harness's
+    ///   own configuration. Always written; this is what keeps a Glasshouse
+    ///   session leaving the user's `claude` exactly as it found it.
+    /// - [`ProjectLocal`](HookDestination::ProjectLocal) — a fixed path
+    ///   inside the user's own project, because that harness reads hooks from
+    ///   nowhere else. Written only when `project_hooks_consent` is `true`;
+    ///   otherwise this creates no file and no directory and returns
+    ///   `Ok(None)`, exactly as if the harness had no hook mechanism at all.
+    ///   A working session with less telemetry is still a working session; a
+    ///   surprise file in the user's repository is not.
+    ///
+    /// `Ok(None)` also covers the ordinary case of a harness with no verified
+    /// hook mechanism, which is not a failure: most of them do not, and a
+    /// session without lifecycle reporting is a perfectly good session.
     pub fn install_hooks(
         &self,
-        program: &Path,
-        session: &str,
-        directory: &Path,
-        scope: &Path,
-        data_dir: &Path,
-        config_dir: &Path,
+        report: &HookCommand,
+        project_hooks_consent: bool,
     ) -> anyhow::Result<Option<Vec<OsString>>> {
-        let report = HookCommand::new(program, session, directory, scope, data_dir, config_dir);
-        let Some(installation) = self.adapter().hook_installation(&report) else {
+        let Some(installation) = self.adapter().hook_installation(report) else {
             return Ok(None);
         };
 
-        std::fs::create_dir_all(directory).with_context(|| {
-            format!(
-                "could not create the session directory `{}`",
-                directory.display()
-            )
-        })?;
-        let path = directory.join(installation.file_name);
+        let path = match installation.destination {
+            HookDestination::GlasshouseOwned => {
+                std::fs::create_dir_all(report.directory()).with_context(|| {
+                    format!(
+                        "could not create the session directory `{}`",
+                        report.directory().display()
+                    )
+                })?;
+                report.file(installation.file_name)
+            }
+            HookDestination::ProjectLocal { relative_path } => {
+                if !project_hooks_consent {
+                    return Ok(None);
+                }
+                let path = report.scope().join(relative_path);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("could not create `{}`", parent.display()))?;
+                }
+                // The first write into someone's repository is not a silent
+                // event: this is the one place Glasshouse ever writes inside
+                // the user's own project, and it happens only after consent.
+                tracing::info!(path = %path.display(), "writing project-local lifecycle hooks");
+                path
+            }
+        };
+
         std::fs::write(&path, installation.contents.as_bytes())
             .with_context(|| format!("could not write `{}`", path.display()))?;
 
@@ -853,5 +878,82 @@ mod tests {
             };
             assert_eq!(selection.adapter().id(), id);
         }
+    }
+
+    // --- Codex's project-local hooks require consent ---------------------
+
+    fn codex_selection(tmp: &Path) -> HarnessSelection {
+        HarnessSelection {
+            id: IntegrationId::Codex,
+            executable: resolved(&write_decoy(tmp, "codex")),
+            source: ExecutableSource::Path {
+                name: "codex".to_string(),
+            },
+        }
+    }
+
+    /// A [`HookCommand`] rooted under `tmp`, with a real `project` directory
+    /// already created so a test can assert on exactly what did or did not
+    /// get written under it.
+    fn hook_command(tmp: &Path) -> (HookCommand, PathBuf) {
+        let project_root = tmp.join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let report = HookCommand::new(
+            tmp.join("glasshouse"),
+            "abc123",
+            tmp.join("state/sessions/abc123"),
+            project_root.clone(),
+            tmp.join("data"),
+            tmp.join("config"),
+        );
+        (report, project_root)
+    }
+
+    #[test]
+    fn codex_hooks_are_written_into_the_project_only_with_consent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let selection = codex_selection(tmp.path());
+        let (report, project_root) = hook_command(tmp.path());
+
+        let result = selection.install_hooks(&report, false).unwrap();
+
+        assert_eq!(result, None, "no consent means no hooks installed");
+        assert!(
+            !project_root.join(".codex").exists(),
+            "no `.codex` directory may appear without consent"
+        );
+    }
+
+    #[test]
+    fn codex_hooks_are_written_where_codex_reads_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let selection = codex_selection(tmp.path());
+        let (report, project_root) = hook_command(tmp.path());
+
+        let result = selection.install_hooks(&report, true).unwrap();
+
+        // Codex finds `.codex/hooks.json` itself; nothing points it there.
+        assert_eq!(result, Some(Vec::new()));
+
+        let written = project_root.join(".codex/hooks.json");
+        let contents = std::fs::read_to_string(&written).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents)
+            .unwrap_or_else(|err| panic!("not valid JSON: {err}\n{contents}"));
+        let mut events: Vec<&str> = parsed["hooks"]
+            .as_object()
+            .expect("a hooks object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        events.sort_unstable();
+        let mut expected = vec![
+            "PermissionRequest",
+            "SessionEnd",
+            "SessionStart",
+            "Stop",
+            "UserPromptSubmit",
+        ];
+        expected.sort_unstable();
+        assert_eq!(events, expected);
     }
 }

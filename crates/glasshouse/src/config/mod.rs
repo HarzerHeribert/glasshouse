@@ -135,6 +135,20 @@ pub struct IntegrationConfig {
     enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     executable: Option<PathBuf>,
+    /// Consent to write this harness's lifecycle hooks *inside the user's
+    /// own project*, for a harness whose only hook mechanism reads from
+    /// there (Codex's `.codex/hooks.json`; see
+    /// [`crate::harness::HookDestination::ProjectLocal`]). `None` means the
+    /// user has never been asked, which must be treated as consent withheld,
+    /// never as consent granted.
+    ///
+    /// `Option<bool>` for the same reason `enabled` is: a plain `bool` here
+    /// would repeat the exact defect `enabled` already caused once — a
+    /// project file that overrides only one of these two fields would parse
+    /// the other as its type's default rather than "not recorded", and
+    /// `false` silently winning is precisely the wrong default for consent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project_hooks: Option<bool>,
 }
 
 impl IntegrationConfig {
@@ -151,6 +165,19 @@ impl IntegrationConfig {
         self.executable.as_deref()
     }
 
+    /// Whether the user has consented to project-local lifecycle hooks for
+    /// this harness. `None` means never asked — see the field's own doc.
+    pub fn project_hooks(&self) -> Option<bool> {
+        self.project_hooks
+    }
+
+    /// The recorded consent decision, or `default` when none was ever
+    /// recorded. Callers resolving this for real use must pass `false`: an
+    /// unrecorded decision is withheld consent, not granted consent.
+    pub fn project_hooks_or(&self, default: bool) -> bool {
+        self.project_hooks.unwrap_or(default)
+    }
+
     pub fn set_enabled(&mut self, enabled: bool) -> &mut Self {
         self.enabled = Some(enabled);
         self
@@ -158,6 +185,11 @@ impl IntegrationConfig {
 
     pub fn set_executable(&mut self, executable: Option<PathBuf>) -> &mut Self {
         self.executable = executable;
+        self
+    }
+
+    pub fn set_project_hooks(&mut self, consent: bool) -> &mut Self {
+        self.project_hooks = Some(consent);
         self
     }
 }
@@ -495,6 +527,32 @@ impl<'a> EffectiveConfig<'a> {
             return Layered::new(enabled, Layer::User);
         }
         Layered::new(default_enabled, Layer::Default)
+    }
+
+    /// Resolve whether `id` has the user's consent to write its lifecycle
+    /// hooks inside the project itself, reporting which layer decided it.
+    /// Falls back to `false` (reported as [`Layer::Default`]) when neither
+    /// layer has ever recorded a decision — unlike
+    /// [`EffectiveConfig::enabled`], callers never get to choose that
+    /// default, because a session with no consent on record must run without
+    /// project-local hooks rather than assume the answer either way.
+    pub fn project_hooks(&self, id: IntegrationId) -> Layered<bool> {
+        if let Some(consent) = self
+            .project
+            .and_then(|p| p.integrations().get(id))
+            .and_then(IntegrationConfig::project_hooks)
+        {
+            return Layered::new(consent, Layer::Project);
+        }
+        if let Some(consent) = self
+            .user
+            .integrations()
+            .get(id)
+            .and_then(IntegrationConfig::project_hooks)
+        {
+            return Layered::new(consent, Layer::User);
+        }
+        Layered::new(false, Layer::Default)
     }
 
     /// Resolve the explicit executable override for `id`, if any layer has
@@ -918,6 +976,96 @@ mod tests {
     }
 
     #[test]
+    fn tri_state_project_hooks_consent_distinguishes_never_asked_from_a_decision() {
+        let mut config = UserConfig::default();
+        assert_eq!(
+            config.integrations().get(IntegrationId::Codex),
+            None,
+            "never asked"
+        );
+
+        config
+            .integrations_mut()
+            .entry(IntegrationId::Codex)
+            .set_project_hooks(false);
+        assert_eq!(
+            config
+                .integrations()
+                .get(IntegrationId::Codex)
+                .unwrap()
+                .project_hooks(),
+            Some(false),
+            "explicitly declined"
+        );
+
+        config
+            .integrations_mut()
+            .entry(IntegrationId::Codex)
+            .set_project_hooks(true);
+        assert_eq!(
+            config
+                .integrations()
+                .get(IntegrationId::Codex)
+                .unwrap()
+                .project_hooks(),
+            Some(true),
+            "explicitly consented"
+        );
+
+        // Recording a decision about `enabled` must not silently record one
+        // about `project_hooks` too — the whole reason this is a second
+        // `Option<bool>` field rather than folded into `enabled`.
+        let mut only_enabled = UserConfig::default();
+        only_enabled
+            .integrations_mut()
+            .entry(IntegrationId::Codex)
+            .set_enabled(true);
+        assert_eq!(
+            only_enabled
+                .integrations()
+                .get(IntegrationId::Codex)
+                .unwrap()
+                .project_hooks(),
+            None
+        );
+    }
+
+    #[test]
+    fn effective_config_defaults_project_hooks_consent_to_withheld() {
+        // Absent consent must resolve to `false`, never `true` — a session
+        // with no recorded decision must run without project-local hooks.
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let consent = effective.project_hooks(IntegrationId::Codex);
+        assert!(!consent.value);
+        assert_eq!(consent.layer, Layer::Default);
+    }
+
+    #[test]
+    fn effective_config_project_hooks_consent_layers_like_enabled() {
+        let mut user = UserConfig::default();
+        user.integrations_mut()
+            .entry(IntegrationId::Codex)
+            .set_project_hooks(true);
+
+        let mut project = ProjectConfig::default();
+        project
+            .integrations_mut()
+            .entry(IntegrationId::Codex)
+            .set_project_hooks(false);
+
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        let consent = effective.project_hooks(IntegrationId::Codex);
+        assert!(!consent.value, "the project layer withdraws consent");
+        assert_eq!(consent.layer, Layer::Project);
+
+        let effective_without_project = EffectiveConfig::new(&user, None);
+        let consent = effective_without_project.project_hooks(IntegrationId::Codex);
+        assert!(consent.value, "the user layer's consent still applies");
+        assert_eq!(consent.layer, Layer::User);
+    }
+
+    #[test]
     fn project_config_layering_reports_the_correct_source_layer() {
         let mut user = UserConfig::default();
         user.integrations_mut()
@@ -1134,16 +1282,22 @@ mod tests {
         let no_decision = IntegrationConfig {
             enabled: None,
             executable: Some(PathBuf::from("/opt/bin/claude")),
+            project_hooks: None,
         };
         let toml_text = toml::to_string_pretty(&no_decision).unwrap();
         assert!(
             !toml_text.contains("enabled"),
             "no-decision entry must not serialize an `enabled` key:\n{toml_text}"
         );
+        assert!(
+            !toml_text.contains("project_hooks"),
+            "no-decision entry must not serialize a `project_hooks` key:\n{toml_text}"
+        );
 
         let explicit_false = IntegrationConfig {
             enabled: Some(false),
             executable: None,
+            project_hooks: None,
         };
         let toml_text = toml::to_string_pretty(&explicit_false).unwrap();
         assert!(
@@ -1157,12 +1311,14 @@ mod tests {
         let decided = IntegrationConfig {
             enabled: Some(true),
             executable: None,
+            project_hooks: None,
         };
         assert!(decided.enabled_or(false));
 
         let declined = IntegrationConfig {
             enabled: Some(false),
             executable: None,
+            project_hooks: None,
         };
         assert!(!declined.enabled_or(true));
 
@@ -1179,10 +1335,11 @@ mod tests {
     #[test]
     fn serialized_form_has_no_secret_capable_field() {
         // `IntegrationConfig` — the only per-item shape stored anywhere in
-        // this module — has exactly these two fields.
+        // this module — has exactly these three fields.
         let cfg = IntegrationConfig {
             enabled: Some(true),
             executable: Some(PathBuf::from("/usr/bin/example")),
+            project_hooks: Some(true),
         };
         let value = toml::Value::try_from(&cfg).unwrap();
         let table = value.as_table().unwrap();
@@ -1190,7 +1347,7 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            vec!["enabled", "executable"],
+            vec!["enabled", "executable", "project_hooks"],
             "IntegrationConfig grew a field — confirm it cannot hold a credential \
              before widening this list"
         );

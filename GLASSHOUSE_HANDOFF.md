@@ -4,7 +4,7 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 8 is five of ten; Phase 6 is twelve of thirteen. 131 -> 134 checked boxes.** `main` clean at
+**Phase 8 is eight of ten; Phase 6 is twelve of thirteen. 131 -> 137 checked boxes.** `main` clean at
 `63bd260`. CI `32849951837` green on Linux, macOS, Windows and lint, with the
 Windows job confirmed to have executed both new end-to-end tests by name.
 
@@ -43,6 +43,47 @@ deliberately *not* a condition — every extra condition is another way to break
 on a Codex update. Full reasoning in `GLASSHOUSE_DESIGN_DECISIONS.md`.
 
 ## Verified completed work
+
+### This session — Codex lifecycle hooks, watched running end to end
+
+Three Phase 8 lines closed: integrate hooks, translate events, detect turn
+completion.
+
+**The chain was watched, not argued.** `glasshouse launch codex` was run
+against the real Codex 0.149.1 with `project_hooks = true`. Glasshouse wrote
+`<project>/.codex/hooks.json` — five events, `timeout: 3`, every path pinned —
+Codex asked to trust the directory, then asked to review the hooks, and after
+one real turn the session record read **`lifecycle = 'idle'`**.
+
+That settles it rather than suggesting it: the only production code that writes
+`Idle` is the `Stop` arm of `lifecycle_for`. Generate, install, trust, fire,
+report, translate, record.
+
+**Quitting cleanly then captured the native identifier from a live session** —
+`01a03983-b696-7832-ac49-296a4deccda1`, verified to be the exact rollout Codex
+wrote (`originator: codex-tui`, no `parent_thread_id`, matching `cwd`), with the
+session reading `resumable`. That closes the last open gap on Phase 8 line 2 as
+a side effect.
+
+**Most of the translation needed no code at all.** Codex spells
+`UserPromptSubmit`, `PermissionRequest` and `Stop` exactly as Claude Code does,
+so `lifecycle_for` already handled them. Only `SessionStart` was added — Codex
+fires it and Claude Code does not. `SessionEnd` is deliberately left unmapped:
+the operating system reporting the process is the authority for a session
+ending, and a hook only races it.
+
+**Two things the harness told us that no amount of reading would have.** Codex
+clamps hook timeouts, announcing `clamping SessionEnd hook timeout to 3s`, so
+the declared timeout is 3 and a real installation warns about nothing. And hook
+trust is a prompt distinct from workspace trust, which is why the project-local
+design needs no user-level write at all.
+
+**Four mutations, four kills** — removing the consent gate, raising the timeout
+to one Codex would clamp, mapping `SessionEnd`, and making the handler read and
+log its payload. The payload scan was additionally hardened to assert the slice
+it scans is the real function, because a scan over the wrong span passes for the
+wrong reason.
+
 
 ### This session — every adapter declares its approval modes
 

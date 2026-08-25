@@ -136,8 +136,8 @@ fn launch_session(
 ) -> anyhow::Result<ExitCode> {
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
-    let selection =
-        session::select::select(harness, EffectiveConfig::new(&user, project.as_ref()))?;
+    let effective = EffectiveConfig::new(&user, project.as_ref());
+    let selection = session::select::select(harness, effective)?;
 
     // Record the session before the harness exists, so a session that dies
     // during startup still leaves a trace. Failing to open the project
@@ -173,7 +173,11 @@ fn launch_session(
     // The adapter decides how its harness is opened; the user's own `--`
     // arguments follow it.
     let mut args = selection.start_args(native.as_deref(), harness_args.iter().map(String::as_str));
-    args.splice(0..0, install_hooks(runtime, &selection, &record.id));
+    let project_hooks_consent = effective.project_hooks(selection.id()).value;
+    args.splice(
+        0..0,
+        install_hooks(runtime, &selection, &record.id, project_hooks_consent),
+    );
     let launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
 
     // From here on, a bookkeeping failure must never change what the user
@@ -224,6 +228,7 @@ fn install_hooks(
     runtime: &Runtime,
     selection: &session::HarnessSelection,
     id: &session::SessionId,
+    project_hooks_consent: bool,
 ) -> Vec<std::ffi::OsString> {
     let program = match std::env::current_exe() {
         Ok(program) => program,
@@ -232,14 +237,15 @@ fn install_hooks(
             return Vec::new();
         }
     };
-    match selection.install_hooks(
-        &program,
+    let report = glasshouse::harness::HookCommand::new(
+        program,
         id.as_str(),
-        &runtime.session_dir(id.as_str()),
+        runtime.session_dir(id.as_str()),
         runtime.project().root(),
         runtime.paths().data_dir(),
         runtime.paths().config_dir(),
-    ) {
+    );
+    match selection.install_hooks(&report, project_hooks_consent) {
         Ok(Some(args)) => args,
         Ok(None) => Vec::new(),
         Err(err) => {
@@ -264,6 +270,15 @@ fn install_hooks(
 /// them is worth costing the user a turn. Glasshouse's bookkeeping is never
 /// more important than the session it is keeping books about.
 fn report_hook(runtime: &Runtime, session: &str, event: &str) {
+    // Codex writes its payload to the hook's stdin, and a process that never
+    // reads it can leave the harness writing into a closed pipe. Glasshouse
+    // has the event name and the session identifier from its own argv, so
+    // the payload is drained to EOF and thrown away, unread and unparsed —
+    // never deserialized, logged, or stored. See
+    // `the_hook_command_never_reads_its_payload` below, and the
+    // `GLASSHOUSE_DESIGN_DECISIONS.md` section this function implements.
+    let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+
     let Some(next) = session::lifecycle_for(event) else {
         // An event this build does not recognise. Harnesses gain events
         // between releases, and guessing a state from an unfamiliar name
@@ -576,6 +591,98 @@ fn setup(runtime: &Runtime, trigger: SetupTrigger) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- the hook handler never reads its payload -------------------------
+
+    /// Every field a Codex hook payload can carry, per
+    /// `GLASSHOUSE_DESIGN_DECISIONS.md`'s "Codex lifecycle hooks" section:
+    /// the six every event carries, plus `SessionStart`'s `source`,
+    /// `UserPromptSubmit`'s `turn_id`/`prompt`, and `Stop`'s
+    /// `stop_hook_active`/`last_assistant_message`. `prompt` and
+    /// `last_assistant_message` are the conversation itself.
+    const HOOK_PAYLOAD_FIELDS: &[&str] = &[
+        "session_id",
+        "transcript_path",
+        "hook_event_name",
+        "permission_mode",
+        "source",
+        "turn_id",
+        "prompt",
+        "stop_hook_active",
+        "last_assistant_message",
+    ];
+
+    /// `report_hook`'s own source, isolated from the rest of this file. A
+    /// whole-file scan would trip on legitimate, unrelated code — this
+    /// module's own `native_session_id` and `cwd` locals are not the Codex
+    /// payload fields of the same or similar name — so this extracts just
+    /// the one function the design decision is actually about.
+    fn hook_handler_source() -> &'static str {
+        let full = include_str!("main.rs");
+        let start = full
+            .find("fn report_hook(")
+            .expect("report_hook must exist in this file");
+        let after_start = &full[start..];
+        let end = after_start
+            .find("\n}\n")
+            .expect("report_hook must have a top-level closing brace");
+        let body = &after_start[..end];
+        // The slice must be the real function, not an empty or truncated one.
+        // A scan over the wrong span passes for the wrong reason, which this
+        // project has been caught by before — a `skip_while` that found a
+        // harness *list* where an adapter *block* was meant. Anchor on
+        // something the handler provably contains.
+        assert!(
+            body.contains("std::io::sink()"),
+            "hook_handler_source() did not capture the real `report_hook` body; \
+             the payload scan below would be checking nothing"
+        );
+        body
+    }
+
+    /// Strip `//` line comments, so a doc comment that merely *mentions* a
+    /// forbidden name (as this file's own comments now do) cannot fail the
+    /// scan below.
+    fn strip_comments(source: &str) -> String {
+        source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_hook_command_never_reads_its_payload() {
+        let source = strip_comments(hook_handler_source());
+
+        for forbidden in ["serde_json", "from_str", "from_reader"] {
+            assert!(
+                !source.contains(forbidden),
+                "the hook handler names `{forbidden}`, so it might parse the payload it must \
+                 only drain and discard"
+            );
+        }
+        for field in HOOK_PAYLOAD_FIELDS {
+            assert!(
+                !source.contains(field),
+                "the hook handler names the payload field `{field}`, which must never be read, \
+                 logged, or stored"
+            );
+        }
+    }
+
+    #[test]
+    fn the_payload_scan_would_catch_a_violation() {
+        // The guard above is only worth having if it can fail.
+        let violating = "fn report_hook(runtime: &Runtime, session: &str, event: &str) {\n    \
+                          let payload: serde_json::Value = serde_json::from_str(\"{}\").unwrap();\n}\n";
+        assert!(strip_comments(violating).contains("serde_json"));
+        assert!(strip_comments(violating).contains("from_str"));
+
+        let reading_a_field = "fn report_hook(runtime: &Runtime, session: &str, event: &str) {\n    \
+                                tracing::debug!(prompt = \"x\");\n}\n";
+        assert!(strip_comments(reading_a_field).contains("prompt"));
+    }
 
     /// The listing's ages, including the case a review flagged: a timestamp in
     /// the future. `saturating_sub` saturates at `i64::MIN`, not at zero, so

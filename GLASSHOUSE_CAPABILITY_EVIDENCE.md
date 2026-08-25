@@ -110,6 +110,109 @@ Missing evidence:
 - Selecting a mode is Phase 9A, and unimplemented. This line is the declaration
   half only.
 
+### Phase 8 — Codex lifecycle hooks (three lines: integrate, translate, detect turn completion)
+
+Contract: Given a Codex session Glasshouse starts in a project where the user
+has consented to project-local hooks, when Codex reports a lifecycle event,
+Glasshouse records the session state that event implies — while never reading
+the conversation content the payload carries, never writing outside the
+project, and never letting a hook failure affect the session.
+
+State: COMPLETE on macOS; CI pending on Linux and Windows.
+
+**The whole chain was watched running against the real binary**, the same proof
+Phase 7 used. `glasshouse launch codex` was run in a real terminal against
+Codex 0.149.1 with `project_hooks = true`. Glasshouse generated the document and
+wrote it to `<project>/.codex/hooks.json` (five events, `timeout: 3`, every path
+pinned); Codex asked to trust the directory, then asked to review the hooks;
+after trusting, one real turn was taken — and the session record moved to
+**`lifecycle = 'idle'`**.
+
+That value settles it rather than suggesting it. The only production code that
+*writes* `Idle` is the `Stop`/`StopFailure` arm of
+`session::lifecycle::lifecycle_for`; nothing else in Glasshouse can produce it.
+So the record could only have reached that state by Glasshouse generating the
+document, writing it under consent, Codex reading and trusting it, Codex firing
+`Stop`, that hook invoking `glasshouse hook`, and the translation recording it.
+Generate, install, trust, fire, report, translate, record — end to end.
+
+Quitting the session cleanly then moved it to `stopped` and **captured
+`native_session_id = 01a03983-b696-7832-ac49-296a4deccda1`**, which was verified
+to be the exact rollout Codex wrote for that project
+(`originator: codex-tui`, no `parent_thread_id`, matching `cwd`). Disposition
+read `resumable`. **That also closes the open gap in the Phase 8 line 2 entry
+above** — a live Codex turn has now had its identifier captured end to end.
+
+Production evidence:
+- `harness/mod.rs: HookDestination` — `GlasshouseOwned` or
+  `ProjectLocal { relative_path }`. Making the destination part of the
+  declaration is what keeps the consent rule enforceable in one place; no
+  adapter can opt out of it.
+- `harness/codex.rs: Codex::hook_installation` — builds the `hooks.json`
+  document, declares `ProjectLocal { ".codex/hooks.json" }` and **empty
+  arguments**, because Codex finds the file itself.
+- `session/select.rs: install_hooks` — writes a `ProjectLocal` installation
+  only with consent; without it, no file, no directory, `Ok(None)`, and the
+  session starts normally.
+- `config/mod.rs` — `project_hooks` consent, an `Option<bool>` so the tri-state
+  is per field. A plain `bool` with `#[serde(default)]` caused a real defect
+  before and is not repeated.
+- `session/lifecycle.rs` — `SessionStart` added. `UserPromptSubmit`,
+  `PermissionRequest` and `Stop` needed no change at all, because **Codex
+  spells them exactly as Claude Code does**. The module's doc claiming Codex
+  used snake_case was wrong and is corrected.
+- `main.rs: report_hook` — drains stdin into `std::io::sink()` and never parses
+  it.
+
+Regression evidence:
+- `codex_hooks_are_written_into_the_project_only_with_consent` — without
+  consent, no file and no `.codex` directory.
+- `codex_hooks_are_written_where_codex_reads_them` — with consent, the document
+  lands at `<root>/.codex/hooks.json` and names the five reported events.
+- `a_codex_hook_declares_a_timeout_codex_will_not_clamp` — every timeout <= 3.
+- `codex_declares_a_project_local_destination`,
+  `claude_code_and_codex_are_the_harnesses_with_a_verified_hook_installation`.
+- `codex_events_translate_to_the_states_they_mean`.
+- `the_hook_command_never_reads_its_payload` plus
+  `the_payload_scan_would_catch_a_violation`.
+- `tri_state_project_hooks_consent_distinguishes_never_asked_from_a_decision`.
+
+Non-vacuity: **four mutations run by the orchestrator, four killed** — removing
+the consent gate; raising Codex's declared timeout to one Codex would clamp;
+mapping `SessionEnd` (which must stay unmapped); and making the hook handler
+read and log its payload. The source scan was additionally hardened: it now
+asserts the slice it scans actually contains `std::io::sink()`, because a scan
+over the wrong span passes for the wrong reason — this project has been caught
+by exactly that before, with a `skip_while` that found a harness list where an
+adapter block was meant.
+
+Failure/isolation evidence:
+- **The payload carries the conversation** — `prompt` is the user's own words,
+  `last_assistant_message` the model's reply. Glasshouse takes the event name
+  and session identifier from its own argv and reads neither. Proven by mutation,
+  not asserted.
+- `SessionEnd` is deliberately **not** mapped: the operating system reporting
+  the process is the authority for a session ending, and a hook only races it.
+- A late hook cannot revive a finished session (`may_apply`); an unfamiliar
+  event changes nothing.
+- The one place Glasshouse ever writes inside a user's repository logs the exact
+  path it created.
+
+Platform/external evidence:
+- Codex 0.149.1, probed in a real terminal: a project-local
+  `.codex/hooks.json` is read (Codex named the file in its own diagnostic),
+  hook trust is a prompt distinct from workspace trust, and `SessionStart`,
+  `UserPromptSubmit` and `Stop` all fired with one real turn taken.
+- **Codex clamps hook timeouts**, announcing `clamping SessionEnd hook timeout
+  to 3s`. The declared timeout is 3 so a real installation warns about nothing.
+
+Missing evidence:
+- CI on Linux and Windows.
+- Lines 8 and 9 (waiting-for-user/permission states, compaction) are open.
+  `PermissionRequest` is installed and translated but has not been watched
+  firing; `PreCompact`/`PostCompact` exist in Codex's catalogue and are not yet
+  requested.
+
 ### Phase 8 — Support resuming a known Codex session through Codex's native resume mechanism
 
 Contract: Given a recorded Codex session whose native identifier Glasshouse
@@ -287,10 +390,12 @@ What CI caught, and it was a production defect rather than a test one:
   the mechanism, and its comment records that the mutation is what settled it.
 
 Missing evidence:
-- No *live* Codex turn has had its identifier captured end to end, because that
-  costs model usage. The header format is proven against 555 real rollouts and
-  the wiring against the shipped binary on three platforms; what is unproven is
-  only the join between them on a real turn.
+- ~~No live Codex turn has had its identifier captured end to end.~~ **Closed
+  2026-08-25.** A real `glasshouse launch codex` session took a turn, was quit,
+  and the record captured `native_session_id =
+  01a03983-b696-7832-ac49-296a4deccda1` — verified against the rollout Codex
+  actually wrote for that project. Disposition read `resumable`. See the Codex
+  hooks entry below.
 - Two Glasshouse Codex sessions started in the same project inside the same
   window will each see the other's rollout and both refuse. Fail-closed and
   honest, but a real edge if anyone runs parallel Codex sessions in one
