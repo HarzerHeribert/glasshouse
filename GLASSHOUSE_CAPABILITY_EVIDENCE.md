@@ -110,6 +110,58 @@ Missing evidence:
 - Selecting a mode is Phase 9A, and unimplemented. This line is the declaration
   half only.
 
+### Phase 9 — the Antigravity adapter (probed, and blocked on authentication)
+
+State: **BLOCKED — the installed CLI is not signed in.** Everything that can be
+established without an account has been.
+
+What the binary says (Antigravity CLI 1.1.20, `/opt/homebrew/bin/agy`, read
+2026-08-25):
+- Resume is `--conversation <id>` — "Resume a previous conversation by ID" —
+  which is what the adapter already declares. `--continue` / `-c` continues the
+  most recent.
+- `--project <id|name>` and `--new-project` scope a session to a project.
+- `--dangerously-skip-permissions` and `--sandbox`, both already declared under
+  Phase 6's approval modes.
+- Also `--mode accept-edits|plan`, `--effort low|medium|high`, `--model`,
+  `--agent`, and `-p/--print` for non-interactive runs.
+- **No hook, event or notification mechanism appears anywhere in `--help`.**
+  Subcommands are `agent(s)`, `changelog`, `help`, `install`, `mcp`,
+  `mic-serve`, `models`, `plugin(s)`, `update`. So Phase 9's lines 5 and 6
+  (structured lifecycle events) look genuinely unavailable, the way Claude
+  Code's compaction line is — but that should be confirmed against a signed-in
+  CLI before being declared.
+- Conversations live in `~/.gemini/antigravity/conversations/`. The directory
+  exists and is **empty**, because the CLI has only ever been interrogated on
+  this machine, never run. So the identifier's format and discoverability are
+  unestablished.
+
+**Line 4 has real supporting evidence already.** Driving the shipped shell
+against `agy` through `probe_real_harness_interface` put Antigravity's own
+interface in Glasshouse's viewport — its welcome box, the text "Welcome to the
+Antigravity CLI", "You are currently not signed in", "Select login method",
+its numbered options and "[Use arrow keys to navigate, Enter to select]". None
+of that is anything Glasshouse's chrome can draw, so the round trip through
+`vt100` into Ratatui cells demonstrably works for this harness.
+
+**The probe was nonetheless reverted rather than weakened.** It asserts the
+harness's own *version string* reaches the viewport, deliberately, because an
+earlier revision matched a harness *name* and passed against Glasshouse's own
+error message. An unauthenticated `agy` opens on a login menu that carries no
+version, so the assertion cannot hold here. Loosening it to match the login
+text would reintroduce exactly the weakness the assertion exists to prevent, so
+the test is not in the tree.
+
+Missing evidence, and what unblocks it:
+- **Somebody must sign the CLI in** (`agy` offers Google OAuth or a Google
+  Cloud project). That is the user's credential and the user's action; nothing
+  here can or should do it.
+- Once signed in: re-add `probe_real_harness_interface("antigravity", "agy")`,
+  which should then pass unchanged and close lines 1 and 4 together; take one
+  turn to populate `~/.gemini/antigravity/conversations/` and read the
+  identifier's shape for line 2; and confirm from a signed-in `--help` whether
+  any hook mechanism exists before declaring lines 5-6 unavailable.
+
 ### Phase 8 — Record observed Codex compaction events or compaction-related state when available
 
 Contract: Given a Codex session that compacts its context, when Glasshouse is
