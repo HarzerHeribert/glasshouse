@@ -45,6 +45,8 @@ blocks the next batch.
 | 9D templates+headers | Sonnet | ~31 min | ~$11.00 | +775/-21, 9 files | 5 | 13/13 | 2 | PASS, CI green first push |
 | 9G gateway skeleton | Opus **team lead**, 3 subcontractors | ~22 min | ~$15.30 | +663, 6 files (new module) | 7 | 10/10 | 4 | PASS |
 | 2C onboarding | Sonnet | in flight | — | — | — | — | — | — |
+| 2C onboarding | Sonnet | ~50 min | ~$9 | +1471/-24, 5 files | 6 | 3 (2 weak, rewritten) | 3 | PASS, CI green first push |
+| 9 Antigravity id | Opus **team lead**, 1 subcontractor | ~25 min | ~$13 (last read $10.83 at 16 min) | +1258/-75, 7 files | 2 | killed, 2 re-run by orchestrator | 7 | PASS |
 | Records audit | Gemini 3.7 Flash via `agy` | **blocked** | — | — | 0 (read-only) | — | — | BLOCKED on its permission model — see below |
 | Records audit (redone) | orchestrator, one script | ~1 min | negligible | 1 script | 0 (read-only) | — | — | PASS — zero real drift found |
 
@@ -142,6 +144,24 @@ So the open question "how accurate is the leaf tier" is still open, and a new
 one joins it: **what does it cost to drive each tier, in orchestrator attention
 and in permission friction?** A tier that needs a human to approve a flag is
 not a tier you can fan out to at 2 a.m.
+
+### The most valuable thing a subcontractor found was not in its brief
+
+The Antigravity batch's subcontractor was asked for three end-to-end tests. It
+also **refused to reuse a literal conversation identifier** it found in an
+existing fixture, and said why — which is how a real identifier of the user's,
+already committed to git history, was discovered at all. Neither the lead nor
+the orchestrator had noticed it across several batches touching that file.
+
+Two batches running, two subcontractor finds outside their briefs (the other
+was a 45-in-100 flake in the lead's own test). That is now the strongest
+argument in this file for the team-lead pattern: **the value is not the extra
+hands, it is the extra pair of eyes that has not already convinced itself.**
+
+Set against it, an honest cost from the same batch: the lead's subpacket
+initially invited the subcontractor to mutate the same `src/` files the lead was
+mutating. It caught this and cancelled before anything started, but the failure
+mode is real and now written into the practice file.
 
 ### The acknowledged bypass is human-only, and two independent designs agree
 

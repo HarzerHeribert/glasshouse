@@ -289,3 +289,27 @@ of its open questions when you can, and record what changed your mind. The
 project is a control plane for routing work to models; the data this process
 generates about *which tier produced what verified result* is the same question
 the product exists to answer.
+
+
+## 13. Two traps this project hit while running several workers at once
+
+**`git add -A` in the main worktree sweeps up whatever a tool left there.**
+On 2026-08-26 a stray `AGENTS.md` — a retitled copy of `CLAUDE.md` that no
+worker admitted to creating — was committed that way, in a commit that was
+supposed to touch one documentation file. `git status` had been checked *before*
+the edits and not again before the commit. **Print `git status --short` in the
+same call that commits**, or stage explicit paths. The SDLC already says to
+reject generated noise; this is how it gets in.
+
+**Mutation proofs are not delegable while the team lead is also mutating.**
+A lead's subpacket invited a subcontractor to run mutations on `src/` files the
+lead was mutating at that moment; both sets of results would have been garbage.
+The lead caught it and cancelled that section before anything started. Put it in
+the packet: *the lead owns every mutation*, and a subcontractor works on files
+the lead is not touching — or from a git ref, never the live working tree.
+
+**A branch cut before a sibling batch landed will not apply cleanly.** Use
+`git apply -3` rather than forcing, and expect to merge by hand on any file two
+batches share. Naming the other live workers' files in `FORBIDDEN FILES` reduces
+this but does not eliminate it, because a batch that landed *between* the branch
+point and the merge is not a live worker any more.
