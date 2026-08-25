@@ -2813,8 +2813,22 @@ fn the_users_environment_survives_except_for_explicit_overrides() {
     // exactly as this process already has it -- inherited, not copied by
     // hand. Compared case-insensitively on the variable *name* only (`set`
     // reports it as `Path=` on Windows), never on the value.
+    //
+    // Whitespace is stripped from **both** sides before comparing, and that
+    // is not a loosening -- it is what makes the assertion about the product
+    // instead of about the terminal. The child's environment is reported
+    // through a pseudo-terminal of fixed width, which hard-wraps a long value
+    // by inserting line breaks into it. A Windows CI runner's `PATH` is
+    // several thousand characters, so it always wraps and the contiguous
+    // substring never exists; this test passed on macOS and Linux and failed
+    // on `windows-latest` for exactly that reason. Removing whitespace from
+    // both sides cancels the wrapping, and cancels real spaces symmetrically,
+    // so the value still has to match character for character otherwise.
+    let without_whitespace =
+        |text: &str| -> String { text.chars().filter(|c| !c.is_whitespace()).collect() };
+    let expected_entry = without_whitespace(&format!("PATH={expected_path}").to_ascii_uppercase());
     assert!(
-        output_upper.contains(&format!("PATH={expected_path}").to_ascii_uppercase()),
+        without_whitespace(&output_upper).contains(&expected_entry),
         "a variable the launch never named did not survive unchanged:\n{output}"
     );
 }
