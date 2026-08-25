@@ -90,6 +90,19 @@ mutation → FAILED; hardened test + clean code → ok.
 asserts the *absence* of a string in rendered output is only as strong as the
 viewport it renders into. Truncation makes absence trivially true.
 
+#### CI evidence
+
+**CI `32911326442` green on Linux, macOS, Windows and lint** at `2bdd89f`,
+with the three decisive tests confirmed by name in the **Windows** job's own
+log: `no_credential_value_is_ever_rendered_across_every_settings_screen` (the
+one the orchestrator's mutation hardened),
+`an_unknown_harness_error_is_visible_not_clipped_by_a_wrapped_label`, and
+`a_stale_reachability_result_does_not_shadow_a_later_profile_input`.
+
+Worth noting for the render tests specifically: they assert over a fixed
+viewport, so running them on a second platform is not redundant — it is the
+only thing that shows the layout is not host-dependent.
+
 #### Three defects found by running the binary, which is why the packet demands it
 
 - **A stale test-result banner shadowed the profile wizard**, leaving it
