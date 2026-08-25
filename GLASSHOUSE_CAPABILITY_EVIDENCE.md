@@ -130,11 +130,26 @@ Platform/external evidence:
   and killing it: `sessions/` was never created. That is why discovery runs at
   session end and why `NotFound` is an ordinary outcome, not a fault.
 
+What CI caught, and it was a production defect rather than a test one:
+- Linux and macOS passed; **Windows failed both end-to-end tests** on the first
+  push (`32849379504`). `read_first_line` refused any first line not ending in
+  `\n`, and the Windows fixture wrote its rollout with `Set-Content
+  -NoNewline`. A harness writes its header before it has anything to append, so
+  a record whose only line is a complete one is ordinary — Glasshouse was
+  discarding it and reporting the session as having no identifier.
+- Invisible to the eight unit tests because the `write_rollout` helper appends
+  `\n` to every fixture. `a_header_with_no_trailing_newline_is_still_read`
+  writes the bytes directly and fails against the old rule.
+- A second change made at the same time — widening the header trim to
+  `str::trim` for CRLF — was **removed after a mutation showed it dead**:
+  `serde_json` already treats a trailing carriage return as whitespace.
+  `a_header_terminated_by_crlf_is_read` stays, pinning the property rather than
+  the mechanism, and its comment records that the mutation is what settled it.
+
 Missing evidence:
-- **Windows and Linux have not executed these tests yet.** Pushed for CI; the
-  `#[cfg(windows)]` branch of the fake rollout-writing harness was authored
-  without a Windows machine to run it on, and is the most likely thing to
-  break there.
+- Windows CI must go green on the fix before this entry is beyond doubt; the
+  first run proved these tests execute there and can fail, which is itself
+  worth more than a green tick over a skipped test.
 - No real Codex session's identifier has been captured end to end, because
   that costs a model turn. The header format is proven against 555 real files
   and the wiring against the shipped binary; what is unproven is only the

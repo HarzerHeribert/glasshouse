@@ -156,9 +156,16 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Read at most the first line of `path`, and at most [`MAX_HEADER_BYTES`] of
-/// it. `None` when the file could not be opened, when end-of-file arrived
-/// before a newline, or when the cap did — either of the last two means this
-/// is not a header Glasshouse will trust.
+/// it. `None` when the file could not be opened, when it is empty, or when the
+/// cap arrived before a newline did — a line the cap truncated is not a header
+/// Glasshouse will trust.
+///
+/// End-of-file without a newline is **accepted**. A harness writes its header
+/// before it has anything to append, so a record whose only line is a complete
+/// one is ordinary rather than suspicious. Requiring the newline is how this
+/// first failed on Windows and nowhere else: every fixture here ended in one,
+/// so eight passing tests said nothing about the case, and the harness that
+/// wrote without one looked to Glasshouse like a session that never happened.
 fn read_first_line(path: &Path) -> Option<Vec<u8>> {
     use std::io::{BufRead, BufReader, Read};
 
@@ -166,10 +173,14 @@ fn read_first_line(path: &Path) -> Option<Vec<u8>> {
     let mut reader = BufReader::new(file).take(MAX_HEADER_BYTES);
     let mut line = Vec::new();
     reader.read_until(b'\n', &mut line).ok()?;
-    if line.last() != Some(&b'\n') {
+    if line.last() == Some(&b'\n') {
+        return Some(line);
+    }
+    // No newline: the file ended, or the cap did. Only the cap is a refusal.
+    if line.len() as u64 >= MAX_HEADER_BYTES {
         return None;
     }
-    Some(line)
+    (!line.is_empty()).then_some(line)
 }
 
 /// Discover and record a just-ended session's native identifier, if
@@ -401,6 +412,76 @@ mod tests {
             ended_at,
         );
         assert_eq!(result, Discovered::Found("real-id".to_owned()));
+    }
+
+    /// A rollout whose only line is its header, with nothing after it — not
+    /// even a newline. Every other fixture in this module ends in one, which
+    /// is why requiring it passed eight tests here and then failed on Windows
+    /// CI alone, where the fake harness wrote without a trailing newline.
+    #[test]
+    fn a_header_with_no_trailing_newline_is_still_read() {
+        let fixture = Fixture::new();
+        let line = header(
+            "id",
+            "eof-id",
+            &fixture.project_root,
+            IN_WINDOW,
+            "codex-tui",
+            None,
+        );
+        std::fs::write(
+            fixture.records_root.join("rollout-eof.jsonl"),
+            line.as_bytes(),
+        )
+        .expect("write fixture with no trailing newline");
+
+        let (started_at, ended_at) = window();
+        let canonical_root = std::fs::canonicalize(&fixture.project_root).expect("canonicalize");
+        let result = discover(
+            &Codex,
+            &fixture.records_root,
+            &canonical_root,
+            started_at,
+            ended_at,
+        );
+        assert_eq!(result, Discovered::Found("eof-id".to_owned()));
+    }
+
+    /// A file written on Windows ends its line `\r\n`, so the header handed to
+    /// the adapter keeps a trailing carriage return.
+    ///
+    /// What makes that work is `serde_json`, which treats it as trailing
+    /// whitespace — not any trimming here. That was established by mutation:
+    /// widening the trim to `str::trim` did **not** make this test fail, so the
+    /// wider trim was removed as the dead code it was. The test stays, because
+    /// the property it pins — a rollout written on Windows is read — is real
+    /// and worth keeping true however it is achieved.
+    #[test]
+    fn a_header_terminated_by_crlf_is_read() {
+        let fixture = Fixture::new();
+        let line = header(
+            "id",
+            "crlf-id",
+            &fixture.project_root,
+            IN_WINDOW,
+            "codex-tui",
+            None,
+        );
+        let mut contents = line.into_bytes();
+        contents.extend_from_slice(b"\r\n");
+        std::fs::write(fixture.records_root.join("rollout-crlf.jsonl"), &contents)
+            .expect("write CRLF fixture");
+
+        let (started_at, ended_at) = window();
+        let canonical_root = std::fs::canonicalize(&fixture.project_root).expect("canonicalize");
+        let result = discover(
+            &Codex,
+            &fixture.records_root,
+            &canonical_root,
+            started_at,
+            ended_at,
+        );
+        assert_eq!(result, Discovered::Found("crlf-id".to_owned()));
     }
 
     #[test]

@@ -586,11 +586,15 @@ have required a magic clamp.
 
 ## Unresolved loose ends
 
-- **Codex identifier capture is verified on macOS only.** The unit tests are
-  platform-independent, but the `#[cfg(windows)]` branch of the fake
-  rollout-writing harness in `pty_smoke.rs` was authored without a Windows
-  machine to run it on. It is the most likely thing to break in CI, and it is
-  isolated to one helper.
+- **Windows CI caught a real production defect on the first push, again.**
+  `read_first_line` required a trailing newline, so a rollout whose only line
+  was its header — which is what a harness writes before it has anything to
+  append — was discarded and the session reported no identifier. Linux and
+  macOS passed; only Windows exercised a fixture written without the newline.
+  Fixed, with `a_header_with_no_trailing_newline_is_still_read` writing the
+  bytes directly rather than through the helper that appends one. **Every one
+  of the eight original unit tests went through `write_rollout`, which appends
+  `\n` — a shared fixture helper is a shared blind spot.**
 - **No *live* Codex turn has had its identifier captured end to end.** The
   header format is proven against 555 real rollouts and the wiring against the
   shipped binary with a fake harness; what is unproven is only the join between

@@ -1386,7 +1386,7 @@ $ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 $dir = Join-Path $env:CODEX_HOME 'sessions\2026\08\25'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $json = '{"type":"session_meta","payload":{"id":"__ROLLOUT_ID__","cwd":"' + $cwd + '","timestamp":"' + $ts + '","originator":"codex-tui"}}'
-Set-Content -NoNewline -Path (Join-Path $dir 'rollout-test-__ROLLOUT_ID__.jsonl') -Value $json
+Set-Content -Path (Join-Path $dir 'rollout-test-__ROLLOUT_ID__.jsonl') -Value $json
 "#;
     let ps1 = ps1_template.replace(PLACEHOLDER, id);
     let ps1_path = bin_dir.join("codex-rollout.ps1");
