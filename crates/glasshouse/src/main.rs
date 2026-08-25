@@ -83,9 +83,15 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             // to know a command exists before Glasshouse is useful.
             setup(&runtime, SetupTrigger::FirstRun)?;
 
-            // The interactive TUI arrives with the session runtime. Until then,
-            // report the resolved project scope, which every later phase builds
-            // on.
+            // With a terminal on both ends, this is the interactive shell.
+            // Without one — a pipe, a redirect, CI — there is nothing to drive
+            // a full-screen interface, so fall through to the plain summary
+            // rather than failing or drawing into a file.
+            if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                glasshouse::shell::run(&runtime)?;
+                return Ok(ExitCode::SUCCESS);
+            }
+
             let project = runtime.project();
             println!("glasshouse {}", glasshouse::VERSION);
             println!("project     {}", project.name());

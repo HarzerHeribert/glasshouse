@@ -1319,3 +1319,125 @@ fn launching_a_harness_records_a_session_that_a_later_command_reads_back() {
         );
     }
 }
+
+/// The shell itself, in a real terminal, driven by real keystrokes.
+///
+/// The view has unit tests against `TestBackend`, but those prove only that a
+/// pure function draws into a buffer. This is the part they cannot show: that
+/// running the shipped binary with no arguments opens the interface, that the
+/// project root is on screen, that the keyboard actually moves between
+/// sessions and opens the overview, and that leaving restores the terminal
+/// instead of stranding the user in the alternate screen.
+#[test]
+fn the_shell_opens_in_a_real_terminal_and_answers_the_keyboard() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&state_dir).expect("create state dir");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+    let good = install_marker_harness(&bin_dir, "shell-harness", "SHELL-HARNESS-RAN", 0);
+    let toml_path = |p: &std::path::Path| p.display().to_string().replace('\\', "\\\\");
+
+    // Onboarding already done, or the wizard would own the terminal instead of
+    // the shell.
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n\
+             [onboarding]\ncompleted = true\n\n\
+             [integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n\n\
+             [integrations.codex]\nenabled = true\nexecutable = \"{}\"\n",
+            toml_path(&good),
+            toml_path(&good)
+        ),
+    )
+    .expect("write user config");
+
+    let base: Vec<String> = vec![
+        "--scope".into(),
+        project_dir.display().to_string(),
+        "--data-dir".into(),
+        state_dir.display().to_string(),
+        "--config-dir".into(),
+        config_dir.display().to_string(),
+    ];
+
+    // Two recorded sessions, so the session bar and navigation have something
+    // real to move between.
+    for harness in ["claude-code", "codex"] {
+        let mut args = base.clone();
+        args.push("launch".into());
+        args.push(harness.into());
+        let mut session = Session::spawn(
+            TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path()).args(args),
+        );
+        session.wait_for_exit();
+    }
+
+    let mut shell = Session::spawn(
+        TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path()).args(base),
+    );
+
+    // The canonical project root is the thing the whole isolation model rests
+    // on, so it has to be on screen. Match on the last component: the shell
+    // truncates from the left when the terminal is narrow, and the tail is the
+    // part that identifies the project.
+    let leaf = project_dir
+        .file_name()
+        .expect("project dir has a name")
+        .to_string_lossy()
+        .into_owned();
+    shell.expect(&leaf);
+
+    // Assert against the root *field* specifically, not just "the leaf appears
+    // somewhere on screen". The project's name and its root's last component
+    // are the same string, so a bare `contains` stayed green even with the root
+    // blanked out — found by mutating `render_root` and watching this test pass.
+    //
+    // There is no line structure to search: a full-screen Ratatui app positions
+    // the cursor rather than emitting newlines, so after stripping the escape
+    // sequences the whole frame is one run of text. The label and the path are
+    // still written contiguously, which is enough to anchor on.
+    let screen = strip_terminal_sequences(&shell.output());
+    let after_label = screen.find("root ").map(|at| &screen[at + "root ".len()..]);
+    let Some(after_label) = after_label else {
+        panic!("the shell never drew the root field:\n--- screen ---\n{screen}\n--- end ---");
+    };
+    let field: String = after_label.chars().take(200).collect();
+    assert!(
+        field.contains(&leaf),
+        "the root field must show the project root; found `{field}`\n         --- screen ---\n{screen}\n--- end ---"
+    );
+    assert!(
+        screen.contains("glasshouse"),
+        "the shell must name itself:\n{screen}"
+    );
+
+    // The keyboard drives it: open the overview, leave it, then quit.
+    shell.send("o");
+    shell.expect("HARNESS");
+
+    shell.send("\x1b"); // Escape leaves the overlay, not Glasshouse.
+    shell.send("\t"); // ...and the shell is still alive to answer Tab.
+    shell.send("q");
+
+    let status = shell.wait_for_exit();
+    assert!(
+        status.success(),
+        "the shell should exit cleanly on `q`, got: {status}\n--- output ---\n{}\n--- end ---",
+        shell.output()
+    );
+
+    // Leaving must put the terminal back. A shell that exits still on the
+    // alternate screen leaves the user staring at a dead frame.
+    let output = shell.output();
+    assert!(
+        output.contains("\x1b[?1049l") || !output.contains("\x1b[?1049h"),
+        "the alternate screen was entered and never left:\n{output:?}"
+    );
+}

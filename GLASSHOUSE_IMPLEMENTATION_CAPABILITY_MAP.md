@@ -91,7 +91,7 @@ Phase 1 — Project-root detection and hard isolation
 ☑ Add a canonical-path guard that rejects file paths resolving outside the current project root.
 ☑ Apply the canonical-path guard after resolving symlinks so a project symlink cannot escape the project boundary.
 ☐ Keep cross-project memory retrieval disabled by design rather than relying only on query filters.
-☐ Display the active canonical project root prominently in the TUI.
+☑ Display the active canonical project root prominently in the TUI.
 
 Phase 2A — Cross-platform runtime
 
@@ -191,18 +191,18 @@ Phase 2 — Persistent project state
 
 Phase 3 — TUI shell
 
-☐ Build the main interactive interface with Ratatui and Crossterm.
-☐ Create a persistent top bar that shows the project name, project root, and active session.
-☐ Create a persistent session bar that lists currently known sessions.
-☐ Create a central viewport reserved for the active session terminal.
-☐ Create a compact bottom status bar for Glasshouse-level key bindings and status messages.
-☐ Allow the user to move to the previous session with a keyboard shortcut.
-☐ Allow the user to move to the next session with a keyboard shortcut.
-☐ Allow the user to open a session overview from the keyboard.
+☑ Build the main interactive interface with Ratatui and Crossterm.
+☑ Create a persistent top bar that shows the project name, project root, and active session.
+☑ Create a persistent session bar that lists currently known sessions.
+☑ Create a central viewport reserved for the active session terminal.
+☑ Create a compact bottom status bar for Glasshouse-level key bindings and status messages.
+☑ Allow the user to move to the previous session with a keyboard shortcut.
+☑ Allow the user to move to the next session with a keyboard shortcut.
+☑ Allow the user to open a session overview from the keyboard.
 ☐ Allow the user to open a project-memory view from the keyboard.
 ☐ Allow the user to return from Glasshouse overlays to the active native session without terminating it.
 ☐ Preserve terminal resize events and propagate the new dimensions to the active embedded terminal.
-☐ Keep the visual design text-first and avoid decorative graph visualizations that do not expose actionable state.
+☑ Keep the visual design text-first and avoid decorative graph visualizations that do not expose actionable state.
 
 Phase 4 — Generic PTY session runtime
 
