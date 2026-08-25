@@ -2814,22 +2814,38 @@ fn the_users_environment_survives_except_for_explicit_overrides() {
     // hand. Compared case-insensitively on the variable *name* only (`set`
     // reports it as `Path=` on Windows), never on the value.
     //
-    // Whitespace is stripped from **both** sides before comparing, and that
-    // is not a loosening -- it is what makes the assertion about the product
-    // instead of about the terminal. The child's environment is reported
-    // through a pseudo-terminal of fixed width, which hard-wraps a long value
-    // by inserting line breaks into it. A Windows CI runner's `PATH` is
-    // several thousand characters, so it always wraps and the contiguous
-    // substring never exists; this test passed on macOS and Linux and failed
-    // on `windows-latest` for exactly that reason. Removing whitespace from
-    // both sides cancels the wrapping, and cancels real spaces symmetrically,
-    // so the value still has to match character for character otherwise.
-    let without_whitespace =
-        |text: &str| -> String { text.chars().filter(|c| !c.is_whitespace()).collect() };
-    let expected_entry = without_whitespace(&format!("PATH={expected_path}").to_ascii_uppercase());
+    // Only the value's opening run is compared, and the reason is a real
+    // finding rather than a convenience.
+    //
+    // This harness reads the raw pseudo-terminal stream and removes escape
+    // sequences (`strip_terminal_sequences`); it does not run a terminal
+    // emulator. When a line reaches the window's width, ConPTY defers the
+    // wrap and then **re-emits the last character** at the start of the next
+    // line, expecting a real terminal to overwrite it. Discarding the escapes
+    // and concatenating therefore duplicates one character at every wrap
+    // boundary. Observed directly on `windows-latest`, where a runner's
+    // `PATH` is several thousand characters and wraps dozens of times:
+    //
+    //     ...C:\hostedtoo | olcache\windows...   -> "hostedtoo" + "olcache"
+    //     ...bin;C:\Pro   | ogram Files\dotnet   -> "Pro" + "ogram"
+    //
+    // So the reconstructed long value is corrupt, not merely re-flowed, and
+    // no amount of whitespace normalisation can recover it. Glasshouse's own
+    // viewport does not have this problem -- it runs the stream through
+    // `vt100`, which honours those escapes -- but this test deliberately does
+    // not, so it must not ask the harness for something the harness cannot
+    // give.
+    //
+    // A short opening run never crosses a wrap boundary, and it proves the
+    // same product claim: the variable was inherited, with its value intact,
+    // rather than dropped or rebuilt by hand.
+    const COMPARED: usize = 30;
+    let expected_head: String = expected_path.chars().take(COMPARED).collect();
+    let expected_entry = format!("PATH={expected_head}").to_ascii_uppercase();
     assert!(
-        without_whitespace(&output_upper).contains(&expected_entry),
-        "a variable the launch never named did not survive unchanged:\n{output}"
+        output_upper.contains(&expected_entry),
+        "a variable the launch never named did not survive unchanged; expected the child's \
+         environment to open `{expected_entry}`:\n{output}"
     );
 }
 

@@ -784,6 +784,26 @@ have required a magic clamp.
 
 ## Unresolved loose ends
 
+- **The PTY test harness duplicates a character at every wrap boundary, and
+  that is not the product.** `pty_smoke.rs` reads the raw pseudo-terminal
+  stream and removes escape sequences (`strip_terminal_sequences`); it does not
+  run a terminal emulator. When a line reaches the window width, ConPTY defers
+  the wrap and **re-emits the last character** at the start of the next line,
+  expecting a real terminal to overwrite it. Stripping the escapes and
+  concatenating therefore duplicates one character per wrap. Observed on
+  `windows-latest` against a runner `PATH` of several thousand characters:
+
+      ...C:\hostedtoo | olcache\windows...  ->  "hostedtoo" + "olcache"
+      ...bin;C:\Pro   | ogram Files\dotnet  ->  "Pro" + "ogram"
+
+  **Glasshouse's own viewport does not have this problem** — it runs the stream
+  through `vt100`, which honours those escapes. Only this test harness is
+  naive. The rule it earns: **never assert on a long value reconstructed from
+  `pty_smoke`'s output.** Assert on something short enough not to wrap, or run
+  the stream through `vt100` first. Two Windows CI round-trips were spent
+  before this was diagnosed, the first on a wrong hypothesis (plain wrapping)
+  that whitespace normalisation "fixed" locally and did not fix on Windows.
+
 - **The user's own gateway keys are available for Glasshouse, on one
   condition.** `~/projects/openrouter-clis` holds working credentials for
   eight gateways (OpenRouter, UnoRouter, AnyRouter, Z.ai, OpenCode Zen, and
