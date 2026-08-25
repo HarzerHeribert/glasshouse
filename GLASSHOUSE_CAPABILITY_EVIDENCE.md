@@ -58,8 +58,9 @@ nothing at all when the right record cannot be told apart from a subagent
 thread, another client's session, another project's session, or a second
 candidate.
 
-State: COMPLETE (macOS). Cross-platform execution is CI-pending; see
-Platform/external evidence.
+State: COMPLETE. Linux, macOS and Windows all executed these tests in CI
+`32849951837`, and the two end-to-end tests were confirmed by name in the
+Windows job's output rather than inferred from a green tick.
 
 Production evidence:
 - `session/native_id.rs: discover` — walks the harness's own records root,
@@ -147,9 +148,14 @@ What CI caught, and it was a production defect rather than a test one:
   the mechanism, and its comment records that the mutation is what settled it.
 
 Missing evidence:
-- Windows CI must go green on the fix before this entry is beyond doubt; the
-  first run proved these tests execute there and can fail, which is itself
-  worth more than a green tick over a skipped test.
+- No *live* Codex turn has had its identifier captured end to end, because that
+  costs model usage. The header format is proven against 555 real rollouts and
+  the wiring against the shipped binary on three platforms; what is unproven is
+  only the join between them on a real turn.
+- Two Glasshouse Codex sessions started in the same project inside the same
+  window will each see the other's rollout and both refuse. Fail-closed and
+  honest, but a real edge if anyone runs parallel Codex sessions in one
+  project; the fix is a narrower discriminator, never a ranking rule.
 - No real Codex session's identifier has been captured end to end, because
   that costs a model turn. The header format is proven against 555 real files
   and the wiring against the shipped binary; what is unproven is only the

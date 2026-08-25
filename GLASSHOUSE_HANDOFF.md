@@ -4,8 +4,9 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 8 is four of ten. 131 -> 132 checked boxes.** `main` clean, all gates
-green locally; pushed for CI.
+**Phase 8 is four of ten. 131 -> 132 checked boxes.** `main` clean at
+`63bd260`. CI `32849951837` green on Linux, macOS, Windows and lint, with the
+Windows job confirmed to have executed both new end-to-end tests by name.
 
 - **Phase 8 line 2 — capture the native Codex session identifier: closed.**
   This is the line that unblocks Codex resume, and it is the first time a
