@@ -108,7 +108,9 @@ keeping the frame intact, because the render order it currently relies on is not
 a property the widget can see.
 
 Platform/external evidence:
-- CI on this batch's commit.
+- CI `32830685235` on `79a0600` — green on Linux, macOS, Windows and lint, with
+  the Windows job confirmed to have executed 321 lib and 33 PTY tests including
+  the colour, wrapping and border tests by name.
 
 Missing evidence:
 - Fidelity is asserted against synthetic escape sequences, not against Claude
@@ -166,7 +168,7 @@ Secrets: no configuration type has a field able to hold one
 view cannot render a secret value. Structural, not a display rule.
 
 Platform/external evidence:
-- CI on this batch's commit.
+- CI `32825574631` on `473d2b0` — green on Linux, macOS, Windows and lint.
 
 Missing evidence:
 - Eleven lines unchecked: Providers, Launch Profiles, Routing (six lines) and

@@ -4,32 +4,40 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 2 complete, Phase 3 eleven of twelve, Phase 4 nine of twelve.**
-Twenty-seven capabilities were closed this session; the checked count went from
-63 to 90.
+**Phases 2, 3, 4 and 5 are complete or all-but-complete; 2D is partially done.**
+Forty-nine capabilities were closed this session; the checked count went from 58
+to 107.
 
-The through-line: Phase 2 gave Glasshouse its own durable session records,
-Phase 3 gave it an interface, Phase 4 gave it live processes behind that
-interface, and the shell now joins all three — `glasshouse` with no arguments
-opens a real TUI, `n` starts a real harness in a real pseudo-terminal, and the
-keyboard reaches it.
+- **Phase 2** — persistent project state: complete.
+- **Phase 2D** — settings: nine of twenty. The other eleven configure features
+  that do not exist yet.
+- **Phase 3** — TUI shell: eleven of twelve (the memory view needs Phase 20).
+- **Phase 4** — PTY session runtime: nine of twelve (three need callers that
+  belong to Phase 14).
+- **Phase 5** — native terminal embedding: **complete, 8 of 8.**
 
-### The decisions this session made, and why
+`glasshouse` with no arguments now opens a real interface with real harnesses
+behind it: `n` starts one in a pseudo-terminal, the viewport draws its actual
+screen — colours, cursor, wrapping — and the keyboard reaches it in session
+mode, with `Ctrl-]` to come back.
 
-1. **Phase 2 first**, because it was the only unblocked group: 2C onboarding
-   needs product decisions from the user, 2D settings needed a TUI, and Phase 3
-   would be cheaper once a session model existed. It also retired the schema
-   half of Phase 1 line 90.
-2. **Phase 3 next**, as recorded when Phase 2 closed: the largest unblocked
-   item, and `session::store` had given it something real to render.
-3. **Phase 4 next**, as recorded when Phase 3 closed: the keystone that three
-   Phase 3 boxes and all of Phase 5 and 11 were waiting on.
-4. **Two keyboard modes**, recorded in
-   `GLASSHOUSE_DESIGN_DECISIONS.md`. Single-key bindings and
-   forwarding every keystroke to a harness cannot both be true. Control mode
-   keeps the bindings; session mode forwards everything; `Ctrl-]` returns. One
-   chord rather than a prefix, because the thing being escaped may be a
-   runaway session.
+### Decisions this session made, and where they are recorded
+
+All in `GLASSHOUSE_DESIGN_DECISIONS.md`, which `CLAUDE.md` now names in its read
+order:
+
+1. **Two keyboard modes.** Single-key bindings and forwarding every keystroke to
+   a harness cannot both be true. `Ctrl-]` returns — one chord, not a prefix,
+   because the thing being escaped may be a runaway session.
+2. **Settings ships only the sections whose feature exists.** An empty
+   "Providers" section is worse than an absent one.
+3. **Project-level config writes need consent.** `.glasshouse/config.toml` is
+   inside the user's repository.
+4. **`vt100` for terminal emulation** (the user's call), chosen over
+   `alacritty_terminal`, `termwiz` and bare `vte`. Three new crates; the
+   viewport renderer is the only consumer, so swapping later is bounded.
+5. **Embedded sessions invert `attach`'s DSR rule.** `attach` must never answer
+   `ESC[6n`; an embedded session must always answer it, or the harness hangs.
 
 ## Verified completed work
 
@@ -335,40 +343,32 @@ have required a magic clamp.
 
 ## Where to go next
 
-**Phase 5 — native terminal embedding — is the next capability.** The viewport
-currently prints the focused session's scrollback as raw bytes. That is honest
-but not a terminal: escape sequences are shown rather than obeyed, so a harness
-that redraws itself looks like noise. Phase 5 replaces it with a real terminal
-emulator over the same `Scrollback`.
+**Phase 6 — the harness adapter interface — is next in map order and
+unblocked.** The architecture backtest run this session recommends landing it
+*before* Phase 7/8 harness work, because that is where the fixed requirement
+"harness specifics stay behind adapters" first gets tested. Today it passes
+because nothing has needed to violate it: production `session/`, `shell/` and
+`pty/` contain zero harness-specific branching (every `ClaudeCode`/`Codex`
+reference is inside `#[cfg(test)]`).
 
-Doing it also unblocks the two things this session could not test:
-
-- The shell's multi-session switching has no end-to-end test, because a
-  differential repaint cannot be sliced back into frames from a captured
-  stream. An emulator in the test harness makes "what is on screen now" a real
-  question with a real answer.
-- The viewport's line handling is currently naive.
-
-**The three unchecked Phase 4 lines need callers, not mechanisms.** Sending
-text to an unfocused session and sending an interrupt are both orchestrator
-operations (Phase 14); nothing yet creates a headless session because the shell
-always starts them embedded. All three work and are tested against real
-processes — do not rebuild them, wire them up when their feature arrives.
+**Do not guess the adapter declarations.** Several Phase 6 lines ask what each
+harness supports — resume mechanism, session-ID discovery, model override,
+protocol. The harnesses are installed on this machine, so derive them from the
+real binaries: `claude --help` shows `-r, --resume [value]`, `--session-id
+<uuid>`, `--fork-session`, `--model`; `codex --help` shows a `resume`
+subcommand with `--last`. That is evidence. Recalling a flag is not.
 
 Still blocked, unchanged:
 
 - Phase 1 line 90 — the cross-project resume guard is complete and
-  mutation-proven, but nothing can *attempt* a resume until a harness adapter
-  exists (Phase 6/7/8). **Do not close it with a `glasshouse resume` that can
-  only ever report "not resumable".**
-- Phase 1 line 92 and Phase 3's project-memory view — Phase 20's memory table.
-  Migration 2 is the pattern to copy: make the project boundary a trigger, not
-  a query filter.
-- Antigravity's executable name and real minimum harness versions — facts this
-  environment does not have.
-- Phase 2C onboarding — interdependent product decisions that need the user.
-- Phase 2D settings — unblocked now that a TUI exists, and the smaller,
-  lower-risk alternative to Phase 5.
+  mutation-proven, but nothing can *attempt* a resume until an adapter exists.
+  **Do not close it with a command that can only report "not resumable".**
+- Phase 1 line 92 and Phase 3's memory view — Phase 20's memory table.
+- Three Phase 4 lines — unfocused `send_text`, `interrupt`, headless sessions.
+  All three work and are tested; they need callers, which are Phase 14's.
+- Eleven Phase 2D lines — Providers, Launch Profiles, Routing, Memory sections.
+- Antigravity's executable name; real minimum harness versions.
+- Phase 2C onboarding — product decisions that need the user.
 
 ## Active worker tasks and results
 
@@ -435,32 +435,35 @@ broken.
 
 Hand this checkpoint to Opus:
 
-> Start with `git status`, `git log -5`, this handoff, and
-> `.agent-runtime/CONTINUATION.md` — whose Part 1 is generic standing rules,
-> including re-arming the context and usage-window watches, which do not
-> survive a session. Pushing to run CI is standing authorization; do it without
-> asking.
+> Start with `git status`, `git log -5`, this handoff,
+> `GLASSHOUSE_DESIGN_DECISIONS.md`, and `.agent-runtime/CONTINUATION.md` —
+> whose Part 1 is generic standing rules, including re-arming the context and
+> usage-window watches, which do not survive a session. Pushing to run CI is
+> standing authorization.
 >
-> Phases 2, 3 and 4 are largely closed. **Read "Where to go next" before
-> choosing** — what remains nearby needs a later phase or a product decision,
-> not more effort here.
+> The capability map gained **fixed architectural requirements** per phase and
+> an architectural-decision principle: a deviation needs an explicit
+> specification change recording reason, impact and migration, not a quietly
+> better design. An architecture backtest against every implemented phase
+> passed with zero violations; it is in this session's history and its findings
+> are in "Where to go next".
 >
-> The recommended next capability is **Phase 5, native terminal embedding**. It
-> replaces the viewport's raw-byte rendering with a real emulator over
-> `session::runtime`'s `Scrollback`, and it is also what makes the shell's
-> multi-session behaviour testable end to end for the first time.
+> **Phase 6, the harness adapter interface, is next.** Derive each adapter's
+> declarations from the installed binaries' `--help`, not from memory.
 >
-> Three habits from this session are worth keeping:
+> Four habits earned the defects they caught this session:
 >
-> - **Drive the shipped binary through a real pseudo-terminal.** Every defect
->   found this session was invisible to unit tests: a `.cmd` path Windows could
->   not open, ragged columns from a `Display` that ignored width, and an escape
->   chord that no real terminal ever produces.
-> - **Assert against a specific row or field, never a whole screen.** Several
->   tests passed while the thing they claimed to check was broken, because the
->   matched string also appeared elsewhere on screen.
-> - **Treat a mutation that does not fail as information about the code.** One
->   correctly identified a piece of the status bar as doing nothing, and it was
->   deleted rather than tested harder.
+> - **Drive the shipped binary through a real pseudo-terminal.** Every product
+>   defect found was invisible to unit tests: a `\\?\` path `cmd.exe` cannot
+>   open; a `Display` that ignored width; an escape chord no real terminal
+>   produces.
+> - **Assert against a specific row or field, never a whole screen.**
+> - **A mutation that does not fail is information about the code.** Five did
+>   not fail; each led to a deleted test, a corrected comment, or deleted
+>   logic — never to a shrug.
+> - **Check that a new capability has a production caller.** The orchestrator
+>   shipped one without and a worker caught it. Grep before checking the box.
 >
-> Do not stub a blocked capability to keep the map's order looking intact.
+> And one that cost time: **an absent line of output is a result.** A gate that
+> printed no `test result` lines meant the suite had not compiled, not that
+> there was nothing to report.
