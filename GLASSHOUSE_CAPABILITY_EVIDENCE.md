@@ -93,8 +93,7 @@ Contract: Given a new Claude Code session, when Glasshouse starts it,
 Glasshouse knows that session's native identifier and records it against the
 session, while never recording an identifier the harness did not receive.
 
-State: PARTIALLY VERIFIED — **box deliberately unchecked**, pending one
-runtime probe named below.
+State: COMPLETE.
 
 Production evidence:
 - `harness/mod.rs: HarnessAdapter::assign_session_id` — the contract. Assigning
@@ -145,19 +144,22 @@ Platform/external evidence:
   pseudo-terminal with one, it came up and ran normally until killed, where an
   invalid one exits immediately.
 
+- **The assigned identifier becomes the conversation's own — run and
+  observed.** With the user's approval, `claude --session-id
+  7f3a91c2-5d84-4e11-9a3b-6c0d2e8f41ab -p "..."` was run once in a scratch
+  directory, and Claude Code wrote its transcript to
+  `~/.claude/projects/<slugged-cwd>/7f3a91c2-5d84-4e11-9a3b-6c0d2e8f41ab.jsonl`
+  — the assigned identifier exactly.
+- **The identifier is resumable, and an unknown one fails cleanly.**
+  `claude --resume 7f3a91c2-…` reopened that conversation with its earlier turn
+  replayed, while `claude --resume 00000000-0000-4000-8000-000000000000`
+  answered "No conversation found with session ID: …" and exited. Both were
+  observed in a real pseudo-terminal; neither cost a model turn.
+
 Missing evidence:
-- **That the conversation is actually stored under the assigned identifier.**
-  Claude Code writes a session transcript only once a turn has happened — a
-  session started and killed without submitting anything leaves no file — so
-  this cannot be observed without one real turn against the user's account.
-- The exact probe: in a scratch directory, run `claude --session-id <uuid> -p
-  "hi"`, then check that `~/.claude/projects/<slugged-cwd>/<uuid>.jsonl`
-  exists. That transcripts are named after the session identifier is already
-  established from real transcripts on this machine; what is unproven is only
-  that an *assigned* identifier becomes the conversation's own.
-- Until then the box stays unchecked. The mechanism is complete and the
-  binary's acceptance is verified; what is missing is the last link, and
-  assuming it is exactly the kind of step this project has been burned by.
+- None. The chain is closed end to end: Glasshouse mints an identifier, hands
+  it to the harness, records the same one, and the harness both stores the
+  conversation under it and reopens it on demand.
 
 ### Phase 6 — the harness adapter interface (eleven of twelve)
 

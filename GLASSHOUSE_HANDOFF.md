@@ -10,11 +10,10 @@ from 107 to 120.
 - **Phase 2B** — Antigravity detection: **closed**, against a real CLI.
 - **Phase 6** — harness adapters: eleven of twelve. The communication-style
   line is deliberately unchecked; see the loose ends.
-- **Phase 7** — Claude Code adapter: its first line is closed. Glasshouse now
+- **Phase 7** — Claude Code adapter: two of ten lines closed. Glasshouse
   **assigns** Claude Code its native session identifier with `--session-id`,
   mints it as a valid version-4 UUID, and records it before the process
-  exists. The capture line's box stays unchecked pending one runtime probe —
-  see the loose ends.
+  exists — and the whole chain is verified against the real binary.
 
 **Sessions reach `Resumable` in production for the first time.** A cleanly
 stopped Claude Code session now has something to resume to, which closes a
@@ -65,6 +64,19 @@ simply wrong, because no reference install had ever been inspected.
 ## Verified completed work
 
 ### This session — assigned native session identifiers (Phase 7)
+
+**The whole chain is verified against the real binary**, with the user's
+approval for the one step that needed a turn:
+
+- `claude --session-id not-a-uuid` → "Error: Invalid session ID. Must be a
+  valid UUID." The format requirement is enforced, not merely documented.
+- `claude --session-id <minted> -p "..."` → Claude Code wrote its transcript to
+  `~/.claude/projects/<slugged-cwd>/<minted>.jsonl`. The assigned identifier
+  *is* the conversation's identity.
+- `claude --resume <minted>` → reopened that conversation with its earlier turn
+  replayed. `claude --resume <unknown-uuid>` → "No conversation found with
+  session ID: …". Both observed in a real pseudo-terminal, neither costing a
+  model turn.
 
 - `HarnessAdapter::assign_session_id` is how a harness says it will take an
   identifier rather than invent one. Assigning beats discovering: the
@@ -372,15 +384,6 @@ have required a magic clamp.
 
 ## Unresolved loose ends
 
-- **Phase 7's capture line needs one runtime probe.** Claude Code writes a
-  transcript only after a turn has happened, so a session started and killed
-  without submitting anything leaves no file, and nothing here can observe
-  that an *assigned* identifier becomes the conversation's own. The probe: in
-  a scratch directory run `claude --session-id <uuid> -p "hi"`, then check
-  that `~/.claude/projects/<slugged-cwd>/<uuid>.jsonl` exists. It costs one
-  small turn against the user's account, which is why it was not run
-  unasked. Everything else is proven: the binary rejects a non-UUID, accepts
-  a minted one, and the identifier handed over is the identifier recorded.
 - **Anything configured as `claude-code` now receives `--session-id`.** Before
   this session Glasshouse passed no arguments at all, so any executable
   worked. A user pointing that integration at a wrapper script now needs the
@@ -388,10 +391,12 @@ have required a magic clamp.
   the harness the user named — but it is a real change in blast radius.
 - **A stopped session reads as resumable on the strength of an assigned
   identifier**, not on proof that a conversation exists. If a harness starts
-  and dies before creating one, `glasshouse resume` will hand the identifier
-  over and the harness will refuse it. That is a clear failure from the
-  harness rather than lost state, and `Failed` sessions are never resumable —
-  but it is optimism, and worth remembering when the resume command lands.
+  and dies before creating one, the harness refuses the identifier — Claude
+  Code answers "No conversation found with session ID: …" and exits, which was
+  observed directly. That is a clear failure rather than lost state or a blank
+  session wearing an old name, and `Failed` sessions are never resumable; but
+  it is optimism, and the resume command should surface the harness's own
+  refusal rather than dressing it up.
 
 - **Phase 6's communication-style line stays unchecked.** Six of seven
   adapters declare `Unverified` because their installed binaries document no

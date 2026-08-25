@@ -296,7 +296,7 @@ Fixed architectural requirements
 - The adapter launches the installed first-party `claude` executable; Glasshouse does not reimplement Claude Code's agent loop or terminal UI.
 
 ☑ Add a Claude Code adapter that starts the real claude executable inside the current project root.
-☐ Capture the native Claude Code session identifier when it can be obtained reliably.
+☑ Capture the native Claude Code session identifier when it can be obtained reliably.
 ☐ Support resuming a known Claude Code session through Claude Code’s native resume mechanism.
 ☐ Preserve the complete native Claude Code TUI inside the Glasshouse PTY.
 ☐ Add Claude Code lifecycle-hook integration for events that Claude exposes structurally.
