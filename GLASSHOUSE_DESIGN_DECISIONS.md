@@ -454,3 +454,93 @@ its UUID is the one `codex resume --help` documents accepting.
 5. Two interactive candidates are refused, not ranked.
 6. A record with `session_id` but no `id` is skipped.
 7. A malformed second line does not prevent a valid header being read.
+
+---
+
+## Harness configuration is project-local, always
+
+### The decision
+
+**Every piece of harness configuration Glasshouse creates is scoped to the
+project it was created for.** Glasshouse never writes hooks, settings, or
+launch configuration into a user-level location that follows the user to every
+other repository on their machine.
+
+This is a user directive (2026-08-25) and it settles Phase 8's open hooks
+question, which had three candidate answers. The reasoning is short and
+decisive:
+
+> What if someone does not want to use Glasshouse somewhere else, and has its
+> hooks still configured?
+
+A user-level hook is a promise Glasshouse cannot keep. It fires in repositories
+Glasshouse has never heard of, it outlives any decision to stop using
+Glasshouse, and the person who has to notice and remove it is the user. A
+project-local one is visible in the project it belongs to and dies with it.
+
+### What this already means, and what it changes
+
+**Claude Code already satisfies this** and did not have to change. Glasshouse
+writes its hook document into a directory it owns under the project's own state
+and passes `--settings <file>`, which loads *additional* settings for that one
+process. `~/.claude` is never touched, so the user's own hooks keep running and
+nothing survives the session.
+
+**Codex is the case that forced the decision**, because it has no `--settings`
+equivalent — no per-invocation hooks-file override exists, and a
+`--strict-config` probe cannot even discriminate one, since `hooks` is a
+free-form table. Its hooks must live at `<project>/.codex/hooks.json`.
+
+That is **inside the user's repository**, so Phase 2D's rule applies without
+exception: the write is a separate, explicit action that shows the exact path
+first and requires its own confirmation, exactly like
+`config::write_project_config_with_consent`. Cancelling leaves no file and no
+directory.
+
+### The alternative that a real uninstall argued against
+
+The tempting answer was a Glasshouse-owned `CODEX_HOME`. It relocates Codex's
+entire state root — verified — so hooks could be installed and their trust hash
+pre-seeded without writing anything into the user's repository at all.
+
+It is the wrong answer, and this machine happened to contain the proof.
+**Orca — a previous multi-agent tool the user had removed — had done exactly
+that.** Uninstalling it turned up `~/Library/Application Support/orca/
+codex-runtime-home`, a private Codex home holding **1.2 GB and 235 session
+transcripts** that the user did not know were there, stranded outside the
+`~/.codex` they actually use.
+
+That is the cost made concrete. Relocating `CODEX_HOME` also takes away the
+user's auth, MCP servers, skills and model configuration, so the session is not
+"the user's own installed harness" at all — which is this product's first
+invariant. Copying their real home in would duplicate credentials, which the
+secret boundary forbids.
+
+### The open question the next session must probe, not guess
+
+Codex trust-gates hooks by content hash, keyed by absolute path:
+
+    [hooks.state."<abs-path>/.codex/hooks.json:<event_snake_case>:0:0"]
+    trusted_hash = "sha256:<64 hex>"
+
+Those entries live in the user's `~/.codex/config.toml`. Writing them there
+would violate the rule above just as surely as a user-level hook does, and
+`--dangerously-bypass-hook-trust` is worse: it bypasses trust for *every*
+enabled hook in that invocation, including project hooks the user has never
+vetted.
+
+There is a third possibility that fits this product exactly, and it has not
+been tested: **let Codex ask.** A Glasshouse session is a real harness in a
+visible viewport, so if Codex prompts for hook trust on first run, the user
+approves it there, in the harness's own interface, and Glasshouse writes
+nothing outside the project. Establish whether Codex actually prompts — or
+silently ignores untrusted hooks — before designing around either.
+
+### Invariants a test must hold to
+
+1. No Glasshouse code path writes to `~/.claude`, `~/.codex`, or any other
+   user-level harness configuration.
+2. A project-level write shows its exact path and requires its own
+   confirmation; cancelling leaves neither file nor directory.
+3. Removing a project removes every piece of harness configuration Glasshouse
+   made for it — nothing is left behind elsewhere.

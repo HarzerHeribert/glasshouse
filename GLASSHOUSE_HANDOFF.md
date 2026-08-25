@@ -812,28 +812,27 @@ history without spending a model turn — the same shape as the Phase 7 evidence
 Also surface the harness's own refusal for an unknown identifier rather than
 dressing it up.
 
-**Then Phase 8's hooks lines (5-9), and they need a decision first.** Evidence
-is gathered in `.agent-runtime/notes-codex-hooks.md`; read it before choosing.
-The headline is that the previous checkpoint's premise was half wrong: Codex
-hooks are **not** only project-local. There is a user-level
-`$CODEX_HOME/hooks.json`, PascalCase and Claude-Code-shaped, and trust is a
-`sha256` keyed by absolute path under `[hooks.state."<path>:<event>:0:0"]` in
-`config.toml`.
+**Phase 8's hooks lines (5-9) — the decision is made: project-local, always.**
+The user settled it on 2026-08-25: *"always project local configuration of
+agent harnesses — what if someone does not want to use Glasshouse somewhere
+else and has its hooks still configured?"* Full reasoning, and the alternative
+it rules out, are in `GLASSHOUSE_DESIGN_DECISIONS.md`.
 
-That does not settle it, because the tempting answer is the wrong one: a
-Glasshouse-owned `CODEX_HOME` would avoid writing in the user's repository and
-let the trust hash be pre-seeded, but it also takes away their auth, MCP
-servers, skills and model configuration. A Codex session that is not logged in
-is not "the user's own installed harness", which is the product's first
-invariant. Copying their real home in would duplicate credentials.
+So Codex hooks go to `<project>/.codex/hooks.json`, which is inside the user's
+repository and therefore needs Phase 2D's explicit consent — show the exact
+path, require its own confirmation, leave nothing behind on cancel.
 
-So the live options remain: project-local `.codex/hooks.json` with explicit
-consent (Phase 2D) plus a write into the user's real `config.toml` (which
-Phase 7 deliberately never did for Claude Code), or leaving Codex hooks
-unsupported and letting lifecycle come from the operating system, which already
-works. A `--strict-config` probe for a per-invocation hooks override was run
-and **cannot answer this** — `hooks` is a free-form table, so every invented key
-is accepted. Do not repeat it; the note records why.
+Claude Code already satisfies the rule and does not change: its hook document
+lives in Glasshouse-owned state and is passed per session with `--settings`.
+
+**One thing to probe before writing any code.** Codex trust-gates hooks by
+content hash in `~/.codex/config.toml` — a user-level file the rule above says
+Glasshouse must not write, and `--dangerously-bypass-hook-trust` is worse
+because it bypasses trust for every enabled hook, including ones the user never
+vetted. The third option fits this product exactly and is untested: **let Codex
+ask.** The session is a real harness in a visible viewport, so the user can
+approve the trust prompt there. Find out whether Codex actually prompts or
+silently ignores untrusted hooks. Do not design around either until you know.
 
 Still blocked, unchanged:
 
