@@ -14,8 +14,8 @@
 //! previous single-name guess was carefully reasoned and simply wrong.
 
 use super::{
-    ApprovalModes, BackendSelection, Backends, Capabilities, Declared, HarnessAdapter,
-    HarnessDescription, Invocation, ModelOverride, Vendor,
+    ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, Declared,
+    HarnessAdapter, HarnessDescription, Invocation, ModelOverride, SandboxSelector, Vendor,
 };
 use crate::integrations::IntegrationId;
 
@@ -110,12 +110,19 @@ impl HarnessAdapter for Antigravity {
                 // `agy --help` documents no classifier-style mode.
                 automatic_review: Declared::Unverified,
                 bypass: Declared::verified(
-                    "--dangerously-skip-permissions",
+                    ApprovalMode {
+                        args: &["--dangerously-skip-permissions"],
+                        description: "Auto-approve all tool permission requests without \
+                                       prompting",
+                    },
                     "`agy --help`: `--dangerously-skip-permissions` — \"Auto-approve all tool \
                      permission requests without prompting\"",
                 ),
                 sandbox: Declared::verified(
-                    "--sandbox",
+                    SandboxSelector {
+                        flag: "--sandbox",
+                        values: &[],
+                    },
                     "`agy --help`: `--sandbox` — \"Run in a sandbox with terminal restrictions \
                      enabled\"",
                 ),

@@ -4,9 +4,17 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 8 is nine of ten; Phase 6 is twelve of thirteen. 131 -> 138 checked boxes.** `main` clean at
-`63bd260`. CI `32849951837` green on Linux, macOS, Windows and lint, with the
-Windows job confirmed to have executed both new end-to-end tests by name.
+**Phase 9A is under way; 138 checked boxes, unchanged this batch.** `main`
+clean. Phase 8 is nine of ten, Phase 6 twelve of thirteen.
+
+This batch checked no box on purpose. It corrected a declaration that Phase 9A
+is about to consume, and a correction is not a capability. The Phase 9A boxes
+wait for the profile abstraction that uses it — this project's own rule is that
+a mechanism with no production caller does not get its box, and it has been
+applied to `SessionRuntime` and to Phase 1 line 90 before now.
+
+**Phase 9A has 26 unchecked lines, not 25** as an earlier checkpoint said. The
+map is authoritative and says 26.
 
 - **Phase 8 line 2 — capture the native Codex session identifier: closed.**
   This is the line that unblocks Codex resume, and it is the first time a
@@ -43,6 +51,48 @@ deliberately *not* a condition — every extra condition is another way to break
 on a Codex update. Full reasoning in `GLASSHOUSE_DESIGN_DECISIONS.md`.
 
 ## Verified completed work
+
+### This session — the approval declaration had to carry argv, not prose
+
+Phase 9A must *select* a harness's approval mode, so the first thing checked
+was what the adapters actually declare. Three of seven could not be used as
+launch arguments at all:
+
+- **Claude Code declared `auto-mode`** — a *subcommand* ("Inspect or reset auto
+  mode classifier configuration"). Appending it to a launch would have run the
+  subcommand instead of starting a session. The flag that selects the mode for
+  a session is **`--permission-mode auto`**, one of six choices.
+- **Codex and Cursor declared their sandbox as usage strings** with
+  placeholders (`-s/--sandbox <read-only|workspace-write|danger-full-access>`)
+  that no process can receive.
+
+A mode is now `ApprovalMode { args, description }` and the sandbox a
+`SandboxSelector { flag, values }`; `HarnessAdapter::approval_args` answers
+`None` — never a substitute — for a mode a harness lacks.
+
+**Verified against the real binaries, both directions.** `claude
+--permission-mode auto` is accepted while `--permission-mode bogus` is rejected
+with the allowed list; `codex --approve-for-me` is accepted **through the cmux
+PATH shim**, which incidentally settles a recorded worry — the wrapper does not
+swallow a flag Glasshouse adds.
+
+**Five mutations, five kills.** Reverting Claude Code's argv to the subcommand
+kills two separate tests; turning an argv back into a usage string, making
+`approval_args` fall back to the bypass, and giving a description a backtick
+each kill their own.
+
+**Running the binary caught two defects the types could not.** Descriptions are
+rendered inside backticks, and Claude Code's and Cursor's own descriptions
+contained backticks, so both rows printed doubled. Both are plain prose now, a
+guard test prevents a recurrence, and the row shows the description **and** the
+argv — a diagnostic that hides the half reaching the process is the weaker one,
+and this row previously named a subcommand.
+
+This is the **third** declaration derived from an artifact that did not serve
+the purpose it was cited for, after Antigravity's executable name and Codex's
+snake_case hook events. The rule it earns: *before a declaration is used, check
+that its evidence supports the use, not merely the claim.*
+
 
 ### This session — the permission cycle, watched from both ends
 
@@ -699,6 +749,18 @@ have required a magic clamp.
 
 ## Unresolved loose ends
 
+- **`glasshouse hook` blocks forever if its stdin never reaches EOF.**
+  `report_hook` drains stdin with `std::io::copy(stdin, sink)` — deliberately,
+  so a harness is never left writing into a closed pipe — but that read is
+  unbounded. Found by accident: running `cargo test` from a shell whose stdin
+  was an open pipe hung `a_hook_that_cannot_report_still_exits_zero` and
+  `an_installed_hook_moves_the_session_state` indefinitely, both parked in
+  `wait4` on the child. Harnesses close the hook's stdin and both Claude Code
+  and Codex additionally impose their own timeouts, so this is not known to
+  bite in production — but it is an unbounded blocking read in a process the
+  harness waits for. **Run the suite with `< /dev/null`**, and consider
+  bounding the drain.
+
 - **`codex` on `PATH` is a cmux wrapper script, not Codex.** In a cmux terminal
   — which is where this project is developed and run — `which codex` resolves
   to `…/cmux-cli-shims/<uuid>/codex`, a bash script that execs
@@ -991,165 +1053,117 @@ have required a magic clamp.
 
 ## Where to go next
 
-**Phase 8 line 3 — resume a Codex session — is next, and its real-binary
-evidence is already gathered.** Both halves were probed this session against
-the installed Codex 0.149.0, in a pseudo-terminal, and **neither cost a model
-turn**:
+**Phase 9A, and the next packet is already written.** Phase 8 line 9 and all of
+Phase 9 remain blocked (below), so Phase 9A is the first actionable work in map
+order, exactly as the previous checkpoint said.
 
-- `codex resume 01a03537-903b-73d2-9886-7799d4c90376` (a real interactive
-  session recorded for this project) printed `Resuming session…` and replayed
-  the conversation — 164 KB of it. The identifier Glasshouse would have
-  recorded is the one Codex reopens.
-- `codex resume 9f1c0b2e-0000-4000-8000-0123456789ab` answered
-  **`ERROR: No saved session found with ID <id>. Run `codex resume` without an
-  ID to choose from existing sessions.`** That is the harness's own refusal,
-  and it is what `resume_session` should surface rather than dress up.
+The design is settled and recorded in `GLASSHOUSE_DESIGN_DECISIONS.md`. The
+shape:
 
-Two practical notes for whoever writes the test. The pseudo-terminal **must be
-given a window size** (`TIOCSWINSZ`); without one Codex emits its handshake and
-draws nothing, which looks exactly like a hang. And Codex may open with an
-**update prompt whose default option runs `curl … | sh`** — never dismiss it
-with Enter; the explicit "Skip" digit is safe.
+- **A profile is data; an overlay is its resolution.** `LaunchProfile` is inert
+  configuration; `resolve(profile, adapter, acknowledged)` produces a
+  `LaunchOverlay` of args and env that applies to exactly one child process.
+  `HarnessLaunch` already *is* that mechanism, so the overlay is handed to it
+  rather than a second launcher being invented.
+- **Resolution refuses rather than invents.** A mechanism the adapter does not
+  declare is an error, never a guessed environment-variable name.
+- **A default that falls back is not a request that is refused.** A profile
+  *explicitly* asking for automatic review from a harness that declares none is
+  refused; a profile that merely took the default resolves to no approval
+  argument at all — never a bypass. The asymmetry is the point: an explicit
+  request is a claim Glasshouse must not silently fail to honour, a default is
+  the absence of one.
+- **A bypass needs a recorded acknowledgement**, per harness, user layer only —
+  a repository must not pre-acknowledge a blanket bypass for whoever clones it.
+- **Only `BackendResource::Native` resolves today.** `DirectProvider` and
+  `GlasshouseGateway` are representable and refused with a diagnostic naming
+  the phase that supplies them, because providers and secrets are 9C/9D/9E.
+- **The Native profile is implied, never stored**, so adding gateway profiles
+  can never remove it and `glasshouse launch` with no profile stays the default
+  path rather than a special case beside it.
 
+**Do not land the profile model without its production caller.** This project's
+own rule, applied to `SessionRuntime` and Phase 1 line 90 before now: a
+mechanism nothing calls does not get its box. The packet therefore goes all the
+way to `glasshouse launch --profile`, recording the profile on the session, and
+showing it.
 
-`resume_session` in `main.rs` is entirely generic: it selects the harness the
-record names and calls `selection.resume_args(...)`, which goes through the
-adapter, and `Codex::resume` already returns `["resume", <id>]`. The only thing
-that was missing was an identifier, and that now exists. What line 3 still
-needs is *evidence*: drive `codex resume <uuid>` against a real recorded
-session in a pseudo-terminal and watch the conversation reopen. There is a real
-interactive rollout for this project to try it against
-(`01a03537-903b-73d2-9886-7799d4c90376`), and reopening a conversation replays
-history without spending a model turn — the same shape as the Phase 7 evidence.
-Also surface the harness's own refusal for an unknown identifier rather than
-dressing it up.
-
-**Phase 8's hooks lines (5-9) — the decision is made: project-local, always.**
-The user settled it on 2026-08-25: *"always project local configuration of
-agent harnesses — what if someone does not want to use Glasshouse somewhere
-else and has its hooks still configured?"* Full reasoning, and the alternative
-it rules out, are in `GLASSHOUSE_DESIGN_DECISIONS.md`.
-
-So Codex hooks go to `<project>/.codex/hooks.json`, which is inside the user's
-repository and therefore needs Phase 2D's explicit consent — show the exact
-path, require its own confirmation, leave nothing behind on cancel.
-
-Claude Code already satisfies the rule and does not change: its hook document
-lives in Glasshouse-owned state and is passed per session with `--settings`.
-
-**The trust question is settled too.** Writing Codex's trust record into the
-user-level `~/.codex/config.toml` is **allowed**. The rule is not "never touch
-a user-level file" — it is that hooks must not end up running in every session
-globally, only in the folder where they are configured. A trust entry cannot
-cause that: it is keyed by absolute path and bound to a content hash, so it
-grants permission for one file at one path for one event and installs nothing.
-Hooks run only where a `.codex/hooks.json` exists.
-
-**The file that *would* make them global is `$CODEX_HOME/hooks.json`**, and
-Glasshouse must never write it. That is a different file from `config.toml`
-and a different line entirely. It is also not hypothetical: a previous tool on
-this machine had exactly that file configured with seven events, firing in
-every repository, and it was found and removed on 2026-08-25.
-
-`--dangerously-bypass-hook-trust` stays rejected: it bypasses trust for every
-enabled hook including unvetted project ones, trading a scoped grant for a
-blanket one.
-
-Still worth probing: whether Codex prompts for hook trust interactively. If it
-does, prefer that — the session is a real harness in a visible viewport, the
-user answers it there, and Glasshouse writes nothing at all.
-
-**A specification change was made this session, deliberately and on the
-record.** The capability map gained **three** lines (1331 -> 1334 unchecked):
-one in Phase 6, two in Phase 9A. Reason, impact and the full evidence table are
-in `GLASSHOUSE_DESIGN_DECISIONS.md` under "Approvals".
-
-The short version. The user's position is that per-command approval is theatre
-— *"no normal human reads a regex lookup with routing into /dev/null and a sed
-with 16 parameters and understands what's happening"* — and that Claude Code's
-auto-mode classifier should be the norm everywhere. Correct, and it does **not**
-require Glasshouse to build a classifier, which the map forbids in a fixed
-architectural requirement and in already-checked line 267.
-
-It requires Glasshouse to *select* the harness's own mode, because three of the
-seven already ship one: Claude Code's auto mode, Codex's `--approve-for-me`
-("automatic review using the workspace-write sandbox"), and Cursor's
-`--auto-review` ("a server classifier auto-runs safe tool calls"). OpenCode,
-Hermes and Antigravity offer only a blanket bypass; Pi is unverified because it
-is still not on `PATH`.
-
-So adapters declare their approval modes like any other fact, a launch profile
-picks one, **the default is automatic review, never bypass**, and a profile
-asking for automatic review from a harness that has none is refused rather than
-quietly downgraded. Blanket bypass stays available as a profile the user picks
-on purpose.
-
-**Also closed: Codex does prompt for hook trust interactively** — confirmed by
-the user. That was the open probe from earlier in this session. It means the
-project-local hooks design works with no user-level write at all if the prompt
-is acceptable; but the same user finds trust prompts annoying, which is exactly
-why the trust-grant route stays available and scoped.
+Deferred deliberately, with reasons: **353** and **359** need provider
+templates and generated configuration (9D/9F); **365** needs pairing class and
+response profile (9J/9K); **369** needs the router (34-37). The migration adds
+`launch_profile` and `backend_resource` only — `model` and `wire_protocol`
+would be columns nothing writes until 9F, which is the speculative
+infrastructure Phase 21H tells us not to build.
 
 Still blocked, unchanged:
 
+- **Phase 8 line 9 (Codex compaction)** — needs Phase 30's compaction counter.
+  Do not fake it with a log line.
+- **Phase 9 (Antigravity), all seven lines** — needs the user to run `agy` once
+  and sign in. Their credential, their action. **Worth asking for: it is a
+  one-minute action that unblocks a whole phase.**
 - Phase 1 line 92 and Phase 3's memory view — Phase 20's memory table.
 - Three Phase 4 lines — unfocused `send_text`, `interrupt`, headless sessions.
 - Eleven Phase 2D lines — Providers, Launch Profiles, Routing, Memory sections.
-- Real minimum harness versions.
+  Launch Profiles unblocks with Phase 9A.
 - Phase 2C onboarding — product decisions that need the user.
 - Phase 6's communication-style line — needs one verified in-place mechanism.
+- Pi's approval modes — needs `~/.hermes/node/bin` on `PATH`.
 
 ## Active worker tasks and results
 
-**One worker, and delegation was the point.** GH-P08-SESSIONID went to a
-Sonnet 5 implementer running as `claude --model sonnet` in a visible cmux
-surface, in its own worktree (`sonnet/codex-session-id`), against a task packet
-carrying the evidence table, the settled design, the expected and forbidden
-files, and ten named acceptance tests. It produced roughly 660 lines across
-seven files.
+**One worker, GH-P09A-APPROVALS**, a Sonnet 5 implementer running as
+`claude --model sonnet` in a visible cmux pane ("Glasshouse workers"), in its
+own worktree (`sonnet/approval-argv`), against a packet carrying the verified
+argv table, the expected and forbidden files, and five named acceptance tests.
+Roughly 290 lines across eight files.
 
-What it got right, and what needed a second pass:
+What it got right, and what the orchestrator still had to do:
 
-- It implemented the design as specified and did not redesign it.
-- **It corrected the packet on one point and was right**: the consistency test
-  between `session_id_source` and `SessionIds::Discoverable` has to be
-  one-directional, because four adapters legitimately declare `Discoverable`
-  with no reader built yet. Verified before accepting.
-- It **named the coverage gap it could not close** — its first end-to-end test
-  covered only the `main.rs` call site — rather than hiding it. That is the
-  behaviour the packet asked for and got.
-- Review sent back two things: an adapter importing `crate::session` (a new,
-  wrong-way dependency), and the missing shell-loop test. Both were fixed.
-
-The orchestrator wrote the design decision, ran every gate independently, ran
-all eight mutations, checked the box, and made the commit. The worker committed
-nothing and touched no project record.
-
-Practical notes for the next session, beyond the routing rules: a worker's
-report file appears *before* it stops working, so gate review on the pane going
-idle and diff a frozen tree. `cmux send` **replaces** the composer buffer
-rather than appending to it. And launching a `--dangerously-skip-permissions`
-session from inside an auto-mode Claude Code session is blocked by the
-classifier — the plain launch inherits auto mode anyway, which was enough.
+- It implemented the specified design and did not redesign it, and it left
+  `pi.rs` untouched **and said so with a reason** — `ApprovalModes::UNVERIFIED`
+  is generic over the new field types, so no edit was needed.
+- **It corrected the packet on one point and was right.** Acceptance test 4 as
+  written asked it to assert `automatic_review != bypass` for four harnesses
+  including Pi, whose whole `ApprovalModes` is `UNVERIFIED` — so both sides are
+  `None` and a literal `assert_ne!` would have failed on `None == None`. It
+  implemented the anti-substitution property and skipped the vacuous
+  comparison, flagging it rather than silently choosing. Verified before
+  accepting. That is the second session running in which a worker was right
+  against its packet.
+- **It flagged, rather than invented, missing evidence**: Cursor's sandbox
+  values were in the packet's table but not in the pre-existing evidence
+  string. The orchestrator had read them from `cursor-agent --help` that day
+  and corrected the citation.
+- The orchestrator ran every gate independently on a frozen tree, ran all five
+  mutations, ran the binary (which found the doubled-backtick rendering), made
+  the design decision, wrote the records, and made the commit. The worker
+  committed nothing and touched no project record.
 
 ## Commands run and outcome
 
-- `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
-  --all-features -- -D warnings`, `cargo test --workspace --all-features`
-  (399 lib + 2 bin + 52 PTY smoke + 4 settings = **457**), `git diff --check`
-  — all pass, run by the orchestrator on the frozen tree, not taken from the
-  worker's report.
-- `rustup run 1.85.0 cargo check --locked --workspace --all-targets` — passes.
+All run by the orchestrator on the frozen tree, not taken from the worker's
+report:
+
+- `cargo fmt --all -- --check` — pass.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` —
+  zero diagnostics.
+- `cargo test --workspace --all-features` — **478 passing, 0 failing**
+  (417 lib + 4 bin + 53 PTY + 4 settings), against a 474 baseline measured on
+  `main` at the start of the session. The four new tests are the acceptance
+  tests plus the backtick guard.
+- `rustup run 1.85.0 cargo check --locked --workspace --all-targets` — pass.
 - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` — **23**
   diagnostics, exactly the recorded baseline. None added.
-- Both new PTY tests confirmed to *execute* on this platform by listing and
-  running them by name, not inferred from an aggregate green.
-- Eight mutations, eight kills (see the session record above).
-- Real-binary probes, none costing a model turn: all 555 rollout headers
-  parsed and tabulated; `codex --help`, `codex resume --help`; bare `codex`
-  started and killed under an isolated `CODEX_HOME` (no `sessions/` created);
-  `CODEX_HOME` relocation confirmed; `--strict-config` probed and recorded as
-  unable to answer the hooks question.
+- `git diff --check` — pass.
+- Five mutations, five kills, each verdict read from the **named test's own
+  result line**.
+- Real-binary probes, none costing a model turn: `claude --permission-mode
+  auto` (accepted) and `--permission-mode bogus` (rejected, listing `auto`);
+  `codex --approve-for-me` through the cmux shim (accepted) and an invalid
+  variant (rejected, suggesting the real flag); `agy --help` and
+  `cursor-agent --help` re-read for sandbox shapes; `glasshouse doctor` built
+  and run, and its approvals rows read line by line.
 
 ## Next exact step
 
@@ -1161,24 +1175,22 @@ Hand this checkpoint to Opus:
 > usage-window watches, which do not survive a session. Pushing to run CI is
 > standing authorization.
 >
-> **Phase 8 line 3, resuming a Codex session, is next**, and the code for it
-> already exists — what it needs is evidence from the real binary. See "Where
-> to go next".
+> **Phase 9A is next and its packet is written**: see "Where to go next" for
+> the settled design, and the packet itself in the scratchpad reference in
+> `.agent-runtime/CONTINUATION.md`. Delegate it; do not implement it inline.
 >
 > The habits that earned this session's results:
 >
-> - **Read the whole corpus, not one example.** The rule for identifying a
->   Codex session came from all 555 rollout files; the two facts that mattered
->   — subagents outnumbering real sessions 171 to 70, and `session_id` missing
->   from 28 — are both invisible in any single file, and the previous
->   session's plan would have shipped on the strength of one.
-> - **Delegate the implementation, keep the design and the evidence.** That
->   worked: a Sonnet worker in a visible cmux pane produced ~660 lines against
->   a settled packet, and the orchestrator's context stayed well under half.
-> - **Never path-wide `git checkout` in a worker's worktree.** Workers do not
->   commit, so their whole contribution is uncommitted, and a restore aimed at
->   one mutated line took out five files.
-> - **A mutation harness needs its own verification.** The first one reported
->   "survived" for every mutation because it read the wrong result line.
-> - **Verify the worker's gates yourself, on a frozen tree.** The report was
->   written while the worker was still editing.
+> - **Check a declaration against the use, not the claim.** Three of seven
+>   approval declarations were true statements that could not be used for the
+>   thing about to consume them. Two minutes of `--help` beat any amount of
+>   reading the type.
+> - **Run the binary.** It caught two rendering defects that compiled, passed
+>   clippy, and passed a full suite.
+> - **Read the named test's own result line.** A mutation verdict inferred from
+>   a shell exit code is how the previous session's harness reported "survived"
+>   for everything.
+> - **Gate review on the pane going idle**, then verify every gate yourself on
+>   a frozen tree. The worker's own run was honest here, and it still missed
+>   nothing only because it was re-run independently.
+> - **Run the suite with `< /dev/null`** — see the hook-stdin loose end.

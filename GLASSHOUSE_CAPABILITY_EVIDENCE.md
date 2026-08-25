@@ -104,11 +104,78 @@ Platform/external evidence:
 - `glasshouse doctor` run from the built binary and its output read, which is
   how the "no automatic review" overstatement was caught before it shipped.
 
+### Correction, later the same day: the declaration now carries argv
+
+Everything above is still true about *which* mode each harness has. One
+citation was wrong in a way that only mattered once something tried to **use**
+a declaration, which Phase 9A does.
+
+`ApprovalModes` stored one human-readable string per mode, and three of the
+seven could not be used as launch arguments at all:
+
+- **Claude Code declared `auto-mode`.** That is a *subcommand* — "Inspect or
+  reset auto mode classifier configuration". Appending it to a launch would
+  have run the subcommand instead of starting a session. The flag that selects
+  the mode **for a session** is `--permission-mode auto`, one of six choices
+  (`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`).
+- **Codex and Cursor declared their sandbox as usage strings** —
+  `-s/--sandbox <read-only|workspace-write|danger-full-access>` and
+  `--sandbox <mode>` — carrying placeholders no process can receive.
+
+A mode is now `ApprovalMode { args, description }` and the sandbox a
+`SandboxSelector { flag, values }`. `args` is the exact argv; `description` is
+the harness's own wording. Both stay, because conflating them is what produced
+an unlaunchable declaration. `HarnessAdapter::approval_args` reads them and
+answers `None` — never a substitute — for a mode a harness lacks.
+
+Production evidence:
+- `harness/mod.rs: ApprovalMode`, `SandboxSelector`, `ApprovalKind`,
+  `HarnessAdapter::approval_args`.
+- `integrations/mod.rs: write_adapter_report` renders the description **and**
+  the argv.
+
+Regression evidence:
+- `each_adapter_declares_the_approval_mode_its_binary_documents` — now pins the
+  **argv**, harness by harness, rather than a description.
+- `claude_code_selects_auto_mode_with_a_session_flag_not_the_subcommand` —
+  fails if `auto-mode` reappears in the selecting argv.
+- `no_approval_argument_is_a_usage_string_rather_than_an_argv_entry` — fails on
+  any element containing a space, `<`, `>` or `|`. This is the check that would
+  have caught the sandbox usage strings being handed to a process.
+- `a_harness_without_automatic_review_offers_no_substitute` —
+  `approval_args(AutomaticReview)` is `None` for OpenCode, Hermes, Antigravity
+  and Pi, and never silently that harness's bypass argv.
+- `no_approval_description_contains_a_backtick` — the report wraps descriptions
+  in backticks, so one carrying its own renders doubled.
+
+Non-vacuity: **five mutations, five kills** — Claude Code's argv reverted to
+the subcommand (killing two separate tests), an argv turned back into a usage
+string, `approval_args` made to fall back to the bypass when review is
+unverified, and a description given a backtick again.
+
+Platform/external evidence:
+- `claude --permission-mode auto` accepted, `--permission-mode bogus` rejected
+  with the allowed list naming `auto` — Claude Code 2.1.245, 2026-08-25.
+- `codex --approve-for-me` accepted **through the cmux PATH shim**, with an
+  invalid variant erroring and suggesting the real flag. That also settles the
+  recorded worry about whether the wrapper would swallow a flag Glasshouse
+  adds — it does not.
+- `glasshouse doctor` run from the built binary, which caught two rendering
+  defects the types could not: Claude Code's and Cursor's descriptions
+  contained backticks and printed doubled inside the backticks the report adds.
+
+**This is the third declaration derived from an artifact that did not serve
+the purpose it was cited for**, after Antigravity's executable name and
+Codex's snake_case hook-event spellings. The rule the pattern earns: *before a
+declaration is used, check that its evidence supports the use, not merely the
+claim.*
+
 Missing evidence:
 - Pi's approval modes. Needs `~/.hermes/node/bin` on `PATH`, or a configured
   explicit executable path.
-- Selecting a mode is Phase 9A, and unimplemented. This line is the declaration
-  half only.
+- Selecting a mode at launch is Phase 9A, and unimplemented. This line remains
+  the declaration half — but the declaration is now *launchable*, which is what
+  the selection half needs.
 
 ### Phase 9 — the Antigravity adapter (probed, and blocked on authentication)
 

@@ -5,8 +5,8 @@
 //! type definitions its own plugin package ships.
 
 use super::{
-    ApprovalModes, BackendSelection, Backends, Capabilities, Declared, HarnessAdapter,
-    HarnessDescription, Hooks, Invocation, ModelOverride, SessionIds, Vendor,
+    ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, Declared,
+    HarnessAdapter, HarnessDescription, Hooks, Invocation, ModelOverride, SessionIds, Vendor,
 };
 use crate::integrations::IntegrationId;
 
@@ -117,7 +117,11 @@ impl HarnessAdapter for OpenCode {
                 // OpenCode's `--help` documents no classifier-style mode.
                 automatic_review: Declared::Unverified,
                 bypass: Declared::verified(
-                    "--auto",
+                    ApprovalMode {
+                        args: &["--auto"],
+                        description: "auto-approve permissions that are not explicitly denied \
+                                       (dangerous!)",
+                    },
                     "`opencode --help`: `--auto` — \"auto-approve permissions that are not \
                      explicitly denied (dangerous!)\". This is approve-unless-denied, not \
                      review, so it is recorded as a bypass and never as automatic review",

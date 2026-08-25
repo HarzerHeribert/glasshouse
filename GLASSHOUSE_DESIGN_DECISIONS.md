@@ -699,6 +699,94 @@ exactly why nobody read it.
 
 ---
 
+## An approval declaration has to carry argv, not prose about argv
+
+### The conflict
+
+The decision above says a launch profile *selects* a harness's approval mode.
+Selecting one means putting arguments on a command line, and `ApprovalModes`
+stored a single human-readable string per mode. Three of the seven values
+could not be used that way at all:
+
+- **Claude Code declared `auto-mode`.** That is a *subcommand* — "Inspect or
+  reset auto mode classifier configuration". Appending it to a launch would
+  have run the subcommand instead of starting a session. The thing that selects
+  the mode **for a session** is `--permission-mode auto`, one of six choices
+  (`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`).
+- **Codex and Cursor declared their sandbox as usage strings** —
+  `-s/--sandbox <read-only|workspace-write|danger-full-access>` and
+  `--sandbox <mode>` — with placeholders no process can receive.
+
+The declaration was not *false*. `auto-mode` is real, and Claude Code really
+does have a classifier. It was cited for a purpose it does not serve, and that
+only became visible when something tried to use it.
+
+### The decision: two fields, and never one
+
+```rust
+pub struct ApprovalMode {
+    pub args: &'static [&'static str],   // exactly what selects the mode
+    pub description: &'static str,       // what the harness's docs call it
+}
+
+pub struct SandboxSelector {
+    pub flag: &'static str,
+    pub values: &'static [&'static str], // empty means a boolean switch
+}
+```
+
+`description` is for a human reading `glasshouse doctor`; `args` is what
+reaches the process. Keeping them apart is the whole decision — collapsing
+them back into one field is how the defect happened, and a future tidy-up that
+"simplifies" this is reintroducing it.
+
+`values` being empty is load-bearing rather than a default: Antigravity's
+`--sandbox` is a boolean switch, while Codex's and Cursor's take a value from a
+fixed set. A caller that appends a value to the first, or omits one from the
+others, produces an invocation the harness rejects.
+
+`HarnessAdapter::approval_args` answers `None` for a mode a harness lacks.
+`None` means "this harness cannot be launched that way", never "launch it some
+other way" — a bypass standing in for automatic review is exactly the silent
+downgrade the previous decision forbids, so the fail-closed answer lives in the
+accessor rather than in every caller's discipline.
+
+### Why the diagnostic shows both halves
+
+`glasshouse doctor` renders the description *and* the argv:
+
+    approvals: auto review `auto permission mode for the session`
+               (--permission-mode auto); bypass `Bypass all permission checks`
+               (--dangerously-skip-permissions)
+
+A diagnostic that showed only prose would hide the half that actually reaches
+the process — and this row previously named a subcommand that could never have
+started a session. Showing the arguments is what lets a reader notice that.
+
+### The third time, and the rule it earns
+
+Antigravity's executable name was read from documentation rather than an
+install. Codex's hook event names were read from trust-record keys rather than
+its hook review screen. Now Claude Code's approval mode was read from a
+subcommand listing rather than the session flag.
+
+Each was a real artifact, cited for a purpose it did not serve. The rule:
+**before a declaration is used, check that its evidence supports the use, not
+merely the claim.** A declaration nobody consumes is never wrong in a way
+anyone notices.
+
+### Invariants a test must hold to
+
+1. No approval argument is a usage string: no element contains a space, `<`,
+   `>` or `|`.
+2. Claude Code's automatic review is `--permission-mode auto`, never the
+   `auto-mode` subcommand.
+3. A harness without automatic review returns `None`, never its bypass argv.
+4. No description contains a backtick, because the report wraps descriptions in
+   backticks and one carrying its own renders doubled.
+
+---
+
 ## Codex lifecycle hooks — a second destination, and a payload not to read
 
 ### The conflict

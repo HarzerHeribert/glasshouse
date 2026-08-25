@@ -5,8 +5,9 @@
 //! installed it.
 
 use super::{
-    ApprovalModes, BackendSelection, Backends, Capabilities, Declared, HarnessAdapter,
-    HarnessDescription, Invocation, ModelOverride, SessionIds, Vendor,
+    ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, Declared,
+    HarnessAdapter, HarnessDescription, Invocation, ModelOverride, SandboxSelector, SessionIds,
+    Vendor,
 };
 use crate::integrations::IntegrationId;
 
@@ -103,19 +104,30 @@ impl HarnessAdapter for Cursor {
             },
             approvals: ApprovalModes {
                 automatic_review: Declared::verified(
-                    "--auto-review",
+                    ApprovalMode {
+                        args: &["--auto-review"],
+                        description: "Use Auto-review (Smart Auto): a server classifier \
+                                       auto-runs safe tool calls and prompts for the rest",
+                    },
                     "`cursor-agent --help`: `--auto-review` — \"Use Auto-review (Smart Auto): \
                      a server classifier auto-runs safe tool calls and prompts for the rest\"",
                 ),
                 bypass: Declared::verified(
-                    "--yolo",
+                    ApprovalMode {
+                        args: &["--yolo"],
+                        description: "Run Everything: force-allow commands unless \
+                                       explicitly denied",
+                    },
                     "`cursor-agent --help`: `--yolo`, documented as an alias for `--force` \
                      (Run Everything)",
                 ),
                 sandbox: Declared::verified(
-                    "--sandbox <mode>",
+                    SandboxSelector {
+                        flag: "--sandbox",
+                        values: &["enabled", "disabled"],
+                    },
                     "`cursor-agent --help`: `--sandbox <mode>` — \"Explicitly enable or disable \
-                     sandbox mode\"",
+                     sandbox mode (overrides config)\", choices \"enabled\", \"disabled\"",
                 ),
             },
             communication_style: Declared::Unverified,

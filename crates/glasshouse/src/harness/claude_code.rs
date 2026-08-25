@@ -6,9 +6,9 @@
 //! recalled.
 
 use super::{
-    ApprovalModes, BackendSelection, Backends, Capabilities, CommunicationStyle, Declared,
-    HarnessAdapter, HarnessDescription, HookCommand, HookDestination, HookInstallation, Hooks,
-    Invocation, ModelOverride, SessionIds, StyleChange, Vendor, WireProtocol,
+    ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, CommunicationStyle,
+    Declared, HarnessAdapter, HarnessDescription, HookCommand, HookDestination, HookInstallation,
+    Hooks, Invocation, ModelOverride, SessionIds, StyleChange, Vendor, WireProtocol,
 };
 use crate::integrations::IntegrationId;
 
@@ -200,12 +200,20 @@ impl HarnessAdapter for ClaudeCode {
             },
             approvals: ApprovalModes {
                 automatic_review: Declared::verified(
-                    "auto-mode",
-                    "`claude --help` lists an `auto-mode` subcommand: \"Inspect or reset auto \
-                     mode classifier\"",
+                    ApprovalMode {
+                        args: &["--permission-mode", "auto"],
+                        description: "auto permission mode for the session",
+                    },
+                    "`claude --help`: `--permission-mode <mode>` — \"Permission mode to use for \
+                     the session\", choices \"acceptEdits\", \"auto\", \"bypassPermissions\", \
+                     \"manual\", \"dontAsk\", \"plan\". The `auto-mode` subcommand inspects the \
+                     classifier configuration and does not select the mode for a session.",
                 ),
                 bypass: Declared::verified(
-                    "--dangerously-skip-permissions",
+                    ApprovalMode {
+                        args: &["--dangerously-skip-permissions"],
+                        description: "Bypass all permission checks",
+                    },
                     "`claude --help`: `--dangerously-skip-permissions` — \"Bypass all \
                      permission checks\"; the same effect is also reachable with \
                      `--permission-mode bypassPermissions`",

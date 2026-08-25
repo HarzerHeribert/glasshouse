@@ -6,10 +6,10 @@
 //! rollouts it writes.
 
 use super::{
-    ApprovalModes, BackendSelection, Backends, Capabilities, Declared, HarnessAdapter,
-    HarnessDescription, HookCommand, HookDestination, HookInstallation, Hooks, Invocation,
-    ModelOverride, NativeSessionKind, NativeSessionRecord, NativeSessionSource, SessionIds, Vendor,
-    WireProtocol,
+    ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, Declared,
+    HarnessAdapter, HarnessDescription, HookCommand, HookDestination, HookInstallation, Hooks,
+    Invocation, ModelOverride, NativeSessionKind, NativeSessionRecord, NativeSessionSource,
+    SandboxSelector, SessionIds, Vendor, WireProtocol,
 };
 use crate::integrations::IntegrationId;
 
@@ -267,19 +267,30 @@ impl HarnessAdapter for Codex {
             },
             approvals: ApprovalModes {
                 automatic_review: Declared::verified(
-                    "--approve-for-me",
+                    ApprovalMode {
+                        args: &["--approve-for-me"],
+                        description: "Route approval requests through automatic review using \
+                                       the workspace-write sandbox",
+                    },
                     "`codex --help`: `--approve-for-me` — \"Route approval requests through \
                      automatic review using the workspace-write sandbox\"",
                 ),
                 bypass: Declared::verified(
-                    "--dangerously-bypass-approvals-and-sandbox",
+                    ApprovalMode {
+                        args: &["--dangerously-bypass-approvals-and-sandbox"],
+                        description: "Skip all confirmation prompts and execute commands \
+                                       without sandboxing. EXTREMELY DANGEROUS",
+                    },
                     "`codex --help`: `--dangerously-bypass-approvals-and-sandbox` — \"Skip all \
                      confirmation prompts and execute commands without sandboxing. EXTREMELY \
                      DANGEROUS\"; `-a never` (`--ask-for-approval <on-request|never>`) reaches \
                      the same effect",
                 ),
                 sandbox: Declared::verified(
-                    "-s/--sandbox <read-only|workspace-write|danger-full-access>",
+                    SandboxSelector {
+                        flag: "--sandbox",
+                        values: &["read-only", "workspace-write", "danger-full-access"],
+                    },
                     "`codex --help`: `-s/--sandbox <read-only|workspace-write|danger-full-access>` \
                      selects the sandbox policy for model-generated shell commands",
                 ),

@@ -4,8 +4,8 @@
 //! 2026-08-25 — `hermes --help`, `hermes hooks --help`, and `hermes version`.
 
 use super::{
-    ApprovalModes, BackendSelection, Backends, Capabilities, Declared, HarnessAdapter,
-    HarnessDescription, Hooks, Invocation, ModelOverride, SessionIds, Vendor,
+    ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, Declared,
+    HarnessAdapter, HarnessDescription, Hooks, Invocation, ModelOverride, SessionIds, Vendor,
 };
 use crate::integrations::IntegrationId;
 
@@ -123,7 +123,10 @@ impl HarnessAdapter for Hermes {
                 // Hermes's `--help` documents no classifier-style mode.
                 automatic_review: Declared::Unverified,
                 bypass: Declared::verified(
-                    "--yolo",
+                    ApprovalMode {
+                        args: &["--yolo"],
+                        description: "Bypass all dangerous command approval prompts",
+                    },
                     "`hermes --help`: `--yolo` — \"Bypass all dangerous command approval \
                      prompts\"",
                 ),

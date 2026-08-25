@@ -382,6 +382,37 @@ pub enum StyleChange {
     NewSession,
 }
 
+/// One approval mode, as the harness's own launch interface exposes it.
+///
+/// Two fields because they answer different questions, and conflating them
+/// caused a real defect: `description` is what the harness's documentation
+/// says, for a human reading `glasshouse doctor`; `args` is what actually
+/// selects the mode on a launch. Claude Code is why they cannot be one field —
+/// its classifier is inspected by an `auto-mode` *subcommand*, which an earlier
+/// declaration cited, while the thing that selects the mode for a session is
+/// `--permission-mode auto`. Appending the subcommand to a launch would not
+/// have started a session at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApprovalMode {
+    /// The exact argv that selects this mode, in order.
+    pub args: &'static [&'static str],
+    /// How the harness's own documentation describes the mode.
+    pub description: &'static str,
+}
+
+/// A harness's sandbox selector.
+///
+/// `values` is empty when the flag is a boolean switch that takes no value —
+/// Antigravity's `--sandbox` ("Run in a sandbox with terminal restrictions
+/// enabled") is one, while Codex's and Cursor's both take a value from a fixed
+/// set. A caller that appends a value to a valueless flag, or omits one from a
+/// flag that requires it, produces an invocation the harness rejects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SandboxSelector {
+    pub flag: &'static str,
+    pub values: &'static [&'static str],
+}
+
 /// How a harness decides whether a tool call may run.
 ///
 /// `automatic_review` is the one that matters: a mode where the harness
@@ -391,11 +422,11 @@ pub enum StyleChange {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApprovalModes {
     /// A native mode that classifies rather than prompts.
-    pub automatic_review: Declared<&'static str>,
+    pub automatic_review: Declared<ApprovalMode>,
     /// A mode that skips checks entirely.
-    pub bypass: Declared<&'static str>,
+    pub bypass: Declared<ApprovalMode>,
     /// A sandbox policy selector, where the harness has one.
-    pub sandbox: Declared<&'static str>,
+    pub sandbox: Declared<SandboxSelector>,
 }
 
 impl ApprovalModes {
@@ -410,6 +441,18 @@ impl ApprovalModes {
     pub fn has_automatic_review(&self) -> bool {
         self.automatic_review.is_verified()
     }
+}
+
+/// Which of a harness's two approval axes [`HarnessAdapter::approval_args`]
+/// is being asked for.
+///
+/// Sandbox is deliberately not a variant here: it takes a value and is a
+/// separate axis from "does this tool call need to be asked about at all",
+/// so it gets its own accessor later rather than a third variant of this one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalKind {
+    AutomaticReview,
+    Bypass,
 }
 
 /// Everything an adapter declares about its harness.
@@ -795,6 +838,22 @@ pub trait HarnessAdapter: std::fmt::Debug + Send + Sync {
     /// Everything this adapter declares about its harness.
     fn describe(&self) -> HarnessDescription;
 
+    /// The arguments that select `mode` on this harness, or `None` when this
+    /// harness declares no such mode.
+    ///
+    /// `None` is the fail-closed answer a caller needs: it means "this harness
+    /// cannot be launched that way", never "launch it some other way". Callers
+    /// must not substitute a different mode for a `None` — a bypass standing in
+    /// for automatic review is exactly the silent downgrade the design forbids.
+    fn approval_args(&self, mode: ApprovalKind) -> Option<Vec<&'static str>> {
+        let approvals = self.describe().approvals;
+        let declared = match mode {
+            ApprovalKind::AutomaticReview => approvals.automatic_review,
+            ApprovalKind::Bypass => approvals.bypass,
+        };
+        declared.value().map(|mode| mode.args.to_vec())
+    }
+
     /// Bytes that deliver `text` to a running session of this harness.
     fn message(&self, text: &str) -> Message {
         Message::typed(text)
@@ -1015,8 +1074,9 @@ mod tests {
         // The property worth holding is not how a declaration is *worded*, it
         // is *which mode each harness actually has*. Three do; four do not,
         // and one of those four could not be read at all. Pinning the table
-        // makes both halves unfoolable.
-        let table: Vec<(IntegrationId, Option<&'static str>)> = all()
+        // — now the argv itself, not just a description — makes both halves
+        // unfoolable.
+        let table: Vec<(IntegrationId, Option<&'static [&'static str]>)> = all()
             .map(|adapter| {
                 (
                     adapter.id(),
@@ -1025,7 +1085,7 @@ mod tests {
                         .approvals
                         .automatic_review
                         .value()
-                        .copied(),
+                        .map(|mode| mode.args),
                 )
             })
             .collect();
@@ -1033,11 +1093,14 @@ mod tests {
         assert_eq!(
             table,
             vec![
-                (IntegrationId::ClaudeCode, Some("auto-mode")),
-                (IntegrationId::Codex, Some("--approve-for-me")),
+                (
+                    IntegrationId::ClaudeCode,
+                    Some(&["--permission-mode", "auto"][..])
+                ),
+                (IntegrationId::Codex, Some(&["--approve-for-me"][..])),
                 (IntegrationId::Antigravity, None),
                 (IntegrationId::OpenCode, None),
-                (IntegrationId::Cursor, Some("--auto-review")),
+                (IntegrationId::Cursor, Some(&["--auto-review"][..])),
                 (IntegrationId::Pi, None),
                 (IntegrationId::Hermes, None),
             ],
@@ -1045,6 +1108,122 @@ mod tests {
              really gained or lost one, read it from the binary and update this \
              table with the evidence"
         );
+    }
+
+    #[test]
+    fn claude_code_selects_auto_mode_with_a_session_flag_not_the_subcommand() {
+        // `auto-mode` is a Claude Code *subcommand* — "Inspect or reset auto
+        // mode classifier configuration" — and appending it to a launch would
+        // run that subcommand instead of starting a session. The flag that
+        // actually selects the mode for a session is `--permission-mode auto`.
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let mode = adapter
+            .describe()
+            .approvals
+            .automatic_review
+            .value()
+            .copied()
+            .expect("Claude Code declares automatic review");
+        assert_eq!(mode.args, &["--permission-mode", "auto"]);
+        assert!(
+            !mode.args.contains(&"auto-mode"),
+            "`auto-mode` is a subcommand that inspects the classifier's \
+             configuration; it does not start a session, so it must never \
+             appear in the argv that selects automatic review"
+        );
+    }
+
+    #[test]
+    fn no_approval_description_contains_a_backtick() {
+        // `glasshouse doctor` renders each description already wrapped in
+        // backticks, so a description carrying one of its own produces a
+        // doubled, broken row: `auto review ``--permission-mode auto` — ...`
+        // was exactly what the binary printed before this test existed. Found
+        // by running the binary, which is the only way this class of defect
+        // ever shows up — the types are all perfectly well-formed.
+        for adapter in all() {
+            let described = adapter.describe();
+            for (label, declared) in [
+                ("automatic_review", described.approvals.automatic_review),
+                ("bypass", described.approvals.bypass),
+            ] {
+                let Some(mode) = declared.value() else {
+                    continue;
+                };
+                assert!(
+                    !mode.description.contains('`'),
+                    "{} {label} description {:?} contains a backtick; the doctor \
+                     report wraps descriptions in backticks, so this renders doubled",
+                    mode.description,
+                    adapter.id().slug()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_approval_argument_is_a_usage_string_rather_than_an_argv_entry() {
+        // This is the check that would have caught `-s/--sandbox
+        // <read-only|...>` being handed to a process as one argument: a usage
+        // string with a placeholder is not an argv entry, and a space inside
+        // one element means it was never meant to be passed as one.
+        for adapter in all() {
+            let described = adapter.describe();
+            for (label, declared) in [
+                ("automatic_review", described.approvals.automatic_review),
+                ("bypass", described.approvals.bypass),
+            ] {
+                let Some(mode) = declared.value() else {
+                    continue;
+                };
+                for arg in mode.args {
+                    assert!(
+                        !arg.contains(' ')
+                            && !arg.contains('<')
+                            && !arg.contains('>')
+                            && !arg.contains('|'),
+                        "{} {label} argument {arg:?} looks like a usage string, not an argv entry",
+                        adapter.id().slug()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_harness_without_automatic_review_offers_no_substitute() {
+        // OpenCode, Hermes and Antigravity each declare a bypass alongside
+        // their unverified automatic review; for those three, `approval_args`
+        // must not silently hand back the bypass argv when automatic review is
+        // asked for. Pi declares neither (its whole `ApprovalModes` is
+        // `UNVERIFIED`), so there is nothing to substitute in the first place
+        // — the comparison is skipped rather than made vacuously against
+        // `None == None`.
+        for id in [
+            IntegrationId::OpenCode,
+            IntegrationId::Hermes,
+            IntegrationId::Antigravity,
+            IntegrationId::Pi,
+        ] {
+            let adapter = adapter_for(id).expect("a harness");
+            let automatic = adapter.approval_args(ApprovalKind::AutomaticReview);
+            assert_eq!(
+                automatic,
+                None,
+                "{} declares automatic review it should not have",
+                id.slug()
+            );
+            let bypass = adapter.approval_args(ApprovalKind::Bypass);
+            if bypass.is_some() {
+                assert_ne!(
+                    automatic,
+                    bypass,
+                    "{} must not substitute its bypass argv for a missing automatic \
+                     review mode",
+                    id.slug()
+                );
+            }
+        }
     }
 
     #[test]

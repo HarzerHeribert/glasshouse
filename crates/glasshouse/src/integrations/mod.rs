@@ -986,9 +986,18 @@ fn write_adapter_report(out: &mut String, adapter: &'static dyn crate::harness::
     // distinction is the entire point of `ApprovalModes`, so the two are
     // rendered with different vocabulary ("auto review" vs. "no automatic
     // review") rather than a shared label that could blur them together.
+    // Each mode is rendered as what the harness calls it *and* the argv that
+    // selects it. Showing only the prose would hide the half that actually
+    // reaches the process — and this row previously named Claude Code's
+    // `auto-mode` subcommand, which could never have started a session, so
+    // the concrete arguments are exactly what a reader needs to sanity-check.
+    fn render_mode(mode: &crate::harness::ApprovalMode) -> String {
+        format!("`{}` ({})", mode.description, mode.args.join(" "))
+    }
+
     let mut approval_parts = Vec::new();
     match described.approvals.automatic_review.value() {
-        Some(mode) => approval_parts.push(format!("auto review `{mode}`")),
+        Some(mode) => approval_parts.push(format!("auto review {}", render_mode(mode))),
         // Deliberately *not* "no automatic review". `Declared` has no way to
         // say "verified absent" for a mode name, so `Unverified` means nobody
         // established one — which is a different claim from the harness not
@@ -998,10 +1007,15 @@ fn write_adapter_report(out: &mut String, adapter: &'static dyn crate::harness::
         None => approval_parts.push("automatic review unverified".to_string()),
     }
     if let Some(bypass) = described.approvals.bypass.value() {
-        approval_parts.push(format!("bypass `{bypass}`"));
+        approval_parts.push(format!("bypass {}", render_mode(bypass)));
     }
     if let Some(sandbox) = described.approvals.sandbox.value() {
-        approval_parts.push(format!("sandbox `{sandbox}`"));
+        let rendered = if sandbox.values.is_empty() {
+            sandbox.flag.to_string()
+        } else {
+            format!("{} <{}>", sandbox.flag, sandbox.values.join("|"))
+        };
+        approval_parts.push(format!("sandbox `{rendered}`"));
     }
     let _ = writeln!(out, "      approvals:    {}", approval_parts.join("; "));
 
@@ -1619,7 +1633,16 @@ mod tests {
         assert!(row("resume:").contains("--resume"));
         assert!(row("session ids:").contains("--session-id"));
         assert!(row("hooks:").contains("settings"));
-        assert!(row("approvals:").contains("auto-mode"));
+        // Both halves: the argv that actually selects the mode, and the
+        // absence of the `auto-mode` subcommand this row used to name. That
+        // subcommand inspects the classifier's configuration and would not
+        // have started a session at all.
+        assert!(row("approvals:").contains("--permission-mode auto"));
+        assert!(
+            !row("approvals:").contains("auto-mode"),
+            "the approvals row must not name the `auto-mode` subcommand: {}",
+            row("approvals:")
+        );
         assert!(row("capabilities:").contains("MCP"));
         assert!(row("protocols:").contains("anthropic-messages"));
         assert!(row("model:").contains("--model"));
