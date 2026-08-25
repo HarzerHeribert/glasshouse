@@ -129,6 +129,29 @@ Stop Ox and promote the task when any of these occurs:
 Do not accumulate contradictory prompts in a confused context. Stop it, write a
 cleaner task packet, and restart at the appropriate model tier.
 
+## Leaf tier: a fast cheap model works here
+
+The leaf tier is not Ox-only. A fast, cheap, less capable model is exactly
+right for mechanically decidable work, and it was measured rather than
+assumed.
+
+Gemini 3.7 Flash, driven through the installed Antigravity CLI (`agy`), was
+given a bounded inventory task: read the capability map, quote every unchecked
+line matching a term list, group by phase, write one report. It returned
+**171 quotes, all 171 verbatim against the map, and none of them an
+already-checked line** — verified mechanically, not eyeballed.
+
+Use it for the same things as any other leaf worker: inventories, call-site
+searches, focused reruns, checklist reviews, settled documentation. Give it
+the same bounded packet, and **verify its output mechanically** — diff its
+quotes against the source rather than trusting the summary.
+
+Two operational notes. Antigravity declares no automatic-review mode, and its
+"always allow" matches on the exact command prefix, so it re-prompts for every
+new script; a leaf worker there needs `--dangerously-skip-permissions`, which
+the user has accepted for this use. And `--mode accept-edits` is required for
+it to write its own report.
+
 ## Risk routing
 
 ### Green: Ox
