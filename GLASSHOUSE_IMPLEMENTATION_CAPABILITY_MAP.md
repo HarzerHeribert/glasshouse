@@ -454,19 +454,19 @@ Fixed architectural requirements
 - Direct-provider and gateway-backed interactive sessions still run through a real installed coding harness.
 - Glasshouse configures the harness's backend but does not take ownership of its agent loop, tools, permissions, compaction, or native session semantics.
 
-☐ Support launching Claude Code directly against a configured Anthropic-compatible gateway by injecting the required child-process environment.
-☐ Support ANTHROPIC_BASE_URL injection for Claude Code launch profiles that use a compatible gateway.
-☐ Support provider authentication injection for Claude Code without modifying the user’s native Claude authentication.
-☐ Allow Claude launch profiles to override default model identifiers when a compatible gateway requires provider-specific model names.
-☐ Keep Claude gateway environment variables scoped to the Glasshouse-launched process.
-☐ Support Codex custom-provider launch profiles using Glasshouse-owned configuration when the configured provider supports the wire API required by Codex.
-☐ Avoid overwriting the user’s normal ~/.codex/config.toml to create a Glasshouse provider profile.
-☐ Generate an isolated Codex configuration or environment for Glasshouse-managed custom-provider sessions where supported.
+☑ Support launching Claude Code directly against a configured Anthropic-compatible gateway by injecting the required child-process environment.
+☑ Support ANTHROPIC_BASE_URL injection for Claude Code launch profiles that use a compatible gateway.
+☑ Support provider authentication injection for Claude Code without modifying the user’s native Claude authentication.
+☑ Allow Claude launch profiles to override default model identifiers when a compatible gateway requires provider-specific model names.
+☑ Keep Claude gateway environment variables scoped to the Glasshouse-launched process.
+☑ Support Codex custom-provider launch profiles using Glasshouse-owned configuration when the configured provider supports the wire API required by Codex.
+☑ Avoid overwriting the user’s normal ~/.codex/config.toml to create a Glasshouse provider profile.
+☑ Generate an isolated Codex configuration or environment for Glasshouse-managed custom-provider sessions where supported.
 ☐ Verify the selected harness, model, provider, and protocol combination before starting an interactive session when a cheap capability check is available.
 ☐ Require the selected coding harness executable to be installed and usable before offering an interactive direct-provider or gateway-backed launch profile.
-☐ Keep the real harness responsible for the agent loop, coding tools, permission flow, compaction, and native session semantics.
-☐ Treat environment variables, CLI overrides, and isolated generated configuration as adapter-specific ways to point that harness at the backend.
-☐ Fall back to a clear launch error rather than silently using the native paid provider when a requested gateway profile cannot be configured.
+☑ Keep the real harness responsible for the agent loop, coding tools, permission flow, compaction, and native session semantics.
+☑ Treat environment variables, CLI overrides, and isolated generated configuration as adapter-specific ways to point that harness at the backend.
+☑ Fall back to a clear launch error rather than silently using the native paid provider when a requested gateway profile cannot be configured.
 
 Phase 9G — Glasshouse local gateway process
 

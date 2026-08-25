@@ -5,10 +5,13 @@
 //! document it reads, and the session transcripts it writes. Nothing here is
 //! recalled.
 
+use std::ffi::OsString;
+
 use super::{
     ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, CommunicationStyle,
-    Declared, HarnessAdapter, HarnessDescription, HookCommand, HookDestination, HookInstallation,
-    Hooks, Invocation, ModelOverride, SessionIds, StyleChange, Vendor, WireProtocol,
+    CredentialPlacement, Declared, DirectProviderPlan, DirectProviderRequest, HarnessAdapter,
+    HarnessDescription, HookCommand, HookDestination, HookInstallation, Hooks, Invocation,
+    ModelOverride, SessionIds, StyleChange, Vendor, WireProtocol,
 };
 use crate::integrations::IntegrationId;
 
@@ -61,6 +64,40 @@ const MODEL_OVERRIDE: &[ModelOverride] = &[
     ModelOverride::CommandLine("--model"),
     ModelOverride::Configuration("the settings document's model key"),
 ];
+
+/// The root a Claude Code child reads its Anthropic endpoint from.
+///
+/// **The root, not an endpoint.** Claude Code 2.1.245 launched with
+/// `ANTHROPIC_BASE_URL=http://127.0.0.1:8731` was observed sending
+/// `POST /v1/messages?beta=true` to that host: the harness appends
+/// `/v1/messages` itself. A provider's declared base URL therefore goes
+/// through verbatim, with nothing appended and nothing stripped.
+const BASE_URL_ENV: &str = "ANTHROPIC_BASE_URL";
+
+/// The model identifier a Claude Code child uses.
+///
+/// Observed arriving as `"model":"probe-model-name"` in the request body. An
+/// identifier Claude Code does not recognise is a *warning*, not a failure —
+/// it assumes a 200k context window and proceeds — which is why a
+/// provider-specific model name is safe to pass through.
+const MODEL_ENV: &str = "ANTHROPIC_MODEL";
+
+/// Where a credential value has to be written for a Claude Code child to use
+/// it.
+///
+/// **Note the asymmetry, which is deliberate.** Claude Code fixes this
+/// variable name, so a provider's own declared variable is where the value is
+/// *read from* and this one is where it is *written to*; the two are rarely
+/// the same name and nothing may assume they are.
+///
+/// Observed on 2.1.245: `ANTHROPIC_AUTH_TOKEN=<value>` arrived as
+/// `authorization: Bearer <value>`, exactly the injected value, with no
+/// `x-api-key` header and **without** the user's own claude.ai credential.
+/// Claude Code said so itself — "claude.ai connectors are disabled because
+/// ANTHROPIC_API_KEY or another auth source is set and takes precedence over
+/// your claude.ai login" — so the injected token wins for that one child
+/// while the user's native login is untouched on disk.
+const CREDENTIAL_ENV: &str = "ANTHROPIC_AUTH_TOKEN";
 
 const BACKEND_SELECTION: &[BackendSelection] = &[
     BackendSelection::ChildEnvironment(
@@ -119,6 +156,54 @@ impl HarnessAdapter for ClaudeCode {
         // identifier, so assigning it is also what lets Glasshouse find the
         // transcript of a session it started.
         Some(Invocation::of(["--session-id", native_session]))
+    }
+
+    /// Three environment variables on one child process, and no arguments at
+    /// all — the mechanism `BACKEND_SELECTION` already declares as
+    /// [`BackendSelection::ChildEnvironment`].
+    ///
+    /// Nothing here writes to `~/.claude` or to any settings document: the
+    /// overlay this plan becomes reaches exactly one process's environment
+    /// and dies with it.
+    fn direct_provider_launch(
+        &self,
+        request: &DirectProviderRequest<'_>,
+    ) -> Option<DirectProviderPlan> {
+        // Claude Code is Anthropic's own client and speaks only the Anthropic
+        // Messages API. A provider serving something else is not something to
+        // translate for — see `crate::provider::translation_available`.
+        if request.protocol != WireProtocol::AnthropicMessages {
+            return None;
+        }
+
+        let mut env = vec![(
+            OsString::from(BASE_URL_ENV),
+            OsString::from(request.base_url),
+        )];
+        let mut names = vec![BASE_URL_ENV];
+
+        if let Some(model) = request.model {
+            env.push((OsString::from(MODEL_ENV), OsString::from(model)));
+            names.push(MODEL_ENV);
+        }
+
+        // A name in, a *destination* out. The provider's own variable name is
+        // where the value is read from; this is where it is written to.
+        let credential = request
+            .credential_var
+            .map(|_| CredentialPlacement::Environment(CREDENTIAL_ENV.to_owned()));
+        if credential.is_some() {
+            names.push(CREDENTIAL_ENV);
+        }
+
+        Some(DirectProviderPlan {
+            args: Vec::new(),
+            env,
+            credential,
+            // Variable names only. The value that fills `CREDENTIAL_ENV` is
+            // never in this string, and never in this type.
+            mechanism: format!("child environment: {}", names.join(", ")),
+        })
     }
 
     fn resume(&self, native_session: &str) -> Option<Invocation> {

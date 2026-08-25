@@ -38,11 +38,14 @@
 //!   guarantee than enumerating the files it must avoid — the same argument
 //!   `harness::resolving_a_launch_profile_touches_no_files` makes for
 //!   [`mod@crate::profile`].
-//! - **It is not wired into a launch path.** Nothing here touches
-//!   [`mod@crate::profile`], [`crate::launch::HarnessLaunch`] or
-//!   [`mod@crate::config`]. A launch profile that can carry a credential is
-//!   Phase 9F's design to make; building the plumbing before that design
-//!   exists would be a guess wearing the costume of progress.
+//! - **It reaches a launch path through exactly one call site.**
+//!   [`crate::profile::resolve`] is the only thing in Glasshouse that calls
+//!   [`SecretStore::resolve`] for a launch: it mints one [`Secret`], moves it
+//!   into the launch overlay's environment for one child process, and drops
+//!   it. Nothing here reaches back into [`mod@crate::profile`],
+//!   [`crate::launch::HarnessLaunch`] or [`mod@crate::config`] — the
+//!   dependency points one way, and a harness adapter is handed variable
+//!   *names* rather than a [`Secret`], so it has nothing to leak.
 //! - **It ships no native OS-backed store.** The macOS Keychain, Windows
 //!   Credential Manager and Secret Service each need a new dependency and
 //!   per-platform verification on real hardware. [`SecretStore`] is the seam
@@ -310,6 +313,29 @@ fn bearer_match(rest: &str) -> Option<(usize, usize)> {
 
     let keep = BEARER_SCHEME.len() + gap;
     Some((keep, keep + token_bytes))
+}
+
+/// Building a [`Secret`] from a literal, for tests in other modules of this
+/// crate.
+///
+/// [`Secret`]'s field is private to this module, which is what stops an
+/// outside module from claiming this type's protections for arbitrary text —
+/// but it also stops any test outside this module from implementing a
+/// [`SecretStore`] at all, and [`crate::profile::resolve`]'s credential rules
+/// have to be exercised against a store holding a known value. Setting a real
+/// environment variable in a test would publish that value to every other
+/// test in the process, which is a worse trade than this.
+///
+/// `#[cfg(test)]` and `pub(crate)`: it does not exist in a release build and
+/// it is not API, so the production boundary is exactly as narrow as it was.
+/// It sits here, immediately above the test module, so that the source scans
+/// in this file and elsewhere — which read everything before the first
+/// `#[cfg(test)]` as "production code" — still see the whole of it.
+#[cfg(test)]
+impl Secret {
+    pub(crate) fn mint_for_test(value: &str) -> Self {
+        Self(value.to_owned())
+    }
 }
 
 #[cfg(test)]

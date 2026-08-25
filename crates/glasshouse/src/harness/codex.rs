@@ -5,11 +5,14 @@
 //! the hook state it records in its own configuration, and the session
 //! rollouts it writes.
 
+use std::ffi::OsString;
+
 use super::{
-    ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, Declared,
-    HarnessAdapter, HarnessDescription, HookCommand, HookDestination, HookInstallation, Hooks,
-    Invocation, ModelOverride, NativeSessionKind, NativeSessionRecord, NativeSessionSource,
-    SandboxSelector, SessionIds, Vendor, WireProtocol,
+    ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, CredentialPlacement,
+    Declared, DirectProviderPlan, DirectProviderRequest, HarnessAdapter, HarnessDescription,
+    HookCommand, HookDestination, HookInstallation, Hooks, Invocation, ModelOverride,
+    NativeSessionKind, NativeSessionRecord, NativeSessionSource, SandboxSelector, SessionIds,
+    Vendor, WireProtocol,
 };
 use crate::integrations::IntegrationId;
 
@@ -74,6 +77,16 @@ const MODEL_OVERRIDE: &[ModelOverride] = &[
     ModelOverride::Configuration("-c model=<id>"),
 ];
 
+/// The only `wire_api` Codex 0.149.1 still accepts.
+///
+/// Not a preference — the other value is gone. `wire_api = "chat"` produces
+/// ``Error loading config.toml: `wire_api = "chat"` is no longer supported.``
+/// A provider serving only `openai-chat` therefore cannot back Codex at all,
+/// and [`Codex::direct_provider_launch`] answers `None` for it rather than
+/// composing a configuration Codex would reject after the process had already
+/// started.
+const WIRE_API: &str = "responses";
+
 const BACKEND_SELECTION: &[BackendSelection] = &[
     BackendSelection::CommandLineArguments(
         "-c <key>=<value> overrides any config value; --oss and --local-provider select a \
@@ -108,6 +121,84 @@ impl HarnessAdapter for Codex {
         // flag. This is exactly the harness-specific knowledge that would
         // otherwise be a `match` somewhere in core.
         Some(Invocation::of(["resume", native_session]))
+    }
+
+    /// A custom provider composed entirely out of `-c` overrides, so **no
+    /// file is written at all** — not `~/.codex/config.toml`, not a generated
+    /// profile beside it, not anything.
+    ///
+    /// That is the strongest possible form of "avoid overwriting the user's
+    /// normal configuration": there is nothing to overwrite and nothing to
+    /// clean up. Every override below was accepted by Codex 0.149.1 under
+    /// `--strict-config`, which rejects a key it does not know, so the set is
+    /// verified rather than assumed.
+    ///
+    /// The base URL goes through verbatim. Codex appends `/responses` to it —
+    /// a `base_url` of `http://127.0.0.1:8731/v1` was observed producing
+    /// `POST /v1/responses` — so the `/v1` belongs to the provider's own
+    /// declared URL and this adapter neither adds nor removes a path segment.
+    ///
+    /// `env_key` names an environment variable **of the child process**;
+    /// its value is what Codex sends as `authorization: Bearer <value>`. With
+    /// that variable absent Codex refuses outright ("Missing environment
+    /// variable: `…`") rather than falling back to the user's own paid
+    /// account — which is why the credential's absence is a refusal here too
+    /// rather than a launch that quietly costs the user money.
+    fn direct_provider_launch(
+        &self,
+        request: &DirectProviderRequest<'_>,
+    ) -> Option<DirectProviderPlan> {
+        // See `WIRE_API`: `chat` is gone in 0.149.1, so `openai-responses` is
+        // the only protocol Codex can be pointed at. Nothing is translated.
+        if request.protocol != WireProtocol::OpenAiResponses {
+            return None;
+        }
+
+        // The provider's name is interpolated into a *dotted TOML path*, so
+        // `.` would be a separator rather than a character to escape.
+        // `profile::resolve` has already refused anything outside
+        // `[A-Za-z0-9_-]` before this request was built — see
+        // `super::unsafe_provider_name_char` for why that check lives there
+        // and not here.
+        let id = request.provider_name;
+
+        let mut args: Vec<OsString> = Vec::new();
+        let mut keys: Vec<String> = Vec::new();
+        let mut override_arg = |key: String, value: &str| {
+            args.push(OsString::from("-c"));
+            let mut pair = OsString::from(&key);
+            pair.push("=");
+            pair.push(value);
+            args.push(pair);
+            keys.push(key);
+        };
+
+        // A fixed, deterministic order: the same profile always composes the
+        // same argv, so a launch is reproducible and a test can assert on it.
+        override_arg("model_provider".to_owned(), id);
+        override_arg(format!("model_providers.{id}.name"), request.provider_name);
+        override_arg(format!("model_providers.{id}.base_url"), request.base_url);
+        override_arg(format!("model_providers.{id}.wire_api"), WIRE_API);
+        if let Some(var) = request.credential_var {
+            override_arg(format!("model_providers.{id}.env_key"), var);
+        }
+        if let Some(model) = request.model {
+            override_arg("model".to_owned(), model);
+        }
+
+        Some(DirectProviderPlan {
+            args,
+            // Codex needs no environment of its own: everything but the
+            // credential is an override, and the credential's destination is
+            // the variable `env_key` just named.
+            env: Vec::new(),
+            credential: request
+                .credential_var
+                .map(|var| CredentialPlacement::Environment(var.to_owned())),
+            // Override *keys* and the provider's name only — never a base
+            // URL, never a model, and never the value behind `env_key`.
+            mechanism: format!("-c overrides: {}", keys.join(", ")),
+        })
     }
 
     fn session_id_source(&self) -> Option<NativeSessionSource> {

@@ -148,7 +148,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
 /// This is the production consumer of the sanctioned launch path: the harness
 /// is chosen and its executable resolved from configuration (project level
 /// overriding user level), the requested launch profile is resolved against
-/// its adapter (Phase 9A — see [`glasshouse::profile`]), and only then is
+/// its adapter (Phase 9A/9F — see [`glasshouse::profile`]), and only then is
 /// anything started through [`HarnessLaunch`] — the only route that exists,
 /// and the one that derives the child's working directory from the active
 /// project rather than from whatever directory Glasshouse happened to be run
@@ -181,11 +181,31 @@ fn launch_session(
         }
     };
     let acknowledged_bypass = effective.bypass_acknowledged(selection.id()).value;
-    let overlay = match glasshouse::profile::resolve(
-        &launch_profile,
-        selection.adapter(),
+    // A direct-provider profile names a provider; the *lookup* is the
+    // caller's job, so `glasshouse::profile` never has to import
+    // `glasshouse::config`. An unknown name is reported exactly as an unknown
+    // profile name is, one step above: a line on stderr, `ExitCode::FAILURE`,
+    // nothing recorded and nothing started.
+    let provider = match &launch_profile.backend {
+        glasshouse::profile::BackendResource::DirectProvider { provider } => {
+            match effective.configured_provider(provider) {
+                Ok(resolved) => Some(resolved.value),
+                Err(err) => {
+                    eprintln!("glasshouse: {err}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+        }
+        _ => None,
+    };
+    let secrets = glasshouse::secret::EnvironmentSecretStore::new();
+    let resolution = glasshouse::profile::Resolution {
+        adapter: selection.adapter(),
         acknowledged_bypass,
-    ) {
+        provider: provider.as_ref(),
+        secrets: &secrets,
+    };
+    let overlay = match glasshouse::profile::resolve(&launch_profile, &resolution) {
         Ok(overlay) => overlay,
         Err(refusal) => {
             eprintln!("glasshouse: {refusal}");
@@ -871,7 +891,17 @@ mod tests {
         assert_eq!(resolved.name, "native");
         assert_eq!(resolved.backend.slug(), "native");
 
-        let overlay = glasshouse::profile::resolve(&resolved, selection.adapter(), false).unwrap();
+        let secrets = glasshouse::secret::EnvironmentSecretStore::new();
+        let overlay = glasshouse::profile::resolve(
+            &resolved,
+            &glasshouse::profile::Resolution {
+                adapter: selection.adapter(),
+                acknowledged_bypass: false,
+                provider: None,
+                secrets: &secrets,
+            },
+        )
+        .unwrap();
         assert!(mechanism_summary(&overlay).contains("automatic review"));
     }
 

@@ -4,9 +4,9 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 9 is three of seven; 9E eight of thirteen; 9C eleven of twelve;
-9D eight of fourteen; 9B eight of nine; 9A seventeen of twenty-six.
-138 -> 193 checked boxes.**
+**Phase 9F is eleven of thirteen. Phase 9 is three of seven; 9E eight of
+thirteen; 9C eleven of twelve; 9D eight of fourteen; 9B eight of nine;
+9A seventeen of twenty-six. 193 -> 204 checked boxes (16%).**
 
 The user signed the Antigravity CLI in, which unblocked Phase 9.
 
@@ -27,6 +27,79 @@ session came up and showed Codex's own trust prompt — and the end-to-end PTY
 test asserts the exact argv.
 
 ## Verified completed work
+
+### This session — the gateway keys become usable, and one defect caught on the way
+
+Phase 9F is the join Phases 9A, 9C, 9D and 9E were building towards: a launch
+profile can now name a configured provider, and a real harness starts against
+it. Eleven of its thirteen lines closed.
+
+**Every mechanism was probed, not recalled.** The installed harnesses were
+pointed at a local HTTP capture server and what they actually sent was read
+off the wire. That settled four things no amount of reasoning would have:
+
+- `ANTHROPIC_BASE_URL` is the **root** — Claude Code appends `/v1/messages`
+  itself, so a helpful `/v1` would have produced `/v1/v1/messages`. A provider's
+  declared base URL goes through verbatim, and a mutation that appends a path
+  kills a test.
+- `ANTHROPIC_AUTH_TOKEN` **wins over the user's claude.ai login for that child
+  and leaves it untouched on disk** — the harness said so itself. No
+  `x-api-key`, and the user's own credential was never sent.
+- **Codex needs no generated file at all.** Six `-c` overrides do the whole
+  job, every one accepted under `--strict-config`, which rejects keys it does
+  not know. "Avoid overwriting `~/.codex/config.toml`" is satisfied by there
+  being nothing to overwrite.
+- **`wire_api = "chat"` is gone in Codex 0.149.1.** A provider serving only
+  `openai-chat` cannot back Codex, so Glasshouse refuses that pairing instead
+  of composing a configuration Codex would reject after the process started.
+  Every built-in template is chat-only today, so no template can back Codex —
+  correct rather than a gap.
+
+**And Codex refuses a missing credential itself** ("Missing environment
+variable: `…`") rather than falling back to the user's paid account, which
+corroborates the "clear launch error" line from the harness's own behaviour.
+
+**A defect caught before it shipped.** Phase 9A gives every Claude Code session
+`--permission-mode auto`. Composed with 9F, **every gateway-backed session
+would have come up with its tools blocked** — auto mode's classifier is a model
+call a third-party gateway cannot serve as Anthropic would. The user's own
+working gateway launcher avoids auto mode for exactly this reason. `resolve` is
+now backend-aware: a defaulted profile on a non-Native backend adds no approval
+argument and records why, an explicit request is refused rather than silently
+dropped, and `Bypass` is unchanged. Keyed on the **backend**, so 9G inherits it.
+Recorded as a strong reading corroborated by a working implementation — not as
+a controlled experiment.
+
+**The secret boundary is structural.** An adapter is handed variable *names*
+and returns a *placement*, never a value, so it has nothing to leak.
+`profile::resolve` is the only place in Glasshouse where a `Secret` exists —
+exactly one production `.expose()` call in the crate, verified by grep. The
+leak test plants a known value and asserts its absence from the overlay's
+`Debug`, every mechanism note, every argument, and the `Display` and `Debug` of
+all fourteen `Refusal` variants, then proves it *is* in the child environment
+by comparison rather than by printing it.
+
+**Sixteen mutations, sixteen kills**, plus two re-run independently by the
+orchestrator against the integrated tree — the `Debug`-prints-values mutation
+and the silently-skip-a-missing-credential mutation both failed their named
+test. Restoration was per-file from a byte-compared backup, never a path-wide
+`git checkout`.
+
+**The worker corrected its packet three times and was right every time**: the
+name check could not live in the adapter (`direct_provider_launch` returns
+`Option` and has no error channel, so a refusal there could only be spelled
+`None`); `secret/mod.rs` needed more than a doc change (a `Secret` cannot be
+minted outside its module, so no external test can implement `SecretStore`);
+and acceptance test 8's premise was wrong (the other adapters are refused one
+step earlier, at the protocol intersection). That is four sessions running.
+
+**What is not proven, stated plainly.** Neither path has run against a real
+backend *through Glasshouse*. For Codex that is currently impossible. For
+Claude Code it is now possible and was not before: **OpenRouter serves
+Anthropic Messages at `https://openrouter.ai/api`** — an unauthenticated POST
+to `/v1/messages` answers 401 while a nonexistent path under the same prefix
+answers 404. No template declares it yet; that is Phase 9D's, and it is the
+thing that would close this end to end.
 
 ### This session — wrappers and shims, and a name that reaches a command line
 

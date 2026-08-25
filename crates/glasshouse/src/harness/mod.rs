@@ -236,6 +236,119 @@ impl std::fmt::Display for BackendSelection {
     }
 }
 
+/// Where a credential value has to be placed for a harness to use it.
+///
+/// A *destination*, never a value. An adapter returns one of these to say
+/// "put it here"; only [`crate::profile::resolve`] ever holds the
+/// [`crate::secret::Secret`] that fills it in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialPlacement {
+    /// Into this environment variable of the child process.
+    Environment(String),
+}
+
+/// What a harness needs in order to talk to a direct provider — handed to an
+/// adapter deliberately WITHOUT the credential value.
+///
+/// Splitting the request from the value is the whole secret boundary: an
+/// adapter composes arguments and environment out of names and URLs, and has
+/// no way to accidentally interpolate a credential into either, because it
+/// never receives one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectProviderRequest<'a> {
+    pub provider_name: &'a str,
+    pub protocol: WireProtocol,
+    pub base_url: &'a str,
+    pub model: Option<&'a str>,
+    /// The environment variable the provider declares its credential comes
+    /// from, when it declares one. A NAME, never a value.
+    pub credential_var: Option<&'a str>,
+}
+
+/// How this harness will be pointed at that provider, for one child process.
+/// Carries no credential value — see [`CredentialPlacement`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectProviderPlan {
+    pub args: Vec<OsString>,
+    /// Non-secret environment only: base URL, model. NEVER a credential.
+    pub env: Vec<(OsString, OsString)>,
+    /// Where [`crate::profile::resolve`] must put the credential value, if
+    /// any.
+    pub credential: Option<CredentialPlacement>,
+    /// Names and mechanism only, for diagnostics. Never a value.
+    pub mechanism: String,
+}
+
+/// The first character of `name` that must not reach a
+/// [`DirectProviderRequest::provider_name`], or `None` when every character
+/// is safe.
+///
+/// A provider name is interpolated by an adapter into a command line — for
+/// Codex, into a *dotted TOML path* (`model_providers.<id>.base_url`), where
+/// `.` is a separator rather than a character to escape. So the allow-list
+/// here is narrower than [`crate::shim`]'s `check_name`, which permits `.`
+/// because a shim's script has no such structure: letters, digits, `-` and
+/// `_` only.
+///
+/// This is checked by [`crate::profile::resolve`] before any adapter sees a
+/// request, rather than inside each adapter, for two reasons.
+/// [`HarnessAdapter::direct_provider_launch`] deliberately has no error
+/// channel — `None` there means "this harness declares no such mechanism",
+/// which is a different answer from "this name is dangerous" and must not
+/// be spelled the same way. And a rule enforced once, before the request
+/// exists, protects every adapter that will ever be written, including the
+/// ones that have not been.
+pub fn unsafe_provider_name_char(name: &str) -> Option<char> {
+    name.chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_')))
+}
+
+/// Why `name` cannot be used as a [`DirectProviderRequest::credential_var`],
+/// or `None` when it is a usable environment variable name.
+///
+/// The same class of problem as [`unsafe_provider_name_char`] and refused the
+/// same way: Codex interpolates this name into a `-c
+/// model_providers.<id>.env_key=<VAR>` value. `-` is excluded as well here,
+/// because this is an environment variable name rather than an identifier,
+/// and a leading digit is refused because such a name is not portably
+/// settable.
+pub fn unusable_credential_var(name: &str) -> Option<CredentialVarProblem> {
+    if name.is_empty() {
+        return Some(CredentialVarProblem::Empty);
+    }
+    if let Some(offending) = name
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '_'))
+    {
+        return Some(CredentialVarProblem::Character(offending));
+    }
+    if name.starts_with(|c: char| c.is_ascii_digit()) {
+        return Some(CredentialVarProblem::LeadingDigit);
+    }
+    None
+}
+
+/// What is wrong with a credential variable *name*. Never carries a value —
+/// this type describes the name only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialVarProblem {
+    Empty,
+    Character(char),
+    LeadingDigit,
+}
+
+impl std::fmt::Display for CredentialVarProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CredentialVarProblem::Empty => f.write_str("it is empty"),
+            CredentialVarProblem::Character(c) => {
+                write!(f, "it contains `{c}`")
+            }
+            CredentialVarProblem::LeadingDigit => f.write_str("it starts with a digit"),
+        }
+    }
+}
+
 /// Structured lifecycle hooks a harness offers, and how they are configured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hooks {
@@ -852,6 +965,27 @@ pub trait HarnessAdapter: std::fmt::Debug + Send + Sync {
             ApprovalKind::Bypass => approvals.bypass,
         };
         declared.value().map(|mode| mode.args.to_vec())
+    }
+
+    /// How this harness is pointed at a direct provider, or `None` when it
+    /// declares no mechanism. Default `None` — never a guess.
+    ///
+    /// `None` is the same fail-closed answer [`HarnessAdapter::approval_args`]
+    /// gives: "this harness cannot be launched that way", never "launch it
+    /// some other way". A harness that speaks a protocol the request does not
+    /// name answers `None` rather than composing a configuration the harness
+    /// itself would reject.
+    ///
+    /// The request carries no credential and the plan returns none — see
+    /// [`DirectProviderRequest`] and [`CredentialPlacement`]. An adapter says
+    /// *where* a value goes; [`crate::profile::resolve`] is the only thing
+    /// that ever holds one.
+    fn direct_provider_launch(
+        &self,
+        request: &DirectProviderRequest<'_>,
+    ) -> Option<DirectProviderPlan> {
+        let _ = request;
+        None
     }
 
     /// Bytes that deliver `text` to a running session of this harness.
