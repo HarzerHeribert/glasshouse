@@ -1181,19 +1181,49 @@ mod tests {
 
         /// The body of `fn name`, from its signature to the first
         /// column-zero `}`.
-        fn body_of(name: &str) -> &'static str {
-            let start = SOURCE
+        ///
+        /// Scanned line by line rather than by searching for a literal
+        /// `"\n}\n"`. That search cost a red Windows CI run: `include_str!`
+        /// reads the file exactly as checked out, and on a runner where Git
+        /// converts line endings the source contains `\r\n`, so the literal
+        /// never matched and the whole guard panicked with "could not find
+        /// the end". `str::lines` strips the `\r` for us, which makes this
+        /// CRLF-agnostic by construction rather than by remembering.
+        fn body_in(source: &str, name: &str) -> String {
+            let start = source
                 .find(&format!("fn {name}("))
                 .unwrap_or_else(|| panic!("this module no longer defines `{name}`"));
-            let rest = &SOURCE[start..];
-            let end = rest
-                .find(
-                    "
-}
-",
-                )
-                .unwrap_or_else(|| panic!("could not find the end of `{name}`"));
-            &rest[..end]
+            let mut body = String::new();
+            for line in source[start..].lines() {
+                body.push_str(line);
+                body.push('\n');
+                // A column-zero `}` ends the item; an indented one does not,
+                // which is why this compares the whole line rather than
+                // trimming both ends.
+                if line.trim_end() == "}" {
+                    return body;
+                }
+            }
+            panic!("could not find the end of `{name}`")
+        }
+
+        fn body_of(name: &str) -> String {
+            body_in(SOURCE, name)
+        }
+
+        // The regression guard for the Windows failure itself: the same scan
+        // over the same source with CRLF endings must find the same body. On
+        // an LF checkout this is the only thing that exercises that path, so
+        // without it the fix would be untested everywhere it was needed.
+        let crlf: String = SOURCE.replace('\n', "\r\n");
+        for name in ["discover_shared_index", "read_index_capped", "snapshot"] {
+            assert_eq!(
+                body_in(&crlf, name),
+                body_of(name),
+                "the source scan must not depend on line endings; `{name}` \
+                 scanned differently under CRLF, which is exactly how this \
+                 test failed on Windows CI"
+            );
         }
 
         // Every function the `SharedIndex` variant can reach.
