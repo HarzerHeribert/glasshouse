@@ -108,6 +108,72 @@ mod tests {
         }
     }
 
+    /// Production source of a module, with its test module and comments
+    /// removed — the same reading the harness-adapter guards use.
+    fn production_code(source: &str) -> String {
+        source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split always yields at least one part")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// "Keep terminal-text parsing only as a fallback for state that cannot be
+    /// obtained structurally."
+    ///
+    /// Glasshouse has no such fallback, and this is what keeps it that way.
+    /// Every state a session can be in comes from something structural: the
+    /// operating system saying the process ended, or the harness itself
+    /// reporting through a hook. Nothing reads the terminal and infers.
+    ///
+    /// The guard is the set of places allowed to move a session's state. A
+    /// text-scanning state machine would have to write from somewhere, and
+    /// anywhere new fails here.
+    #[test]
+    fn nothing_derives_session_state_from_terminal_output() {
+        // The translator itself must not be able to see terminal output.
+        let translator = production_code(include_str!("lifecycle.rs"));
+        for forbidden in ["scrollback", "Scrollback", "screen", "vt100"] {
+            assert!(
+                !translator.contains(forbidden),
+                "the lifecycle translator names `{forbidden}`, so state could be read out \
+                 of terminal output"
+            );
+        }
+
+        // And the only writers are the structural ones.
+        let writers = [
+            ("main.rs", include_str!("../main.rs")),
+            ("shell/mod.rs", include_str!("../shell/mod.rs")),
+            ("session/runtime.rs", include_str!("runtime.rs")),
+            ("session/attach.rs", include_str!("attach.rs")),
+            ("session/select.rs", include_str!("select.rs")),
+        ];
+        let allowed = ["main.rs", "shell/mod.rs"];
+        for (name, source) in writers {
+            let code = production_code(source);
+            let writes = code.contains("set_lifecycle(");
+            if writes {
+                assert!(
+                    allowed.contains(&name),
+                    "{name} moves a session's state; only the launch and shell paths may, \
+                     and only from structural events"
+                );
+            }
+        }
+
+        // The runtime, which is the one place that *does* see terminal output,
+        // must never move a session's state.
+        let runtime = production_code(include_str!("runtime.rs"));
+        assert!(
+            !runtime.contains("set_lifecycle("),
+            "the runtime reads terminal output and must not also decide session state"
+        );
+    }
+
     #[test]
     fn a_live_session_follows_its_harness() {
         assert!(may_apply(

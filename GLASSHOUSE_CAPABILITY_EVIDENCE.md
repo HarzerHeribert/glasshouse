@@ -49,6 +49,56 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 7 — Keep terminal-text parsing only as a fallback for state that cannot be obtained structurally
+
+Contract: Given a session whose state changes, when Glasshouse records it, the
+change came from something structural — the operating system reporting the
+process, or the harness reporting through a hook — and never from reading the
+terminal and inferring.
+
+State: COMPLETE. Glasshouse has no text-parsing fallback at all, which is a
+stronger position than the line asks for.
+
+Production evidence:
+- `session/lifecycle.rs` translates harness events only, and cannot see
+  terminal output.
+- `session/runtime.rs: poll_exits` asks the process, never the output — a
+  harness can be silent for minutes while thinking.
+- The only writers of session state are the launch path and the shell (session
+  started, stopped, failed) and the hook path.
+
+Regression evidence:
+- `nothing_derives_session_state_from_terminal_output` — the translator names
+  no scrollback, screen or emulator type, and the runtime, which is the one
+  place that *does* see terminal output, may not move a session's state.
+  **Mutation-checked** by giving the runtime a method that infers a state and
+  writes it: the test fails.
+
+Missing evidence:
+- None. If a future capability genuinely needs a text heuristic, this test is
+  where the decision has to be argued rather than slipped in.
+
+### Phase 7 — Record Claude compaction events when they can be observed reliably
+
+Contract: Given a Claude Code session that compacts its context, when that
+happens, Glasshouse records it.
+
+State: NOT STARTED — **blocked by the harness, not by Glasshouse.**
+
+Missing evidence:
+- Claude Code 2.1.245 exposes **no compaction hook**. The event names a real
+  installation was found accepting are `PreToolUse`, `PostToolUse`,
+  `PostToolUseFailure`, `PermissionRequest`, `UserPromptSubmit`, `Stop`,
+  `StopFailure`, `SubagentStart`, `SubagentStop` and `TeammateIdle`. None
+  concerns compaction.
+- Codex, by contrast, *does*: its recorded hook state carries `pre_compact` and
+  `post_compact`, so Phase 8's equivalent line is reachable and this one is not.
+- The capability says "when they can be observed reliably". They cannot be, in
+  this version, and the only honest alternatives are to wait for a hook or to
+  scrape the terminal for a compaction banner — which
+  `nothing_derives_session_state_from_terminal_output` exists to prevent.
+- Revisit when a Claude Code release exposes one.
+
 ### Phase 5/7 — the terminal handshake, and the defect it was hiding
 
 Contract: Given a live harness session, when the harness asks its terminal a
@@ -127,9 +177,10 @@ ended — Glasshouse records the matching session state, while never editing the
 user's own Claude Code configuration and never costing the user a turn if the
 reporting fails.
 
-State: **Translation is COMPLETE** (its map box is checked). Hook
-*integration*, permission detection and turn-completion detection are
-PARTIALLY VERIFIED and their boxes stay unchecked — see the missing evidence.
+State: **COMPLETE** for hook integration, translation and turn-completion
+detection — all three observed end to end against the real harness. Permission
+detection is PARTIALLY VERIFIED and its box stays unchecked; see the missing
+evidence.
 
 Production evidence:
 - `harness/mod.rs: HookCommand`, `HookInstallation`,
@@ -191,17 +242,25 @@ Platform/external evidence:
 - Claude Code 2.1.245 **accepts the document Glasshouse generates**: started
   with one, it parsed it and reached its workspace-trust prompt.
 
+- **Claude Code fires the generated document's hooks — run and observed.** A
+  Glasshouse session was opened against the real `claude` in a pseudo-terminal,
+  one prompt was submitted, and the session record moved from `starting` to
+  **`idle`**.
+- That value is conclusive rather than suggestive: the only production code
+  that *writes* `Idle` is the `Stop`/`StopFailure` arm of
+  `session::lifecycle::lifecycle_for`. Nothing else in Glasshouse can produce
+  it, so the record could only have got there by Claude Code running the hook
+  Glasshouse installed, which invoked `glasshouse hook`, which translated the
+  event. The full chain — generate, install, fire, report, translate, record —
+  is proven.
+
 Missing evidence:
-- **Claude Code firing the generated document's hooks, observed.** Everything
-  around it is proven — the mechanism fires for a document of this shape, the
-  generated document is asserted to have that shape and parses, the real
-  binary accepts it, and the command it contains moves the session state when
-  run. What has not been watched happen is Claude Code running *this* file's
-  hooks, and inferring it is exactly the step this project keeps getting
-  burned by.
-- The probe: launch a Glasshouse session against the real `claude`, submit one
-  prompt, and check the session record moves to `Running` and then `Idle`. It
-  costs one turn against the user's account.
+- **Permission detection specifically.** `PermissionRequest` is installed,
+  translated and proven to move the record when its command runs, but Claude
+  Code firing *that particular* event has not been watched: the verifying turn
+  needed no permission, and this machine's Claude Code runs in auto mode, where
+  a prompt that would ask is approved without asking. Its map box stays
+  unchecked.
 - Hook firing is verified on macOS only. The generated document and the
   reporting command are platform-independent and covered everywhere by the
   tests above, but Claude Code's own hook execution on Windows is unverified.

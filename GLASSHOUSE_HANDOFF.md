@@ -12,8 +12,10 @@ from 107 to 120.
   line is deliberately unchecked; see the loose ends.
 - **Phase 1 line 90** — the cross-project resume guard: **closed after three
   sessions blocked.** `glasshouse resume` is its production caller.
-- **Phase 7** — Claude Code adapter: five of ten lines closed, with three more
-  built and awaiting one probe.
+- **Phase 7** — Claude Code adapter: **eight of ten lines closed.** The two
+  that are not are honest gaps, not unfinished work: permission detection needs
+  a permission prompt to fire (this machine runs Claude Code in auto mode), and
+  Claude Code 2.1.245 exposes no compaction hook at all.
 - **A defect that was damaging the user's installation is fixed.** Glasshouse
   answered only one of the three questions a harness asks its terminal at
   startup, so Claude Code's fullscreen renderer failed and, after two strikes,
@@ -70,6 +72,28 @@ list was carefully reasoned, documented at length, and pinned by a test — and
 simply wrong, because no reference install had ever been inspected.
 
 ## Verified completed work
+
+### This session — the hooks, observed firing for real
+
+A Glasshouse session was opened against the real `claude` in a pseudo-terminal,
+one prompt was submitted, and the session record moved from `starting` to
+**`idle`**.
+
+That value settles it rather than suggesting it. The only production code that
+*writes* `Idle` is the `Stop`/`StopFailure` arm of
+`session::lifecycle::lifecycle_for`; nothing else in Glasshouse can produce it.
+So the record could only have reached that state by Claude Code running the
+hook Glasshouse generated and installed, which invoked `glasshouse hook`, which
+translated the event and wrote it down. Generate, install, fire, report,
+translate, record — the whole chain, end to end, against the real harness.
+
+**And one line closed by having nothing rather than something.** "Keep
+terminal-text parsing only as a fallback" is satisfied because Glasshouse has
+no such fallback at all: state comes from the operating system or from the
+harness, never from reading the screen.
+`nothing_derives_session_state_from_terminal_output` keeps it that way — the
+runtime is the one component that sees terminal output, and it may not move a
+session's state. Giving it a method that infers one fails the test.
 
 ### This session — answering the terminal's questions
 
@@ -507,13 +531,18 @@ have required a magic clamp.
   are platform-independent and their tests run everywhere, but no real harness
   has been driven through the viewport on Windows.
 
-- **Three Phase 7 hook lines are built but unchecked**, pending one probe:
-  watching Claude Code fire the hooks in the document Glasshouse generated.
-  Everything around it is proven — the mechanism fires for a document of this
-  shape, the generated document has that shape and parses, the real binary
-  accepts it, and the command it contains moves the session state when run.
-  The probe costs one turn: launch a session against the real `claude`, submit
-  one prompt, and watch the record move to `Running` and then `Idle`.
+- **Permission detection is the one hook line still open.**
+  `PermissionRequest` is installed, translated, and proven to move the record
+  when its command runs, but Claude Code firing *that* event has not been
+  watched: the verifying turn needed no permission, and this machine runs
+  Claude Code in auto mode, where a prompt that would ask is approved without
+  asking. Closing it needs an isolated configuration with approvals required
+  and a prompt that wants to run something.
+- **Compaction is blocked by the harness.** Claude Code 2.1.245 exposes no
+  compaction hook — the events a real installation accepts are the ten
+  recorded in the adapter, none about compaction. Codex *does* expose
+  `pre_compact`/`post_compact`, so Phase 8's equivalent is reachable and this
+  one is not. Revisit when a release exposes one.
 - **Hook firing is verified on macOS only.** The document and the reporting
   command are platform-independent and tested everywhere; Claude Code's own
   hook execution on Windows is not.
@@ -707,12 +736,12 @@ surface before sending anything to it.
 
 - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
   --all-features -- -D warnings`, `cargo test --workspace --all-features`
-  (380 lib + 2 bin + 49 PTY smoke + 4 settings), `rustup run 1.85.0 cargo
+  (381 lib + 2 bin + 49 PTY smoke + 4 settings), `rustup run 1.85.0 cargo
   check --locked --workspace --all-targets`, `git diff --check` — all pass.
 - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` — 23
   diagnostics, exactly the baseline measured at `HEAD` in a throwaway
   worktree. None added.
-- Eighteen mutations. Seventeen failed the test they targeted; one **passed**,
+- Twenty mutations. Nineteen failed the test they targeted; one **passed**,
   and exposed a test that could not reach the guard it was supposed to cover.
   A test was written to reach it, and the mutation now fails. Two further
   mutation attempts produced *no output at all* — a build failure, not a
