@@ -64,3 +64,6 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Check README progress block
+        run: python3 scripts/progress.py --check

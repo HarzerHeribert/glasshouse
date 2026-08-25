@@ -1,2 +1,6 @@
 /target
 /.agent-runtime/
+
+# Python bytecode from repository tooling.
+__pycache__/
+*.pyc
