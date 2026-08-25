@@ -1212,14 +1212,24 @@ mod tests {
         }
 
         // The regression guard for the Windows failure itself: the same scan
-        // over the same source with CRLF endings must find the same body. On
-        // an LF checkout this is the only thing that exercises that path, so
-        // without it the fix would be untested everywhere it was needed.
-        let crlf: String = SOURCE.replace('\n', "\r\n");
+        // over the same source must find the same body under either line
+        // ending. On an LF checkout nothing else exercises that path, so
+        // without this the fix would be untested exactly where it was needed.
+        //
+        // Both copies are built from a normalised base rather than from
+        // `SOURCE` directly. The first version of this guard did
+        // `SOURCE.replace('\n', "\r\n")` and went red on Windows for its own
+        // reason: there `SOURCE` is *already* CRLF, so that produced `\r\r\n`,
+        // and `lines` strips only one `\r`. An assertion that depends on how
+        // the file happened to be checked out is a flake generator — the same
+        // lesson a subcontractor taught this project one batch earlier, with a
+        // test that scanned a randomly generated token.
+        let lf: String = SOURCE.replace("\r\n", "\n");
+        let crlf: String = lf.replace('\n', "\r\n");
         for name in ["discover_shared_index", "read_index_capped", "snapshot"] {
             assert_eq!(
                 body_in(&crlf, name),
-                body_of(name),
+                body_in(&lf, name),
                 "the source scan must not depend on line endings; `{name}` \
                  scanned differently under CRLF, which is exactly how this \
                  test failed on Windows CI"
