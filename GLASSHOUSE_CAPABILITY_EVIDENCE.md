@@ -128,6 +128,18 @@ Platform/external evidence — the real binary:
   "refusing to generate a shim for profile `…`: it contains `"`, which a shell
   would interpret rather than pass through."
 
+CI evidence:
+- **CI `32887437992` green on Linux, macOS, Windows and lint** at `5f99865`.
+  Windows executed the shim tests by name
+  (`a_generated_shim_calls_glasshouse_run`,
+  `a_generated_shim_contains_no_secret_and_no_url`,
+  `deleting_a_generated_shim_leaves_nothing_behind`) and 451 lib tests against
+  macOS's 459 — the difference is the Unix-gated set, including the
+  environment-inheritance assertion described below.
+- The lint job's `Check README progress block` step ran and passed, so the
+  README's generated block is verified against the map on every push rather
+  than trusted.
+
 ### A claim Windows would not support, and the box that came back off
 
 Line 384 — "preserve the user's existing shell environment except for explicit
