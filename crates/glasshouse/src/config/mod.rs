@@ -505,6 +505,14 @@ pub struct ProviderConfig {
     /// a user hold several keys for the same router.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     credential_env: Vec<String>,
+    /// Extra HTTP headers this provider needs, as name/value pairs — see
+    /// [`crate::provider::Provider::headers`]. Configuration, not a
+    /// credential: a header value here is written by the user into their own
+    /// config file and never resolved through `SecretStore`. Non-empty here
+    /// replaces the template's own headers entirely, matching
+    /// [`ProviderConfig::credential_env`]'s own replace-not-merge rule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    headers: Vec<(String, String)>,
 }
 
 /// Why a stored [`ProviderConfig`] could not be turned into a
@@ -516,6 +524,33 @@ pub enum ProviderConfigError {
          the provider's `template` key or remove the entry"
     )]
     UnknownTemplate { name: String, template: String },
+
+    /// A header *name* would reach an `ANTHROPIC_CUSTOM_HEADERS` line or a
+    /// Codex `-c model_providers.<id>.http_headers=…` TOML literal carrying
+    /// a character neither would parse as part of the name itself.
+    #[error(
+        "provider `{name}` names a header {header_name:?} that contains {offending:?}; a \
+         header name may use letters, digits and `-` only"
+    )]
+    InvalidHeaderName {
+        name: String,
+        header_name: String,
+        offending: char,
+    },
+
+    /// A header *value* containing a control character — most importantly
+    /// `\r` or `\n`, which would let a header value inject a second header of
+    /// its own choosing into every request this provider's child process
+    /// sends. Refused, never escaped.
+    #[error(
+        "provider `{name}`'s header {header_name:?} has a value that contains {offending:?}, a \
+         control character; a header value must not contain one"
+    )]
+    InvalidHeaderValue {
+        name: String,
+        header_name: String,
+        offending: char,
+    },
 }
 
 impl ProviderConfig {
@@ -524,6 +559,7 @@ impl ProviderConfig {
             template: template.into(),
             base_url: None,
             credential_env: Vec::new(),
+            headers: Vec::new(),
         }
     }
 
@@ -551,6 +587,15 @@ impl ProviderConfig {
 
     pub fn set_credential_env(&mut self, names: Vec<String>) -> &mut Self {
         self.credential_env = names;
+        self
+    }
+
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
+    pub fn set_headers(&mut self, headers: Vec<(String, String)>) -> &mut Self {
+        self.headers = headers;
         self
     }
 
@@ -584,9 +629,53 @@ impl ProviderConfig {
         if !self.credential_env.is_empty() {
             provider.credential_env = self.credential_env.clone();
         }
+        if !self.headers.is_empty() {
+            for (header_name, value) in &self.headers {
+                if let Some(offending) = unsafe_header_name_char(header_name) {
+                    return Err(ProviderConfigError::InvalidHeaderName {
+                        name: name.to_owned(),
+                        header_name: header_name.clone(),
+                        offending,
+                    });
+                }
+                if let Some(offending) = unsafe_header_value_char(value) {
+                    return Err(ProviderConfigError::InvalidHeaderValue {
+                        name: name.to_owned(),
+                        header_name: header_name.clone(),
+                        offending,
+                    });
+                }
+            }
+            provider.headers = self.headers.clone();
+        }
 
         Ok(provider)
     }
+}
+
+/// The first character of `name` that must not reach a header rendered into
+/// an `ANTHROPIC_CUSTOM_HEADERS` line or a Codex `-c` TOML literal, or `None`
+/// when every character is safe.
+///
+/// A header field-name is narrower than [`crate::shim`]'s `check_name`:
+/// letters, digits and `-` only — no `_` and no `.`, neither of which an HTTP
+/// header name uses. See that function for the shape this one follows.
+fn unsafe_header_name_char(name: &str) -> Option<char> {
+    name.chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '-'))
+}
+
+/// The first character of `value` that must not reach a header value line,
+/// or `None` when every character is safe.
+///
+/// Any control character is refused, which already covers `\r` and `\n`:
+/// a header *value* carrying either would let it inject a second header of
+/// the attacker's own choosing into every request this provider's child
+/// process sends — the exact class [`crate::shim`]'s `check_name` already
+/// refuses for profile names, applied here to a header value instead of a
+/// name. Refused, never escaped.
+fn unsafe_header_value_char(value: &str) -> Option<char> {
+    value.chars().find(|c| c.is_control())
 }
 
 /// A map of configured providers, keyed by provider name.
@@ -1337,6 +1426,27 @@ mod tests {
     /// want — no `.git` scaffolding needed.
     fn test_project(root: &Path) -> Project {
         Project::discover(root, None, false).expect("test project root must be usable")
+    }
+
+    /// A [`crate::secret::SecretStore`] holding exactly one credential — for
+    /// tests here that just need a direct-provider profile to resolve,
+    /// rather than exercising secret resolution itself (that belongs to
+    /// `crate::profile`'s own tests).
+    struct OneShotSecrets(&'static str, &'static str);
+
+    impl crate::secret::SecretStore for OneShotSecrets {
+        fn resolve(&self, reference: &crate::secret::SecretRef) -> Option<crate::secret::Secret> {
+            let crate::secret::SecretRef::Environment { var } = reference;
+            (var == self.0).then(|| crate::secret::Secret::mint_for_test(self.1))
+        }
+
+        fn is_present(&self, reference: &crate::secret::SecretRef) -> bool {
+            self.resolve(reference).is_some()
+        }
+
+        fn describe(&self) -> &'static str {
+            "one-shot test store"
+        }
     }
 
     fn fully_populated_user_config() -> UserConfig {
@@ -2317,7 +2427,8 @@ mod tests {
         let mut provider = ProviderConfig::new("zai");
         provider
             .set_base_url(Some("https://mirror.example.com/paas/v4".to_owned()))
-            .set_credential_env(vec!["ZAI_API_KEY".to_owned(), "ZAI_API_KEY_2".to_owned()]);
+            .set_credential_env(vec!["ZAI_API_KEY".to_owned(), "ZAI_API_KEY_2".to_owned()])
+            .set_headers(vec![("X-Org-Id".to_owned(), "acme".to_owned())]);
         user.providers_mut().set("my-zai", provider);
         user.save(&paths).unwrap();
 
@@ -2333,6 +2444,192 @@ mod tests {
             loaded_provider.credential_env(),
             &["ZAI_API_KEY".to_owned(), "ZAI_API_KEY_2".to_owned()]
         );
+        assert_eq!(
+            loaded_provider.headers(),
+            &[("X-Org-Id".to_owned(), "acme".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_configured_base_url_override_is_what_reaches_a_launched_child_process() {
+        // Line 423, all the way through: a base-URL override is not just a
+        // config-layer value (`a_configured_provider_may_override_a_template_base_url`
+        // already proves that) — it is what a real launch actually points
+        // the harness at.
+        let mut user = UserConfig::default();
+        let mut provider_cfg = ProviderConfig::new("openrouter");
+        provider_cfg.set_base_url(Some("https://mirror.example.com/api".to_owned()));
+        user.providers_mut().set("my-openrouter", provider_cfg);
+
+        let effective = EffectiveConfig::new(&user, None);
+        let provider = effective
+            .configured_provider("my-openrouter")
+            .unwrap()
+            .value;
+
+        let adapter = crate::harness::adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let mut profile = crate::profile::LaunchProfile::native(IntegrationId::ClaudeCode);
+        profile.backend = crate::profile::BackendResource::DirectProvider {
+            provider: provider.name.clone(),
+        };
+        let secrets = OneShotSecrets("OPENROUTER_API_KEY", "sk-test-not-a-real-key");
+        let resolution = crate::profile::Resolution {
+            adapter,
+            acknowledged_bypass: false,
+            provider: Some(&provider),
+            secrets: &secrets,
+        };
+
+        let overlay = crate::profile::resolve(&profile, &resolution).expect(
+            "a configured openrouter provider now backs Claude Code via anthropic-messages",
+        );
+        let base_url = overlay
+            .env()
+            .iter()
+            .find(|(key, _)| key == std::ffi::OsStr::new("ANTHROPIC_BASE_URL"))
+            .map(|(_, value)| value.to_string_lossy().into_owned())
+            .expect("ANTHROPIC_BASE_URL must be set");
+        assert_eq!(
+            base_url, "https://mirror.example.com/api",
+            "the configured override must reach the child, not openrouter's own default \
+             (https://openrouter.ai/api)"
+        );
+    }
+
+    /// Line 353, closed by a test: a `claude-code` profile backed by a
+    /// *configured* OpenRouter provider (no override at all) resolves, and
+    /// its `ANTHROPIC_BASE_URL` is the root OpenRouter now also serves
+    /// Anthropic Messages at — no `/v1`. That suffix is the exact mistake
+    /// the reference implementation (`~/projects/openrouter-clis/bin/claude-or`)
+    /// had to write a comment about: Claude Code appends `/v1/messages`
+    /// itself, so a base URL still carrying `/v1` would double it up.
+    #[test]
+    fn a_configured_openrouter_provider_backs_claude_code_at_the_v1_less_api_root() {
+        let mut user = UserConfig::default();
+        user.providers_mut()
+            .set("openrouter-configured", ProviderConfig::new("openrouter"));
+
+        let effective = EffectiveConfig::new(&user, None);
+        let provider = effective
+            .configured_provider("openrouter-configured")
+            .unwrap()
+            .value;
+
+        let adapter = crate::harness::adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let mut profile = crate::profile::LaunchProfile::native(IntegrationId::ClaudeCode);
+        profile.backend = crate::profile::BackendResource::DirectProvider {
+            provider: provider.name.clone(),
+        };
+        let secrets = OneShotSecrets("OPENROUTER_API_KEY", "sk-test-not-a-real-key");
+        let resolution = crate::profile::Resolution {
+            adapter,
+            acknowledged_bypass: false,
+            provider: Some(&provider),
+            secrets: &secrets,
+        };
+
+        let overlay = crate::profile::resolve(&profile, &resolution)
+            .expect("claude-code + a configured openrouter provider must now resolve");
+        let base_url = overlay
+            .env()
+            .iter()
+            .find(|(key, _)| key == std::ffi::OsStr::new("ANTHROPIC_BASE_URL"))
+            .map(|(_, value)| value.to_string_lossy().into_owned())
+            .expect("ANTHROPIC_BASE_URL must be set");
+        assert_eq!(base_url, "https://openrouter.ai/api");
+        assert!(
+            !base_url.ends_with("/v1"),
+            "ANTHROPIC_BASE_URL must not carry a /v1 suffix: Claude Code appends \
+             /v1/messages itself, so a URL of {base_url:?} would double it up"
+        );
+    }
+
+    #[test]
+    fn a_configured_provider_may_declare_custom_headers_that_reach_the_provider() {
+        let mut user = UserConfig::default();
+        let mut provider_cfg = ProviderConfig::new("openrouter");
+        provider_cfg.set_headers(vec![
+            ("X-Org-Id".to_owned(), "acme".to_owned()),
+            ("X-Trace".to_owned(), "on".to_owned()),
+        ]);
+        user.providers_mut().set("headered", provider_cfg);
+
+        let effective = EffectiveConfig::new(&user, None);
+        let provider = effective.configured_provider("headered").unwrap().value;
+        assert_eq!(
+            provider.headers,
+            vec![
+                ("X-Org-Id".to_owned(), "acme".to_owned()),
+                ("X-Trace".to_owned(), "on".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_header_name_with_an_unsafe_character_is_refused_and_named() {
+        for (name, offending) in [("Bad:Name", ':'), ("Bad Name", ' ')] {
+            let mut provider_cfg = ProviderConfig::new("openrouter");
+            provider_cfg.set_headers(vec![(name.to_owned(), "value".to_owned())]);
+
+            let err = provider_cfg
+                .to_provider("headered")
+                .expect_err("an unsafe header name must be refused");
+            match &err {
+                ProviderConfigError::InvalidHeaderName {
+                    header_name,
+                    offending: found,
+                    ..
+                } => {
+                    assert_eq!(header_name, name);
+                    assert_eq!(*found, offending);
+                }
+                other => panic!("expected InvalidHeaderName for `{name}`, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_header_value_with_a_control_character_is_refused_and_named() {
+        for (value, offending) in [("line-one\r\nline-two", '\r'), ("has\ttab", '\t')] {
+            let mut provider_cfg = ProviderConfig::new("openrouter");
+            provider_cfg.set_headers(vec![("X-Glasshouse".to_owned(), value.to_owned())]);
+
+            let err = provider_cfg
+                .to_provider("headered")
+                .expect_err("a control character in a header value must be refused");
+            match &err {
+                ProviderConfigError::InvalidHeaderValue {
+                    header_name,
+                    offending: found,
+                    ..
+                } => {
+                    assert_eq!(header_name, "X-Glasshouse");
+                    assert_eq!(*found, offending);
+                }
+                other => panic!("expected InvalidHeaderValue for {value:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_header_carrying_crlf_is_refused_rather_than_escaped() {
+        // The concrete injection this whole check exists to stop: a header
+        // value containing a newline would otherwise let a configured
+        // provider inject a second header of its own choosing into every
+        // request Claude Code or Codex sends.
+        let mut provider_cfg = ProviderConfig::new("openrouter");
+        provider_cfg.set_headers(vec![(
+            "X-Glasshouse".to_owned(),
+            "legit\r\nX-Injected: evil".to_owned(),
+        )]);
+
+        let err = provider_cfg
+            .to_provider("headered")
+            .expect_err("a newline in a header value must be refused, never escaped");
+        assert!(matches!(
+            err,
+            ProviderConfigError::InvalidHeaderValue { .. }
+        ));
     }
 
     /// Structural guard, not a string search: enumerate every field this
@@ -2445,20 +2742,23 @@ mod tests {
         let mut provider_cfg = ProviderConfig::new("openrouter");
         provider_cfg
             .set_base_url(Some("https://mirror.example.com/v1".to_owned()))
-            .set_credential_env(vec!["OPENROUTER_API_KEY".to_owned()]);
+            .set_credential_env(vec!["OPENROUTER_API_KEY".to_owned()])
+            .set_headers(vec![("X-Org-Id".to_owned(), "acme".to_owned())]);
         let provider_value = toml::Value::try_from(&provider_cfg).unwrap();
         let provider_table = provider_value.as_table().unwrap();
         let mut provider_keys: Vec<&str> = provider_table.keys().map(String::as_str).collect();
         provider_keys.sort_unstable();
         assert_eq!(
             provider_keys,
-            vec!["base_url", "credential_env", "template"],
+            vec!["base_url", "credential_env", "headers", "template"],
             "ProviderConfig grew a field — confirm it cannot hold a credential value \
-             (as opposed to a variable name) before widening this list"
+             (as opposed to a variable name) before widening this list. `headers` holds \
+             name/value pairs that are themselves configuration, never a credential — see \
+             ProviderConfig::set_headers's own doc for why that is safe."
         );
 
         // `ProviderTable` itself adds nothing beyond the map: every entry it
-        // can hold is one of the three fields just checked.
+        // can hold is one of the four fields just checked.
         let mut table = ProviderTable::default();
         table.set("mine", provider_cfg);
         let table_value = toml::Value::try_from(&table).unwrap();
@@ -2470,6 +2770,9 @@ mod tests {
             .map(String::as_str)
             .collect();
         entry_keys.sort_unstable();
-        assert_eq!(entry_keys, vec!["base_url", "credential_env", "template"]);
+        assert_eq!(
+            entry_keys,
+            vec!["base_url", "credential_env", "headers", "template"]
+        );
     }
 }

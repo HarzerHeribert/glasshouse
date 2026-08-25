@@ -703,6 +703,7 @@ fn apply_direct_provider(
         base_url: &support.base_url,
         model: profile.model.as_deref(),
         credential_var,
+        headers: &provider.headers,
     };
 
     let Some(plan) = cx.adapter.direct_provider_launch(&request) else {
@@ -938,6 +939,7 @@ mod tests {
             model_list_endpoint: Declared::Unverified,
             usage_telemetry: Declared::Unverified,
             credential_env: Vec::new(),
+            headers: Vec::new(),
         }
     }
 
@@ -1488,6 +1490,87 @@ mod tests {
             "the message must name what Codex needs: {message}"
         );
         assert!(message.contains("Codex"), "{message}");
+    }
+
+    /// The real, shipped NVIDIA template — not a synthetic stand-in — is the
+    /// honest consequence of declaring `openai-chat` only: it cannot back
+    /// Codex, exactly like the synthetic case just above.
+    #[test]
+    fn a_codex_profile_backed_by_the_real_nvidia_template_is_refused_on_protocol_grounds() {
+        let adapter = adapter_for(IntegrationId::Codex).expect("a harness");
+        let provider = crate::provider::template("nvidia").expect("nvidia is a built-in template");
+        let secrets = FakeSecrets::empty();
+        let profile = direct_profile(IntegrationId::Codex, &provider.name);
+
+        let err = resolve(&profile, &direct_cx(adapter, &provider, &secrets))
+            .expect_err("NVIDIA declares openai-chat only, which cannot back Codex 0.149.1");
+        assert!(matches!(err, Refusal::ProviderProtocolUnsupported { .. }));
+    }
+
+    /// Line 423's consumer: configured headers reach Claude Code as one
+    /// `ANTHROPIC_CUSTOM_HEADERS` variable, `Name: value` per line.
+    #[test]
+    fn claude_code_receives_configured_headers_as_a_custom_headers_variable() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let mut provider = anthropic_provider();
+        provider.headers = vec![
+            ("X-Glasshouse-One".to_owned(), "value-one".to_owned()),
+            ("X-Glasshouse-Two".to_owned(), "value-two".to_owned()),
+        ];
+        let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
+        let profile = direct_profile(IntegrationId::ClaudeCode, &provider.name);
+
+        let overlay = resolve(&profile, &direct_cx(adapter, &provider, &secrets)).unwrap();
+        let headers = env_value(&overlay, "ANTHROPIC_CUSTOM_HEADERS")
+            .expect("configured headers must reach the child")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            headers,
+            "X-Glasshouse-One: value-one\nX-Glasshouse-Two: value-two"
+        );
+    }
+
+    /// The same headers reach Codex as one `-c
+    /// model_providers.<id>.http_headers=…` inline-TOML-table override.
+    #[test]
+    fn codex_receives_configured_headers_as_an_http_headers_override() {
+        let adapter = adapter_for(IntegrationId::Codex).expect("a harness");
+        let mut provider = responses_provider();
+        provider.headers = vec![("X-Glasshouse-One".to_owned(), "value-one".to_owned())];
+        let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
+        let profile = direct_profile(IntegrationId::Codex, &provider.name);
+
+        let overlay = resolve(&profile, &direct_cx(adapter, &provider, &secrets)).unwrap();
+        let args = rendered_args(&overlay);
+        assert!(
+            args.iter().any(|arg| arg
+                == "model_providers.my-responses.http_headers={ \"X-Glasshouse-One\" = \"value-one\" }"),
+            "the header override never reached the argument list: {args:?}"
+        );
+    }
+
+    /// No headers configured, no header mechanism at all — on either
+    /// harness. An always-present but empty header line would be a subtler
+    /// version of the same invention this whole line refuses elsewhere.
+    #[test]
+    fn no_headers_configured_means_no_header_mechanism_on_either_harness() {
+        let claude = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let provider = anthropic_provider();
+        let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
+        let profile = direct_profile(IntegrationId::ClaudeCode, &provider.name);
+        let overlay = resolve(&profile, &direct_cx(claude, &provider, &secrets)).unwrap();
+        assert!(env_value(&overlay, "ANTHROPIC_CUSTOM_HEADERS").is_none());
+
+        let codex = adapter_for(IntegrationId::Codex).expect("a harness");
+        let responses = responses_provider();
+        let profile = direct_profile(IntegrationId::Codex, &responses.name);
+        let overlay = resolve(&profile, &direct_cx(codex, &responses, &secrets)).unwrap();
+        assert!(
+            !rendered_args(&overlay)
+                .iter()
+                .any(|arg| arg.contains("http_headers")),
+        );
     }
 
     /// A provider name is interpolated into a dotted TOML path, so it is

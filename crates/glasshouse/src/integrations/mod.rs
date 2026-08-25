@@ -1866,10 +1866,15 @@ mod tests {
             .split("Configured providers")
             .nth(1)
             .expect("a configured providers section");
+        // Not a fixed line count: openrouter now declares more than one
+        // protocol (line 353), so its block is longer than it used to be.
+        // This test configures the only provider in the section, so taking
+        // every line up to the section's own trailing blank line is exactly
+        // this provider's block, however many protocols it grows to.
         let block: Vec<&str> = section
             .lines()
             .skip_while(|line| !line.trim_start().starts_with("my-router"))
-            .take(5)
+            .take_while(|line| !line.trim().is_empty())
             .collect();
         assert!(!block.is_empty(), "no `my-router` block in the report");
 

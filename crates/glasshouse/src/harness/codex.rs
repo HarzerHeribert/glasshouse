@@ -98,6 +98,36 @@ const BACKEND_SELECTION: &[BackendSelection] = &[
     BackendSelection::ChildEnvironment("CODEX_HOME relocates the whole configuration root"),
 ];
 
+/// The `{ "N" = "V", ... }` inline TOML table for `headers`, or `None` when
+/// there are none to send — composed by hand rather than through a
+/// TOML-writing dependency, exactly as `-c model_providers.<id>.http_headers`
+/// was probed on Codex 0.149.1: `-c 'model_providers.<id>.http_headers={
+/// "Name" = "value" }'` arrived, and `--strict-config` accepted the key.
+///
+/// A header *name* is already restricted to `[A-Za-z0-9-]` by
+/// `crate::config`'s validation before it ever reaches this adapter, so it
+/// needs no escaping. A header *value* still can — `\` and `"` are the two
+/// characters that would let it break out of its own TOML string — so both
+/// are escaped here.
+fn http_headers_table(headers: &[(String, String)]) -> Option<String> {
+    if headers.is_empty() {
+        return None;
+    }
+    let mut table = String::from("{ ");
+    for (index, (name, value)) in headers.iter().enumerate() {
+        if index > 0 {
+            table.push_str(", ");
+        }
+        table.push('"');
+        table.push_str(name);
+        table.push_str("\" = \"");
+        table.push_str(&value.replace('\\', "\\\\").replace('"', "\\\""));
+        table.push('"');
+    }
+    table.push_str(" }");
+    Some(table)
+}
+
 impl HarnessAdapter for Codex {
     fn id(&self) -> IntegrationId {
         IntegrationId::Codex
@@ -144,6 +174,10 @@ impl HarnessAdapter for Codex {
     /// variable: `…`") rather than falling back to the user's own paid
     /// account — which is why the credential's absence is a refusal here too
     /// rather than a launch that quietly costs the user money.
+    ///
+    /// `http_headers` is one more override in the same set, present only
+    /// when the provider declares headers at all — see `http_headers_table`
+    /// below.
     fn direct_provider_launch(
         &self,
         request: &DirectProviderRequest<'_>,
@@ -179,6 +213,9 @@ impl HarnessAdapter for Codex {
         override_arg(format!("model_providers.{id}.name"), request.provider_name);
         override_arg(format!("model_providers.{id}.base_url"), request.base_url);
         override_arg(format!("model_providers.{id}.wire_api"), WIRE_API);
+        if let Some(table) = http_headers_table(request.headers) {
+            override_arg(format!("model_providers.{id}.http_headers"), &table);
+        }
         if let Some(var) = request.credential_var {
             override_arg(format!("model_providers.{id}.env_key"), var);
         }

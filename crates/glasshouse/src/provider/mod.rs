@@ -25,10 +25,35 @@
 //! Every built-in template in [`templates`] was read from a real installation
 //! or the service's own endpoint list on 2026-08-25, exactly once, the same
 //! way an adapter in [`mod@crate::harness`] is read from an installed binary.
-//! Only OpenRouter's model-list endpoint (`GET /models`, documented and
-//! public) was established well enough to declare `Verified`; every other
-//! capability nothing was actually established for is `Unverified` — never
-//! filled in from what a service probably supports.
+//! Only OpenRouter's and LiteLLM's model-list endpoints (both a documented,
+//! public `GET /models`) were established well enough to declare `Verified`;
+//! every other capability nothing was actually established for is
+//! `Unverified` — never filled in from what a service probably supports.
+//!
+//! Two sources were added on the same date, alongside the two above:
+//!
+//! - **NVIDIA.** `docs.api.nvidia.com/nim/reference/llm-apis` gives base
+//!   `https://integrate.api.nvidia.com` with `POST /v1/chat/completions`, and
+//!   NVIDIA's own `build.nvidia.com` model pages use
+//!   `base_url = "https://integrate.api.nvidia.com/v1"`. No Responses
+//!   endpoint was established, so [`templates`]' `nvidia` entry declares
+//!   `openai-chat` only — which is also why it cannot back Codex, whose
+//!   `wire_api` dropped `"chat"` in 0.149.1.
+//! - **LiteLLM.** Its quick-start and `proxy/user_keys` documentation pages
+//!   both use exactly `http://0.0.0.0:4000` as the client `base_url` — kept
+//!   verbatim rather than "fixed" to `localhost`. Its proxy documentation
+//!   also lists `GET /models - available models on server`, which is the
+//!   second `Verified` model-list endpoint above.
+//! - **OpenRouter serves Anthropic Messages too**, established two
+//!   independent ways: an unauthenticated `POST
+//!   https://openrouter.ai/api/v1/messages` answers `401`, while `POST
+//!   https://openrouter.ai/api/v1/nonexistent-endpoint` under the same prefix
+//!   answers `404` — the working control case that turns "the endpoint
+//!   exists and wants a credential" into a finding rather than a guess. And
+//!   the user's own working launcher (`~/projects/openrouter-clis/bin/claude-or`)
+//!   drives real Claude Code against exactly `https://openrouter.ai/api`,
+//!   its own comment explaining why: it strips `/v1` from the OpenAI base
+//!   URL because Claude Code appends `/v1/messages` itself.
 //!
 //! **Kilo, Nous and RouterAI are deliberately not templates here.** The user
 //! holds a credential for each, but no endpoint has been established for any
@@ -78,6 +103,12 @@ pub struct Provider {
     /// from. **Names only — never a value.** More than one is allowed: a
     /// user may hold several keys for the same router.
     pub credential_env: Vec<String>,
+    /// Extra HTTP headers this provider needs, as name/value pairs.
+    /// Configuration, not credentials: a header VALUE here is written by the
+    /// user into their own config file and is not resolved through
+    /// `SecretStore`. A provider needing a secret in a header is out of scope
+    /// for this line — refuse it rather than smuggling a credential through.
+    pub headers: Vec<(String, String)>,
 }
 
 impl Provider {
@@ -141,10 +172,15 @@ pub fn templates() -> Vec<Provider> {
     vec![
         Provider {
             name: "openrouter".to_owned(),
-            protocols: vec![unverified_support(
-                WireProtocol::OpenAiChat,
-                "https://openrouter.ai/api/v1",
-            )],
+            protocols: vec![
+                unverified_support(WireProtocol::OpenAiChat, "https://openrouter.ai/api/v1"),
+                // See the module documentation's "OpenRouter serves Anthropic
+                // Messages too" entry for both sources. The root, with no
+                // `/v1` — Claude Code appends `/v1/messages` itself.
+                // Streaming, tool_calls and reasoning stay Unverified: only
+                // the endpoint's existence was established.
+                unverified_support(WireProtocol::AnthropicMessages, "https://openrouter.ai/api"),
+            ],
             model_list_endpoint: Declared::verified(
                 true,
                 "OpenRouter's API reference documents a public, unauthenticated \
@@ -152,6 +188,7 @@ pub fn templates() -> Vec<Provider> {
             ),
             usage_telemetry: Declared::Unverified,
             credential_env: vec!["OPENROUTER_API_KEY".to_owned()],
+            headers: vec![],
         },
         Provider {
             name: "unorouter".to_owned(),
@@ -162,6 +199,7 @@ pub fn templates() -> Vec<Provider> {
             model_list_endpoint: Declared::Unverified,
             usage_telemetry: Declared::Unverified,
             credential_env: vec!["UNOROUTER_API_KEY".to_owned()],
+            headers: vec![],
         },
         Provider {
             name: "anyrouter".to_owned(),
@@ -172,6 +210,7 @@ pub fn templates() -> Vec<Provider> {
             model_list_endpoint: Declared::Unverified,
             usage_telemetry: Declared::Unverified,
             credential_env: vec!["ANYROUTER_API_KEY".to_owned()],
+            headers: vec![],
         },
         Provider {
             name: "zai".to_owned(),
@@ -182,6 +221,7 @@ pub fn templates() -> Vec<Provider> {
             model_list_endpoint: Declared::Unverified,
             usage_telemetry: Declared::Unverified,
             credential_env: vec!["ZAI_API_KEY".to_owned()],
+            headers: vec![],
         },
         Provider {
             name: "opencode-zen".to_owned(),
@@ -194,6 +234,7 @@ pub fn templates() -> Vec<Provider> {
             // No credential environment variable was established for this
             // one — see the module documentation on guessing.
             credential_env: vec![],
+            headers: vec![],
         },
         Provider {
             name: "ollama".to_owned(),
@@ -204,6 +245,7 @@ pub fn templates() -> Vec<Provider> {
             model_list_endpoint: Declared::Unverified,
             usage_telemetry: Declared::Unverified,
             credential_env: vec![],
+            headers: vec![],
         },
         Provider {
             name: "llama-cpp".to_owned(),
@@ -214,6 +256,52 @@ pub fn templates() -> Vec<Provider> {
             model_list_endpoint: Declared::Unverified,
             usage_telemetry: Declared::Unverified,
             credential_env: vec![],
+            headers: vec![],
+        },
+        Provider {
+            name: "nvidia".to_owned(),
+            // `docs.api.nvidia.com/nim/reference/llm-apis` gives base
+            // `https://integrate.api.nvidia.com` with `POST
+            // /v1/chat/completions`; NVIDIA's own `build.nvidia.com` model
+            // pages use `base_url = "https://integrate.api.nvidia.com/v1"`.
+            // Read 2026-08-25. `openai-chat` only — no Responses endpoint
+            // was established, so this template cannot back Codex, which
+            // needs `openai-responses`.
+            protocols: vec![unverified_support(
+                WireProtocol::OpenAiChat,
+                "https://integrate.api.nvidia.com/v1",
+            )],
+            model_list_endpoint: Declared::Unverified,
+            usage_telemetry: Declared::Unverified,
+            // NVIDIA's own sample reads `api_key = "$NVIDIA_API_KEY"`.
+            credential_env: vec!["NVIDIA_API_KEY".to_owned()],
+            headers: vec![],
+        },
+        Provider {
+            name: "litellm".to_owned(),
+            // LiteLLM's quick-start and `proxy/user_keys` pages both use
+            // exactly `http://0.0.0.0:4000` as the client `base_url`. Written
+            // as read — not "fixed" to `localhost`. Read 2026-08-25.
+            protocols: vec![unverified_support(
+                WireProtocol::OpenAiChat,
+                "http://0.0.0.0:4000",
+            )],
+            model_list_endpoint: Declared::verified(
+                true,
+                "LiteLLM's proxy documentation lists `GET /models - available models on \
+                 server`, read 2026-08-25",
+            ),
+            usage_telemetry: Declared::Unverified,
+            // Deliberately empty. LiteLLM documents no dedicated credential
+            // variable, and its own examples reuse the generic
+            // `OPENAI_API_KEY` — declaring that here would make Glasshouse
+            // read a user's real OpenAI key for what is usually a local
+            // proxy. A LiteLLM key is a per-deployment virtual key, so the
+            // user names its variable through
+            // `ProviderConfig::set_credential_env`, exactly as the two
+            // generic templates below already expect.
+            credential_env: vec![],
+            headers: vec![],
         },
         // The two generic templates: a concrete protocol is established
         // (OpenAI-compatible chat completions, or Anthropic Messages), but
@@ -225,6 +313,7 @@ pub fn templates() -> Vec<Provider> {
             model_list_endpoint: Declared::Unverified,
             usage_telemetry: Declared::Unverified,
             credential_env: vec![],
+            headers: vec![],
         },
         Provider {
             name: "anthropic-compatible".to_owned(),
@@ -232,6 +321,7 @@ pub fn templates() -> Vec<Provider> {
             model_list_endpoint: Declared::Unverified,
             usage_telemetry: Declared::Unverified,
             credential_env: vec![],
+            headers: vec![],
         },
     ]
 }
@@ -294,6 +384,7 @@ mod tests {
             model_list_endpoint: Declared::Unverified,
             usage_telemetry: Declared::Unverified,
             credential_env: vec!["A_EXAMPLE_KEY".to_owned()],
+            headers: vec![],
         };
         assert!(provider.serves(WireProtocol::OpenAiChat).is_some());
         assert!(provider.serves(WireProtocol::AnthropicMessages).is_some());
@@ -314,6 +405,7 @@ mod tests {
             model_list_endpoint: Declared::Unverified,
             usage_telemetry: Declared::Unverified,
             credential_env: vec![],
+            headers: vec![],
         };
         let chat = provider.serves(WireProtocol::OpenAiChat).unwrap();
         let anthropic = provider.serves(WireProtocol::AnthropicMessages).unwrap();
@@ -342,6 +434,7 @@ mod tests {
             model_list_endpoint: Declared::Unverified,
             usage_telemetry: Declared::Unverified,
             credential_env: vec![],
+            headers: vec![],
         };
         let openai_responses_only = Provider {
             name: "responses-only".to_owned(),
@@ -352,6 +445,7 @@ mod tests {
             model_list_endpoint: Declared::Unverified,
             usage_telemetry: Declared::Unverified,
             credential_env: vec![],
+            headers: vec![],
         };
         assert!(
             openai_chat_only
@@ -455,9 +549,12 @@ mod tests {
         }
         assert_eq!(
             verified,
-            vec!["openrouter.model_list_endpoint".to_owned()],
-            "only openrouter's model-list endpoint was authorised as Verified; every other \
-             capability must be Unverified: {verified:?}"
+            vec![
+                "openrouter.model_list_endpoint".to_owned(),
+                "litellm.model_list_endpoint".to_owned(),
+            ],
+            "only openrouter's and litellm's model-list endpoints were authorised as Verified; \
+             every other capability must be Unverified: {verified:?}"
         );
     }
 
@@ -472,6 +569,7 @@ mod tests {
                 "A_EXAMPLE_KEY".to_owned(),
                 "A_EXAMPLE_KEY_BACKUP".to_owned(),
             ],
+            headers: vec![],
         };
         assert_eq!(provider.credential_env.len(), 2);
         assert!(
@@ -490,5 +588,77 @@ mod tests {
     fn template_looks_up_by_name_and_is_none_for_unknown_names() {
         assert!(template("openrouter").is_some());
         assert!(template("not-a-real-provider").is_none());
+    }
+
+    // --- line 415: NVIDIA ------------------------------------------------
+
+    #[test]
+    fn nvidia_serves_chat_only_at_the_documented_base_url() {
+        let nvidia = template("nvidia").expect("nvidia is a built-in template");
+        let chat = nvidia
+            .serves(WireProtocol::OpenAiChat)
+            .expect("nvidia serves openai-chat");
+        assert_eq!(chat.base_url, "https://integrate.api.nvidia.com/v1");
+        assert!(
+            nvidia.serves(WireProtocol::OpenAiResponses).is_none(),
+            "no Responses endpoint was established for NVIDIA — a provider serving only \
+             openai-chat must not answer for openai-responses"
+        );
+        assert_eq!(nvidia.credential_env, vec!["NVIDIA_API_KEY".to_owned()]);
+        assert!(nvidia.headers.is_empty());
+    }
+
+    // --- line 416: LiteLLM -------------------------------------------------
+
+    #[test]
+    fn litellm_serves_chat_with_a_verified_model_list_and_no_credential_variable() {
+        let litellm = template("litellm").expect("litellm is a built-in template");
+        let chat = litellm
+            .serves(WireProtocol::OpenAiChat)
+            .expect("litellm serves openai-chat");
+        assert_eq!(chat.base_url, "http://0.0.0.0:4000");
+        assert!(
+            litellm.model_list_endpoint.is_verified(),
+            "LiteLLM's documented GET /models must be Verified, not Unverified"
+        );
+        assert!(
+            litellm.credential_env.is_empty(),
+            "LiteLLM declares no dedicated credential variable — the user must name their \
+             own via ProviderConfig::set_credential_env, never OPENAI_API_KEY by default"
+        );
+        assert!(litellm.headers.is_empty());
+    }
+
+    // --- line 353: OpenRouter also serves Anthropic Messages ---------------
+
+    #[test]
+    fn openrouter_also_serves_anthropic_messages_at_the_api_root_with_no_v1() {
+        let openrouter = template("openrouter").expect("openrouter is a built-in template");
+        let anthropic = openrouter
+            .serves(WireProtocol::AnthropicMessages)
+            .expect("openrouter must also serve anthropic-messages");
+        assert_eq!(
+            anthropic.base_url, "https://openrouter.ai/api",
+            "Claude Code appends /v1/messages itself, so the configured base URL must be \
+             the root with no /v1 suffix"
+        );
+        // The original protocol is untouched by adding a second one.
+        let chat = openrouter
+            .serves(WireProtocol::OpenAiChat)
+            .expect("openrouter must still serve openai-chat");
+        assert_eq!(chat.base_url, "https://openrouter.ai/api/v1");
+    }
+
+    #[test]
+    fn every_built_in_template_ships_no_header_unless_one_was_established() {
+        // Nothing established a required header for any built-in template —
+        // inventing one is the same failure as inventing a base URL.
+        for provider in templates() {
+            assert!(
+                provider.headers.is_empty(),
+                "{} declares a header nobody established",
+                provider.name
+            );
+        }
     }
 }

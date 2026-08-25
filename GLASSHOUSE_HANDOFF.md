@@ -4,9 +4,13 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 9F is eleven of thirteen. Phase 9 is three of seven; 9E eight of
-thirteen; 9C eleven of twelve; 9D eight of fourteen; 9B eight of nine;
-9A seventeen of twenty-six. 193 -> 204 checked boxes (16%).**
+**Phase 9F is eleven of thirteen; 9D eleven of fourteen; 9A nineteen of
+twenty-six. Phase 9 is three of seven; 9E eight of thirteen; 9C eleven of
+twelve; 9B eight of nine. 193 -> 209 checked boxes (16%).**
+
+Three workers now run concurrently, partitioned by the files they touch —
+see `GLASSHOUSE_ORCHESTRATION_MEASUREMENTS.md`, which is a standing inherited
+experiment and not a one-off note.
 
 The user signed the Antigravity CLI in, which unblocked Phase 9.
 
@@ -27,6 +31,54 @@ session came up and showed Codex's own trust prompt — and the end-to-end PTY
 test asserts the exact argv.
 
 ## Verified completed work
+
+### This session — a gateway a harness can actually reach, and a header that cannot forge another
+
+Five lines across two phases, and the one that matters most is not a template:
+**OpenRouter serves Anthropic Messages at `https://openrouter.ai/api`** — the
+root, no `/v1`, because Claude Code appends `/v1/messages` itself. Established
+twice over: an unauthenticated POST to `/v1/messages` answers 401 while a
+nonexistent path under the same prefix answers 404, and the user's own working
+launcher drives the real Claude Code against exactly that root. So
+"Claude / OpenRouter" (9A line 353) is now a profile that resolves, and Phase
+9F finally has a real backend to be proven against.
+
+**NVIDIA and LiteLLM templates**, both read from the vendors' own docs. NVIDIA
+is `openai-chat` only, so a test asserts the honest consequence — it cannot
+back Codex. LiteLLM's base URL is written as read (`http://0.0.0.0:4000`), and
+its `credential_env` is deliberately empty because the docs reuse the generic
+`OPENAI_API_KEY`, which Glasshouse must not read for a local proxy.
+
+**Headers are overridable, and CR/LF is refused rather than escaped.** A
+newline inside a header value would forge a second header into every request,
+so `unsafe_header_value_char` rejects control characters outright. Both
+delivery mechanisms were verified off the wire beforehand:
+`ANTHROPIC_CUSTOM_HEADERS` as newline-joined `Name: value` lines, and Codex's
+`-c model_providers.<id>.http_headers` inline table.
+
+**Line 355 closed end to end at last.** It had stayed open because no shipped
+profile could populate `env`; a direct-provider profile now can. A pty_smoke
+test resolves one, spawns a real child, and asserts the base URL and credential
+arrive **in the child**, the parent's environment does not carry them, and
+`PATH` is untouched.
+
+**Thirteen mutations, thirteen kills**, plus two re-run independently by the
+orchestrator — disabling the CR/LF guard killed its test, and adding `/v1` back
+to the OpenRouter root killed two independent tests at different layers.
+
+**Two forbidden-file findings, both correct and both flagged rather than hidden.**
+Adding a field to `Provider` forces every exhaustive struct literal to change,
+including one inside `secret/mod.rs`'s tests — unavoidable. And the batch's own
+design change broke an unrelated pre-existing test whose `.take(5)` window was
+sized for a one-protocol world; replaced with a `take_while` that is correct for
+any number.
+
+**A known, bounded inconsistency is recorded rather than smoothed over:** header
+validation runs at the config boundary while credential-variable validation runs
+at resolve time. It is bounded because the only production constructors of a
+`Provider` are `to_provider`, which validates, and `templates()`, which a test
+pins to carry no headers. If a third is ever added, header validation must move
+to resolve time too.
 
 ### This session — the gateway keys become usable, and one defect caught on the way
 

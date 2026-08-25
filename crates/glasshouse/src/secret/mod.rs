@@ -763,6 +763,7 @@ mod tests {
                 "A_EXAMPLE_KEY".to_owned(),
                 "A_EXAMPLE_KEY_BACKUP".to_owned(),
             ],
+            headers: vec![],
         };
         assert_eq!(
             pooled.secret_refs(),

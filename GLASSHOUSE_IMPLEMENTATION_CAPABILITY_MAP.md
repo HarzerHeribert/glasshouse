@@ -350,9 +350,9 @@ Fixed architectural requirements
 ☐ Define a launch profile as the combination of harness, backend resource, model selection, protocol compatibility, child-process configuration overlay, and response profile.
 ☑ Treat a provider, direct API, router, or gateway as a backend resource for a harness rather than as an interactive coding harness by itself.
 ☑ Give every harness a Native launch profile that uses the harness’s normal first-party authentication and configuration.
-☐ Allow additional launch profiles such as Claude / OpenRouter, Claude / NVIDIA, or Codex / Custom Provider.
+☑ Allow additional launch profiles such as Claude / OpenRouter, Claude / NVIDIA, or Codex / Custom Provider.
 ☑ Store launch-profile configuration separately from project memory.
-☐ Allow a launch profile to inject environment variables only into the child harness process.
+☑ Allow a launch profile to inject environment variables only into the child harness process.
 ☑ Allow a launch profile to inject command-line arguments only into the child harness process.
 ☑ Allow a launch profile to select the harness's own approval mode, defaulting to its native automatic-review mode where one exists and never to a blanket bypass.
 ☑ Allow a blanket bypass on a harness that declares no automatic-review mode only after the user has been shown its risk once and acknowledged it, record that acknowledgement per harness, and never downgrade to a bypass silently.
@@ -412,15 +412,15 @@ Fixed architectural requirements
 Phase 9D — Built-in provider templates
 
 ☑ Add a built-in OpenRouter provider template.
-☐ Add a built-in NVIDIA-compatible provider template for endpoints exposing supported NIM-style APIs.
-☐ Add a built-in LiteLLM provider template.
+☑ Add a built-in NVIDIA-compatible provider template for endpoints exposing supported NIM-style APIs.
+☑ Add a built-in LiteLLM provider template.
 ☑ Add a built-in Ollama provider template.
 ☑ Add a built-in llama.cpp provider template.
 ☑ Add a generic OpenAI-compatible provider template.
 ☑ Add a generic Anthropic-compatible provider template.
 ☑ Allow providers such as UnoRouter, AnyRouter, Kilo, Nous, RouterAI, Z.ai, OpenCode Zen, Cerebras, Groq, or future services to be configured through generic templates when their API shape is compatible.
 ☑ Keep provider templates declarative so adding a known service does not require branching throughout the core router.
-☐ Keep service-specific default URLs and headers overridable by the user.
+☑ Keep service-specific default URLs and headers overridable by the user.
 ☑ Allow a provider template to define required environment-variable names without storing the secret in project memory.
 ☐ Allow the user to test provider connectivity from settings before enabling it for routing.
 ☐ Allow the user to refresh a provider’s model list manually when the provider exposes model discovery.

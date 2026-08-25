@@ -2857,6 +2857,129 @@ fn the_users_environment_survives_except_for_explicit_overrides() {
     }
 }
 
+/// Phase 9D, line 355, closed end to end rather than half.
+///
+/// `an_override_reaches_the_spawned_process_and_not_the_parent` and
+/// `the_users_environment_survives_except_for_explicit_overrides` already
+/// prove that a hand-built [`glasshouse::profile::LaunchOverlay`] reaches
+/// only the child through a real [`HarnessLaunch`]. What neither could prove
+/// before Phase 9F is the other half of the chain: that resolving a real
+/// **direct-provider** profile is what *produces* an overlay with an
+/// environment at all. This test drives both halves together — resolve,
+/// apply, spawn — using the same env-dumping fixture harness.
+#[test]
+fn a_direct_provider_profile_reaches_a_real_child_and_only_that_child() {
+    use glasshouse::harness::{Declared, WireProtocol, adapter_for};
+    use glasshouse::integrations::IntegrationId;
+    use glasshouse::profile::{BackendResource, LaunchProfile, Resolution, resolve};
+    use glasshouse::provider::{ProtocolSupport, Provider};
+    use glasshouse::secret::EnvironmentSecretStore;
+
+    const CREDENTIAL_VAR: &str = "GLASSHOUSE_PTY_SMOKE_DIRECT_PROVIDER_KEY";
+    const CREDENTIAL_VALUE: &str = "sk-glasshouse-pty-smoke-planted-credential-never-a-real-key";
+    const BASE_URL: &str = "https://gateway.example/anthropic";
+
+    assert!(
+        std::env::var(CREDENTIAL_VAR).is_err(),
+        "test setup is degenerate: {CREDENTIAL_VAR} is already set in this process"
+    );
+    let expected_path =
+        std::env::var("PATH").expect("PATH must be set in this process to run this test");
+
+    let provider = Provider {
+        name: "pty-smoke-gateway".to_owned(),
+        protocols: vec![ProtocolSupport {
+            protocol: WireProtocol::AnthropicMessages,
+            base_url: BASE_URL.to_owned(),
+            streaming: Declared::Unverified,
+            tool_calls: Declared::Unverified,
+            reasoning: Declared::Unverified,
+        }],
+        model_list_endpoint: Declared::Unverified,
+        usage_telemetry: Declared::Unverified,
+        credential_env: vec![CREDENTIAL_VAR.to_owned()],
+        headers: Vec::new(),
+    };
+
+    let mut profile = LaunchProfile::native(IntegrationId::ClaudeCode);
+    profile.name = "pty-smoke-direct-provider".to_owned();
+    profile.backend = BackendResource::DirectProvider {
+        provider: provider.name.clone(),
+    };
+
+    let adapter = adapter_for(IntegrationId::ClaudeCode).expect("Claude Code has an adapter");
+    let secrets = EnvironmentSecretStore::new();
+
+    // SAFETY: `CREDENTIAL_VAR` is unique to this test and is removed again
+    // immediately below, before `resolve`'s result (and any assertion that
+    // might panic) is even inspected, so no other test can observe it set.
+    unsafe {
+        std::env::set_var(CREDENTIAL_VAR, CREDENTIAL_VALUE);
+    }
+    let resolution = Resolution {
+        adapter,
+        acknowledged_bypass: false,
+        provider: Some(&provider),
+        secrets: &secrets,
+    };
+    let resolved = resolve(&profile, &resolution);
+    unsafe {
+        std::env::remove_var(CREDENTIAL_VAR);
+    }
+    let overlay = resolved.expect("a configured anthropic-messages provider must back Claude Code");
+
+    let fixture = RuntimeFixture::new();
+    let path = install_env_dump_harness(&fixture.bin_dir, "env-dump-direct-provider");
+    let launch = overlay.apply(fixture.launch(&path));
+    let mut session = Session::spawn_harness(&launch);
+    let status = session.wait_for_exit();
+    assert!(status.success(), "{status}");
+
+    let output = strip_terminal_sequences(&session.output());
+
+    assert!(
+        output.contains(&format!("ANTHROPIC_BASE_URL={BASE_URL}")),
+        "the provider's base URL never reached the child:\n{output}"
+    );
+    // The credential's presence is compared, never printed: a failure here
+    // must not put the (test-only, invented) value into the panic message.
+    let credential_reached_the_child =
+        output.contains(&format!("ANTHROPIC_AUTH_TOKEN={CREDENTIAL_VALUE}"));
+    assert!(
+        credential_reached_the_child,
+        "the credential never reached the child (value withheld from this message)"
+    );
+
+    assert!(
+        std::env::var("ANTHROPIC_BASE_URL").is_err(),
+        "the overlay's own environment variable leaked into this (parent) process"
+    );
+    assert!(
+        std::env::var(CREDENTIAL_VAR).is_err(),
+        "the credential's source variable was not cleaned up from this process"
+    );
+
+    // `PATH`, which no launch operation named, arrives unchanged — the same
+    // assertion `the_users_environment_survives_except_for_explicit_overrides`
+    // makes, for the same Windows-vs-Unix reason documented there.
+    #[cfg(unix)]
+    {
+        const COMPARED: usize = 30;
+        let expected_head: String = expected_path.chars().take(COMPARED).collect();
+        let expected_entry = format!("PATH={expected_head}").to_ascii_uppercase();
+        let output_upper = output.to_ascii_uppercase();
+        assert!(
+            output_upper.contains(&expected_entry),
+            "PATH did not survive unchanged; expected the child's environment to open \
+             `{expected_entry}`:\n{output}"
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = &expected_path;
+    }
+}
+
 /// An embedded session answers the cursor-position query itself.
 ///
 /// This is the rule `session::attach` inverts. `attach` is a pass-through and

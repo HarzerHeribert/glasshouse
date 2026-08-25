@@ -99,6 +99,15 @@ const MODEL_ENV: &str = "ANTHROPIC_MODEL";
 /// while the user's native login is untouched on disk.
 const CREDENTIAL_ENV: &str = "ANTHROPIC_AUTH_TOKEN";
 
+/// Extra headers Claude Code sends on every request, one per line.
+///
+/// Verified on 2.1.245: probed with `X-Glasshouse-Probe: probe-header-value`,
+/// the request arrived carrying `x-glasshouse-probe: probe-header-value`. The
+/// `\n` separator between several headers is verified too — probed with
+/// `$'X-Probe-One: value-one\nX-Probe-Two: value-two'`, both headers arrived
+/// (`x-probe-one: value-one`, `x-probe-two: value-two`).
+const CUSTOM_HEADERS_ENV: &str = "ANTHROPIC_CUSTOM_HEADERS";
+
 const BACKEND_SELECTION: &[BackendSelection] = &[
     BackendSelection::ChildEnvironment(
         "ANTHROPIC_API_KEY, or a third-party provider's own credentials",
@@ -158,9 +167,11 @@ impl HarnessAdapter for ClaudeCode {
         Some(Invocation::of(["--session-id", native_session]))
     }
 
-    /// Three environment variables on one child process, and no arguments at
-    /// all — the mechanism `BACKEND_SELECTION` already declares as
-    /// [`BackendSelection::ChildEnvironment`].
+    /// Up to four environment variables on one child process, and no
+    /// arguments at all — the mechanism `BACKEND_SELECTION` already declares
+    /// as [`BackendSelection::ChildEnvironment`]. The fourth,
+    /// `CUSTOM_HEADERS_ENV`, is present only when the provider declares
+    /// headers at all.
     ///
     /// Nothing here writes to `~/.claude` or to any settings document: the
     /// overlay this plan becomes reaches exactly one process's environment
@@ -194,6 +205,20 @@ impl HarnessAdapter for ClaudeCode {
             .map(|_| CredentialPlacement::Environment(CREDENTIAL_ENV.to_owned()));
         if credential.is_some() {
             names.push(CREDENTIAL_ENV);
+        }
+
+        // `Name: value` per header, joined by a real newline — see
+        // `CUSTOM_HEADERS_ENV`'s doc for the verification. Absent entirely
+        // rather than an empty string when the provider declares none.
+        if !request.headers.is_empty() {
+            let rendered = request
+                .headers
+                .iter()
+                .map(|(name, value)| format!("{name}: {value}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            env.push((OsString::from(CUSTOM_HEADERS_ENV), OsString::from(rendered)));
+            names.push(CUSTOM_HEADERS_ENV);
         }
 
         Some(DirectProviderPlan {

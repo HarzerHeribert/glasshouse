@@ -263,6 +263,13 @@ pub struct DirectProviderRequest<'a> {
     /// The environment variable the provider declares its credential comes
     /// from, when it declares one. A NAME, never a value.
     pub credential_var: Option<&'a str>,
+    /// Extra HTTP headers this provider needs, as name/value pairs — see
+    /// [`crate::provider::Provider::headers`]. Configuration, not
+    /// credentials: names and values here are never resolved through a
+    /// [`crate::secret::SecretStore`], and `crate::config`'s
+    /// `ProviderConfig::to_provider` has already refused anything that
+    /// could not survive being interpolated into a header line.
+    pub headers: &'a [(String, String)],
 }
 
 /// How this harness will be pointed at that provider, for one child process.
