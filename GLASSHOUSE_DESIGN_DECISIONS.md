@@ -148,3 +148,65 @@ to answer, and a value with no provenance cannot answer it.
 6. No secret value is rendered — structurally guaranteed, since no
    configuration type has a field able to hold one.
 
+---
+
+## Terminal emulation — who answers the terminal's questions
+
+### The decision: `vt100`
+
+Phase 5 requires rendering a harness's ANSI output "faithfully enough for
+native Claude Code and Codex TUIs to remain usable". That needs a terminal
+emulator. Four were considered:
+
+- **`vt100`** — parses terminal data into a screen grid. **Chosen.**
+- `alacritty_terminal` — Alacritty's production state machine. More
+  battle-tested, materially heavier.
+- `termwiz` — WezTerm's; brings input handling and widgets that duplicate
+  Crossterm and Ratatui.
+- `vte` — parser only, no grid; the screen model would be hand-written, which
+  is where subtle rendering bugs live.
+
+`vt100` costs three new crates (`vt100`, `vte`, `arrayvec` — its other
+dependencies were already present), taking the tree from 138 to 141, and holds
+the 1.85 MSRV. That fits Phase 0's fixed requirement to keep the dependency set
+limited to what terminal UI, PTYs, serialization, SQLite and process control
+need.
+
+The escape hatch is deliberate: both `vt100` and `alacritty_terminal` produce a
+cell grid, and the viewport renderer is the only consumer. If fidelity proves
+insufficient against a real harness TUI, swapping is a bounded change to one
+module rather than an architectural reversal.
+
+### The consequence: embedded sessions invert the DSR rule
+
+`session::attach` is a **pass-through**. Its module documentation is explicit
+that Glasshouse must *never* answer the ConPTY startup handshake
+(`ESC[6n` → `ESC[<row>;<col>R`), because the user's real terminal is on the
+other end and will answer it. Two replies would reach the harness as input.
+
+An **embedded** session is the exact opposite. Glasshouse is the terminal: the
+output goes into a buffer it owns and is redrawn into a viewport, and no real
+terminal ever sees the query. If nothing answers, a harness that waits for the
+reply hangs — silently, looking like a session that started and did nothing.
+
+So the rule inverts, and both halves must hold:
+
+- **Pass-through session (`attach`): never answer.** Unchanged.
+- **Embedded session (`SessionRuntime`): always answer, and never forward the
+  query onward.**
+
+That the runtime's existing tests needed a hand-written `DsrTracker` helper to
+answer queries on the test's behalf is the evidence that nothing in production
+answers them today. Phase 5 is where that stops being acceptable.
+
+### Invariants a test must hold to
+
+1. A harness that emits `ESC[6n` receives exactly one well-formed reply.
+2. The reply reports the cursor position of the **viewport**, not the outer
+   terminal — the harness is being told about the screen it actually has.
+3. `session::attach` still answers nothing.
+4. Resizing the viewport resizes the emulator's grid and the child's
+   pseudo-terminal to the same dimensions.
+5. Colours, cursor position and line wrapping survive a round trip through the
+   emulator into Ratatui cells.
+
