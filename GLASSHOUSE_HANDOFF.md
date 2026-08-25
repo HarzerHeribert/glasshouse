@@ -93,6 +93,22 @@ executable name to the catalogue; making the doctor report's adapter loop
 print nothing; and adding an `IntegrationId`-returning method to
 `SessionRuntime`.
 
+**Growing the catalogue moved the setup wizard toward a limit, so the list now
+scrolls.** Ten integrations plus two section headers still fit an 80x24 screen,
+but the margin is thin, and Ratatui silently draws fewer rows when a list
+outgrows its area — an integration past the bottom edge would be one the user
+can neither see nor toggle, with every test still green. The list is rendered
+with its selection now, so it follows the cursor. Two tests hold it: all rows
+present at 80x24, and every row still reachable at 80x12, where the list
+genuinely truncates. Reverting to stateless rendering fails the second and not
+the first.
+
+**One scare that was not a defect.** The first version of that test asserted
+every integration had a row, and failed on cmux — which the wizard
+deliberately never offers unless it is actually detected. The layout was fine;
+the test's premise was wrong. Worth remembering that a failing new test is a
+claim about the code *or* about the test.
+
 **A test was rewritten because it pinned a wrong fact.**
 `antigravity_only_searches_the_literal_name` asserted the guess that a real
 install disproved. It is now
@@ -485,12 +501,15 @@ surface before sending anything to it.
 
 - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
   --all-features -- -D warnings`, `cargo test --workspace --all-features`
-  (354 lib + 2 bin + 41 PTY smoke + 4 settings), `rustup run 1.85.0 cargo
+  (356 lib + 2 bin + 41 PTY smoke + 4 settings), `rustup run 1.85.0 cargo
   check --locked --workspace --all-targets`, `git diff --check` — all pass.
 - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` — 23
   diagnostics, exactly the baseline measured at `HEAD` in a throwaway
   worktree. None added.
-- Five mutations, each observed to fail the test it targets. None passed.
+- Six mutations, each observed to fail the test it targets. None passed.
+- CI `32835774698` green on Linux, macOS, Windows and lint, with the Windows
+  job confirmed to have executed 346 lib, 2 bin, 33 PTY and 4 settings tests
+  rather than merely reporting green.
 - `glasshouse doctor` run from the built binary, which is how two rendering
   defects were found and how Antigravity detection was confirmed against a
   real install.

@@ -11,7 +11,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::integrations::{IntegrationKind, IntegrationStatus};
 
@@ -19,11 +19,12 @@ use super::state::{PathInputView, RowView, Step, WizardState};
 
 /// Draw the current step of `state` into `frame`.
 ///
-/// Every screen fits an 80x24 terminal without scrolling. Below that,
-/// Ratatui's layout solver simply gives less space to each region (and, for
-/// the list, shows fewer rows) rather than panicking — nothing here computes
-/// a size by subtraction, which is the usual way a "must not panic on a tiny
-/// terminal" requirement gets violated.
+/// Every screen fits an 80x24 terminal without scrolling. Below that, the
+/// integration list scrolls to follow the selection, so every row stays
+/// reachable rather than being cut off at the bottom edge; the other regions
+/// simply get less space from Ratatui's layout solver rather than panicking —
+/// nothing here computes a size by subtraction, which is the usual way a
+/// "must not panic on a tiny terminal" requirement gets violated.
 pub fn render(state: &WizardState, frame: &mut Frame) {
     let area = frame.area();
     let [title_area, body_area, footer_area] = Layout::default()
@@ -102,6 +103,10 @@ fn render_harnesses(state: &WizardState, frame: &mut Frame, area: Rect) {
 
     let mut items = Vec::new();
     let mut current_kind: Option<IntegrationKind> = None;
+    // Which *item* the selected row became. Headers are interleaved with
+    // rows, so this is not the row index, and the list has to be told the
+    // item index or it would scroll to the wrong place.
+    let mut selected_item = None;
     for row in state.rows() {
         if current_kind != Some(row.kind) {
             current_kind = Some(row.kind);
@@ -116,11 +121,26 @@ fn render_harnesses(state: &WizardState, frame: &mut Frame, area: Rect) {
                 Style::default().add_modifier(Modifier::BOLD),
             ))));
         }
+        if row.selected {
+            selected_item = Some(items.len());
+        }
         items.push(ListItem::new(row_line(row)));
     }
-    frame.render_widget(
+
+    // Rendered with the selection so the list scrolls to keep it on screen.
+    // Without this the catalogue is only fully reachable in a terminal tall
+    // enough to hold all of it at once, and an integration past the bottom
+    // edge is one the user can neither see nor toggle — silently, because
+    // Ratatui simply draws fewer rows rather than complaining.
+    //
+    // No `highlight_style`: the `> ` cursor in `row_line` is already the
+    // selection marker, and the state is here for the scrolling alone.
+    let mut list_state = ListState::default();
+    list_state.select(selected_item);
+    frame.render_stateful_widget(
         List::new(items).block(Block::default().borders(Borders::NONE)),
         list_area,
+        &mut list_state,
     );
 
     if let Some(input) = input {
@@ -280,6 +300,111 @@ mod tests {
         terminal
             .draw(|frame| render(state, frame))
             .expect("draw must not panic");
+    }
+
+    /// Every integration the wizard offers has a row on an 80x24 screen.
+    ///
+    /// The catalogue grew from seven integrations to ten this session, which
+    /// moved this materially closer to its limit: ten rows plus two section
+    /// headers against the twenty-two the body gets. Not panicking is not the
+    /// same as being usable — Ratatui silently draws fewer rows when a list
+    /// outgrows its area, so an integration past the bottom edge would be one
+    /// the user can neither see nor toggle, with every other test green.
+    ///
+    /// cmux is included here by giving it a detected executable, because the
+    /// wizard deliberately does not offer an undetected cmux at all (see
+    /// `build_rows`).
+    #[test]
+    fn every_offered_integration_has_a_row_at_80x24() {
+        let state = advance_to_harnesses(all_detected_state());
+        let screen = rendered_lines(&state, 80, 24);
+
+        for &id in IntegrationId::ALL {
+            let name = id.display_name();
+            assert!(
+                screen.iter().any(|line| line.contains(name)),
+                "`{name}` has no visible row at 80x24; the catalogue has outgrown the \
+                 wizard's list"
+            );
+        }
+    }
+
+    /// Below 80x24 the list scrolls to follow the selection, so every row
+    /// stays reachable rather than being cut off at the bottom edge.
+    ///
+    /// Twelve items into ten rows: this height genuinely truncates, which is
+    /// what makes the assertion mean something. Reverting the list to a
+    /// stateless `render_widget` fails this while leaving the test above
+    /// passing.
+    #[test]
+    fn a_short_terminal_still_reaches_every_integration() {
+        let mut state = advance_to_harnesses(all_detected_state());
+
+        for (step, &id) in IntegrationId::ALL.iter().enumerate() {
+            let name = id.display_name();
+            let screen = rendered_lines(&state, 80, 12);
+            assert!(
+                screen.iter().any(|line| line.contains(name)),
+                "after {step} moves down, `{name}` is off a 80x12 screen and cannot be \
+                 reached"
+            );
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Down,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+    }
+
+    /// A wizard offered every integration in the catalogue. cmux needs a
+    /// detected executable or the wizard will not offer it.
+    fn all_detected_state() -> WizardState {
+        let detected: Vec<IntegrationDetection> = IntegrationId::ALL
+            .iter()
+            .map(|&id| IntegrationDetection {
+                id,
+                status: IntegrationStatus::NotFound,
+                executable: (id == IntegrationId::Cmux).then(|| "/usr/bin/cmux".into()),
+                version: None,
+            })
+            .collect();
+        WizardState::new(
+            &detected,
+            &UserConfig::default(),
+            "glasshouse".to_owned(),
+            "/home/user/glasshouse".into(),
+            "0.1.0".to_owned(),
+        )
+    }
+
+    /// Draw `state` and read the screen back as lines of text.
+    fn rendered_lines(state: &WizardState, width: u16, height: u16) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| render(state, frame))
+            .expect("draw must not panic");
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// Move a fresh wizard to the harnesses step.
+    fn advance_to_harnesses(mut state: WizardState) -> WizardState {
+        for _ in 0..4 {
+            if matches!(state.step(), Step::Harnesses) {
+                return state;
+            }
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+        panic!("the wizard never reached the harnesses step");
     }
 
     #[test]
