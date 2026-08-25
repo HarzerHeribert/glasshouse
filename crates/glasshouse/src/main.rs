@@ -153,8 +153,10 @@ fn launch_session(
         "opening a harness session"
     );
 
-    let launch =
-        HarnessLaunch::new(selection.into_executable(), runtime.project()).args(harness_args);
+    // The adapter decides how its harness is opened; the user's own `--`
+    // arguments follow it.
+    let args = selection.start_args(harness_args.iter().map(String::as_str));
+    let launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
 
     // From here on, a bookkeeping failure must never change what the user
     // sees. The session is real and running; losing a state transition is a

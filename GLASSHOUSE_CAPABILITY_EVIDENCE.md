@@ -49,6 +49,163 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 6 — the harness adapter interface (eleven of twelve)
+
+Contract: Given a harness Glasshouse supports, when anything in core needs to
+know how that harness is started, resumed, messaged, interrupted, observed or
+described, Glasshouse asks that harness's adapter and gets an answer derived
+from the installed binary, while core itself stays unable to name any
+particular harness.
+
+State: COMPLETE for eleven of the phase's twelve lines. The
+communication-style line is PARTIALLY VERIFIED and its box stays unchecked —
+see its own entry below.
+
+Production evidence:
+- `harness/mod.rs: HarnessAdapter` — the contract, with `id`,
+  `executable_candidates`, `start`, `resume`, `describe`, `message` and
+  `interrupt`. The six verbs the map names map onto it: starting is
+  `start`, resuming `resume`, messaging `message`, interrupting `interrupt`,
+  observing is `describe().hooks` plus `describe().session_ids`, and
+  describing is `describe` itself.
+- `harness/mod.rs: adapter_for` — the registry. Total over
+  `IntegrationKind::Harness`, `None` for everything else.
+- `integrations/mod.rs: IntegrationId::executable_candidates` — **delegates to
+  the adapter for every harness.** This is the production path that makes the
+  phase's fixed requirement structural rather than aspirational: there is one
+  place a harness's executable name lives, and it is the adapter.
+- `session/select.rs: HarnessSelection::adapter` and
+  `HarnessSelection::start_args` — the seam both start paths go through.
+- `main.rs: launch_session` and `shell/mod.rs: start_session` — the two real
+  session producers, both using `start_args`.
+- `integrations/mod.rs: doctor_report` / `write_adapter_report` — `glasshouse
+  doctor` prints every adapter's declarations. This is what keeps `describe`
+  from being a data structure nothing reads; it is generic over the trait and
+  cannot tell one harness from another.
+
+Regression evidence (macOS, and Linux/Windows in CI — all are pure logic):
+- `every_harness_has_an_adapter_and_nothing_else_does` — a harness added to
+  the catalogue without an adapter fails here rather than at a user's launch.
+- `the_catalogue_takes_harness_executable_names_from_the_adapter` — proves the
+  delegation above; **mutation-checked** by restoring a hard-coded name to the
+  catalogue, which fails it.
+- `resume_shapes_match_the_installed_binaries` — pins all seven resume
+  invocations, which genuinely differ (`--resume`, a `resume` subcommand,
+  `--conversation`, `--session`). **Mutation-checked** by giving Codex Claude
+  Code's flag.
+- `the_executable_names_match_the_installed_binaries` — pins `agy` for
+  Antigravity. **Mutation-checked** by removing it.
+- `resume_passes_the_identifier_as_one_whole_argument` — an identifier is its
+  own `argv` entry and always last, so a value starting with a dash cannot be
+  re-read as a flag.
+- `every_verified_declaration_cites_its_evidence` — a `Verified` declaration
+  with no usable evidence string fails. This is the honesty rule made
+  mechanical.
+- `no_two_adapters_claim_the_same_executable_name` — two harnesses claiming
+  one name would silently resolve as each other.
+- `a_sessions_arguments_are_the_adapters_first_then_the_users` — the ordering
+  rule, exercised against a test adapter that actually declares start
+  arguments, since none of the seven real ones needs any today.
+- `the_doctor_report_shows_each_adapters_declarations` — asserts the specific
+  rows of one adapter's block, not a `contains` over the whole report.
+  **Mutation-checked** by making the report loop print nothing.
+- `the_doctor_report_describes_every_harness_adapter` — every adapter gets a
+  block whether or not it is installed on the machine running the tests.
+
+Failure/isolation evidence:
+- `the_generic_pty_runtime_depends_on_no_adapter` and
+  `the_session_model_depends_on_no_adapter` — scan the production source of
+  `pty/mod.rs`, `pty/process.rs`, `session/runtime.rs` and `session/store.rs`
+  for `HarnessAdapter`, `crate::harness` and `IntegrationId`. Comments are
+  stripped first, because `session/store` *documents* that it stores an
+  identifier's string form, which is the boundary working rather than
+  breaking. **Mutation-checked** by adding a method returning an
+  `IntegrationId` to `SessionRuntime`, which fails it.
+- `the_dependency_scan_would_catch_a_violation` — the scanner's own
+  non-vacuity check: it fires on code, and not on a doc comment or a test.
+- `an_unverified_capability_is_not_treated_as_present` — `Declared::Unverified`
+  reads as "cannot rely on it", never as present.
+
+Platform/external evidence:
+- Declarations derived on 2026-08-25 from binaries installed on this machine:
+  Claude Code 2.1.245, Codex 0.149.0, Antigravity CLI 1.1.20, OpenCode
+  1.18.22, Cursor CLI 2026.08.11-e8db854, Pi 0.73.1, Hermes Agent 0.15.1.
+  Each adapter module names what was read.
+- `glasshouse doctor` run from the built binary; its output is what surfaced
+  two rendering defects (nested backticks, a source phrase that did not fit
+  its sentence) that no unit test would have shown.
+
+Missing evidence:
+- `resume`, `message` and `interrupt` are declared and unit-proven but have no
+  production caller yet: resuming is Phase 7/8's, messaging and interrupting
+  are Phase 13/14's. Line 3 asks an adapter to *expose* the resume command,
+  which it does; executing one is a later phase's line and is not claimed
+  here.
+- No adapter parses harness output yet, so line 12's guard currently protects
+  a property nothing is pushing against. That is the point of installing it
+  before Phase 7 rather than after.
+
+### Phase 6 — Make each adapter declare which native communication-style mechanisms it supports and whether changing them requires a new or cleared native session
+
+Contract: Given a harness with a native way to control how it talks to the
+user, when Glasshouse needs to apply a response profile, the adapter names
+that mechanism and says whether changing it costs the running session, while
+never presenting an unverified guess as a mechanism.
+
+State: PARTIALLY VERIFIED — **box deliberately unchecked.**
+
+Production evidence:
+- `harness/mod.rs: CommunicationStyle`, `StyleChange`, and
+  `HarnessDescription::communication_style` — the declaration exists and every
+  adapter fills it in.
+- `harness/claude_code.rs` — declares output styles, supplied through the
+  settings document `--settings` reads at startup, as `StyleChange::NewSession`.
+
+Missing evidence:
+- Six of seven adapters declare `Unverified`, because their installed binaries
+  document no communication-style mechanism at all. Codex is the pointed case:
+  the capability map names "Codex personalities" as an example, and Codex
+  0.149.0's `--help` exposes none.
+- `StyleChange::InPlace` has no instance. Claude Code's declaration is
+  `NewSession` because the mechanism *Glasshouse can drive* — a settings
+  document read once at startup — is fixed for the life of the process. A
+  native in-session command may well exist; relying on one that has not been
+  observed would be exactly the guess this phase's design forbids, and the
+  conservative direction is also the safe one, since Phase 9K requires warning
+  before a profile change that costs a warm session.
+- Closing this needs one verified in-place mechanism, or a second harness with
+  a verified native mechanism of any kind.
+
+### Phase 2B — Detect Antigravity when a supported Antigravity CLI executable is present
+
+Contract: Given a machine with the Antigravity CLI installed, when Glasshouse
+runs discovery, it finds it and reports its version, while never resolving an
+unrelated program that merely has a similar name.
+
+State: COMPLETE.
+
+Production evidence:
+- `harness/antigravity.rs: Antigravity::executable_candidates` — `["agy",
+  "antigravity"]`, reached through `IntegrationId::executable_candidates` by
+  the existing `Discovery` pass.
+
+Regression evidence:
+- `the_executable_names_match_the_installed_binaries` — pins both names.
+- `no_integration_is_searched_for_under_a_guessed_abbreviation` — replaces a
+  test that asserted the *wrong* single name; keeps the hazard it guarded (no
+  `ag`, which is the-silver-searcher on many machines).
+
+Platform/external evidence:
+- A real Antigravity CLI 1.1.20 was installed on this machine on 2026-08-25,
+  and `glasshouse doctor` reported it as `[available]` at its Caskroom path
+  with version `1.1.20` read by the normal `--version` probe.
+
+Missing evidence:
+- None for this line. Note that the *published package* links the binary onto
+  `PATH` as `agy`; an install by another route may expose `antigravity`
+  instead, which is why both names are searched.
+
+
 ### Phase 5 — native terminal embedding (complete, 8 of 8)
 
 Contract: Given a live harness session, when Glasshouse draws it, the harness's

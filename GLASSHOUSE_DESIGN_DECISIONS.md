@@ -210,3 +210,133 @@ answers them today. Phase 5 is where that stops being acceptable.
 5. Colours, cursor position and line wrapping survive a round trip through the
    emulator into Ratatui cells.
 
+
+---
+
+## Harness adapters — what an adapter is allowed to claim
+
+### The conflict
+
+Phase 6 asks each adapter to declare a dozen facts about its harness: how it
+resumes, whether it has hooks, whether its session identifiers can be
+discovered, which protocols it speaks, what it can do. Every one of those is
+easy to answer from memory and expensive to answer correctly, and a wrong
+answer is not inert — it launches the wrong program, resumes the wrong
+conversation, or promises the user a capability that is not there.
+
+The previous session's handoff said it plainly: *derive them from the real
+binaries; recalling a flag is not evidence.* This decision makes that
+mechanical rather than a habit someone has to remember.
+
+### The decision: every declaration is `Declared<T>`, and there is no third state
+
+An adapter's every fact is either:
+
+- `Verified { value, evidence }` — read from the installed harness itself, with
+  the source named concretely enough to re-check: a `--help` line, one of its
+  own configuration files, a session record it wrote; or
+- `Unverified` — nobody could establish it here.
+
+There is deliberately no "probably", no "likely", and no bare `bool`.
+`every_verified_declaration_cites_its_evidence` fails on a `Verified` whose
+evidence string is too short to be a real citation, so the honesty rule is
+enforced by the suite rather than by review.
+
+`Declared<bool>::is_known_present` reads `Unverified` as *false*, because a
+caller asking "may I rely on this" must be told no when nobody has checked.
+Distinguishing "verified absent" from "not checked" is a `match`, and the two
+really are different: one tells a router to avoid a harness, the other tells it
+to go and look.
+
+The cost is visible in `glasshouse doctor`, where OpenCode's code-editing
+capability reads *unverified* — plainly true of the product, and not
+established by anything its installation exposes. That is the right trade. The
+map itself asks for capabilities "when known", and an honest gap invites
+someone to close it, while a confident guess never gets revisited.
+
+### What this immediately caught
+
+Glasshouse searched `PATH` for `antigravity` and would never have found a real
+install. The published Antigravity CLI links its binary onto `PATH` as **`agy`**.
+The old single-name list was carefully reasoned, documented at length, pinned by
+a test — and simply wrong, because no reference install had ever been
+inspected. One `brew install` settled in a minute what the comment had been
+hedging for weeks, and the Phase 2B detection box that had been blocked on
+exactly this is now closed.
+
+### The decision: the adapter owns the executable name, and nothing else keeps a copy
+
+`IntegrationId::executable_candidates` delegates to the adapter for every
+harness. The catalogue keeps names only for cmux, Ollama and llama.cpp — the
+integrations that are not harnesses, have no session to start, and so have no
+adapter.
+
+Two copies of a harness's executable name would be two places for it to be
+wrong, and they would drift. This is also the phase's fixed requirement
+("commands ... remain isolated inside adapters") made structural: the name is
+the first and most consequential command there is.
+
+### The decision: adapters describe, they never act
+
+An adapter returns descriptions — names to look for, arguments, the bytes that
+deliver a message or an interrupt. It never spawns a process, never touches a
+`SessionRuntime`, and never parses terminal output.
+
+`the_generic_pty_runtime_depends_on_no_adapter` and
+`the_session_model_depends_on_no_adapter` scan the production source of
+`pty/`, `session/runtime.rs` and `session/store.rs` for `HarnessAdapter`,
+`crate::harness` and `IntegrationId`, and fail if one appears. Comments are
+stripped first: `session/store` *documents* that it holds an identifier's
+string form, and a scan that punished the comment explaining the boundary
+would be teaching the wrong lesson.
+
+No adapter parses anything yet, so today the guard protects a property nothing
+is pushing against. Installing it before Phase 7 rather than after is the whole
+point — the pressure arrives with the first lifecycle parser.
+
+### Invariants a test must hold to
+
+1. Every `IntegrationKind::Harness` has an adapter; nothing else does.
+2. No two adapters claim the same executable name.
+3. A resume identifier is its own `argv` entry, and always the last one.
+4. A `Verified` declaration cites evidence; an `Unverified` one carries none.
+5. The generic PTY runtime and the session model name no adapter.
+6. A session's arguments are the adapter's, then the user's.
+
+---
+
+## Which harnesses Glasshouse ships adapters for
+
+### The decision: seven, each verified against a real install
+
+Claude Code, Codex, Antigravity, OpenCode, Cursor CLI, Pi, and Hermes Agent.
+The last three were added at the user's request, for subscription pooling —
+Hermes in particular manages pooled provider credentials natively — and all
+three were installed and interrogated before a single declaration was written.
+
+Adding a harness later is cheap (one adapter module, one catalogue entry);
+retrofitting the *interface* around a harness that does not fit is not. That is
+why the roster was settled while Phase 6 was being built rather than after.
+
+### Two that were asked for and deliberately not shipped
+
+**DeepSeek Harness** (`@deepseek-ai/dsh` 0.1.1-rc.2) was installed and does
+run. It is a *profile launcher*: `dsh --profile <name>` boots a stack of
+plugin bundles, and the profiles it ships are `web` (a browser UI at
+`127.0.0.1:3080`) and `headless` (a one-shot runner). It ships no interactive
+terminal profile — the only one is a community package outside DeepSeek's own
+namespace — which was confirmed against both the installed package and the
+project's own repository.
+
+Glasshouse embeds *terminal* harnesses in a pseudo-terminal; a browser UI is
+not something a viewport can hold. And DSH's own "profile" concept is the same
+idea as Phase 9A's launch profiles, so an adapter written now would have to be
+rewritten then. It waits for Phase 9A, or for an official terminal profile.
+
+**ZCode** (Z.ai) is a desktop application. Its documentation offers `.dmg`,
+`.exe` and `.AppImage` installers and no CLI at all, so there is no executable
+for an adapter to start.
+
+Neither is a rejection of the product. Both are the same rule the rest of this
+phase runs on: an adapter may only describe something that was actually there
+to look at.

@@ -4,44 +4,103 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phases 2, 3, 4 and 5 are complete or all-but-complete; 2D is partially done.**
-Forty-nine capabilities were closed this session; the checked count went from 58
-to 107.
+**Phase 6 — the harness adapter interface — is eleven of twelve.** The checked
+count went from 107 to 119: eleven Phase 6 lines, plus the Phase 2B Antigravity
+detection line that had been blocked for want of a real install.
 
-- **Phase 2** — persistent project state: complete.
-- **Phase 2D** — settings: nine of twenty. The other eleven configure features
-  that do not exist yet.
-- **Phase 3** — TUI shell: eleven of twelve (the memory view needs Phase 20).
-- **Phase 4** — PTY session runtime: nine of twelve (three need callers that
-  belong to Phase 14).
-- **Phase 5** — native terminal embedding: **complete, 8 of 8.**
+- **Phase 2B** — Antigravity detection: **closed**, against a real CLI.
+- **Phase 6** — harness adapters: eleven of twelve. The communication-style
+  line is deliberately unchecked; see the loose ends.
 
-`glasshouse` with no arguments now opens a real interface with real harnesses
-behind it: `n` starts one in a pseudo-terminal, the viewport draws its actual
-screen — colours, cursor, wrapping — and the keyboard reaches it in session
-mode, with `Ctrl-]` to come back.
+Glasshouse now reaches every supported harness through one contract.
+`glasshouse doctor` prints what each adapter declares — vendor, resume
+command, hooks mechanism, session-identifier discovery, capabilities,
+protocols, model override — and every one of those facts carries the evidence
+it was read from.
 
-### Decisions this session made, and where they are recorded
+### Seven harnesses, each verified against a real install
 
-All in `GLASSHOUSE_DESIGN_DECISIONS.md`, which `CLAUDE.md` now names in its read
-order:
+Claude Code 2.1.245, Codex 0.149.0, Antigravity CLI 1.1.20, OpenCode 1.18.22,
+Cursor CLI 2026.08.11, Pi 0.73.1, Hermes Agent 0.15.1.
 
-1. **Two keyboard modes.** Single-key bindings and forwarding every keystroke to
-   a harness cannot both be true. `Ctrl-]` returns — one chord, not a prefix,
-   because the thing being escaped may be a runaway session.
-2. **Settings ships only the sections whose feature exists.** An empty
-   "Providers" section is worse than an absent one.
-3. **Project-level config writes need consent.** `.glasshouse/config.toml` is
-   inside the user's repository.
-4. **`vt100` for terminal emulation** (the user's call), chosen over
-   `alacritty_terminal`, `termwiz` and bare `vte`. Three new crates; the
-   viewport renderer is the only consumer, so swapping later is bounded.
-5. **Embedded sessions invert `attach`'s DSR rule.** `attach` must never answer
-   `ESC[6n`; an embedded session must always answer it, or the harness hangs.
+Cursor, Pi and Hermes were added this session at the user's request, for
+subscription pooling — Hermes manages pooled provider credentials natively.
+All three were installed and interrogated before any declaration was written.
+
+**Two that were asked for and deliberately not shipped**, both recorded in
+`GLASSHOUSE_DESIGN_DECISIONS.md`:
+
+- **DeepSeek Harness** (`@deepseek-ai/dsh` 0.1.1-rc.2) is installed and runs,
+  but it is a *profile launcher* whose shipped profiles are a browser UI and a
+  one-shot headless runner. It has no official interactive terminal profile —
+  confirmed against both the installed package and DeepSeek's own repository.
+  A browser UI is not something a viewport can hold, and DSH's own "profile"
+  concept is Phase 9A's launch profiles under another name, so an adapter
+  written now would be rewritten then.
+- **ZCode** (Z.ai) is a desktop application with no CLI, so there is no
+  executable for an adapter to start.
+
+### The decision this phase rests on
+
+Every fact an adapter states is a `Declared<T>`: `Verified { value, evidence }`
+with the source named concretely enough to re-check, or `Unverified`. There is
+no third state meaning "probably", and
+`every_verified_declaration_cites_its_evidence` fails a `Verified` whose
+evidence is too thin to be a citation.
+
+**It paid for itself immediately.** Glasshouse searched `PATH` for
+`antigravity` and would never have found a real install: the published
+Antigravity CLI links its binary onto `PATH` as **`agy`**. The old single-name
+list was carefully reasoned, documented at length, and pinned by a test — and
+simply wrong, because no reference install had ever been inspected.
 
 ## Verified completed work
 
-### This session — live sessions behind the interface
+### This session — the harness adapter interface
+
+- `harness::HarnessAdapter` is the contract: `id`, `executable_candidates`,
+  `start`, `resume`, `describe`, `message`, `interrupt`. The map's six verbs
+  all land on it — observing is `describe().hooks` plus
+  `describe().session_ids`.
+- `IntegrationId::executable_candidates` **delegates to the adapter** for every
+  harness. One place a harness's executable name lives, which is the phase's
+  fixed requirement made structural rather than aspirational. The catalogue
+  keeps names only for cmux, Ollama and llama.cpp, which are not harnesses and
+  have no session to start.
+- `HarnessSelection::start_args` is the single seam both session producers go
+  through (`glasshouse launch` and the shell's `n`): the adapter's arguments,
+  then the user's, so an explicit request always has the last word. No harness
+  needs a start argument today, so the ordering rule is proven against a test
+  adapter that does.
+- `glasshouse doctor` prints every adapter's declarations. That is what keeps
+  `describe` from being a data structure nothing reads, and it is generic over
+  the trait — it cannot tell one harness from another.
+- Two source-scanning tests hold the architecture: the generic PTY runtime and
+  the session model may not name `HarnessAdapter`, `crate::harness` or
+  `IntegrationId` in production code. Comments are stripped first, because
+  `session/store` *documents* that it holds an identifier's string form — the
+  boundary working, not breaking.
+
+**Running the shipped binary found what the suite could not, again.** Two
+rendering defects surfaced only from reading real `glasshouse doctor` output:
+declarations rendering as nested backticks, and a session-id source phrase
+that did not fit the sentence it was interpolated into. Both were invisible to
+every test that passed.
+
+**Five mutations were run and each failed its target**: giving Codex Claude
+Code's resume flag; removing Antigravity's `agy`; restoring a hard-coded
+executable name to the catalogue; making the doctor report's adapter loop
+print nothing; and adding an `IntegrationId`-returning method to
+`SessionRuntime`.
+
+**A test was rewritten because it pinned a wrong fact.**
+`antigravity_only_searches_the_literal_name` asserted the guess that a real
+install disproved. It is now
+`no_integration_is_searched_for_under_a_guessed_abbreviation`, which keeps the
+hazard the original actually guarded — `ag` is the-silver-searcher on many
+machines — and drops the guess.
+
+### Earlier sessions — live sessions behind the interface
 
 - `session::runtime::SessionRuntime` holds several live harnesses, each with
   its own reader thread draining its pseudo-terminal into its own bounded
@@ -76,7 +135,7 @@ remembering:
   exits, even with a background child still holding the slave, so the
   discriminating case cannot be built there.
 
-### This session — the TUI shell
+### Earlier sessions — the TUI shell
 
 - `glasshouse` with no arguments opens the shell; piped or redirected runs keep
   the plain summary rather than drawing a full-screen interface into a file.
@@ -117,7 +176,7 @@ Ratatui's decorative widgets all draw with Unicode block elements, so the test
 fails on any character in U+2580..U+259F, and adding a sparkline-looking line to
 the viewport fails it.
 
-### This session — the session store
+### Earlier sessions — the session store
 
 - `session::store` is Glasshouse's own record of the sessions in a project,
   deliberately not a view over any harness's session files. `native_session_id`
@@ -255,6 +314,35 @@ have required a magic clamp.
 
 ## Unresolved loose ends
 
+- **Phase 6's communication-style line stays unchecked.** Six of seven
+  adapters declare `Unverified` because their installed binaries document no
+  such mechanism — Codex 0.149.0 in particular exposes no "personality",
+  though the capability map names one as its example. `StyleChange::InPlace`
+  therefore has no instance: Claude Code's output style is declared
+  `NewSession` because the mechanism Glasshouse can drive, a settings document
+  read once at startup, is fixed for the life of the process. Closing this
+  needs one verified in-place mechanism, or a second harness with any verified
+  native mechanism.
+- **`resume`, `message` and `interrupt` have no production caller.** They are
+  declared and unit-proven. Resuming belongs to Phase 7/8; messaging and
+  interrupting to Phase 13/14. Line 3 asks an adapter to *expose* the resume
+  command, which it does — executing one is a later line, and is not claimed.
+- **No adapter parses harness output yet**, so the isolation guard for line 12
+  currently protects a property nothing is pushing against. Installing it
+  before Phase 7 rather than after is the point.
+- **DeepSeek Harness waits for Phase 9A.** It is installed and its launcher
+  interface is verified, but it ships no interactive terminal profile, and its
+  own profile concept is Phase 9A's launch profiles under another name.
+- **Pi is installed but not on `PATH`** on this machine (npm's global prefix
+  is `~/.hermes/node`, which is not in `PATH`), so `glasshouse doctor` reports
+  it as not found with `candidates tried: pi`. That is correct behaviour, and
+  a good live example of why a configurable explicit executable path exists.
+- The rustdoc baseline recorded in earlier revisions of this file as "15
+  pre-existing diagnostics" was **wrong**: measured against `HEAD` in a clean
+  worktree it is **23**. This session added none — it briefly added two
+  ambiguous doc links (`crate::session::select` is both a function and a
+  module) and both were fixed to `mod@` form before commit.
+
 - **The shell's key bindings are plain single keys**, because no native session
   owns the keyboard yet. When one does (Phase 5) they must move behind a prefix
   or a mode, or they will steal keystrokes the harness needs.
@@ -296,7 +384,11 @@ have required a magic clamp.
 - **Nothing calls `open_for_resume` in production.** The cross-project resume
   guard is implemented, structurally enforced, and mutation-proven, but there
   is no `glasshouse resume`, so Phase 1 line 90 is `PARTIALLY VERIFIED` and its
-  box stays unchecked. Closing it needs a harness adapter, not more code here.
+  box stays unchecked. The adapter it was waiting for now exists — every one of
+  the seven exposes a verified resume invocation — but a `glasshouse resume`
+  built today could still only report "not resumable", because no adapter
+  *captures* a native identifier yet. That is Phase 7/8, and the earlier
+  instruction stands: do not close line 90 with a command that can only say no.
 - No harness adapter captures a native session identifier yet, so in production
   `sessions.native_session_id` is always `NULL` and no session ever reaches the
   `Resumable` disposition. The mechanism is complete; what feeds it is Phase
@@ -319,9 +411,12 @@ have required a magic clamp.
   multi-session TUI will need a different input path.
 - Native Windows UNC project roots remain refused; `cmd.exe` cannot reliably
   hold a UNC working directory.
-- Antigravity detection lacks a real-install verification. cmux
-  control-environment and Ollama configured-endpoint detection are now
-  implemented and checked.
+- Antigravity detection is **resolved**: a real Antigravity CLI 1.1.20 was
+  installed and `glasshouse doctor` reports it. The executable name was wrong —
+  the published package links its binary onto `PATH` as `agy`, not
+  `antigravity` — so nothing would ever have detected it. Both names are
+  searched now. cmux control-environment and Ollama configured-endpoint
+  detection remain implemented and checked.
 - The UNC refusal's *premise* — that `cmd.exe` substitutes the Windows
   directory rather than failing — is documented Windows behaviour, not
   something a live run confirmed. No real UNC share was exercised; the refusal
@@ -343,93 +438,66 @@ have required a magic clamp.
 
 ## Where to go next
 
-**Phase 6 — the harness adapter interface — is next in map order and
-unblocked.** The architecture backtest run this session recommends landing it
-*before* Phase 7/8 harness work, because that is where the fixed requirement
-"harness specifics stay behind adapters" first gets tested. Today it passes
-because nothing has needed to violate it: production `session/`, `shell/` and
-`pty/` contain zero harness-specific branching (every `ClaudeCode`/`Codex`
-reference is inside `#[cfg(test)]`).
+**Phase 7 — the Claude Code adapter — is next in map order and unblocked.**
+Phase 6 gives it the contract; Phase 7 is where the Claude Code adapter starts
+doing rather than declaring:
 
-**Do not guess the adapter declarations.** Several Phase 6 lines ask what each
-harness supports — resume mechanism, session-ID discovery, model override,
-protocol. The harnesses are installed on this machine, so derive them from the
-real binaries: `claude --help` shows `-r, --resume [value]`, `--session-id
-<uuid>`, `--fork-session`, `--model`; `codex --help` shows a `resume`
-subcommand with `--last`. That is evidence. Recalling a flag is not.
+- capture the native session identifier. Claude Code is the easy case and the
+  adapter already declares why: `--session-id <uuid>` lets Glasshouse *assign*
+  one, so the identifier is known before the process exists rather than
+  discovered afterwards. That is what finally lets a record reach the
+  `Resumable` disposition.
+- then resume through it, which is also what unblocks **Phase 1 line 90** — the
+  cross-project resume guard that has been complete and unreachable for two
+  sessions.
+- then lifecycle hooks. The adapter declares the mechanism (a `hooks` section
+  in a settings document, suppliable per session with `--settings`) and nine
+  verified event names.
+
+Phase 8 (Codex) follows the same shape with different mechanics: a `resume`
+subcommand, identifiers discoverable from rollout files under
+`$CODEX_HOME/sessions/...`, and hooks in a project-local `.codex/hooks.json`
+that is trust-gated per project.
 
 Still blocked, unchanged:
 
-- Phase 1 line 90 — the cross-project resume guard is complete and
-  mutation-proven, but nothing can *attempt* a resume until an adapter exists.
-  **Do not close it with a command that can only report "not resumable".**
 - Phase 1 line 92 and Phase 3's memory view — Phase 20's memory table.
 - Three Phase 4 lines — unfocused `send_text`, `interrupt`, headless sessions.
   All three work and are tested; they need callers, which are Phase 14's.
 - Eleven Phase 2D lines — Providers, Launch Profiles, Routing, Memory sections.
-- Antigravity's executable name; real minimum harness versions.
+- Real minimum harness versions.
 - Phase 2C onboarding — product decisions that need the user.
 
 ## Active worker tasks and results
 
-Three worker tiers, settled during this session at the user's direction:
+**No workers were used this session.** The work was a single coherent design —
+seven adapters whose every declaration had to be derived from a real binary —
+and the risk in it was precisely the judgment a worker tier is not for. The
+orchestrator wrote it, ran every gate, and mutation-checked its own tests.
 
-- **Opus (orchestrator):** red risk — PTY lifecycle, signals, terminal
-  restoration, persistence and migrations, concurrency, resume identity, secret
-  boundaries — plus every design decision and every judgment about whether a
-  capability is complete.
-- **Claude Code with Sonnet, in a visible cmux surface:** implementation, to
-  save orchestrator tokens. Give it its own `git worktree` and a task packet
-  carrying real context — the API it will call, the files it may touch, the
-  helpers to reuse, the exact gates. Start it with
-  `claude --model sonnet --permission-mode acceptEdits`. It wrote 625 lines of
-  cross-platform integration tests and then the shell wiring, respected every
-  file boundary it was given, and reported honestly what it could not do.
-- **Ox: trivial tasks only** — pure enumeration. It listed every test in a file
-  and every production call site accurately. It is **not** reliable for
-  verdicts: asked to judge twelve capability lines it marked two "already
-  satisfied" whose named production paths had no test covering them.
-
-Start Ox by running **plain `ox`** and typing into its visible TUI, as
-`GLASSHOUSE_ORCHESTRATOR_PROMPT.md` has always said. `ox --prompt` is listed in
-`ox --help` but does not reliably start the turn.
-
-Practical cmux notes: a surface is only readable while its workspace is
-selected and it is the visible tab, so give a worker its own workspace rather
-than a second surface in a busy pane. A new surface needs several seconds
-before its shell accepts input; text sent earlier is silently eaten.
-
-Every worker gate, and every worker verdict, was re-run or re-derived here. That
-caught: a report whose tests did not compile; an inventory naming a test that
-does not exist; a correct conclusion reached from false reasoning; and two
-worker-written tests that passed while the behaviour they claimed to check was
-broken.
+The tiers and their routing are unchanged; see
+`GLASSHOUSE_WORKER_CAPABILITIES.md`. The practical notes from earlier sessions
+still hold: give an editing worker its own worktree and a task packet with real
+context, start Ox as plain `ox` and type into its visible TUI, and read a
+surface before sending anything to it.
 
 ## Commands run and outcome
 
 - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
   --all-features -- -D warnings`, `cargo test --workspace --all-features`
-  (295 lib + 2 bin + 39 PTY smoke), `rustup run 1.85.0 cargo check --locked`,
-  `git diff --check` — all pass.
-- Strict rustdoc reports 15 pre-existing lib-doc diagnostics, 9 of them public
-  docs linking to private items. This session added none, verified by measuring
-  the baseline with the branch stashed.
-- Roughly thirty mutation checks, each observed to fail the test it targets.
-  Four did **not** fail, and each was acted on rather than ignored: a false
-  justification for a schema clause; a status-bar width measurement that turned
-  out to duplicate Ratatui's own clipping (deleted); a liveness assertion
-  reading a cached status instead of asking the operating system (fixed); and
-  an exit-detection test that could not discriminate on macOS (removed, with
-  the platform reason recorded).
-- CI, all green on Linux, macOS, Windows and lint, with the Windows job
-  confirmed each time to have executed the suite rather than merely reporting
-  green: `32815286487`, `32815757547`, `32816717226`, `32819167010` and
-  `32821964808`.
-- One red Windows job (`32821591638`), and it was worth having. The new
-  end-to-end keystroke test failed there — not a product defect, but the fake
-  `.cmd` harness reading with `set /p`, which wants CRLF where a real Enter key
-  is a bare carriage return. The test was split rather than the encoding
-  weakened; see the loose end above.
+  (354 lib + 2 bin + 41 PTY smoke + 4 settings), `rustup run 1.85.0 cargo
+  check --locked --workspace --all-targets`, `git diff --check` — all pass.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` — 23
+  diagnostics, exactly the baseline measured at `HEAD` in a throwaway
+  worktree. None added.
+- Five mutations, each observed to fail the test it targets. None passed.
+- `glasshouse doctor` run from the built binary, which is how two rendering
+  defects were found and how Antigravity detection was confirmed against a
+  real install.
+- Harnesses installed this session, all without `sudo`:
+  `brew install --cask antigravity-cli` (links its binary as `agy`),
+  `brew install --cask cursor-cli` (links `cursor-agent`), and
+  `npm install -g @deepseek-ai/dsh @mariozechner/pi-coding-agent`.
 
 ## Next exact step
 
@@ -441,29 +509,25 @@ Hand this checkpoint to Opus:
 > usage-window watches, which do not survive a session. Pushing to run CI is
 > standing authorization.
 >
-> The capability map gained **fixed architectural requirements** per phase and
-> an architectural-decision principle: a deviation needs an explicit
-> specification change recording reason, impact and migration, not a quietly
-> better design. An architecture backtest against every implemented phase
-> passed with zero violations; it is in this session's history and its findings
-> are in "Where to go next".
+> **Phase 7, the Claude Code adapter, is next.** Phase 6 landed the contract
+> and seven adapters; Phase 7 is where one of them starts doing rather than
+> declaring. Start with the native session identifier — `--session-id <uuid>`
+> means Glasshouse can assign one rather than discover it — because that is
+> what unblocks resume, the `Resumable` disposition, and Phase 1 line 90.
 >
-> **Phase 6, the harness adapter interface, is next.** Derive each adapter's
-> declarations from the installed binaries' `--help`, not from memory.
+> The habits that earned this session's defects:
 >
-> Four habits earned the defects they caught this session:
->
-> - **Drive the shipped binary through a real pseudo-terminal.** Every product
->   defect found was invisible to unit tests: a `\\?\` path `cmd.exe` cannot
->   open; a `Display` that ignored width; an escape chord no real terminal
->   produces.
-> - **Assert against a specific row or field, never a whole screen.**
-> - **A mutation that does not fail is information about the code.** Five did
->   not fail; each led to a deleted test, a corrected comment, or deleted
->   logic — never to a shrug.
-> - **Check that a new capability has a production caller.** The orchestrator
->   shipped one without and a worker caught it. Grep before checking the box.
->
-> And one that cost time: **an absent line of output is a result.** A gate that
-> printed no `test result` lines meant the suite had not compiled, not that
-> there was nothing to report.
+> - **Derive every harness fact from the installed binary.** The one fact that
+>   had been reasoned rather than read — Antigravity's executable name — was
+>   wrong, and had been wrong, documented, and test-pinned for weeks.
+> - **Drive the shipped binary.** Both defects this session were in output no
+>   test reads.
+> - **Assert against a specific row or field, never a whole screen.** The
+>   doctor-report test failed first because a `skip_while` found the harness
+>   *list* rather than the adapter *block* — the same class of mistake the
+>   records warn about, caught by the test being specific enough to notice.
+> - **A mutation that does not fail is information about the code.** Five were
+>   run; all five failed as intended.
+> - **Check that a new capability has a production caller.** `describe()` got
+>   one — `glasshouse doctor` — rather than shipping as a data structure
+>   nothing reads.

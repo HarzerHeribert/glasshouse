@@ -359,7 +359,12 @@ fn start_session(
         "starting a session from the shell"
     );
 
-    let launch = HarnessLaunch::new(selection.into_executable(), app_runtime.project()).size(size);
+    // No user arguments here: the shell's `n` opens a session, and anything
+    // extra would be a Glasshouse invention rather than something asked for.
+    let args = selection.start_args(Vec::<String>::new());
+    let launch = HarnessLaunch::new(selection.into_executable(), app_runtime.project())
+        .args(args)
+        .size(size);
     if let Err(err) = live.start(record.id.clone(), record.presentation, &launch) {
         if let Err(store_err) = store.set_lifecycle(&record.id, SessionLifecycle::Failed) {
             tracing::warn!(

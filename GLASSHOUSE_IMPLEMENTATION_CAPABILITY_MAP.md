@@ -136,7 +136,7 @@ Phase 2B — Agent and tool auto-detection
 ☑ Add a non-destructive discovery pass that searches the current PATH for supported harness executables.
 ☑ Detect Claude Code when a usable claude executable is present.
 ☑ Detect Codex when a usable codex executable is present.
-☐ Detect Antigravity when a supported Antigravity CLI executable is present.
+☑ Detect Antigravity when a supported Antigravity CLI executable is present.
 ☑ Detect OpenCode when a usable opencode executable is present.
 ☑ Detect cmux when a usable cmux executable or supported cmux control environment is present.
 ☑ Detect Ollama when a usable ollama executable or configured local endpoint is present.
@@ -276,18 +276,18 @@ Fixed architectural requirements
 - Glasshouse core depends on a common `HarnessAdapter` contract, not on harness-specific implementation details.
 - Commands, lifecycle parsing, hooks, model overrides, protocol declarations, and configuration mechanisms remain isolated inside adapters.
 
-☐ Define a common HarnessAdapter interface for starting, resuming, messaging, interrupting, observing, and describing a harness session.
-☐ Make each adapter expose the executable command used to start a new native session.
-☐ Make each adapter expose the command or arguments used to resume a native session when supported.
-☐ Make each adapter declare whether structured lifecycle hooks are available.
-☐ Make each adapter declare whether native session IDs can be discovered.
-☐ Make each adapter expose known capabilities such as code editing, shell access, browser use, MCP support, and native subagents when known.
-☐ Make each adapter declare which backend wire protocols and model-override mechanisms it supports.
-☐ Make each adapter declare whether backend selection is configured through child environment, command-line arguments, an isolated generated configuration, or another explicit launch mechanism.
+☑ Define a common HarnessAdapter interface for starting, resuming, messaging, interrupting, observing, and describing a harness session.
+☑ Make each adapter expose the executable command used to start a new native session.
+☑ Make each adapter expose the command or arguments used to resume a native session when supported.
+☑ Make each adapter declare whether structured lifecycle hooks are available.
+☑ Make each adapter declare whether native session IDs can be discovered.
+☑ Make each adapter expose known capabilities such as code editing, shell access, browser use, MCP support, and native subagents when known.
+☑ Make each adapter declare which backend wire protocols and model-override mechanisms it supports.
+☑ Make each adapter declare whether backend selection is configured through child environment, command-line arguments, an isolated generated configuration, or another explicit launch mechanism.
 ☐ Make each adapter declare which native communication-style mechanisms it supports and whether changing them requires a new or cleared native session.
-☐ Make each adapter identify the harness vendor independently from the model developer and serving provider.
-☐ Make the generic PTY runtime independent from any specific harness adapter.
-☐ Keep adapter-specific parsing isolated from the core Glasshouse session model.
+☑ Make each adapter identify the harness vendor independently from the model developer and serving provider.
+☑ Make the generic PTY runtime independent from any specific harness adapter.
+☑ Keep adapter-specific parsing isolated from the core Glasshouse session model.
 
 Phase 7 — Claude Code adapter
 

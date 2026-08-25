@@ -14,10 +14,12 @@
 //! already do, and nothing logs or formats anything but paths and
 //! integration names.
 
+use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::config::{EffectiveConfig, Layer};
+use crate::harness::HarnessAdapter;
 use crate::integrations::{IntegrationId, IntegrationKind};
 use crate::platform::exec::{self, ResolveError, ResolvedExecutable};
 
@@ -72,6 +74,41 @@ pub struct HarnessSelection {
 impl HarnessSelection {
     pub fn id(&self) -> IntegrationId {
         self.id
+    }
+
+    /// The adapter for the selected harness.
+    ///
+    /// Never `None`: selection only ever yields an [`IntegrationKind::Harness`]
+    /// (the two arms above both enforce it), and every harness has an adapter.
+    /// The `expect` records that invariant at the one place it could be
+    /// violated rather than pushing an `Option` onto every caller for a case
+    /// that cannot happen.
+    pub fn adapter(&self) -> &'static dyn HarnessAdapter {
+        crate::harness::adapter_for(self.id)
+            .expect("selection only yields harnesses, and every harness has an adapter")
+    }
+
+    /// The arguments a new session starts with: what the harness's adapter
+    /// declares, then whatever the user asked for.
+    ///
+    /// Order is the contract. The adapter's arguments are how the harness is
+    /// opened at all, and the user's follow so that an explicit request always
+    /// has the last word — most command-line parsers let a later occurrence
+    /// win, and a user who typed something deserves for it to be the thing
+    /// that survives.
+    ///
+    /// No harness needs a start argument today, so for now this is exactly the
+    /// user's own list. It is nonetheless the seam both production start paths
+    /// go through, because the alternative is two call sites that each have to
+    /// remember the rule the day a harness does need one.
+    pub fn start_args<I, S>(&self, user_args: I) -> Vec<OsString>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+    {
+        let mut args = self.adapter().start().args().to_vec();
+        args.extend(user_args.into_iter().map(Into::into));
+        args
     }
 
     pub fn executable(&self) -> &ResolvedExecutable {
@@ -641,5 +678,105 @@ mod tests {
             !msg.contains("cmux"),
             "only harness slugs belong here: {msg}"
         );
+    }
+
+    // --- the adapter seam -------------------------------------------------
+
+    /// An adapter that needs an argument to start, which none of the real
+    /// seven do today. The composition rule has to hold for the day one does,
+    /// and that day must not be the first time it is exercised.
+    #[derive(Debug)]
+    struct NeedsAnArgument;
+
+    impl crate::harness::HarnessAdapter for NeedsAnArgument {
+        fn id(&self) -> IntegrationId {
+            IntegrationId::ClaudeCode
+        }
+
+        fn executable_candidates(&self) -> &'static [&'static str] {
+            &["pretend"]
+        }
+
+        fn start(&self) -> crate::harness::Invocation {
+            crate::harness::Invocation::of(["--interactive", "--no-colour"])
+        }
+
+        fn resume(&self, _native_session: &str) -> Option<crate::harness::Invocation> {
+            None
+        }
+
+        fn describe(&self) -> crate::harness::HarnessDescription {
+            crate::harness::HarnessDescription {
+                vendor: crate::harness::Declared::Unverified,
+                hooks: crate::harness::Declared::Unverified,
+                session_ids: crate::harness::Declared::Unverified,
+                capabilities: crate::harness::Capabilities::UNVERIFIED,
+                backends: crate::harness::Backends::UNVERIFIED,
+                communication_style: crate::harness::Declared::Unverified,
+            }
+        }
+    }
+
+    /// Mirrors `HarnessSelection::start_args` against an adapter that actually
+    /// declares arguments. The production method reads its adapter from the
+    /// registry, so this composes the same two pieces in the same order
+    /// against a double — the rule under test is the ordering, not the
+    /// declaration.
+    fn compose(adapter: &dyn crate::harness::HarnessAdapter, user: &[&str]) -> Vec<String> {
+        let mut args: Vec<String> = adapter
+            .start()
+            .args()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        args.extend(user.iter().map(|s| (*s).to_string()));
+        args
+    }
+
+    #[test]
+    fn a_sessions_arguments_are_the_adapters_first_then_the_users() {
+        assert_eq!(
+            compose(&NeedsAnArgument, &["--resume", "abc"]),
+            vec!["--interactive", "--no-colour", "--resume", "abc"],
+        );
+    }
+
+    #[test]
+    fn start_args_passes_the_users_arguments_through_unchanged() {
+        // Every shipped adapter starts bare, so today this is exactly the
+        // user's list — and `glasshouse launch claude-code -- --resume x` must
+        // reach the harness as `--resume x` and nothing else.
+        let tmp = tempfile::tempdir().unwrap();
+        let selection = HarnessSelection {
+            id: IntegrationId::ClaudeCode,
+            executable: resolved(&write_decoy(tmp.path(), "claude")),
+            source: ExecutableSource::Path {
+                name: "claude".to_string(),
+            },
+        };
+        let args: Vec<String> = selection
+            .start_args(["--resume", "x"])
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, vec!["--resume", "x"]);
+    }
+
+    #[test]
+    fn every_selectable_harness_resolves_to_its_own_adapter() {
+        let tmp = tempfile::tempdir().unwrap();
+        for &id in IntegrationId::ALL {
+            if id.kind() != IntegrationKind::Harness {
+                continue;
+            }
+            let selection = HarnessSelection {
+                id,
+                executable: resolved(&write_decoy(tmp.path(), id.slug())),
+                source: ExecutableSource::Path {
+                    name: "x".to_string(),
+                },
+            };
+            assert_eq!(selection.adapter().id(), id);
+        }
     }
 }

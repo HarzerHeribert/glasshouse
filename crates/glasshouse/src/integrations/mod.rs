@@ -47,6 +47,9 @@ pub enum IntegrationId {
     Codex,
     Antigravity,
     OpenCode,
+    Cursor,
+    Pi,
+    Hermes,
     Cmux,
     Ollama,
     LlamaCpp,
@@ -59,6 +62,9 @@ impl IntegrationId {
         IntegrationId::Codex,
         IntegrationId::Antigravity,
         IntegrationId::OpenCode,
+        IntegrationId::Cursor,
+        IntegrationId::Pi,
+        IntegrationId::Hermes,
         IntegrationId::Cmux,
         IntegrationId::Ollama,
         IntegrationId::LlamaCpp,
@@ -72,6 +78,9 @@ impl IntegrationId {
             IntegrationId::Codex => "codex",
             IntegrationId::Antigravity => "antigravity",
             IntegrationId::OpenCode => "opencode",
+            IntegrationId::Cursor => "cursor",
+            IntegrationId::Pi => "pi",
+            IntegrationId::Hermes => "hermes",
             IntegrationId::Cmux => "cmux",
             IntegrationId::Ollama => "ollama",
             IntegrationId::LlamaCpp => "llama-cpp",
@@ -85,6 +94,9 @@ impl IntegrationId {
             IntegrationId::Codex => "Codex",
             IntegrationId::Antigravity => "Antigravity",
             IntegrationId::OpenCode => "OpenCode",
+            IntegrationId::Cursor => "Cursor CLI",
+            IntegrationId::Pi => "Pi",
+            IntegrationId::Hermes => "Hermes Agent",
             IntegrationId::Cmux => "cmux",
             IntegrationId::Ollama => "Ollama",
             IntegrationId::LlamaCpp => "llama.cpp",
@@ -96,7 +108,10 @@ impl IntegrationId {
             IntegrationId::ClaudeCode
             | IntegrationId::Codex
             | IntegrationId::Antigravity
-            | IntegrationId::OpenCode => IntegrationKind::Harness,
+            | IntegrationId::OpenCode
+            | IntegrationId::Cursor
+            | IntegrationId::Pi
+            | IntegrationId::Hermes => IntegrationKind::Harness,
             IntegrationId::Cmux => IntegrationKind::Multiplexer,
             IntegrationId::Ollama | IntegrationId::LlamaCpp => IntegrationKind::LocalInference,
         }
@@ -105,27 +120,38 @@ impl IntegrationId {
     /// Executable names to search `PATH` for, in priority order — the first
     /// one that resolves to a usable executable wins. These are defaults,
     /// not guarantees: the user can always point Glasshouse at an explicit
-    /// path when a real install uses a different name than the one guessed
+    /// path when a real install uses a different name than the one recorded
     /// here.
     ///
-    /// The Antigravity entry is deliberately a single name. The real
-    /// Antigravity CLI executable name could not be verified from this
-    /// development environment (no reference install was available to
-    /// inspect). Rather than guess additional short aliases — `ag` in
-    /// particular collides with the unrelated, widely-installed
-    /// the-silver-searcher tool and would produce a confident, wrong
-    /// detection — this only ever searches for the literal name
-    /// `antigravity`. A missed detection here is safe (the user adds an
-    /// explicit path); a false detection of an unrelated binary is not.
+    /// **A harness's names come from its adapter**, not from this list.
+    /// Phase 6 fixes the architecture that harness commands stay isolated
+    /// inside adapters, and the executable name is the first and most
+    /// consequential of those commands — get it wrong and Glasshouse starts
+    /// the wrong program, or nothing at all. Keeping a second copy here would
+    /// be a second place for it to be wrong, and the two would drift.
+    ///
+    /// What stays here are the integrations that are *not* harnesses: cmux
+    /// multiplexes terminals and Ollama and llama.cpp serve models, so none
+    /// of them has a session to start or an adapter to own it.
     pub fn executable_candidates(self) -> &'static [&'static str] {
+        if let Some(adapter) = crate::harness::adapter_for(self) {
+            return adapter.executable_candidates();
+        }
         match self {
-            IntegrationId::ClaudeCode => &["claude"],
-            IntegrationId::Codex => &["codex"],
-            IntegrationId::Antigravity => &["antigravity"],
-            IntegrationId::OpenCode => &["opencode"],
             IntegrationId::Cmux => &["cmux"],
             IntegrationId::Ollama => &["ollama"],
             IntegrationId::LlamaCpp => &["llama-server", "llama-cli"],
+            // Every harness is answered by its adapter above. This arm is
+            // unreachable rather than a fallback: a harness with no adapter
+            // would be a harness Glasshouse cannot open a session in, and
+            // `every_harness_has_an_adapter` fails before it can ship.
+            IntegrationId::ClaudeCode
+            | IntegrationId::Codex
+            | IntegrationId::Antigravity
+            | IntegrationId::OpenCode
+            | IntegrationId::Cursor
+            | IntegrationId::Pi
+            | IntegrationId::Hermes => &[],
         }
     }
 
@@ -619,6 +645,47 @@ fn config_evidence(id: IntegrationId, home: Option<&Path>) -> (ConfigEvidence, V
             }
             (evidence_result(found), notes)
         }
+        IntegrationId::Cursor => {
+            let mut notes = Vec::new();
+            let mut found = false;
+            if let Some(home) = home
+                && home.join(".cursor").is_dir()
+            {
+                notes.push("~/.cursor directory exists".to_string());
+                found = true;
+            }
+            if env_set("CURSOR_API_KEY") {
+                notes.push("CURSOR_API_KEY is set".to_string());
+                found = true;
+            }
+            (evidence_result(found), notes)
+        }
+        IntegrationId::Pi => {
+            let mut notes = Vec::new();
+            let mut found = false;
+            if let Some(home) = home
+                && home.join(".pi").is_dir()
+            {
+                notes.push("~/.pi directory exists".to_string());
+                found = true;
+            }
+            (evidence_result(found), notes)
+        }
+        IntegrationId::Hermes => {
+            let mut notes = Vec::new();
+            let mut found = false;
+            if let Some(home) = home {
+                if home.join(".hermes").is_dir() {
+                    notes.push("~/.hermes directory exists".to_string());
+                    found = true;
+                }
+                if home.join(".hermes").join("config.yaml").is_file() {
+                    notes.push("~/.hermes/config.yaml exists".to_string());
+                    found = true;
+                }
+            }
+            (evidence_result(found), notes)
+        }
         IntegrationId::Ollama => {
             let mut notes = Vec::new();
             let mut found = false;
@@ -773,6 +840,18 @@ pub fn doctor_report(runtime: &crate::Runtime) -> String {
     }
     let _ = writeln!(out);
 
+    // What Glasshouse believes about each harness, and why. This is the
+    // answer to "would a session in this harness be able to resume, or run a
+    // hook, or use MCP" — questions a user cannot otherwise ask, and which
+    // Glasshouse itself will act on from Phase 7 onward. Every claim carries
+    // the evidence it was read from, so a wrong one can be caught by reading
+    // rather than by a surprise at launch.
+    let _ = writeln!(out, "Harness adapters");
+    for adapter in crate::harness::all() {
+        write_adapter_report(&mut out, adapter);
+    }
+    let _ = writeln!(out);
+
     let _ = writeln!(out, "Provider signals");
     let providers = discovery.providers();
     if providers.secret_vars_present().is_empty() {
@@ -845,6 +924,103 @@ fn write_integration_line(out: &mut String, d: &DetectedIntegration, status_widt
     }
 }
 
+/// Render one harness adapter's declarations.
+///
+/// Generic over [`crate::harness::HarnessAdapter`] on purpose: this function
+/// is in the report, not in an adapter, and it must stay unable to tell one
+/// harness from another. If it ever needs to know which harness it is
+/// printing, the thing it wanted belongs in the adapter's declarations
+/// instead.
+fn write_adapter_report(out: &mut String, adapter: &'static dyn crate::harness::HarnessAdapter) {
+    use crate::harness::SessionIds;
+    use std::fmt::Write as _;
+
+    let described = adapter.describe();
+
+    let vendor = described
+        .vendor
+        .value()
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "vendor unverified".to_string());
+    let _ = writeln!(
+        out,
+        "  {:<14} {} · starts `{}`",
+        adapter.id().display_name(),
+        vendor,
+        adapter.executable_candidates().join("` or `"),
+    );
+
+    // A stored identifier is what resume needs, so the two are shown
+    // together: "resumes with X" is only useful alongside whether Glasshouse
+    // can ever learn the X.
+    match adapter.resume("<id>") {
+        Some(invocation) => {
+            let args: Vec<String> = invocation
+                .args()
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            let _ = writeln!(out, "      resume:       {}", args.join(" "));
+        }
+        None => {
+            let _ = writeln!(out, "      resume:       no verified mechanism");
+        }
+    }
+
+    let session_ids = match described.session_ids.value() {
+        Some(SessionIds::Assigned { flag }) => {
+            format!("Glasshouse can assign one with `{flag}`")
+        }
+        Some(SessionIds::Discoverable { source }) => format!("discoverable from {source}"),
+        None => "unverified".to_string(),
+    };
+    let _ = writeln!(out, "      session ids:  {session_ids}");
+
+    let hooks = match described.hooks.value() {
+        Some(hooks) => hooks.mechanism.to_string(),
+        None => "unverified".to_string(),
+    };
+    let _ = writeln!(out, "      hooks:        {hooks}");
+
+    // Only what is known present is listed. An unverified capability is not
+    // an absent one, so it is counted rather than named as missing.
+    let named = described.capabilities.named();
+    let known: Vec<&str> = named
+        .iter()
+        .filter(|(_, declared)| declared.is_known_present())
+        .map(|(name, _)| *name)
+        .collect();
+    let unverified = named.len() - known.len();
+    let capabilities = if known.is_empty() {
+        format!("none verified ({unverified} unverified)")
+    } else if unverified == 0 {
+        known.join(", ")
+    } else {
+        format!("{} ({unverified} unverified)", known.join(", "))
+    };
+    let _ = writeln!(out, "      capabilities: {capabilities}");
+
+    let protocols = match described.backends.protocols.value() {
+        Some(protocols) => protocols
+            .iter()
+            .map(|p| p.slug())
+            .collect::<Vec<_>>()
+            .join(", "),
+        None => "unverified".to_string(),
+    };
+    let _ = writeln!(out, "      protocols:    {protocols}");
+
+    let model = match described.backends.model_override.value() {
+        Some(overrides) => overrides
+            .iter()
+            .map(|o| o.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        None => "unverified".to_string(),
+    };
+    let _ = writeln!(out, "      model:        {model}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -893,12 +1069,32 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_only_searches_the_literal_name() {
-        // Regression guard for the collision this module documents: no
-        // short alias like `ag` may ever be added here.
+    fn no_integration_is_searched_for_under_a_guessed_abbreviation() {
+        // This test used to assert that Antigravity was searched for as
+        // `antigravity` and nothing else — a carefully reasoned guess, made
+        // when no reference install existed, and simply wrong: the published
+        // Antigravity CLI links its binary onto PATH as `agy`. Glasshouse
+        // would never have found a real one.
+        //
+        // What was right about the original is the hazard it guarded, so that
+        // is what survives here. `ag` is the-silver-searcher on a great many
+        // machines; resolving it would start an unrelated program as a coding
+        // harness, and a confident wrong detection is worse than a missed one.
+        // Names come from real installs now — never from abbreviating a
+        // product's name and hoping.
+        for &id in IntegrationId::ALL {
+            for &name in id.executable_candidates() {
+                assert_ne!(
+                    name,
+                    "ag",
+                    "{} would resolve the-silver-searcher as a harness",
+                    id.slug()
+                );
+            }
+        }
         assert_eq!(
             IntegrationId::Antigravity.executable_candidates(),
-            &["antigravity"]
+            &["agy", "antigravity"]
         );
     }
 
@@ -1335,5 +1531,107 @@ mod tests {
         assert!(report.contains("Optional integrations"));
         assert!(report.contains("Provider signals"));
         assert!(report.contains("Problems"));
+    }
+
+    /// `doctor` is where an adapter's declarations become visible to a user,
+    /// and so it is the production caller that keeps them from being a
+    /// write-only data structure.
+    ///
+    /// Asserted against the specific rows for one harness rather than against
+    /// the whole report: a `contains` over a screenful of text passes for
+    /// reasons that have nothing to do with the thing under test.
+    #[test]
+    fn the_doctor_report_shows_each_adapters_declarations() {
+        use clap::Parser;
+
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join(".git")).unwrap();
+
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+            "--config-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, workspace.path()).unwrap();
+        let report = doctor_report(&runtime);
+
+        assert!(report.contains("Harness adapters"));
+
+        // The Claude Code block: its heading row, then the rows under it, each
+        // located on its own rather than searched for anywhere in the report.
+        let adapters_section = report
+            .split("Harness adapters")
+            .nth(1)
+            .expect("a harness adapters section");
+        let block: Vec<&str> = adapters_section
+            .lines()
+            .skip_while(|line| !line.trim_start().starts_with("Claude Code"))
+            .take(7)
+            .collect();
+        assert!(
+            !block.is_empty(),
+            "the report has no Claude Code adapter block"
+        );
+
+        let heading = block[0];
+        assert!(
+            heading.contains("Anthropic"),
+            "adapter heading does not name the vendor: {heading:?}"
+        );
+        assert!(
+            heading.contains("`claude`"),
+            "adapter heading does not name the executable: {heading:?}"
+        );
+
+        let row = |label: &str| {
+            block
+                .iter()
+                .find(|line| line.trim_start().starts_with(label))
+                .unwrap_or_else(|| panic!("no `{label}` row in {block:?}"))
+        };
+        assert!(row("resume:").contains("--resume"));
+        assert!(row("session ids:").contains("--session-id"));
+        assert!(row("hooks:").contains("settings"));
+        assert!(row("capabilities:").contains("MCP"));
+        assert!(row("protocols:").contains("anthropic-messages"));
+        assert!(row("model:").contains("--model"));
+    }
+
+    /// Every harness gets a block, not only the ones that happen to be
+    /// installed on the machine running the tests.
+    #[test]
+    fn the_doctor_report_describes_every_harness_adapter() {
+        use clap::Parser;
+
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join(".git")).unwrap();
+
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+            "--config-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, workspace.path()).unwrap();
+        let report = doctor_report(&runtime);
+
+        let adapters_section = report
+            .split("Harness adapters")
+            .nth(1)
+            .expect("a harness adapters section");
+        for adapter in crate::harness::all() {
+            let name = adapter.id().display_name();
+            assert!(
+                adapters_section.contains(name),
+                "{name} has an adapter but no block in the doctor report"
+            );
+        }
     }
 }
