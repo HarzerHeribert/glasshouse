@@ -12,6 +12,7 @@ working as the primary orchestrator, read these files completely in this order:
 7. `GLASSHOUSE_ORCHESTRATOR_PROMPT.md`
 8. `GLASSHOUSE_DESIGN_DECISIONS.md`
 9. `GLASSHOUSE_ORCHESTRATION_PRACTICE.md`
+10. `GLASSHOUSE_ORCHESTRATION_MEASUREMENTS.md`
 
 The capability map is authoritative. Work in its stated order. Do not check a
 box until its evidence-ledger entry is `COMPLETE`. Only the primary Opus
@@ -21,6 +22,17 @@ orchestrator integrates, commits, and updates project-status records.
 how to run this process without repeating mistakes that have already cost
 whole cycles — task sizing for real parallelism, never losing a finished
 worker, reading a failure before fixing it, and the shell traps that have bitten.
+Its later sections cover running several workers at once, team leads that
+subcontract, and the cheap leaf tier.
+
+**Run workers in parallel.** Partition batches by the files they touch, order
+those batches by the map, and name the other live workers' files in each
+packet's `FORBIDDEN FILES`. Map order is a priority, not a mutex — one worker
+at a time has already cost this project a session.
+
+`GLASSHOUSE_ORCHESTRATION_MEASUREMENTS.md` is a standing inherited experiment
+measuring which model tier closes capability boxes at what cost. Add every
+batch to its ledger and answer one of its open questions when you can.
 
 **Every worker gets a nagging watch, armed in the same turn it is started:**
 `Monitor(command: "scripts/worker-watch.sh <name> <surface> <report>", persistent: true)`.

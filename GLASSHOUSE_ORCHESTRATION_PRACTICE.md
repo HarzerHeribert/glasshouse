@@ -201,3 +201,91 @@ Before handing off:
   because **workers never commit** — the worktree *is* the deliverable;
 - `python3 scripts/progress.py` must have been run if the map changed, or CI's
   lint job fails.
+
+---
+
+## 9. Parallelism at scale — partition by file, order by map
+
+**The failure this rule buys back:** on 2026-08-25 the orchestrator ran one
+worker at a time for most of a session, believing the work could not be
+partitioned. The map disproves it — 1,266 unchecked lines across 99 phases,
+with whole blocks in modules nothing else touches.
+
+The conflicts were real, but only *inside* the Phase 9 family, because work was
+being taken in strict map order within one family. **Map order is a priority,
+not a mutex.**
+
+So schedule like this:
+
+1. Group open lines by **the source files they would touch**, not by phase.
+2. Within a group, take them in map order.
+3. Run one worker per group, concurrently.
+4. **A packet's `FORBIDDEN FILES` section is the scheduling primitive.** Name
+   the other live workers' files in it explicitly — "another worker is editing
+   this right now" — and add a stop condition telling the worker to report
+   rather than edit. That is what makes concurrency safe.
+
+Three editing workers is the point where reviews start to collide, because
+reviews are serial and worker wall-clock is not. Beyond that, use a team lead.
+
+Measured numbers live in `GLASSHOUSE_ORCHESTRATION_MEASUREMENTS.md`. Add yours.
+
+## 10. Team leads — push the review cycle down a level
+
+An Opus worker may run its own subcontractors. This is how concurrency grows
+past the orchestrator's own attention: **a lead's review cost is paid out of
+the lead's context, not yours.**
+
+Give a lead a packet that decomposes, and say in the packet:
+
+- **what it must keep** — every red-risk part, the design, and the mutations;
+- **what is good to hand out** — test batches once the API is settled,
+  mechanical wiring, dependency plumbing, scans and inventories;
+- and the three rules that are not negotiable:
+  1. **verify every subcontractor's gates yourself** — a worker on this project
+     once reported gates green while its tests did not compile;
+  2. **never let two subcontractors edit the same file at once** — give each an
+     explicit file list;
+  3. **the lead owns the mutations** — a subcontractor may write a test, but
+     only the lead decides it is non-vacuous and runs the mutation that proves
+     it, reading the named test's own result line in the target that runs it.
+
+Ask the lead to report what it delegated and what it kept, so the value of the
+arrangement can be measured rather than assumed.
+
+## 11. The cheap tier: Gemini Flash via `agy`, and how to run it
+
+The leaf tier is measured, not assumed — it scored 171/171 verbatim quotes on a
+bounded map inventory. Use it for inventories, call-site searches, focused
+reruns, checklist reviews, settled documentation, and **record audits**, which
+it is unusually good at because they are pure counting.
+
+Running it, with the traps in order:
+
+- Start it as `agy --mode accept-edits`. Without `accept-edits` it cannot write
+  its own report. Antigravity declares **no automatic-review mode**, and its
+  "always allow" matches on the exact command prefix, so it re-prompts for
+  every new command; a leaf doing more than reading may additionally need
+  `--dangerously-skip-permissions`, which the user has accepted for this use.
+  **Claude Code's own auto-mode classifier may refuse to type that flag into a
+  pane** — if so, ask the user to approve it rather than working around it.
+- **Give it its own worktree, never another worker's and never `main`.** It
+  runs in accept-edits mode; a folder it is trusted in is a folder it can
+  write. `git worktree add --detach <path> main` costs nothing and contains it.
+- It asks **"Yes, I trust this folder"** on first start in a new directory.
+  Confirm only after checking which directory the pane is actually in — the
+  pane inherits the workspace's cwd, which is usually the *previous* worker's
+  worktree.
+- **Verify its output mechanically.** Diff its quotes against the source; do
+  not read its summary and nod. Its value is that it is checkable.
+- Watch it like any other worker, with a shorter nag: leaf tasks finish fast,
+  and `scripts/worker-watch.sh <name> <surface> <report> 120` is right.
+
+## 12. Keep the experiment running
+
+`GLASSHOUSE_ORCHESTRATION_MEASUREMENTS.md` is a standing, inherited experiment,
+not a one-off note. Add every batch to its ledger with its verdict, answer one
+of its open questions when you can, and record what changed your mind. The
+project is a control plane for routing work to models; the data this process
+generates about *which tier produced what verified result* is the same question
+the product exists to answer.
