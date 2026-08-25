@@ -4,32 +4,83 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 2 — Persistent project state is complete.** Six capabilities were
-closed this session, each with a `COMPLETE` ledger entry:
+**Phase 2 (persistent project state) is complete, and Phase 3's TUI shell is
+substantially complete.** Sixteen capabilities were closed this session; the
+checked count went from 63 to 79.
 
-1. Persist Glasshouse session metadata independently of native harness files.
+Phase 2 — all six remaining boxes:
+
+1. Persist session metadata independently of native harness files.
 2. Persist the Glasshouse-ID to native-session-ID mapping.
-3. Persist harness, creation time, last activity time, role, lifecycle, and
-   project identifier.
+3. Persist harness, times, role, lifecycle, and project identifier.
 4. Persist the process presentation mode.
 5. Persist enough to distinguish active, resumable, closed, and failed.
 6. Never store provider credentials in the project database.
 
-The checked count went from 63 to 69.
+Phase 3 — nine of twelve, plus Phase 1's last renderable gap (line 93, the
+active canonical project root in the TUI). The three left open are blocked, not
+skipped: the project-memory view needs Phase 20, and both "return to the active
+native session" and "propagate resize to the embedded terminal" need a live
+embedded terminal, which is Phase 5.
 
 ### The decision this session made, and why
 
 The previous checkpoint ended on a deliberate choice between three blocked
-groups. **Phase 2 was chosen** because it was the only one actually unblocked:
-Phase 2C onboarding needs product decisions from the user, Phase 2D settings
-needs a TUI that does not exist, and Phase 3 is larger and would be cheaper
-after a session model exists. Phase 2 also does double duty — Phase 1 line 90
-was blocked on exactly this table.
+groups. **Phase 2 was chosen first** because it was the only one unblocked:
+2C onboarding needs product decisions from the user, 2D settings needs a TUI,
+and Phase 3 would be cheaper once a session model existed. Phase 2 also retired
+the schema half of Phase 1 line 90.
 
-Risk class was Red (persistence, migrations, resume identity, secret
-boundaries), so it was the orchestrator's own work; Ox is barred from it.
+**Phase 3 followed** for exactly the reason recorded when Phase 2 closed: it was
+then the largest unblocked item, and `session::store` had given it something
+real to render.
+
+Phase 2 was Red (persistence, migrations, resume identity, secret boundaries)
+and was the orchestrator's own work. Phase 3's state and view are Amber; the
+terminal ownership it builds on already existed.
 
 ## Verified completed work
+
+### This session — the TUI shell
+
+- `glasshouse` with no arguments opens the shell; piped or redirected runs keep
+  the plain summary rather than drawing a full-screen interface into a file.
+- Split like the first-run wizard: `shell::state` answers keys without drawing,
+  `shell::view` draws without deciding anything. That is what makes the
+  interesting behaviour testable without a terminal.
+- The session bar renders the records `session::store` keeps, so Phase 3 reads
+  what Phase 2 wrote — the two halves of this session meet in production, not
+  only in tests.
+- The overview draws *over* the shell rather than replacing it, so it reads as
+  somewhere you leave rather than somewhere you go. Escape leaves the overlay
+  while one is open and leaves Glasshouse only when none is.
+- Selection follows a session's identifier, not its index. Sessions sort by
+  last activity, so a refresh reorders them, and holding an index would move
+  the user to a different session behind their back.
+- The status bar carries the key bindings plus a note when a key could not do
+  anything — pressing Tab in a one-session project explains itself instead of
+  looking like a dead keyboard.
+
+**Mutation testing rejected a piece of this code, which is the point of it.**
+The status bar originally measured the remaining width and truncated a note to
+fit. Removing that measurement changed nothing on screen, because Ratatui
+already clips the row. The measurement is gone; the property that matters —
+bindings are needed permanently, a note only once — is now carried by writing
+the bindings first and letting the clip fall where it should, and swapping the
+order fails the test.
+
+**It also exposed two vacuous assertions, both the same mistake.** The
+real-terminal check for the project root survived having the root blanked out,
+because the project's name and its root's last component are the same string
+and a bare `contains` matched the title bar. The same flaw let the
+narrow-terminal test pass while truncating from the wrong end. Both now read a
+single specific row or field. The lesson generalises: **asserting against a
+whole screen is nearly always weaker than it looks.**
+
+The text-first constraint is enforced mechanically rather than by assertion:
+Ratatui's decorative widgets all draw with Unicode block elements, so the test
+fails on any character in U+2580..U+259F, and adding a sparkline-looking line to
+the viewport fails it.
 
 ### This session — the session store
 
@@ -169,6 +220,17 @@ have required a magic clamp.
 
 ## Unresolved loose ends
 
+- **The shell's key bindings are plain single keys**, because no native session
+  owns the keyboard yet. When one does (Phase 5) they must move behind a prefix
+  or a mode, or they will steal keystrokes the harness needs.
+  `ShellState::handle_key` is deliberately the only place that has to change.
+- The shell reads sessions once at startup and on an explicit redraw event.
+  Nothing yet raises that event, so a session started elsewhere while the shell
+  is open does not appear until it is reopened. `AppEvent::Redraw` and
+  `ShellState::refresh` are the seam, and `refresh` already reconciles by
+  identifier rather than index.
+- The viewport is reserved and empty. Phase 5 fills it.
+
 - **Nothing calls `open_for_resume` in production.** The cross-project resume
   guard is implemented, structurally enforced, and mutation-proven, but there
   is no `glasshouse resume`, so Phase 1 line 90 is `PARTIALLY VERIFIED` and its
@@ -219,65 +281,67 @@ have required a magic clamp.
 
 ## Where to go next
 
-**Read this before picking anything up.** The three-group structure from the
-previous checkpoint still holds, minus what Phase 2 retired.
+**Phase 4 — the generic PTY session runtime — is the next capability, and it is
+unblocked.** It is also the keystone: three Phase 3 boxes, Phase 5's terminal
+embedding, and the whole of Phase 11's overview all wait on sessions being live
+in-process rather than only recorded.
 
-**Group 1 — blocked on a later phase.** Two of the three remain:
+Phase 4 asks for keystroke forwarding to the active PTY, programmatic sends,
+interrupts, a bounded scrollback per session, inactive sessions that keep
+running, switching that changes only presentation, and a headless mode. Two
+things already built are the foundation and two are the obstacle:
 
-- Phase 1 line 92 (cross-project memory retrieval disabled by design) needs the
-  memory table — Phase 20. The pattern to copy is already in place: migration 2
-  proves how to make a project boundary structural rather than a query filter,
-  and the memory table should get the same trigger treatment.
-- Phase 1 line 93 (display the project root in the TUI) needs the TUI —
-  Phase 3.
+- `pty::PtyProcess` and `launch::HarnessLaunch` already start a real harness in
+  a real PTY bound to the project root.
+- `session::attach` is **not** reusable as-is. It owns the process's terminal
+  for the whole of its life and its stdin pump cannot be cancelled — it relies
+  on the process exiting out from under it. A multi-session runtime needs an
+  input path that can be handed between sessions, which is new work, and it is
+  Red: PTY lifecycle, job control, and concurrency.
 
-Phase 1 line 90 (reject a cross-project session resume) is **no longer blocked
-on schema** — the guard exists, is structurally enforced by triggers, and is
-mutation-proven. It is now blocked on there being a resume path at all, which
-needs a harness adapter (Phase 6/7/8). See its ledger entry, which says
-explicitly not to close it with a `resume` command that can only ever report
-"not resumable".
+Still blocked, unchanged:
 
-**Group 2 — blocked on facts this environment does not have.** Unchanged:
-Antigravity's real executable name, and real minimum harness versions. Guessing
-either produces confident, wrong results.
-
-**Group 3 — needs product decisions.** Unchanged: the Phase 2C onboarding block
-(provider and gateway configuration, routing-model choices, Configure now / Do
-later) is interdependent and shapes everything after it. Worth agreeing the
-shape with the user before implementing.
-
-**The natural forward path is now Phase 3, the TUI shell.** It is the largest
-remaining unblocked item, it unblocks Phase 1 line 93 and Phase 2D, and it now
-has a session model to render: `glasshouse sessions` is effectively the
-non-interactive version of Phase 11's session overview, and the columns it
-prints are the ones the overview needs.
+- Phase 1 line 90 — the cross-project resume guard is complete, structurally
+  enforced and mutation-proven, but nothing can *attempt* a resume until a
+  harness adapter exists (Phase 6/7/8). **Do not close it with a `glasshouse
+  resume` that can only ever report "not resumable".**
+- Phase 1 line 92 and Phase 3's project-memory view — Phase 20's memory table.
+  Migration 2 is the pattern to copy: make the project boundary a trigger, not
+  a query filter.
+- Antigravity's executable name and real minimum harness versions — facts this
+  environment does not have.
+- Phase 2C onboarding — interdependent product decisions that need the user.
+- Phase 2D settings — now unblocked in principle, since a TUI exists. It is a
+  reasonable alternative to Phase 4 if smaller, lower-risk work is wanted.
 
 ## Active worker tasks and results
 
-Workers ran as visible normal-TUI `ox` panes in the workers cmux workspace,
-started with `ox --prompt` pointing at a task-packet file — never `ox run`, and
-never by pasting a packet into a running TUI. Reports went to
-`.agent-runtime/report-<TASK-ID>.md`, because the ox viewport cannot be
-scrolled back reliably.
+Workers run as visible normal-TUI `ox` panes in the workers cmux workspace.
+**Start `ox` plainly and type the prompt into its visible TUI** — that is what
+`GLASSHOUSE_ORCHESTRATOR_PROMPT.md` has always said, and an earlier revision of
+this file was wrong to suggest `ox --prompt`. The flag is listed in `ox --help`
+but does not reliably start the turn, leaving a pane that looks like a stalled
+worker. Never `ox run`. Reports go to `.agent-runtime/report-<TASK-ID>.md`,
+because the ox viewport cannot be scrolled back reliably.
 
-- **Implementer (isolated worktree):** built `session/select.rs` with all ten
-  required acceptance tests. It hit a real failure and fixed it itself,
-  independently reaching the correct conclusion about the config schema. Two
-  things it could not get right from its own vantage point were corrected at
-  integration: it exceeded its stated size limit without saying so, and its
-  diagnostic suggested a `--harness` flag that does not exist, because
-  `cli.rs` was outside its permitted files.
-- **Implementer (isolated worktree):** the `Option<bool>` config fix, with the
-  regression test reproduced before the fix as instructed.
-- **Reviewer (read-only):** ten-item checklist over the PTY/launch/shutdown
-  diff. ACCEPT, 10/10 PASS, and its independent non-vacuity reasoning matched
-  the mutation the orchestrator had actually run.
-- **Inventory (read-only):** spawn-site inventory, re-run after the merge.
-  Three production spawn sites, all project-bound; zero production callers of
-  the generic `TerminalCommand::new`.
+Two practical notes learned the hard way: a surface just created with
+`cmux new-surface` needs several seconds before its shell accepts input, and
+text sent earlier is silently eaten — read the *target* surface, not a sibling,
+before sending. And prefer a fresh surface over a pane still holding a live `ox`
+session from an earlier task.
 
-Every worker gate was re-run by the orchestrator rather than taken on report —
+- **Reviewer (read-only), this session:** a ten-item checklist over the session
+  store. Returned ACCEPT WITH FINDINGS with two real defects, both fixed in
+  `cdd6656`. Its reasoning on one was wrong even though its conclusion was
+  right — it called a branch dead because "`saturating_sub` clamps to zero",
+  which `i64::saturating_sub` does not do. Checking rather than accepting also
+  turned up an edge case the report had missed. **Verify the reasoning, not
+  just the verdict.**
+- Earlier sessions: two implementers in isolated worktrees (`session/select.rs`
+  and the `Option<bool>` config fix), a reviewer over the PTY/launch/shutdown
+  diff, and a spawn-site inventory.
+
+Every worker gate is re-run by the orchestrator rather than taken on report —
 one worker's report would otherwise have carried tests that did not compile,
 and one inventory row named a test that does not exist.
 
@@ -285,16 +349,27 @@ and one inventory row named a test that does not exist.
 
 - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
   --all-features -- -D warnings`, `cargo test --workspace --all-features`
-  (194 unit + 26 PTY smoke), `rustup run 1.85.0 cargo check --locked`,
+  (265 lib + 2 bin + 28 PTY smoke), `rustup run 1.85.0 cargo check --locked`,
   `git diff --check` — all pass.
-- Mutation checks, each observed to fail the test it targets: project-over-user
-  precedence, the project-derived working directory, exit-code propagation, the
-  PTY allocation retry, and the config tri-state fix.
-- PTY stress: 40 rounds x 8 concurrent binaries; 27/320 runs failed, all with
-  the same `openpty` refusal. Host probes measured the pseudo-terminal cap at
-  511 and reproduced the race at 64 live allocations.
-- CI `32788309876` on `e3295a7` — green on Linux, macOS, Windows, and lint,
-  with the Windows job confirmed to have executed 186 lib and 20 PTY tests.
+- Strict rustdoc reports 15 pre-existing lib-doc diagnostics, 9 of them public
+  docs linking to private items. This session added none, verified by measuring
+  the baseline with the branch stashed.
+- Mutation checks, each observed to fail the test it targets: the cross-project
+  resume refusal; the schema trigger; the trigger's `IS NOT` fail-closed
+  behaviour; the native-session unique index, its scope, and its nullability;
+  the resumable disposition; lifecycle-as-activity; session recording in
+  `launch`; the recorded outcome; the project root in the TUI (unit and real
+  terminal); root truncation direction; the session bar; Escape's
+  overlay-first semantics; the status bar's bindings and notes; and the
+  text-first block-element guard.
+- Two mutations did **not** fail, and both were informative rather than
+  ignorable. One showed a documented justification for the unique index's
+  `WHERE` clause was simply false. The other showed the status bar's width
+  measurement did nothing, because Ratatui already clips the row; that code was
+  deleted rather than tested harder.
+- CI `32815286487` on `3d606e3` and `32815757547` on `cdd6656` — green on
+  Linux, macOS, Windows and lint, with the Windows job confirmed to have
+  executed 228 lib and 22 PTY tests rather than merely reporting green.
 
 ## Next exact step
 
@@ -307,17 +382,22 @@ Hand this checkpoint to Opus:
 > authorization; do it without asking, and treat a red Windows job as ordinary
 > work.
 >
-> Phase 2 is complete and Phase 1's remaining gaps are documented above with
-> the specific later phase each is waiting on. **Read "Where to go next" before
-> choosing** — the map's order still cannot be followed literally.
+> Phase 2 is complete and Phase 3 is nine boxes of twelve, with the three
+> remaining blocked on Phase 5 and Phase 20 rather than unstarted. **Read
+> "Where to go next" before choosing.**
 >
-> The recommended next capability is **Phase 3, the TUI shell**: it is the
-> largest unblocked item, it unblocks Phase 1 line 93 and Phase 2D, and
-> `session::store` now gives it something real to render. If you take it,
-> `main.rs: session_report` is the non-interactive version of the same listing
-> and its columns are the ones Phase 11 asks for.
+> The recommended next capability is **Phase 4, the generic PTY session
+> runtime**. Read the note there about `session::attach` before starting: it is
+> not reusable as-is, because it owns the terminal for the process's whole life
+> and its stdin pump cannot be cancelled. Designing an input path that can be
+> handed between sessions is the real work, and it is Red — PTY lifecycle, job
+> control, concurrency — so it belongs to the orchestrator, not to Ox.
 >
-> Do not stub a blocked capability to keep the map's order looking intact. In
-> particular, do not close Phase 1 line 90 with a `glasshouse resume` that can
-> only ever report "not resumable", and do not guess an Antigravity executable
-> name or a minimum harness version.
+> Two habits from this session are worth keeping. **Assert against a specific
+> row or field, never a whole screen**: two tests here passed while the thing
+> they claimed to check was broken, because the matched string also appeared
+> elsewhere. And **treat a mutation that does not fail as information about the
+> code, not just the test** — one such mutation correctly identified a piece of
+> the status bar as doing nothing, and it was deleted rather than tested harder.
+>
+> Do not stub a blocked capability to keep the map's order looking intact.

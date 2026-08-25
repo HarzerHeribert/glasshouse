@@ -78,9 +78,9 @@ Failure/isolation evidence:
   user on a dead frame would fail.
 
 Platform/external evidence:
-- CI on the shell batch commit — Linux, macOS, Windows, lint, with the
-  Windows job confirmed to have executed the suite rather than merely
-  reporting green.
+- CI `32816717226` on `5da067a` — green on Linux, macOS, Windows and lint,
+  with the Windows job confirmed to have executed 257 lib and 23 PTY tests,
+  including the real-terminal shell test, rather than merely reporting green.
 
 Missing evidence:
 - none.
@@ -116,9 +116,9 @@ Failure/isolation evidence:
   initially survived, for the same reason, and now reads a single row.
 
 Platform/external evidence:
-- CI on the shell batch commit — Linux, macOS, Windows, lint, with the
-  Windows job confirmed to have executed the suite rather than merely
-  reporting green.
+- CI `32816717226` on `5da067a` — green on Linux, macOS, Windows and lint,
+  with the Windows job confirmed to have executed 257 lib and 23 PTY tests,
+  including the real-terminal shell test, rather than merely reporting green.
 
 Missing evidence:
 - none.
@@ -145,9 +145,9 @@ Failure/isolation evidence:
 - Mutation: dropping the per-session span fails the listing test.
 
 Platform/external evidence:
-- CI on the shell batch commit — Linux, macOS, Windows, lint, with the
-  Windows job confirmed to have executed the suite rather than merely
-  reporting green.
+- CI `32816717226` on `5da067a` — green on Linux, macOS, Windows and lint,
+  with the Windows job confirmed to have executed 257 lib and 23 PTY tests,
+  including the real-terminal shell test, rather than merely reporting green.
 
 Missing evidence:
 - none.
@@ -177,9 +177,9 @@ Failure/isolation evidence:
   "must not panic on a tiny terminal" claim fails; the 1x1 cases prove it.
 
 Platform/external evidence:
-- CI on the shell batch commit — Linux, macOS, Windows, lint, with the
-  Windows job confirmed to have executed the suite rather than merely
-  reporting green.
+- CI `32816717226` on `5da067a` — green on Linux, macOS, Windows and lint,
+  with the Windows job confirmed to have executed 257 lib and 23 PTY tests,
+  including the real-terminal shell test, rather than merely reporting green.
 
 Missing evidence:
 - The viewport is reserved, not filled. Embedding a live harness terminal is
@@ -214,9 +214,9 @@ Failure/isolation evidence:
   decides what is lost.
 
 Platform/external evidence:
-- CI on the shell batch commit — Linux, macOS, Windows, lint, with the
-  Windows job confirmed to have executed the suite rather than merely
-  reporting green.
+- CI `32816717226` on `5da067a` — green on Linux, macOS, Windows and lint,
+  with the Windows job confirmed to have executed 257 lib and 23 PTY tests,
+  including the real-terminal shell test, rather than merely reporting green.
 
 Missing evidence:
 - none.
@@ -249,9 +249,9 @@ Failure/isolation evidence:
 - Mutation: removing the no-op status message fails the explanatory test.
 
 Platform/external evidence:
-- CI on the shell batch commit — Linux, macOS, Windows, lint, with the
-  Windows job confirmed to have executed the suite rather than merely
-  reporting green.
+- CI `32816717226` on `5da067a` — green on Linux, macOS, Windows and lint,
+  with the Windows job confirmed to have executed 257 lib and 23 PTY tests,
+  including the real-terminal shell test, rather than merely reporting green.
 
 Missing evidence:
 - Bindings are plain single keys because no native session owns the keyboard
@@ -285,9 +285,9 @@ Failure/isolation evidence:
   what stops Escape closing Glasshouse from inside the overview.
 
 Platform/external evidence:
-- CI on the shell batch commit — Linux, macOS, Windows, lint, with the
-  Windows job confirmed to have executed the suite rather than merely
-  reporting green.
+- CI `32816717226` on `5da067a` — green on Linux, macOS, Windows and lint,
+  with the Windows job confirmed to have executed 257 lib and 23 PTY tests,
+  including the real-terminal shell test, rather than merely reporting green.
 
 Missing evidence:
 - none.
@@ -316,9 +316,9 @@ Failure/isolation evidence:
   is a real check rather than a restatement of intent.
 
 Platform/external evidence:
-- CI on the shell batch commit — Linux, macOS, Windows, lint, with the
-  Windows job confirmed to have executed the suite rather than merely
-  reporting green.
+- CI `32816717226` on `5da067a` — green on Linux, macOS, Windows and lint,
+  with the Windows job confirmed to have executed 257 lib and 23 PTY tests,
+  including the real-terminal shell test, rather than merely reporting green.
 
 Missing evidence:
 - Mechanical rather than aesthetic: the test proves no block-element widget is
@@ -355,9 +355,9 @@ Failure/isolation evidence:
   mutations exposed them.
 
 Platform/external evidence:
-- CI on the shell batch commit — Linux, macOS, Windows, lint, with the
-  Windows job confirmed to have executed the suite rather than merely
-  reporting green.
+- CI `32816717226` on `5da067a` — green on Linux, macOS, Windows and lint,
+  with the Windows job confirmed to have executed 257 lib and 23 PTY tests,
+  including the real-terminal shell test, rather than merely reporting green.
 
 Missing evidence:
 - none.
