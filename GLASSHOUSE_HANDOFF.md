@@ -12,7 +12,13 @@ from 107 to 120.
   line is deliberately unchecked; see the loose ends.
 - **Phase 1 line 90** — the cross-project resume guard: **closed after three
   sessions blocked.** `glasshouse resume` is its production caller.
-- **Phase 7** — Claude Code adapter: four of ten lines closed, with three more built and awaiting one probe. Glasshouse
+- **Phase 7** — Claude Code adapter: five of ten lines closed, with three more
+  built and awaiting one probe.
+- **A defect that was damaging the user's installation is fixed.** Glasshouse
+  answered only one of the three questions a harness asks its terminal at
+  startup, so Claude Code's fullscreen renderer failed and, after two strikes,
+  the harness turned it off *globally* — overriding the user's own
+  `"tui": "fullscreen"` setting. Glasshouse
   **assigns** Claude Code its native session identifier with `--session-id`,
   mints it as a valid version-4 UUID, and records it before the process
   exists — and the whole chain is verified against the real binary.
@@ -64,6 +70,38 @@ list was carefully reasoned, documented at length, and pinned by a test — and
 simply wrong, because no reference install had ever been inspected.
 
 ## Verified completed work
+
+### This session — answering the terminal's questions
+
+A real Claude Code startup was captured in a pseudo-terminal and every escape
+sequence it writes before drawing was examined. Three are *questions*:
+`ESC[6n` (cursor position), `ESC[c` (primary device attributes) and `ESC[>0q`
+(XTVERSION). Everything else — bracketed paste, focus reporting, synchronised
+output, keyboard-protocol pushes — is an instruction.
+
+**Glasshouse answered one of the three.** Phase 5's design note had already
+written the rule down — "an embedded session must always answer, or the harness
+hangs" — and only the cursor-position half was ever built.
+
+The consequence was worse than a hang. Claude Code counts the failures and,
+after two, disables its fullscreen renderer *globally*, writing that decision
+into the user's own configuration where it outlives Glasshouse entirely. This
+user's `settings.json` says `"tui": "fullscreen"`, so Glasshouse had overridden
+an explicit preference of theirs, on their machine, permanently.
+
+`TerminalQueryScanner` now recognises all three across chunk boundaries and
+answers each: the emulated screen's cursor position; `ESC[?1;2c` for device
+attributes, which is what the viewport actually is rather than a richer
+terminal whose sequences it could not draw; and Glasshouse's own name for
+XTVERSION, so an application that knows the name can decide for itself and one
+that does not falls back to conservative defaults.
+
+**Verified against the real binary, in an isolated Claude configuration so the
+user's own was not touched.** Before, two sessions were enough to trigger the
+auto-disable. After, three consecutive sessions left it absent, the failure
+notice was gone, and with `"tui": "fullscreen"` set the fullscreen interface
+rendered in the viewport with no notice at all. The isolated configuration was
+deleted afterwards.
 
 ### This session — Claude Code lifecycle hooks
 
@@ -460,6 +498,15 @@ have required a magic clamp.
 
 ## Unresolved loose ends
 
+- **The user's `~/.claude.json` still carries the `fullscreenAutoDisabled`
+  record this defect caused.** The cause is fixed, but Glasshouse will not edit
+  a harness's own configuration, so clearing it is the user's to do:
+  `/tui fullscreen` in any Claude Code session resets it, and it also resets on
+  the next update.
+- **The terminal handshake is verified on macOS only.** The queries and replies
+  are platform-independent and their tests run everywhere, but no real harness
+  has been driven through the viewport on Windows.
+
 - **Three Phase 7 hook lines are built but unchecked**, pending one probe:
   watching Claude Code fire the hooks in the document Glasshouse generated.
   Everything around it is proven — the mechanism fires for a document of this
@@ -660,12 +707,12 @@ surface before sending anything to it.
 
 - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
   --all-features -- -D warnings`, `cargo test --workspace --all-features`
-  (380 lib + 2 bin + 47 PTY smoke + 4 settings), `rustup run 1.85.0 cargo
+  (380 lib + 2 bin + 49 PTY smoke + 4 settings), `rustup run 1.85.0 cargo
   check --locked --workspace --all-targets`, `git diff --check` — all pass.
 - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` — 23
   diagnostics, exactly the baseline measured at `HEAD` in a throwaway
   worktree. None added.
-- Fifteen mutations. Fourteen failed the test they targeted; one **passed**,
+- Eighteen mutations. Seventeen failed the test they targeted; one **passed**,
   and exposed a test that could not reach the guard it was supposed to cover.
   A test was written to reach it, and the mutation now fails. Two further
   mutation attempts produced *no output at all* — a build failure, not a

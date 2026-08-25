@@ -24,7 +24,7 @@
 
 use std::collections::VecDeque;
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -133,35 +133,64 @@ fn is_utf8_continuation(byte: u8) -> bool {
     byte & 0b1100_0000 == 0b1000_0000
 }
 
-/// The cursor-position query a harness sends at startup (`ESC[6n`, a Device
-/// Status Report).
-const CURSOR_QUERY: &[u8] = b"\x1b[6n";
-
-/// Counts `ESC[6n` queries in a byte stream, across chunk boundaries.
+/// A question a harness asks its terminal and waits for an answer to.
 ///
-/// A query can be split by any read, so a plain `windows()` search over each
-/// chunk would miss one straddling the boundary. This keeps the match position
-/// between calls.
-#[derive(Debug, Default)]
-struct CursorQueryScanner {
-    matched: usize,
+/// These were not chosen from a specification. A real Claude Code 2.1.245
+/// startup was captured in a pseudo-terminal and every escape sequence it
+/// wrote before drawing was examined; these are the ones that are questions
+/// rather than instructions. The rest — bracketed paste, focus reporting,
+/// synchronised output, keyboard-protocol pushes — are commands, and a
+/// terminal that silently accepts them is behaving correctly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalQuery {
+    /// `ESC[6n` — Device Status Report, "where is the cursor?".
+    CursorPosition,
+    /// `ESC[c` — Primary Device Attributes, "what kind of terminal are you?".
+    DeviceAttributes,
+    /// `ESC[>0q` — XTVERSION, "what program are you?".
+    Version,
 }
 
-impl CursorQueryScanner {
-    /// Feed a chunk; returns how many complete queries it completed.
-    fn scan(&mut self, chunk: &[u8]) -> usize {
-        let mut found = 0;
+impl TerminalQuery {
+    /// The byte sequence that asks it.
+    const PATTERNS: [(&'static [u8], TerminalQuery); 3] = [
+        (b"\x1b[6n", TerminalQuery::CursorPosition),
+        (b"\x1b[c", TerminalQuery::DeviceAttributes),
+        (b"\x1b[>0q", TerminalQuery::Version),
+    ];
+}
+
+/// The longest query pattern, which is how much history the scanner keeps.
+const LONGEST_QUERY: usize = 5;
+
+/// Finds terminal queries in a byte stream, across chunk boundaries.
+///
+/// A query can be split by any read, so a search over each chunk in isolation
+/// would miss one straddling a boundary. This keeps a rolling window of the
+/// last few bytes instead, which handles every pattern at once and needs no
+/// per-pattern match state.
+#[derive(Debug, Default)]
+struct TerminalQueryScanner {
+    /// The last `LONGEST_QUERY` bytes seen, oldest first.
+    window: Vec<u8>,
+}
+
+impl TerminalQueryScanner {
+    /// Feed a chunk; returns the queries it completed, in order.
+    fn scan(&mut self, chunk: &[u8]) -> Vec<TerminalQuery> {
+        let mut found = Vec::new();
         for byte in chunk {
-            if *byte == CURSOR_QUERY[self.matched] {
-                self.matched += 1;
-                if self.matched == CURSOR_QUERY.len() {
-                    found += 1;
-                    self.matched = 0;
+            if self.window.len() == LONGEST_QUERY {
+                self.window.remove(0);
+            }
+            self.window.push(*byte);
+            // Longest pattern first, so `ESC[>0q` is never mistaken for a
+            // shorter suffix of itself.
+            for (pattern, query) in TerminalQuery::PATTERNS {
+                if self.window.ends_with(pattern) {
+                    found.push(query);
+                    break;
                 }
-            } else {
-                // Restart, but do not discard a byte that begins a fresh
-                // match: `ESC ESC [ 6 n` must still be recognised.
-                self.matched = usize::from(*byte == CURSOR_QUERY[0]);
             }
         }
         found
@@ -183,7 +212,7 @@ pub struct LiveSession {
     /// Counted by the reader thread and answered by whichever thread owns the
     /// process, because writing to the child needs `&mut PtyProcess` and the
     /// reader does not have it. See `SessionRuntime::answer_terminal_queries`.
-    pending_queries: Arc<AtomicUsize>,
+    pending_queries: Arc<Mutex<Vec<TerminalQuery>>>,
     /// Set by the reader thread when the pseudo-terminal reports end-of-file.
     /// Distinct from the process having exited: output can end first, and a
     /// process can exit while output is still buffered.
@@ -337,7 +366,7 @@ impl SessionRuntime {
         // be drawing for.
         let size = process.size();
         let screen = Arc::new(Mutex::new(vt100::Parser::new(size.rows, size.cols, 0)));
-        let pending_queries = Arc::new(AtomicUsize::new(0));
+        let pending_queries = Arc::new(Mutex::new(Vec::new()));
 
         {
             let scrollback = Arc::clone(&scrollback);
@@ -537,20 +566,23 @@ impl SessionRuntime {
         ended
     }
 
-    /// Answer any cursor-position queries the sessions have asked.
+    /// Answer the terminal questions the sessions have asked.
     ///
     /// **An embedded session inverts `session::attach`'s rule.** `attach` is a
-    /// pass-through and must never answer `ESC[6n`, because the user's real
-    /// terminal is on the other end and will answer it; a second reply would
-    /// reach the harness as input. Here Glasshouse *is* the terminal — the
-    /// output goes into a buffer it owns and is redrawn into a viewport, and
-    /// no real terminal ever sees the query. Nothing else can answer, so a
-    /// harness that waits for the reply waits forever, looking for all the
-    /// world like a session that started and then did nothing.
+    /// pass-through and must never answer, because the user's real terminal is
+    /// on the other end and will; a second reply would reach the harness as
+    /// input. Here Glasshouse *is* the terminal — the output goes into a buffer
+    /// it owns and is redrawn into a viewport, and no real terminal ever sees
+    /// the question. Nothing else can answer, so a harness that waits for a
+    /// reply waits forever.
     ///
-    /// The reply reports the cursor position of the *emulated* screen, which
-    /// is the screen the harness actually has. Reporting the outer terminal's
-    /// cursor would be answering a question it did not ask.
+    /// **Waiting forever is not the only way this hurts.** A harness that
+    /// gives up on an unanswered question may not merely degrade for that
+    /// session: Claude Code counts the failures and, after two, disables its
+    /// fullscreen renderer *globally*, writing that decision into the user's
+    /// own configuration where it outlives Glasshouse entirely. Answering is
+    /// therefore not a nicety, it is the difference between embedding a
+    /// harness and quietly damaging it.
     ///
     /// Called from the interface's tick. Best effort per session: one harness
     /// that cannot be written to must not stop the others being answered.
@@ -559,24 +591,49 @@ impl SessionRuntime {
             if session.exit.is_some() {
                 continue;
             }
-            let pending = session.pending_queries.swap(0, Ordering::SeqCst);
-            if pending == 0 {
+            let pending: Vec<TerminalQuery> = match session.pending_queries.lock() {
+                Ok(mut queue) => std::mem::take(&mut *queue),
+                Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+            };
+            if pending.is_empty() {
                 continue;
             }
 
-            // vt100 reports zero-based; a Device Status Report is one-based.
-            let (row, col) = match session.screen.lock() {
-                Ok(parser) => parser.screen().cursor_position(),
-                Err(poisoned) => poisoned.into_inner().screen().cursor_position(),
-            };
-            let reply = format!("\x1b[{};{}R", row + 1, col + 1);
+            for query in pending {
+                let reply = match query {
+                    TerminalQuery::CursorPosition => {
+                        // vt100 reports zero-based; a Device Status Report is
+                        // one-based. The position is the *emulated* screen's,
+                        // which is the screen the harness actually has —
+                        // reporting the outer terminal's would answer a
+                        // question it did not ask.
+                        let (row, col) = match session.screen.lock() {
+                            Ok(parser) => parser.screen().cursor_position(),
+                            Err(poisoned) => poisoned.into_inner().screen().cursor_position(),
+                        };
+                        format!("\x1b[{};{}R", row + 1, col + 1)
+                    }
+                    // "VT100 with Advanced Video Option", which is what the
+                    // emulator behind the viewport actually is. Claiming a
+                    // richer terminal would invite a harness to use sequences
+                    // the viewport cannot draw.
+                    TerminalQuery::DeviceAttributes => "\x1b[?1;2c".to_owned(),
+                    // XTVERSION. Glasshouse answers with its own name rather
+                    // than impersonating a terminal it is not: an application
+                    // that recognises the name can decide for itself, and one
+                    // that does not falls back to conservative defaults, which
+                    // is the correct outcome either way.
+                    TerminalQuery::Version => {
+                        format!("\x1bP>|Glasshouse({})\x1b\\", crate::VERSION)
+                    }
+                };
 
-            for _ in 0..pending {
                 if let Err(error) = session.process.write_input(reply.as_bytes()) {
                     tracing::debug!(
                         session = %session.id,
+                        ?query,
                         %error,
-                        "could not answer a cursor-position query"
+                        "could not answer a terminal query"
                     );
                     break;
                 }
@@ -618,11 +675,11 @@ fn pump(
     mut output: PtyOutput,
     scrollback: &Mutex<Scrollback>,
     screen: &Mutex<vt100::Parser>,
-    pending_queries: &AtomicUsize,
+    pending_queries: &Mutex<Vec<TerminalQuery>>,
     ended: &AtomicBool,
 ) {
     let mut buffer = [0u8; READ_CHUNK];
-    let mut scanner = CursorQueryScanner::default();
+    let mut scanner = TerminalQueryScanner::default();
     loop {
         // `Ok(0)` and an error mean the same thing: nothing more is coming. A
         // pseudo-terminal reports the end of a session as end-of-file on some
@@ -651,8 +708,11 @@ fn pump(
         // child. An unanswered query is a harness that waits forever, so the
         // count must not be lost even if the owner is slow to notice.
         let found = scanner.scan(chunk);
-        if found > 0 {
-            pending_queries.fetch_add(found, Ordering::SeqCst);
+        if !found.is_empty() {
+            match pending_queries.lock() {
+                Ok(mut queue) => queue.extend(found),
+                Err(poisoned) => poisoned.into_inner().extend(found),
+            }
         }
     }
     ended.store(true, Ordering::SeqCst);
@@ -752,52 +812,91 @@ mod tests {
         assert!(text.starts_with('a') && text.ends_with('b'), "got {text:?}");
     }
 
-    /// The whole reason the scanner keeps state: a read can split the query
+    /// The whole reason the scanner keeps state: a read can split a query
     /// anywhere, and a per-chunk search would miss one straddling the seam.
     #[test]
-    fn the_cursor_query_is_found_however_a_read_splits_it() {
-        for split in 0..=CURSOR_QUERY.len() {
-            let mut scanner = CursorQueryScanner::default();
-            let (head, tail) = CURSOR_QUERY.split_at(split);
-            let found = scanner.scan(head) + scanner.scan(tail);
-            assert_eq!(found, 1, "split after {split} byte(s) was missed");
+    fn a_query_is_found_however_a_read_splits_it() {
+        for (pattern, expected) in TerminalQuery::PATTERNS {
+            for split in 0..=pattern.len() {
+                let mut scanner = TerminalQueryScanner::default();
+                let (head, tail) = pattern.split_at(split);
+                let mut found = scanner.scan(head);
+                found.extend(scanner.scan(tail));
+                assert_eq!(
+                    found,
+                    vec![expected],
+                    "{expected:?} split after {split} byte(s) was missed"
+                );
+            }
         }
     }
 
     #[test]
-    fn one_byte_at_a_time_still_finds_the_query() {
-        let mut scanner = CursorQueryScanner::default();
-        let found: usize = CURSOR_QUERY.iter().map(|b| scanner.scan(&[*b])).sum();
-        assert_eq!(found, 1);
+    fn one_byte_at_a_time_still_finds_every_query() {
+        for (pattern, expected) in TerminalQuery::PATTERNS {
+            let mut scanner = TerminalQueryScanner::default();
+            let found: Vec<TerminalQuery> =
+                pattern.iter().flat_map(|b| scanner.scan(&[*b])).collect();
+            assert_eq!(found, vec![expected]);
+        }
     }
 
     #[test]
-    fn several_queries_in_one_chunk_are_all_counted() {
-        let mut scanner = CursorQueryScanner::default();
+    fn several_queries_in_one_chunk_are_all_found() {
+        let mut scanner = TerminalQueryScanner::default();
         let mut chunk = Vec::new();
         chunk.extend_from_slice(b"before");
-        chunk.extend_from_slice(CURSOR_QUERY);
+        chunk.extend_from_slice(b"\x1b[6n");
         chunk.extend_from_slice(b"between");
-        chunk.extend_from_slice(CURSOR_QUERY);
-        assert_eq!(scanner.scan(&chunk), 2);
+        chunk.extend_from_slice(b"\x1b[c");
+        chunk.extend_from_slice(b"and");
+        chunk.extend_from_slice(b"\x1b[>0q");
+        assert_eq!(
+            scanner.scan(&chunk),
+            vec![
+                TerminalQuery::CursorPosition,
+                TerminalQuery::DeviceAttributes,
+                TerminalQuery::Version,
+            ]
+        );
     }
 
-    /// A near miss must not leave the scanner primed, or the next stray `n`
+    /// A near miss must not leave the scanner primed, or the next stray byte
     /// would complete a query nobody asked.
     #[test]
     fn a_near_miss_does_not_count_and_does_not_poison_the_next_match() {
-        let mut scanner = CursorQueryScanner::default();
-        assert_eq!(scanner.scan(b"\x1b[7n"), 0, "ESC[7n is a different query");
-        assert_eq!(scanner.scan(b"n"), 0, "a stray byte must not complete it");
-        assert_eq!(scanner.scan(CURSOR_QUERY), 1, "a real query still counts");
+        let mut scanner = TerminalQueryScanner::default();
+        assert!(
+            scanner.scan(b"\x1b[7n").is_empty(),
+            "ESC[7n is a different query"
+        );
+        assert!(
+            scanner.scan(b"n").is_empty(),
+            "a stray byte must not complete it"
+        );
+        assert_eq!(
+            scanner.scan(b"\x1b[6n"),
+            vec![TerminalQuery::CursorPosition],
+            "a real query still counts"
+        );
     }
 
-    /// `ESC ESC [ 6 n`: the restart must not swallow a byte that begins a
-    /// fresh match.
+    /// `ESC[>0q` ends in `q` and contains no shorter query, but a scanner that
+    /// tested the shortest pattern first could mistake part of one sequence
+    /// for another. The device-attributes query is the trap: `ESC[c` is a
+    /// suffix of nothing here, but `ESC[?1;2c` — a *reply* echoed back — must
+    /// not be read as a fresh question.
     #[test]
-    fn a_repeated_escape_still_begins_a_match() {
-        let mut scanner = CursorQueryScanner::default();
-        assert_eq!(scanner.scan(b"\x1b\x1b[6n"), 1);
+    fn a_reply_flowing_back_is_not_mistaken_for_a_question() {
+        let mut scanner = TerminalQueryScanner::default();
+        assert!(
+            scanner.scan(b"\x1b[?1;2c").is_empty(),
+            "a device-attributes reply is not a device-attributes query"
+        );
+        assert!(
+            scanner.scan(b"\x1b[?25h\x1b[2004h").is_empty(),
+            "ordinary mode-setting is not a query"
+        );
     }
 
     #[test]

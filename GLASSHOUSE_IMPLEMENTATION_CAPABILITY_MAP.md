@@ -298,7 +298,7 @@ Fixed architectural requirements
 ☑ Add a Claude Code adapter that starts the real claude executable inside the current project root.
 ☑ Capture the native Claude Code session identifier when it can be obtained reliably.
 ☑ Support resuming a known Claude Code session through Claude Code’s native resume mechanism.
-☐ Preserve the complete native Claude Code TUI inside the Glasshouse PTY.
+☑ Preserve the complete native Claude Code TUI inside the Glasshouse PTY.
 ☐ Add Claude Code lifecycle-hook integration for events that Claude exposes structurally.
 ☑ Translate supported Claude lifecycle events into Glasshouse lifecycle events.
 ☐ Detect when Claude Code requires user input or permission through structured events when possible.

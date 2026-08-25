@@ -3168,3 +3168,100 @@ fn the_real_claude_code_interface_appears_in_the_viewport() {
     shell.send("q");
     let _ = shell.wait_for_exit();
 }
+
+/// Every question a real harness asks at startup gets an answer.
+///
+/// The three sequences are not invented: a real Claude Code 2.1.245 startup
+/// was captured in a pseudo-terminal and these are the ones that are questions
+/// rather than instructions. A harness script asks all three and reports what
+/// came back.
+///
+/// Unanswered, these are not a cosmetic problem. Claude Code counts the
+/// failures and, after two, turns its fullscreen renderer off *globally* by
+/// writing the decision into the user's own configuration — where it outlives
+/// Glasshouse. That is how this test came to exist.
+#[cfg(unix)]
+#[test]
+fn every_startup_question_a_harness_asks_is_answered() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let project = Project::discover(&project_dir, None, false).expect("discover project");
+
+    // Ask each question and then stay alive. The replies are asserted against
+    // the session's scrollback rather than read back inside the script: a
+    // terminal echoes what is written to it, and none of these replies ends in
+    // a newline, so a shell `read` would wait for a line that never comes.
+    let script = "#!/bin/sh\nprintf 'ASKING\\n'\nprintf '\\033[6n'\nprintf '\\033[c'\n\
+                  printf '\\033[>0q'\nsleep 3\nexit 0\n";
+    let path = bin_dir.join("asks-questions");
+    std::fs::write(&path, script).expect("write harness");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+    }
+
+    let mut runtime = SessionRuntime::new();
+    let id = SessionId::new("questions");
+    let executable = glasshouse::platform::exec::resolve_explicit(&path).expect("resolve");
+    let launch = HarnessLaunch::new(executable, &project);
+    runtime
+        .start(id.clone(), SessionPresentation::Embedded, &launch)
+        .expect("start the harness");
+
+    // The replies are read back out of the session's scrollback, which is
+    // where the terminal's echo of them lands. Echo renders an escape as the
+    // two characters `^[`, not as the byte, so these match the visible form.
+    //
+    // A cursor-position report is `<row>;<col>R`, and the row depends on what
+    // the harness printed first, so it is matched by shape rather than by a
+    // guessed number.
+    fn has_cursor_report(text: &str) -> bool {
+        let bytes: Vec<char> = text.chars().collect();
+        bytes.iter().enumerate().any(|(i, c)| {
+            *c == 'R'
+                && i >= 3
+                && bytes[..i]
+                    .iter()
+                    .rev()
+                    .take_while(|c| c.is_ascii_digit() || **c == ';')
+                    .any(|c| *c == ';')
+        })
+    }
+
+    let deadline = Instant::now() + TIMEOUT;
+    let mut scrollback = String::new();
+    while Instant::now() < deadline {
+        // The interface's tick does exactly this.
+        runtime.answer_terminal_queries();
+        scrollback = runtime.get(&id).expect("live").scrollback();
+        if has_cursor_report(&scrollback)
+            && scrollback.contains("[?1;2c")
+            && scrollback.contains("Glasshouse(")
+        {
+            break;
+        }
+        runtime.poll_exits();
+        std::thread::sleep(POLL);
+    }
+
+    assert!(
+        has_cursor_report(&scrollback),
+        "no cursor-position reply\n--- scrollback ---\n{scrollback:?}\n--- end ---"
+    );
+    assert!(
+        scrollback.contains("[?1;2c"),
+        "no device-attributes reply, so a harness would count a strike\n\
+         --- scrollback ---\n{scrollback:?}\n--- end ---"
+    );
+    assert!(
+        scrollback.contains("Glasshouse("),
+        "no version reply\n--- scrollback ---\n{scrollback:?}\n--- end ---"
+    );
+
+    let _ = runtime.close(&id);
+}

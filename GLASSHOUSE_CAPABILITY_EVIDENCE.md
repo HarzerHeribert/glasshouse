@@ -49,70 +49,75 @@ Missing evidence:
 
 ## Active entries
 
-### Phase 5/7 — DEFECT: a harness's fullscreen renderer fails inside the viewport, and the harness disables it globally
+### Phase 5/7 — the terminal handshake, and the defect it was hiding
 
-Contract (Phase 5): Given a live harness session, when Glasshouse draws it, the
-harness's own interface appears as it drew it — and Phase 7 asks for the
-**complete** native Claude Code TUI.
+Contract: Given a live harness session, when the harness asks its terminal a
+question at startup, Glasshouse answers it, so the harness's own interface
+works exactly as it would in a real terminal — and does not quietly degrade
+itself, or the user's installation, when it does not.
 
-State: **DEFECT, confirmed against the real binary.** Phase 7's "Preserve the
-complete native Claude Code TUI inside the Glasshouse PTY" box is deliberately
-**not** checked, because "complete" is exactly what fails.
+State: COMPLETE. Phase 7's "Preserve the complete native Claude Code TUI
+inside the Glasshouse PTY" box is now checked on the strength of this.
 
-What was observed:
-- Driving the shipped `glasshouse` shell with the real Claude Code 2.1.245,
-  the harness's interface *does* render in the viewport — version banner,
-  model line, project path, prompt box, mode line, context meter. Rendering
-  fidelity is not the problem.
-- But the viewport also showed Claude Code's own notice: *"Claude Code's
-  fullscreen renderer has repeatedly failed to start on this machine, so it
-  has been turned off here. Run /tui fullscreen to try it again (this also
-  resets after an update)."*
-- The user's `~/.claude.json` gained
-  `fullscreenAutoDisabled = {"version": "2.1.245", "at": …, "strikes": 2}`,
-  timestamped **during this session**. So what the viewport now shows is
-  Claude Code's *fallback* renderer, and the harness has recorded a global,
-  persistent decision to stop trying.
+The defect, and how it was found:
+- Driving the shipped shell against the real Claude Code 2.1.245, the viewport
+  carried the harness's own notice: *"Claude Code's fullscreen renderer has
+  repeatedly failed to start on this machine, so it has been turned off
+  here."* The user's `~/.claude.json` had gained
+  `fullscreenAutoDisabled = {"version": "2.1.245", …, "strikes": 2}`.
+- So a Glasshouse session had made a harness permanently change the user's own
+  installation, globally — breaking the product invariant that Glasshouse
+  operates real harnesses without altering them. Worse, that user's
+  `settings.json` reads `"tui": "fullscreen"`: Glasshouse had overridden an
+  explicit preference.
 
-Why this matters more than a rendering nit:
-- It breaks a product invariant. Glasshouse "operates real installed harnesses
-  and never hides or replaces them", and Phase 9B is explicit that Glasshouse
-  must not mutate the user's global harness configuration as a side effect.
-  Here a Glasshouse session caused exactly that — outside Glasshouse too.
-- Two strikes are enough. A user who opens two sessions loses fullscreen mode
-  in their own terminal until they run `/tui fullscreen`.
+The cause:
+- A real Claude Code startup was captured in a pseudo-terminal. Of everything
+  it writes before drawing, three sequences are *questions*: `ESC[6n`
+  (cursor position), `ESC[c` (primary device attributes) and `ESC[>0q`
+  (XTVERSION). The rest — bracketed paste, focus reporting, synchronised
+  output, keyboard-protocol pushes — are instructions.
+- Glasshouse answered exactly one of the three. Phase 5's own design note had
+  already stated the rule ("an embedded session must always answer, or the
+  harness hangs"); only the cursor-position half was ever built.
 
-Likely cause, not yet proven:
-- `session/runtime.rs` answers exactly one terminal query, the cursor-position
-  report (`ESC[6n`), via `CursorQueryScanner`. A real Claude Code startup,
-  captured in a plain pseudo-terminal, also emits primary device attributes
-  (`ESC[c`), XTVERSION (`ESC[>0q`), the kitty keyboard protocol query
-  (`ESC[>1u` / `ESC[?u`) and `modifyOtherKeys` (`ESC[>4;2m`). Nothing in
-  Glasshouse answers any of those, so a renderer that waits for a reply before
-  committing to fullscreen would time out — twice, and then give up for good.
-- Phase 5's design note already states the rule this violates: an embedded
-  session "must always answer" the queries a harness sends, "or the harness
-  hangs". Only the DSR half of that was ever built.
+The fix:
+- `session/runtime.rs: TerminalQuery` / `TerminalQueryScanner` recognise all
+  three across chunk boundaries, and `answer_terminal_queries` replies to each:
+  the emulated screen's cursor position, `ESC[?1;2c` for device attributes
+  (what the viewport actually is, rather than a richer terminal whose sequences
+  it could not draw), and its own name for XTVERSION rather than impersonating
+  a terminal it is not.
 
-What closing this needs:
-1. Answer primary device attributes, and decide explicitly for each other
-   startup query whether Glasshouse replies or deliberately stays silent —
-   declining is a legitimate answer only if the harness treats silence as a
-   negative rather than as a timeout.
-2. Re-run the real-harness probe and confirm the strike counter in
-   `~/.claude.json` stops advancing.
-3. Only then does "the complete native TUI" claim become checkable.
+Regression evidence:
+- `every_startup_question_a_harness_asks_is_answered` (PTY smoke, Unix) — a
+  harness asks all three through a real pseudo-terminal and every reply is
+  found in its scrollback. **Mutation-checked three ways**: making either new
+  query unrecognisable, or emptying the cursor reply, fails it.
+- `a_query_is_found_however_a_read_splits_it`,
+  `one_byte_at_a_time_still_finds_every_query`,
+  `several_queries_in_one_chunk_are_all_found`,
+  `a_near_miss_does_not_count_and_does_not_poison_the_next_match`,
+  `a_reply_flowing_back_is_not_mistaken_for_a_question`.
 
-Regression evidence available now:
-- `the_real_claude_code_interface_appears_in_the_viewport` (PTY smoke, Unix,
-  opt-in via `GLASSHOUSE_PROBE_REAL_HARNESS=1`) — drives the shipped shell
-  against the real harness, asserts the harness's *own version string* appears
-  in the viewport, and first asserts it is **absent** before a session exists,
-  so a match cannot come from Glasshouse's own chrome. An earlier revision
-  looked for "Claude Code" and passed against a Glasshouse error message; that
-  is why the guard is there.
-- The probe is opt-in so an ordinary `cargo test` never starts somebody's real
-  coding agent, and it submits nothing, so it costs no model turn.
+Platform/external evidence (macOS, real Claude Code 2.1.245):
+- **Before:** two sessions were enough to trigger `fullscreenAutoDisabled`.
+- **After:** three consecutive sessions against an isolated Claude
+  configuration left it **absent**, and the failure notice was gone —
+  replaced first by Claude Code's *offer* of the fullscreen renderer, and then,
+  with `"tui": "fullscreen"` set, by the fullscreen interface itself rendering
+  in the viewport with no notice at all.
+- The isolated configuration was used precisely so the verification did not
+  touch the user's own; it was deleted afterwards.
+
+Missing evidence:
+- The user's real `~/.claude.json` still carries the `fullscreenAutoDisabled`
+  record this defect caused. Glasshouse will not edit a harness's own
+  configuration, so clearing it is the user's to do — `/tui fullscreen` in any
+  Claude Code session resets it, and it also resets on the next update.
+- Verified on macOS. The queries and replies are platform-independent and the
+  tests run everywhere, but no real harness has been driven through the
+  viewport on Windows.
 
 ### Phase 7 — Claude Code lifecycle hooks (one line closed, three pending one probe)
 
