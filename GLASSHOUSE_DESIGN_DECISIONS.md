@@ -674,3 +674,109 @@ may only claim something that was actually there to look at.
 3. The default profile never selects a blanket-bypass flag.
 4. Glasshouse contains no code that decides whether a harness's tool call is
    permitted. The hook adapters report lifecycle; they do not veto.
+
+---
+
+## Codex lifecycle hooks — a second destination, and a payload not to read
+
+### The conflict
+
+Phase 7 gave Claude Code hooks a clean shape: the adapter builds a settings
+document, Glasshouse writes it into a directory **it owns**, and `--settings`
+points the harness at it. Nothing of the user's is touched and nothing survives
+the session.
+
+Codex has no `--settings`. It reads hooks from exactly one place —
+`<project>/.codex/hooks.json` — which is **inside the user's repository**. The
+mechanism that made Phase 7 clean does not exist here.
+
+### The decision: `HookInstallation` gains a destination
+
+`HookInstallation` currently means "write this file somewhere Glasshouse owns
+and pass these arguments". That is one of two real cases, so the type says which:
+
+    pub enum HookDestination {
+        /// A directory Glasshouse owns; the harness is pointed at it by the
+        /// installation's own arguments. Nothing of the user's is touched.
+        GlasshouseOwned,
+        /// Inside the user's project, at this relative path, because the
+        /// harness reads hooks from nowhere else. Requires explicit consent.
+        ProjectLocal { relative_path: &'static str },
+    }
+
+Claude Code keeps `GlasshouseOwned`; Codex declares
+`ProjectLocal { relative_path: ".codex/hooks.json" }` and empty arguments,
+because Codex finds the file by itself.
+
+Making the destination part of the declaration rather than a special case in
+core is what keeps the consent rule enforceable in one place: **core refuses to
+write a `ProjectLocal` installation unless consent has been given**, and no
+adapter can quietly opt out of that.
+
+### The decision: consent is configuration, not a per-session prompt
+
+Phase 2D requires that writing inside the user's repository shows the exact path
+and takes a distinct confirmation. A modal prompt in front of every session
+start would be the wrong shape — a session is started to be used, not to be
+interrogated.
+
+So consent is an explicit setting the user turns on once, and the first write
+logs the exact path it created. Absent that setting, Glasshouse installs no
+Codex hooks and the session runs without them, which is a working session with
+less telemetry rather than a broken one.
+
+### The decision: report five events, and mind the clamp
+
+`SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `Stop`, `SessionEnd`.
+Deliberately not `PreToolUse`/`PostToolUse`, which fire many times per turn and
+say nothing about a *session's* state — the same reasoning Phase 7 applied.
+
+**`SessionStart` fires for Codex**, which it does not for Claude Code 2.1.245.
+The two harnesses genuinely differ, and `session/lifecycle.rs` is the one place
+allowed to know that.
+
+Codex **clamps hook timeouts** — it announced `clamping SessionEnd hook timeout
+to 3s` about a declared 10s. Declare 3s and the clamp never fires, so a real
+installation produces no warning the user has to wonder about.
+
+### The decision: the payload is read for two fields and no more
+
+Every Codex hook payload carries `session_id`, `transcript_path`, `cwd`,
+`hook_event_name`, `model` and `permission_mode`. `UserPromptSubmit` adds
+`prompt`; `Stop` adds `last_assistant_message`.
+
+Those last two are **the conversation itself** — the user's words and the
+model's reply. Glasshouse needs the event name and the session identifier and
+has no business with the rest. The handler must drain stdin and discard it, and
+a test must prove no payload field reaches a log, a diagnostic, a `Debug`, or
+the database — the same way `nothing_is_read_past_the_first_line` guards
+rollouts.
+
+Draining matters mechanically too, not only ethically: a hook that never reads
+its stdin can leave the harness writing into a closed pipe.
+
+### The consequence: two identifier sources, and the weaker one stays
+
+`session_id` is in every payload, so a hook hands Glasshouse the native
+identifier directly — no originator filtering, no subagent exclusion, no time
+window, no ambiguity, and `transcript_path` even names the exact rollout. It is
+strictly better information than Phase 8 line 2's rollout discovery produces.
+
+Line 2 stays regardless. Hooks require installation *and* the user's consent
+*and* the user trusting them in Codex's own review prompt; discovery requires
+none of those and still works for a session that predates the hooks. So:
+**prefer a reported `session_id`, fall back to discovery.** A capability that
+degrades to a working fallback is worth more than one that is merely elegant.
+
+### Invariants a test must hold to
+
+1. A `ProjectLocal` installation is not written without consent, and cancelling
+   leaves neither file nor directory.
+2. No Glasshouse code path writes `$CODEX_HOME/hooks.json`.
+3. No hook payload field other than the event name and session identifier
+   reaches a log, diagnostic, `Debug`, or the database.
+4. An unfamiliar event changes nothing, and a late hook cannot revive a
+   finished session.
+5. A hook always exits 0.
+6. A reported `session_id` wins over a discovered one; with no hook, discovery
+   still captures the identifier.
