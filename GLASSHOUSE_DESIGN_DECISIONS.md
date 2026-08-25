@@ -1121,3 +1121,31 @@ degrades to a working fallback is worth more than one that is merely elegant.
 5. A hook always exits 0.
 6. A reported `session_id` wins over a discovered one; with no hook, discovery
    still captures the identifier.
+
+
+## A credential-shaped value minted inside the crate should not widen `Secret`
+
+Decided 2026-08-26 by the Opus orchestrator, on a recommendation from the
+Phase 9G team lead.
+
+The gateway needs an authentication token with exactly `Secret`'s protections —
+no `Display`, no `Deref`, no `AsRef<str>`, no serde, a `Debug` that prints
+`REDACTED`. It cannot *be* a `Secret`: the inner field is private to
+`crate::secret` and the only other constructor is `#[cfg(test)]`, so a sibling
+module cannot mint one in production. `GatewayToken` therefore mirrors it item
+for item and carries the same source-scan test.
+
+The lead recommended a `pub(crate) Secret::from_generated(String)`. **Declined,
+and the reason matters more than the decision:** that constructor would let any
+module in the crate turn arbitrary text into a `Secret`, which is precisely
+what the module documentation says must be impossible — "an outside crate or
+module cannot construct one from arbitrary text and then claim the protections
+of this type for it." A convenience that dissolves the guarantee is not worth
+having.
+
+If the duplication ever becomes a real cost, the right shape is
+**`Secret::generate(len)` living inside `crate::secret`**, filling its own bytes
+from `getrandom`. The value then never comes from a caller at all, so the
+boundary is preserved rather than widened. Nothing needs it today: one mirrored
+type with a shared `REDACTED` constant and a shared scan test is cheaper than a
+new API on the most security-sensitive module in the codebase.

@@ -213,6 +213,15 @@ fn launch_session(
         }
     };
 
+    // Phase 9G: whether a local gateway exists at all is decided from the
+    // active launch profiles, never from a flag — see
+    // `glasshouse::gateway::gateway_is_required`. It sits after the
+    // resolution above so that a refused launch still costs nothing, which
+    // also means it binds nothing today: `profile::resolve` still refuses a
+    // gateway-backed profile. The guard lives to the end of this function,
+    // so the listener goes away with the instance on every path out.
+    let _gateway = glasshouse::gateway::start_if_required(std::slice::from_ref(&launch_profile))?;
+
     // Record the session before the harness exists, so a session that dies
     // during startup still leaves a trace. Failing to open the project
     // database is fatal here rather than a warning: `bootstrap` already

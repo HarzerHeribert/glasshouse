@@ -49,6 +49,106 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 9G — the local gateway process (seven of nineteen)
+
+Contract: Given a Glasshouse instance whose active launch profiles include one
+backed by the Glasshouse gateway, when that instance starts, Glasshouse binds a
+listener **on loopback only, on an ephemeral port**, mints a fresh per-instance
+authentication token, and tears all of it down when the instance exits — while
+preserving: no listener exists at all when no profile needs one; two instances
+never contend for a port; the token never reaches a log, a `Debug`, or a file;
+and the gateway never owns a session or becomes a harness.
+
+State: **COMPLETE for the seven process lines.** Every ingress line, streaming,
+tool-call payloads, error mapping and the two credential-holding lines are a
+later slice and remain unchecked.
+
+#### Production evidence
+
+- `gateway/mod.rs` (new, ~300 production lines) — `Gateway`, bound to
+  `Ipv4Addr::LOCALHOST` on port `0` with the real port read back via
+  `local_addr`; `GatewayToken`, 32 bytes of `getrandom` rendered as hex; and
+  `gateway_is_required(&[LaunchProfile])`, which reads `BackendResource`.
+- `main.rs` — `start_if_required` is called from `launch_session`, placed
+  **after** profile resolution so a refused launch still costs nothing.
+- **Line 2 is structural, not promised.** The module imports none of
+  `crate::session`, `crate::shell`, `crate::tui`, `crate::harness`, enforced by
+  a source scan with a paired positive/negative test. A module that cannot see
+  the session model cannot own a session.
+
+#### Regression evidence — 13 tests, none `#[cfg]`-gated
+
+Loopback and non-zero port; two gateways binding different ports; two gateways
+minting different tokens; `Debug` rendering `crate::secret::REDACTED` (the
+shared constant, not a second one); **no listener bound at all** when no
+profile needs one, asserted on absence rather than a boolean; a listener bound
+when one does; the port released on drop, proved by rebinding it; and the
+import scan with its vacuity twin.
+
+#### Mutations — 10 by the lead, 2 re-run independently by the orchestrator
+
+All killed. The orchestrator re-ran the two security-critical ones against the
+integrated tree, restoring from a byte-compared backup: binding
+`Ipv4Addr::UNSPECIFIED` instead of loopback killed the loopback test, and
+making `Debug` print the token killed **two** independent tests. The
+orchestrator additionally ran the gateway suite **40 times: 0 failures**,
+because this batch's own report disclosed a flake it had found and fixed.
+
+#### Four packet corrections, and the orchestrator's packet was wrong in one of them
+
+- **The packet's §2 was factually impossible.** It said "a connection that
+  arrives is closed immediately". With no `accept` call the *kernel* completes
+  the handshake into the listen backlog, so `connect` **succeeds** and the
+  connection simply sits there. Making the packet's sentence true would need an
+  accept loop, which the same paragraph forbids. The lead measured the real
+  behaviour and asserted **that** instead: `connect` succeeds, and the gateway
+  never sends a byte — checked by reading *after* the drop, since bytes written
+  before a close survive in the receiving buffer, which catches a gateway that
+  greeted its client without needing a sleep.
+- **A latent hazard in existing code.** `shutdown`'s `FORCED_EXIT_CLEANUP` is a
+  single `Mutex<Option<_>>` slot: `on_forced_exit` *overwrites* it and the
+  guard's `Drop` sets it to `None`. Registering a gateway cleanup there would
+  have displaced the harness-kill callback an attached session installs, and
+  dropping the gateway would have unregistered the session's callback —
+  orphaning a real harness on a second Ctrl-C. It is harmless today only
+  because there is exactly one caller. **The next slice that adds a second
+  caller must fix that API.** The gateway uses RAII instead, like the three
+  existing guards.
+- **A `GatewayToken` cannot be a `Secret`.** `Secret`'s field is private to its
+  module and the only other constructor is `#[cfg(test)]`, so a sibling module
+  cannot mint one in production. The token mirrors `Secret` item for item and
+  carries the same source-scan test. See the design decision recorded below.
+- **A random-input assertion is a flake generator.** The first `Debug` test
+  scanned prefixes of a *generated* 64-hex-character token against the
+  rendering, and `[redacted]` contains four of the sixteen hex digits — a
+  one-character prefix "leaked" whenever the token began with one. Measured at
+  **45 failures in 100 runs** and fixed the way `secret`'s twin does it, with a
+  fixed non-hex stand-in.
+
+#### Two gaps, stated rather than papered over
+
+- **The `main.rs` wiring has no test that would fail if the call were deleted**,
+  because the only profile that would bind a listener is refused by
+  `profile::resolve` two statements earlier — 9F's refusal, which this packet
+  forbade touching. The *predicate* is mutation-proven; the *wiring* becomes
+  testable the moment the ingress slice lifts that refusal, and that slice must
+  add the test.
+- **`resume_session` resolves no launch profile at all**, so a resumed session
+  cannot require a gateway even in principle. The session record does carry
+  `launch_profile` and `backend_resource`, so reconstructing one is possible —
+  a design decision for the ingress slice.
+
+#### The dependency, audited
+
+`getrandom = "0.4"` adds **no package** — one line in the lock, 249 `[[package]]`
+stanzas before and after, since it was already in the graph via `tempfile`. It
+needs no feature flags and selects a backend unconditionally on macOS, Linux
+and Windows. It declares `rust-version = "1.85"`, **exactly** the workspace
+MSRV with no headroom, so a future `cargo update` into a 0.4.x that bumps to
+1.86 would break the MSRV gate; `--locked` in CI holds that off until the lock
+is deliberately refreshed. It moves from dev-only into the shipped binary; its
+only non-dev dependency is `libc`, already present.
+
 ### Phase 9D/9A — provider templates, header overrides, and the first gateway a harness can actually reach (five lines)
 
 Contract: Given a provider configured from a built-in template, when the user

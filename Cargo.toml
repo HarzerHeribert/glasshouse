@@ -16,6 +16,7 @@ clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 ctrlc = { version = "3", features = ["termination"] }
 directories = "6"
+getrandom = "0.4"
 hex = "0.4"
 ratatui = "0.30"
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }

@@ -655,6 +655,7 @@ dependencies = [
  "crossterm",
  "ctrlc",
  "directories",
+ "getrandom 0.4.3",
  "hex",
  "libc",
  "portable-pty",

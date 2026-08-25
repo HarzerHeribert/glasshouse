@@ -8,6 +8,7 @@
 pub mod cli;
 pub mod config;
 mod database;
+pub mod gateway;
 pub mod harness;
 pub mod integrations;
 pub mod launch;

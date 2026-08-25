@@ -4,9 +4,10 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 9F is eleven of thirteen; 9D eleven of fourteen; 9A nineteen of
-twenty-six. Phase 9 is three of seven; 9E eight of thirteen; 9C eleven of
-twelve; 9B eight of nine. 193 -> 209 checked boxes (16%).**
+**Phase 9G is seven of nineteen; 9F eleven of thirteen; 9D eleven of
+fourteen; 9A nineteen of twenty-six. Phase 9 is three of seven; 9E eight of
+thirteen; 9C eleven of twelve; 9B eight of nine. 193 -> 216 checked boxes
+(17%).**
 
 Three workers now run concurrently, partitioned by the files they touch —
 see `GLASSHOUSE_ORCHESTRATION_MEASUREMENTS.md`, which is a standing inherited
@@ -31,6 +32,44 @@ session came up and showed Codex's own trust prompt — and the end-to-end PTY
 test asserts the exact argv.
 
 ## Verified completed work
+
+### This session — the gateway process, built by a team lead with its own subcontractors
+
+Seven of Phase 9G's nineteen lines: the local gateway *process* — loopback-only
+listener, ephemeral port, per-instance token, and the lifetime of all three.
+No ingress; that is the next slice.
+
+**Line 2 is structural rather than promised.** The module imports none of
+`crate::session`, `crate::shell`, `crate::tui`, `crate::harness`, enforced by a
+source scan with a paired vacuity test. A module that cannot see the session
+model cannot own a session.
+
+**The packet was wrong and the worker measured its way out.** It said "a
+connection that arrives is closed immediately" — impossible for a listener
+nothing accepts, because the kernel completes the handshake into the backlog by
+itself, so `connect` succeeds. The honest behaviour was measured and asserted
+instead: the gateway never sends a byte, checked by reading *after* the drop,
+which catches a gateway that greeted its client without needing a sleep.
+
+**A latent hazard in existing code, found and correctly left alone.**
+`shutdown`'s `FORCED_EXIT_CLEANUP` is a single slot: registering there would
+have displaced the harness-kill callback an attached session installs, and
+dropping the gateway would have unregistered it — orphaning a real harness on a
+second Ctrl-C. Harmless today only because there is exactly one caller.
+**The next slice that adds a second caller must fix that API.**
+
+**The team-lead experiment paid, on evidence.** Three subcontractors, none with
+write access to the same file; the lead kept the listener, the token, the
+predicate, the shutdown decision and every mutation. **Two of ten mutations
+survive the lead's own tests entirely and die only to a subcontractor's test** —
+delegation bought coverage the lead demonstrably did not have. A subcontractor
+also caught a 45-in-100 flake in the lead's own `Debug` test: it scanned
+prefixes of a *generated* hex token, and `[redacted]` contains four of the
+sixteen hex digits. The orchestrator ran the suite 40 more times: 0 failures.
+
+**One process lesson worth carrying:** a subcontractor snapshotted the lead's
+worktree *mid-mutation* and captured a deliberately broken tree. Snapshot before
+mutations begin, or have subcontractors work from a git ref.
 
 ### This session — a gateway a harness can actually reach, and a header that cannot forge another
 
