@@ -45,7 +45,8 @@ blocks the next batch.
 | 9D templates+headers | Sonnet | in flight | — | — | — | — | — | — |
 | 9G gateway skeleton | Opus **team lead** (may subcontract) | in flight | — | — | — | — | — | — |
 | 2C onboarding | Sonnet | in flight | — | — | — | — | — | — |
-| Records audit | Gemini 3.7 Flash via `agy` | in flight | — | — | 0 (read-only) | — | — | — |
+| Records audit | Gemini 3.7 Flash via `agy` | **blocked** | — | — | 0 (read-only) | — | — | BLOCKED on its permission model — see below |
+| Records audit (redone) | orchestrator, one script | ~1 min | negligible | 1 script | 0 (read-only) | — | — | PASS — zero real drift found |
 
 ### What the first data point already says
 
@@ -75,6 +76,30 @@ concurrently; reviews queue. So:
 - a **team lead that reviews its own subcontractors** raises the first ceiling
   without touching the second, because its review cost is paid out of *its*
   context, not the orchestrator's. That is the whole reason to use one.
+
+### A tier's cost includes the cost of driving it
+
+The leaf tier is cheap per token and **not** free to operate. Measured
+2026-08-25:
+
+- Antigravity declares no automatic-review mode, and its "always allow" matches
+  the **exact command prefix including the whole script body**. So a leaf doing
+  real work re-prompts on every distinct command, and the "always allow" option
+  buys nothing. It is unusable unattended without
+  `--dangerously-skip-permissions`.
+- **Claude Code's own auto-mode classifier refused to type that flag into a
+  pane**, repeatably. The orchestrator did not route around it — that is the
+  one thing such a denial exists to prevent — so the leaf worker was parked and
+  the task was done another way.
+- **The task itself took the orchestrator about a minute as a single script.**
+  Which is the lesson worth keeping: a purely mechanical counting task is often
+  cheaper to *do* than to *delegate*, and delegation earns its keep on breadth
+  (many files, many quotes) rather than on arithmetic.
+
+So the open question "how accurate is the leaf tier" is still open, and a new
+one joins it: **what does it cost to drive each tier, in orchestrator attention
+and in permission friction?** A tier that needs a human to approve a flag is
+not a tier you can fan out to at 2 a.m.
 
 ### The mistake this measurement exposed
 
