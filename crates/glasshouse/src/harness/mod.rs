@@ -1185,6 +1185,54 @@ mod tests {
 
     // --- the architecture the map fixes ---------------------------------
 
+    /// Crate names that would mean Glasshouse had reached inside a harness
+    /// instead of talking to its command line.
+    const HARNESS_INTERNALS: [&str; 5] = [
+        "codex-core",
+        "codex-tui",
+        "codex-protocol",
+        "claude-code",
+        "cursor-agent",
+    ];
+
+    /// Whether a manifest's dependency section names a harness's internals.
+    fn depends_on_harness_internals(manifest: &str) -> Option<&'static str> {
+        let dependencies = manifest.split("[dependencies]").nth(1).unwrap_or(manifest);
+        HARNESS_INTERNALS
+            .into_iter()
+            .find(|forbidden| dependencies.contains(forbidden))
+    }
+
+    /// "Avoid coupling Glasshouse core logic to Codex-internal Rust crates."
+    ///
+    /// Codex is written in Rust, which makes depending on its internals
+    /// tempting in a way that Claude Code's TypeScript never could be. It
+    /// would also be a trap: Glasshouse would be pinned to one harness's
+    /// release cadence and internal types, for a harness it is supposed to
+    /// reach only through its command line like any other.
+    #[test]
+    fn glasshouse_depends_on_no_harness_internal_crate() {
+        assert_eq!(
+            depends_on_harness_internals(include_str!("../../Cargo.toml")),
+            None
+        );
+    }
+
+    /// The guard above is only worth having if it can fail. Checked against a
+    /// fabricated manifest rather than by editing the real one, because adding
+    /// a dependency that does not exist fails in cargo's resolver and proves
+    /// nothing about the test.
+    #[test]
+    fn the_dependency_guard_would_catch_a_coupling() {
+        let manifest = "[package]\nname = \"glasshouse\"\n\n\
+                        [dependencies]\nratatui = \"0.30\"\ncodex-core = \"0.1\"\n";
+        assert_eq!(depends_on_harness_internals(manifest), Some("codex-core"));
+        // A harness *named* in a comment or elsewhere is not a dependency.
+        let innocent = "[package]\nname = \"glasshouse\"\n# codex-core is deliberately absent\n\
+                        [dependencies]\nratatui = \"0.30\"\n";
+        assert_eq!(depends_on_harness_internals(innocent), None);
+    }
+
     /// "Make the generic PTY runtime independent from any specific harness
     /// adapter."
     #[test]

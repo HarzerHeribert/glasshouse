@@ -3060,7 +3060,7 @@ fn a_hook_that_cannot_report_still_exits_zero() {
     }
 }
 
-/// The real Claude Code TUI, drawn inside Glasshouse's viewport.
+/// A real harness's own interface, drawn inside Glasshouse's viewport.
 ///
 /// Opt-in: set `GLASSHOUSE_PROBE_REAL_HARNESS=1`. Without it this skips, so an
 /// ordinary `cargo test` never starts somebody's real coding agent. It submits
@@ -3071,14 +3071,13 @@ fn a_hook_that_cannot_report_still_exits_zero() {
 /// survives the round trip through `vt100` into Ratatui cells: a fake harness
 /// proves the pipe works, not that a real TUI is legible at the other end.
 #[cfg(unix)]
-#[test]
-fn the_real_claude_code_interface_appears_in_the_viewport() {
+fn probe_real_harness_interface(slug: &str, executable_name: &str) {
     if std::env::var("GLASSHOUSE_PROBE_REAL_HARNESS").as_deref() != Ok("1") {
         eprintln!("skipping: set GLASSHOUSE_PROBE_REAL_HARNESS=1 to run the real-harness probe");
         return;
     }
-    let Ok(claude) = glasshouse::platform::exec::resolve("claude") else {
-        eprintln!("skipping: `claude` is not on PATH");
+    let Ok(harness) = glasshouse::platform::exec::resolve(executable_name) else {
+        eprintln!("skipping: `{executable_name}` is not on PATH");
         return;
     };
 
@@ -3097,8 +3096,8 @@ fn the_real_claude_code_interface_appears_in_the_viewport() {
         config_dir.join("config.toml"),
         format!(
             "version = 1\n\n[onboarding]\ncompleted = true\n\n\
-             [integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n",
-            claude.path().display()
+             [integrations.{slug}]\nenabled = true\nexecutable = \"{}\"\n",
+            harness.path().display()
         ),
     )
     .expect("write user config");
@@ -3123,12 +3122,18 @@ fn the_real_claude_code_interface_appears_in_the_viewport() {
     // produce — an earlier version of this test looked for "Claude Code" and
     // passed against Glasshouse's own error message, which is the whole
     // reason this asserts on something specific instead.
-    let version = std::process::Command::new(claude.path())
+    let version = std::process::Command::new(harness.path())
         .arg("--version")
         .output()
         .ok()
         .and_then(|out| String::from_utf8(out.stdout).ok())
-        .and_then(|text| text.split_whitespace().next().map(str::to_owned))
+        .and_then(|text| {
+            // `claude --version` leads with the number, `codex --version`
+            // leads with its own name. The number is what is on the screen.
+            text.split_whitespace()
+                .find(|word| word.starts_with(|c: char| c.is_ascii_digit()))
+                .map(str::to_owned)
+        })
         .expect("the harness reports a version");
     assert!(
         version.starts_with(char::is_numeric),
@@ -3159,7 +3164,7 @@ fn the_real_claude_code_interface_appears_in_the_viewport() {
     }
     assert!(
         seen,
-        "the harness's own version `{version}` never appeared in the viewport\n\
+        "{slug}: the harness's own version `{version}` never appeared in the viewport\n\
          --- screen ---\n{}\n--- end ---",
         strip_terminal_sequences(&shell.output())
     );
@@ -3167,6 +3172,18 @@ fn the_real_claude_code_interface_appears_in_the_viewport() {
     shell.send("\x1d");
     shell.send("q");
     let _ = shell.wait_for_exit();
+}
+
+#[cfg(unix)]
+#[test]
+fn the_real_claude_code_interface_appears_in_the_viewport() {
+    probe_real_harness_interface("claude-code", "claude");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_real_codex_interface_appears_in_the_viewport() {
+    probe_real_harness_interface("codex", "codex");
 }
 
 /// Every question a real harness asks at startup gets an answer.

@@ -49,6 +49,57 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 8 — the Codex adapter's first three lines
+
+Contract: Given a project and an enabled Codex, when the user opens a session,
+Glasshouse starts the user's own installed `codex` in the project root and its
+interface appears in the viewport as Codex drew it — while Glasshouse's own
+code stays unable to reach inside Codex.
+
+State: COMPLETE for starting Codex, preserving its interface, and staying
+uncoupled from its internals. The rest of Phase 8 is open.
+
+Production evidence:
+- `harness/codex.rs: Codex` — names `codex`, starts bare ("If no subcommand is
+  specified, options will be forwarded to the interactive CLI").
+- The same selection and launch path as every other harness: `session::select`
+  resolves it, `HarnessLaunch` derives the working directory from the project.
+
+Regression evidence:
+- `the_real_codex_interface_appears_in_the_viewport` (PTY smoke, Unix, opt-in
+  via `GLASSHOUSE_PROBE_REAL_HARNESS=1`) — drives the shipped shell against the
+  real Codex and asserts Codex's own version string reaches the viewport,
+  having first asserted it is absent before any session exists so a match
+  cannot come from Glasshouse's chrome. The probe is shared with Claude Code,
+  so both harnesses are held to the same check.
+- `glasshouse_depends_on_no_harness_internal_crate` and
+  `the_dependency_guard_would_catch_a_coupling` — the manifest names no
+  harness's internals, and the guard is checked against a fabricated manifest
+  that does. Fabricated deliberately: adding a nonexistent dependency to the
+  real manifest fails in cargo's resolver and proves nothing about the test.
+- The existing launch smokes already start a fake harness under the `codex`
+  slug and assert its working directory is the project root.
+
+Platform/external evidence:
+- Codex 0.149.0, driven through the viewport on macOS: its interface renders.
+- **Codex asks a question Claude Code does not.** Its startup handshake is
+  `ESC[>5u`, `ESC[6n`, `ESC[?u`, `ESC[c`, `ESC[0 q`. The `ESC[?u` is the kitty
+  keyboard-protocol probe, and Glasshouse deliberately stays silent on it —
+  see `DELIBERATELY_UNANSWERED` in `session/runtime.rs`. Replying would claim a
+  protocol `tui::event` does not encode for, and the harness would then
+  mis-read every keystroke. Silence is the correct answer *and* is not a
+  timeout: Codex sends `ESC[?u` and `ESC[c` together, and the device-attributes
+  reply arriving with no keyboard reply before it is the negative answer.
+  Pinned by `the_keyboard_protocol_query_is_deliberately_unanswered` and
+  `device_attributes_still_answer_after_an_unanswered_question`.
+
+Missing evidence:
+- Session-identifier capture, resume, hooks and compaction are open. Codex
+  writes no rollout file until a turn has happened (verified: starting it and
+  killing it left the session count unchanged), so identifier discovery has to
+  wait for the first turn and match on the rollout header's `payload.cwd` and
+  `payload.id`.
+
 ### Phase 7 — Keep terminal-text parsing only as a fallback for state that cannot be obtained structurally
 
 Contract: Given a session whose state changes, when Glasshouse records it, the

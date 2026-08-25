@@ -160,6 +160,29 @@ impl TerminalQuery {
     ];
 }
 
+/// Questions Glasshouse deliberately does **not** answer.
+///
+/// `ESC[?u` asks whether the terminal speaks the kitty keyboard protocol.
+/// Codex 0.149.0 asks it at startup, and the temptation is to reply — an
+/// unanswered question is what this whole mechanism exists to prevent.
+///
+/// Replying would be a lie with consequences. The reply means "supported",
+/// the harness would then enable the protocol and expect *key events encoded
+/// that way*, and `crate::tui::event` sends ordinary bytes. The harness would
+/// come up looking fine and then mis-read every keystroke.
+///
+/// Silence is the correct answer, and it is not a timeout: the established
+/// idiom is to send `ESC[?u` and `ESC[c` together, and a device-attributes
+/// reply arriving with no keyboard reply before it *is* the negative answer.
+/// Codex sends exactly that pair, in that order. Answering device attributes —
+/// which Glasshouse does — is therefore what lets a harness conclude "no kitty
+/// protocol here" immediately rather than waiting.
+///
+/// Do not add a reply here without also teaching `tui::event` to encode keys
+/// in the protocol being claimed.
+#[cfg(test)]
+const DELIBERATELY_UNANSWERED: &[&[u8]] = &[b"\x1b[?u"];
+
 /// The longest query pattern, which is how much history the scanner keeps.
 const LONGEST_QUERY: usize = 5;
 
@@ -878,6 +901,33 @@ mod tests {
             scanner.scan(b"\x1b[6n"),
             vec![TerminalQuery::CursorPosition],
             "a real query still counts"
+        );
+    }
+
+    /// A question Glasshouse must stay silent on, and why silence is an
+    /// answer rather than a hang.
+    #[test]
+    fn the_keyboard_protocol_query_is_deliberately_unanswered() {
+        for query in DELIBERATELY_UNANSWERED {
+            let mut scanner = TerminalQueryScanner::default();
+            assert!(
+                scanner.scan(query).is_empty(),
+                "Glasshouse must not claim a keyboard protocol it does not encode for"
+            );
+        }
+    }
+
+    /// The idiom the silence relies on: a harness sends the keyboard query and
+    /// device attributes together, and the device-attributes reply arriving
+    /// with nothing before it is what tells the harness the protocol is
+    /// absent. Codex 0.149.0 sends exactly this pair, in this order.
+    #[test]
+    fn device_attributes_still_answer_after_an_unanswered_question() {
+        let mut scanner = TerminalQueryScanner::default();
+        assert_eq!(
+            scanner.scan(b"\x1b[?u\x1b[c"),
+            vec![TerminalQuery::DeviceAttributes],
+            "the pair must yield exactly one answer: the negative signal"
         );
     }
 

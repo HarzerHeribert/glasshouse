@@ -12,6 +12,9 @@ from 107 to 120.
   line is deliberately unchecked; see the loose ends.
 - **Phase 1 line 90** — the cross-project resume guard: **closed after three
   sessions blocked.** `glasshouse resume` is its production caller.
+- **Phase 8** — Codex adapter: three of ten lines closed. Codex starts, its
+  interface renders in the viewport, and Glasshouse depends on none of its
+  internals.
 - **Phase 7** — Claude Code adapter: **eight of ten lines closed.** The two
   that are not are honest gaps, not unfinished work: permission detection needs
   a permission prompt to fire (this machine runs Claude Code in auto mode), and
@@ -72,6 +75,34 @@ list was carefully reasoned, documented at length, and pinned by a test — and
 simply wrong, because no reference install had ever been inspected.
 
 ## Verified completed work
+
+### This session — Codex, and a question it asks that Claude Code does not
+
+Codex's startup handshake is `ESC[>5u`, `ESC[6n`, `ESC[?u`, `ESC[c`,
+`ESC[0 q`. The `ESC[?u` is the kitty keyboard-protocol probe — a fourth
+question, and Glasshouse **deliberately stays silent on it**.
+
+Answering would be the obvious move and the wrong one. The reply means
+"supported"; the harness would enable the protocol and expect key events
+encoded that way, and `tui::event` sends ordinary bytes. The session would come
+up looking perfect and then mis-read every keystroke.
+
+Silence is not a hang here, because of the idiom Codex uses: it sends `ESC[?u`
+and `ESC[c` together, and a device-attributes reply arriving with no keyboard
+reply before it *is* the negative answer. So the device-attributes reply added
+this session is exactly what lets Codex conclude "no kitty protocol" without
+waiting. Two tests pin it, and the constant is named
+`DELIBERATELY_UNANSWERED` so the next person to find an unanswered query has to
+read why before answering it.
+
+The real-harness viewport probe is now shared between Claude Code and Codex,
+so both are held to the same check: the harness's own version string must be
+absent before a session exists and present afterwards.
+
+**Codex writes no session file until a turn happens** — starting it and killing
+it left the rollout count unchanged. So its identifier can only be discovered
+after the first turn, by matching a rollout header's `payload.cwd` against the
+project and taking its `payload.id`. That is the next piece of Phase 8.
 
 ### This session — the hooks, observed firing for real
 
@@ -736,7 +767,7 @@ surface before sending anything to it.
 
 - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
   --all-features -- -D warnings`, `cargo test --workspace --all-features`
-  (381 lib + 2 bin + 49 PTY smoke + 4 settings), `rustup run 1.85.0 cargo
+  (385 lib + 2 bin + 50 PTY smoke + 4 settings), `rustup run 1.85.0 cargo
   check --locked --workspace --all-targets`, `git diff --check` — all pass.
 - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` — 23
   diagnostics, exactly the baseline measured at `HEAD` in a throwaway
