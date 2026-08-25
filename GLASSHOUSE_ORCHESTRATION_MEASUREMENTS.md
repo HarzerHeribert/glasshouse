@@ -42,8 +42,8 @@ blocks the next batch.
 | Batch | Tier | Wall-clock | Worker cost | Output | Boxes | Kills | Corrections | Verdict |
 |---|---|---|---|---|---|---|---|---|
 | 9F direct provider | Opus specialist | ~39 min | ~$10.90 | +1757/-78, 6 files | 11 | 16/16 | 3 | PASS, CI green first push |
-| 9D templates+headers | Sonnet | in flight | — | — | — | — | — | — |
-| 9G gateway skeleton | Opus **team lead** (may subcontract) | in flight | — | — | — | — | — | — |
+| 9D templates+headers | Sonnet | ~31 min | ~$11.00 | +775/-21, 9 files | 5 | 13/13 | 2 | PASS, CI green first push |
+| 9G gateway skeleton | Opus **team lead**, 3 subcontractors | ~22 min | ~$15.30 | +663, 6 files (new module) | 7 | 10/10 | 4 | PASS |
 | 2C onboarding | Sonnet | in flight | — | — | — | — | — | — |
 | Records audit | Gemini 3.7 Flash via `agy` | **blocked** | — | — | 0 (read-only) | — | — | BLOCKED on its permission model — see below |
 | Records audit (redone) | orchestrator, one script | ~1 min | negligible | 1 script | 0 (read-only) | — | — | PASS — zero real drift found |
@@ -62,6 +62,48 @@ blocks the next batch.
 - **Sonnet runs at roughly a third of Opus's cost rate** for comparable
   packets. The 9F batch was routed to Opus because it crossed a secret
   boundary, not because Sonnet could not have written the code.
+
+### Three batches in, and the tiers separate
+
+| | 9F (Opus solo) | 9D (Sonnet solo) | 9G (Opus + 3 subs) |
+|---|---|---|---|
+| boxes | 11 | 5 | 7 |
+| worker cost | ~$10.90 | ~$11.00 | ~$15.30 |
+| **cost per box** | **~$0.99** | **~$2.20** | **~$2.19** |
+| wall-clock | 39 min | 31 min | 22 min |
+| **boxes per hour** | **17** | 10 | **19** |
+| packet corrections | 3 | 2 | 4 |
+
+Read carefully, because the headline is misleading. **Cost per box is dominated
+by how many boxes a packet's lines happen to be worth, not by tier.** 9F's
+eleven lines were a single coherent seam; 9D's five each needed their own
+evidence. Comparing Sonnet to Opus on this table is not valid — the packets
+were not comparable. What *is* comparable: **Sonnet produced 775 lines with 13
+mutations and 2 correct packet corrections, and its CI went green first push.**
+Nothing in the 9D batch needed Opus, and it was routed to Sonnet on exactly
+that judgement.
+
+**The team lead is the fastest thing measured so far** — 19 boxes/hour against
+17 for a solo Opus, on red-risk work, with the most packet corrections of any
+batch. It cost ~40% more per box than the solo Opus batch, and bought:
+
+- **coverage the lead did not have.** Two of its ten mutations survive the
+  lead's own tests entirely and die only to a subcontractor's test. That is the
+  single most useful number in this file.
+- a **45-in-100 flake found in the lead's own test** by a subcontractor. The
+  lead had convinced itself the test was correct.
+- a vacuity check run against **all four** forbidden import paths rather than
+  the one asked for, plus a false-positive nobody had considered
+  (`crate::shell` being a substring of `crate::shutdown`).
+
+**The cost was real:** subcontractors each copied a 1.1 GB worktree, and one
+snapshotted the lead's tree *mid-mutation*, capturing a deliberately broken
+intermediate and having to redo everything. **Snapshot before mutations begin,
+or have subcontractors work from a git ref rather than the working tree.**
+
+Verdict so far: **use a team lead for red-risk work that decomposes.** Its
+review cost is paid from its own context, its subcontractors find what it
+cannot, and it is not slower.
 
 ### The parallelism ceiling, derived rather than guessed
 
