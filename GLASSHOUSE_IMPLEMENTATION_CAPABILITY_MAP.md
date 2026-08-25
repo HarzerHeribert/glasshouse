@@ -355,7 +355,7 @@ Fixed architectural requirements
 ☐ Allow a launch profile to inject environment variables only into the child harness process.
 ☐ Allow a launch profile to inject command-line arguments only into the child harness process.
 ☐ Allow a launch profile to select the harness's own approval mode, defaulting to its native automatic-review mode where one exists and never to a blanket bypass.
-☐ Refuse a launch profile that requests automatic review from a harness which declares none, rather than silently downgrading it to a bypass mode.
+☐ Allow a blanket bypass on a harness that declares no automatic-review mode only after the user has been shown its risk once and acknowledged it, record that acknowledgement per harness, and never downgrade to a bypass silently.
 ☐ Allow a launch profile to use an isolated generated configuration file when a harness requires file-based provider configuration.
 ☐ Represent these mechanisms together as an ephemeral child-process launch overlay rather than assuming every harness can be redirected through environment variables alone.
 ☐ Resolve the launch overlay through the selected HarnessAdapter and refuse unsupported combinations instead of inventing generic environment names.

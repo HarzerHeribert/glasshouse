@@ -655,15 +655,37 @@ Defaulting to bypass would also make Glasshouse the thing that silently
 widened a user's blast radius, which is not a default any tool should choose on
 someone's behalf even when that user would have chosen it themselves.
 
-### What this costs, stated rather than hidden
+### What this costs, and the workaround the user chose
 
 "All harnesses" is a promise Glasshouse cannot keep uniformly. For OpenCode,
 Hermes and Antigravity the closest available mode is a blanket bypass, which is
-not automatic review and must not be described as though it were. Those
-adapters declare no automatic-review mode, `glasshouse doctor` shows that, and
-a profile asking for automatic review on one of them is refused rather than
-quietly downgraded — the same rule the rest of this file runs on: an adapter
-may only claim something that was actually there to look at.
+not automatic review and must never be described as though it were.
+
+The user settled what happens then (2026-08-25): **bypass is an acceptable
+workaround, provided they are told the risk the first time and then never
+again.**
+
+> "I'm fine if they bypass as a workaround, that's totally okay by me. User
+> should be notified about risk first time they approve this, then all good."
+
+So the rule is *informed*, not *forbidden*:
+
+- The default is still the harness's automatic-review mode, and never a bypass.
+- On a harness that declares no automatic review, Glasshouse may use its bypass
+  — but the first time, it shows what that means in that harness's own terms
+  (OpenCode's `--auto` is "auto-approve permissions that are not explicitly
+  denied"; Hermes's `--yolo` "bypasses all dangerous command approval prompts";
+  Antigravity's `--dangerously-skip-permissions` "auto-approves all tool
+  permission requests without prompting") and takes an explicit acknowledgement.
+- That acknowledgement is **recorded per harness**, so it is asked once and not
+  again. Nagging a user who has already decided is how a warning becomes
+  noise, and noise is what made per-command approval useless in the first place.
+- A silent downgrade remains forbidden. The failure this guards against is a
+  user believing a session is being classified when it is not.
+
+The asymmetry is deliberate: the *warning* is once, because it is a decision
+about a harness's nature; the *per-command prompt* was every time, which is
+exactly why nobody read it.
 
 ### Invariants a test must hold to
 
