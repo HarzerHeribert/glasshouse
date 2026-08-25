@@ -135,6 +135,18 @@ automatic-review mode. That is the decision recorded under "Approvals"; it is a
 real change in what the user's harness does, and the end-to-end PTY test now
 asserts the exact argv rather than the previous "no arguments at all".
 
+CI evidence:
+- **CI `32881520282` green on Linux, macOS, Windows and lint** for `6e730f6`,
+  with the new tests confirmed to have *executed* on the Windows runner by
+  name — including
+  `upgrading_a_version_2_database_preserves_every_existing_session`, which is
+  the one that would matter most if the migration behaved differently there,
+  plus `resolving_a_launch_profile_touches_no_files`,
+  `a_configured_gateway_profile_never_displaces_the_native_one`,
+  `a_bypass_is_refused_until_it_is_acknowledged_for_that_harness`,
+  `a_provider_backed_profile_is_refused_with_the_phase_that_supplies_it` and
+  `an_explicit_automatic_review_request_is_refused_on_a_harness_without_one`.
+
 Missing evidence — the nine open lines and what each waits for:
 - **350** (a profile is harness + backend + model + protocol + overlay +
   *response profile*): `LaunchProfile` has five of the six. Response profiles
