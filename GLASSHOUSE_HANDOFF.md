@@ -779,7 +779,27 @@ have required a magic clamp.
 
 ## Where to go next
 
-**Phase 8 line 3 — resume a Codex session — is next and is nearly free.**
+**Phase 8 line 3 — resume a Codex session — is next, and its real-binary
+evidence is already gathered.** Both halves were probed this session against
+the installed Codex 0.149.0, in a pseudo-terminal, and **neither cost a model
+turn**:
+
+- `codex resume 01a03537-903b-73d2-9886-7799d4c90376` (a real interactive
+  session recorded for this project) printed `Resuming session…` and replayed
+  the conversation — 164 KB of it. The identifier Glasshouse would have
+  recorded is the one Codex reopens.
+- `codex resume 9f1c0b2e-0000-4000-8000-0123456789ab` answered
+  **`ERROR: No saved session found with ID <id>. Run `codex resume` without an
+  ID to choose from existing sessions.`** That is the harness's own refusal,
+  and it is what `resume_session` should surface rather than dress up.
+
+Two practical notes for whoever writes the test. The pseudo-terminal **must be
+given a window size** (`TIOCSWINSZ`); without one Codex emits its handshake and
+draws nothing, which looks exactly like a hang. And Codex may open with an
+**update prompt whose default option runs `curl … | sh`** — never dismiss it
+with Enter; the explicit "Skip" digit is safe.
+
+
 `resume_session` in `main.rs` is entirely generic: it selects the harness the
 record names and calls `selection.resume_args(...)`, which goes through the
 adapter, and `Codex::resume` already returns `["resume", <id>]`. The only thing
