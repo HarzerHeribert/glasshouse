@@ -49,6 +49,99 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 9 — the Antigravity adapter (three of seven, and one design defect it caught)
+
+Contract: Given a signed-in Antigravity CLI, when Glasshouse starts a session
+in the current project, it runs the real `agy` in the viewport and treats
+anything the harness does not report as unknown.
+
+State: **COMPLETE for lines 1, 4 and 7.** Lines 2 and 3 are blocked on an
+interface change described below; lines 5 and 6 are unavailable.
+
+The user signed the CLI in, which unblocked the whole phase.
+
+Production evidence:
+- `harness/antigravity.rs` — starts `agy`, resumes with `--conversation <id>`,
+  declares `session_ids` as `Discoverable` from the CLI's own index, and
+  `Antigravity::read_last_conversation`, a pure function from index text to an
+  identifier.
+
+Platform/external evidence — the real signed-in harness:
+- `the_real_antigravity_interface_appears_in_the_viewport` **passes**:
+  Antigravity's own version string `1.1.20` reaches the Glasshouse viewport.
+  That is the same assertion Claude Code and Codex are held to, and it is
+  deliberately the version rather than a name — an earlier revision of this
+  probe matched a harness *name* and passed against Glasshouse's own error
+  message.
+- On its first run the probe failed at Antigravity's **workspace-trust
+  prompt**, which gates the banner the version sits in. The captured screen
+  showed the harness's ASCII logo, "Welcome to the Antigravity CLI", its
+  sign-in spinner, the trust prompt and its navigation hints, all rendering
+  inside the viewport — none of which Glasshouse's chrome can draw. Trusting
+  the directory once, exactly as the Claude Code call site's comment already
+  assumes ("the project is this repository, which the user's Claude Code
+  already trusts"), and the probe passes unchanged. The assertion was never
+  weakened.
+
+**Corrections to what this ledger previously recorded.** It said conversations
+live in `~/.gemini/antigravity/conversations/` and that the directory was
+empty. That is the *desktop app's* state root; the CLI's is
+`~/.gemini/antigravity-cli/`. Conversations there are **SQLite databases named
+by UUID**, and there is a machine-readable index at
+`cache/last_conversations.json` mapping **absolute project path → UUID**. This
+is the fourth declaration in this project derived from an artifact that did
+not serve the purpose it was cited for.
+
+Two further facts established against the signed-in CLI:
+- **Print mode records nothing.** `agy -p` completes a turn and adds no entry;
+  only interactive sessions are recorded, at session end.
+- **Resume does not fail closed.** `agy --conversation <unknown-uuid>` prints
+  `warning: conversation "…" not found` and then **starts a fresh conversation,
+  exiting 0**. Codex refuses with an error; Antigravity does not. Glasshouse
+  must therefore only ever pass an identifier it recorded itself, or a user
+  would get a new conversation wearing an old one's name.
+
+### The design defect the worker refused to implement
+
+The task packet asked for a `NativeSessionSource` with
+`subdirectory: "conversations"` and extension `.db`, so that
+`session::native_id` could find the records. **The worker declined and was
+right.**
+
+`native_id::discover` walks that directory and, for **every** file matching the
+prefix and extension, opens it and reads up to 1 MiB before any adapter sees
+it. With that source populated, every Antigravity session Glasshouse ended
+would have opened **every one of the user's conversation databases** — a direct
+violation of the same packet's security invariant, "never open a `.db`".
+`read_session_record` returning `None` does not help: the file is already open
+and read by then.
+
+The mechanism is also the wrong shape on its merits. `read_session_record`
+assumes each record *self-describes* its identity from its own first line. A
+`conversations/<uuid>.db` is a binary SQLite file, and the identifier a session
+needs is not in any record's bytes at all — it lives in one shared index keyed
+by project path, which must be read and matched as a whole rather than
+discovered by filtering file names.
+
+**This is the third session running in which a worker was right against its
+packet, and the first in which following the packet would have breached a
+secret boundary.** The stop condition that produced it was worth every word.
+
+Missing evidence:
+- **Lines 2 and 3** (capture the identifier; resume a known conversation).
+  `read_last_conversation` is pure and unit-proven but **has no production
+  caller**, because wiring it needs a `NativeSessionSource` variant that can
+  express "the identifier comes from a shared index keyed by project path
+  rather than from a record's own contents". That is an interface change to
+  `harness/mod.rs` and `session/native_id.rs` — the orchestrator's to design,
+  and deliberately not attempted here. Same rule as `SessionRuntime` and
+  Phase 1 line 90.
+- **Lines 5 and 6** (structured lifecycle events): a signed-in `agy --help`
+  exposes no hook, event or notification mechanism, and its subcommands are
+  `agent(s)`, `changelog`, `help`, `install`, `mcp`, `mic-serve`, `models`,
+  `plugin(s)`, `update`. Genuinely unavailable, now confirmed signed-in rather
+  than assumed.
+
 ### Phase 9E — secret storage (eight of thirteen)
 
 Contract: Given a provider credential, when Glasshouse needs it to launch a

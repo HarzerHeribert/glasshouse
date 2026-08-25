@@ -3927,6 +3927,12 @@ fn the_real_codex_interface_appears_in_the_viewport() {
     probe_real_harness_interface("codex", "codex");
 }
 
+#[cfg(unix)]
+#[test]
+fn the_real_antigravity_interface_appears_in_the_viewport() {
+    probe_real_harness_interface("antigravity", "agy");
+}
+
 /// Every question a real harness asks at startup gets an answer.
 ///
 /// The three sequences are not invented: a real Claude Code 2.1.245 startup
