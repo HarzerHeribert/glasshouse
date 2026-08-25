@@ -285,6 +285,7 @@ Fixed architectural requirements
 ☑ Make each adapter declare which backend wire protocols and model-override mechanisms it supports.
 ☑ Make each adapter declare whether backend selection is configured through child environment, command-line arguments, an isolated generated configuration, or another explicit launch mechanism.
 ☐ Make each adapter declare which native communication-style mechanisms it supports and whether changing them requires a new or cleared native session.
+☐ Make each adapter declare which native approval/permission modes it supports, including whether a native automatic-review mode exists, and treat an absent mode as unverified rather than substituting a blanket bypass.
 ☑ Make each adapter identify the harness vendor independently from the model developer and serving provider.
 ☑ Make the generic PTY runtime independent from any specific harness adapter.
 ☑ Keep adapter-specific parsing isolated from the core Glasshouse session model.
@@ -353,6 +354,8 @@ Fixed architectural requirements
 ☐ Store launch-profile configuration separately from project memory.
 ☐ Allow a launch profile to inject environment variables only into the child harness process.
 ☐ Allow a launch profile to inject command-line arguments only into the child harness process.
+☐ Allow a launch profile to select the harness's own approval mode, defaulting to its native automatic-review mode where one exists and never to a blanket bypass.
+☐ Refuse a launch profile that requests automatic review from a harness which declares none, rather than silently downgrading it to a bypass mode.
 ☐ Allow a launch profile to use an isolated generated configuration file when a harness requires file-based provider configuration.
 ☐ Represent these mechanisms together as an ephemeral child-process launch overlay rather than assuming every harness can be redirected through environment variables alone.
 ☐ Resolve the launch overlay through the selected HarnessAdapter and refuse unsupported combinations instead of inventing generic environment names.

@@ -847,6 +847,37 @@ Still worth probing: whether Codex prompts for hook trust interactively. If it
 does, prefer that — the session is a real harness in a visible viewport, the
 user answers it there, and Glasshouse writes nothing at all.
 
+**A specification change was made this session, deliberately and on the
+record.** The capability map gained **three** lines (1331 -> 1334 unchecked):
+one in Phase 6, two in Phase 9A. Reason, impact and the full evidence table are
+in `GLASSHOUSE_DESIGN_DECISIONS.md` under "Approvals".
+
+The short version. The user's position is that per-command approval is theatre
+— *"no normal human reads a regex lookup with routing into /dev/null and a sed
+with 16 parameters and understands what's happening"* — and that Claude Code's
+auto-mode classifier should be the norm everywhere. Correct, and it does **not**
+require Glasshouse to build a classifier, which the map forbids in a fixed
+architectural requirement and in already-checked line 267.
+
+It requires Glasshouse to *select* the harness's own mode, because three of the
+seven already ship one: Claude Code's auto mode, Codex's `--approve-for-me`
+("automatic review using the workspace-write sandbox"), and Cursor's
+`--auto-review` ("a server classifier auto-runs safe tool calls"). OpenCode,
+Hermes and Antigravity offer only a blanket bypass; Pi is unverified because it
+is still not on `PATH`.
+
+So adapters declare their approval modes like any other fact, a launch profile
+picks one, **the default is automatic review, never bypass**, and a profile
+asking for automatic review from a harness that has none is refused rather than
+quietly downgraded. Blanket bypass stays available as a profile the user picks
+on purpose.
+
+**Also closed: Codex does prompt for hook trust interactively** — confirmed by
+the user. That was the open probe from earlier in this session. It means the
+project-local hooks design works with no user-level write at all if the prompt
+is acceptable; but the same user finds trust prompts annoying, which is exactly
+why the trust-grant route stays available and scoped.
+
 Still blocked, unchanged:
 
 - Phase 1 line 92 and Phase 3's memory view — Phase 20's memory table.

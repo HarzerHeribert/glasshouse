@@ -569,3 +569,108 @@ own interface.
 5. Removing a project removes every piece of harness configuration Glasshouse
    made for it, including its trust grants in the user-level `config.toml` —
    nothing is left behind elsewhere.
+
+---
+
+## Approvals — Glasshouse selects a harness's own policy, and never becomes one
+
+### The conflict
+
+Per-command approval is a poor control and the user put the reason plainly
+(2026-08-25):
+
+> approving bash with (Y) is just stupid because no normal human reads a regex
+> lookup with routing into /dev/null and a sed with 16 parameters and
+> understands what's happening really.
+
+That is correct, and it is not a preference. A prompt a person cannot evaluate
+does not produce a decision; it produces a reflex, and a reflex trained to press
+Y on every command is worse than no prompt at all, because it manufactures the
+appearance of review. The observed behaviour follows: the first thing done in a
+new session is to turn approvals off entirely.
+
+The stated wish was that Claude Code's auto-mode classifier "should be the case
+for all harnesses".
+
+### Why Glasshouse must not build that classifier
+
+The capability map forbids it, in three places and one of them is a **fixed
+architectural requirement**:
+
+- Phase 5: *"Native commands, permission flows, model controls, compaction,
+  resume behavior, and tool interfaces remain owned by the harness."*
+- Phase 5, already checked: *"Allow native permission prompts to remain
+  interactive."*
+- Phase 9G: Glasshouse *"must not acquire an autonomous coding loop, repository
+  tool surface, permission system, or compaction system."*
+
+Glasshouse also has no seam to put a classifier in. It owns a pseudo-terminal,
+not the harness's tool dispatch. The only interception point it has is the
+hooks it installs — `PreToolUse` / `pre_tool_use`, where a non-zero exit is a
+veto — and using that as a decision engine would be precisely "acquiring a
+permission system", with Glasshouse answering for commands it did not generate
+and cannot see the context of.
+
+### The decision: declare the modes, select one, default to automatic review
+
+The wish turns out not to need the deviation, because **the harnesses already
+ship the mechanism**. Read from the installed binaries on 2026-08-25:
+
+| Harness | Automatic review | Blanket bypass | Sandbox |
+|---|---|---|---|
+| Claude Code 2.1.245 | auto mode (`auto-mode` subcommand inspects/resets the classifier) | `--dangerously-skip-permissions`, `--permission-mode bypassPermissions` | — |
+| Codex 0.149.1 | `--approve-for-me` — "route approval requests through automatic review using the workspace-write sandbox" | `--dangerously-bypass-approvals-and-sandbox`, `-a never` | `-s read-only\|workspace-write\|danger-full-access` |
+| Cursor CLI | `--auto-review` — "Smart Auto: a server classifier auto-runs safe tool calls and prompts for the rest" | `--yolo` (alias for `--force`) | `--sandbox <mode>` |
+| OpenCode 1.18.22 | none | `--auto` — "auto-approve permissions that are not explicitly denied (dangerous!)" | — |
+| Hermes 0.15.1 | none | `--yolo` | — |
+| Antigravity 1.1.20 | none | `--dangerously-skip-permissions` | `--sandbox` |
+| Pi 0.73.1 | unverified — not on `PATH` on this machine | unverified | unverified |
+
+So:
+
+1. **Each adapter declares its approval modes**, as `Declared<T>` like every
+   other harness fact, including whether a native automatic-review mode exists.
+   Three of seven have one; four do not, and the honest declaration says so
+   rather than implying parity.
+2. **A launch profile selects one**, through the child-process argument overlay
+   Phase 9A already defines. No new mechanism.
+3. **The default is the harness's automatic-review mode where one exists.**
+   Blanket bypass remains available as a profile the user picks deliberately,
+   never as what happens by default.
+
+The permission flow stays owned by the harness, so the fixed requirement holds
+and line 267 stays true: when a mode does prompt, the prompt is still the
+harness's own and still interactive in the viewport.
+
+### Why the default is automatic review and not bypass
+
+They are not the same thing and the difference is the whole point. Claude
+Code's auto mode is a *classifier* — it blocked an attempt to spawn a
+`--dangerously-skip-permissions` process during the very session this decision
+was written in. `--yolo` classifies nothing. Codex's `--approve-for-me` is
+additionally sandbox-bounded to workspace-write, so it is strictly narrower
+than the bypass flag it replaces.
+
+Defaulting to bypass would also make Glasshouse the thing that silently
+widened a user's blast radius, which is not a default any tool should choose on
+someone's behalf even when that user would have chosen it themselves.
+
+### What this costs, stated rather than hidden
+
+"All harnesses" is a promise Glasshouse cannot keep uniformly. For OpenCode,
+Hermes and Antigravity the closest available mode is a blanket bypass, which is
+not automatic review and must not be described as though it were. Those
+adapters declare no automatic-review mode, `glasshouse doctor` shows that, and
+a profile asking for automatic review on one of them is refused rather than
+quietly downgraded — the same rule the rest of this file runs on: an adapter
+may only claim something that was actually there to look at.
+
+### Invariants a test must hold to
+
+1. Every adapter's declared approval modes are `Verified` with a citation, or
+   `Unverified`. No bare defaults.
+2. A launch profile requesting automatic review on a harness that declares none
+   is refused, not downgraded to bypass.
+3. The default profile never selects a blanket-bypass flag.
+4. Glasshouse contains no code that decides whether a harness's tool call is
+   permitted. The hook adapters report lifecycle; they do not veto.
