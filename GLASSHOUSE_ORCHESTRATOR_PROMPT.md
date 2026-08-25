@@ -117,8 +117,13 @@ context, and the map is long. Assume most of the work leaves your hands:
   missing fact does not block the phases beside it.
 - **Only four things justify stopping**: a genuine product decision that is the
   user's to make, an unavailable mandatory dependency, missing authority for a
-  material external action, or unsafe ambiguity. "This is taking a while" and
-  "I could not automate it" are not among them.
+  material external action, or unsafe ambiguity. "This is taking a while",
+  "I could not automate it", and **"I am running out of context"** are not
+  among them.
+- **Running low on context means hand off and continue, not stop.** Checkpoint
+  the batch in hand, rewrite the continuation, commit, then relaunch a fresh
+  orchestrator that carries on. Announcing a checkpoint and halting leaves the
+  map exactly where it was and makes the user restart you by hand.
 - **Prefer the cheap path to a fact.** If driving a TUI through a script keeps
   failing, drive it in a real terminal instead. Do not spend more effort
   automating a step than doing it would cost.
