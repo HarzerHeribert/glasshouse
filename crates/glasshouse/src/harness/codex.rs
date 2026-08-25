@@ -15,22 +15,31 @@ use crate::integrations::IntegrationId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Codex;
 
-/// Hook events observed in a real Codex installation's recorded hook state.
+/// Codex's own hook event catalogue, in the spelling its `hooks.json` uses.
 ///
-/// Observed, not catalogued — see [`super::Hooks::verified_events`].
+/// Read from Codex 0.149.1's **hook review screen**, which enumerates every
+/// event it supports with a one-line description — the authoritative artifact,
+/// and not the one an earlier revision of this file cited.
+///
+/// That earlier revision listed ten events in `snake_case`, taken from the
+/// `[hooks.state."<path>:<event>:0:0"]` keys in `config.toml`. Those keys are
+/// real, but they are the spelling Codex uses to *record trust*, not the
+/// spelling it reads from a hooks document — a hooks file on this machine used
+/// PascalCase. The wrong artifact was cited, the casing was wrong throughout,
+/// and `SessionEnd` was missing altogether.
 const HOOK_EVENTS: &[&str] = &[
-    "session_start",
-    "user_prompt_submit",
-    "pre_tool_use",
-    "post_tool_use",
-    "permission_request",
-    "pre_compact",
-    "post_compact",
-    "subagent_start",
-    "subagent_stop",
-    "stop",
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "PreCompact",
+    "PostCompact",
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "SubagentStart",
+    "SubagentStop",
+    "Stop",
 ];
-
 const PROTOCOLS: &[WireProtocol] = &[WireProtocol::OpenAiResponses];
 
 const MODEL_OVERRIDE: &[ModelOverride] = &[
@@ -149,13 +158,15 @@ impl HarnessAdapter for Codex {
             ),
             hooks: Declared::verified(
                 Hooks {
-                    mechanism: "a `.codex/hooks.json` inside the project, each entry trusted \
-                                per project by hash before it runs",
+                    mechanism: "a `.codex/hooks.json` inside the project, reviewed and \
+                                trusted per project by content hash before it runs",
                     verified_events: HOOK_EVENTS,
                 },
-                "a real Codex configuration records per-project hook trust keyed by \
-                 `<project>/.codex/hooks.json:<event>`; `codex --help` documents \
-                 `--dangerously-bypass-hook-trust`",
+                "Codex 0.149.1's hook review screen enumerates these eleven events with \
+                 descriptions when a project's `.codex/hooks.json` is first seen; it \
+                 offers \"Review hooks\" / \"Trust all and continue\" / \"Continue \
+                 without trusting (hooks won't run)\", and records the result as \
+                 `[hooks.state.\"<path>:<event>:0:0\"]` in `config.toml`",
             ),
             session_ids: Declared::verified(
                 SessionIds::Discoverable {

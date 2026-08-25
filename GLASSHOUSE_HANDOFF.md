@@ -660,11 +660,31 @@ have required a magic clamp.
   evidence and the ordered open questions are in
   `.agent-runtime/notes-codex-hooks.md`.
 
-- **The Codex adapter may be citing the wrong source for its event names.** Its
-  `HOOK_EVENTS` are snake_case, taken from `[hooks.state…]` trust keys, but a
-  real `hooks.json` on this machine used **PascalCase**. If the file wants
-  PascalCase, that declaration's evidence string points at the wrong artifact.
-  Verify before building on it.
+- **The Codex adapter was citing the wrong artifact for its event names, and
+  is fixed.** It declared ten `snake_case` events taken from
+  `[hooks.state…]` trust keys — real keys, but the spelling Codex uses to
+  *record trust*, not the spelling it reads from a hooks document. Codex
+  0.149.1's own **hook review screen** enumerates **eleven PascalCase events
+  with descriptions**, and that is now what the adapter declares:
+  `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`,
+  `PostCompact`, `SessionStart`, `SessionEnd`, `UserPromptSubmit`,
+  `SubagentStart`, `SubagentStop`, `Stop`. `SessionEnd` had been missing
+  entirely. This is the second time a declaration derived from the wrong
+  artifact was wrong; the first was Antigravity's executable name.
+
+- **Codex hook trust is its own prompt, separate from workspace trust.** On
+  first seeing a project's `.codex/hooks.json` it says "Hooks need review — N
+  hooks are new or changed. Hooks can run outside the sandbox after you trust
+  them", offering `Review hooks` / `Trust all and continue` / `Continue without
+  trusting (hooks won't run)`. So the project-local design works with **no
+  user-level write at all**: the session is a real harness in a visible
+  viewport and the user answers there. The `[hooks.state…]` hash entries are
+  what that answer records.
+
+- **A project-local `<project>/.codex/hooks.json` is definitely read** — the
+  review screen counted the hooks from one. What is still unobserved is a
+  Codex hook actually *firing*, which needs the hooks trusted and one real
+  turn.
 
 - **Windows CI caught a real production defect on the first push, again.**
   `read_first_line` required a trailing newline, so a rollout whose only line
