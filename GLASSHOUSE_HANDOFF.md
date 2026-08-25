@@ -423,8 +423,13 @@ broken.
   the platform reason recorded).
 - CI, all green on Linux, macOS, Windows and lint, with the Windows job
   confirmed each time to have executed the suite rather than merely reporting
-  green: `32815286487`, `32815757547`, `32816717226`, `32819167010`, and the
-  run for `c1664e0`.
+  green: `32815286487`, `32815757547`, `32816717226`, `32819167010` and
+  `32821964808`.
+- One red Windows job (`32821591638`), and it was worth having. The new
+  end-to-end keystroke test failed there — not a product defect, but the fake
+  `.cmd` harness reading with `set /p`, which wants CRLF where a real Enter key
+  is a bare carriage return. The test was split rather than the encoding
+  weakened; see the loose end above.
 
 ## Next exact step
 

@@ -89,7 +89,9 @@ Failure/isolation evidence:
   the Phase 4 entry.
 
 Platform/external evidence:
-- CI on this batch's commit. The resize test is Unix-only: `stty` is the
+- CI `32821964808` on `f77b9c8` — green on Linux, macOS, Windows and lint,
+  with the Windows job confirmed to have executed 287 lib and 33 PTY tests,
+  including the shell's mode machinery in a real terminal. The resize test is Unix-only: `stty` is the
   portable way for a shell harness to report its terminal size and Windows has
   no equivalent a `.cmd` harness can run. The underlying `PtyProcess::resize`
   is covered on all three platforms by `resize_reaches_the_operating_system`
