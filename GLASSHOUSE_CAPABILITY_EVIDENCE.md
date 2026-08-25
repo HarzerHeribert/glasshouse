@@ -84,7 +84,10 @@ Failure/isolation evidence:
   refused rather than orphaned when the database has no project bound.
 
 Platform/external evidence:
-- CI on the batch commit — Linux, macOS, Windows, lint.
+- CI `32815286487` on `3d606e3` — green on Linux, macOS, Windows and lint,
+  with the Windows job confirmed to have executed 228 lib and 22 PTY tests
+  (a green tick is not proof the suite ran: when the lib target fails,
+  cargo never reaches the integration tests).
 
 Missing evidence:
 - none.
@@ -119,7 +122,10 @@ Failure/isolation evidence:
   unidentified session collide — the reason the column stays nullable.
 
 Platform/external evidence:
-- CI on the batch commit — Linux, macOS, Windows, lint.
+- CI `32815286487` on `3d606e3` — green on Linux, macOS, Windows and lint,
+  with the Windows job confirmed to have executed 228 lib and 22 PTY tests
+  (a green tick is not proof the suite ran: when the lib target fails,
+  cargo never reaches the integration tests).
 
 Missing evidence:
 - No harness adapter captures a native identifier yet (Phase 7/8), so in
@@ -160,7 +166,10 @@ Failure/isolation evidence:
 - `touching_an_unknown_session_reports_it_missing_rather_than_inventing_one`
 
 Platform/external evidence:
-- CI on the batch commit — Linux, macOS, Windows, lint.
+- CI `32815286487` on `3d606e3` — green on Linux, macOS, Windows and lint,
+  with the Windows job confirmed to have executed 228 lib and 22 PTY tests
+  (a green tick is not proof the suite ran: when the lib target fails,
+  cargo never reaches the integration tests).
 
 Missing evidence:
 - none.
@@ -190,7 +199,10 @@ Failure/isolation evidence:
   use `Formatter::pad`, so the listing's columns cannot silently go ragged.
 
 Platform/external evidence:
-- CI on the batch commit — Linux, macOS, Windows, lint.
+- CI `32815286487` on `3d606e3` — green on Linux, macOS, Windows and lint,
+  with the Windows job confirmed to have executed 228 lib and 22 PTY tests
+  (a green tick is not proof the suite ran: when the lib target fails,
+  cargo never reaches the integration tests).
 
 Missing evidence:
 - Only `Embedded` occurs in production today, because `glasshouse launch` is the
@@ -226,7 +238,10 @@ Failure/isolation evidence:
   `a_live_session_is_not_resumable` — the refusals `open_for_resume` enforces.
 
 Platform/external evidence:
-- CI on the batch commit — Linux, macOS, Windows, lint.
+- CI `32815286487` on `3d606e3` — green on Linux, macOS, Windows and lint,
+  with the Windows job confirmed to have executed 228 lib and 22 PTY tests
+  (a green tick is not proof the suite ran: when the lib target fails,
+  cargo never reaches the integration tests).
 
 Missing evidence:
 - none.
@@ -263,7 +278,10 @@ Failure/isolation evidence:
   equality, so it cannot pass vacuously.
 
 Platform/external evidence:
-- CI on the batch commit — Linux, macOS, Windows, lint.
+- CI `32815286487` on `3d606e3` — green on Linux, macOS, Windows and lint,
+  with the Windows job confirmed to have executed 228 lib and 22 PTY tests
+  (a green tick is not proof the suite ran: when the lib target fails,
+  cargo never reaches the integration tests).
 
 Missing evidence:
 - Provider credentials do not exist yet (Phase 9E). This entry proves the
@@ -307,7 +325,10 @@ Failure/isolation evidence:
   comparison.
 
 Platform/external evidence:
-- CI on the batch commit — Linux, macOS, Windows, lint.
+- CI `32815286487` on `3d606e3` — green on Linux, macOS, Windows and lint,
+  with the Windows job confirmed to have executed 228 lib and 22 PTY tests
+  (a green tick is not proof the suite ran: when the lib target fails,
+  cargo never reaches the integration tests).
 
 Missing evidence:
 - **No production caller.** There is no `glasshouse resume`, because resuming a
