@@ -313,3 +313,26 @@ the lead is not touching — or from a git ref, never the live working tree.
 batches share. Naming the other live workers' files in `FORBIDDEN FILES` reduces
 this but does not eliminate it, because a batch that landed *between* the branch
 point and the merge is not a live worker any more.
+
+
+## 14. A source-scanning test is a line-ending trap
+
+`include_str!` reads a file exactly as it was checked out. On a runner where Git
+converts line endings, the source your test scans contains `\r\n`, so any search
+for a literal `"\n}\n"` — or any other multi-line literal — silently finds
+nothing. On 2026-08-26 that took Windows CI red on a guard that had nothing to do
+with platforms: it proved a code path never opens the user's conversation
+databases, and it failed by *panicking* rather than by asserting.
+
+Two rules, and the second is the one that matters:
+
+1. **Scan by `str::lines`**, which strips the carriage return for you. A
+   column-zero `}` is `line.trim_end() == "}"`. CRLF-agnostic by construction
+   rather than by remembering.
+2. **Test the scan against a CRLF copy of its own source.** An LF checkout never
+   exercises the broken path, so without this the fix is untested precisely where
+   it was needed. `SOURCE.replace('\n', "\r\n")` and assert both scans agree —
+   restoring the old literal search must fail *locally*.
+
+This project now has **six** source-scanning tests. Every one of them is
+exposed to this.
