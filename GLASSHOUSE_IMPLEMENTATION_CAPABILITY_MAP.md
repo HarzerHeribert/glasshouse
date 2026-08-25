@@ -433,19 +433,19 @@ Fixed architectural requirements
 - Credentials remain outside project memory, tracked configuration, checkpoints, event payloads, and diagnostic logs.
 - Secret storage is accessed through a dedicated `SecretStore` abstraction, preferring native OS-backed secure storage when available.
 
-☐ Define a SecretStore abstraction independent from project memory and provider configuration.
+☑ Define a SecretStore abstraction independent from project memory and provider configuration.
 ☐ Prefer the macOS Keychain for user-entered provider secrets on macOS when available.
 ☐ Prefer Windows Credential Manager for user-entered provider secrets on Windows when available.
 ☐ Prefer a Secret Service-compatible keyring on Linux when available.
-☐ Allow environment-variable references as a cross-platform secret source.
+☑ Allow environment-variable references as a cross-platform secret source.
 ☐ Provide a clearly labeled fallback when a native secure secret store is unavailable.
-☐ Store only secret references in provider configuration whenever possible.
-☐ Never write API keys into tracked .glasshouse project files.
-☐ Never include provider secrets in checkpoints, memory extraction input, event logs, debug logs, or crash reports.
-☐ Redact recognized secrets from diagnostic output.
+☑ Store only secret references in provider configuration whenever possible.
+☑ Never write API keys into tracked .glasshouse project files.
+☑ Never include provider secrets in checkpoints, memory extraction input, event logs, debug logs, or crash reports.
+☑ Redact recognized secrets from diagnostic output.
 ☐ Allow the user to delete a stored provider credential from settings.
-☐ Allow multiple credentials for the same provider through distinct provider instances.
-☐ Allow several credentials for one provider to be held as a pool rather than only as separate provider instances, so a user who has more than one key for the same router can configure them together.
+☑ Allow multiple credentials for the same provider through distinct provider instances.
+☑ Allow several credentials for one provider to be held as a pool rather than only as separate provider instances, so a user who has more than one key for the same router can configure them together.
 
 Phase 9F — Direct provider launch profiles
 

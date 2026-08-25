@@ -4,8 +4,8 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 9C is eleven of twelve; Phase 9D eight of fourteen; Phase 9B eight of
-nine; Phase 9A seventeen of twenty-six. 138 -> 182 checked boxes.**
+**Phase 9E is eight of thirteen; 9C eleven of twelve; 9D eight of fourteen;
+9B eight of nine; 9A seventeen of twenty-six. 138 -> 190 checked boxes.**
 
 The README now carries a progress bar generated from this map by
 `scripts/progress.py`, checked in CI. **Run it after every map change or the

@@ -41,6 +41,7 @@
 //! one in the meantime.
 
 use crate::harness::{Declared, WireProtocol};
+use crate::secret::SecretRef;
 
 /// What a provider serves, for ONE protocol.
 ///
@@ -87,6 +88,28 @@ impl Provider {
     /// `AnthropicMessages` from either.
     pub fn serves(&self, protocol: WireProtocol) -> Option<&ProtocolSupport> {
         self.protocols.iter().find(|p| p.protocol == protocol)
+    }
+
+    /// One [`SecretRef`] per name in [`Provider::credential_env`], in the
+    /// order declared.
+    ///
+    /// Still names only — a [`SecretRef`] is a reference, and resolving one
+    /// into a value is [`crate::secret::SecretStore`]'s job, not this
+    /// type's. The point of returning them is that a caller which needs a
+    /// credential stops handling bare strings, whose meaning it would
+    /// otherwise have to infer.
+    ///
+    /// Several names yield several references rather than a chosen one:
+    /// which key of a pool to use is a routing decision, and this method
+    /// refuses to make it silently. A provider with no credential variable
+    /// yields none — never a reference to an invented variable name, for
+    /// the same reason this module ships no template with an invented base
+    /// URL.
+    pub fn secret_refs(&self) -> Vec<SecretRef> {
+        self.credential_env
+            .iter()
+            .map(|var| SecretRef::Environment { var: var.clone() })
+            .collect()
     }
 }
 
