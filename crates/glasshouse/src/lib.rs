@@ -17,6 +17,7 @@ pub mod paths;
 pub mod platform;
 pub mod profile;
 pub mod project;
+pub mod provider;
 pub mod pty;
 pub mod session;
 pub mod shell;

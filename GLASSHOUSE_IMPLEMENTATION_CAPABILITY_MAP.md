@@ -396,32 +396,32 @@ Fixed architectural requirements
 - Protocol compatibility is modeled explicitly and verified before launch.
 - V1 prefers protocol pass-through; broad universal protocol translation is not part of the base architecture and requires an explicit pair-specific adapter and tests.
 
-☐ Represent provider compatibility explicitly as anthropic-messages, openai-responses, openai-chat, or another named protocol.
-☐ Allow a provider to support more than one protocol.
-☐ Store the provider base URL independently for each supported protocol when necessary.
-☐ Record whether a provider supports streaming for a protocol.
-☐ Record whether a provider supports tool calls for a protocol.
-☐ Record whether a provider supports reasoning or thinking controls when known.
-☐ Record whether a provider exposes a model-list endpoint.
-☐ Record whether a provider exposes usage or rate-limit telemetry.
+☑ Represent provider compatibility explicitly as anthropic-messages, openai-responses, openai-chat, or another named protocol.
+☑ Allow a provider to support more than one protocol.
+☑ Store the provider base URL independently for each supported protocol when necessary.
+☑ Record whether a provider supports streaming for a protocol.
+☑ Record whether a provider supports tool calls for a protocol.
+☑ Record whether a provider supports reasoning or thinking controls when known.
+☑ Record whether a provider exposes a model-list endpoint.
+☑ Record whether a provider exposes usage or rate-limit telemetry.
 ☐ Treat protocol compatibility as a hard routing constraint before model-quality scoring.
-☐ Do not assume OpenAI-compatible chat completion support implies OpenAI Responses API compatibility.
-☐ Do not assume an OpenAI-compatible model can transparently satisfy Claude Code’s Anthropic Messages behavior.
-☐ Allow explicit protocol-translation adapters later without making translation mandatory for V1.
+☑ Do not assume OpenAI-compatible chat completion support implies OpenAI Responses API compatibility.
+☑ Do not assume an OpenAI-compatible model can transparently satisfy Claude Code’s Anthropic Messages behavior.
+☑ Allow explicit protocol-translation adapters later without making translation mandatory for V1.
 
 Phase 9D — Built-in provider templates
 
-☐ Add a built-in OpenRouter provider template.
+☑ Add a built-in OpenRouter provider template.
 ☐ Add a built-in NVIDIA-compatible provider template for endpoints exposing supported NIM-style APIs.
 ☐ Add a built-in LiteLLM provider template.
-☐ Add a built-in Ollama provider template.
-☐ Add a built-in llama.cpp provider template.
-☐ Add a generic OpenAI-compatible provider template.
-☐ Add a generic Anthropic-compatible provider template.
-☐ Allow providers such as UnoRouter, AnyRouter, Kilo, Nous, RouterAI, Z.ai, OpenCode Zen, Cerebras, Groq, or future services to be configured through generic templates when their API shape is compatible.
-☐ Keep provider templates declarative so adding a known service does not require branching throughout the core router.
+☑ Add a built-in Ollama provider template.
+☑ Add a built-in llama.cpp provider template.
+☑ Add a generic OpenAI-compatible provider template.
+☑ Add a generic Anthropic-compatible provider template.
+☑ Allow providers such as UnoRouter, AnyRouter, Kilo, Nous, RouterAI, Z.ai, OpenCode Zen, Cerebras, Groq, or future services to be configured through generic templates when their API shape is compatible.
+☑ Keep provider templates declarative so adding a known service does not require branching throughout the core router.
 ☐ Keep service-specific default URLs and headers overridable by the user.
-☐ Allow a provider template to define required environment-variable names without storing the secret in project memory.
+☑ Allow a provider template to define required environment-variable names without storing the secret in project memory.
 ☐ Allow the user to test provider connectivity from settings before enabling it for routing.
 ☐ Allow the user to refresh a provider’s model list manually when the provider exposes model discovery.
 ☐ Cache discovered model metadata with a timestamp rather than querying remote model catalogs on every Glasshouse start.

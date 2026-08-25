@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 163 / 1267 mandatory capabilities (12%)
+`█████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 182 / 1267 mandatory capabilities (14%)
 
 <details>
 <summary>Per-phase breakdown (4 of 103 phases complete)</summary>
@@ -42,8 +42,8 @@ the authoritative specification and tracks what is done.
 | Phase 9 — Antigravity adapter | 0/7 |
 | Phase 9A — Harness launch profiles | 17/26 |
 | Phase 9B — Scoped harness wrappers and shims | 8/9 |
-| Phase 9C — Provider protocol model | 0/12 |
-| Phase 9D — Built-in provider templates | 0/14 |
+| Phase 9C — Provider protocol model | 11/12 |
+| Phase 9D — Built-in provider templates | 8/14 |
 | Phase 9E — Secret storage | 0/13 |
 | Phase 9F — Direct provider launch profiles | 0/13 |
 | Phase 9G — Glasshouse local gateway process | 0/19 |

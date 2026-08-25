@@ -474,6 +474,158 @@ fn wire_protocol_from_slug(slug: &str) -> Option<crate::harness::WireProtocol> {
     }
 }
 
+/// One configured provider, as stored in a `[providers.<name>]` table.
+///
+/// The provider's *name* is its key in [`ProviderTable`], not a field here —
+/// the same relationship [`ProfileConfig`] has to its name in [`ProfileTable`].
+///
+/// Deliberately holds only a template slug, an optional base-URL override,
+/// and credential variable *names* — see the module-level "No secrets here"
+/// section. [`ProviderConfig::to_provider`] is the only thing that turns this
+/// into a [`crate::provider::Provider`], and it never reads an environment
+/// variable's value while doing so.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    /// The built-in template this provider is based on — a
+    /// [`crate::provider::Provider::name`] from [`crate::provider::templates`].
+    /// Required: the two generic templates (`openai-compatible`,
+    /// `anthropic-compatible`) are exactly how a fully custom provider gets
+    /// configured, so there is no separate template-less shape to support.
+    template: String,
+    /// Override for the template's base URL. Required, in practice, for the
+    /// two generic templates — their own base URL is empty because it is
+    /// user-supplied — and optional for the rest, where it lets a configured
+    /// provider point at a mirror or self-hosted instance of a known router
+    /// (line 423).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base_url: Option<String>,
+    /// Environment variable names this provider's credential may come from.
+    /// **Names only — never a value.** Non-empty here replaces the
+    /// template's own default credential names entirely, which is what lets
+    /// a user hold several keys for the same router.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    credential_env: Vec<String>,
+}
+
+/// Why a stored [`ProviderConfig`] could not be turned into a
+/// [`crate::provider::Provider`].
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderConfigError {
+    #[error(
+        "provider `{name}` names template `{template}`, which Glasshouse does not know; fix \
+         the provider's `template` key or remove the entry"
+    )]
+    UnknownTemplate { name: String, template: String },
+}
+
+impl ProviderConfig {
+    pub fn new(template: impl Into<String>) -> Self {
+        Self {
+            template: template.into(),
+            base_url: None,
+            credential_env: Vec::new(),
+        }
+    }
+
+    pub fn template(&self) -> &str {
+        &self.template
+    }
+
+    pub fn set_template(&mut self, template: impl Into<String>) -> &mut Self {
+        self.template = template.into();
+        self
+    }
+
+    pub fn base_url(&self) -> Option<&str> {
+        self.base_url.as_deref()
+    }
+
+    pub fn set_base_url(&mut self, base_url: Option<String>) -> &mut Self {
+        self.base_url = base_url;
+        self
+    }
+
+    pub fn credential_env(&self) -> &[String] {
+        &self.credential_env
+    }
+
+    pub fn set_credential_env(&mut self, names: Vec<String>) -> &mut Self {
+        self.credential_env = names;
+        self
+    }
+
+    /// Turn this stored configuration into the resolvable domain type,
+    /// naming it `name` — the key this entry was stored under.
+    ///
+    /// The template's own base URL is overridden, on every protocol it
+    /// declares, when [`ProviderConfig::base_url`] is set — see the field's
+    /// own doc for why there is exactly one override rather than one per
+    /// protocol: every built-in template today declares exactly one
+    /// protocol. Likewise, a non-empty [`ProviderConfig::credential_env`]
+    /// replaces the template's own credential names rather than adding to
+    /// them.
+    pub fn to_provider(
+        &self,
+        name: &str,
+    ) -> Result<crate::provider::Provider, ProviderConfigError> {
+        let mut provider = crate::provider::template(&self.template).ok_or_else(|| {
+            ProviderConfigError::UnknownTemplate {
+                name: name.to_owned(),
+                template: self.template.clone(),
+            }
+        })?;
+
+        provider.name = name.to_owned();
+        if let Some(base_url) = &self.base_url {
+            for protocol in &mut provider.protocols {
+                protocol.base_url = base_url.clone();
+            }
+        }
+        if !self.credential_env.is_empty() {
+            provider.credential_env = self.credential_env.clone();
+        }
+
+        Ok(provider)
+    }
+}
+
+/// A map of configured providers, keyed by provider name.
+///
+/// Providers are configuration, never a credential store: every value this
+/// table can hold is a template slug, a base-URL override, or credential
+/// variable *names* — see [`ProviderConfig`] and the module-level "No
+/// secrets here" section.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProviderTable(BTreeMap<String, ProviderConfig>);
+
+impl ProviderTable {
+    pub fn get(&self, name: &str) -> Option<&ProviderConfig> {
+        self.0.get(name)
+    }
+
+    pub fn set(&mut self, name: impl Into<String>, config: ProviderConfig) {
+        self.0.insert(name.into(), config);
+    }
+
+    pub fn remove(&mut self, name: &str) -> Option<ProviderConfig> {
+        self.0.remove(name)
+    }
+
+    /// Every configured provider name in this table.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &ProviderConfig)> {
+        self.0.iter().map(|(name, cfg)| (name.as_str(), cfg))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// A map of configured launch profiles, keyed by profile name.
 ///
 /// Profiles are configuration, never project memory: nothing here touches
@@ -565,6 +717,8 @@ pub struct UserConfig {
     integrations: IntegrationTable,
     #[serde(default)]
     profiles: ProfileTable,
+    #[serde(default)]
+    providers: ProviderTable,
 }
 
 impl Default for UserConfig {
@@ -574,6 +728,7 @@ impl Default for UserConfig {
             onboarding: OnboardingState::default(),
             integrations: IntegrationTable::default(),
             profiles: ProfileTable::default(),
+            providers: ProviderTable::default(),
         }
     }
 }
@@ -605,6 +760,14 @@ impl UserConfig {
 
     pub fn profiles_mut(&mut self) -> &mut ProfileTable {
         &mut self.profiles
+    }
+
+    pub fn providers(&self) -> &ProviderTable {
+        &self.providers
+    }
+
+    pub fn providers_mut(&mut self) -> &mut ProviderTable {
+        &mut self.providers
     }
 
     /// Load the user-level configuration file named by `paths`.
@@ -653,6 +816,8 @@ pub struct ProjectConfig {
     integrations: IntegrationTable,
     #[serde(default)]
     profiles: ProfileTable,
+    #[serde(default)]
+    providers: ProviderTable,
 }
 
 impl Default for ProjectConfig {
@@ -661,6 +826,7 @@ impl Default for ProjectConfig {
             version: CURRENT_SCHEMA_VERSION,
             integrations: IntegrationTable::default(),
             profiles: ProfileTable::default(),
+            providers: ProviderTable::default(),
         }
     }
 }
@@ -684,6 +850,14 @@ impl ProjectConfig {
 
     pub fn profiles_mut(&mut self) -> &mut ProfileTable {
         &mut self.profiles
+    }
+
+    pub fn providers(&self) -> &ProviderTable {
+        &self.providers
+    }
+
+    pub fn providers_mut(&mut self) -> &mut ProviderTable {
+        &mut self.providers
     }
 }
 
@@ -952,6 +1126,57 @@ impl<'a> EffectiveConfig<'a> {
         }
         Ok(Layered::new(profile, layer))
     }
+
+    /// Every configured provider name available, from either layer.
+    ///
+    /// Unlike [`EffectiveConfig::profile_names`], there is no implied entry:
+    /// a provider only exists here because a user or project explicitly
+    /// configured one.
+    pub fn provider_names(&self) -> Vec<String> {
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        names.extend(self.user.providers().names().map(str::to_owned));
+        if let Some(project) = self.project {
+            names.extend(project.providers().names().map(str::to_owned));
+        }
+        names.into_iter().collect()
+    }
+
+    /// Resolve `name` to a [`crate::provider::Provider`], reporting which
+    /// layer supplied it. The project layer's definition wins over the user
+    /// layer's, matching every other lookup on this type.
+    pub fn configured_provider(
+        &self,
+        name: &str,
+    ) -> Result<Layered<crate::provider::Provider>, ProviderLookupError> {
+        let found = if let Some(config) = self.project.and_then(|p| p.providers().get(name)) {
+            Some((config, Layer::Project))
+        } else {
+            self.user
+                .providers()
+                .get(name)
+                .map(|config| (config, Layer::User))
+        };
+
+        let Some((config, layer)) = found else {
+            return Err(ProviderLookupError::Unknown {
+                name: name.to_owned(),
+                known: self.provider_names(),
+            });
+        };
+
+        let provider = config.to_provider(name)?;
+        Ok(Layered::new(provider, layer))
+    }
+}
+
+/// Why a provider named on the command line, or looked up for `glasshouse
+/// doctor`, could not be resolved.
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderLookupError {
+    #[error("`{name}` is not a configured provider; valid names are: {}", .known.join(", "))]
+    Unknown { name: String, known: Vec<String> },
+    #[error(transparent)]
+    Invalid(#[from] ProviderConfigError),
 }
 
 /// Why a launch profile named on the command line could not be resolved.
@@ -1961,6 +2186,155 @@ mod tests {
         ));
     }
 
+    // ---------------------------------------------------------------
+    // Providers.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn a_configured_provider_may_override_a_template_base_url() {
+        let mut user = UserConfig::default();
+        let mut provider = ProviderConfig::new("openrouter");
+        provider.set_base_url(Some("https://mirror.example.com/v1".to_owned()));
+        user.providers_mut().set("my-openrouter", provider);
+
+        let effective = EffectiveConfig::new(&user, None);
+        let resolved = effective.configured_provider("my-openrouter").unwrap();
+        assert_eq!(resolved.layer, Layer::User);
+
+        let protocol = resolved
+            .value
+            .serves(crate::harness::WireProtocol::OpenAiChat)
+            .expect("openrouter serves openai-chat");
+        assert_eq!(protocol.base_url, "https://mirror.example.com/v1");
+
+        // The unconfigured template still has its own base URL — the
+        // override is per configured provider, not global to the template.
+        let template = crate::provider::template("openrouter").unwrap();
+        let template_protocol = template
+            .serves(crate::harness::WireProtocol::OpenAiChat)
+            .unwrap();
+        assert_eq!(template_protocol.base_url, "https://openrouter.ai/api/v1");
+    }
+
+    #[test]
+    fn a_configured_provider_without_a_base_url_override_keeps_the_templates_own() {
+        let mut user = UserConfig::default();
+        user.providers_mut()
+            .set("plain-openrouter", ProviderConfig::new("openrouter"));
+
+        let effective = EffectiveConfig::new(&user, None);
+        let resolved = effective.configured_provider("plain-openrouter").unwrap();
+        let protocol = resolved
+            .value
+            .serves(crate::harness::WireProtocol::OpenAiChat)
+            .unwrap();
+        assert_eq!(protocol.base_url, "https://openrouter.ai/api/v1");
+        // And the template's own default credential name is kept too, since
+        // this configuration declared no override.
+        assert_eq!(resolved.value.credential_env, vec!["OPENROUTER_API_KEY"]);
+    }
+
+    #[test]
+    fn a_provider_may_declare_several_credential_variable_names() {
+        let mut user = UserConfig::default();
+        let mut provider = ProviderConfig::new("openrouter");
+        provider.set_credential_env(vec![
+            "OPENROUTER_API_KEY".to_owned(),
+            "OPENROUTER_API_KEY_BACKUP".to_owned(),
+        ]);
+        user.providers_mut().set("multi-key", provider);
+
+        let effective = EffectiveConfig::new(&user, None);
+        let resolved = effective.configured_provider("multi-key").unwrap();
+        assert_eq!(
+            resolved.value.credential_env,
+            vec!["OPENROUTER_API_KEY", "OPENROUTER_API_KEY_BACKUP"]
+        );
+    }
+
+    #[test]
+    fn a_provider_naming_an_unknown_template_is_reported_rather_than_guessed() {
+        let mut user = UserConfig::default();
+        user.providers_mut()
+            .set("broken", ProviderConfig::new("not-a-real-template"));
+        let effective = EffectiveConfig::new(&user, None);
+
+        let err = effective.configured_provider("broken").unwrap_err();
+        assert!(matches!(
+            err,
+            ProviderLookupError::Invalid(ProviderConfigError::UnknownTemplate { .. })
+        ));
+    }
+
+    #[test]
+    fn an_unknown_provider_name_lists_the_known_names() {
+        let mut user = UserConfig::default();
+        user.providers_mut()
+            .set("configured-one", ProviderConfig::new("openrouter"));
+        let effective = EffectiveConfig::new(&user, None);
+
+        let err = effective.configured_provider("does-not-exist").unwrap_err();
+        match err {
+            ProviderLookupError::Unknown { name, known } => {
+                assert_eq!(name, "does-not-exist");
+                assert_eq!(known, vec!["configured-one".to_owned()]);
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_project_configured_provider_wins_over_a_user_configured_one_of_the_same_name() {
+        let mut user = UserConfig::default();
+        user.providers_mut()
+            .set("router", ProviderConfig::new("openrouter"));
+
+        let mut project = ProjectConfig::default();
+        let mut project_provider = ProviderConfig::new("openrouter");
+        project_provider.set_base_url(Some("https://project-mirror.example.com/v1".to_owned()));
+        project.providers_mut().set("router", project_provider);
+
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        let resolved = effective.configured_provider("router").unwrap();
+        assert_eq!(resolved.layer, Layer::Project);
+        let protocol = resolved
+            .value
+            .serves(crate::harness::WireProtocol::OpenAiChat)
+            .unwrap();
+        assert_eq!(protocol.base_url, "https://project-mirror.example.com/v1");
+
+        let without_project = EffectiveConfig::new(&user, None);
+        let resolved = without_project.configured_provider("router").unwrap();
+        assert_eq!(resolved.layer, Layer::User);
+    }
+
+    #[test]
+    fn provider_table_round_trips_through_save_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
+
+        let mut user = UserConfig::default();
+        let mut provider = ProviderConfig::new("zai");
+        provider
+            .set_base_url(Some("https://mirror.example.com/paas/v4".to_owned()))
+            .set_credential_env(vec!["ZAI_API_KEY".to_owned(), "ZAI_API_KEY_2".to_owned()]);
+        user.providers_mut().set("my-zai", provider);
+        user.save(&paths).unwrap();
+
+        let loaded = UserConfig::load(&paths).unwrap();
+        assert_eq!(loaded, user);
+        let loaded_provider = loaded.providers().get("my-zai").unwrap();
+        assert_eq!(loaded_provider.template(), "zai");
+        assert_eq!(
+            loaded_provider.base_url(),
+            Some("https://mirror.example.com/paas/v4")
+        );
+        assert_eq!(
+            loaded_provider.credential_env(),
+            &["ZAI_API_KEY".to_owned(), "ZAI_API_KEY_2".to_owned()]
+        );
+    }
+
     /// Structural guard, not a string search: enumerate every field this
     /// module's config types can hold and assert none of them is
     /// credential-shaped. If a future edit adds a field, this test forces a
@@ -2032,7 +2406,13 @@ mod tests {
         user_keys.sort_unstable();
         assert_eq!(
             user_keys,
-            vec!["integrations", "onboarding", "profiles", "version"]
+            vec![
+                "integrations",
+                "onboarding",
+                "profiles",
+                "providers",
+                "version"
+            ]
         );
 
         // And the serialized TOML text itself contains none of the names a
@@ -2045,5 +2425,51 @@ mod tests {
                 "serialized UserConfig unexpectedly contains `{forbidden}`:\n{serialized}"
             );
         }
+    }
+
+    /// Structural guard for [`ProviderConfig`] specifically, alongside
+    /// [`serialized_form_has_no_secret_capable_field`]'s coverage of the
+    /// rest of this module's config types.
+    ///
+    /// `credential_env` holds environment variable *names* (e.g.
+    /// `"OPENROUTER_API_KEY"`), which legitimately contain words like "key"
+    /// as part of a name — that is exactly what the field is for. So unlike
+    /// the sibling test's broad word-scan (which only ever runs against a
+    /// fixture with no provider entries), what proves this type cannot hold
+    /// a secret *value* is structural: `credential_env`'s type is
+    /// `Vec<String>` of names, and this list pins that `ProviderConfig` has
+    /// no field beyond that, `base_url`, and `template` — nothing shaped to
+    /// carry an actual credential.
+    #[test]
+    fn no_provider_type_can_hold_a_credential_value() {
+        let mut provider_cfg = ProviderConfig::new("openrouter");
+        provider_cfg
+            .set_base_url(Some("https://mirror.example.com/v1".to_owned()))
+            .set_credential_env(vec!["OPENROUTER_API_KEY".to_owned()]);
+        let provider_value = toml::Value::try_from(&provider_cfg).unwrap();
+        let provider_table = provider_value.as_table().unwrap();
+        let mut provider_keys: Vec<&str> = provider_table.keys().map(String::as_str).collect();
+        provider_keys.sort_unstable();
+        assert_eq!(
+            provider_keys,
+            vec!["base_url", "credential_env", "template"],
+            "ProviderConfig grew a field — confirm it cannot hold a credential value \
+             (as opposed to a variable name) before widening this list"
+        );
+
+        // `ProviderTable` itself adds nothing beyond the map: every entry it
+        // can hold is one of the three fields just checked.
+        let mut table = ProviderTable::default();
+        table.set("mine", provider_cfg);
+        let table_value = toml::Value::try_from(&table).unwrap();
+        let entry = table_value.as_table().unwrap().get("mine").unwrap();
+        let mut entry_keys: Vec<&str> = entry
+            .as_table()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        entry_keys.sort_unstable();
+        assert_eq!(entry_keys, vec!["base_url", "credential_env", "template"]);
     }
 }

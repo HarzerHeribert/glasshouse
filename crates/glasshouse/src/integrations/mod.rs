@@ -880,6 +880,16 @@ pub fn doctor_report(runtime: &crate::Runtime) -> String {
     }
     let _ = writeln!(out);
 
+    // Configured providers: what a user or project actually declared in
+    // `config.toml`, resolved against the built-in templates. Distinct from
+    // "Provider signals" above — that section is opportunistic evidence
+    // (an env var happens to be set), this one is what Glasshouse itself
+    // would use to answer "what can this provider serve". Never a value:
+    // see `write_provider_report`.
+    let _ = writeln!(out, "Configured providers");
+    write_configured_providers_report(&mut out, runtime);
+    let _ = writeln!(out);
+
     let _ = writeln!(out, "Problems");
     let problems = discovery.problems();
     if problems.is_empty() {
@@ -1056,6 +1066,120 @@ fn write_adapter_report(out: &mut String, adapter: &'static dyn crate::harness::
         None => "unverified".to_string(),
     };
     let _ = writeln!(out, "      model:        {model}");
+}
+
+/// Render every configured provider (Phase 9C/9D), or a note explaining why
+/// none could be shown.
+///
+/// Loads `config.toml` itself rather than taking an already-resolved
+/// [`crate::config::EffectiveConfig`], because `doctor` is the one place this
+/// runs standalone — every other caller already has a `Runtime` and nothing
+/// else. A load failure is reported as a line in the report, not a panic:
+/// `doctor` is diagnostic, and a broken config file is exactly the kind of
+/// thing a user runs `doctor` to find out about.
+fn write_configured_providers_report(out: &mut String, runtime: &crate::Runtime) {
+    use std::fmt::Write as _;
+
+    let user = match crate::config::UserConfig::load(runtime.paths()) {
+        Ok(user) => user,
+        Err(err) => {
+            let _ = writeln!(out, "  configuration could not be loaded: {err}");
+            return;
+        }
+    };
+    let project = match crate::config::load_project_config(runtime.project()) {
+        Ok(project) => project,
+        Err(err) => {
+            let _ = writeln!(out, "  configuration could not be loaded: {err}");
+            return;
+        }
+    };
+    let effective = crate::config::EffectiveConfig::new(&user, project.as_ref());
+
+    let names = effective.provider_names();
+    if names.is_empty() {
+        let _ = writeln!(out, "  (none configured)");
+        return;
+    }
+
+    for name in names {
+        match effective.configured_provider(&name) {
+            Ok(layered) => write_provider_report(out, &name, &layered),
+            Err(err) => {
+                let _ = writeln!(out, "  {name}: {err}");
+            }
+        }
+    }
+}
+
+/// Render one resolved, configured provider: its protocols and their base
+/// URLs, its declared capabilities, and its credential variable names —
+/// **names only.**
+///
+/// [`std::env::var_os`] is used rather than [`std::env::var`] to check
+/// whether each credential variable is set: this function must never hold
+/// the value, even transiently, and `var_os` is the version of that check
+/// that never decodes one.
+fn write_provider_report(
+    out: &mut String,
+    name: &str,
+    layered: &crate::config::Layered<crate::provider::Provider>,
+) {
+    use std::fmt::Write as _;
+
+    fn declared_bool(declared: crate::harness::Declared<bool>) -> &'static str {
+        match declared {
+            crate::harness::Declared::Verified { value: true, .. } => "yes",
+            crate::harness::Declared::Verified { value: false, .. } => "no",
+            crate::harness::Declared::Unverified => "unverified",
+        }
+    }
+
+    let layer = match layered.layer {
+        crate::config::Layer::Project => "project",
+        crate::config::Layer::User => "user",
+        crate::config::Layer::Default => "default",
+    };
+    let provider = &layered.value;
+    let _ = writeln!(out, "  {name} (layer: {layer})");
+
+    for protocol in &provider.protocols {
+        let base_url = if protocol.base_url.is_empty() {
+            "(not set)"
+        } else {
+            protocol.base_url.as_str()
+        };
+        let _ = writeln!(out, "      {}  base url: {base_url}", protocol.protocol);
+        let _ = writeln!(
+            out,
+            "          streaming: {}  tool calls: {}  reasoning: {}",
+            declared_bool(protocol.streaming),
+            declared_bool(protocol.tool_calls),
+            declared_bool(protocol.reasoning),
+        );
+    }
+
+    let _ = writeln!(
+        out,
+        "      model list endpoint: {}  usage telemetry: {}",
+        declared_bool(provider.model_list_endpoint),
+        declared_bool(provider.usage_telemetry),
+    );
+
+    if provider.credential_env.is_empty() {
+        let _ = writeln!(out, "      credential env: (none configured)");
+    } else {
+        let statuses: Vec<String> = provider
+            .credential_env
+            .iter()
+            .map(|var| {
+                let set = std::env::var_os(var).is_some();
+                let status = if set { "set" } else { "not set" };
+                format!("{var} ({status}, value hidden)")
+            })
+            .collect();
+        let _ = writeln!(out, "      credential env: {}", statuses.join(", "));
+    }
 }
 
 #[cfg(test)]
@@ -1680,5 +1804,132 @@ mod tests {
                 "{name} has an adapter but no block in the doctor report"
             );
         }
+    }
+
+    // --- Configured providers (Phase 9C/9D) -------------------------------
+
+    /// Bootstrap a `Runtime` over fresh, isolated data/config/workspace
+    /// directories — the shared setup every doctor test below needs.
+    fn bootstrapped_runtime() -> (tempfile::TempDir, tempfile::TempDir, crate::Runtime) {
+        use clap::Parser;
+
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join(".git")).unwrap();
+
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+            "--config-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, workspace.path()).unwrap();
+        (data, workspace, runtime)
+    }
+
+    #[test]
+    fn the_doctor_report_says_none_configured_with_no_providers_set_up() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let report = doctor_report(&runtime);
+        assert!(report.contains("Configured providers"));
+        let section = report
+            .split("Configured providers")
+            .nth(1)
+            .expect("a configured providers section");
+        let first_line = section
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .expect("at least one line after the heading");
+        assert!(first_line.contains("none configured"), "{first_line:?}");
+    }
+
+    /// `doctor` is where a configured provider's resolved shape becomes
+    /// visible to a user: which protocol, at which base URL (including an
+    /// override), and which credential variable names to set. Asserted
+    /// against the specific block rather than the whole report, for the same
+    /// reason `the_doctor_report_shows_each_adapters_declarations` is.
+    #[test]
+    fn the_doctor_report_shows_a_configured_providers_protocol_and_base_url() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let mut user = crate::config::UserConfig::load(runtime.paths()).unwrap();
+        let mut provider = crate::config::ProviderConfig::new("openrouter");
+        provider.set_base_url(Some("https://mirror.example.com/v1".to_owned()));
+        user.providers_mut().set("my-router", provider);
+        user.save(runtime.paths()).unwrap();
+
+        let report = doctor_report(&runtime);
+        let section = report
+            .split("Configured providers")
+            .nth(1)
+            .expect("a configured providers section");
+        let block: Vec<&str> = section
+            .lines()
+            .skip_while(|line| !line.trim_start().starts_with("my-router"))
+            .take(5)
+            .collect();
+        assert!(!block.is_empty(), "no `my-router` block in the report");
+
+        assert!(block[0].contains("layer: user"), "{block:?}");
+        let protocol_line = block
+            .iter()
+            .find(|l| l.contains("openai-chat"))
+            .unwrap_or_else(|| panic!("no openai-chat row in {block:?}"));
+        assert!(
+            protocol_line.contains("https://mirror.example.com/v1"),
+            "{protocol_line:?}"
+        );
+        let credential_line = block
+            .iter()
+            .find(|l| l.contains("credential env"))
+            .unwrap_or_else(|| panic!("no credential env row in {block:?}"));
+        assert!(
+            credential_line.contains("OPENROUTER_API_KEY"),
+            "{credential_line:?}"
+        );
+    }
+
+    /// The one test this file exists to make pass for providers: a credential
+    /// variable set to an unmistakable secret-shaped value in the test
+    /// process must never appear in the report, while its name must.
+    #[test]
+    fn the_doctor_report_names_variable_names_and_never_values() {
+        const VAR_NAME: &str = "GLASSHOUSE_DOCTOR_TEST_ONLY_SECRET_VAR";
+        const SECRET_VALUE: &str = "sk-doctor-test-totally-real-looking-secret-xyz123";
+
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let mut user = crate::config::UserConfig::load(runtime.paths()).unwrap();
+        let mut provider = crate::config::ProviderConfig::new("openrouter");
+        provider.set_credential_env(vec![VAR_NAME.to_owned()]);
+        user.providers_mut().set("secret-test", provider);
+        user.save(runtime.paths()).unwrap();
+
+        // SAFETY: `VAR_NAME` is unique to this test and is always removed
+        // again before returning, including on the panic paths below, so no
+        // other test can observe it set.
+        unsafe {
+            std::env::set_var(VAR_NAME, SECRET_VALUE);
+        }
+        let report = doctor_report(&runtime);
+        unsafe {
+            std::env::remove_var(VAR_NAME);
+        }
+
+        assert!(
+            !report.contains(SECRET_VALUE),
+            "the doctor report must never contain a credential's value"
+        );
+        assert!(
+            report.contains(VAR_NAME),
+            "the doctor report must name the credential variable"
+        );
+        assert!(
+            report.contains(&format!("{VAR_NAME} (set")),
+            "the doctor report must say the variable is set: {report}"
+        );
     }
 }
