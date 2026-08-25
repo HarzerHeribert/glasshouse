@@ -615,6 +615,57 @@ have required a magic clamp.
 
 ## Unresolved loose ends
 
+- **`codex` on `PATH` is a cmux wrapper script, not Codex.** In a cmux terminal
+  — which is where this project is developed and run — `which codex` resolves
+  to `…/cmux-cli-shims/<uuid>/codex`, a bash script that execs
+  `cmux-codex-wrapper`. That wrapper injects `--enable hooks`,
+  **`--dangerously-bypass-hook-trust`** and `-c hooks.X=…` into every
+  entrypoint that starts a session (interactive, `exec`/`e`, `resume`, `fork`)
+  so cmux's own session hooks run unprompted; other subcommands, including
+  `--help`, pass through untouched.
+
+  Observed directly: a session started with no such flag printed
+  "`--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without
+  review for this invocation."
+
+  Consequences worth holding on to. `session::select` resolves that shim, so
+  Glasshouse's Codex sessions already inherit cmux's hooks and its trust
+  bypass. Glasshouse's own project-local hooks would be a *second* source
+  alongside cmux's `-c hooks.X=` injections, and whether they compose is an
+  assumption rather than a finding. Declarations read from `codex --help`
+  remain sound, because the wrapper passes `--help` through — but they were
+  read through a shim, which is worth knowing now rather than discovering later.
+
+  **This is the Antigravity lesson in a new shape**: there the executable's
+  *name* was wrong; here the name is right and the *identity* is not. Glasshouse
+  should not silently prefer the real binary — the shim is what the user's
+  environment provides, and stepping around it would break cmux's integration
+  and the "operate the user's real installed harness" invariant. Making the
+  resolved path visible, which `glasshouse doctor` already does, is the right
+  response.
+
+- **Codex's hook trust rides on its workspace-trust prompt.** Entering an
+  untrusted directory, Codex asks whether to trust it and says in its own words
+  that "Trusting … allows … hooks". So a Glasshouse session, being a real
+  harness in a visible viewport, can simply let the user answer it — no
+  user-level write needed. Whether that prompt alone enables a project-local
+  `.codex/hooks.json`, or a per-file `[hooks.state…]` hash is also required, is
+  **not yet established**.
+
+- **No Codex hook has been observed firing yet.** With the workspace trusted
+  and `<project>/.codex/hooks.json` present under both PascalCase and
+  snake_case, a start-and-kill session fired nothing — consistent with
+  `SessionStart` not firing in Claude Code either. Settling whether the file is
+  read at all needs one real turn against a `user_prompt_submit` hook. Full
+  evidence and the ordered open questions are in
+  `.agent-runtime/notes-codex-hooks.md`.
+
+- **The Codex adapter may be citing the wrong source for its event names.** Its
+  `HOOK_EVENTS` are snake_case, taken from `[hooks.state…]` trust keys, but a
+  real `hooks.json` on this machine used **PascalCase**. If the file wants
+  PascalCase, that declaration's evidence string points at the wrong artifact.
+  Verify before building on it.
+
 - **Windows CI caught a real production defect on the first push, again.**
   `read_first_line` required a trailing newline, so a rollout whose only line
   was its header — which is what a harness writes before it has anything to
