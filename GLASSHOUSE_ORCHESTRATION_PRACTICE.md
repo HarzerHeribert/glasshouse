@@ -375,3 +375,34 @@ flake generator, and it will find the environment you did not test on. Build
 both sides from a normalised base. A subcontractor taught this project the same
 lesson one batch earlier with a test that scanned a randomly generated token and
 failed 45 times in 100.
+
+
+## 16. A mutation runner must force a rebuild, and workers must not share `target/`
+
+The worst failure mode in this whole process is a mutation result that is not
+about the code. On 2026-08-26 a subcontractor pointed `CARGO_TARGET_DIR` at the
+repository's shared `target/` and cargo served it a **cached test binary built
+from mutated source** — the fingerprint matched, so a mutation no longer present
+in the source was still in the binary under test. It caught this itself and
+moved to a private target dir.
+
+The trap has a second mouth, which the team lead then reproduced deliberately:
+**restoring a mutated file with `mv` puts back the original mtime**, so the next
+build is judged fresh against a mutant binary. `cp` from a backup has the same
+shape unless the timestamp moves.
+
+So, for any mutation runner:
+
+- **`touch` every source file before each build.** Do not rely on the restore
+  having moved a timestamp.
+- **Never share a `target/` between two workers**, and never point one at the
+  repository's. Each worktree builds into its own.
+- When in doubt, **delete `target/` and re-run the gates from scratch** before
+  reporting. The batch that found this did exactly that and re-derived every
+  number in its report from the clean build.
+- Subagents inherit the lead's scratchpad directory, so two of them can collide
+  on a path like `scratchpad/mutant/` without either doing anything wrong. Give
+  each one its own.
+
+A mutation verdict from a stale binary is worse than no mutation testing at all,
+because it is indistinguishable from a real one in the report.
