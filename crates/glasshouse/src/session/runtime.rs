@@ -24,7 +24,7 @@
 
 use std::collections::VecDeque;
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -133,11 +133,57 @@ fn is_utf8_continuation(byte: u8) -> bool {
     byte & 0b1100_0000 == 0b1000_0000
 }
 
+/// The cursor-position query a harness sends at startup (`ESC[6n`, a Device
+/// Status Report).
+const CURSOR_QUERY: &[u8] = b"\x1b[6n";
+
+/// Counts `ESC[6n` queries in a byte stream, across chunk boundaries.
+///
+/// A query can be split by any read, so a plain `windows()` search over each
+/// chunk would miss one straddling the boundary. This keeps the match position
+/// between calls.
+#[derive(Debug, Default)]
+struct CursorQueryScanner {
+    matched: usize,
+}
+
+impl CursorQueryScanner {
+    /// Feed a chunk; returns how many complete queries it completed.
+    fn scan(&mut self, chunk: &[u8]) -> usize {
+        let mut found = 0;
+        for byte in chunk {
+            if *byte == CURSOR_QUERY[self.matched] {
+                self.matched += 1;
+                if self.matched == CURSOR_QUERY.len() {
+                    found += 1;
+                    self.matched = 0;
+                }
+            } else {
+                // Restart, but do not discard a byte that begins a fresh
+                // match: `ESC ESC [ 6 n` must still be recognised.
+                self.matched = usize::from(*byte == CURSOR_QUERY[0]);
+            }
+        }
+        found
+    }
+}
+
 /// One running harness.
 pub struct LiveSession {
     id: SessionId,
     process: PtyProcess,
     scrollback: Arc<Mutex<Scrollback>>,
+    /// The session's screen, as a terminal would have drawn it.
+    ///
+    /// Fed by the same reader thread that fills `scrollback`: the raw bytes
+    /// remain the record of what was said, this is what it looks like.
+    screen: Arc<Mutex<vt100::Parser>>,
+    /// Cursor-position queries the harness has asked and nobody has answered.
+    ///
+    /// Counted by the reader thread and answered by whichever thread owns the
+    /// process, because writing to the child needs `&mut PtyProcess` and the
+    /// reader does not have it. See `SessionRuntime::answer_terminal_queries`.
+    pending_queries: Arc<AtomicUsize>,
     /// Set by the reader thread when the pseudo-terminal reports end-of-file.
     /// Distinct from the process having exited: output can end first, and a
     /// process can exit while output is still buffered.
@@ -190,6 +236,17 @@ impl LiveSession {
             // the process is still running and still steerable, and an empty
             // view of its history is better than an unusable runtime.
             Err(poisoned) => read(&poisoned.into_inner()),
+        }
+    }
+
+    /// Read the session's screen as a terminal would have drawn it.
+    ///
+    /// Borrowed rather than copied out: a screen is a grid of cells and the
+    /// viewport wants to walk it, not own it.
+    pub fn with_screen<T>(&self, read: impl FnOnce(&vt100::Screen) -> T) -> T {
+        match self.screen.lock() {
+            Ok(parser) => read(parser.screen()),
+            Err(poisoned) => read(poisoned.into_inner().screen()),
         }
     }
 
@@ -275,14 +332,30 @@ impl SessionRuntime {
         let (process, output) = launch.spawn()?;
         let scrollback = Arc::new(Mutex::new(Scrollback::new(self.scrollback_bytes)));
         let output_ended = Arc::new(AtomicBool::new(false));
+        // Read back from the process rather than from the launch: this is the
+        // size the pseudo-terminal actually got, which is what the harness will
+        // be drawing for.
+        let size = process.size();
+        let screen = Arc::new(Mutex::new(vt100::Parser::new(size.rows, size.cols, 0)));
+        let pending_queries = Arc::new(AtomicUsize::new(0));
 
         {
             let scrollback = Arc::clone(&scrollback);
+            let screen = Arc::clone(&screen);
+            let pending_queries = Arc::clone(&pending_queries);
             let output_ended = Arc::clone(&output_ended);
             let name = format!("glasshouse-session-{}", short(&id));
             std::thread::Builder::new()
                 .name(name)
-                .spawn(move || pump(output, &scrollback, &output_ended))
+                .spawn(move || {
+                    pump(
+                        output,
+                        &scrollback,
+                        &screen,
+                        &pending_queries,
+                        &output_ended,
+                    )
+                })
                 .context("could not start the session output reader")?;
         }
 
@@ -291,6 +364,8 @@ impl SessionRuntime {
             id: id.clone(),
             process,
             scrollback,
+            screen,
+            pending_queries,
             output_ended,
             presentation,
             exit: None,
@@ -407,6 +482,16 @@ impl SessionRuntime {
             .iter_mut()
             .find(|session| &session.id == id)
             .ok_or_else(|| anyhow::anyhow!("session `{id}` is not running in this Glasshouse"))?;
+        // Both, or the harness draws for one shape while Glasshouse renders
+        // another: the child is told through its pseudo-terminal, the emulator
+        // is told directly, and they must agree.
+        match session.screen.lock() {
+            Ok(mut parser) => parser.screen_mut().set_size(size.rows, size.cols),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .screen_mut()
+                .set_size(size.rows, size.cols),
+        }
         session.process.resize(size)
     }
 
@@ -452,6 +537,53 @@ impl SessionRuntime {
         ended
     }
 
+    /// Answer any cursor-position queries the sessions have asked.
+    ///
+    /// **An embedded session inverts `session::attach`'s rule.** `attach` is a
+    /// pass-through and must never answer `ESC[6n`, because the user's real
+    /// terminal is on the other end and will answer it; a second reply would
+    /// reach the harness as input. Here Glasshouse *is* the terminal — the
+    /// output goes into a buffer it owns and is redrawn into a viewport, and
+    /// no real terminal ever sees the query. Nothing else can answer, so a
+    /// harness that waits for the reply waits forever, looking for all the
+    /// world like a session that started and then did nothing.
+    ///
+    /// The reply reports the cursor position of the *emulated* screen, which
+    /// is the screen the harness actually has. Reporting the outer terminal's
+    /// cursor would be answering a question it did not ask.
+    ///
+    /// Called from the interface's tick. Best effort per session: one harness
+    /// that cannot be written to must not stop the others being answered.
+    pub fn answer_terminal_queries(&mut self) {
+        for session in &mut self.sessions {
+            if session.exit.is_some() {
+                continue;
+            }
+            let pending = session.pending_queries.swap(0, Ordering::SeqCst);
+            if pending == 0 {
+                continue;
+            }
+
+            // vt100 reports zero-based; a Device Status Report is one-based.
+            let (row, col) = match session.screen.lock() {
+                Ok(parser) => parser.screen().cursor_position(),
+                Err(poisoned) => poisoned.into_inner().screen().cursor_position(),
+            };
+            let reply = format!("\x1b[{};{}R", row + 1, col + 1);
+
+            for _ in 0..pending {
+                if let Err(error) = session.process.write_input(reply.as_bytes()) {
+                    tracing::debug!(
+                        session = %session.id,
+                        %error,
+                        "could not answer a cursor-position query"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
     /// Stop a session and forget it.
     ///
     /// Best effort on the signal: a process that has already gone is not a
@@ -482,8 +614,15 @@ impl SessionRuntime {
 }
 
 /// Drain a pseudo-terminal into a scrollback until it has nothing left.
-fn pump(mut output: PtyOutput, scrollback: &Mutex<Scrollback>, ended: &AtomicBool) {
+fn pump(
+    mut output: PtyOutput,
+    scrollback: &Mutex<Scrollback>,
+    screen: &Mutex<vt100::Parser>,
+    pending_queries: &AtomicUsize,
+    ended: &AtomicBool,
+) {
     let mut buffer = [0u8; READ_CHUNK];
+    let mut scanner = CursorQueryScanner::default();
     loop {
         // `Ok(0)` and an error mean the same thing: nothing more is coming. A
         // pseudo-terminal reports the end of a session as end-of-file on some
@@ -493,12 +632,27 @@ fn pump(mut output: PtyOutput, scrollback: &Mutex<Scrollback>, ended: &AtomicBoo
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
+        let chunk = &buffer[..read];
+
         match scrollback.lock() {
-            Ok(mut scrollback) => scrollback.push(&buffer[..read]),
+            Ok(mut scrollback) => scrollback.push(chunk),
             // Another thread panicked holding the lock. Keep draining anyway:
             // stopping would block the pseudo-terminal and eventually the
             // harness itself, which is far worse than a gap in the history.
-            Err(poisoned) => poisoned.into_inner().push(&buffer[..read]),
+            Err(poisoned) => poisoned.into_inner().push(chunk),
+        }
+
+        match screen.lock() {
+            Ok(mut screen) => screen.process(chunk),
+            Err(poisoned) => poisoned.into_inner().process(chunk),
+        }
+
+        // Counted here, answered elsewhere: this thread cannot write to the
+        // child. An unanswered query is a harness that waits forever, so the
+        // count must not be lost even if the owner is slow to notice.
+        let found = scanner.scan(chunk);
+        if found > 0 {
+            pending_queries.fetch_add(found, Ordering::SeqCst);
         }
     }
     ended.store(true, Ordering::SeqCst);
@@ -596,6 +750,54 @@ mod tests {
         scrollback.push(&[b'a', 0xC3, 0x28, b'b']);
         let text = scrollback.text();
         assert!(text.starts_with('a') && text.ends_with('b'), "got {text:?}");
+    }
+
+    /// The whole reason the scanner keeps state: a read can split the query
+    /// anywhere, and a per-chunk search would miss one straddling the seam.
+    #[test]
+    fn the_cursor_query_is_found_however_a_read_splits_it() {
+        for split in 0..=CURSOR_QUERY.len() {
+            let mut scanner = CursorQueryScanner::default();
+            let (head, tail) = CURSOR_QUERY.split_at(split);
+            let found = scanner.scan(head) + scanner.scan(tail);
+            assert_eq!(found, 1, "split after {split} byte(s) was missed");
+        }
+    }
+
+    #[test]
+    fn one_byte_at_a_time_still_finds_the_query() {
+        let mut scanner = CursorQueryScanner::default();
+        let found: usize = CURSOR_QUERY.iter().map(|b| scanner.scan(&[*b])).sum();
+        assert_eq!(found, 1);
+    }
+
+    #[test]
+    fn several_queries_in_one_chunk_are_all_counted() {
+        let mut scanner = CursorQueryScanner::default();
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(b"before");
+        chunk.extend_from_slice(CURSOR_QUERY);
+        chunk.extend_from_slice(b"between");
+        chunk.extend_from_slice(CURSOR_QUERY);
+        assert_eq!(scanner.scan(&chunk), 2);
+    }
+
+    /// A near miss must not leave the scanner primed, or the next stray `n`
+    /// would complete a query nobody asked.
+    #[test]
+    fn a_near_miss_does_not_count_and_does_not_poison_the_next_match() {
+        let mut scanner = CursorQueryScanner::default();
+        assert_eq!(scanner.scan(b"\x1b[7n"), 0, "ESC[7n is a different query");
+        assert_eq!(scanner.scan(b"n"), 0, "a stray byte must not complete it");
+        assert_eq!(scanner.scan(CURSOR_QUERY), 1, "a real query still counts");
+    }
+
+    /// `ESC ESC [ 6 n`: the restart must not swallow a byte that begins a
+    /// fresh match.
+    #[test]
+    fn a_repeated_escape_still_begins_a_match() {
+        let mut scanner = CursorQueryScanner::default();
+        assert_eq!(scanner.scan(b"\x1b\x1b[6n"), 1);
     }
 
     #[test]

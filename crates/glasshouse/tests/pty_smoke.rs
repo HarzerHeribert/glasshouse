@@ -2404,3 +2404,82 @@ fn an_environment_override_reaches_a_real_child() {
         "a variable removed after being set still reached the child:\n{output}"
     );
 }
+
+/// An embedded session answers the cursor-position query itself.
+///
+/// This is the rule `session::attach` inverts. `attach` is a pass-through and
+/// must never answer `ESC[6n` — the user's real terminal does, and a second
+/// reply would reach the harness as input. An embedded session has no real
+/// terminal behind it: Glasshouse owns the buffer and redraws it, so if nothing
+/// answers, a harness that waits for the reply waits forever and looks exactly
+/// like one that started and did nothing.
+///
+/// The harness here asks, then reads back precisely the six bytes of a reply
+/// for a fresh screen (`ESC[1;1R`) and writes them to a file, so the test can
+/// assert on the actual bytes rather than on the absence of a hang.
+///
+/// Unix only: it needs `printf`/`head -c`, and a `.cmd` harness has no
+/// equivalent way to read a fixed byte count from its own terminal.
+#[cfg(unix)]
+#[test]
+fn an_embedded_session_answers_the_cursor_position_query_itself() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = RuntimeFixture::new();
+    let reply_path = fixture.bin_dir.join("reply.bin");
+    let path = fixture.bin_dir.join("asks-where-it-is");
+    std::fs::write(
+        &path,
+        // `stty raw`: a Device Status Report reply carries no newline, and a
+        // pseudo-terminal in canonical mode delivers nothing until one arrives,
+        // so a cooked read would block forever no matter who answered. `-echo`
+        // keeps the reply out of the session's own output.
+        format!(
+            "#!/bin/sh\nstty raw -echo\nprintf '\\033[6n'\nhead -c 6 > '{}'\nstty sane\n",
+            reply_path.display()
+        ),
+    )
+    .expect("write harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+
+    let launch = fixture.launch(&path);
+    let mut runtime = SessionRuntime::new();
+    let id = SessionId::new("asks");
+    runtime
+        .start(id.clone(), SessionPresentation::Embedded, &launch)
+        .expect("start");
+
+    // The interface's tick does exactly this: drain exits, answer queries.
+    // Wait for six bytes, not for the file: the shell's redirection creates it
+    // the instant the harness starts, long before `head` has read anything.
+    let deadline = Instant::now() + TIMEOUT;
+    while Instant::now() < deadline {
+        runtime.answer_terminal_queries();
+        runtime.poll_exits();
+        if std::fs::metadata(&reply_path).map(|m| m.len()).unwrap_or(0) >= 6 {
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+
+    let reply = std::fs::read(&reply_path).unwrap_or_else(|_| {
+        panic!(
+            "the harness never received a reply to its cursor-position query\n\
+             bytes written so far: {:?}\n--- its output ---\n{}\n--- end ---",
+            std::fs::metadata(&reply_path).map(|m| m.len()),
+            runtime
+                .get(&id)
+                .map(LiveSession::scrollback)
+                .unwrap_or_default()
+        )
+    });
+
+    assert_eq!(
+        reply, b"\x1b[1;1R",
+        "expected a Device Status Report for a fresh screen, got {reply:?}"
+    );
+
+    runtime.close(&id).expect("close");
+}
