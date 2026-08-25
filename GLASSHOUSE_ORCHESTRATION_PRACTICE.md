@@ -334,5 +334,16 @@ Two rules, and the second is the one that matters:
    it was needed. `SOURCE.replace('\n', "\r\n")` and assert both scans agree —
    restoring the old literal search must fail *locally*.
 
-This project now has **six** source-scanning tests. Every one of them is
-exposed to this.
+**How exposed is the rest of the codebase? Checked, not guessed.** Eight files
+use `include_str!` to scan their own source. After this fix, **none** of them
+searches a multi-line literal, none uses `split('\n')`, and every other scan
+already goes through `str::lines`. So the exposure was exactly one site — the
+one that went red — and the rest were already safe by habit.
+
+That is worth stating precisely rather than alarmingly, because the first
+version of this section claimed six tests were exposed. That number came from a
+worker's count of a narrower idiom, was repeated without checking, and was
+wrong. *Check a declaration against the use* applies to the practice file too.
+
+The rule still stands for the next scan someone writes: `lines`, and a CRLF
+copy in the test.
