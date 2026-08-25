@@ -4,8 +4,8 @@
 //! 2026-08-25 — `hermes --help`, `hermes hooks --help`, and `hermes version`.
 
 use super::{
-    BackendSelection, Backends, Capabilities, Declared, HarnessAdapter, HarnessDescription, Hooks,
-    Invocation, ModelOverride, SessionIds, Vendor,
+    ApprovalModes, BackendSelection, Backends, Capabilities, Declared, HarnessAdapter,
+    HarnessDescription, Hooks, Invocation, ModelOverride, SessionIds, Vendor,
 };
 use crate::integrations::IntegrationId;
 
@@ -118,6 +118,16 @@ impl HarnessAdapter for Hermes {
                     "`hermes --help`: `--provider PROVIDER` (\"e.g. openrouter, anthropic\"), \
                      and `--ignore-user-config`",
                 ),
+            },
+            approvals: ApprovalModes {
+                // Hermes's `--help` documents no classifier-style mode.
+                automatic_review: Declared::Unverified,
+                bypass: Declared::verified(
+                    "--yolo",
+                    "`hermes --help`: `--yolo` — \"Bypass all dangerous command approval \
+                     prompts\"",
+                ),
+                sandbox: Declared::Unverified,
             },
             communication_style: Declared::Unverified,
         }

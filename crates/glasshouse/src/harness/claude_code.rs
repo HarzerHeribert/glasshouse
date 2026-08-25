@@ -6,9 +6,9 @@
 //! recalled.
 
 use super::{
-    BackendSelection, Backends, Capabilities, CommunicationStyle, Declared, HarnessAdapter,
-    HarnessDescription, HookCommand, HookInstallation, Hooks, Invocation, ModelOverride,
-    SessionIds, StyleChange, Vendor, WireProtocol,
+    ApprovalModes, BackendSelection, Backends, Capabilities, CommunicationStyle, Declared,
+    HarnessAdapter, HarnessDescription, HookCommand, HookInstallation, Hooks, Invocation,
+    ModelOverride, SessionIds, StyleChange, Vendor, WireProtocol,
 };
 use crate::integrations::IntegrationId;
 
@@ -231,6 +231,20 @@ impl HarnessAdapter for ClaudeCode {
                      ANTHROPIC_API_KEY or apiKeyHelper via --settings ... 3P providers \
                      (Bedrock/Vertex/Foundry) use their own credentials\"",
                 ),
+            },
+            approvals: ApprovalModes {
+                automatic_review: Declared::verified(
+                    "auto-mode",
+                    "`claude --help` lists an `auto-mode` subcommand: \"Inspect or reset auto \
+                     mode classifier\"",
+                ),
+                bypass: Declared::verified(
+                    "--dangerously-skip-permissions",
+                    "`claude --help`: `--dangerously-skip-permissions` — \"Bypass all \
+                     permission checks\"; the same effect is also reachable with \
+                     `--permission-mode bypassPermissions`",
+                ),
+                sandbox: Declared::Unverified,
             },
             communication_style: Declared::verified(
                 CommunicationStyle {

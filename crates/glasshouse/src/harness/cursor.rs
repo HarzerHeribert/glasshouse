@@ -5,8 +5,8 @@
 //! installed it.
 
 use super::{
-    BackendSelection, Backends, Capabilities, Declared, HarnessAdapter, HarnessDescription,
-    Invocation, ModelOverride, SessionIds, Vendor,
+    ApprovalModes, BackendSelection, Backends, Capabilities, Declared, HarnessAdapter,
+    HarnessDescription, Invocation, ModelOverride, SessionIds, Vendor,
 };
 use crate::integrations::IntegrationId;
 
@@ -99,6 +99,23 @@ impl HarnessAdapter for Cursor {
                     BACKEND_SELECTION,
                     "`cursor-agent --help`: `--api-key` (\"can also use CURSOR_API_KEY env \
                      var\") and `-e/--endpoint` (\"can also use CURSOR_API_ENDPOINT env var\")",
+                ),
+            },
+            approvals: ApprovalModes {
+                automatic_review: Declared::verified(
+                    "--auto-review",
+                    "`cursor-agent --help`: `--auto-review` — \"Use Auto-review (Smart Auto): \
+                     a server classifier auto-runs safe tool calls and prompts for the rest\"",
+                ),
+                bypass: Declared::verified(
+                    "--yolo",
+                    "`cursor-agent --help`: `--yolo`, documented as an alias for `--force` \
+                     (Run Everything)",
+                ),
+                sandbox: Declared::verified(
+                    "--sandbox <mode>",
+                    "`cursor-agent --help`: `--sandbox <mode>` — \"Explicitly enable or disable \
+                     sandbox mode\"",
                 ),
             },
             communication_style: Declared::Unverified,

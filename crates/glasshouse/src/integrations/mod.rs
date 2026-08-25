@@ -982,6 +982,29 @@ fn write_adapter_report(out: &mut String, adapter: &'static dyn crate::harness::
     };
     let _ = writeln!(out, "      hooks:        {hooks}");
 
+    // A blanket bypass is never worded as though it were review — that
+    // distinction is the entire point of `ApprovalModes`, so the two are
+    // rendered with different vocabulary ("auto review" vs. "no automatic
+    // review") rather than a shared label that could blur them together.
+    let mut approval_parts = Vec::new();
+    match described.approvals.automatic_review.value() {
+        Some(mode) => approval_parts.push(format!("auto review `{mode}`")),
+        // Deliberately *not* "no automatic review". `Declared` has no way to
+        // say "verified absent" for a mode name, so `Unverified` means nobody
+        // established one — which is a different claim from the harness not
+        // having one, and the difference is the reason `Declared` exists. Pi
+        // is the case that makes it concrete: it is installed but not on
+        // `PATH` here, so its `--help` could not be read at all.
+        None => approval_parts.push("automatic review unverified".to_string()),
+    }
+    if let Some(bypass) = described.approvals.bypass.value() {
+        approval_parts.push(format!("bypass `{bypass}`"));
+    }
+    if let Some(sandbox) = described.approvals.sandbox.value() {
+        approval_parts.push(format!("sandbox `{sandbox}`"));
+    }
+    let _ = writeln!(out, "      approvals:    {}", approval_parts.join("; "));
+
     // Only what is known present is listed. An unverified capability is not
     // an absent one, so it is counted rather than named as missing.
     let named = described.capabilities.named();
@@ -1570,7 +1593,7 @@ mod tests {
         let block: Vec<&str> = adapters_section
             .lines()
             .skip_while(|line| !line.trim_start().starts_with("Claude Code"))
-            .take(7)
+            .take(8)
             .collect();
         assert!(
             !block.is_empty(),
@@ -1596,6 +1619,7 @@ mod tests {
         assert!(row("resume:").contains("--resume"));
         assert!(row("session ids:").contains("--session-id"));
         assert!(row("hooks:").contains("settings"));
+        assert!(row("approvals:").contains("auto-mode"));
         assert!(row("capabilities:").contains("MCP"));
         assert!(row("protocols:").contains("anthropic-messages"));
         assert!(row("model:").contains("--model"));

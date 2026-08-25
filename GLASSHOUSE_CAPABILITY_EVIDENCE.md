@@ -49,6 +49,67 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 6 — Make each adapter declare which native approval/permission modes it supports
+
+Contract: Given a supported harness, when Glasshouse is asked what approval
+modes it offers, the adapter answers with what was read from that harness's own
+binary — naming its automatic-review mode when it has one, and saying plainly
+when nobody established one — while never presenting a blanket bypass as though
+it were review.
+
+State: COMPLETE.
+
+Production evidence:
+- `harness/mod.rs: ApprovalModes` — `automatic_review`, `bypass` and `sandbox`,
+  each a `Declared<&'static str>` like every other harness fact.
+- All seven adapters declare it; `HarnessDescription` carries it.
+- `integrations/mod.rs: write_adapter_report` — `glasshouse doctor` prints it,
+  which is what keeps the declaration from being data nothing reads.
+
+The distinction the type exists for: **a blanket bypass is not automatic
+review.** Claude Code's auto mode, Codex's `--approve-for-me` ("automatic review
+using the workspace-write sandbox") and Cursor's `--auto-review` ("a server
+classifier auto-runs safe tool calls") classify. OpenCode's `--auto`
+("auto-approve permissions that are not explicitly denied (dangerous!)"),
+Hermes's `--yolo` and Antigravity's `--dangerously-skip-permissions` do not, and
+are recorded as bypasses only.
+
+Regression evidence:
+- `each_adapter_declares_the_approval_mode_its_binary_documents` — pins the
+  whole table, harness by harness, mode string by mode string.
+- `every_verified_declaration_cites_its_evidence` covers the new field.
+- `the_doctor_report_describes_every_adapter` — the rendered row.
+
+Non-vacuity: **the first version of this test was weak and a mutation proved
+it.** It asserted only that an `automatic_review` evidence string avoided the
+words "yolo", "dangerously" and "bypass"; a mutation recording OpenCode's
+`--auto` as automatic review, with evidence reading "…(dangerous!)", walked
+straight through — "dangerous!" is not "dangerously". The fuzzy test was
+replaced by the exact table above, and the same mutation now fails, as does
+removing Cursor's real `--auto-review`. The lesson is recorded in the test's own
+comment: pin *which mode each harness has*, never how a declaration is worded.
+
+Failure/isolation evidence:
+- `Unverified` renders as **"automatic review unverified"**, never "no automatic
+  review". `Declared` cannot express "verified absent" for a mode name, so
+  absence of a declaration means nobody established one — a different claim from
+  the harness not having one. Pi makes it concrete: installed, but not on `PATH`
+  here, so its `--help` could not be read and everything about it is
+  `Unverified`.
+
+Platform/external evidence:
+- Every declaration read on 2026-08-25 from the installed binaries: Claude Code
+  2.1.245, Codex 0.149.1, Cursor CLI 2026.08.11, OpenCode 1.18.22, Hermes Agent
+  0.15.1, Antigravity CLI 1.1.20. Pi 0.73.1 could not be read.
+- `glasshouse doctor` run from the built binary and its output read, which is
+  how the "no automatic review" overstatement was caught before it shipped.
+
+Missing evidence:
+- Pi's approval modes. Needs `~/.hermes/node/bin` on `PATH`, or a configured
+  explicit executable path.
+- Selecting a mode is Phase 9A, and unimplemented. This line is the declaration
+  half only.
+
 ### Phase 8 — Support resuming a known Codex session through Codex's native resume mechanism
 
 Contract: Given a recorded Codex session whose native identifier Glasshouse

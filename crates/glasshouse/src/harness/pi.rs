@@ -4,8 +4,8 @@
 //! — `pi --help` and the package that installed it.
 
 use super::{
-    BackendSelection, Backends, Capabilities, Declared, HarnessAdapter, HarnessDescription,
-    Invocation, ModelOverride, SessionIds, Vendor,
+    ApprovalModes, BackendSelection, Backends, Capabilities, Declared, HarnessAdapter,
+    HarnessDescription, Invocation, ModelOverride, SessionIds, Vendor,
 };
 use crate::integrations::IntegrationId;
 
@@ -94,6 +94,12 @@ impl HarnessAdapter for Pi {
                      to env vars)`",
                 ),
             },
+            // Pi is installed but not on `PATH` on this machine (npm's global
+            // prefix is `~/.hermes/node`), so `pi --help` could not be read.
+            // Nothing about its approval modes is established — guessing from
+            // another harness's flags would be exactly the invented
+            // declaration this module exists to prevent.
+            approvals: ApprovalModes::UNVERIFIED,
             // `--system-prompt` and `--append-system-prompt` change the whole
             // system prompt, which is not a communication-style mechanism:
             // the capability map is explicit that a response profile must not

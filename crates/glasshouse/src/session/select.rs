@@ -786,6 +786,7 @@ mod tests {
                 session_ids: crate::harness::Declared::Unverified,
                 capabilities: crate::harness::Capabilities::UNVERIFIED,
                 backends: crate::harness::Backends::UNVERIFIED,
+                approvals: crate::harness::ApprovalModes::UNVERIFIED,
                 communication_style: crate::harness::Declared::Unverified,
             }
         }

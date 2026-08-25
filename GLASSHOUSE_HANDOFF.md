@@ -4,7 +4,7 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 8 is five of ten. 131 -> 133 checked boxes.** `main` clean at
+**Phase 8 is five of ten; Phase 6 is twelve of thirteen. 131 -> 134 checked boxes.** `main` clean at
 `63bd260`. CI `32849951837` green on Linux, macOS, Windows and lint, with the
 Windows job confirmed to have executed both new end-to-end tests by name.
 
@@ -43,6 +43,35 @@ deliberately *not* a condition — every extra condition is another way to break
 on a Codex update. Full reasoning in `GLASSHOUSE_DESIGN_DECISIONS.md`.
 
 ## Verified completed work
+
+### This session — every adapter declares its approval modes
+
+Phase 6's new line, closed. `ApprovalModes` carries `automatic_review`,
+`bypass` and `sandbox` as `Declared<&'static str>`, all seven adapters fill it
+in from their own binaries, and `glasshouse doctor` prints it.
+
+The distinction is the point: **three harnesses classify, four only bypass.**
+Claude Code's auto mode, Codex's `--approve-for-me` and Cursor's
+`--auto-review` are automatic review; OpenCode's `--auto`, Hermes's `--yolo`
+and Antigravity's `--dangerously-skip-permissions` are not, and are recorded as
+bypasses only.
+
+**A mutation caught a weak test, which is what mutations are for.** The first
+version asserted only that an `automatic_review` evidence string avoided the
+words "yolo", "dangerously" and "bypass". A mutation recording OpenCode's
+`--auto` as automatic review — evidence reading "…(dangerous!)" — walked
+straight through it, because "dangerous!" is not "dangerously". The fuzzy check
+was replaced with an exact harness-by-harness table, and the same mutation now
+fails. That weak test was specified by the orchestrator's own packet, not
+invented by the worker.
+
+**And running the binary caught an overstatement before it shipped.** The first
+rendering printed "no automatic review" for anything `Unverified` — but
+`Declared` cannot say "verified absent" for a mode name, so `Unverified` means
+nobody established one. Pi makes the difference concrete: installed, not on
+`PATH` here, `--help` unreadable. It now reads "automatic review unverified",
+matching the convention the neighbouring `capabilities:` line already used.
+
 
 ### This session — resuming a Codex session, which cost no production code
 

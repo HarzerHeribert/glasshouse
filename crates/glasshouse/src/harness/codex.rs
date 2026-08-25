@@ -6,9 +6,9 @@
 //! rollouts it writes.
 
 use super::{
-    BackendSelection, Backends, Capabilities, Declared, HarnessAdapter, HarnessDescription, Hooks,
-    Invocation, ModelOverride, NativeSessionKind, NativeSessionRecord, NativeSessionSource,
-    SessionIds, Vendor, WireProtocol,
+    ApprovalModes, BackendSelection, Backends, Capabilities, Declared, HarnessAdapter,
+    HarnessDescription, Hooks, Invocation, ModelOverride, NativeSessionKind, NativeSessionRecord,
+    NativeSessionSource, SessionIds, Vendor, WireProtocol,
 };
 use crate::integrations::IntegrationId;
 
@@ -217,6 +217,25 @@ impl HarnessAdapter for Codex {
                     "`codex --help`: `-c <key=value>`, `--oss`, `--local-provider`, and \
                      `-p/--profile` (\"Layer $CODEX_HOME/<name>.config.toml on top of the base \
                      user config\")",
+                ),
+            },
+            approvals: ApprovalModes {
+                automatic_review: Declared::verified(
+                    "--approve-for-me",
+                    "`codex --help`: `--approve-for-me` — \"Route approval requests through \
+                     automatic review using the workspace-write sandbox\"",
+                ),
+                bypass: Declared::verified(
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "`codex --help`: `--dangerously-bypass-approvals-and-sandbox` — \"Skip all \
+                     confirmation prompts and execute commands without sandboxing. EXTREMELY \
+                     DANGEROUS\"; `-a never` (`--ask-for-approval <on-request|never>`) reaches \
+                     the same effect",
+                ),
+                sandbox: Declared::verified(
+                    "-s/--sandbox <read-only|workspace-write|danger-full-access>",
+                    "`codex --help`: `-s/--sandbox <read-only|workspace-write|danger-full-access>` \
+                     selects the sandbox policy for model-generated shell commands",
                 ),
             },
             // Codex 0.149.0's `--help` documents no output-style, persona, or

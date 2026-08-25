@@ -382,6 +382,36 @@ pub enum StyleChange {
     NewSession,
 }
 
+/// How a harness decides whether a tool call may run.
+///
+/// `automatic_review` is the one that matters: a mode where the harness
+/// classifies its own tool calls and only asks about the ones that warrant
+/// it. A blanket bypass is NOT automatic review and must never be recorded
+/// as one — the difference is the entire point of the declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApprovalModes {
+    /// A native mode that classifies rather than prompts.
+    pub automatic_review: Declared<&'static str>,
+    /// A mode that skips checks entirely.
+    pub bypass: Declared<&'static str>,
+    /// A sandbox policy selector, where the harness has one.
+    pub sandbox: Declared<&'static str>,
+}
+
+impl ApprovalModes {
+    /// Nothing known — the starting point an adapter fills in.
+    pub const UNVERIFIED: Self = Self {
+        automatic_review: Declared::Unverified,
+        bypass: Declared::Unverified,
+        sandbox: Declared::Unverified,
+    };
+
+    /// Whether this harness can be asked to classify instead of prompt.
+    pub fn has_automatic_review(&self) -> bool {
+        self.automatic_review.is_verified()
+    }
+}
+
 /// Everything an adapter declares about its harness.
 ///
 /// One value rather than a dozen trait methods: these are read together —
@@ -395,6 +425,7 @@ pub struct HarnessDescription {
     pub session_ids: Declared<SessionIds>,
     pub capabilities: Capabilities,
     pub backends: Backends,
+    pub approvals: ApprovalModes,
     pub communication_style: Declared<CommunicationStyle>,
 }
 
@@ -870,10 +901,81 @@ mod tests {
                 &format!("{slug} communication style"),
                 d.communication_style.evidence(),
             );
+            check(
+                &format!("{slug} automatic review"),
+                d.approvals.automatic_review.evidence(),
+            );
+            check(&format!("{slug} bypass"), d.approvals.bypass.evidence());
+            check(&format!("{slug} sandbox"), d.approvals.sandbox.evidence());
             for (name, declared) in d.capabilities.named() {
                 check(&format!("{slug} {name}"), declared.evidence());
             }
         }
+    }
+
+    // --- approvals: honesty about review vs. bypass ----------------------
+
+    #[test]
+    fn each_adapter_declares_the_approval_mode_its_binary_documents() {
+        // Exact, not a proxy. An earlier version of this test asserted only
+        // that an `automatic_review` evidence string avoided the words "yolo",
+        // "dangerously" and "bypass" — and a mutation walked straight through
+        // it, recording OpenCode's blanket `--auto` as automatic review with
+        // evidence reading "auto-approve permissions that are not explicitly
+        // denied (dangerous!)". "dangerous!" is not "dangerously", so the
+        // substring check passed and the wrong claim stood.
+        //
+        // The property worth holding is not how a declaration is *worded*, it
+        // is *which mode each harness actually has*. Three do; four do not,
+        // and one of those four could not be read at all. Pinning the table
+        // makes both halves unfoolable.
+        let table: Vec<(IntegrationId, Option<&'static str>)> = all()
+            .map(|adapter| {
+                (
+                    adapter.id(),
+                    adapter
+                        .describe()
+                        .approvals
+                        .automatic_review
+                        .value()
+                        .copied(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            table,
+            vec![
+                (IntegrationId::ClaudeCode, Some("auto-mode")),
+                (IntegrationId::Codex, Some("--approve-for-me")),
+                (IntegrationId::Antigravity, None),
+                (IntegrationId::OpenCode, None),
+                (IntegrationId::Cursor, Some("--auto-review")),
+                (IntegrationId::Pi, None),
+                (IntegrationId::Hermes, None),
+            ],
+            "an adapter's automatic-review declaration changed; if a harness \
+             really gained or lost one, read it from the binary and update this \
+             table with the evidence"
+        );
+    }
+
+    #[test]
+    fn three_harnesses_declare_automatic_review() {
+        // Pinned so a future adapter cannot quietly claim parity with a
+        // harness's real automatic-review mode without evidence.
+        let declaring: Vec<IntegrationId> = all()
+            .filter(|adapter| adapter.describe().approvals.has_automatic_review())
+            .map(|adapter| adapter.id())
+            .collect();
+        assert_eq!(
+            declaring,
+            vec![
+                IntegrationId::ClaudeCode,
+                IntegrationId::Codex,
+                IntegrationId::Cursor,
+            ]
+        );
     }
 
     #[test]
