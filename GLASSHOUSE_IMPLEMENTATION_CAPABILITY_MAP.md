@@ -481,19 +481,19 @@ Fixed architectural requirements
 ☑ Start the local gateway only when at least one active launch profile requires it.
 ☑ Use an ephemeral local port by default so multiple Glasshouse instances can coexist.
 ☑ Generate an ephemeral per-instance gateway authentication token for child harnesses.
-☐ Never expose provider API keys to a child harness when the local gateway can hold the credential itself.
-☐ Keep provider credentials inside the Glasshouse process or secure secret-store boundary.
-☐ Expose an Anthropic Messages-compatible ingress for gateway-backed Claude Code profiles when implemented.
+☑ Never expose provider API keys to a child harness when the local gateway can hold the credential itself.
+☑ Keep provider credentials inside the Glasshouse process or secure secret-store boundary.
+☑ Expose an Anthropic Messages-compatible ingress for gateway-backed Claude Code profiles when implemented.
 ☐ Expose an OpenAI Responses-compatible ingress for gateway-backed Codex profiles when implemented.
 ☐ Expose an OpenAI Chat-compatible ingress for compatible disposable jobs and harnesses when implemented.
-☐ Require every interactive gateway ingress to be consumed through a compatible installed harness launch profile.
-☐ Preserve streaming end-to-end through the gateway.
-☐ Preserve tool-call payloads without lossy rewriting when the backend speaks the same protocol.
-☐ Preserve provider error information in structured Glasshouse diagnostics while returning a compatible error to the harness.
-☐ Keep the first gateway implementation protocol pass-through wherever possible.
-☐ Do not implement broad cross-protocol request translation until concrete harness/provider pairs require it.
+☑ Require every interactive gateway ingress to be consumed through a compatible installed harness launch profile.
+☑ Preserve streaming end-to-end through the gateway.
+☑ Preserve tool-call payloads without lossy rewriting when the backend speaks the same protocol.
+☑ Preserve provider error information in structured Glasshouse diagnostics while returning a compatible error to the harness.
+☑ Keep the first gateway implementation protocol pass-through wherever possible.
+☑ Do not implement broad cross-protocol request translation until concrete harness/provider pairs require it.
 ☑ Shut down the local gateway when the owning Glasshouse instance exits and no detached sessions depend on it.
-☐ Make gateway logs opt-in and redact prompt bodies and secrets by default.
+☑ Make gateway logs opt-in and redact prompt bodies and secrets by default.
 
 Phase 9H — Sticky gateway routing for harness-backed interactive sessions
 

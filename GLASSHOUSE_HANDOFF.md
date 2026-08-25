@@ -4,10 +4,11 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 9 is five of seven; 2C fifteen of nineteen; 9G seven of nineteen;
+**Phase 9G is seventeen of nineteen; Phase 9 five of seven; 2C fifteen of
+nineteen;
 9F eleven of thirteen; 9D eleven of fourteen; 9A nineteen of twenty-six;
 9E eight of thirteen; 9C eleven of twelve; 9B eight of nine.
-193 -> 224 checked boxes (17%).**
+193 -> 234 checked boxes (18%).**
 
 **One thing needs the user.** A real conversation identifier of theirs is
 committed in git history (one identifier, one commit, working tree already
@@ -39,6 +40,46 @@ session came up and showed Codex's own trust prompt — and the end-to-end PTY
 test asserts the exact argv.
 
 ## Verified completed work
+
+### This session — a gateway that holds the key, so the harness never has to
+
+Ten Phase 9G lines. A Claude Code session launched under a gateway-backed
+profile now gets `ANTHROPIC_AUTH_TOKEN` = **the gateway's own per-instance
+token**, never the provider key. The gateway checks that token and attaches the
+real credential itself, resolved through `SecretStore` and never leaving the
+process. A request with the wrong bearer is refused **before any upstream
+connection is opened** — and the test asserts that on the fixture's *connection
+count*, not on the status code.
+
+Still no async runtime: blocking threads, one per connection, with `ureq` for
+the outbound hop because its body is an incremental `Read`. +26 lock packages,
+the unavoidable price of TLS.
+
+**The survived mutation was the most useful result.** Removing
+`set_nonblocking(false)` from an accepted socket broke nothing — every test
+wrote its request before the gateway accepted, so the bytes were already
+buffered. A real harness connects first and writes after. A new test pauses past
+one accept poll before writing, and the mutation then fails.
+
+**Two real defects, found by building rather than reasoning.** The test fixture
+had the very platform bug the production code documents, and it looked exactly
+like a flaky network test. And Nagle's algorithm was stalling every streamed
+event, because the response head was written field by field with `TCP_NODELAY`
+off — a latency defect in precisely the property the streaming line promises.
+
+**`redact` is not enough, and a test written to prove the seam caught it.** It
+removes credential-shaped runs and says nothing about the text around them; a
+captured line had the credential redacted and a planted prompt body verbatim.
+Transport details are now one of eight `&'static str` phrases written in that
+file, so a leak is not something to be careful about — it is something the
+function cannot express.
+
+**A caching trap that could have poisoned every mutation verdict.** A
+subcontractor pointed `CARGO_TARGET_DIR` at the repo's shared `target/` and
+cargo served a cached test binary built from mutated source. It caught this
+itself; the lead then reproduced it deliberately, found that restoring a file
+with `mv` puts back the original mtime, made its runner `touch` every source,
+deleted `target/` and re-derived every number from a clean build. Practice §16.
 
 ### This session — an identifier read from an index, without opening a single conversation
 

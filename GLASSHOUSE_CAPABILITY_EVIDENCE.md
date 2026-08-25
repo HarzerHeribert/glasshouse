@@ -49,6 +49,123 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 9G — the Anthropic Messages ingress, and a credential the child never sees (ten lines)
+
+Contract: Given a Claude Code session launched under a gateway-backed profile,
+when the harness sends an Anthropic Messages request to the local gateway,
+Glasshouse forwards it unmodified to the configured provider **with the
+credential attached by the gateway**, streaming the response back
+byte-for-byte — while preserving: the child process never receives the provider
+credential; request and response bodies are never rewritten or logged; and a
+provider error reaches the harness intact while its detail reaches diagnostics
+with no foreign text at all.
+
+State: **COMPLETE** for ten lines. Phase 9G is seventeen of nineteen.
+
+#### Architecture, and why there is still no async runtime
+
+Blocking threads, one per accepted connection. Glasshouse has no async runtime,
+and adding one for a single-user loopback proxy would touch every module for a
+capability that does not need it. Outbound is `ureq` 3.4.0 with
+`default-features = false, features = ["rustls"]`; `Body::into_reader()` gives
+an incremental `Read`, which is what makes pass-through streaming possible
+without an executor. **+26 lock packages** (249 → 275), the unavoidable cost of
+a TLS client.
+
+#### The credential boundary — lines 2 and 3, and the point of the phase
+
+The child harness is given `ANTHROPIC_AUTH_TOKEN` = **the gateway's own
+per-instance token**, never the provider key. The gateway checks that token and
+attaches the real credential itself, resolved through `SecretStore` and never
+leaving the process. A request whose bearer is not this instance's is refused
+**401 before any upstream connection is opened** — asserted on the fixture's
+*connection count*, not on the status code, so "refused" means "nothing was
+opened".
+
+#### Mutations — 24 by the lead, 2 re-run independently by the orchestrator
+
+23 caught immediately. The orchestrator re-ran the two highest-stakes against
+the integrated tree: making the token comparison accept everything **failed four
+tests** including the opens-nothing-upstream one; buffering the body before
+writing **failed** `a_streamed_response_reaches_the_client_before_the_upstream_has_finished`.
+The orchestrator additionally ran the gateway suite **20 more times: 0
+failures**, on top of the lead's 40.
+
+**The one that survived is the most useful result here.** Removing
+`set_nonblocking(false)` from an accepted socket broke nothing, because every
+test wrote its request *before* the gateway accepted, so the bytes were already
+buffered. A real harness connects first and writes afterwards. A new test,
+`a_client_that_connects_before_it_writes_is_still_served`, pauses past one
+accept poll before writing; the mutation then fails with an empty response.
+
+#### Two real defects found while building
+
+- **The test fixture had the platform bug the production code documents** — a
+  non-blocking listener whose accepted sockets inherit the flag on macOS. It
+  reproduced twice in fifteen suite runs and looked exactly like a flaky network
+  test.
+- **Nagle's algorithm was stalling every streamed event.** The client socket had
+  `TCP_NODELAY` off and the response head was written field by field, so a dozen
+  tiny segments each waited on a delayed acknowledgement. That is a latency
+  defect in precisely the property line 4 promises. Now `set_nodelay(true)`,
+  with the head and each chunk written once.
+
+#### `redact` is not enough for foreign text, and now nothing foreign is kept
+
+The packet said to run foreign text through `crate::secret::redact` before it
+reaches a diagnostic. **That is insufficient** and a test written to prove the
+seam caught it: `redact` removes credential-*shaped* runs and says nothing about
+the text around them. A captured log line read
+`detail=Some("connect failed for Bearer [redacted] carrying PLANTED-PROMPT-BODY-DO-NOT-LOG")`
+— credential gone, prompt body verbatim.
+
+`transport_detail` now maps `ureq::Error`'s variant to one of eight phrases
+written in that file and returns `&'static str`. A leak is no longer something
+to be careful about; it is something the function **cannot express**. A source
+scan refuses an owned `String` on `Outcome`, and a mutation proves it fires.
+
+#### Six packet corrections, two of which are the orchestrator's to confirm
+
+- **§6 contradicted §2, and §2 won.** §6 asked for a provider error's
+  `error.type`/`error.message` in diagnostics; §2 forbids parsing the body and
+  makes it a stop condition. Extracting either field *is* parsing. The
+  diagnostic records status, provider and upstream host; the body goes to the
+  harness, which is what needed to read it.
+- **"Rewrite exactly three things" needed a fourth category.** A proxy
+  terminates one connection and opens another, so connection framing cannot
+  survive: `content-length` is re-stated, `transfer-encoding` re-applied, and
+  RFC 9110 §7.6.1 hop-by-hop headers are not forwarded. Forwarding them is a
+  defect, not fidelity — a mutation shows the upstream dying on two
+  `content-length` headers. "Byte-for-byte" remains exactly true of the method,
+  the target, every end-to-end header and every body byte.
+- **`GlasshouseGateway` names no provider.** `profile::gateway_upstream` takes
+  the single configured provider serving the ingress protocol and **refuses on
+  zero or several, naming the candidates** — because choosing a backend per
+  session is Phase 9H's sticky routing, not a launch profile's decision.
+  **Orchestrator confirms this**: refusing ambiguity is what `session::select`,
+  the resume resolver and `native_id` all already do.
+- **`Resolution` could not gain a `gateway` field** — `config/mod.rs` was
+  forbidden (a concurrent worker owned it) and builds two `Resolution` literals
+  in its tests. `resolve` keeps its signature and delegates to
+  `resolve_with_gateway`. **Follow-up:** fold the field in once `config/mod.rs`
+  is free; it is a two-line change to those literals.
+- **Constant-time comparison is hand-rolled and says so.** Safe Rust cannot
+  promise constant time; `subtle` is in the lock transitively via `rustls` but
+  promoting it is a new direct dependency the packet forbade. Disclosed in the
+  function's own doc rather than claimed as equivalent.
+- **A `HEAD` response now carries no body**, whatever its status says. Not in
+  the packet, not reachable from any harness in scope, but the method is
+  forwarded rather than vetted.
+
+#### An ordering change worth knowing
+
+The gateway used to start *after* `profile::resolve`. A gateway-backed profile
+now resolves into *this gateway's* address and token, so it must start first.
+Nothing binds and no credential resolves for a launch that needs no gateway —
+the upstream is a closure, and
+`no_profile_needing_a_gateway_binds_no_listener_and_resolves_no_credential`
+asserts it is never called.
+
 ### Phase 9 — the Antigravity conversation identifier, from an index rather than a walk (lines 2 and 3)
 
 Contract: Given a Glasshouse-started Antigravity session that has just ended,

@@ -45,6 +45,7 @@
 use std::ffi::OsString;
 use std::fmt;
 
+use crate::gateway::{Gateway, Upstream};
 use crate::harness::{
     ApprovalKind, ApprovalMode, CredentialPlacement, CredentialVarProblem, DirectProviderRequest,
     HarnessAdapter, WireProtocol,
@@ -53,6 +54,38 @@ use crate::integrations::IntegrationId;
 use crate::launch::HarnessLaunch;
 use crate::provider::Provider;
 use crate::secret::{SecretRef, SecretStore};
+
+/// The protocols the local gateway's ingress actually serves.
+///
+/// One entry, and the list is here rather than in [`mod@crate::gateway`]
+/// because that module is structurally forbidden from naming
+/// [`crate::harness`] — see its own header — and a protocol enum lives
+/// there. Phase 9G's map names an OpenAI Responses ingress and an OpenAI
+/// Chat ingress as separate lines; when either is built, it is added here
+/// and a Codex profile starts resolving. Until then a harness that cannot
+/// speak Anthropic Messages is refused rather than pointed at an ingress
+/// that would not understand it.
+pub const GATEWAY_INGRESS_PROTOCOLS: &[WireProtocol] = &[WireProtocol::AnthropicMessages];
+
+/// The name the gateway presents itself to an adapter under.
+///
+/// Letters, digits and `-` only, so it survives
+/// [`crate::harness::unsafe_provider_name_char`] — an adapter may
+/// interpolate it into a command line, and Codex puts it in a dotted TOML
+/// path. It is the same string [`BackendResource::slug`] already uses, so a
+/// session record and a launch mechanism name the same thing.
+const GATEWAY_PROVIDER_NAME: &str = "glasshouse-gateway";
+
+/// The variable name a gateway-backed launch associates its token with.
+///
+/// [`DirectProviderRequest::credential_var`] serves two purposes at once in
+/// the adapters that read it: Claude Code uses it only as "there is a
+/// credential, put it in my own fixed variable", while Codex writes it out
+/// as the `env_key` the child will read. This name is therefore a
+/// *destination*, and it is a real one for either adapter — it is not the
+/// name of a variable anything reads a value **from**, because the gateway
+/// token is minted in memory and has no source variable at all.
+const GATEWAY_TOKEN_VAR: &str = "GLASSHOUSE_GATEWAY_TOKEN";
 
 /// The profile every harness has before any configuration ever names one.
 pub const NATIVE_PROFILE_NAME: &str = "native";
@@ -244,14 +277,35 @@ impl fmt::Debug for LaunchOverlay {
 #[derive(Debug, thiserror::Error)]
 pub enum Refusal {
     #[error(
-        "launch profile `{profile}` for {} needs {backend}, and the local Glasshouse gateway \
-         is Phase 9G",
+        "launch profile `{profile}` for {} is backed by the local Glasshouse gateway, but no \
+         gateway is running for this launch",
         .harness.display_name(),
     )]
-    BackendUnavailable {
+    GatewayNotRunning {
         profile: String,
         harness: IntegrationId,
-        backend: &'static str,
+    },
+
+    #[error(
+        "launch profile `{profile}` is backed by the local Glasshouse gateway, whose ingress \
+         speaks {protocol}, but {} cannot be pointed at that protocol",
+        .harness.display_name(),
+    )]
+    GatewayProtocolUnserved {
+        profile: String,
+        harness: IntegrationId,
+        protocol: WireProtocol,
+    },
+
+    #[error(
+        "launch profile `{profile}` is backed by the local Glasshouse gateway, but {} declares \
+         nowhere to put the gateway's own token; the session would reach the gateway \
+         unauthenticated and be refused by it",
+        .harness.display_name(),
+    )]
+    GatewayTokenUnplaceable {
+        profile: String,
+        harness: IntegrationId,
     },
 
     #[error(
@@ -480,17 +534,44 @@ pub struct Resolution<'a> {
 ///
 /// [`BackendResource::Native`] behaviour does not change by one byte.
 pub fn resolve(profile: &LaunchProfile, cx: &Resolution<'_>) -> Result<LaunchOverlay, Refusal> {
-    let adapter = cx.adapter;
+    resolve_with_gateway(profile, cx, None)
+}
 
-    // The Glasshouse gateway is Phase 9G. It refuses here exactly as it
-    // always has: naming what was asked for, and starting nothing.
-    if matches!(profile.backend, BackendResource::GlasshouseGateway) {
-        return Err(Refusal::BackendUnavailable {
-            profile: profile.name.clone(),
-            harness: profile.harness,
-            backend: profile.backend.kind_description(),
-        });
-    }
+/// [`resolve`], for a caller that has a running local gateway to offer.
+///
+/// # Why this is a second entry point rather than a field on [`Resolution`]
+///
+/// A gateway is not a property of the profile or of the adapter: it is a
+/// *process* the caller started, and only a caller that decided to start one
+/// has anything to pass. Callers that never can — the configuration tests
+/// that resolve a Native profile to check a lookup — keep the argument-free
+/// [`resolve`] and are unaffected.
+///
+/// `None` here is not "no gateway configured"; it is "this call site has no
+/// gateway to give". A gateway-backed profile therefore refuses with
+/// [`Refusal::GatewayNotRunning`], which is the honest thing to say, rather
+/// than being silently resolved against something else.
+///
+/// # What a gateway-backed profile resolves into
+///
+/// Exactly what a direct-provider profile resolves into, through the same
+/// adapter method, with two substitutions: the base URL is the gateway's own
+/// loopback address, and the credential written into the child is the
+/// **gateway's token** rather than any provider key. That is line 2 of Phase
+/// 9G in one sentence — the provider credential stays in this process, held
+/// by the gateway, and the child is given something that is worthless
+/// anywhere else.
+///
+/// Reusing [`HarnessAdapter::direct_provider_launch`] is deliberate. The
+/// variables Claude Code reads are the harness's own declared knowledge, and
+/// naming `ANTHROPIC_BASE_URL` here instead would put that knowledge in a
+/// second place, where the two copies could disagree.
+pub fn resolve_with_gateway(
+    profile: &LaunchProfile,
+    cx: &Resolution<'_>,
+    gateway: Option<&Gateway>,
+) -> Result<LaunchOverlay, Refusal> {
+    let adapter = cx.adapter;
 
     if profile.model.is_some() {
         let can_override_model = adapter.describe().backends.model_override.value().is_some();
@@ -526,8 +607,20 @@ pub fn resolve(profile: &LaunchProfile, cx: &Resolution<'_>) -> Result<LaunchOve
 
     let mut overlay = LaunchOverlay::empty();
 
-    if let BackendResource::DirectProvider { provider } = &profile.backend {
-        apply_direct_provider(profile, provider, cx, &mut overlay)?;
+    match &profile.backend {
+        BackendResource::DirectProvider { provider } => {
+            apply_direct_provider(profile, provider, cx, &mut overlay)?;
+        }
+        BackendResource::GlasshouseGateway => {
+            let Some(gateway) = gateway else {
+                return Err(Refusal::GatewayNotRunning {
+                    profile: profile.name.clone(),
+                    harness: profile.harness,
+                });
+            };
+            apply_gateway(profile, gateway, adapter, &mut overlay)?;
+        }
+        BackendResource::Native => {}
     }
 
     // An automatic-review mode is not necessarily served by whatever the
@@ -601,6 +694,224 @@ pub fn resolve(profile: &LaunchProfile, cx: &Resolution<'_>) -> Result<LaunchOve
     }
 
     Ok(overlay)
+}
+
+/// Point one child process at the local gateway, or refuse.
+///
+/// The three things that make this different from a direct provider, and
+/// nothing else is:
+///
+/// 1. the base URL is the gateway's own loopback address rather than a
+///    provider's;
+/// 2. the credential written into the child is the gateway's token, which is
+///    already in memory, so **no [`crate::secret::Secret`] is resolved here
+///    at all** — the provider's key was resolved once, at gateway start, and
+///    lives in the gateway;
+/// 3. no provider headers are forwarded, because the child is not talking to
+///    a provider. A provider's own extra headers are the gateway's business
+///    on the hop the gateway makes.
+///
+/// Everything else — the arguments, the environment, the credential's
+/// destination variable — comes from the adapter's own declaration, so a
+/// harness that changes how it is pointed at a backend changes it in one
+/// place.
+fn apply_gateway(
+    profile: &LaunchProfile,
+    gateway: &Gateway,
+    adapter: &dyn HarnessAdapter,
+    overlay: &mut LaunchOverlay,
+) -> Result<(), Refusal> {
+    let harness_protocols: &[WireProtocol] = adapter
+        .describe()
+        .backends
+        .protocols
+        .value()
+        .copied()
+        .unwrap_or(&[]);
+
+    // An explicit ask is a constraint, never a hint — the same rule
+    // `choose_protocol` applies to a direct provider. A profile expecting a
+    // protocol the ingress does not serve is refused rather than quietly
+    // given the one that exists.
+    let protocol = match profile.expected_protocol {
+        Some(expected) => GATEWAY_INGRESS_PROTOCOLS
+            .contains(&expected)
+            .then_some(expected),
+        None => harness_protocols
+            .iter()
+            .copied()
+            .find(|protocol| GATEWAY_INGRESS_PROTOCOLS.contains(protocol)),
+    };
+    let Some(protocol) = protocol.filter(|protocol| harness_protocols.contains(protocol)) else {
+        return Err(Refusal::GatewayProtocolUnserved {
+            profile: profile.name.clone(),
+            harness: profile.harness,
+            // What the ingress serves, for a message that names the mismatch
+            // from the side the user cannot change.
+            protocol: GATEWAY_INGRESS_PROTOCOLS[0],
+        });
+    };
+
+    let base_url = gateway.base_url();
+    let request = DirectProviderRequest {
+        provider_name: GATEWAY_PROVIDER_NAME,
+        protocol,
+        base_url: &base_url,
+        model: profile.model.as_deref(),
+        credential_var: Some(GATEWAY_TOKEN_VAR),
+        headers: &[],
+    };
+
+    let Some(plan) = adapter.direct_provider_launch(&request) else {
+        return Err(Refusal::NoDirectProviderMechanism {
+            profile: profile.name.clone(),
+            harness: profile.harness,
+            provider: GATEWAY_PROVIDER_NAME.to_owned(),
+            protocol,
+        });
+    };
+
+    let Some(CredentialPlacement::Environment(destination)) = plan.credential else {
+        return Err(Refusal::GatewayTokenUnplaceable {
+            profile: profile.name.clone(),
+            harness: profile.harness,
+        });
+    };
+
+    overlay.args.extend(plan.args);
+    overlay.env.extend(plan.env);
+    // The gateway's token, not a provider key. This is the only value that
+    // reaches the child, and it authenticates against exactly one loopback
+    // listener owned by exactly one Glasshouse instance.
+    overlay.env.push((
+        OsString::from(destination),
+        OsString::from(gateway.token().expose()),
+    ));
+
+    // The loopback address and the adapter's own variable names. Not the
+    // token, and not the provider's credential — neither of which any
+    // mechanism note has ever carried.
+    overlay.mechanisms.push(MechanismNote {
+        category: "glasshouse gateway",
+        detail: format!("{base_url} over {protocol} — {}", plan.mechanism),
+    });
+
+    Ok(())
+}
+
+/// Which configured provider the local gateway forwards to, with its
+/// credential resolved.
+///
+/// # Why this refuses to choose
+///
+/// [`BackendResource::GlasshouseGateway`] names no provider — it cannot,
+/// because which backend a gateway-backed session runs against is Phase 9H's
+/// *sticky routing* decision and belongs to the session, not to the profile.
+/// This phase therefore does the only thing that invents nothing: it takes
+/// the single configured provider that serves the ingress protocol, and
+/// refuses when there is no such provider or more than one. A gateway that
+/// picked the alphabetically first of three routers would be making exactly
+/// the routing decision the map defers.
+///
+/// The credential is resolved here, once, at start, and moved into the
+/// [`Upstream`]. That is the second place in Glasshouse where a
+/// [`crate::secret::Secret`] exists — the first being [`resolve`]'s
+/// direct-provider path — and unlike that one it does not end at a child
+/// process: it stays in this process for the gateway's lifetime, which is
+/// the entire point of holding it here instead.
+pub fn gateway_upstream(
+    providers: &[Provider],
+    secrets: &dyn SecretStore,
+) -> Result<Upstream, GatewayUpstreamRefusal> {
+    let protocol = GATEWAY_INGRESS_PROTOCOLS[0];
+    let candidates: Vec<&Provider> = providers
+        .iter()
+        .filter(|provider| {
+            provider
+                .serves(protocol)
+                .is_some_and(|support| !support.base_url.is_empty())
+        })
+        .collect();
+
+    let provider = match candidates.as_slice() {
+        [] => {
+            return Err(GatewayUpstreamRefusal::NoProviderServesTheIngress { protocol });
+        }
+        [only] => *only,
+        several => {
+            return Err(GatewayUpstreamRefusal::SeveralProvidersServeTheIngress {
+                protocol,
+                candidates: several.iter().map(|p| p.name.clone()).collect(),
+            });
+        }
+    };
+
+    let support = provider
+        .serves(protocol)
+        .expect("the provider was selected because it serves this protocol");
+
+    // A provider declaring several credential variables is a pool, and
+    // choosing between them on cost or quota is a routing decision this
+    // phase does not make: take the first that currently resolves, exactly
+    // as `apply_direct_provider` does.
+    let credential = provider
+        .credential_env
+        .iter()
+        .find_map(|var| secrets.resolve(&SecretRef::Environment { var: var.clone() }))
+        .ok_or_else(|| GatewayUpstreamRefusal::CredentialUnavailable {
+            provider: provider.name.clone(),
+            variables: provider.credential_env.clone(),
+        })?;
+
+    Ok(Upstream::new(
+        provider.name.clone(),
+        &support.base_url,
+        credential,
+    )?)
+}
+
+/// Why the local gateway could not be given an upstream to forward to.
+///
+/// Separate from [`Refusal`] because it is answered before any profile is
+/// resolved against any adapter: there is no harness in the question yet,
+/// and a refusal that had to invent one would be naming something it did not
+/// check. Every variant carries names only.
+#[derive(Debug, thiserror::Error)]
+pub enum GatewayUpstreamRefusal {
+    #[error(
+        "the local Glasshouse gateway forwards {protocol} requests, but no configured provider \
+         serves {protocol} with a base URL; configure one before launching a gateway-backed \
+         profile"
+    )]
+    NoProviderServesTheIngress { protocol: WireProtocol },
+
+    #[error(
+        "the local Glasshouse gateway would have to choose between {} to serve {protocol}, and \
+         choosing a backend per session is sticky routing rather than something a launch \
+         profile decides; configure exactly one provider for {protocol}",
+        .candidates.join(", "),
+    )]
+    SeveralProvidersServeTheIngress {
+        protocol: WireProtocol,
+        /// Provider *names*, so the message can say which entries collided.
+        candidates: Vec<String>,
+    },
+
+    #[error(
+        "the local Glasshouse gateway needs the credential for the provider `{provider}`, but \
+         the environment variable it names ({}) has no value; set it and try again. \
+         Glasshouse will not start a harness against its own native account instead",
+        .variables.join(" and "),
+    )]
+    CredentialUnavailable {
+        provider: String,
+        /// The environment variable **names** the provider declares. Never a
+        /// value — this refusal is printed precisely when there is none.
+        variables: Vec<String>,
+    },
+
+    #[error(transparent)]
+    Unusable(#[from] crate::gateway::UpstreamError),
 }
 
 /// Point one child process at `provider_name`, or refuse.
@@ -1111,25 +1422,285 @@ mod tests {
         assert!(matches!(err, Refusal::BypassNotAcknowledged { .. }));
     }
 
-    // --- 5. the gateway backend names the phase that supplies it ---------
+    // --- 5. the gateway backend, and what it resolves into ---------------
 
+    /// The gateway is a *process a caller started*, so a call site with none
+    /// to offer cannot resolve a profile that needs one. It refuses by
+    /// saying exactly that, and starts nothing.
+    ///
+    /// This is also what keeps [`resolve`]'s one-argument form honest: it
+    /// forwards `None`, so every existing caller behaves as it always did.
     #[test]
-    fn a_gateway_backed_profile_is_refused_with_the_phase_that_supplies_it() {
+    fn a_gateway_backed_profile_is_refused_when_no_gateway_is_running() {
         let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
         let mut profile = profile_for(IntegrationId::ClaudeCode);
         profile.backend = BackendResource::GlasshouseGateway;
 
         let err = resolve(&profile, &native_cx(adapter, false, &FakeSecrets::empty()))
-            .expect_err("the local gateway is Phase 9G");
+            .expect_err("no gateway was supplied");
         match &err {
-            Refusal::BackendUnavailable { harness, .. } => {
+            Refusal::GatewayNotRunning { harness, .. } => {
                 assert_eq!(*harness, IntegrationId::ClaudeCode);
             }
-            other => panic!("expected BackendUnavailable, got {other:?}"),
+            other => panic!("expected GatewayNotRunning, got {other:?}"),
         }
         let message = err.to_string();
-        assert!(message.contains("9G"), "{message}");
         assert!(message.contains("Claude Code"), "{message}");
+        assert!(message.contains("gateway"), "{message}");
+    }
+
+    /// A running gateway, for the tests below. Its upstream never has to
+    /// answer: resolution reads the gateway's address and token and opens no
+    /// connection at all.
+    fn running_gateway() -> crate::gateway::Gateway {
+        let profiles = [{
+            let mut profile = profile_for(IntegrationId::ClaudeCode);
+            profile.backend = BackendResource::GlasshouseGateway;
+            profile
+        }];
+        crate::gateway::start_if_required(&profiles, || {
+            Ok(Upstream::new(
+                "fixture".to_owned(),
+                "https://provider.example/api",
+                crate::secret::Secret::mint_for_test(PLANTED_CREDENTIAL),
+            )?)
+        })
+        .expect("loopback is bindable")
+        .expect("a gateway-backed profile asks for a gateway")
+    }
+
+    /// Phase 9G's line 1 for Claude Code, end to end at the resolution
+    /// layer: a gateway-backed profile **resolves**, and the child is
+    /// pointed at the local gateway with the gateway's own token.
+    ///
+    /// The two environment variables are asserted by name and by value
+    /// because both are the capability. `ANTHROPIC_BASE_URL` pointing
+    /// anywhere but this gateway would send the user's prompts somewhere
+    /// nobody chose; `ANTHROPIC_AUTH_TOKEN` holding anything but the
+    /// gateway's token would either fail authentication or — much worse —
+    /// be the provider key this whole phase exists to keep out of the child.
+    #[test]
+    fn a_gateway_backed_claude_code_profile_resolves_into_the_local_gateway() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let gateway = running_gateway();
+        let mut profile = profile_for(IntegrationId::ClaudeCode);
+        profile.backend = BackendResource::GlasshouseGateway;
+
+        let overlay = resolve_with_gateway(
+            &profile,
+            &native_cx(adapter, false, &FakeSecrets::empty()),
+            Some(&gateway),
+        )
+        .expect("a gateway-backed Claude Code profile resolves once a gateway is running");
+
+        let env: Vec<(String, String)> = overlay
+            .env()
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+
+        assert!(
+            env.contains(&(
+                "ANTHROPIC_BASE_URL".to_owned(),
+                format!("http://{}", gateway.address())
+            )),
+            "the child was not pointed at this gateway: {env:?}"
+        );
+        assert!(
+            env.contains(&(
+                "ANTHROPIC_AUTH_TOKEN".to_owned(),
+                gateway.token().expose().to_owned()
+            )),
+            "the child was not given this gateway's own token"
+        );
+        // ... and nothing resembling a provider credential went with it.
+        assert!(
+            !env.iter()
+                .any(|(_, value)| value.contains(PLANTED_CREDENTIAL)),
+            "a provider credential reached the child of a gateway-backed profile"
+        );
+
+        let mechanisms = overlay
+            .mechanisms()
+            .iter()
+            .map(|note| format!("{}: {}", note.category, note.detail))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(mechanisms.contains("glasshouse gateway"), "{mechanisms}");
+        assert!(
+            !mechanisms.contains(gateway.token().expose()),
+            "a mechanism note carried the gateway token"
+        );
+    }
+
+    /// The ingress speaks one protocol, and a harness that cannot be pointed
+    /// at it is refused rather than pointed at it anyway. Codex declares
+    /// `openai-responses`; there is no Responses ingress in this phase, and
+    /// the map lists it as a separate line.
+    #[test]
+    fn a_harness_that_cannot_speak_the_ingress_protocol_is_refused() {
+        let adapter = adapter_for(IntegrationId::Codex).expect("a harness");
+        let gateway = running_gateway();
+        let mut profile = profile_for(IntegrationId::Codex);
+        profile.backend = BackendResource::GlasshouseGateway;
+
+        let err = resolve_with_gateway(
+            &profile,
+            &native_cx(adapter, false, &FakeSecrets::empty()),
+            Some(&gateway),
+        )
+        .expect_err("there is no OpenAI Responses ingress in this phase");
+        assert!(
+            matches!(err, Refusal::GatewayProtocolUnserved { .. }),
+            "{err:?}"
+        );
+    }
+
+    /// A profile that explicitly expects a protocol the ingress does not
+    /// serve is refused too. An explicit ask is a constraint, never a hint —
+    /// the same rule the direct-provider path applies.
+    #[test]
+    fn a_gateway_profile_expecting_another_protocol_is_refused() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let gateway = running_gateway();
+        let mut profile = profile_for(IntegrationId::ClaudeCode);
+        profile.backend = BackendResource::GlasshouseGateway;
+        profile.expected_protocol = Some(WireProtocol::OpenAiChat);
+
+        let err = resolve_with_gateway(
+            &profile,
+            &native_cx(adapter, false, &FakeSecrets::empty()),
+            Some(&gateway),
+        )
+        .expect_err("Claude Code cannot be pointed at openai-chat at all");
+        // Refused by the generic protocol check before the gateway arm is
+        // reached — which is the right layer for it, and is asserted so that
+        // moving the check does not silently change the message.
+        assert!(matches!(err, Refusal::ProtocolMismatch { .. }), "{err:?}");
+    }
+
+    /// Which provider a gateway forwards to is a routing decision, and this
+    /// phase makes exactly one of them: the single configured provider that
+    /// serves the ingress protocol. Zero and several are both refusals that
+    /// name what was found.
+    #[test]
+    fn the_gateway_upstream_is_the_one_provider_that_serves_the_ingress() {
+        let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
+
+        let mut anthropic = provider_serving(
+            "openrouter",
+            WireProtocol::AnthropicMessages,
+            "https://openrouter.ai/api",
+        );
+        anthropic.credential_env = vec![CREDENTIAL_VAR.to_owned()];
+
+        let upstream = gateway_upstream(std::slice::from_ref(&anthropic), &secrets)
+            .expect("exactly one provider serves the ingress");
+        let rendered = format!("{upstream:?}");
+        assert!(rendered.contains("openrouter"), "{rendered}");
+        assert!(
+            !rendered.contains(PLANTED_CREDENTIAL),
+            "the upstream's own rendering carried the credential it holds"
+        );
+
+        // Nothing serving the ingress at all.
+        let chat_only = provider_serving("chat", WireProtocol::OpenAiChat, "https://a.example/v1");
+        assert!(matches!(
+            gateway_upstream(std::slice::from_ref(&chat_only), &secrets),
+            Err(GatewayUpstreamRefusal::NoProviderServesTheIngress { .. })
+        ));
+        assert!(matches!(
+            gateway_upstream(&[], &secrets),
+            Err(GatewayUpstreamRefusal::NoProviderServesTheIngress { .. })
+        ));
+
+        // A provider that serves it but declares no base URL is not a
+        // candidate: launching against `""` must never happen, which is the
+        // same rule `apply_direct_provider` already applies.
+        let mut no_url = provider_serving("no-url", WireProtocol::AnthropicMessages, "");
+        no_url.credential_env = vec![CREDENTIAL_VAR.to_owned()];
+        assert!(matches!(
+            gateway_upstream(&[no_url], &secrets),
+            Err(GatewayUpstreamRefusal::NoProviderServesTheIngress { .. })
+        ));
+
+        // Several, which is a refusal rather than a pick.
+        let mut second = provider_serving(
+            "another-router",
+            WireProtocol::AnthropicMessages,
+            "https://another.example/api",
+        );
+        second.credential_env = vec![CREDENTIAL_VAR.to_owned()];
+        match gateway_upstream(&[anthropic.clone(), second], &secrets) {
+            Err(GatewayUpstreamRefusal::SeveralProvidersServeTheIngress { candidates, .. }) => {
+                assert_eq!(candidates, vec!["openrouter", "another-router"]);
+            }
+            other => panic!("expected a refusal naming both candidates, got {other:?}"),
+        }
+
+        // And a provider whose credential variable holds nothing is refused
+        // rather than launched without one — the gateway would otherwise
+        // forward requests with an empty bearer token and the user would see
+        // the provider's own 401.
+        match gateway_upstream(&[anthropic], &FakeSecrets::empty()) {
+            Err(GatewayUpstreamRefusal::CredentialUnavailable { variables, .. }) => {
+                assert_eq!(variables, vec![CREDENTIAL_VAR.to_owned()]);
+            }
+            other => panic!("expected CredentialUnavailable, got {other:?}"),
+        }
+    }
+
+    /// Every rendering of a gateway upstream refusal, checked against a
+    /// planted value. These are printed on a launch path, which is exactly
+    /// where a credential would be seen.
+    #[test]
+    fn no_gateway_upstream_refusal_carries_a_credential() {
+        let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
+        let mut anthropic = provider_serving(
+            "openrouter",
+            WireProtocol::AnthropicMessages,
+            "https://openrouter.ai/api",
+        );
+        anthropic.credential_env = vec![CREDENTIAL_VAR.to_owned()];
+        let mut second = provider_serving(
+            "another-router",
+            WireProtocol::AnthropicMessages,
+            "https://another.example/api",
+        );
+        second.credential_env = vec![CREDENTIAL_VAR.to_owned()];
+        let mut unusable = provider_serving(
+            "unusable",
+            WireProtocol::AnthropicMessages,
+            "not-an-absolute-url",
+        );
+        unusable.credential_env = vec![CREDENTIAL_VAR.to_owned()];
+
+        let refusals = vec![
+            gateway_upstream(&[], &secrets).unwrap_err(),
+            gateway_upstream(&[anthropic.clone(), second], &secrets).unwrap_err(),
+            gateway_upstream(&[anthropic], &FakeSecrets::empty()).unwrap_err(),
+            gateway_upstream(&[unusable], &secrets).unwrap_err(),
+        ];
+
+        let mut seen = std::collections::BTreeSet::new();
+        for refusal in &refusals {
+            let display = refusal.to_string();
+            let debug = format!("{refusal:?}");
+            assert!(!display.contains(PLANTED_CREDENTIAL), "{display}");
+            assert!(!debug.contains(PLANTED_CREDENTIAL), "{debug}");
+            seen.insert(match refusal {
+                GatewayUpstreamRefusal::NoProviderServesTheIngress { .. } => "none",
+                GatewayUpstreamRefusal::SeveralProvidersServeTheIngress { .. } => "several",
+                GatewayUpstreamRefusal::CredentialUnavailable { .. } => "credential",
+                GatewayUpstreamRefusal::Unusable(_) => "unusable",
+            });
+        }
+        assert_eq!(seen.len(), 4, "every variant must be exercised: {seen:?}");
     }
 
     /// A direct-provider profile whose provider the caller could not look up
@@ -1753,6 +2324,41 @@ mod tests {
         assert!(err.to_string().contains("Pi"), "{err}");
     }
 
+    /// A harness that *can* be pointed at a backend but declares nowhere to
+    /// put the credential — the one shape that would silently launch a
+    /// gateway-backed session the gateway itself would then refuse.
+    #[derive(Debug)]
+    struct TokenUnplaceable;
+
+    impl HarnessAdapter for TokenUnplaceable {
+        fn id(&self) -> IntegrationId {
+            IntegrationId::Pi
+        }
+        fn executable_candidates(&self) -> &'static [&'static str] {
+            &["pretend"]
+        }
+        fn start(&self) -> crate::harness::Invocation {
+            crate::harness::Invocation::bare()
+        }
+        fn resume(&self, _native_session: &str) -> Option<crate::harness::Invocation> {
+            None
+        }
+        fn describe(&self) -> crate::harness::HarnessDescription {
+            NoDirectProviderMechanism.describe()
+        }
+        fn direct_provider_launch(
+            &self,
+            _request: &DirectProviderRequest<'_>,
+        ) -> Option<crate::harness::DirectProviderPlan> {
+            Some(crate::harness::DirectProviderPlan {
+                args: Vec::new(),
+                env: Vec::new(),
+                credential: None,
+                mechanism: "a test double that forgets the credential".to_owned(),
+            })
+        }
+    }
+
     /// A harness declaring a protocol it can serve, and no way at all to be
     /// pointed at a provider — the default every adapter inherits.
     #[derive(Debug)]
@@ -1911,10 +2517,25 @@ mod tests {
         bad_var.credential_env = vec!["9NOPE".to_owned()];
 
         let scenarios: Vec<(&str, Refusal)> = vec![
-            ("gateway", {
+            ("gateway not running", {
                 let mut p = profile_for(IntegrationId::ClaudeCode);
                 p.backend = BackendResource::GlasshouseGateway;
                 resolve(&p, &native_cx(claude, false, &secrets)).unwrap_err()
+            }),
+            ("gateway protocol unserved", {
+                let gateway = running_gateway();
+                let mut p = profile_for(IntegrationId::Codex);
+                p.backend = BackendResource::GlasshouseGateway;
+                resolve_with_gateway(&p, &native_cx(codex, false, &secrets), Some(&gateway))
+                    .unwrap_err()
+            }),
+            ("gateway token unplaceable", {
+                let gateway = running_gateway();
+                let double = TokenUnplaceable;
+                let mut p = profile_for(IntegrationId::Pi);
+                p.backend = BackendResource::GlasshouseGateway;
+                resolve_with_gateway(&p, &native_cx(&double, false, &secrets), Some(&gateway))
+                    .unwrap_err()
             }),
             ("unconfigured provider", {
                 let p = direct_profile(IntegrationId::ClaudeCode, "nope");
@@ -2002,7 +2623,9 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         for (_, refusal) in &scenarios {
             seen.insert(match refusal {
-                Refusal::BackendUnavailable { .. } => "BackendUnavailable",
+                Refusal::GatewayNotRunning { .. } => "GatewayNotRunning",
+                Refusal::GatewayProtocolUnserved { .. } => "GatewayProtocolUnserved",
+                Refusal::GatewayTokenUnplaceable { .. } => "GatewayTokenUnplaceable",
                 Refusal::ProviderNotConfigured { .. } => "ProviderNotConfigured",
                 Refusal::ProviderProtocolUnsupported { .. } => "ProviderProtocolUnsupported",
                 Refusal::ProviderBaseUrlMissing { .. } => "ProviderBaseUrlMissing",
@@ -2022,7 +2645,7 @@ mod tests {
         }
         assert_eq!(
             seen.len(),
-            14,
+            16,
             "every Refusal variant must be exercised here: {seen:?}"
         );
     }

@@ -199,28 +199,44 @@ fn launch_session(
         _ => None,
     };
     let secrets = glasshouse::secret::EnvironmentSecretStore::new();
+
+    // Phase 9G: whether a local gateway exists at all is decided from the
+    // active launch profiles, never from a flag — see
+    // `glasshouse::gateway::gateway_is_required`. It now has to be bound
+    // *before* the resolution below, because a gateway-backed profile
+    // resolves into this gateway's own address and token. Nothing is bound
+    // and no credential is resolved for a launch that needs no gateway: the
+    // upstream is a closure, called only after the predicate says yes.
+    // The guard lives to the end of this function, so the listener goes away
+    // with the instance on every path out.
+    let gateway =
+        match glasshouse::gateway::start_if_required(std::slice::from_ref(&launch_profile), || {
+            gateway_upstream(&effective, &secrets)
+        }) {
+            Ok(gateway) => gateway,
+            Err(err) => {
+                eprintln!("glasshouse: {err}");
+                return Ok(ExitCode::FAILURE);
+            }
+        };
+
     let resolution = glasshouse::profile::Resolution {
         adapter: selection.adapter(),
         acknowledged_bypass,
         provider: provider.as_ref(),
         secrets: &secrets,
     };
-    let overlay = match glasshouse::profile::resolve(&launch_profile, &resolution) {
+    let overlay = match glasshouse::profile::resolve_with_gateway(
+        &launch_profile,
+        &resolution,
+        gateway.as_ref(),
+    ) {
         Ok(overlay) => overlay,
         Err(refusal) => {
             eprintln!("glasshouse: {refusal}");
             return Ok(ExitCode::FAILURE);
         }
     };
-
-    // Phase 9G: whether a local gateway exists at all is decided from the
-    // active launch profiles, never from a flag — see
-    // `glasshouse::gateway::gateway_is_required`. It sits after the
-    // resolution above so that a refused launch still costs nothing, which
-    // also means it binds nothing today: `profile::resolve` still refuses a
-    // gateway-backed profile. The guard lives to the end of this function,
-    // so the listener goes away with the instance on every path out.
-    let _gateway = glasshouse::gateway::start_if_required(std::slice::from_ref(&launch_profile))?;
 
     // Record the session before the harness exists, so a session that dies
     // during startup still leaves a trace. Failing to open the project
@@ -318,6 +334,26 @@ fn launch_session(
         eprintln!("glasshouse: the harness {status}");
     }
     Ok(exit_code_for(&status))
+}
+
+/// The provider the local Glasshouse gateway forwards to, with its
+/// credential resolved.
+///
+/// The configuration lookup is the caller's job, exactly as it already is
+/// for a direct-provider profile: `glasshouse::profile` never imports
+/// `glasshouse::config`, so every configured provider is read here and
+/// handed in as a value. Which of them the gateway uses — and why more than
+/// one is a refusal rather than a choice — is
+/// `glasshouse::profile::gateway_upstream`'s decision, not this function's.
+fn gateway_upstream(
+    effective: &EffectiveConfig<'_>,
+    secrets: &dyn glasshouse::secret::SecretStore,
+) -> anyhow::Result<glasshouse::gateway::Upstream> {
+    let mut providers = Vec::new();
+    for name in effective.provider_names() {
+        providers.push(effective.configured_provider(&name)?.value);
+    }
+    Ok(glasshouse::profile::gateway_upstream(&providers, secrets)?)
 }
 
 /// Generate one file that `exec`s `glasshouse run <harness> --profile
