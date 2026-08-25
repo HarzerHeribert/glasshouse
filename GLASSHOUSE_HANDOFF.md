@@ -4,7 +4,7 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 8 is four of ten. 131 -> 132 checked boxes.** `main` clean at
+**Phase 8 is five of ten. 131 -> 133 checked boxes.** `main` clean at
 `63bd260`. CI `32849951837` green on Linux, macOS, Windows and lint, with the
 Windows job confirmed to have executed both new end-to-end tests by name.
 
@@ -43,6 +43,34 @@ deliberately *not* a condition — every extra condition is another way to break
 on a Codex update. Full reasoning in `GLASSHOUSE_DESIGN_DECISIONS.md`.
 
 ## Verified completed work
+
+### This session — resuming a Codex session, which cost no production code
+
+Phase 8 line 3 closed without a line of new production code, and that is the
+Phase 6 adapter contract paying for itself. `resume_session` selects the
+harness the *record* names and asks its adapter; `Codex::resume` already
+returned `["resume", <id>]`. The only thing missing was an identifier, and
+line 2 supplied it.
+
+**Codex resumes with a subcommand, Claude Code with a flag.** That difference
+is exactly what the contract exists to absorb, and it is now asserted rather
+than assumed: the test fails if a Codex invocation is ever handed
+`--resume`, with an assertion message that names the failure as one harness's
+vocabulary leaking into another's.
+
+The test is deliberately **not** `#[cfg]`-gated. Windows CI found a real defect
+on this same rollout-fixture path for line 2, so there is a concrete reason to
+keep proving it on all three platforms rather than only where it was written.
+
+Three mutations, three kills: Codex given Claude Code's flag, Codex returning
+no resume arguments, and Codex resuming a different conversation.
+
+**Verified against the real Codex 0.149.1, at no model cost** — a known
+identifier replays the conversation, an unknown one answers `ERROR: No saved
+session found with ID <id>`. Two traps recorded with it: a pseudo-terminal with
+no window size makes Codex draw nothing and look hung, and its update prompt
+defaults to an option that runs `curl … | sh`.
+
 
 ### This session — the Codex session identifier, and the rule `cwd` alone cannot express
 

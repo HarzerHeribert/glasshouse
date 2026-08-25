@@ -49,6 +49,82 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 8 — Support resuming a known Codex session through Codex's native resume mechanism
+
+Contract: Given a recorded Codex session whose native identifier Glasshouse
+captured, when the user resumes it, Glasshouse reopens that same conversation
+through Codex's own `resume` subcommand — while never handing Codex a flag
+belonging to a different harness, and never assigning a fresh identifier to a
+session that already has one.
+
+State: COMPLETE.
+
+Production evidence:
+- `main.rs: resume_session` — generic by construction. It selects the harness
+  the *record* names, not whichever is configured now, and asks that harness's
+  adapter for the invocation. Nothing in it knows Codex exists.
+- `session/select.rs: HarnessSelection::resume_args` — the adapter's start
+  arguments, then its resume invocation, then the user's own.
+- `harness/codex.rs: Codex::resume` — `["resume", <id>]`.
+- `session/store.rs: open_for_resume` — decides whether a session may be
+  resumed at all (right project, not still running, something to resume to)
+  before a harness is selected and long before a process exists.
+- Nothing was written for this line. What made it reachable was Phase 8 line 2:
+  until an identifier was captured, `glasshouse resume` could only ever answer
+  "not resumable".
+
+**The shape difference is the whole point.** Codex resumes with a *subcommand*,
+Claude Code with a *flag*. That is precisely the harness-specific knowledge the
+Phase 6 adapter contract exists to absorb, and it is now asserted rather than
+assumed.
+
+Regression evidence:
+- `a_recorded_codex_session_is_resumed_through_its_own_subcommand` (PTY smoke,
+  **executed on macOS, Linux and Windows** — deliberately not `#[cfg]`-gated,
+  because Windows CI found a real defect on this exact fixture path for line 2).
+  Drives the shipped binary end to end: `glasshouse launch codex` against a
+  fake harness that writes a real rollout header under an isolated `CODEX_HOME`
+  and echoes its own argv; asserts the launch argv is **bare**; takes the
+  *short* twelve-character identifier out of `glasshouse sessions`, which is
+  the only form that listing shows and therefore the only one a user could
+  type; resumes with it; then asserts the harness was handed `resume` and the
+  captured identifier, and **not** `--resume` and **not** `--session-id`.
+
+Non-vacuity: **three mutations run by the orchestrator, all three killed** —
+giving Codex Claude Code's `--resume` flag; returning no resume arguments at
+all; and resuming a different conversation. The first is the one that matters:
+it is the adapter contract leaking one harness's vocabulary into another, and
+the test names that failure in its own assertion message.
+
+Failure/isolation evidence:
+- `resuming_a_session_with_no_conversation_is_refused` reaches `open_for_resume`
+  through a Codex session precisely because Codex has no identifier to resume
+  to until one is captured — that test was written for this shape.
+- `resuming_an_unknown_session_is_refused`,
+  `resuming_a_session_belonging_to_another_project_is_refused`,
+  `a_live_session_is_not_resumable`.
+
+Platform/external evidence:
+- Against the real Codex 0.149.1 in a pseudo-terminal, neither costing a model
+  turn: `codex resume <a real recorded id for this project>` printed
+  `Resuming session…` and replayed the conversation; `codex resume
+  9f1c0b2e-0000-4000-8000-0123456789ab` answered `ERROR: No saved session found
+  with ID <id>. Run `codex resume` without an ID to choose from existing
+  sessions.`
+- Two traps found while probing, recorded so nobody rediscovers them: a
+  pseudo-terminal with **no window size** makes Codex emit its handshake and
+  draw nothing, which reads exactly like a hang; and Codex may open with an
+  **update prompt whose default option runs `curl … | sh`**, so it must never
+  be dismissed with Enter.
+
+Missing evidence:
+- Glasshouse does not yet surface the harness's own refusal. If a recorded
+  identifier no longer exists, Codex prints its `ERROR: No saved session found`
+  and exits, and Glasshouse reports only that the harness exited non-zero. The
+  session record is optimistic — it says `resumable` on the strength of a
+  captured identifier, not on proof the conversation still exists. Honest, but
+  the message the user sees should be the harness's.
+
 ### Phase 8 — Capture the native Codex thread or session identifier when it can be obtained reliably
 
 Contract: Given a Codex session Glasshouse started in the project root, when

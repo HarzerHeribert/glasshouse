@@ -3022,6 +3022,214 @@ fn a_recorded_session_is_resumed_under_the_identifier_it_was_given() {
     );
 }
 
+/// Combines [`install_codex_rollout_harness`] and [`install_argv_harness`]: a
+/// single fake `codex` that both writes a real rollout header under
+/// `$CODEX_HOME` (so a `glasshouse launch codex` records a native identifier
+/// there is something to resume to) and reports every argument it is given
+/// (so a later `glasshouse resume` can be checked against the exact command
+/// line Glasshouse actually built).
+///
+/// `id` is baked into the script when it is written, not read off the
+/// command line, so every invocation — including the later `resume` one —
+/// writes the same header. That is harmless: `resume_session` never re-reads
+/// it, only `launch_session`'s discovery window does.
+///
+/// The rollout ends in a trailing newline on both platforms, matching a real
+/// rollout file; omitting it on Windows is what broke Phase 8 line 2 in CI.
+#[cfg(unix)]
+fn install_codex_rollout_and_argv_harness(
+    bin_dir: &std::path::Path,
+    id: &str,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    const PLACEHOLDER: &str = "__ROLLOUT_ID__";
+    let template = r#"#!/bin/sh
+echo "ARGV:$*"
+DIR="$CODEX_HOME/sessions/2026/08/25"
+mkdir -p "$DIR"
+CWD=$(pwd -P)
+TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+printf '{"type":"session_meta","payload":{"id":"__ROLLOUT_ID__","cwd":"%s","timestamp":"%s","originator":"codex-tui"}}\n' "$CWD" "$TS" > "$DIR/rollout-test-__ROLLOUT_ID__.jsonl"
+exit 0
+"#;
+    let script = template.replace(PLACEHOLDER, id);
+
+    let path = bin_dir.join("codex");
+    std::fs::write(&path, script).expect("write fake codex harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Windows counterpart of the function above, following
+/// [`install_codex_rollout_harness`]'s `.cmd`-delegates-to-PowerShell shape:
+/// `cmd.exe` echoes the arguments itself (`%*`, its own equivalent of `$*`)
+/// and then hands the rollout-writing to a short PowerShell script, since
+/// batch has no sane UTC-instant-formatting primitive of its own.
+#[cfg(windows)]
+fn install_codex_rollout_and_argv_harness(
+    bin_dir: &std::path::Path,
+    id: &str,
+) -> std::path::PathBuf {
+    const PLACEHOLDER: &str = "__ROLLOUT_ID__";
+    let ps1_template = r#"$cwd = (Get-Location).Path.Replace('\', '/')
+$ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+$dir = Join-Path $env:CODEX_HOME 'sessions\2026\08\25'
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+$json = '{"type":"session_meta","payload":{"id":"__ROLLOUT_ID__","cwd":"' + $cwd + '","timestamp":"' + $ts + '","originator":"codex-tui"}}'
+Set-Content -Path (Join-Path $dir 'rollout-test-__ROLLOUT_ID__.jsonl') -Value $json
+"#;
+    let ps1 = ps1_template.replace(PLACEHOLDER, id);
+    let ps1_path = bin_dir.join("codex-rollout-argv.ps1");
+    std::fs::write(&ps1_path, ps1).expect("write fake codex rollout script");
+
+    let path = bin_dir.join("codex.cmd");
+    std::fs::write(
+        &path,
+        format!(
+            "@echo off\r\necho ARGV:%*\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"\r\nexit /b 0\r\n",
+            ps1_path.display()
+        ),
+    )
+    .expect("write fake codex harness");
+    path
+}
+
+/// The Codex counterpart of
+/// `a_recorded_session_is_resumed_under_the_identifier_it_was_given` above:
+/// the whole resume path, through the shipped binary, for a harness whose
+/// resume mechanism is a *subcommand* rather than a flag.
+///
+/// Codex names its own sessions — nothing on Glasshouse's command line
+/// assigns one, unlike Claude Code's `--session-id` — so the identifier this
+/// test resumes against comes from the fake harness's own rollout, not from
+/// anything captured off a launch argument list. The assertions below are the
+/// adapter contract stated as a test: `codex resume <id>`, never Claude
+/// Code's `--resume <id>`, and never also handed a fresh `--session-id` — a
+/// resumed conversation is not a new one.
+///
+/// Runs on both platforms: unlike the Claude Code equivalent, everything this
+/// test needs — the fake harness and the shipped binary itself — has a
+/// Windows implementation already, and CI found a real defect in the same
+/// rollout-fixture path on Windows before (the missing trailing newline
+/// `install_codex_rollout_and_argv_harness` above is careful to avoid), so
+/// there is a concrete reason to keep proving this on both.
+#[test]
+fn a_recorded_codex_session_is_resumed_through_its_own_subcommand() {
+    const KNOWN_ID: &str = "6f21ce4e-90ab-4cde-8f12-abcdef012345";
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    let bin_dir = tmp.path().join("bin");
+    for dir in [&state_dir, &config_dir, &bin_dir] {
+        std::fs::create_dir_all(dir).expect("create dir");
+    }
+    let codex_home = tmp.path().join("codex-home");
+    std::fs::create_dir_all(&codex_home).expect("create codex home");
+
+    let codex = install_codex_rollout_and_argv_harness(&bin_dir, KNOWN_ID);
+    let toml_path = |p: &std::path::Path| p.display().to_string().replace('\\', "\\\\");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[integrations.codex]\nenabled = true\nexecutable = \"{}\"\n",
+            toml_path(&codex)
+        ),
+    )
+    .expect("write user config");
+
+    // Every invocation gets `CODEX_HOME` relocated to the isolated fixture
+    // directory: discovery reads that variable from Glasshouse's own
+    // environment, and the fake harness reads it from the environment
+    // Glasshouse passes down, so one setting here covers both halves.
+    let glasshouse = |args: &[&str]| {
+        let mut command = TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path())
+            .arg("--scope")
+            .arg(&project_dir)
+            .arg("--data-dir")
+            .arg(&state_dir)
+            .arg("--config-dir")
+            .arg(&config_dir)
+            .env("CODEX_HOME", &codex_home);
+        for arg in args {
+            command = command.arg(arg);
+        }
+        command
+    };
+
+    let read_argv = |session: &mut Session| -> String {
+        let deadline = Instant::now() + TIMEOUT;
+        while Instant::now() < deadline {
+            session.answer_pending_queries();
+            let clean = strip_terminal_sequences(&session.output());
+            if let Some(line) = clean.lines().find(|line| line.contains("ARGV:")) {
+                return line.trim().to_owned();
+            }
+            std::thread::sleep(POLL);
+        }
+        panic!(
+            "the harness never reported its arguments\n--- output ---\n{}\n--- end ---",
+            session.output()
+        )
+    };
+
+    // Start one, and let it finish. A fresh launch is bare: Codex assigns its
+    // own identifier, so Glasshouse hands it nothing at all to start with.
+    let mut first = Session::spawn(glasshouse(&["launch", "codex"]));
+    let started = read_argv(&mut first);
+    let _ = first.wait_for_exit();
+
+    let launch_args = started
+        .split_once("ARGV:")
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or_else(|| panic!("no ARGV: marker in the launch output: {started}"));
+    assert!(
+        launch_args.is_empty(),
+        "a new session is not a resumed one — codex should start with no `resume` subcommand \
+         and no identifier on its command line: {started}"
+    );
+
+    // The short form is the only identifier the listing shows, so it is the
+    // one a user would type — and therefore the one this test uses.
+    let mut listing = Session::spawn(glasshouse(&["sessions"]));
+    let _ = listing.wait_for_exit();
+    let text = strip_terminal_sequences(&listing.output());
+    let row = text
+        .lines()
+        .find(|line| line.contains("resumable"))
+        .unwrap_or_else(|| panic!("no resumable session in the listing:\n{text}"));
+    let short = row.split_whitespace().next().expect("an identifier column");
+    assert_eq!(short.len(), 12, "the listing's short form changed: {row}");
+
+    // Reopen it.
+    let mut second = Session::spawn(glasshouse(&["resume", short]));
+    let resumed = read_argv(&mut second);
+    let _ = second.wait_for_exit();
+
+    assert!(
+        resumed.contains("resume"),
+        "resuming did not use Codex's own resume subcommand: {resumed}"
+    );
+    assert!(
+        resumed.contains(KNOWN_ID),
+        "resumed a different conversation than the one Codex recorded: {resumed}"
+    );
+    assert!(
+        !resumed.contains("--resume"),
+        "Claude Code's flag leaked into a Codex invocation — the adapter contract is supposed \
+         to keep one harness's vocabulary from leaking into another's: {resumed}"
+    );
+    assert!(
+        !resumed.contains("--session-id"),
+        "a resumed session must not also be assigned a fresh identifier: {resumed}"
+    );
+}
+
 /// Resuming something this project never recorded is refused, and says so.
 #[cfg(unix)]
 #[test]
