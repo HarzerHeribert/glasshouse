@@ -282,12 +282,13 @@ fn format_age(timestamp: i64) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0);
+    // A timestamp in the future is possible — a clock corrected backwards
+    // between writing the row and reading it — and produces a negative value
+    // here, because `saturating_sub` saturates at `i64::MIN`, not at zero. The
+    // first arm covers it: reporting "just now" is the honest answer, and it
+    // avoids printing a confident negative age. An explicit `< 0` guard used
+    // to sit here returning the same string, which only obscured that.
     let seconds = now.saturating_sub(timestamp);
-    if seconds < 0 {
-        // A clock that moved backwards between writing and reading. Say so
-        // rather than printing a confident negative age.
-        return "just now".to_owned();
-    }
     match seconds {
         s if s < 60 => "just now".to_owned(),
         s if s < 3_600 => format!("{}m ago", s / 60),
@@ -368,5 +369,82 @@ fn setup(runtime: &Runtime, trigger: SetupTrigger) -> anyhow::Result<bool> {
             eprintln!("glasshouse: setup cancelled; nothing was saved.");
             Ok(false)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The listing's ages, including the case a review flagged: a timestamp in
+    /// the future. `saturating_sub` saturates at `i64::MIN`, not at zero, so
+    /// the value really can be negative and the first arm has to absorb it.
+    #[test]
+    fn ages_read_sensibly_including_a_clock_that_moved_backwards() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_secs() as i64;
+
+        assert_eq!(format_age(now), "just now");
+        assert_eq!(format_age(now - 30), "just now");
+        assert_eq!(format_age(now - 120), "2m ago");
+        assert_eq!(format_age(now - 7_200), "2h ago");
+        assert_eq!(format_age(now - 3 * 86_400), "3d ago");
+
+        // A future timestamp must not print a negative age.
+        let ahead = format_age(now + 10_000);
+        assert_eq!(
+            ahead, "just now",
+            "a future timestamp must not read as an age"
+        );
+        assert!(!ahead.contains('-'), "no negative ages: {ahead}");
+
+        // Extremes must not panic or overflow. A row holding a nonsense
+        // timestamp cannot come from Glasshouse's own writes — `system_clock`
+        // never returns a negative — so the honest contract is only that the
+        // output stays finite and non-negative. `i64::MIN` yields an absurdly
+        // large age, which is the right kind of wrong: visibly broken rather
+        // than plausibly incorrect.
+        for extreme in [i64::MIN, i64::MAX, 0] {
+            let text = format_age(extreme);
+            assert!(!text.is_empty() && !text.contains('-'), "bad age: {text}");
+        }
+        assert_eq!(
+            format_age(i64::MAX),
+            "just now",
+            "the far future reads as now"
+        );
+    }
+
+    /// The header and every row go through `session_row`, so their columns
+    /// cannot drift apart. Checked here rather than trusted.
+    #[test]
+    fn listing_columns_line_up_between_the_header_and_a_row() {
+        let header = session_row("SESSION", "HARNESS", "STATE", "ROLE", "PRESENTED", "LAST");
+        let row = session_row(
+            "abc123",
+            "claude-code",
+            "resumable",
+            "orchestrator",
+            "embedded",
+            "2h ago",
+        );
+
+        let starts = |line: &str| -> Vec<usize> {
+            let mut out = vec![0];
+            let bytes = line.as_bytes();
+            for i in 1..bytes.len() {
+                if bytes[i] != b' ' && bytes[i - 1] == b' ' && i >= 2 && bytes[i - 2] == b' ' {
+                    out.push(i);
+                }
+            }
+            out
+        };
+        assert_eq!(
+            starts(&header),
+            starts(&row),
+            "columns must start at the same offsets:\n{header}\n{row}"
+        );
     }
 }

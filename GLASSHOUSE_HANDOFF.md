@@ -144,6 +144,29 @@ Two process lessons worth keeping:
   program, argv, requested cwd, canonical root, marker presence, exit status,
   and both streams. That one change identified the bug immediately.
 
+### Review findings, and one the reviewer got half right
+
+A read-only Ox reviewer worked the batch as a ten-item checklist and returned
+ACCEPT WITH FINDINGS. Both findings were real and both are fixed:
+
+- `SessionRecord::disposition` led with `lifecycle if lifecycle.is_live()`. A
+  **guarded arm does not count towards exhaustiveness**, so the match needed a
+  wildcard, and a new `SessionLifecycle` variant would have silently become
+  `Active` — the opposite of what its "unreachable" comment claimed. Both it
+  and `is_live` now enumerate every variant with no `_`, verified by adding a
+  variant and watching three compile errors appear.
+- `format_age`'s explicit `seconds < 0` branch returned the same string as the
+  arm below it.
+
+The reviewer's *reasoning* on the second was wrong: it said `saturating_sub`
+clamps to zero, making the branch dead. It does not — `i64::saturating_sub`
+saturates at `i64::MIN`, so the value really can be negative and the branch was
+reachable, merely redundant. Right conclusion, wrong mechanism. Checking it
+rather than accepting it also turned up an edge the report missed: a row
+holding `i64::MIN` prints an absurd age, now pinned by a test that asserts the
+honest contract (finite, never negative) instead of a prettier one that would
+have required a magic clamp.
+
 ## Unresolved loose ends
 
 - **Nothing calls `open_for_resume` in production.** The cross-project resume

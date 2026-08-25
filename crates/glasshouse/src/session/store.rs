@@ -185,11 +185,15 @@ sql_enum!(SessionLifecycle {
 
 impl SessionLifecycle {
     /// True while a process is expected to exist.
+    ///
+    /// A full `match` rather than `matches!`, which imposes no exhaustiveness:
+    /// a new variant must be classified here instead of defaulting to "not
+    /// live".
     pub fn is_live(self) -> bool {
-        matches!(
-            self,
-            Self::Starting | Self::Running | Self::Idle | Self::WaitingForUser
-        )
+        match self {
+            Self::Starting | Self::Running | Self::Idle | Self::WaitingForUser => true,
+            Self::Stopped | Self::Failed | Self::Closed => false,
+        }
     }
 }
 
@@ -224,15 +228,22 @@ impl SessionRecord {
     /// than offering the user a resume that could only ever produce a blank
     /// session wearing an old session's name.
     pub fn disposition(&self) -> SessionDisposition {
+        // Every variant is listed and there is no `_` arm, so adding a
+        // lifecycle state is a compile error here rather than a silent
+        // classification. An earlier version led with `lifecycle if
+        // lifecycle.is_live()`; a guarded arm does not count towards
+        // exhaustiveness, so it needed a wildcard, and a new variant would
+        // have quietly become `Active`.
         match self.lifecycle {
-            lifecycle if lifecycle.is_live() => SessionDisposition::Active,
+            SessionLifecycle::Starting
+            | SessionLifecycle::Running
+            | SessionLifecycle::Idle
+            | SessionLifecycle::WaitingForUser => SessionDisposition::Active,
             SessionLifecycle::Failed => SessionDisposition::Failed,
             SessionLifecycle::Stopped if self.native_session_id.is_some() => {
                 SessionDisposition::Resumable
             }
             SessionLifecycle::Stopped | SessionLifecycle::Closed => SessionDisposition::Closed,
-            // Unreachable: every live variant is caught by the first arm.
-            _ => SessionDisposition::Active,
         }
     }
 }
