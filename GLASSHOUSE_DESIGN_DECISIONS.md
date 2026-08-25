@@ -1149,3 +1149,41 @@ from `getrandom`. The value then never comes from a caller at all, so the
 boundary is preserved rather than widened. Nothing needs it today: one mirrored
 type with a shared `REDACTED` constant and a shared scan test is cheaper than a
 new API on the most security-sensitive module in the codebase.
+
+
+## Phase 9E's native secret stores: `keyring` 3.x, not 4.x, and the reason is the MSRV
+
+Decided 2026-08-26 by the Opus orchestrator, from crates.io metadata rather than
+recollection. Recorded so the packet that implements the three native-keychain
+lines does not have to rediscover it — or worse, reach for the newest version.
+
+Phase 9E has three unchecked lines asking Glasshouse to prefer the macOS
+Keychain, Windows Credential Manager, and a Secret Service keyring. All three
+want one cross-platform crate behind `SecretStore`, and `keyring` is the
+obvious candidate.
+
+**The obvious version does not fit.** `keyring 4.1.6` declares
+`rust-version = "1.88.0"`. This workspace pins **1.85**, and CI gates on
+`rustup run 1.85.0 cargo check --locked`. Adding 4.x breaks that gate.
+
+**`keyring 3.6.3` declares `rust-version = "1.75"`**, which is comfortably
+inside the workspace MSRV. So the line to pin is `keyring = "3.6"`.
+
+Three consequences worth carrying into the packet:
+
+- **Pin the minor line, not `"3"`.** A caret on `3` is fine today, but the 3→4
+  jump is exactly the MSRV cliff above, and `--locked` in CI is the only thing
+  standing between a routine `cargo update` and a red gate.
+- **The platform backends are feature-gated in 3.x**, and which features are
+  needed was *not* established here. The packet must read the crate's own
+  feature list before enabling anything, and must not assume the 4.x `v1`
+  feature name applies.
+- **Raising the workspace MSRV to 1.88 is a product decision, not a
+  convenience.** It decides who can build Glasshouse. If a future line genuinely
+  needs `keyring` 4.x, that trade goes to the user, not into a dependency bump.
+
+**Still unproven, and the packet must say so rather than claim it:** a
+Secret Service keyring needs a session bus, and a Windows Credential Manager
+needs a real user session. Neither is obviously present on a CI runner. macOS
+can be proven on this machine; the other two need either a real host or an
+honest `LOCALLY VERIFIED` with the platform gap recorded.
