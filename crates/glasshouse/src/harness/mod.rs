@@ -47,7 +47,7 @@ pub mod opencode;
 pub mod pi;
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::integrations::{IntegrationId, IntegrationKind};
@@ -383,18 +383,56 @@ pub enum SessionIds {
     Discoverable { source: &'static str },
 }
 
-/// Where a harness keeps its session records, machine-readable enough that
-/// [`mod@crate::session::native_id`] can find and open them without knowing
-/// which harness it is looking at.
+/// Where a harness keeps the session identity Glasshouse discovers, and in
+/// which of the two shapes it keeps it.
 ///
 /// This is the *machine* counterpart to [`SessionIds::Discoverable`]'s
 /// `source`, which is a human-readable citation for [`describe`](HarnessAdapter::describe)'s
 /// evidence. The two must agree in substance, but only this one is actually
-/// walked.
+/// read.
+///
+/// # Why this is an enum rather than one struct with optional fields
+///
+/// Harnesses do not agree on what a "session record" is, and the difference
+/// is not cosmetic: one shape means opening every file that survives a name
+/// filter, the other means opening exactly one named file and no other. A
+/// struct that could describe both would let a declaration send
+/// [`mod@crate::session::native_id`] walking a directory of SQLite
+/// conversation databases — which is precisely what must never happen for
+/// Antigravity, whose records are the user's private conversations. Stating
+/// the shape in the type makes the walk unreachable from the index variant
+/// by construction rather than by a rule someone has to remember.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NativeSessionSource {
-    /// Environment variable that relocates the harness's state root.
-    pub home_env: &'static str,
+pub enum NativeSessionSource {
+    /// One record per session, self-describing in its own first line.
+    /// Paired with [`HarnessAdapter::read_session_record`].
+    RecordPerSession(RecordPerSessionSource),
+    /// The identifier lives in one shared index keyed by project path; no
+    /// session record is ever opened. Paired with
+    /// [`HarnessAdapter::read_index_entry`].
+    SharedIndex(SharedIndexSource),
+}
+
+impl NativeSessionSource {
+    /// How this source's state root is found: the environment variable that
+    /// relocates it, if the harness honours one, and its default place under
+    /// the user's home directory.
+    pub fn home(&self) -> (Option<&'static str>, &'static str) {
+        match self {
+            Self::RecordPerSession(source) => (source.home_env, source.home_default),
+            Self::SharedIndex(source) => (source.home_env, source.home_default),
+        }
+    }
+}
+
+/// A harness whose session store holds one record per session, each naming
+/// its own id, cwd and start time in its first line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordPerSessionSource {
+    /// Environment variable that relocates the harness's state root, or
+    /// `None` when the harness honours none and its root is only ever found
+    /// under the user's home directory.
+    pub home_env: Option<&'static str>,
     /// The root's default place under the user's home directory.
     pub home_default: &'static str,
     /// Subdirectory of that root holding session records.
@@ -403,6 +441,25 @@ pub struct NativeSessionSource {
     pub file_prefix: &'static str,
     /// Session record file names end with this.
     pub file_extension: &'static str,
+}
+
+/// A harness that keeps every project's last conversation identifier in one
+/// shared index file, keyed by project path.
+///
+/// There is deliberately no field naming the records themselves. The whole
+/// point of this variant is that the records are never reached: Antigravity's
+/// are `conversations/<uuid>.db`, SQLite databases holding the user's private
+/// conversations, and nothing in Glasshouse may open, list or glob them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharedIndexSource {
+    /// Environment variable that relocates the harness's state root, or
+    /// `None` when the harness honours none.
+    pub home_env: Option<&'static str>,
+    /// The root's default place under the user's home directory.
+    pub home_default: &'static str,
+    /// The index's path within that root. Exactly one file, named in full —
+    /// not a directory, not a pattern.
+    pub index_path: &'static str,
 }
 
 /// One harness session, as the harness itself recorded it — what
@@ -923,8 +980,29 @@ pub trait HarnessAdapter: std::fmt::Debug + Send + Sync {
     /// Pure: it is handed text and returns a description. The walking, the
     /// time bound and the ambiguity rule belong to
     /// [`mod@crate::session::native_id`], which knows no harness.
+    ///
+    /// Paired with [`NativeSessionSource::RecordPerSession`]; an adapter
+    /// declaring [`NativeSessionSource::SharedIndex`] implements
+    /// [`HarnessAdapter::read_index_entry`] instead.
     fn read_session_record(&self, header: &str) -> Option<NativeSessionRecord> {
         let _ = header;
+        None
+    }
+
+    /// The identifier this harness's shared index holds for `project_root`.
+    ///
+    /// Pure in exactly the sense [`HarnessAdapter::read_session_record`] is:
+    /// handed the index's own text, it returns an identifier and opens
+    /// nothing. Core resolves the path and reads the one file; this never
+    /// touches a filesystem, and in particular never reaches the harness's
+    /// conversation records — for Antigravity those are SQLite databases
+    /// holding the user's private conversations.
+    ///
+    /// Paired with [`NativeSessionSource::SharedIndex`]. Returning `None` is
+    /// the answer for "this index says nothing about that project", which
+    /// [`mod@crate::session::native_id`] turns into recording nothing.
+    fn read_index_entry(&self, index: &str, project_root: &Path) -> Option<String> {
+        let _ = (index, project_root);
         None
     }
 

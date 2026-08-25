@@ -26,29 +26,43 @@
 //!
 //! Inside that root, `cache/last_conversations.json` maps each project's
 //! absolute path to the conversation UUID Antigravity last opened there —
-//! see [`Antigravity::read_last_conversation`]. Reading it is deliberately
-//! **not** wired through [`super::HarnessAdapter::session_id_source`] /
-//! [`super::HarnessAdapter::read_session_record`]: that pair assumes a
-//! harness's session store holds one record per session, self-describing its
-//! own id/cwd/timestamp in a header `session::native_id::discover` opens and
-//! parses. Antigravity's records are `conversations/<uuid>.db` — SQLite
-//! databases that must never be opened (see the module's security note) —
-//! and the identifier is not in any record's own contents at all; it is an
-//! entry in one shared index, keyed by project path, that has to be read as
-//! a whole rather than discovered by walking and filtering file names.
-//! That is a genuinely different shape, so `session_id_source` is left
-//! undeclared here rather than populated with directory/extension values
-//! that would compile but would send `discover` to open every conversation
-//! database on the box the moment it runs. Wiring
-//! [`Antigravity::read_last_conversation`] into core is an interface
-//! decision for whoever owns `harness/mod.rs` and `session/`, not this file.
+//! see [`Antigravity::read_last_conversation`].
+//!
+//! # Why this harness declares a different *shape* of source
+//!
+//! An earlier revision of this file left
+//! [`super::HarnessAdapter::session_id_source`] undeclared, and was right to:
+//! the only shape it could describe at the time was "a directory of session
+//! records, each self-describing in its own first line", which
+//! `session::native_id::discover` walks and **opens**. Antigravity's records
+//! are `conversations/<uuid>.db` — SQLite databases holding the user's
+//! private conversations — so declaring that shape here would have sent
+//! discovery to open every one of them on the box the moment a session
+//! ended. A worker asked to do exactly that refused and cited the code.
+//!
+//! [`super::NativeSessionSource`] is now an enum over the two shapes, so this
+//! adapter declares the one it actually has:
+//! [`super::NativeSessionSource::SharedIndex`], which names one file and
+//! carries no notion of a record directory at all. Discovery reads that one
+//! file and hands its text to [`super::HarnessAdapter::read_index_entry`];
+//! the conversation databases are unreachable from that code path rather than
+//! merely forbidden to it.
+//!
+//! Note the absent `home_env`. Codex honours `CODEX_HOME`, so Glasshouse
+//! follows the harness wherever the user has moved it. Antigravity CLI 1.1.20
+//! honours no such variable — its binary was searched on 2026-08-26 for
+//! `GEMINI_DIR`, `GEMINI_HOME`, `ANTIGRAVITY_HOME`, `AGY_HOME`, `XDG_*` and
+//! every `*_HOME`/`*_DIR` symbol it contains, and none of them relocates
+//! `~/.gemini/antigravity-cli`. Declaring a plausible-sounding one would be
+//! the same mistake this module already records twice: an invented name that
+//! compiles and is simply not what the binary does.
 
 use std::path::Path;
 
 use super::{
     ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, Declared,
-    HarnessAdapter, HarnessDescription, Invocation, ModelOverride, SandboxSelector, SessionIds,
-    Vendor,
+    HarnessAdapter, HarnessDescription, Invocation, ModelOverride, NativeSessionSource,
+    SandboxSelector, SessionIds, SharedIndexSource, Vendor,
 };
 use crate::integrations::IntegrationId;
 
@@ -98,6 +112,21 @@ impl HarnessAdapter for Antigravity {
         // `Antigravity::read_last_conversation`), never one it invented,
         // guessed, or received from anywhere else.
         Some(Invocation::of(["--conversation", native_session]))
+    }
+
+    fn session_id_source(&self) -> Option<NativeSessionSource> {
+        // One shared index, keyed by absolute project path — not a directory
+        // of records. See this module's doc comment for why the distinction
+        // is load-bearing rather than cosmetic, and why `home_env` is `None`.
+        Some(NativeSessionSource::SharedIndex(SharedIndexSource {
+            home_env: None,
+            home_default: ".gemini/antigravity-cli",
+            index_path: "cache/last_conversations.json",
+        }))
+    }
+
+    fn read_index_entry(&self, index: &str, project_root: &Path) -> Option<String> {
+        Self::read_last_conversation(index, project_root)
     }
 
     fn describe(&self) -> HarnessDescription {
@@ -231,7 +260,7 @@ mod tests {
         // resume invocation is built from nothing but the identifier the
         // caller supplies — no constant fallback, no environment, no
         // rediscovery. This pins exactly that.
-        let recorded_id = "6cc20c51-e7d6-4b94-a000-4db47b58797c";
+        let recorded_id = "5f8c1a2b-1234-4abc-8abc-abcdefabcdef";
         let invocation = Antigravity
             .resume(recorded_id)
             .expect("Antigravity resumes");
@@ -256,6 +285,14 @@ mod tests {
     }
 
     // --- the conversation index -------------------------------------------
+    //
+    // Every identifier below is synthetic, and must stay that way. These
+    // fixtures previously carried a UUID copied off the developer's own
+    // signed-in install while this adapter was being written: it was in
+    // the live `last_conversations.json` and named a real
+    // `conversations/<uuid>.db` holding that person's own conversation.
+    // A conversation identifier is the user's data, and a repository is
+    // the one place it must never be. Fabricate them.
 
     fn index_with(entries: &[(&str, &str)]) -> String {
         let body = entries
@@ -271,11 +308,11 @@ mod tests {
         let project = PathBuf::from("/Users/example/projects/glasshouse");
         let index = index_with(&[(
             "/Users/example/projects/glasshouse",
-            "6cc20c51-e7d6-4b94-a000-4db47b58797c",
+            "5f8c1a2b-1234-4abc-8abc-abcdefabcdef",
         )]);
         assert_eq!(
             Antigravity::read_last_conversation(&index, &project),
-            Some("6cc20c51-e7d6-4b94-a000-4db47b58797c".to_owned())
+            Some("5f8c1a2b-1234-4abc-8abc-abcdefabcdef".to_owned())
         );
     }
 
@@ -300,14 +337,14 @@ mod tests {
     fn the_index_is_matched_canonically_not_lexically() {
         let index = index_with(&[(
             "/Users/example/projects/glasshouse",
-            "6cc20c51-e7d6-4b94-a000-4db47b58797c",
+            "5f8c1a2b-1234-4abc-8abc-abcdefabcdef",
         )]);
         // A `.` component and a trailing separator: not the exact bytes the
         // index carries, but the same path.
         let project = PathBuf::from("/Users/example/projects/./glasshouse/");
         assert_eq!(
             Antigravity::read_last_conversation(&index, &project),
-            Some("6cc20c51-e7d6-4b94-a000-4db47b58797c".to_owned())
+            Some("5f8c1a2b-1234-4abc-8abc-abcdefabcdef".to_owned())
         );
     }
 
@@ -335,13 +372,13 @@ mod tests {
         let project = PathBuf::from("/Users/example/projects/glasshouse");
         let index = format!(
             "{{{},{},{}}}",
-            r#""/Users/example/projects/glasshouse":"6cc20c51-e7d6-4b94-a000-4db47b58797c""#,
+            r#""/Users/example/projects/glasshouse":"5f8c1a2b-1234-4abc-8abc-abcdefabcdef""#,
             r#""/Users/example/projects/other":{"nested":"should never surface"}"#,
             r#""unrelated_metadata":"should never surface""#
         );
         assert_eq!(
             Antigravity::read_last_conversation(&index, &project),
-            Some("6cc20c51-e7d6-4b94-a000-4db47b58797c".to_owned())
+            Some("5f8c1a2b-1234-4abc-8abc-abcdefabcdef".to_owned())
         );
     }
 }

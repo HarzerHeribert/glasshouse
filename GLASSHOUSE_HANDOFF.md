@@ -4,10 +4,17 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 2C is fifteen of nineteen; 9G seven of nineteen; 9F eleven of
-thirteen; 9D eleven of fourteen; 9A nineteen of twenty-six. Phase 9 is three of
-seven; 9E eight of thirteen; 9C eleven of twelve; 9B eight of nine.
-193 -> 222 checked boxes (17%).**
+**Phase 9 is five of seven; 2C fifteen of nineteen; 9G seven of nineteen;
+9F eleven of thirteen; 9D eleven of fourteen; 9A nineteen of twenty-six;
+9E eight of thirteen; 9C eleven of twelve; 9B eight of nine.
+193 -> 224 checked boxes (17%).**
+
+**One thing needs the user.** A real conversation identifier of theirs is
+committed in git history (one identifier, one commit, working tree already
+scrubbed). The repository is **private**, and the value is not a credential —
+it names a local SQLite file and grants no access. Whether that warrants a
+history rewrite is the user's call; the orchestrator will not force-push
+unattended.
 
 Three workers now run concurrently, partitioned by the files they touch —
 see `GLASSHOUSE_ORCHESTRATION_MEASUREMENTS.md`, which is a standing inherited
@@ -32,6 +39,40 @@ session came up and showed Codex's own trust prompt — and the end-to-end PTY
 test asserts the exact argv.
 
 ## Verified completed work
+
+### This session — an identifier read from an index, without opening a single conversation
+
+Phase 9 lines 2 and 3. `NativeSessionSource` is now an enum over two shapes:
+Codex's walk-and-filter, unchanged byte for byte, and a new `SharedIndex`
+variant that reads **exactly one named file** and never calls the directory
+walk. That matters because Antigravity's records are
+`conversations/<uuid>.db` — the user's own private conversations — and an
+earlier packet had asked for the walker to be pointed straight at them.
+
+**The identity guard is two rules and both are load-bearing.** The index has no
+per-entry timestamps, so: the index file's mtime must fall inside the session's
+window, *and* this project's entry must have changed during it. Rule 1 alone
+has a real hole — the mtime moves when any project's entry changes — and rule 2
+closes it, because a stale entry is by definition unchanged.
+
+**Antigravity honours no environment variable for its state root.** The lead
+searched the 1.1.20 binary for every plausible name and found none, so
+`home_env` became an `Option` rather than gaining a fifth invented declaration.
+
+**A design rule of mine was too broad and is now corrected.** "No log line, no
+diagnostic" for a conversation identifier collided with two pre-existing log
+lines, one carrying a deliberate comment that the identifier is what makes a
+failed resume diagnosable. The lead reported it instead of choosing. The lines
+stay: the identifier is not a credential, and the property the rule should have
+stated is *never log the index's contents, and never log another project's
+identifier.*
+
+**Two things found that were not this batch's job.** A real conversation
+identifier of the user's was already committed in git history — spotted by a
+subcontractor that refused to reuse the literal in a fixture. And an existing
+Codex resume test could pass vacuously if its harness never started; the
+orchestrator hardened it, since the batch correctly declined to touch a test
+outside its scope.
 
 ### This session — the gateway process, built by a team lead with its own subcontractors
 

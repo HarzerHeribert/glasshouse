@@ -11,8 +11,8 @@ use super::{
     ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, CredentialPlacement,
     Declared, DirectProviderPlan, DirectProviderRequest, HarnessAdapter, HarnessDescription,
     HookCommand, HookDestination, HookInstallation, Hooks, Invocation, ModelOverride,
-    NativeSessionKind, NativeSessionRecord, NativeSessionSource, SandboxSelector, SessionIds,
-    Vendor, WireProtocol,
+    NativeSessionKind, NativeSessionRecord, NativeSessionSource, RecordPerSessionSource,
+    SandboxSelector, SessionIds, Vendor, WireProtocol,
 };
 use crate::integrations::IntegrationId;
 
@@ -239,13 +239,18 @@ impl HarnessAdapter for Codex {
     }
 
     fn session_id_source(&self) -> Option<NativeSessionSource> {
-        Some(NativeSessionSource {
-            home_env: "CODEX_HOME",
-            home_default: ".codex",
-            subdirectory: "sessions",
-            file_prefix: "rollout-",
-            file_extension: "jsonl",
-        })
+        // One rollout per session, each naming its own id, cwd and start
+        // time in its first line — the shape `read_session_record` below
+        // parses.
+        Some(NativeSessionSource::RecordPerSession(
+            RecordPerSessionSource {
+                home_env: Some("CODEX_HOME"),
+                home_default: ".codex",
+                subdirectory: "sessions",
+                file_prefix: "rollout-",
+                file_extension: "jsonl",
+            },
+        ))
     }
 
     /// Codex reads hooks from exactly one place — `<project>/.codex/hooks.json`

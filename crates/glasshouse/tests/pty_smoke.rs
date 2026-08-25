@@ -1633,6 +1633,163 @@ fn a_codex_session_started_from_the_shell_has_its_identifier_captured_on_exit() 
     );
 }
 
+/// Write a fake `agy` that, when run, writes the one shared index Antigravity
+/// keeps every project's last conversation identifier in —
+/// `$HOME/.gemini/antigravity-cli/cache/last_conversations.json`, a flat
+/// `{ "<absolute project path>": "<uuid>" }` object — with an entry naming
+/// wherever it was actually run, then exits.
+///
+/// The project path is captured at *run* time rather than baked in when this
+/// function writes the script, for the same reason
+/// [`install_codex_rollout_harness`] captures its timestamp then: the index
+/// is keyed by the directory the harness ran in, as the harness itself
+/// resolved it, and only the running script can say what that is.
+///
+/// # Why `HOME`, and why unix only
+///
+/// Codex honours `CODEX_HOME`, so its fixtures relocate its whole state root
+/// with one variable. Antigravity CLI 1.1.20 honours no such variable — its
+/// binary was searched for one and has none — so the only way to keep a test
+/// off the developer's real `~/.gemini` is to move `HOME` itself. That is
+/// what `directories` reads on unix and deliberately does not read on
+/// Windows, which is why all three Antigravity tests below are `#[cfg(unix)]`
+/// rather than following the codex resume test onto both platforms.
+///
+/// One `.env("HOME", ...)` covers both halves of every one of them:
+/// Glasshouse resolves the index underneath it, and this script writes
+/// underneath the same one because Glasshouse passes its environment down to
+/// the harness — exactly the trick the codex fixtures play with `CODEX_HOME`.
+#[cfg(unix)]
+fn install_antigravity_index_harness(bin_dir: &std::path::Path, id: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    const PLACEHOLDER: &str = "__CONVERSATION_ID__";
+    let template = r#"#!/bin/sh
+echo GLASSHOUSE-ANTIGRAVITY-RAN
+DIR="$HOME/.gemini/antigravity-cli/cache"
+mkdir -p "$DIR"
+CWD=$(pwd -P)
+printf '{"%s":"__CONVERSATION_ID__"}\n' "$CWD" > "$DIR/last_conversations.json"
+exit 0
+"#;
+    let script = template.replace(PLACEHOLDER, id);
+
+    let path = bin_dir.join("agy");
+    std::fs::write(&path, script).expect("write fake antigravity harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// The Antigravity counterpart of
+/// `a_codex_session_s_identifier_is_captured_by_the_launch_path`, and the
+/// end-to-end proof of Phase 9's capture line: `glasshouse launch
+/// antigravity`, the real shipped binary, records the conversation identifier
+/// Antigravity itself wrote down for this project.
+///
+/// What makes this worth a second end-to-end test rather than another unit
+/// fixture is that it exercises the *other* shape of native session source.
+/// Codex keeps one self-describing record per session and discovery walks a
+/// directory of them, opening each survivor's first line. Antigravity keeps
+/// every project's last conversation in a single shared index, and its
+/// records are `conversations/<uuid>.db` SQLite databases holding the user's
+/// private conversations — so the shared-index path reads exactly one named
+/// file and never lists a directory at all. Nothing here creates a
+/// `conversations/` directory, and nothing on that code path could reach one
+/// if it did.
+///
+/// A shared index carries no per-entry timestamp, so the identity guard that
+/// makes this safe is "the entry for this project *changed* during the
+/// session": Glasshouse reads it at session start and again at session end.
+/// A fake harness writing the index for the first time satisfies that, which
+/// is precisely the case a real first session in a new project produces.
+///
+/// The record is read back through `ProjectSessions`, not by scraping
+/// `glasshouse sessions`: that listing never shows a native identifier, only
+/// the disposition one produces.
+#[cfg(unix)]
+#[test]
+fn an_antigravity_session_s_identifier_is_captured_by_the_launch_path() {
+    const KNOWN_ID: &str = "7ab3d19c-1234-4abc-8abc-abcdefabcdef";
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&state_dir).expect("create state dir");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+    // Isolated from the developer's real `~/.gemini`: Antigravity honours no
+    // variable for its state root, so `HOME` is the only lever — see
+    // `install_antigravity_index_harness`. A sibling of the project rather
+    // than its ancestor, so relocating it cannot change what Glasshouse
+    // thinks about the project root.
+    let home_dir = tmp.path().join("home");
+    std::fs::create_dir_all(&home_dir).expect("create home dir");
+
+    let antigravity = install_antigravity_index_harness(&bin_dir, KNOWN_ID);
+    let toml_path = |p: &std::path::Path| p.display().to_string().replace('\\', "\\\\");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[integrations.antigravity]\nenabled = true\nexecutable = \"{}\"\n",
+            toml_path(&antigravity)
+        ),
+    )
+    .expect("write user config");
+
+    let command = TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path())
+        .arg("--scope")
+        .arg(&project_dir)
+        .arg("--data-dir")
+        .arg(&state_dir)
+        .arg("--config-dir")
+        .arg(&config_dir)
+        .arg("launch")
+        .arg("antigravity")
+        .env("HOME", &home_dir);
+
+    let mut session = Session::spawn(command);
+    let status = session.wait_for_exit();
+    assert!(
+        status.success(),
+        "`glasshouse launch antigravity` reported: {status}\n--- output ---\n{}\n--- end ---",
+        session.output()
+    );
+
+    let cli = Cli::try_parse_from([
+        "glasshouse",
+        "--scope",
+        &project_dir.display().to_string(),
+        "--data-dir",
+        &state_dir.display().to_string(),
+        "--config-dir",
+        &config_dir.display().to_string(),
+    ])
+    .expect("parse cli");
+    let runtime = bootstrap(&cli, &project_dir).expect("bootstrap runtime");
+    let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+    let records = sessions.store().list().expect("list sessions");
+    let record = records
+        .iter()
+        .find(|record| record.harness == "antigravity")
+        .unwrap_or_else(|| panic!("no antigravity session was recorded: {records:?}"));
+
+    assert_eq!(
+        record.native_session_id.as_deref(),
+        Some(KNOWN_ID),
+        "the shared index's own identifier for this project was not captured: {record:?}"
+    );
+    assert_eq!(
+        record.disposition(),
+        SessionDisposition::Resumable,
+        "a captured native identifier should make the session resumable: {record:?}"
+    );
+}
+
 /// The shell itself, in a real terminal, driven by real keystrokes.
 ///
 /// The view has unit tests against `TestBackend`, but those prove only that a
@@ -3670,13 +3827,26 @@ fn resuming_a_session_with_no_conversation_is_refused() {
 
     let mut first = Session::spawn(glasshouse(&["launch", "codex"]));
     let deadline = Instant::now() + TIMEOUT;
+    let mut started = false;
     while Instant::now() < deadline {
         first.answer_pending_queries();
         if strip_terminal_sequences(&first.output()).contains("ARGV:") {
+            started = true;
             break;
         }
         std::thread::sleep(POLL);
     }
+    // Without this the loop can simply time out and every assertion below
+    // passes vacuously — the refusal check is `!contains("ARGV:")`, which a
+    // harness that never started satisfies for the wrong reason. Found by a
+    // subcontractor on the Antigravity batch, which hardened its own sibling
+    // test and left this one alone as out of scope.
+    assert!(
+        started,
+        "the first session never reached its harness, so this test would prove \
+         nothing about resume:\n{}",
+        strip_terminal_sequences(&first.output())
+    );
     let _ = first.wait_for_exit();
 
     let mut listing = Session::spawn(glasshouse(&["sessions"]));
@@ -3707,6 +3877,293 @@ fn resuming_a_session_with_no_conversation_is_refused() {
     assert!(
         !refusal.contains("ARGV:"),
         "the harness must never be started for a session with nothing to resume:\n{refusal}"
+    );
+}
+
+/// Combines [`install_antigravity_index_harness`] and [`install_argv_harness`]:
+/// a single fake `agy` that both writes the shared index under `$HOME` (so a
+/// `glasshouse launch antigravity` has a conversation identifier to record)
+/// and reports every argument it is given (so a later `glasshouse resume` can
+/// be checked against the exact command line Glasshouse actually built).
+///
+/// `id` is baked into the script when it is written rather than read off the
+/// command line, so every invocation — the later `resume` one included —
+/// writes the same entry. That is harmless: `resume_session` never
+/// rediscovers an identifier, and `capture` returns immediately for a record
+/// that already carries one.
+#[cfg(unix)]
+fn install_antigravity_index_and_argv_harness(
+    bin_dir: &std::path::Path,
+    id: &str,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    const PLACEHOLDER: &str = "__CONVERSATION_ID__";
+    let template = r#"#!/bin/sh
+echo "ARGV:$*"
+DIR="$HOME/.gemini/antigravity-cli/cache"
+mkdir -p "$DIR"
+CWD=$(pwd -P)
+printf '{"%s":"__CONVERSATION_ID__"}\n' "$CWD" > "$DIR/last_conversations.json"
+exit 0
+"#;
+    let script = template.replace(PLACEHOLDER, id);
+
+    let path = bin_dir.join("agy");
+    std::fs::write(&path, script).expect("write fake antigravity harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// The Antigravity counterpart of
+/// `a_recorded_codex_session_is_resumed_through_its_own_subcommand`: the whole
+/// resume path, through the shipped binary, for the third resume vocabulary
+/// this project has had to absorb.
+///
+/// Three harnesses, three different mechanisms — Claude Code's `--resume`,
+/// Codex's `resume` subcommand, Antigravity's `--conversation` flag — and the
+/// adapter contract exists so none of them leaks into another. That is what
+/// the negative assertions below are for; they are the interesting half of
+/// this test, not padding around the positive one.
+///
+/// Like Codex, Antigravity names its own conversations: nothing on
+/// Glasshouse's command line assigns one, so the identifier resumed here is
+/// the one the fake harness wrote into the shared index during the launch,
+/// captured by the same production path
+/// `an_antigravity_session_s_identifier_is_captured_by_the_launch_path`
+/// proves.
+///
+/// Unix only, for the `HOME` reason recorded on
+/// [`install_antigravity_index_harness`].
+#[cfg(unix)]
+#[test]
+fn a_recorded_antigravity_conversation_is_resumed_through_its_own_flag() {
+    const KNOWN_ID: &str = "7ab3d19c-90ab-4cde-8f12-abcdef012345";
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    let bin_dir = tmp.path().join("bin");
+    let home_dir = tmp.path().join("home");
+    for dir in [&state_dir, &config_dir, &bin_dir, &home_dir] {
+        std::fs::create_dir_all(dir).expect("create dir");
+    }
+
+    let antigravity = install_antigravity_index_and_argv_harness(&bin_dir, KNOWN_ID);
+    let toml_path = |p: &std::path::Path| p.display().to_string().replace('\\', "\\\\");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[integrations.antigravity]\nenabled = true\nexecutable = \"{}\"\n",
+            toml_path(&antigravity)
+        ),
+    )
+    .expect("write user config");
+
+    // Every invocation gets `HOME` relocated to the isolated fixture
+    // directory: discovery resolves the index underneath it, and the fake
+    // harness writes underneath the environment Glasshouse passes down, so
+    // one setting here covers both halves — the same arrangement the codex
+    // resume test makes with `CODEX_HOME`.
+    let glasshouse = |args: &[&str]| {
+        let mut command = TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path())
+            .arg("--scope")
+            .arg(&project_dir)
+            .arg("--data-dir")
+            .arg(&state_dir)
+            .arg("--config-dir")
+            .arg(&config_dir)
+            .env("HOME", &home_dir);
+        for arg in args {
+            command = command.arg(arg);
+        }
+        command
+    };
+
+    let read_argv = |session: &mut Session| -> String {
+        let deadline = Instant::now() + TIMEOUT;
+        while Instant::now() < deadline {
+            session.answer_pending_queries();
+            let clean = strip_terminal_sequences(&session.output());
+            if let Some(line) = clean.lines().find(|line| line.contains("ARGV:")) {
+                return line.trim().to_owned();
+            }
+            std::thread::sleep(POLL);
+        }
+        panic!(
+            "the harness never reported its arguments\n--- output ---\n{}\n--- end ---",
+            session.output()
+        )
+    };
+
+    // Start one, and let it finish.
+    let mut first = Session::spawn(glasshouse(&["launch", "antigravity"]));
+    let started = read_argv(&mut first);
+    let _ = first.wait_for_exit();
+    assert!(
+        !started.contains("--conversation"),
+        "a new session is not a resumed one — nothing should put Antigravity's resume flag on \
+         a launch command line: {started}"
+    );
+
+    // The short form is the only identifier the listing shows, so it is the
+    // one a user would type — and therefore the one this test uses.
+    let mut listing = Session::spawn(glasshouse(&["sessions"]));
+    let _ = listing.wait_for_exit();
+    let text = strip_terminal_sequences(&listing.output());
+    let row = text
+        .lines()
+        .find(|line| line.contains("resumable"))
+        .unwrap_or_else(|| panic!("no resumable session in the listing:\n{text}"));
+    let short = row.split_whitespace().next().expect("an identifier column");
+    assert_eq!(short.len(), 12, "the listing's short form changed: {row}");
+
+    // Reopen it.
+    let mut second = Session::spawn(glasshouse(&["resume", short]));
+    let resumed = read_argv(&mut second);
+    let _ = second.wait_for_exit();
+
+    assert!(
+        resumed.contains("--conversation"),
+        "resuming did not use Antigravity's own resume flag: {resumed}"
+    );
+    assert!(
+        resumed.contains(KNOWN_ID),
+        "resumed a different conversation than the one Antigravity recorded: {resumed}"
+    );
+    assert!(
+        !resumed.contains("resume"),
+        "Codex's resume subcommand leaked into an Antigravity invocation — the adapter contract \
+         is supposed to keep one harness's vocabulary from leaking into another's: {resumed}"
+    );
+    assert!(
+        !resumed.contains("--resume"),
+        "Claude Code's flag leaked into an Antigravity invocation: {resumed}"
+    );
+    assert!(
+        !resumed.contains("--session-id"),
+        "a resumed session must not also be assigned a fresh identifier: {resumed}"
+    );
+}
+
+/// An Antigravity session Glasshouse never recorded an identifier for is
+/// refused **before the harness is ever started** — and this is the test the
+/// whole Antigravity resume line is dangerous without.
+///
+/// `agy --conversation <unknown-uuid>` does not fail. It prints
+/// `warning: conversation "<id>" not found` to stderr, starts a brand new
+/// conversation, and exits 0. So Antigravity gives Glasshouse no way to
+/// detect a bad resume after the fact: a wrong identifier is silent, and
+/// asserting the argument list would prove nothing about it. The only
+/// protection that exists is upstream — Glasshouse refusing to start the
+/// harness at all for a session it has no recorded conversation for — so
+/// that is what is asserted here, and the absence of `ARGV:` is the assertion
+/// that carries it. The Codex sibling
+/// `resuming_a_session_with_no_conversation_is_refused` reaches the same
+/// store guard; this one pins it for the harness where being wrong is
+/// undetectable rather than merely an error.
+///
+/// The fake `agy` reports its arguments and deliberately **never writes the
+/// index**, so discovery finds nothing and the session ends `closed` rather
+/// than `resumable` — a real Antigravity session that took no turn produces
+/// exactly this.
+#[cfg(unix)]
+#[test]
+fn resuming_an_antigravity_session_with_no_recorded_conversation_is_refused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    let bin_dir = tmp.path().join("bin");
+    let home_dir = tmp.path().join("home");
+    for dir in [&state_dir, &config_dir, &bin_dir, &home_dir] {
+        std::fs::create_dir_all(dir).expect("create dir");
+    }
+
+    let harness = install_argv_harness(&bin_dir, "fake-agy");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[integrations.antigravity]\nenabled = true\nexecutable = \"{}\"\n",
+            harness.display()
+        ),
+    )
+    .expect("write user config");
+
+    // `HOME` is relocated here too, even though this fixture writes no index
+    // at all: without it discovery would resolve the developer's own
+    // `~/.gemini/antigravity-cli/cache/last_conversations.json` and read it,
+    // and a test has no business opening a real user's conversation index.
+    let glasshouse = |args: &[&str]| {
+        let mut command = TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path())
+            .arg("--scope")
+            .arg(&project_dir)
+            .arg("--data-dir")
+            .arg(&state_dir)
+            .arg("--config-dir")
+            .arg(&config_dir)
+            .env("HOME", &home_dir);
+        for arg in args {
+            command = command.arg(arg);
+        }
+        command
+    };
+
+    let mut first = Session::spawn(glasshouse(&["launch", "antigravity"]));
+    let deadline = Instant::now() + TIMEOUT;
+    while Instant::now() < deadline {
+        first.answer_pending_queries();
+        if strip_terminal_sequences(&first.output()).contains("ARGV:") {
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+    let _ = first.wait_for_exit();
+    // The launch must genuinely have reached the harness, or the assertion
+    // this whole test exists for — no `ARGV:` on the *resume* — would hold
+    // for the wrong reason: a harness that never runs at all prints nothing
+    // either, and the test would pass while proving nothing.
+    assert!(
+        strip_terminal_sequences(&first.output()).contains("ARGV:"),
+        "the fake harness never ran during the launch\n--- output ---\n{}\n--- end ---",
+        first.output()
+    );
+
+    let mut listing = Session::spawn(glasshouse(&["sessions"]));
+    let _ = listing.wait_for_exit();
+    let text = strip_terminal_sequences(&listing.output());
+    let row = text
+        .lines()
+        .find(|line| line.contains("antigravity"))
+        .unwrap_or_else(|| panic!("no antigravity session in the listing:\n{text}"));
+    assert!(
+        row.contains("closed"),
+        "a session whose harness wrote no index entry leaves nothing to resume to: {row}"
+    );
+    let short = row.split_whitespace().next().expect("an identifier column");
+
+    let mut second = Session::spawn(glasshouse(&["resume", short]));
+    let status = second.wait_for_exit();
+    assert!(
+        !status.success(),
+        "resuming an Antigravity session with no recorded conversation must not succeed"
+    );
+
+    let refusal = strip_terminal_sequences(&second.output());
+    assert!(
+        refusal.contains("closed"),
+        "the refusal must say why the session cannot be resumed:\n{refusal}"
+    );
+    assert!(
+        !refusal.contains("ARGV:"),
+        "the harness must never be started for a session with no recorded conversation — \
+         `agy --conversation <unknown>` starts a fresh conversation and exits 0, so reaching \
+         it at all is the failure this test exists to catch:\n{refusal}"
     );
 }
 

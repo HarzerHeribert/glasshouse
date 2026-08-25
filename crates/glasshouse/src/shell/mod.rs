@@ -30,6 +30,8 @@
 pub mod state;
 pub mod view;
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use ratatui::layout::Rect;
 
@@ -40,7 +42,7 @@ use crate::launch::HarnessLaunch;
 use crate::onboarding;
 use crate::pty::TerminalSize;
 use crate::session::{
-    self, NewSession, ProjectSessions, RuntimeError, SessionLifecycle, SessionRuntime,
+    self, NewSession, ProjectSessions, RuntimeError, SessionId, SessionLifecycle, SessionRuntime,
 };
 use crate::tui::{AppEvent, DEFAULT_TICK, Event, EventSource, Screen};
 
@@ -68,6 +70,14 @@ pub fn run(runtime: &Runtime) -> Result<()> {
         records,
     );
     let mut live = SessionRuntime::new();
+    // What each started session's harness index held for this project before
+    // it ran — half the identity guard for a harness whose identifiers live
+    // in one shared index, and the reason that read has to happen at start
+    // rather than at exit. See `session::native_id::snapshot`. Kept in memory
+    // rather than in the session record: it is scaffolding for one discovery,
+    // meaningless once the session has ended, and a shell that dies mid-session
+    // has nothing to capture anyway.
+    let mut index_snapshots: HashMap<SessionId, session::native_id::IndexSnapshot> = HashMap::new();
 
     // Acquired after the database work above, so a failure there leaves the
     // user's terminal untouched rather than flashing an alternate screen.
@@ -96,6 +106,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                         &mut live,
                         &sessions,
                         viewport_terminal_size(&screen),
+                        &mut index_snapshots,
                     ) {
                         Ok(()) => {
                             if let Ok(records) = sessions.store().list() {
@@ -219,11 +230,13 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     // The session is over, so this is the tightest the
                     // discovery window will ever be — see
                     // `session::native_id::capture`'s doc comment.
+                    let index_before = index_snapshots.remove(&id).unwrap_or_default();
                     if let Ok(Some(record)) = sessions.store().get(&id) {
                         session::native_id::capture(
                             &sessions.store(),
                             &record,
                             runtime.project().root(),
+                            &index_before,
                         );
                     }
                     if let Err(err) = sessions.store().set_lifecycle(&id, lifecycle) {
@@ -377,6 +390,7 @@ fn start_session(
     live: &mut SessionRuntime,
     sessions: &ProjectSessions,
     size: TerminalSize,
+    index_snapshots: &mut HashMap<SessionId, session::native_id::IndexSnapshot>,
 ) -> anyhow::Result<()> {
     let user = UserConfig::load(app_runtime.paths())?;
     let project_config = config::load_project_config(app_runtime.project())?;
@@ -391,6 +405,13 @@ fn start_session(
     let record = store.create(
         NewSession::embedded(selection.id().slug()).with_native_session_id(native.clone()),
     )?;
+
+    // Before the harness runs — see the declaration of `index_snapshots` in
+    // `run`, and `session::native_id::snapshot`.
+    index_snapshots.insert(
+        record.id.clone(),
+        session::native_id::snapshot(&record.harness, app_runtime.project().root()),
+    );
 
     tracing::info!(
         session = %record.id,
@@ -432,6 +453,9 @@ fn start_session(
         .args(args)
         .size(size);
     if let Err(err) = live.start(record.id.clone(), record.presentation, &launch) {
+        // A session that never started will never be polled for its exit, so
+        // its snapshot has nothing left to pair with.
+        index_snapshots.remove(&record.id);
         if let Err(store_err) = store.set_lifecycle(&record.id, SessionLifecycle::Failed) {
             tracing::warn!(
                 session = %record.id,

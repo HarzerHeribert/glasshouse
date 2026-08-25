@@ -49,6 +49,85 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 9 — the Antigravity conversation identifier, from an index rather than a walk (lines 2 and 3)
+
+Contract: Given a Glasshouse-started Antigravity session that has just ended,
+when Glasshouse looks for its native conversation identifier, it reads **one
+shared index file** keyed by project path and records the identifier only if
+that project's entry both **changed** during the session and the index's mtime
+sits inside the session's window — while preserving: **no conversation database
+is ever opened**, an absent or unchanged entry records nothing, and a resume
+only ever passes an identifier Glasshouse recorded itself.
+
+State: **COMPLETE** for both lines. Phase 9 is five of seven.
+
+#### Why this needed a new shape at all
+
+`session::native_id::discover` was built for one shape: a directory of session
+records, each self-describing in its own first line — it walks, filters by name,
+and **opens every survivor**. Antigravity does not have that shape. Its
+identifier lives in `~/.gemini/antigravity-cli/cache/last_conversations.json`,
+a flat `{project path: uuid}` map with **no timestamps**, and its records are
+`conversations/<uuid>.db` — SQLite databases holding the user's private
+conversations. A previous packet asked for `session_id_source` to be pointed at
+those databases; the worker refused and was right.
+
+So `NativeSessionSource` is now an enum: `RecordPerSession` (Codex's walk, byte
+for byte unchanged) and `SharedIndex`, paired with a new pure adapter method
+`read_index_entry`. The `SharedIndex` path reads **exactly one named file** and
+never calls the directory walk — a property of the code path, not a rule anyone
+has to remember, and
+`the_shared_index_code_path_never_mentions_the_directory_walk` enforces it.
+
+#### The identity guard is two rules, and both are load-bearing
+
+A shared index has no per-entry timestamp, so the window has to come from
+elsewhere:
+
+1. the **index file's own mtime** must fall inside `[started_at, ended_at]`;
+2. the entry for this project must have **changed** during the session.
+
+Rule 1 alone is not enough and the hole is worth naming: the mtime moves when
+*any* project's entry changes, so an Antigravity session in another project
+during our window could make a stale entry for ours look fresh. Rule 2 closes
+it, because a stale entry is by definition unchanged. Its one false negative —
+resuming the same conversation leaves the entry unchanged — is safe, because
+Glasshouse only ever resumes an identifier it already holds.
+
+#### Mutations — by the lead, plus two re-run independently by the orchestrator
+
+- removing the changed-entry guard → `a_shared_index_entry_that_did_not_change_is_never_captured` **FAILED** (killed);
+- making the shared-index path walk a directory →
+  `the_shared_index_code_path_never_mentions_the_directory_walk` **FAILED** (killed).
+
+Line 3 was additionally proved by hand against the built binary in a real PTY
+before any test existed: a launched session listed as `resumable`, and
+`glasshouse resume <short>` producing `--conversation <id>`.
+
+#### `home_env` is `None`, and that is a finding
+
+The design left the variable name open ("`GEMINI_DIR` or whatever agy
+honours"). The lead searched the 1.1.20 binary for `GEMINI_DIR`, `GEMINI_HOME`,
+`ANTIGRAVITY_HOME`, `AGY_HOME`, every `XDG_*` and every `*_HOME`/`*_DIR`
+symbol: **Antigravity honours no environment variable for its state root.** So
+`home_env` became `Option<&'static str>` — `Some("CODEX_HOME")` for Codex,
+`None` here. Declaring `"GEMINI_DIR"` would have been a fifth invented
+declaration in a module whose own doc already records two.
+
+#### An orchestrator design rule that was too broad, corrected
+
+The design said "no log line, no diagnostic" for a conversation identifier.
+Two **pre-existing** log lines carry one (`native_id::capture`'s success log and
+`resume_session`), and the second has a comment deliberately arguing the
+identifier is the one fact that makes a failed resume diagnosable. The lead
+reported the collision rather than choosing.
+
+**Orchestrator's decision: the log lines stay.** The identifier is not a
+credential — it grants no access and names local state Glasshouse already
+records in its own database. The real property is narrower and is what the rule
+should have said: *never log the index's contents, and never log an identifier
+belonging to another project.* Both hold.
+
 ### Phase 2C — first-run onboarding, and the acknowledgement `setup` had been promising (six lines, plus a 9A gap closed)
 
 Contract: Given a first run, when the user reaches the provider step,

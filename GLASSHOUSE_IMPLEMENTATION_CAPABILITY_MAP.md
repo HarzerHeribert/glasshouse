@@ -331,8 +331,8 @@ Fixed architectural requirements
 - The adapter launches the real supported Antigravity executable and preserves its native interaction model rather than emulating it.
 
 ☑ Add an Antigravity adapter that starts the real supported Antigravity CLI command inside the current project root.
-☐ Capture the native Antigravity conversation identifier when it can be obtained reliably.
-☐ Support resuming a known Antigravity conversation through its native mechanism when available.
+☑ Capture the native Antigravity conversation identifier when it can be obtained reliably.
+☑ Support resuming a known Antigravity conversation through its native mechanism when available.
 ☑ Preserve the native Antigravity terminal experience inside the Glasshouse PTY.
 ☐ Integrate structured Antigravity lifecycle events where the CLI exposes them.
 ☐ Translate supported Antigravity lifecycle state into Glasshouse lifecycle events.

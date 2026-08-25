@@ -243,6 +243,14 @@ fn launch_session(
             .with_backend_resource(Some(launch_profile.backend.slug())),
     )?;
 
+    // Read before the harness runs, for a harness that keeps its identifiers
+    // in one shared index: such an index carries no per-entry timestamp, so
+    // "this project's entry changed during the session" is the only thing
+    // standing between Glasshouse and adopting a stale entry somebody else's
+    // session refreshed. Empty, and free, for every other harness — see
+    // `session::native_id::snapshot`.
+    let index_before = session::native_id::snapshot(&record.harness, runtime.project().root());
+
     tracing::info!(
         session = %record.id,
         harness = selection.id().slug(),
@@ -291,7 +299,7 @@ fn launch_session(
 
     // The session is over, so this is the tightest the discovery window will
     // ever be — see `session::native_id::capture`'s doc comment.
-    session::native_id::capture(&store, &record, runtime.project().root());
+    session::native_id::capture(&store, &record, runtime.project().root(), &index_before);
 
     note_lifecycle(
         &store,
