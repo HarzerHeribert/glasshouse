@@ -516,25 +516,45 @@ user's auth, MCP servers, skills and model configuration, so the session is not
 invariant. Copying their real home in would duplicate credentials, which the
 secret boundary forbids.
 
-### The open question the next session must probe, not guess
+### Trust is user-level, and that is fine — because it grants, it does not install
 
 Codex trust-gates hooks by content hash, keyed by absolute path:
 
     [hooks.state."<abs-path>/.codex/hooks.json:<event_snake_case>:0:0"]
     trusted_hash = "sha256:<64 hex>"
 
-Those entries live in the user's `~/.codex/config.toml`. Writing them there
-would violate the rule above just as surely as a user-level hook does, and
-`--dangerously-bypass-hook-trust` is worse: it bypasses trust for *every*
-enabled hook in that invocation, including project hooks the user has never
-vetted.
+Those entries live in the user's `~/.codex/config.toml`, and writing one there
+is **allowed** (user decision, 2026-08-25). The rule this file states is not
+"never touch a user-level file"; it is *"hooks must not end up running in every
+session on a global level — only in the folder where they are actually
+configured."* A trust entry cannot cause that, because of what it is:
 
-There is a third possibility that fits this product exactly, and it has not
-been tested: **let Codex ask.** A Glasshouse session is a real harness in a
-visible viewport, so if Codex prompts for hook trust on first run, the user
-approves it there, in the harness's own interface, and Glasshouse writes
-nothing outside the project. Establish whether Codex actually prompts — or
-silently ignores untrusted hooks — before designing around either.
+- It **installs nothing.** It records that one file, at one absolute path, with
+  one exact content hash, is trusted for one event. Hooks run only where a
+  `.codex/hooks.json` actually exists, which under this design is only inside
+  the project Glasshouse was asked to configure.
+- It is **content-bound.** Change the file and the hash no longer matches, so
+  trust has to be granted again. Glasshouse regenerating its hooks document
+  cannot silently inherit an old grant.
+- It is **enumerable and revocable.** Every entry names the project path it
+  belongs to, so Glasshouse can find and remove its own grants.
+
+The thing that *would* make hooks global is a different file entirely:
+**`$CODEX_HOME/hooks.json`**, the user-level hooks document. That is a real
+mechanism, it does apply everywhere, and it is exactly what a previous tool on
+this machine was using — seven events, every session, every repository.
+**Glasshouse must never write it.** That is the line, and it is not the same
+line as `config.toml`.
+
+`--dangerously-bypass-hook-trust` stays rejected regardless. It bypasses trust
+for *every* enabled hook in the invocation, including project hooks the user
+has never vetted, which trades a narrow scoped grant for a blanket one.
+
+Whether Codex prompts for trust interactively is still worth knowing — a
+visible viewport could simply let the user answer it, and then Glasshouse
+writes nothing at all. Probe it; if it does prompt, prefer it, because the
+best version of a grant is the one the user makes themselves in the harness's
+own interface.
 
 ### Invariants a test must hold to
 
@@ -542,5 +562,10 @@ silently ignores untrusted hooks — before designing around either.
    user-level harness configuration.
 2. A project-level write shows its exact path and requires its own
    confirmation; cancelling leaves neither file nor directory.
-3. Removing a project removes every piece of harness configuration Glasshouse
-   made for it — nothing is left behind elsewhere.
+3. Glasshouse never writes `$CODEX_HOME/hooks.json`. That file is the global
+   mechanism; a test should fail on any code path that could produce it.
+4. Every trust grant Glasshouse writes is keyed by a path **inside the current
+   project root**. A grant naming any other path is a defect.
+5. Removing a project removes every piece of harness configuration Glasshouse
+   made for it, including its trust grants in the user-level `config.toml` —
+   nothing is left behind elsewhere.

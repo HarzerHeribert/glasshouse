@@ -825,14 +825,27 @@ path, require its own confirmation, leave nothing behind on cancel.
 Claude Code already satisfies the rule and does not change: its hook document
 lives in Glasshouse-owned state and is passed per session with `--settings`.
 
-**One thing to probe before writing any code.** Codex trust-gates hooks by
-content hash in `~/.codex/config.toml` — a user-level file the rule above says
-Glasshouse must not write, and `--dangerously-bypass-hook-trust` is worse
-because it bypasses trust for every enabled hook, including ones the user never
-vetted. The third option fits this product exactly and is untested: **let Codex
-ask.** The session is a real harness in a visible viewport, so the user can
-approve the trust prompt there. Find out whether Codex actually prompts or
-silently ignores untrusted hooks. Do not design around either until you know.
+**The trust question is settled too.** Writing Codex's trust record into the
+user-level `~/.codex/config.toml` is **allowed**. The rule is not "never touch
+a user-level file" — it is that hooks must not end up running in every session
+globally, only in the folder where they are configured. A trust entry cannot
+cause that: it is keyed by absolute path and bound to a content hash, so it
+grants permission for one file at one path for one event and installs nothing.
+Hooks run only where a `.codex/hooks.json` exists.
+
+**The file that *would* make them global is `$CODEX_HOME/hooks.json`**, and
+Glasshouse must never write it. That is a different file from `config.toml`
+and a different line entirely. It is also not hypothetical: a previous tool on
+this machine had exactly that file configured with seven events, firing in
+every repository, and it was found and removed on 2026-08-25.
+
+`--dangerously-bypass-hook-trust` stays rejected: it bypasses trust for every
+enabled hook including unvetted project ones, trading a scoped grant for a
+blanket one.
+
+Still worth probing: whether Codex prompts for hook trust interactively. If it
+does, prefer that — the session is a real harness in a visible viewport, the
+user answers it there, and Glasshouse writes nothing at all.
 
 Still blocked, unchanged:
 
