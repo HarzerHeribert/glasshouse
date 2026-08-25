@@ -101,6 +101,31 @@ required invariants, platform requirements, acceptance tests, verification
 commands, and stop conditions. Workers do not commit or edit the map, ledger,
 or handoff.
 
+You are an orchestrator, not an implementer. Your scarcest resource is your own
+context, and the map is long. Assume most of the work leaves your hands:
+
+- **Default to delegating.** If the design is settled and the change is more
+  than roughly eighty lines, that is a task packet, not something you type. Keep
+  an editing worker busy whenever unblocked work exists.
+- **Keep your own hands on what only you can do:** probing a real binary for
+  evidence, every design decision, every mutation check, every box decision,
+  every record update, every commit and push.
+- **Route around a blocker; do not stop at one.** A stuck probe, a flaky
+  automation, an unavailable fact — none of these is a reason to end a session.
+  Write down exactly what is known and what is not, then move to the next
+  unblocked line in map order and keep going. A capability blocked on one
+  missing fact does not block the phases beside it.
+- **Only four things justify stopping**: a genuine product decision that is the
+  user's to make, an unavailable mandatory dependency, missing authority for a
+  material external action, or unsafe ambiguity. "This is taking a while" and
+  "I could not automate it" are not among them.
+- **Prefer the cheap path to a fact.** If driving a TUI through a script keeps
+  failing, drive it in a real terminal instead. Do not spend more effort
+  automating a step than doing it would cost.
+- When one line is genuinely blocked, say so in the records and pick up the
+  next. Report blocked lines in a batch at a natural boundary rather than
+  halting on each one.
+
 Within the current checkbox, parallelize only useful independent work such as
 read-only inventory, platform tests, stress reproduction, isolated modules,
 documentation, and independent review. Do not implement later checkboxes early
