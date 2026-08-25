@@ -143,6 +143,34 @@ one joins it: **what does it cost to drive each tier, in orchestrator attention
 and in permission friction?** A tier that needs a human to approve a flag is
 not a tier you can fan out to at 2 a.m.
 
+### The acknowledged bypass is human-only, and two independent designs agree
+
+2026-08-26. The user explicitly authorized recording Antigravity's
+blanket-bypass acknowledgement so the leaf tier could run unattended. **The
+orchestrator could not do it, by three different routes** — typing the harness's
+bypass flag into a pane, launching the harness with it, and writing the
+acknowledgement key into the user config. Each was refused by Claude Code's
+auto-mode classifier, and none was routed around.
+
+That is a *result*, not an obstacle, because two safety designs that know
+nothing about each other reached the same conclusion:
+
+- **Phase 9A** permits a blanket bypass only "after the user has been shown its
+  risk once and acknowledged it" — a human act, recorded per harness, user
+  layer only.
+- **The harness's classifier** independently refuses to let an agent enable a
+  bypass on its own behalf.
+
+So the acknowledgement genuinely requires a keyboard, which is what the
+capability line intends. **Do not treat this as friction to engineer away.** The
+correct sequence is one human step — `glasshouse setup`, tick the harness — after
+which `glasshouse shim <harness> --profile <p>` produces a user-owned entry
+point with the decision recorded behind it.
+
+The measurable consequence for tier selection: **the leaf tier cannot be
+bootstrapped autonomously.** An overnight run cannot add it; a human must arm it
+once, in advance.
+
 ### The mistake this measurement exposed
 
 For most of 2026-08-25 the orchestrator ran **one worker at a time**, believing
