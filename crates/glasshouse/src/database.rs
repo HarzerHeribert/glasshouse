@@ -44,14 +44,18 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 
 /// The highest schema version this build knows how to migrate to.
 ///
-/// Version 1 is the empty-but-initialized schema plus [`MIGRATION_1`]'s
-/// `project_metadata` table. Later migrations are appended to
+/// Version 1 is the empty-but-initialized schema plus the `project_metadata`
+/// table. Version 2 adds `sessions`. Later migrations are appended to
 /// [`MIGRATIONS`], and this constant moves with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 1;
+const SUPPORTED_SCHEMA_VERSION: i64 = 2;
 
 /// Migration `index + 1` upgrades a database from schema version `index` to
 /// version `index + 1`. Migrations run in order inside one transaction, so a
 /// partially applied upgrade can never be observed.
+///
+/// Migrations are append-only. Editing one that has shipped would leave
+/// already-migrated databases silently disagreeing with new ones, because the
+/// recorded version would match while the schema did not.
 const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
     // 1: identity of the project this database belongs to. Memory (Phase 20)
     // and everything else project-scoped joins against these rows.
@@ -61,9 +65,86 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
         value TEXT NOT NULL
     ) WITHOUT ROWID;
     ",
+    // 2: Glasshouse session metadata.
+    //
+    // This is Glasshouse's own record of a session and is deliberately not
+    // derived from any harness's session files: `native_session_id` is a
+    // nullable *reference* to the harness's own identifier, never the source
+    // of truth. A session exists here whether or not the harness kept a file,
+    // and deleting the harness's history does not delete this row.
+    //
+    // The `CHECK` constraints keep the enum columns honest at the storage
+    // layer, so a future writer cannot invent a lifecycle value that readers
+    // would have to guess about.
+    //
+    // The two triggers are the structural half of the project-isolation rule.
+    // Filtering by `project_id` in queries would be a convention any new query
+    // could forget; a `BEFORE INSERT`/`BEFORE UPDATE` guard cannot be
+    // forgotten, because SQLite enforces it against the binding in
+    // `project_metadata` no matter which code writes the row. `IS NOT` rather
+    // than `<>` is deliberate: if the binding row were somehow missing, the
+    // subquery yields NULL and `<>` would silently evaluate to NULL and let
+    // the write through, whereas `IS NOT` aborts. The guard fails closed.
+    "
+    CREATE TABLE sessions (
+        id                TEXT PRIMARY KEY,
+        project_id        TEXT NOT NULL,
+        harness           TEXT NOT NULL,
+        native_session_id TEXT,
+        role              TEXT NOT NULL
+            CHECK (role IN ('normal', 'orchestrator', 'worker')),
+        lifecycle         TEXT NOT NULL
+            CHECK (lifecycle IN ('starting', 'running', 'idle',
+                                 'waiting_for_user', 'stopped', 'failed',
+                                 'closed')),
+        presentation      TEXT NOT NULL
+            CHECK (presentation IN ('embedded', 'headless', 'external')),
+        created_at        INTEGER NOT NULL,
+        last_activity_at  INTEGER NOT NULL
+    ) WITHOUT ROWID;
+
+    CREATE INDEX sessions_by_last_activity
+        ON sessions (last_activity_at DESC);
+
+    -- A native session belongs to at most one Glasshouse session, which is
+    -- what makes the column a mapping rather than a loose annotation. Scoped
+    -- per harness because two harnesses may coincidentally use the same
+    -- identifier format.
+    --
+    -- The `WHERE` clause is not what lets many sessions sit without a native
+    -- identifier: SQLite already treats NULLs as distinct in a unique index,
+    -- so they would never collide either way. It is here to keep the index
+    -- from carrying an entry for every not-yet-identified session, and to say
+    -- plainly that the constraint is about real identifiers. Sentinel values
+    -- would break that — an empty-string default in place of NULL really
+    -- would collide.
+    CREATE UNIQUE INDEX sessions_native_id
+        ON sessions (harness, native_session_id)
+        WHERE native_session_id IS NOT NULL;
+
+    CREATE TRIGGER sessions_reject_foreign_project_insert
+    BEFORE INSERT ON sessions
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'session belongs to a different project');
+    END;
+
+    CREATE TRIGGER sessions_reject_foreign_project_update
+    BEFORE UPDATE OF project_id ON sessions
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'session belongs to a different project');
+    END;
+    ",
 ];
 
-const PROJECT_ID_KEY: &str = "project_id";
+pub(crate) const PROJECT_ID_KEY: &str = "project_id";
 
 /// Everything that can go wrong while preparing a project database.
 ///
@@ -150,7 +231,21 @@ pub(crate) enum DatabaseError {
 /// Called from `bootstrap`, so a successful [`crate::Runtime`] always has a
 /// valid project database waiting in its state directory. On success the
 /// connection is closed again; nothing holds it open between launches.
+///
+/// Use [`open`] instead when the caller actually needs to read or write.
 pub(crate) fn ensure_ready(runtime: &Runtime) -> Result<(), DatabaseError> {
+    // Dropping the connection closes it. Validation is the point of the call.
+    open(runtime).map(drop)
+}
+
+/// Open the project database, applying every check [`ensure_ready`] applies,
+/// and hand back the live connection.
+///
+/// This is the only way anything in Glasshouse obtains a usable connection, so
+/// the symlink refusal, the read-only refusal, the project-identity check, and
+/// the migrations are not steps a caller can skip or reorder. The path and the
+/// binding identifier both come from `runtime`; neither is a parameter.
+pub(crate) fn open(runtime: &Runtime) -> Result<Connection, DatabaseError> {
     let db_path = runtime.database_path();
     let project_id = runtime.project().id().as_str();
 
@@ -206,7 +301,7 @@ pub(crate) fn ensure_ready(runtime: &Runtime) -> Result<(), DatabaseError> {
         source,
     })?;
 
-    Ok(())
+    Ok(conn)
 }
 
 /// Per-connection configuration that must hold before any work happens.
@@ -720,8 +815,12 @@ mod tests {
         let db = fixture.runtime.database_path();
 
         {
+            // What a newer Glasshouse would leave behind: this build's
+            // migrations, plus one it has never heard of. Appending rather
+            // than rewriting the existing rows keeps the fixture correct as
+            // more migrations are added.
             let conn = Connection::open(&db).unwrap();
-            conn.execute_batch("UPDATE schema_migrations SET version = 99;")
+            conn.execute_batch("INSERT INTO schema_migrations (version) VALUES (99);")
                 .unwrap();
         }
 

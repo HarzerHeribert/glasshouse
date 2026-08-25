@@ -8,6 +8,7 @@ use glasshouse::launch::HarnessLaunch;
 use glasshouse::onboarding;
 use glasshouse::pty::ExitStatus;
 use glasshouse::session;
+use glasshouse::session::{NewSession, ProjectSessions, SessionDisposition, SessionLifecycle};
 use glasshouse::{Cli, Command, Runtime, logging, shutdown};
 
 use clap::Parser;
@@ -68,6 +69,9 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 return Ok(ExitCode::FAILURE);
             }
         }
+        Some(Command::Sessions) => {
+            print!("{}", session_report(&runtime)?);
+        }
         Some(Command::Launch {
             harness,
             harness_args,
@@ -120,7 +124,18 @@ fn launch_session(
     let selection =
         session::select::select(harness, EffectiveConfig::new(&user, project.as_ref()))?;
 
+    // Record the session before the harness exists, so a session that dies
+    // during startup still leaves a trace. Failing to open the project
+    // database is fatal here rather than a warning: `bootstrap` already
+    // validated it, so a failure now means the project's state directory
+    // broke underneath us, and starting a session Glasshouse cannot account
+    // for is worse than not starting one.
+    let sessions = ProjectSessions::open(runtime)?;
+    let store = sessions.store();
+    let record = store.create(NewSession::embedded(selection.id().slug()))?;
+
     tracing::info!(
+        session = %record.id,
         harness = selection.id().slug(),
         // The resolved path and the layer that chose it are diagnostics a
         // user needs when a session starts the wrong binary. Neither is a
@@ -134,7 +149,30 @@ fn launch_session(
 
     let launch =
         HarnessLaunch::new(selection.into_executable(), runtime.project()).args(harness_args);
-    let status = session::attach(launch)?;
+
+    // From here on, a bookkeeping failure must never change what the user
+    // sees. The session is real and running; losing a state transition is a
+    // diagnostics problem, whereas turning it into an error would make a
+    // database hiccup look like a harness failure.
+    note_lifecycle(&store, &record.id, SessionLifecycle::Running);
+
+    let status = match session::attach(launch) {
+        Ok(status) => status,
+        Err(err) => {
+            note_lifecycle(&store, &record.id, SessionLifecycle::Failed);
+            return Err(err);
+        }
+    };
+
+    note_lifecycle(
+        &store,
+        &record.id,
+        if status.success() {
+            SessionLifecycle::Stopped
+        } else {
+            SessionLifecycle::Failed
+        },
+    );
 
     if !status.success() {
         // The harness failing is not Glasshouse failing, so this is a plain
@@ -143,6 +181,119 @@ fn launch_session(
         eprintln!("glasshouse: the harness {status}");
     }
     Ok(exit_code_for(&status))
+}
+
+/// Move a session to a new state, logging rather than failing.
+///
+/// See the call sites: once a harness is running, Glasshouse's own record
+/// keeping is not worth failing the user's session over.
+fn note_lifecycle(
+    store: &glasshouse::session::SessionStore<'_>,
+    id: &glasshouse::session::SessionId,
+    lifecycle: SessionLifecycle,
+) {
+    if let Err(err) = store.set_lifecycle(id, lifecycle) {
+        tracing::warn!(session = %id, %lifecycle, error = %err, "could not record a session state change");
+    }
+}
+
+/// The `glasshouse sessions` listing.
+///
+/// Reads Glasshouse's own records rather than any harness's session files, so
+/// the list is the same whether or not a harness kept its own history.
+fn session_report(runtime: &Runtime) -> anyhow::Result<String> {
+    use std::fmt::Write as _;
+
+    let sessions = ProjectSessions::open(runtime)?;
+    let records = sessions.store().list()?;
+
+    if records.is_empty() {
+        return Ok(format!(
+            "No sessions recorded for {}.\nStart one with `glasshouse launch`.\n",
+            runtime.project().name()
+        ));
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{}",
+        session_row(
+            "SESSION",
+            "HARNESS",
+            "STATE",
+            "ROLE",
+            "PRESENTED",
+            "LAST ACTIVITY"
+        )
+    );
+    for record in &records {
+        let state = match record.disposition() {
+            SessionDisposition::Active => "active",
+            SessionDisposition::Resumable => "resumable",
+            SessionDisposition::Closed => "closed",
+            SessionDisposition::Failed => "failed",
+        };
+        let _ = writeln!(
+            out,
+            "{}",
+            session_row(
+                &short_id(&record.id),
+                &record.harness,
+                state,
+                &record.role.to_string(),
+                &record.presentation.to_string(),
+                &format_age(record.last_activity_at),
+            )
+        );
+    }
+    Ok(out)
+}
+
+/// One line of the session listing, header included.
+///
+/// The header and the rows go through the same function so their columns
+/// cannot drift apart — the usual way a hand-aligned table stops lining up is
+/// someone widening a column in one of the two format strings.
+fn session_row(
+    session: &str,
+    harness: &str,
+    state: &str,
+    role: &str,
+    presented: &str,
+    activity: &str,
+) -> String {
+    // Widths fit the longest value each column can hold: `resumable`,
+    // `orchestrator`, `embedded`.
+    format!("{session:<12}  {harness:<14}  {state:<9}  {role:<12}  {presented:<9}  {activity}")
+}
+
+/// Enough of an identifier to name a session in conversation.
+///
+/// The full identifier stays available in `--log-level` output and is what any
+/// command taking a session takes; this is only for the eye.
+fn short_id(id: &glasshouse::session::SessionId) -> String {
+    id.as_str().chars().take(12).collect()
+}
+
+/// A rough "how long ago", which is what a session list is actually read for.
+fn format_age(timestamp: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+    let seconds = now.saturating_sub(timestamp);
+    if seconds < 0 {
+        // A clock that moved backwards between writing and reading. Say so
+        // rather than printing a confident negative age.
+        return "just now".to_owned();
+    }
+    match seconds {
+        s if s < 60 => "just now".to_owned(),
+        s if s < 3_600 => format!("{}m ago", s / 60),
+        s if s < 86_400 => format!("{}h ago", s / 3_600),
+        s => format!("{}d ago", s / 86_400),
+    }
 }
 
 /// Translate a harness's exit into Glasshouse's own.

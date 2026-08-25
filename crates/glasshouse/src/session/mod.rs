@@ -8,12 +8,21 @@
 //!   ambiguity rather than guessing;
 //! - [`attach`] hands the terminal to it and stays out of the way.
 //!
-//! Both go through [`crate::launch::HarnessLaunch`], the only sanctioned way
-//! to start a harness: it derives the child's working directory from the
-//! active project and offers no way to override it.
+//! [`store`] holds the third: Glasshouse's own durable record of the sessions
+//! in this project, kept independently of whatever session files the harness
+//! writes for itself.
+//!
+//! Selecting and attaching both go through [`crate::launch::HarnessLaunch`],
+//! the only sanctioned way to start a harness: it derives the child's working
+//! directory from the active project and offers no way to override it.
 
 pub mod attach;
 pub mod select;
+pub mod store;
 
 pub use attach::attach;
 pub use select::{ExecutableSource, HarnessSelection, SelectionError, select};
+pub use store::{
+    NewSession, ProjectSessions, ResumableSession, SessionDisposition, SessionId, SessionLifecycle,
+    SessionPresentation, SessionRecord, SessionRole, SessionStore, SessionStoreError,
+};

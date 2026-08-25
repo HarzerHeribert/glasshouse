@@ -74,6 +74,12 @@ pub enum Command {
     /// Setup runs by itself the first time Glasshouse is used in an
     /// interactive terminal; this is how to revisit those choices later.
     Setup,
+    /// List the sessions Glasshouse has recorded for this project.
+    ///
+    /// Glasshouse keeps its own record of every session it starts, separate
+    /// from whatever session files the harness writes for itself, so the list
+    /// is the same whether or not a harness kept its own history.
+    Sessions,
     /// Open a session in an installed harness, inside this project.
     ///
     /// The harness runs in a pseudo-terminal whose working directory is this

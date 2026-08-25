@@ -4,23 +4,79 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-Five capabilities were completed and checked this session, each with a
-`COMPLETE` ledger entry and green cross-platform CI:
+**Phase 2 — Persistent project state is complete.** Six capabilities were
+closed this session, each with a `COMPLETE` ledger entry:
 
-1. **Phase 1** — every spawned harness process starts in the project root.
-2. **Phase 2A** — unsupported platform/harness combinations fail with a clear
-   diagnostic instead of half-starting.
-3. **Phase 2A** — native Windows is a first-class runtime.
-4. **Phase 2B** — cmux is detected via its control environment.
-5. **Phase 2B** — Ollama is detected via a configured endpoint.
+1. Persist Glasshouse session metadata independently of native harness files.
+2. Persist the Glasshouse-ID to native-session-ID mapping.
+3. Persist harness, creation time, last activity time, role, lifecycle, and
+   project identifier.
+4. Persist the process presentation mode.
+5. Persist enough to distinguish active, resumable, closed, and failed.
+6. Never store provider credentials in the project database.
 
-The checked count went from 58 to 63. `main` is clean and pushed, and the
-latest CI run is green on Linux, macOS, Windows, and lint.
+The checked count went from 63 to 69.
 
-What remains nearby is **blocked, not merely unstarted** — see "Where to go
-next", which is the first thing to read.
+### The decision this session made, and why
+
+The previous checkpoint ended on a deliberate choice between three blocked
+groups. **Phase 2 was chosen** because it was the only one actually unblocked:
+Phase 2C onboarding needs product decisions from the user, Phase 2D settings
+needs a TUI that does not exist, and Phase 3 is larger and would be cheaper
+after a session model exists. Phase 2 also does double duty — Phase 1 line 90
+was blocked on exactly this table.
+
+Risk class was Red (persistence, migrations, resume identity, secret
+boundaries), so it was the orchestrator's own work; Ox is barred from it.
 
 ## Verified completed work
+
+### This session — the session store
+
+- `session::store` is Glasshouse's own record of the sessions in a project,
+  deliberately not a view over any harness's session files. `native_session_id`
+  is a nullable *reference*, so a record is complete before a harness has
+  produced an identifier and stays valid after the harness's history is gone.
+- **Project isolation is structural, not a query filter.** Migration 2 adds
+  `BEFORE INSERT` and `BEFORE UPDATE OF project_id` triggers that abort any row
+  whose `project_id` is not the identifier bound in `project_metadata`. No
+  present or future query has to remember to filter. The comparison uses
+  `IS NOT` rather than `<>` so that a missing binding aborts instead of
+  evaluating to NULL and passing — mutation-proven, not merely argued.
+- `SessionRecord::disposition` derives active/resumable/closed/failed from
+  lifecycle plus the presence of a native identifier, rather than storing a
+  second column that could disagree with the first. A stopped session with no
+  native identifier reads as closed, because offering a resume with nothing to
+  resume to would produce a blank session wearing an old session's name.
+- `glasshouse launch` now records what it starts, moving the session through
+  `Starting` -> `Running` -> `Stopped`/`Failed`, and `glasshouse sessions`
+  reads it back. Creating the record is fatal if it fails; every later state
+  change is best effort, because once a harness is running, Glasshouse's
+  bookkeeping is not worth failing the user's session over.
+- The schema has nowhere to put a provider credential, and
+  `the_project_database_schema_has_nowhere_to_put_a_credential` pins the exact
+  `(table, column)` list so any future addition fails until someone reviews it.
+  An allowlist, not a name pattern: `project_metadata.key` would false-positive
+  on any name match, and a credential column could just as easily be `value`.
+
+Two defects were caught by running the thing rather than reading it:
+
+- Every `Display` impl used `Formatter::write_str`, which **silently ignores
+  width and alignment**, so the session listing's columns were ragged. Fixed
+  with `Formatter::pad` and pinned by a test.
+- `too_new_schema_is_rejected_and_not_recreated` set *every* migration row to
+  99, which worked with one migration and violated the primary key with two.
+  The fixture now appends a row, which is also what a newer build would
+  actually leave behind.
+
+One documented claim turned out to be **wrong and was corrected**: the unique
+index's `WHERE native_session_id IS NOT NULL` clause was justified as
+preventing collisions between sessions with no identifier yet. It does not —
+SQLite already treats NULLs as distinct in a unique index. The mutation that
+should have failed passed, which is how it was caught. The clause is kept for
+index size and intent, and the comment now says so; the real hazard it guards
+against is a future `NOT NULL DEFAULT ''` refactor, which is now its own
+mutation check.
 
 - `glasshouse launch [harness] [-- args]` is the first production consumer of
   `HarnessLaunch`. Until now the Phase 1 promise rested on a mechanism no
@@ -90,6 +146,21 @@ Two process lessons worth keeping:
 
 ## Unresolved loose ends
 
+- **Nothing calls `open_for_resume` in production.** The cross-project resume
+  guard is implemented, structurally enforced, and mutation-proven, but there
+  is no `glasshouse resume`, so Phase 1 line 90 is `PARTIALLY VERIFIED` and its
+  box stays unchecked. Closing it needs a harness adapter, not more code here.
+- No harness adapter captures a native session identifier yet, so in production
+  `sessions.native_session_id` is always `NULL` and no session ever reaches the
+  `Resumable` disposition. The mechanism is complete; what feeds it is Phase
+  7/8.
+- Only `Embedded` presentation occurs in production, because `glasshouse
+  launch` is the only session producer. `Headless` and `External` arrive with
+  Phase 4 and Phase 17.
+- `glasshouse sessions` has no filtering, no sorting options, and no way to
+  remove a record. Phase 11 owns the real overview; this is the minimum that
+  makes the stored metadata observable.
+
 - The forced-exit orphan is **fixed**: an attached session registers a cleanup
   that `shutdown`'s force path runs before `process::exit`. It is best effort
   by construction (`try_lock`, never `lock`) because a cleanup that waits could
@@ -113,7 +184,10 @@ Two process lessons worth keeping:
   real minimum needs verified release data this environment does not have.
 - The main session TUI, session metadata schema, harness adapters, durable
   memory table, and session persistence are not implemented.
-- Strict rustdoc still fails on 12 pre-existing intra-doc-link diagnostics.
+- Strict rustdoc still fails on 15 pre-existing lib-doc diagnostics, 9 of them
+  public docs linking to private items. The count in an earlier revision of
+  this file said 12 and was simply wrong; this session added none, verified by
+  measuring the baseline with the branch stashed.
 - The cross-harness completion protocol remains design documentation. This
   session used its durable-file half — each worker wrote
   `.agent-runtime/report-<TASK-ID>.md` — with manual visible pane polling and
@@ -122,46 +196,39 @@ Two process lessons worth keeping:
 
 ## Where to go next
 
-**The easy, unblocked work is now done.** Everything still unchecked nearby
-falls into one of three groups, and the next orchestrator's first job is to
-pick a group deliberately rather than work down the list.
+**Read this before picking anything up.** The three-group structure from the
+previous checkpoint still holds, minus what Phase 2 retired.
 
-**Group 1 — blocked on a later phase.** The database has only
-`project_metadata` and `schema_migrations`, which is what blocks these:
+**Group 1 — blocked on a later phase.** Two of the three remain:
 
-- Phase 1 line 90 (reject a cross-project session resume) needs a sessions
-  table and a resume path — Phase 2.
 - Phase 1 line 92 (cross-project memory retrieval disabled by design) needs the
-  memory table — Phase 20.
+  memory table — Phase 20. The pattern to copy is already in place: migration 2
+  proves how to make a project boundary structural rather than a query filter,
+  and the memory table should get the same trigger treatment.
 - Phase 1 line 93 (display the project root in the TUI) needs the TUI —
   Phase 3.
 
-The map's order cannot be followed literally here. **Do not stub any of them.**
-The real decision is whether to pull Phase 2's session metadata schema forward
-to unblock line 90 — that is a product/architecture call worth making
-explicitly and recording.
+Phase 1 line 90 (reject a cross-project session resume) is **no longer blocked
+on schema** — the guard exists, is structurally enforced by triggers, and is
+mutation-proven. It is now blocked on there being a resume path at all, which
+needs a harness adapter (Phase 6/7/8). See its ledger entry, which says
+explicitly not to close it with a `resume` command that can only ever report
+"not resumable".
 
-**Group 2 — blocked on facts this environment does not have.**
+**Group 2 — blocked on facts this environment does not have.** Unchanged:
+Antigravity's real executable name, and real minimum harness versions. Guessing
+either produces confident, wrong results.
 
-- "Detect Antigravity when a supported Antigravity CLI executable is present"
-  needs a real install to confirm the executable name. Guessing aliases is
-  worse than missing the detection: `ag` collides with the-silver-searcher and
-  would produce a confident, wrong detection.
-- "Mark every detected integration as available, configured, unconfigured,
-  unsupported-version, or unknown" is implemented for four of the five states.
-  `UnsupportedVersion` is unreachable only because `minimum_version()` returns
-  `None` everywhere, and inventing a minimum would produce false reports for
-  users on perfectly good installs. It needs verified release data, not code.
+**Group 3 — needs product decisions.** Unchanged: the Phase 2C onboarding block
+(provider and gateway configuration, routing-model choices, Configure now / Do
+later) is interdependent and shapes everything after it. Worth agreeing the
+shape with the user before implementing.
 
-**Group 3 — needs product decisions, and is a coherent block rather than
-individual boxes.** The Phase 2C onboarding items (provider and gateway
-configuration, the routing-model choices, Configure now / Do later) are
-interdependent and shape how providers and routing work for everything after
-them. Worth agreeing the shape with the user before implementing.
-
-If none of the above is desirable, Phase 2D (the settings view) and Phase 3
-(the TUI shell) are the natural forward path, and Phase 3 would also unblock
-line 93.
+**The natural forward path is now Phase 3, the TUI shell.** It is the largest
+remaining unblocked item, it unblocks Phase 1 line 93 and Phase 2D, and it now
+has a session model to render: `glasshouse sessions` is effectively the
+non-interactive version of Phase 11's session overview, and the columns it
+prints are the ones the overview needs.
 
 ## Active worker tasks and results
 
@@ -217,17 +284,17 @@ Hand this checkpoint to Opus:
 > authorization; do it without asking, and treat a red Windows job as ordinary
 > work.
 >
-> Five capabilities were closed this session and the unblocked near-term work
-> is done. **Read "Where to go next" above before picking anything up** — what
-> remains nearby is blocked rather than merely unstarted, and it sorts into
-> three groups with different reasons. Working down the list in order will not
-> work.
+> Phase 2 is complete and Phase 1's remaining gaps are documented above with
+> the specific later phase each is waiting on. **Read "Where to go next" before
+> choosing** — the map's order still cannot be followed literally.
 >
-> The first real decision is a product/architecture one: whether to pull
-> Phase 2's session metadata schema forward to unblock Phase 1 line 90, or to
-> move to Phase 2C onboarding (which needs the user's input on provider and
-> routing shape), or to start Phase 3's TUI shell (which would also unblock
-> line 93). Make that decision explicitly and record it. Do not stub a blocked
-> capability to keep the map's order looking intact, and do not guess an
-> Antigravity executable name or a minimum harness version — both would produce
-> confident, wrong results, which is worse than the gap they would close.
+> The recommended next capability is **Phase 3, the TUI shell**: it is the
+> largest unblocked item, it unblocks Phase 1 line 93 and Phase 2D, and
+> `session::store` now gives it something real to render. If you take it,
+> `main.rs: session_report` is the non-interactive version of the same listing
+> and its columns are the ones Phase 11 asks for.
+>
+> Do not stub a blocked capability to keep the map's order looking intact. In
+> particular, do not close Phase 1 line 90 with a `glasshouse resume` that can
+> only ever report "not resumable", and do not guess an Antigravity executable
+> name or a minimum harness version.

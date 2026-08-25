@@ -1191,3 +1191,131 @@ fn the_launch_command_opens_the_configured_harness_inside_the_project_root() {
         "glasshouse did not propagate the harness's exit code; it reported: {status}"
     );
 }
+
+/// Glasshouse's own session record, written by the real binary during a real
+/// session and read back by a second process.
+///
+/// The store has thorough unit tests, but those construct a runtime in-process.
+/// This is the part they cannot show: that `glasshouse launch` actually records
+/// what it started, that the outcome of the harness reaches the record, and
+/// that a later `glasshouse sessions` reads it back off disk. Without this,
+/// "Glasshouse persists session metadata" would rest on machinery no shipped
+/// command exercises.
+#[test]
+fn launching_a_harness_records_a_session_that_a_later_command_reads_back() {
+    const OK_MARKER: &str = "GLASSHOUSE-SESSION-OK";
+    const BAD_MARKER: &str = "GLASSHOUSE-SESSION-BAD";
+    /// Neither 0 nor 1, so a generic failure cannot be mistaken for this one.
+    const FAILING_EXIT: u8 = 9;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&state_dir).expect("create state dir");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+    let good = install_marker_harness(&bin_dir, "good-harness", OK_MARKER, 0);
+    let bad = install_marker_harness(&bin_dir, "bad-harness", BAD_MARKER, FAILING_EXIT);
+
+    let toml_path = |p: &std::path::Path| p.display().to_string().replace('\\', "\\\\");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n\
+             [integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n\n\
+             [integrations.codex]\nenabled = true\nexecutable = \"{}\"\n",
+            toml_path(&good),
+            toml_path(&bad)
+        ),
+    )
+    .expect("write user config");
+
+    let base_args = |extra: &[&str]| {
+        let mut args: Vec<String> = vec![
+            "--scope".into(),
+            project_dir.display().to_string(),
+            "--data-dir".into(),
+            state_dir.display().to_string(),
+            "--config-dir".into(),
+            config_dir.display().to_string(),
+        ];
+        args.extend(extra.iter().map(|s| (*s).to_owned()));
+        args
+    };
+
+    // Nothing has run yet, so the listing must say so rather than inventing a
+    // row or failing on an empty table.
+    let empty = std::process::Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+        .args(base_args(&["sessions"]))
+        .output()
+        .expect("run glasshouse sessions");
+    let empty_text = String::from_utf8_lossy(&empty.stdout);
+    assert!(
+        empty_text.contains("No sessions recorded"),
+        "a fresh project should report no sessions, got:\n{empty_text}"
+    );
+
+    // A session that succeeds, and one that fails, each in a real terminal.
+    for (harness, expected_exit) in [("claude-code", 0u32), ("codex", u32::from(FAILING_EXIT))] {
+        let command = TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path())
+            .args(base_args(&["launch", harness]));
+        // `wait_for_exit` answers the ConPTY startup handshake while it polls,
+        // so nothing here has to babysit the terminal.
+        let mut session = Session::spawn(command);
+        let status = session.wait_for_exit();
+        assert_eq!(
+            status.code(),
+            expected_exit,
+            "`glasshouse launch {harness}` reported: {status}\n--- output ---\n{}\n--- end ---",
+            session.output()
+        );
+    }
+
+    let listed = std::process::Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+        .args(base_args(&["sessions"]))
+        .output()
+        .expect("run glasshouse sessions");
+    let text = String::from_utf8_lossy(&listed.stdout);
+
+    // Both sessions are there, written by one process and read by another,
+    // which is the whole point: the record outlives the session.
+    let rows: Vec<&str> = text
+        .lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert_eq!(rows.len(), 2, "expected one row per session, got:\n{text}");
+
+    let claude_row = rows
+        .iter()
+        .find(|row| row.contains("claude-code"))
+        .unwrap_or_else(|| panic!("no row for the successful session:\n{text}"));
+    let codex_row = rows
+        .iter()
+        .find(|row| row.contains("codex"))
+        .unwrap_or_else(|| panic!("no row for the failed session:\n{text}"));
+
+    // The harness's outcome reached the record. A harness that exited cleanly
+    // is over; one that exited badly is distinguishable from it, which is what
+    // makes the four dispositions worth storing.
+    assert!(
+        claude_row.contains("closed"),
+        "a harness that exited cleanly should read as closed:\n{claude_row}"
+    );
+    assert!(
+        codex_row.contains("failed"),
+        "a harness that exited {FAILING_EXIT} should read as failed:\n{codex_row}"
+    );
+
+    // Columns line up, which is the only reason a listing is readable at all.
+    for row in &rows {
+        assert!(
+            row.contains("normal") && row.contains("embedded"),
+            "row is missing role/presentation columns:\n{row}"
+        );
+    }
+}
