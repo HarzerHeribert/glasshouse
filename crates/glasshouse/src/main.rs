@@ -190,6 +190,10 @@ fn launch_session(
         }
     };
 
+    // The session is over, so this is the tightest the discovery window will
+    // ever be — see `session::native_id::capture`'s doc comment.
+    session::native_id::capture(&store, &record, runtime.project().root());
+
     note_lifecycle(
         &store,
         &record.id,

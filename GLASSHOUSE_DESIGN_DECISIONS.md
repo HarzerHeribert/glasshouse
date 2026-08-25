@@ -340,3 +340,117 @@ for an adapter to start.
 Neither is a rejection of the product. Both are the same rule the rest of this
 phase runs on: an adapter may only describe something that was actually there
 to look at.
+
+---
+
+## Discovering a Codex session's identifier — and why `cwd` is not enough
+
+### The conflict
+
+Claude Code lets Glasshouse *assign* an identifier: `--session-id <uuid>` is
+handed over before the process exists, so the identifier is known even if the
+harness dies during startup. Codex has no equivalent on its interactive path —
+`codex --help` 0.149.0 offers nothing of the kind — so its identifier has to be
+discovered afterwards, from the rollout file Codex writes.
+
+The obvious plan, and the one the previous session's checkpoint proposed, was:
+read the rollout headers under `$CODEX_HOME/sessions/<yyyy>/<mm>/<dd>/`, match
+`payload.cwd` against the project root, take `payload.id`.
+
+**That plan captures the wrong session most of the time.**
+
+### What the real install said
+
+Across the 555 rollout files on the development machine, `payload.originator`
+takes four values and one of them is not a user's session at all:
+
+| originator | count | what it is |
+|---|---|---|
+| `codex-tui` | 241 | the interactive TUI — but see below |
+| `Codex Desktop` | 229 | the desktop / VS Code client |
+| `codex_exec` | 81 | headless `codex exec` |
+| `codex_work_desktop` | 4 | another desktop client |
+
+And of the 241 `codex-tui` rollouts, **171 are subagent threads**, each carrying
+a `parent_thread_id`. A subagent's `cwd` is its parent's `cwd`. So in the
+directory Glasshouse cares about, records written by subagents outnumber records
+written by real sessions **171 to 70**. Matching on `cwd` alone would usually
+have recorded a subagent's identifier — and `glasshouse resume` would then
+reopen a subagent thread wearing the user's session's name.
+
+### The decision: four conditions, and refuse ambiguity
+
+A record is the session Glasshouse started only if all four hold:
+
+1. `payload.originator == "codex-tui"` — an interactive terminal session.
+2. `payload.parent_thread_id` is absent — not a subagent thread.
+3. `payload.cwd` canonically equals the project root.
+4. `payload.timestamp` falls between when Glasshouse started the session and
+   when it observed it end.
+
+On the reference install, conditions 1 and 2 together select **exactly** the 70
+real interactive CLI sessions, with zero counterexamples in 555 files. All 70
+also carry `source == "cli"`, which is deliberately *not* a fifth condition:
+it is corroborating evidence, and every extra condition is another way to break
+on a Codex update.
+
+`forked_from_id` is deliberately not disqualifying either. All 128 of its
+occurrences are subagents, already excluded by condition 2, and a session made
+with `codex fork` is a real resumable session.
+
+**Two or more survivors means Glasshouse records nothing.** Not "take the
+newest" — the failure mode of guessing here is resuming a stranger's
+conversation, and `session::select` and the resume identifier resolver already
+refuse ambiguity for the same reason. A session with no identifier reads as
+`closed` rather than `resumable`, which is the honest answer.
+
+### The decision: `payload.id`, never `payload.session_id`
+
+Both fields normally hold the same UUID, and the obvious-looking one is wrong:
+`session_id` is present in only **527 of 555** records, while `id` is present in
+all 555 and always equals the UUID in the file name. A reader reaching for the
+better-named field would silently skip one record in twenty.
+
+### The decision: discovery runs once, when the session ends
+
+Not on a timer, not in a watcher thread. That is when the identifier is needed —
+a stopped session is only `Resumable` if it has one — and it is also the moment
+the time window is two-sided and therefore tightest. Codex writes no rollout
+until a turn has happened (verified by starting it under an isolated
+`CODEX_HOME` and killing it: the `sessions/` directory was never created), so
+there is nothing to find earlier anyway.
+
+### The decision: only the first line is ever read
+
+The first line is the `session_meta` header. Everything after it is the user's
+conversation — their prompts, their file contents, their tool output. Glasshouse
+reads one line, capped, and stops. This is a secret boundary, so it is a test
+rather than a habit.
+
+### The decision: the adapter parses, core walks
+
+`adapter.read_session_record(&first_line)` is a pure function from text to a
+description; `session::native_id` owns the directory walk, the time bound and
+the ambiguity rule and knows nothing about Codex. That keeps Phase 6's rule
+intact — adapters describe, they never act — while leaving every Codex-shaped
+field name inside `codex.rs`.
+
+### The alternative that was rejected
+
+`~/.codex/sqlite/codex-dev.db` carries a `local_thread_catalog` table with
+`thread_id` and `cwd`, and `codex migrate-rollouts` shows Codex is moving
+session history into it. It was rejected: it is an undocumented internal store
+of a dev build whose schema has already been rebuilt by migration, whereas the
+rollout header's shape held steady across 555 files spanning three months, and
+its UUID is the one `codex resume --help` documents accepting.
+
+### Invariants a test must hold to
+
+1. Given a subagent, a desktop and an interactive record with the same `cwd`
+   in the same window, only the interactive one's identifier is captured.
+2. A window containing only a subagent record captures nothing.
+3. A record whose `cwd` is another project captures nothing.
+4. A record predating the window captures nothing.
+5. Two interactive candidates are refused, not ranked.
+6. A record with `session_id` but no `id` is skipped.
+7. A malformed second line does not prevent a valid header being read.

@@ -49,6 +49,97 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 8 — Capture the native Codex thread or session identifier when it can be obtained reliably
+
+Contract: Given a Codex session Glasshouse started in the project root, when
+that session ends, Glasshouse records the native identifier of the interactive
+Codex session that ran in that directory inside that window — while recording
+nothing at all when the right record cannot be told apart from a subagent
+thread, another client's session, another project's session, or a second
+candidate.
+
+State: COMPLETE (macOS). Cross-platform execution is CI-pending; see
+Platform/external evidence.
+
+Production evidence:
+- `session/native_id.rs: discover` — walks the harness's own records root,
+  applies four filters, and refuses ambiguity.
+- `session/native_id.rs: capture` — the production wiring, called at session
+  end from **both** producers: `main.rs: launch_session` (before
+  `note_lifecycle`) and `shell/mod.rs`'s `poll_exits` loop (before
+  `set_lifecycle`). Best effort by construction: it only ever logs, because
+  the harness has already run and a bookkeeping failure must not become the
+  user's error.
+- `harness/codex.rs: Codex::session_id_source` / `::read_session_record` — the
+  Codex-shaped half: `CODEX_HOME`/`.codex`/`sessions`/`rollout-`/`jsonl`, and
+  a pure parse of one header line.
+- `session::store::set_native_session_id` finally has a production caller. It
+  has existed unused since Phase 2.
+
+Regression evidence (all executed on macOS; the unit tests are
+platform-independent and run everywhere):
+- `the_interactive_session_in_the_window_is_the_one_captured` — a subagent, a
+  desktop record and the real interactive one, same cwd, same window; only the
+  interactive one is taken.
+- `a_subagent_thread_is_never_captured` — the case that would otherwise be
+  captured most often.
+- `another_project_s_session_is_never_captured`,
+  `a_session_that_started_before_this_one_is_never_captured`,
+  `two_candidates_are_refused_rather_than_guessed`,
+  `a_record_without_a_session_id_field_is_skipped`,
+  `an_unreadable_records_root_is_not_an_error`.
+- `nothing_is_read_past_the_first_line` — the secret boundary.
+- `a_codex_session_s_identifier_is_captured_by_the_launch_path` and
+  `a_codex_session_started_from_the_shell_has_its_identifier_captured_on_exit`
+  — the shipped binary, a fake `codex` that writes a real rollout-shaped
+  header under an isolated `CODEX_HOME`, one per production call site.
+
+Non-vacuity: **eight mutations were run by the orchestrator and all eight
+failed their target test.** Dropping the interactive filter, the cwd filter or
+the time window; resolving ambiguity by taking the first candidate; reading
+`payload.session_id` instead of `payload.id`; reading the whole file instead of
+the first line; and deleting each of the two call sites in turn. The two
+call-site mutations are what make the wiring proved rather than asserted.
+
+Failure/isolation evidence:
+- Ambiguity records nothing: `Discovered::Ambiguous` has no writer.
+- `no_adapter_depends_on_the_session_model` — a new architecture scan: no
+  adapter may name `crate::session` in production code, with
+  `the_adapter_dependency_scan_would_catch_a_violation` proving it fires on a
+  fabricated `use` and stays quiet on a doc comment.
+- `a_discoverable_adapter_declares_discoverable_session_ids` — one-directional
+  by design: Cursor, Hermes, Pi and OpenCode correctly declare
+  `SessionIds::Discoverable` about their own harnesses without Glasshouse
+  having built a reader for each, so the converse is not a defect.
+
+Platform/external evidence:
+- Codex 0.149.0 on macOS. The rule was derived from **all 555 real rollout
+  files** in `~/.codex/sessions`: every first line is `session_meta`;
+  `payload.id` is present in 555 and always equals the filename UUID, while
+  `payload.session_id` is present in only 527; `originator == "codex-tui"`
+  with no `parent_thread_id` selects exactly the 70 real interactive sessions,
+  zero counterexamples. **Subagent rollouts share their parent's `cwd` and
+  outnumber real sessions 171 to 70**, which is why matching on `cwd` alone —
+  the previous session's plan — would have captured the wrong identifier most
+  of the time.
+- `CODEX_HOME` relocates Codex's entire state root (verified: an isolated home
+  received `version.json`, `installation_id`, its sqlite files, `skills`,
+  `tmp`), which is what makes the two end-to-end tests hermetic.
+- Codex writes no rollout at all until a turn has happened — verified by
+  starting bare `codex` in a pseudo-terminal under an isolated `CODEX_HOME`
+  and killing it: `sessions/` was never created. That is why discovery runs at
+  session end and why `NotFound` is an ordinary outcome, not a fault.
+
+Missing evidence:
+- **Windows and Linux have not executed these tests yet.** Pushed for CI; the
+  `#[cfg(windows)]` branch of the fake rollout-writing harness was authored
+  without a Windows machine to run it on, and is the most likely thing to
+  break there.
+- No real Codex session's identifier has been captured end to end, because
+  that costs a model turn. The header format is proven against 555 real files
+  and the wiring against the shipped binary; what is unproven is only the
+  join between them on a live turn.
+
 ### Phase 8 — the Codex adapter's first three lines
 
 Contract: Given a project and an enabled Codex, when the user opens a session,

@@ -4,79 +4,112 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 6 is eleven of twelve and Phase 7 has begun.** The checked count went
-from 107 to 120.
+**Phase 8 is four of ten. 131 -> 132 checked boxes.** `main` clean, all gates
+green locally; pushed for CI.
 
-- **Phase 2B** — Antigravity detection: **closed**, against a real CLI.
-- **Phase 6** — harness adapters: eleven of twelve. The communication-style
-  line is deliberately unchecked; see the loose ends.
-- **Phase 1 line 90** — the cross-project resume guard: **closed after three
-  sessions blocked.** `glasshouse resume` is its production caller.
-- **Phase 8** — Codex adapter: three of ten lines closed. Codex starts, its
-  interface renders in the viewport, and Glasshouse depends on none of its
-  internals.
-- **Phase 7** — Claude Code adapter: **eight of ten lines closed.** The two
-  that are not are honest gaps, not unfinished work: permission detection needs
-  a permission prompt to fire (this machine runs Claude Code in auto mode), and
-  Claude Code 2.1.245 exposes no compaction hook at all.
-- **A defect that was damaging the user's installation is fixed.** Glasshouse
-  answered only one of the three questions a harness asks its terminal at
-  startup, so Claude Code's fullscreen renderer failed and, after two strikes,
-  the harness turned it off *globally* — overriding the user's own
-  `"tui": "fullscreen"` setting. Glasshouse
-  **assigns** Claude Code its native session identifier with `--session-id`,
-  mints it as a valid version-4 UUID, and records it before the process
-  exists — and the whole chain is verified against the real binary.
+- **Phase 8 line 2 — capture the native Codex session identifier: closed.**
+  This is the line that unblocks Codex resume, and it is the first time a
+  Codex session gets a `Resumable` disposition.
+- **Phase 6** — harness adapters: eleven of twelve (communication style open).
+- **Phase 7** — Claude Code: eight of ten. Both open lines are honest gaps:
+  permission detection needs a permission prompt to fire (this machine runs
+  Claude Code in auto mode), and Claude Code 2.1.245 exposes no compaction
+  hook at all.
 
-**Sessions reach `Resumable` in production for the first time.** A cleanly
-stopped Claude Code session now has something to resume to, which closes a
-loose end that had been open since Phase 2.
+A correction to an earlier revision of this file: its header said the checked
+count went "from 107 to 120" while its own body already described the
+131-box state. The authoritative count comes from the map, which is what the
+number above is read from.
 
-Glasshouse now reaches every supported harness through one contract.
-`glasshouse doctor` prints what each adapter declares — vendor, resume
-command, hooks mechanism, session-identifier discovery, capabilities,
-protocols, model override — and every one of those facts carries the evidence
-it was read from.
+### The previous session's plan for this line was wrong, and the install said so
 
-### Seven harnesses, each verified against a real install
+The last checkpoint said: match rollout headers on `payload.cwd`, take
+`payload.id`. Read against all 555 real rollout files in `~/.codex/sessions`,
+that is not sufficient:
 
-Claude Code 2.1.245, Codex 0.149.0, Antigravity CLI 1.1.20, OpenCode 1.18.22,
-Cursor CLI 2026.08.11, Pi 0.73.1, Hermes Agent 0.15.1.
+- **Subagent threads write their own rollouts with their parent's `cwd`.**
+  There are 171 of them against 70 real interactive sessions, so matching on
+  `cwd` alone would have captured a subagent's identifier most of the time,
+  and `glasshouse resume` would have reopened a subagent thread wearing the
+  user's session's name.
+- **`payload.session_id` — the better-named field — is missing in 28 of 555.**
+  `payload.id` is present in all 555 and always equals the filename UUID.
 
-Cursor, Pi and Hermes were added this session at the user's request, for
-subscription pooling — Hermes manages pooled provider credentials natively.
-All three were installed and interrogated before any declaration was written.
-
-**Two that were asked for and deliberately not shipped**, both recorded in
-`GLASSHOUSE_DESIGN_DECISIONS.md`:
-
-- **DeepSeek Harness** (`@deepseek-ai/dsh` 0.1.1-rc.2) is installed and runs,
-  but it is a *profile launcher* whose shipped profiles are a browser UI and a
-  one-shot headless runner. It has no official interactive terminal profile —
-  confirmed against both the installed package and DeepSeek's own repository.
-  A browser UI is not something a viewport can hold, and DSH's own "profile"
-  concept is Phase 9A's launch profiles under another name, so an adapter
-  written now would be rewritten then.
-- **ZCode** (Z.ai) is a desktop application with no CLI, so there is no
-  executable for an adapter to start.
-
-### The decision this phase rests on
-
-Every fact an adapter states is a `Declared<T>`: `Verified { value, evidence }`
-with the source named concretely enough to re-check, or `Unverified`. There is
-no third state meaning "probably", and
-`every_verified_declaration_cites_its_evidence` fails a `Verified` whose
-evidence is too thin to be a citation.
-
-**It paid for itself immediately.** Glasshouse searched `PATH` for
-`antigravity` and would never have found a real install: the published
-Antigravity CLI links its binary onto `PATH` as **`agy`**. The old single-name
-list was carefully reasoned, documented at length, and pinned by a test — and
-simply wrong, because no reference install had ever been inspected.
+The rule that is exact on this install: `originator == "codex-tui"` **and** no
+`parent_thread_id`. It selects precisely the 70 real interactive sessions, with
+zero counterexamples. `source == "cli"` corroborates it in all 70 and is
+deliberately *not* a condition — every extra condition is another way to break
+on a Codex update. Full reasoning in `GLASSHOUSE_DESIGN_DECISIONS.md`.
 
 ## Verified completed work
 
-### This session — Codex, and a question it asks that Claude Code does not
+### This session — the Codex session identifier, and the rule `cwd` alone cannot express
+
+`session::native_id::discover` finds the rollout a Glasshouse-started Codex
+session wrote, and `capture` records it. Four conditions, all required:
+`originator == "codex-tui"`, no `parent_thread_id`, `payload.cwd` canonically
+equal to the project root, and `payload.timestamp` inside the window between
+Glasshouse starting the session and observing it end.
+
+**Two or more survivors means nothing is recorded.** Not "take the newest" —
+the failure mode of guessing is resuming a stranger's conversation, and
+`session::select` and the resume identifier resolver already refuse ambiguity
+for the same reason.
+
+**Only the first line of a rollout is ever read**, capped at 1 MiB. Everything
+after it is the user's own conversation, and
+`nothing_is_read_past_the_first_line` is what keeps that a boundary rather than
+a habit.
+
+**Discovery runs once, at session end, from both producers** — `launch_session`
+and the shell's `poll_exits` loop. That is when the identifier is needed (a
+stopped session is `Resumable` only if it has one) and when the window is
+two-sided and therefore tightest. Codex writes no rollout until a turn has
+happened, verified again this session under an isolated `CODEX_HOME`, so there
+is nothing to find earlier.
+
+`session::store::set_native_session_id` finally has a production caller; it had
+been unused since Phase 2.
+
+**Eight mutations, all eight killed** — including deleting each of the two call
+sites in turn, which is what makes the wiring proved rather than asserted. The
+first attempt at the mutation harness was itself defective in two ways worth
+recording:
+
+- it restored each mutation with `git checkout -- crates/glasshouse/src/`,
+  which — because workers are told never to commit — reverted the worker's
+  entire contribution to five tracked files rather than the one mutated line.
+  Recovery meant asking the still-live worker session to rewrite them. **Never
+  use a path-wide git restore in a worktree whose value is uncommitted.**
+- its verdict logic grepped for `0 failed` across all four test binaries, which
+  always matches the filtered-out lib line, so it reported "survived" for every
+  mutation including ones that never compiled. **A mutation harness must read
+  the named test's own result line**, and must distinguish `error: test failed`
+  (the kill) from `could not compile` (no result at all).
+
+**An adapter may no longer depend on the session model.** The first
+implementation had `harness/codex.rs` importing `crate::session::native_id`;
+no adapter on `main` imported `crate::session` at all. The two record types
+moved to `harness/mod.rs` where the rest of the adapter vocabulary lives, the
+RFC3339 parser became private to `codex.rs`, and
+`no_adapter_depends_on_the_session_model` now scans all seven adapters, with a
+paired test proving the scan fires on a fabricated `use` and stays quiet on a
+doc comment.
+
+**One worker judgement was better than the packet.** The packet asked for a
+bidirectional consistency test between `session_id_source` and
+`SessionIds::Discoverable`. Cursor, Hermes, Pi and OpenCode all correctly
+declare `Discoverable` about their own harnesses without Glasshouse having
+built a reader for each, so the converse is not a defect and the test is
+one-directional by design.
+
+**A worker's report can be written before it stops working.** The report file
+appeared while the worker was still running its own mutation checks, and two
+successive `git status` snapshots each showed a different call site missing.
+Gate review on the pane going idle, not on the report appearing.
+
+
+### Previous session — Codex, and a question it asks that Claude Code does not
 
 Codex's startup handshake is `ESC[>5u`, `ESC[6n`, `ESC[?u`, `ESC[c`,
 `ESC[0 q`. The `ESC[?u` is the kitty keyboard-protocol probe — a fourth
@@ -104,7 +137,7 @@ it left the rollout count unchanged. So its identifier can only be discovered
 after the first turn, by matching a rollout header's `payload.cwd` against the
 project and taking its `payload.id`. That is the next piece of Phase 8.
 
-### This session — the hooks, observed firing for real
+### Previous session — the hooks, observed firing for real
 
 A Glasshouse session was opened against the real `claude` in a pseudo-terminal,
 one prompt was submitted, and the session record moved from `starting` to
@@ -126,7 +159,7 @@ harness, never from reading the screen.
 runtime is the one component that sees terminal output, and it may not move a
 session's state. Giving it a method that infers one fails the test.
 
-### This session — answering the terminal's questions
+### Previous session — answering the terminal's questions
 
 A real Claude Code startup was captured in a pseudo-terminal and every escape
 sequence it writes before drawing was examined. Three are *questions*:
@@ -158,7 +191,7 @@ notice was gone, and with `"tui": "fullscreen"` set the fullscreen interface
 rendered in the viewport with no notice at all. The isolated configuration was
 deleted afterwards.
 
-### This session — Claude Code lifecycle hooks
+### Previous session — Claude Code lifecycle hooks
 
 Glasshouse installs per-session hooks so a session's state comes from the
 harness saying what happened, not from reading its terminal and guessing.
@@ -197,7 +230,7 @@ command carried no paths, so it discovered its own project from wherever the
 harness happened to run it. It exited 0, looked healthy, and silently updated
 nothing. Every path is pinned now, and dropping them fails two tests.
 
-### This session — `glasshouse resume`
+### Previous session — `glasshouse resume`
 
 - `glasshouse resume <session>` reopens a recorded session in the harness that
   created it — not whichever harness is configured now, because resuming a
@@ -232,7 +265,7 @@ race this project already diagnosed and retried around, rather than anything in
 the resume path, but it is written down because an unexplained failure that is
 merely rare is not the same as one that is understood.
 
-### This session — assigned native session identifiers (Phase 7)
+### Previous session — assigned native session identifiers (Phase 7)
 
 **The whole chain is verified against the real binary**, with the user's
 approval for the one step that needed a turn:
@@ -279,7 +312,7 @@ child, not about arguments. Worth knowing: **anything configured as
 `claude-code` now receives that flag**, so a user's wrapper script has to pass
 its arguments through.
 
-### This session — the harness adapter interface
+### Previous session — the harness adapter interface
 
 - `harness::HarnessAdapter` is the contract: `id`, `executable_candidates`,
   `start`, `resume`, `describe`, `message`, `interrupt`. The map's six verbs
@@ -553,6 +586,26 @@ have required a magic clamp.
 
 ## Unresolved loose ends
 
+- **Codex identifier capture is verified on macOS only.** The unit tests are
+  platform-independent, but the `#[cfg(windows)]` branch of the fake
+  rollout-writing harness in `pty_smoke.rs` was authored without a Windows
+  machine to run it on. It is the most likely thing to break in CI, and it is
+  isolated to one helper.
+- **No *live* Codex turn has had its identifier captured end to end.** The
+  header format is proven against 555 real rollouts and the wiring against the
+  shipped binary with a fake harness; what is unproven is only the join between
+  the two on a real turn, which costs model usage. Worth doing once,
+  deliberately, when a turn is being spent anyway.
+- **A Codex session that takes no turn gets no identifier, forever.** That is
+  correct — there is nothing to resume to — but it means a Codex session the
+  user opened and closed without prompting reads as `closed`, not `resumable`,
+  and the reason is invisible in `glasshouse sessions`.
+- **Two Glasshouse Codex sessions started in the same project within the same
+  window will both refuse to record an identifier**, because each sees the
+  other's rollout as a second candidate. Fail-closed and honest, but a real
+  usability edge if anyone runs parallel Codex sessions in one project. The fix
+  is a narrower discriminator, not a ranking rule.
+
 - The `fullscreenAutoDisabled` record this defect left in the user's
   `~/.claude.json` is **cleared**. `/tui fullscreen` was run in a real Claude
   Code session at the user's explicit request — they could not run it
@@ -721,73 +774,102 @@ have required a magic clamp.
 
 ## Where to go next
 
-**Phase 7 — the Claude Code adapter — is next in map order and unblocked.**
-Phase 6 gives it the contract; Phase 7 is where the Claude Code adapter starts
-doing rather than declaring:
+**Phase 8 line 3 — resume a Codex session — is next and is nearly free.**
+`resume_session` in `main.rs` is entirely generic: it selects the harness the
+record names and calls `selection.resume_args(...)`, which goes through the
+adapter, and `Codex::resume` already returns `["resume", <id>]`. The only thing
+that was missing was an identifier, and that now exists. What line 3 still
+needs is *evidence*: drive `codex resume <uuid>` against a real recorded
+session in a pseudo-terminal and watch the conversation reopen. There is a real
+interactive rollout for this project to try it against
+(`01a03537-903b-73d2-9886-7799d4c90376`), and reopening a conversation replays
+history without spending a model turn — the same shape as the Phase 7 evidence.
+Also surface the harness's own refusal for an unknown identifier rather than
+dressing it up.
 
-- capture the native session identifier. Claude Code is the easy case and the
-  adapter already declares why: `--session-id <uuid>` lets Glasshouse *assign*
-  one, so the identifier is known before the process exists rather than
-  discovered afterwards. That is what finally lets a record reach the
-  `Resumable` disposition.
-- then resume through it, which is also what unblocks **Phase 1 line 90** — the
-  cross-project resume guard that has been complete and unreachable for two
-  sessions.
-- then lifecycle hooks. The adapter declares the mechanism (a `hooks` section
-  in a settings document, suppliable per session with `--settings`) and nine
-  verified event names.
+**Then Phase 8's hooks lines (5-9), and they need a decision first.** Evidence
+is gathered in `.agent-runtime/notes-codex-hooks.md`; read it before choosing.
+The headline is that the previous checkpoint's premise was half wrong: Codex
+hooks are **not** only project-local. There is a user-level
+`$CODEX_HOME/hooks.json`, PascalCase and Claude-Code-shaped, and trust is a
+`sha256` keyed by absolute path under `[hooks.state."<path>:<event>:0:0"]` in
+`config.toml`.
 
-Phase 8 (Codex) follows the same shape with different mechanics: a `resume`
-subcommand, identifiers discoverable from rollout files under
-`$CODEX_HOME/sessions/...`, and hooks in a project-local `.codex/hooks.json`
-that is trust-gated per project.
+That does not settle it, because the tempting answer is the wrong one: a
+Glasshouse-owned `CODEX_HOME` would avoid writing in the user's repository and
+let the trust hash be pre-seeded, but it also takes away their auth, MCP
+servers, skills and model configuration. A Codex session that is not logged in
+is not "the user's own installed harness", which is the product's first
+invariant. Copying their real home in would duplicate credentials.
+
+So the live options remain: project-local `.codex/hooks.json` with explicit
+consent (Phase 2D) plus a write into the user's real `config.toml` (which
+Phase 7 deliberately never did for Claude Code), or leaving Codex hooks
+unsupported and letting lifecycle come from the operating system, which already
+works. A `--strict-config` probe for a per-invocation hooks override was run
+and **cannot answer this** — `hooks` is a free-form table, so every invented key
+is accepted. Do not repeat it; the note records why.
 
 Still blocked, unchanged:
 
 - Phase 1 line 92 and Phase 3's memory view — Phase 20's memory table.
 - Three Phase 4 lines — unfocused `send_text`, `interrupt`, headless sessions.
-  All three work and are tested; they need callers, which are Phase 14's.
 - Eleven Phase 2D lines — Providers, Launch Profiles, Routing, Memory sections.
 - Real minimum harness versions.
 - Phase 2C onboarding — product decisions that need the user.
+- Phase 6's communication-style line — needs one verified in-place mechanism.
 
 ## Active worker tasks and results
 
-**No workers were used this session.** The work was a single coherent design —
-seven adapters whose every declaration had to be derived from a real binary —
-and the risk in it was precisely the judgment a worker tier is not for. The
-orchestrator wrote it, ran every gate, and mutation-checked its own tests.
+**One worker, and delegation was the point.** GH-P08-SESSIONID went to a
+Sonnet 5 implementer running as `claude --model sonnet` in a visible cmux
+surface, in its own worktree (`sonnet/codex-session-id`), against a task packet
+carrying the evidence table, the settled design, the expected and forbidden
+files, and ten named acceptance tests. It produced roughly 660 lines across
+seven files.
 
-The tiers and their routing are unchanged; see
-`GLASSHOUSE_WORKER_CAPABILITIES.md`. The practical notes from earlier sessions
-still hold: give an editing worker its own worktree and a task packet with real
-context, start Ox as plain `ox` and type into its visible TUI, and read a
-surface before sending anything to it.
+What it got right, and what needed a second pass:
+
+- It implemented the design as specified and did not redesign it.
+- **It corrected the packet on one point and was right**: the consistency test
+  between `session_id_source` and `SessionIds::Discoverable` has to be
+  one-directional, because four adapters legitimately declare `Discoverable`
+  with no reader built yet. Verified before accepting.
+- It **named the coverage gap it could not close** — its first end-to-end test
+  covered only the `main.rs` call site — rather than hiding it. That is the
+  behaviour the packet asked for and got.
+- Review sent back two things: an adapter importing `crate::session` (a new,
+  wrong-way dependency), and the missing shell-loop test. Both were fixed.
+
+The orchestrator wrote the design decision, ran every gate independently, ran
+all eight mutations, checked the box, and made the commit. The worker committed
+nothing and touched no project record.
+
+Practical notes for the next session, beyond the routing rules: a worker's
+report file appears *before* it stops working, so gate review on the pane going
+idle and diff a frozen tree. `cmux send` **replaces** the composer buffer
+rather than appending to it. And launching a `--dangerously-skip-permissions`
+session from inside an auto-mode Claude Code session is blocked by the
+classifier — the plain launch inherits auto mode anyway, which was enough.
 
 ## Commands run and outcome
 
 - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
   --all-features -- -D warnings`, `cargo test --workspace --all-features`
-  (385 lib + 2 bin + 50 PTY smoke + 4 settings), `rustup run 1.85.0 cargo
-  check --locked --workspace --all-targets`, `git diff --check` — all pass.
-- `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` — 23
-  diagnostics, exactly the baseline measured at `HEAD` in a throwaway
-  worktree. None added.
-- Twenty mutations. Nineteen failed the test they targeted; one **passed**,
-  and exposed a test that could not reach the guard it was supposed to cover.
-  A test was written to reach it, and the mutation now fails. Two further
-  mutation attempts produced *no output at all* — a build failure, not a
-  result — and were redone properly rather than counted.
-- CI `32835774698` green on Linux, macOS, Windows and lint, with the Windows
-  job confirmed to have executed 346 lib, 2 bin, 33 PTY and 4 settings tests
-  rather than merely reporting green.
-- `glasshouse doctor` run from the built binary, which is how two rendering
-  defects were found and how Antigravity detection was confirmed against a
-  real install.
-- Harnesses installed this session, all without `sudo`:
-  `brew install --cask antigravity-cli` (links its binary as `agy`),
-  `brew install --cask cursor-cli` (links `cursor-agent`), and
-  `npm install -g @deepseek-ai/dsh @mariozechner/pi-coding-agent`.
+  (399 lib + 2 bin + 52 PTY smoke + 4 settings = **457**), `git diff --check`
+  — all pass, run by the orchestrator on the frozen tree, not taken from the
+  worker's report.
+- `rustup run 1.85.0 cargo check --locked --workspace --all-targets` — passes.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` — **23**
+  diagnostics, exactly the recorded baseline. None added.
+- Both new PTY tests confirmed to *execute* on this platform by listing and
+  running them by name, not inferred from an aggregate green.
+- Eight mutations, eight kills (see the session record above).
+- Real-binary probes, none costing a model turn: all 555 rollout headers
+  parsed and tabulated; `codex --help`, `codex resume --help`; bare `codex`
+  started and killed under an isolated `CODEX_HOME` (no `sessions/` created);
+  `CODEX_HOME` relocation confirmed; `--strict-config` probed and recorded as
+  unable to answer the hooks question.
 
 ## Next exact step
 
@@ -799,25 +881,24 @@ Hand this checkpoint to Opus:
 > usage-window watches, which do not survive a session. Pushing to run CI is
 > standing authorization.
 >
-> **Phase 7, the Claude Code adapter, is next.** Phase 6 landed the contract
-> and seven adapters; Phase 7 is where one of them starts doing rather than
-> declaring. Start with the native session identifier — `--session-id <uuid>`
-> means Glasshouse can assign one rather than discover it — because that is
-> what unblocks resume, the `Resumable` disposition, and Phase 1 line 90.
+> **Phase 8 line 3, resuming a Codex session, is next**, and the code for it
+> already exists — what it needs is evidence from the real binary. See "Where
+> to go next".
 >
-> The habits that earned this session's defects:
+> The habits that earned this session's results:
 >
-> - **Derive every harness fact from the installed binary.** The one fact that
->   had been reasoned rather than read — Antigravity's executable name — was
->   wrong, and had been wrong, documented, and test-pinned for weeks.
-> - **Drive the shipped binary.** Both defects this session were in output no
->   test reads.
-> - **Assert against a specific row or field, never a whole screen.** The
->   doctor-report test failed first because a `skip_while` found the harness
->   *list* rather than the adapter *block* — the same class of mistake the
->   records warn about, caught by the test being specific enough to notice.
-> - **A mutation that does not fail is information about the code.** Five were
->   run; all five failed as intended.
-> - **Check that a new capability has a production caller.** `describe()` got
->   one — `glasshouse doctor` — rather than shipping as a data structure
->   nothing reads.
+> - **Read the whole corpus, not one example.** The rule for identifying a
+>   Codex session came from all 555 rollout files; the two facts that mattered
+>   — subagents outnumbering real sessions 171 to 70, and `session_id` missing
+>   from 28 — are both invisible in any single file, and the previous
+>   session's plan would have shipped on the strength of one.
+> - **Delegate the implementation, keep the design and the evidence.** That
+>   worked: a Sonnet worker in a visible cmux pane produced ~660 lines against
+>   a settled packet, and the orchestrator's context stayed well under half.
+> - **Never path-wide `git checkout` in a worker's worktree.** Workers do not
+>   commit, so their whole contribution is uncommitted, and a restore aimed at
+>   one mutated line took out five files.
+> - **A mutation harness needs its own verification.** The first one reported
+>   "survived" for every mutation because it read the wrong result line.
+> - **Verify the worker's gates yourself, on a frozen tree.** The report was
+>   written while the worker was still editing.

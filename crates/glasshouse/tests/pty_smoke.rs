@@ -36,8 +36,12 @@ use glasshouse::launch::HarnessLaunch;
 use glasshouse::platform::{exec, paths};
 use glasshouse::pty::{ProcessSignal, PtyOutput, PtyProcess, TerminalCommand, TerminalSize};
 use glasshouse::session::{
-    LiveSession, RuntimeError, Scrollback, SessionId, SessionPresentation, SessionRuntime,
+    LiveSession, ProjectSessions, RuntimeError, Scrollback, SessionDisposition, SessionId,
+    SessionPresentation, SessionRuntime,
 };
+use glasshouse::{Cli, bootstrap};
+
+use clap::Parser as _;
 
 /// Upper bound for any single wait in these tests. Generous enough for a loaded
 /// CI runner, short enough that a genuine hang fails instead of stalling.
@@ -1330,6 +1334,303 @@ fn launching_a_harness_records_a_session_that_a_later_command_reads_back() {
             "row is missing role/presentation columns:\n{row}"
         );
     }
+}
+
+/// Write a fake `codex` that, when run, writes one Codex-rollout-shaped
+/// header — first line `"type":"session_meta"`, `originator: "codex-tui"`,
+/// no `parent_thread_id`, `cwd` set to wherever it is actually run, and
+/// `timestamp` set to the moment it runs — under
+/// `$CODEX_HOME/sessions/2026/08/25/rollout-test-<id>.jsonl`, then exits.
+///
+/// The timestamp and cwd have to be captured at *run* time, not baked in when
+/// this function writes the script: Glasshouse's own session-creation
+/// timestamp (the discovery window's lower bound) is set only once this
+/// process actually starts, which is strictly after this function returns, so
+/// a timestamp captured now would already be too early to fall inside the
+/// window `session::native_id::capture` will check.
+#[cfg(unix)]
+fn install_codex_rollout_harness(bin_dir: &std::path::Path, id: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    const PLACEHOLDER: &str = "__ROLLOUT_ID__";
+    let template = r#"#!/bin/sh
+echo GLASSHOUSE-CODEX-RAN
+DIR="$CODEX_HOME/sessions/2026/08/25"
+mkdir -p "$DIR"
+CWD=$(pwd -P)
+TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+printf '{"type":"session_meta","payload":{"id":"__ROLLOUT_ID__","cwd":"%s","timestamp":"%s","originator":"codex-tui"}}\n' "$CWD" "$TS" > "$DIR/rollout-test-__ROLLOUT_ID__.jsonl"
+exit 0
+"#;
+    let script = template.replace(PLACEHOLDER, id);
+
+    let path = bin_dir.join("codex");
+    std::fs::write(&path, script).expect("write fake codex harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Windows counterpart of the function above. `cmd.exe` batch has no sane
+/// UTC-instant-formatting primitive of its own, so the `.cmd` shim (the same
+/// executable shape `install_marker_harness` uses for Windows, so resolution
+/// goes through the identical `.cmd`-via-`cmd.exe` path production code
+/// does) delegates the actual work to a short PowerShell script, which both
+/// platforms Windows CI runs ship.
+#[cfg(windows)]
+fn install_codex_rollout_harness(bin_dir: &std::path::Path, id: &str) -> std::path::PathBuf {
+    const PLACEHOLDER: &str = "__ROLLOUT_ID__";
+    let ps1_template = r#"$cwd = (Get-Location).Path.Replace('\', '/')
+$ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+$dir = Join-Path $env:CODEX_HOME 'sessions\2026\08\25'
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+$json = '{"type":"session_meta","payload":{"id":"__ROLLOUT_ID__","cwd":"' + $cwd + '","timestamp":"' + $ts + '","originator":"codex-tui"}}'
+Set-Content -NoNewline -Path (Join-Path $dir 'rollout-test-__ROLLOUT_ID__.jsonl') -Value $json
+"#;
+    let ps1 = ps1_template.replace(PLACEHOLDER, id);
+    let ps1_path = bin_dir.join("codex-rollout.ps1");
+    std::fs::write(&ps1_path, ps1).expect("write fake codex rollout script");
+
+    let path = bin_dir.join("codex.cmd");
+    std::fs::write(
+        &path,
+        format!(
+            "@echo off\r\necho GLASSHOUSE-CODEX-RAN\r\n\
+             powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"\r\nexit /b 0\r\n",
+            ps1_path.display()
+        ),
+    )
+    .expect("write fake codex harness");
+    path
+}
+
+/// The whole point of section D's production wiring: that `glasshouse launch
+/// codex`, the real shipped binary, actually captures a real Codex session's
+/// own identifier and records it — not merely that `session::native_id::
+/// discover` returns the right answer when handed fixtures directly (the
+/// eight tests in `session::native_id` all exercise `discover` in isolation
+/// and would keep passing even if both call sites in `main.rs` and
+/// `shell/mod.rs` were deleted).
+///
+/// This test drives only the `main.rs: launch_session` call site —
+/// `glasshouse launch` is a one-shot command, not the interactive shell, so
+/// it can never reach `shell::run`'s `poll_exits` loop. The sibling test
+/// immediately below,
+/// `a_codex_session_started_from_the_shell_has_its_identifier_captured_on_exit`,
+/// covers that second call site the same way: real keystrokes into the
+/// shipped binary's interactive shell.
+#[test]
+fn a_codex_session_s_identifier_is_captured_by_the_launch_path() {
+    const KNOWN_ID: &str = "6f21ce4e-1234-4abc-8abc-abcdefabcdef";
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&state_dir).expect("create state dir");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+    // Isolated from the developer's real `~/.codex` — `CODEX_HOME` relocates
+    // Codex's entire state root, verified directly against a real install.
+    let codex_home = tmp.path().join("codex-home");
+    std::fs::create_dir_all(&codex_home).expect("create codex home");
+
+    let codex = install_codex_rollout_harness(&bin_dir, KNOWN_ID);
+    let toml_path = |p: &std::path::Path| p.display().to_string().replace('\\', "\\\\");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[integrations.codex]\nenabled = true\nexecutable = \"{}\"\n",
+            toml_path(&codex)
+        ),
+    )
+    .expect("write user config");
+
+    let command = TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path())
+        .arg("--scope")
+        .arg(&project_dir)
+        .arg("--data-dir")
+        .arg(&state_dir)
+        .arg("--config-dir")
+        .arg(&config_dir)
+        .arg("launch")
+        .arg("codex")
+        .env("CODEX_HOME", &codex_home);
+
+    let mut session = Session::spawn(command);
+    let status = session.wait_for_exit();
+    assert!(
+        status.success(),
+        "`glasshouse launch codex` reported: {status}\n--- output ---\n{}\n--- end ---",
+        session.output()
+    );
+
+    // Read Glasshouse's own record directly rather than scraping `glasshouse
+    // sessions`' text: that listing never shows the native identifier at
+    // all, only the disposition it produces.
+    let cli = Cli::try_parse_from([
+        "glasshouse",
+        "--scope",
+        &project_dir.display().to_string(),
+        "--data-dir",
+        &state_dir.display().to_string(),
+        "--config-dir",
+        &config_dir.display().to_string(),
+    ])
+    .expect("parse cli");
+    let runtime = bootstrap(&cli, &project_dir).expect("bootstrap runtime");
+    let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+    let records = sessions.store().list().expect("list sessions");
+    let record = records
+        .iter()
+        .find(|record| record.harness == "codex")
+        .unwrap_or_else(|| panic!("no codex session was recorded: {records:?}"));
+
+    assert_eq!(
+        record.native_session_id.as_deref(),
+        Some(KNOWN_ID),
+        "the rollout's own identifier was not captured: {record:?}"
+    );
+    assert_eq!(
+        record.disposition(),
+        SessionDisposition::Resumable,
+        "a captured native identifier should make the session resumable: {record:?}"
+    );
+}
+
+/// The `shell::run` `poll_exits` call site, end to end: `n` starts a real
+/// Codex session inside the live interactive shell, the fake harness writes
+/// its rollout and exits almost immediately, the shell's tick loop notices
+/// the exit and calls `session::native_id::capture` before recording the
+/// lifecycle change, and the session's record — read directly out of the
+/// project database, the same way
+/// `a_codex_session_s_identifier_is_captured_by_the_launch_path` above does —
+/// carries the identifier the fake harness wrote and reads `Resumable`.
+///
+/// Nothing on screen changes when `poll_exits` notices the exit: the session
+/// bar and overview are only ever refreshed from the store on specific
+/// events (starting a session, an explicit redraw signal), and detecting an
+/// exit is neither. So instead of guessing how many 16ms ticks the shell
+/// needs, this polls Glasshouse's own database directly — safe to do
+/// concurrently with the live shell process, since `database::ensure_ready`
+/// sets a five-second `busy_timeout` on every connection precisely so a
+/// second reader never has to guess either.
+///
+/// This is the second half of the coverage gap the sibling test above names:
+/// that one can only ever prove the `main.rs: launch_session` call site,
+/// because `glasshouse launch` is a one-shot command that never reaches this
+/// loop. This one proves the other, the same way
+/// `a_keystroke_typed_into_the_shell_reaches_a_real_harness_and_comes_back`
+/// proves the shell's live-session wiring in general: real keystrokes into
+/// the shipped binary in a real pseudo-terminal.
+#[test]
+fn a_codex_session_started_from_the_shell_has_its_identifier_captured_on_exit() {
+    const KNOWN_ID: &str = "9a12ce4e-5678-4abc-8abc-abcdefabcdef";
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&state_dir).expect("create state dir");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+    let codex_home = tmp.path().join("codex-home");
+    std::fs::create_dir_all(&codex_home).expect("create codex home");
+
+    let codex = install_codex_rollout_harness(&bin_dir, KNOWN_ID);
+    let toml_path = |p: &std::path::Path| p.display().to_string().replace('\\', "\\\\");
+    // Codex is the *only* enabled harness so `n` (`session::select::select`
+    // with no explicit request) resolves it without ambiguity.
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[onboarding]\ncompleted = true\n\n\
+             [integrations.codex]\nenabled = true\nexecutable = \"{}\"\n",
+            toml_path(&codex)
+        ),
+    )
+    .expect("write user config");
+
+    let mut shell = Session::spawn(
+        TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path())
+            .args([
+                "--scope".to_owned(),
+                project_dir.display().to_string(),
+                "--data-dir".to_owned(),
+                state_dir.display().to_string(),
+                "--config-dir".to_owned(),
+                config_dir.display().to_string(),
+            ])
+            .env("CODEX_HOME", &codex_home),
+    );
+
+    shell.expect("root ");
+
+    // `n` starts the session; the session bar names it once the record
+    // exists — the same signal
+    // `a_keystroke_typed_into_the_shell_reaches_a_real_harness_and_comes_back`
+    // waits on.
+    shell.send("n");
+    shell.expect("codex");
+
+    let cli = Cli::try_parse_from([
+        "glasshouse",
+        "--scope",
+        &project_dir.display().to_string(),
+        "--data-dir",
+        &state_dir.display().to_string(),
+        "--config-dir",
+        &config_dir.display().to_string(),
+    ])
+    .expect("parse cli");
+    let runtime = bootstrap(&cli, &project_dir).expect("bootstrap runtime");
+
+    let deadline = Instant::now() + TIMEOUT;
+    let mut captured = None;
+    while Instant::now() < deadline {
+        shell.answer_pending_queries();
+        let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+        let records = sessions.store().list().expect("list sessions");
+        if let Some(record) = records
+            .into_iter()
+            .find(|record| record.harness == "codex" && record.native_session_id.is_some())
+        {
+            captured = Some(record);
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+
+    shell.send("q");
+    let status = shell.wait_for_exit();
+    assert!(
+        status.success(),
+        "the shell should exit cleanly on `q`: {status}\n--- output ---\n{}\n--- end ---",
+        shell.output()
+    );
+
+    let Some(record) = captured else {
+        panic!(
+            "the shell's poll_exits loop never captured a native session identifier for the \
+             codex session\n--- shell output ---\n{}\n--- end ---",
+            shell.output()
+        );
+    };
+    assert_eq!(
+        record.native_session_id.as_deref(),
+        Some(KNOWN_ID),
+        "the rollout's own identifier was not captured by the shell's poll_exits loop: {record:?}"
+    );
+    assert_eq!(
+        record.disposition(),
+        SessionDisposition::Resumable,
+        "a captured native identifier should make the session resumable: {record:?}"
+    );
 }
 
 /// The shell itself, in a real terminal, driven by real keystrokes.

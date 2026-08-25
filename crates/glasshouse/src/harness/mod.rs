@@ -47,6 +47,8 @@ pub mod opencode;
 pub mod pi;
 
 use std::ffi::OsString;
+use std::path::PathBuf;
+use std::time::SystemTime;
 
 use crate::integrations::{IntegrationId, IntegrationKind};
 
@@ -259,6 +261,49 @@ pub enum SessionIds {
     /// The harness chooses the identifier; Glasshouse can read it back from
     /// this source afterwards.
     Discoverable { source: &'static str },
+}
+
+/// Where a harness keeps its session records, machine-readable enough that
+/// [`mod@crate::session::native_id`] can find and open them without knowing
+/// which harness it is looking at.
+///
+/// This is the *machine* counterpart to [`SessionIds::Discoverable`]'s
+/// `source`, which is a human-readable citation for [`describe`](HarnessAdapter::describe)'s
+/// evidence. The two must agree in substance, but only this one is actually
+/// walked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeSessionSource {
+    /// Environment variable that relocates the harness's state root.
+    pub home_env: &'static str,
+    /// The root's default place under the user's home directory.
+    pub home_default: &'static str,
+    /// Subdirectory of that root holding session records.
+    pub subdirectory: &'static str,
+    /// Session record file names start with this.
+    pub file_prefix: &'static str,
+    /// Session record file names end with this.
+    pub file_extension: &'static str,
+}
+
+/// One harness session, as the harness itself recorded it — what
+/// [`HarnessAdapter::read_session_record`] returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSessionRecord {
+    pub id: String,
+    pub cwd: PathBuf,
+    /// When the harness says the session began.
+    pub started_at: SystemTime,
+    pub kind: NativeSessionKind,
+}
+
+/// What kind of session a [`NativeSessionRecord`] describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeSessionKind {
+    /// An interactive terminal session — the kind Glasshouse starts.
+    Interactive,
+    /// Something else written to the same place: a subagent thread, a
+    /// headless run, or another client's session.
+    Other,
 }
 
 /// What a harness is known to be able to do.
@@ -580,6 +625,30 @@ pub trait HarnessAdapter: std::fmt::Debug + Send + Sync {
     /// it.
     fn assign_session_id(&self, native_session: &str) -> Option<Invocation> {
         let _ = native_session;
+        None
+    }
+
+    /// Where this harness records the sessions it writes, or `None` when
+    /// Glasshouse cannot discover an identifier for it afterwards.
+    ///
+    /// Must agree with [`HarnessDescription::session_ids`]: returning `Some`
+    /// here and declaring anything but [`SessionIds::Discoverable`] is a
+    /// contradiction, and `a_discoverable_adapter_declares_discoverable_session_ids`
+    /// fails on it — the same pattern
+    /// `assignment_agrees_with_the_declaration` checks for
+    /// [`HarnessAdapter::assign_session_id`].
+    fn session_id_source(&self) -> Option<NativeSessionSource> {
+        None
+    }
+
+    /// Read one session record from the first line of an artifact this
+    /// harness wrote.
+    ///
+    /// Pure: it is handed text and returns a description. The walking, the
+    /// time bound and the ambiguity rule belong to
+    /// [`mod@crate::session::native_id`], which knows no harness.
+    fn read_session_record(&self, header: &str) -> Option<NativeSessionRecord> {
+        let _ = header;
         None
     }
 
@@ -987,6 +1056,39 @@ mod tests {
     }
 
     #[test]
+    fn a_discoverable_adapter_declares_discoverable_session_ids() {
+        // Deliberately one-directional, unlike `assignment_agrees_with_the_
+        // declaration` above: `SessionIds::Discoverable` describes a fact
+        // about the *harness* (it names its own sessions and keeps a record
+        // of them somewhere), which can be true, and correctly declared,
+        // before Glasshouse has implemented reading that record — Cursor,
+        // Hermes, Pi and OpenCode all declare it today with no
+        // `session_id_source` yet. The direction that must never happen is
+        // the other one: a real, working `session_id_source` whose adapter
+        // tells a different story about itself.
+        //
+        // Combined with `assignment_agrees_with_the_declaration`, this also
+        // rules out an adapter claiming both mechanisms: `describe()` names
+        // exactly one `SessionIds` variant, so an adapter implementing both
+        // `session_id_source` and `assign_session_id` would have to satisfy
+        // "declares Discoverable" here and "declares Assigned" there for the
+        // same declaration, which is impossible.
+        for adapter in all() {
+            if adapter.session_id_source().is_none() {
+                continue;
+            }
+            assert!(
+                matches!(
+                    adapter.describe().session_ids.value(),
+                    Some(SessionIds::Discoverable { .. })
+                ),
+                "{} has a session_id_source but does not declare SessionIds::Discoverable",
+                adapter.id().slug()
+            );
+        }
+    }
+
+    #[test]
     fn claude_code_assigns_the_identifier_its_binary_demands() {
         let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
         let invocation = adapter
@@ -1266,6 +1368,47 @@ mod tests {
                  has become dependent on a harness adapter"
             );
         }
+    }
+
+    /// "Keep adapter-specific parsing isolated from the core Glasshouse
+    /// session model" cuts both ways: `session::native_id` depending on
+    /// `crate::harness` is fine and matches `session::select` (`discover`
+    /// takes a `&dyn HarnessAdapter`), but an adapter depending back on
+    /// `crate::session` is the same dependency pointed the wrong way — it
+    /// would make the two modules a cycle instead of the one-directional
+    /// relationship every other boundary test in this file enforces.
+    #[test]
+    fn no_adapter_depends_on_the_session_model() {
+        let modules = [
+            ("harness/antigravity.rs", include_str!("antigravity.rs")),
+            ("harness/claude_code.rs", include_str!("claude_code.rs")),
+            ("harness/codex.rs", include_str!("codex.rs")),
+            ("harness/cursor.rs", include_str!("cursor.rs")),
+            ("harness/hermes.rs", include_str!("hermes.rs")),
+            ("harness/opencode.rs", include_str!("opencode.rs")),
+            ("harness/pi.rs", include_str!("pi.rs")),
+        ];
+        for (name, source) in modules {
+            let code = production_code(source);
+            assert!(
+                !code.contains("crate::session"),
+                "{name} names `crate::session` in production code: an adapter has become \
+                 dependent on the session model it is supposed to be described *by*, not \
+                 coupled to"
+            );
+        }
+    }
+
+    /// The scan above is only worth having if it can fail.
+    #[test]
+    fn the_adapter_dependency_scan_would_catch_a_violation() {
+        let violating = "use crate::session::native_id;\nfn read() {}";
+        assert!(production_code(violating).contains("crate::session"));
+        // ... and does not fire on a doc comment that merely mentions the
+        // module, the same way `harness/mod.rs`'s own doc comments legitimately
+        // do (e.g. mentioning `crate::session::select`).
+        let documented = "/// See [`mod@crate::session::native_id`].\nfn read() {}";
+        assert!(!production_code(documented).contains("crate::session"));
     }
 
     /// The scan above is only worth having if it can fail.

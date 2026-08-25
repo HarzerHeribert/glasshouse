@@ -15,9 +15,14 @@
 //! Selecting and attaching both go through [`crate::launch::HarnessLaunch`],
 //! the only sanctioned way to start a harness: it derives the child's working
 //! directory from the active project and offers no way to override it.
+//!
+//! [`native_id`] is a fourth, smaller piece: for a harness that names its own
+//! sessions rather than accepting one Glasshouse assigns, it finds that
+//! identifier after the session ends and records it in [`store`].
 
 pub mod attach;
 pub mod lifecycle;
+pub mod native_id;
 pub mod runtime;
 pub mod select;
 pub mod store;

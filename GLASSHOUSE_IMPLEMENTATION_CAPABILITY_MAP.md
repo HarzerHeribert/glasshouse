@@ -313,7 +313,7 @@ Fixed architectural requirements
 - The adapter launches the installed first-party `codex` executable; Glasshouse does not reimplement Codex's agent loop or couple core behavior to Codex-internal crates.
 
 ☑ Add a Codex adapter that starts the real codex executable inside the current project root.
-☐ Capture the native Codex thread or session identifier when it can be obtained reliably.
+☑ Capture the native Codex thread or session identifier when it can be obtained reliably.
 ☐ Support resuming a known Codex session through Codex’s native resume mechanism.
 ☑ Preserve the complete native Codex TUI inside the Glasshouse PTY.
 ☐ Integrate structured Codex events or hooks wherever the installed Codex version exposes them.

@@ -191,6 +191,16 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     } else {
                         SessionLifecycle::Failed
                     };
+                    // The session is over, so this is the tightest the
+                    // discovery window will ever be — see
+                    // `session::native_id::capture`'s doc comment.
+                    if let Ok(Some(record)) = sessions.store().get(&id) {
+                        session::native_id::capture(
+                            &sessions.store(),
+                            &record,
+                            runtime.project().root(),
+                        );
+                    }
                     if let Err(err) = sessions.store().set_lifecycle(&id, lifecycle) {
                         tracing::warn!(session = %id, %err, "could not record a session's exit");
                     }
