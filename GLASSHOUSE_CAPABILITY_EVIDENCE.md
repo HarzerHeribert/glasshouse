@@ -203,6 +203,18 @@ runs it, which is the trap this project has already been caught by once.
   `protocols: Declared::Unverified`, so they are refused one step *earlier*,
   at the protocol intersection. Correct behaviour; both paths are now tested.
 
+#### CI evidence
+
+**CI `32900481354` green on Linux, macOS, Windows and lint** at `988dde2`,
+with the five decisive tests confirmed by name in the **Windows** job's own
+log rather than inferred from a green tick:
+`a_resolved_credential_never_reaches_a_rendering`,
+`a_credential_that_cannot_be_resolved_is_refused_and_produces_no_overlay`,
+`a_codex_profile_backed_by_an_openai_chat_provider_is_refused`,
+`a_claude_code_profile_carries_the_providers_base_url_and_credential`, and
+`a_defaulted_profile_selects_automatic_review_only_on_a_native_backend`.
+None of the new tests is `#[cfg]`-gated, which is why they run there at all.
+
 #### Missing evidence
 
 - **Neither path has run against a real backend through Glasshouse.** Both are
