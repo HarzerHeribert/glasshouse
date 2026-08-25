@@ -49,6 +49,71 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 5/7 — DEFECT: a harness's fullscreen renderer fails inside the viewport, and the harness disables it globally
+
+Contract (Phase 5): Given a live harness session, when Glasshouse draws it, the
+harness's own interface appears as it drew it — and Phase 7 asks for the
+**complete** native Claude Code TUI.
+
+State: **DEFECT, confirmed against the real binary.** Phase 7's "Preserve the
+complete native Claude Code TUI inside the Glasshouse PTY" box is deliberately
+**not** checked, because "complete" is exactly what fails.
+
+What was observed:
+- Driving the shipped `glasshouse` shell with the real Claude Code 2.1.245,
+  the harness's interface *does* render in the viewport — version banner,
+  model line, project path, prompt box, mode line, context meter. Rendering
+  fidelity is not the problem.
+- But the viewport also showed Claude Code's own notice: *"Claude Code's
+  fullscreen renderer has repeatedly failed to start on this machine, so it
+  has been turned off here. Run /tui fullscreen to try it again (this also
+  resets after an update)."*
+- The user's `~/.claude.json` gained
+  `fullscreenAutoDisabled = {"version": "2.1.245", "at": …, "strikes": 2}`,
+  timestamped **during this session**. So what the viewport now shows is
+  Claude Code's *fallback* renderer, and the harness has recorded a global,
+  persistent decision to stop trying.
+
+Why this matters more than a rendering nit:
+- It breaks a product invariant. Glasshouse "operates real installed harnesses
+  and never hides or replaces them", and Phase 9B is explicit that Glasshouse
+  must not mutate the user's global harness configuration as a side effect.
+  Here a Glasshouse session caused exactly that — outside Glasshouse too.
+- Two strikes are enough. A user who opens two sessions loses fullscreen mode
+  in their own terminal until they run `/tui fullscreen`.
+
+Likely cause, not yet proven:
+- `session/runtime.rs` answers exactly one terminal query, the cursor-position
+  report (`ESC[6n`), via `CursorQueryScanner`. A real Claude Code startup,
+  captured in a plain pseudo-terminal, also emits primary device attributes
+  (`ESC[c`), XTVERSION (`ESC[>0q`), the kitty keyboard protocol query
+  (`ESC[>1u` / `ESC[?u`) and `modifyOtherKeys` (`ESC[>4;2m`). Nothing in
+  Glasshouse answers any of those, so a renderer that waits for a reply before
+  committing to fullscreen would time out — twice, and then give up for good.
+- Phase 5's design note already states the rule this violates: an embedded
+  session "must always answer" the queries a harness sends, "or the harness
+  hangs". Only the DSR half of that was ever built.
+
+What closing this needs:
+1. Answer primary device attributes, and decide explicitly for each other
+   startup query whether Glasshouse replies or deliberately stays silent —
+   declining is a legitimate answer only if the harness treats silence as a
+   negative rather than as a timeout.
+2. Re-run the real-harness probe and confirm the strike counter in
+   `~/.claude.json` stops advancing.
+3. Only then does "the complete native TUI" claim become checkable.
+
+Regression evidence available now:
+- `the_real_claude_code_interface_appears_in_the_viewport` (PTY smoke, Unix,
+  opt-in via `GLASSHOUSE_PROBE_REAL_HARNESS=1`) — drives the shipped shell
+  against the real harness, asserts the harness's *own version string* appears
+  in the viewport, and first asserts it is **absent** before a session exists,
+  so a match cannot come from Glasshouse's own chrome. An earlier revision
+  looked for "Claude Code" and passed against a Glasshouse error message; that
+  is why the guard is there.
+- The probe is opt-in so an ordinary `cargo test` never starts somebody's real
+  coding agent, and it submits nothing, so it costs no model turn.
+
 ### Phase 7 — Claude Code lifecycle hooks (one line closed, three pending one probe)
 
 Contract: Given a running Claude Code session, when the harness reaches a

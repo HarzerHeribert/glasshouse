@@ -3059,3 +3059,112 @@ fn a_hook_that_cannot_report_still_exits_zero() {
         );
     }
 }
+
+/// The real Claude Code TUI, drawn inside Glasshouse's viewport.
+///
+/// Opt-in: set `GLASSHOUSE_PROBE_REAL_HARNESS=1`. Without it this skips, so an
+/// ordinary `cargo test` never starts somebody's real coding agent. It submits
+/// nothing and costs no model turn — it starts a session, reads the screen,
+/// and leaves.
+///
+/// This is the only honest way to check that a harness's own interface
+/// survives the round trip through `vt100` into Ratatui cells: a fake harness
+/// proves the pipe works, not that a real TUI is legible at the other end.
+#[cfg(unix)]
+#[test]
+fn the_real_claude_code_interface_appears_in_the_viewport() {
+    if std::env::var("GLASSHOUSE_PROBE_REAL_HARNESS").as_deref() != Ok("1") {
+        eprintln!("skipping: set GLASSHOUSE_PROBE_REAL_HARNESS=1 to run the real-harness probe");
+        return;
+    }
+    let Ok(claude) = glasshouse::platform::exec::resolve("claude") else {
+        eprintln!("skipping: `claude` is not on PATH");
+        return;
+    };
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    for dir in [&state_dir, &config_dir] {
+        std::fs::create_dir_all(dir).expect("create dir");
+    }
+    // The project is this repository, which the user's Claude Code already
+    // trusts; a fresh directory would meet the workspace-trust prompt instead
+    // of the interface under test.
+    let project_dir = std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir");
+
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[onboarding]\ncompleted = true\n\n\
+             [integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n",
+            claude.path().display()
+        ),
+    )
+    .expect("write user config");
+
+    let mut shell = Session::spawn(
+        TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path())
+            .size(TerminalSize::new(40, 120))
+            .args([
+                "--scope".to_owned(),
+                project_dir,
+                "--data-dir".to_owned(),
+                state_dir.display().to_string(),
+                "--config-dir".to_owned(),
+                config_dir.display().to_string(),
+            ]),
+    );
+
+    shell.expect("root ");
+
+    // The harness's own version string, asked of the harness itself. It is
+    // the one thing on the opening screen that Glasshouse's chrome can never
+    // produce — an earlier version of this test looked for "Claude Code" and
+    // passed against Glasshouse's own error message, which is the whole
+    // reason this asserts on something specific instead.
+    let version = std::process::Command::new(claude.path())
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .and_then(|text| text.split_whitespace().next().map(str::to_owned))
+        .expect("the harness reports a version");
+    assert!(
+        version.starts_with(char::is_numeric),
+        "unexpected version format: {version}"
+    );
+
+    // Nothing Glasshouse draws by itself carries the harness's version, so if
+    // it is on screen before a session exists the assertion below would prove
+    // nothing. An earlier revision of this test did exactly that.
+    assert!(
+        !strip_terminal_sequences(&shell.output()).contains(&version),
+        "`{version}` is on screen before any session started, so matching it proves nothing"
+    );
+
+    shell.send("n");
+
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut seen = false;
+    while Instant::now() < deadline {
+        shell.answer_pending_queries();
+        // Spaces are collapsed out of the captured screen, so the version is
+        // matched rather than any phrase around it.
+        if strip_terminal_sequences(&shell.output()).contains(&version) {
+            seen = true;
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+    assert!(
+        seen,
+        "the harness's own version `{version}` never appeared in the viewport\n\
+         --- screen ---\n{}\n--- end ---",
+        strip_terminal_sequences(&shell.output())
+    );
+
+    shell.send("\x1d");
+    shell.send("q");
+    let _ = shell.wait_for_exit();
+}
