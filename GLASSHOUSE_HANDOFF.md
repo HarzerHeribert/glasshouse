@@ -4,8 +4,8 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 9B is complete; Phase 9A is seventeen of twenty-six. 138 -> 164
-checked boxes.** `main` clean. Phase 8 is nine of ten, Phase 6 twelve of
+**Phase 9B is eight of nine; Phase 9A is seventeen of twenty-six. 138 -> 163
+checked boxes** (164, then one came back off — see below). `main` clean. Phase 8 is nine of ten, Phase 6 twelve of
 thirteen.
 
 Phase 9A's nine open lines are open for recorded reasons, each with the phase

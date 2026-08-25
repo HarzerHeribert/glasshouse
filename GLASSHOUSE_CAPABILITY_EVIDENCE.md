@@ -49,7 +49,7 @@ Missing evidence:
 
 ## Active entries
 
-### Phase 9B — scoped harness wrappers and shims (nine of nine, COMPLETE)
+### Phase 9B — scoped harness wrappers and shims (eight of nine)
 
 Contract: Given a launch profile, when the user starts a harness from the shell
 — through `glasshouse run` or a shim they asked Glasshouse to generate — the
@@ -58,7 +58,8 @@ with every override confined to that process tree, while Glasshouse never
 touches a shell startup file and deleting a generated shim is enough to remove
 it.
 
-State: **COMPLETE.**
+State: **COMPLETE for eight lines. Line 384 is reopened** — see "A claim
+Windows would not support" below.
 
 Production evidence:
 - `cli.rs` — `Command::Run` (fields identical to `Command::Launch`) and
@@ -127,7 +128,45 @@ Platform/external evidence — the real binary:
   "refusing to generate a shim for profile `…`: it contains `"`, which a shell
   would interpret rather than pass through."
 
+### A claim Windows would not support, and the box that came back off
+
+Line 384 — "preserve the user's existing shell environment except for explicit
+launch-profile overrides" — **was checked and is now unchecked.** Its test
+passed on macOS and Linux and failed three times on `windows-latest`, and the
+third failure's message is what finally said why:
+
+    expected (the test process): PATH=D:\A\GLASSHOUSE\GLASSHOUSE\TAR...
+    child reported:              Path=C:\Program Files\MongoDB\Server\...
+
+The child's `PATH` is the **system** one. The calling process's own `PATH` — a
+cargo test binary's, with the target directory prepended — is simply absent
+from it. On the same run, the explicit override asserted immediately above
+*did* reach that child, so `CommandBuilder::env` works on Windows and only
+**inherited** variables are in question.
+
+The strongest reading of the evidence: `portable_pty::CommandBuilder` composes
+the child environment on Windows from the system/user environment rather than
+from the calling process, layering explicit overrides on top. **That is a
+reading, not a proven fact** — nothing here has run on a real Windows host, and
+`into_builder` itself does nothing but `CommandBuilder::new` plus explicit
+`env`/`env_remove` calls.
+
+Two wrong fixes preceded this. The first blamed line wrapping and normalised
+whitespace; the second blamed ConPTY's deferred-wrap character duplication,
+which is **real** (see the handoff's loose end) but was not this failure's
+cause. Both made the test pass locally, where `PATH` is short and the parent's
+prefix happens to survive, and left Windows failing for the original reason.
+The lesson is the project's own: read the failure before forming the fix.
+
+The assertion is now `#[cfg(unix)]`, claiming only the platform it can
+demonstrate, and line 384 stays unchecked until someone runs this on a real
+Windows host and determines whether the harness a user launches there sees the
+environment their shell set.
+
 Missing evidence:
+- **Line 384 on Windows**, above. If the reading is right it is a product
+  defect rather than a test defect, and it would matter to any user who
+  configures a harness through their shell environment.
 - `a_generated_shim_actually_starts_the_harness` is Unix-only; the Windows
   `.cmd` *content* is covered everywhere by
   `a_windows_shim_is_a_cmd_file_and_a_unix_shim_is_a_shell_script`, but
