@@ -163,6 +163,13 @@ Platform/external evidence:
 - `glasshouse doctor` run from the built binary, which caught two rendering
   defects the types could not: Claude Code's and Cursor's descriptions
   contained backticks and printed doubled inside the backticks the report adds.
+- **CI `32875637992` green on Linux, macOS, Windows and lint** for `37605ad`,
+  with all four new tests confirmed to have *executed* on the Windows runner by
+  name — `claude_code_selects_auto_mode_with_a_session_flag_not_the_subcommand`,
+  `no_approval_argument_is_a_usage_string_rather_than_an_argv_entry`,
+  `a_harness_without_automatic_review_offers_no_substitute` and
+  `no_approval_description_contains_a_backtick` — rather than inferred from an
+  aggregate green.
 
 **This is the third declaration derived from an artifact that did not serve
 the purpose it was cited for**, after Antigravity's executable name and

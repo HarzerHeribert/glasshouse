@@ -5,7 +5,10 @@ Last updated: 2026-08-25 (Europe/Berlin)
 ## Current capability / phase
 
 **Phase 9A is under way; 138 checked boxes, unchanged this batch.** `main`
-clean. Phase 8 is nine of ten, Phase 6 twelve of thirteen.
+clean at `37605ad`, pushed, with CI `32875637992` **green on Linux, macOS,
+Windows and lint** — and all four new tests confirmed to have executed on the
+Windows runner by name, not inferred from an aggregate green. Phase 8 is nine
+of ten, Phase 6 twelve of thirteen.
 
 This batch checked no box on purpose. It corrected a declaration that Phase 9A
 is about to consume, and a correction is not a capability. The Phase 9A boxes
