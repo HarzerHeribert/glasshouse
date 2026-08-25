@@ -681,10 +681,39 @@ have required a magic clamp.
   viewport and the user answers there. The `[hooks.state…]` hash entries are
   what that answer records.
 
-- **A project-local `<project>/.codex/hooks.json` is definitely read** — the
-  review screen counted the hooks from one. What is still unobserved is a
-  Codex hook actually *firing*, which needs the hooks trusted and one real
-  turn.
+- **Codex hooks are observed firing, and their payloads are captured.** With a
+  project-local `.codex/hooks.json` trusted and one real turn taken,
+  `SessionStart`, `UserPromptSubmit` and `Stop` all fired. Codex also printed
+  `⚠ clamping SessionEnd hook timeout to 3s in <project>/.codex/hooks.json`,
+  which names the file and proves it was read — and warns that **Codex clamps
+  hook timeouts**, so a declared timeout may be silently shortened.
+  Note `SessionStart` *does* fire for Codex, unlike Claude Code.
+
+  Every payload carries `session_id`, `transcript_path`, `cwd`,
+  `hook_event_name`, `model` and `permission_mode`; `UserPromptSubmit` adds
+  `turn_id` and `prompt`; `Stop` adds `turn_id`, `stop_hook_active` and
+  `last_assistant_message`. Full schema in
+  `.agent-runtime/notes-codex-hooks.md`.
+
+- **A hook is a better identifier source than a rollout scan, and Phase 8 line
+  2 stays anyway.** `session_id` is in every payload, handed over directly with
+  none of the originator/parent/cwd/time-window filtering that discovery needs —
+  `transcript_path` even names the exact rollout. But hooks require
+  installation *and* the user trusting them, while discovery needs nothing and
+  works for a session that predates the hooks. Prefer the hook's `session_id`
+  when one has reported; fall back to discovery otherwise.
+
+- **The hook payloads carry conversation content.** `prompt` is the user's own
+  words and `last_assistant_message` is the model's reply. A Glasshouse hook
+  handler needs `session_id` and `hook_event_name` and must read neither of the
+  others into a log, a diagnostic, a `Debug`, or the database. Make it a test,
+  the way `nothing_is_read_past_the_first_line` already does for rollouts.
+
+- **Never steer a user toward "Trust all and continue".** Doing so during this
+  probe trusted five unrelated `warp@claude-code-warp` plugin hooks that
+  happened to be pending review, writing them into the user's `config.toml`.
+  Restored byte-identical from a backup. It is a blanket action over whatever
+  else is pending; "Review hooks" is the honest path.
 
 - **Windows CI caught a real production defect on the first push, again.**
   `read_first_line` required a trailing newline, so a rollout whose only line
