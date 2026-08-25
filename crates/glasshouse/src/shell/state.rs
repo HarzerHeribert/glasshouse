@@ -923,6 +923,8 @@ mod tests {
             presentation: SessionPresentation::Embedded,
             created_at: 1_000,
             last_activity_at: 1_000,
+            launch_profile: None,
+            backend_resource: None,
         }
     }
 
@@ -1461,6 +1463,8 @@ mod native_input_tests {
             presentation: SessionPresentation::Embedded,
             created_at: 0,
             last_activity_at: 0,
+            launch_profile: None,
+            backend_resource: None,
         };
         let mut state = ShellState::new("p", "/p", "0.1.0", vec![record]);
         state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -1563,6 +1567,8 @@ mod settings_tests {
             presentation: SessionPresentation::Embedded,
             created_at: 0,
             last_activity_at: 0,
+            launch_profile: None,
+            backend_resource: None,
         }
     }
 

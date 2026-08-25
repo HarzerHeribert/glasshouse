@@ -15,6 +15,7 @@ pub mod logging;
 pub mod onboarding;
 pub mod paths;
 pub mod platform;
+pub mod profile;
 pub mod project;
 pub mod pty;
 pub mod session;

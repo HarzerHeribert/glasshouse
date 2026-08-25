@@ -3178,8 +3178,11 @@ fn a_recorded_codex_session_is_resumed_through_its_own_subcommand() {
         )
     };
 
-    // Start one, and let it finish. A fresh launch is bare: Codex assigns its
-    // own identifier, so Glasshouse hands it nothing at all to start with.
+    // Start one, and let it finish. Codex assigns its own identifier, so
+    // Glasshouse hands it nothing to start one with — but the default launch
+    // profile (Phase 9A) does resolve Codex's own automatic-review argument
+    // (`--approve-for-me`), since Codex declares one and nothing has asked
+    // for anything else.
     let mut first = Session::spawn(glasshouse(&["launch", "codex"]));
     let started = read_argv(&mut first);
     let _ = first.wait_for_exit();
@@ -3188,10 +3191,11 @@ fn a_recorded_codex_session_is_resumed_through_its_own_subcommand() {
         .split_once("ARGV:")
         .map(|(_, rest)| rest.trim())
         .unwrap_or_else(|| panic!("no ARGV: marker in the launch output: {started}"));
-    assert!(
-        launch_args.is_empty(),
+    assert_eq!(
+        launch_args, "--approve-for-me",
         "a new session is not a resumed one — codex should start with no `resume` subcommand \
-         and no identifier on its command line: {started}"
+         and no identifier on its command line, only the default profile's automatic-review \
+         argument: {started}"
     );
 
     // The short form is the only identifier the listing shows, so it is the

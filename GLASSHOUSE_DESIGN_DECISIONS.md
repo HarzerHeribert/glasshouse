@@ -699,6 +699,157 @@ exactly why nobody read it.
 
 ---
 
+## Launch profiles — a declared value, resolved through the adapter into an overlay
+
+### The conflict
+
+Phase 9A asks for twenty-six things at once: an abstraction, a composition, a
+default approval mode, an acknowledgement ledger, an environment overlay, an
+argument overlay, a generated-configuration mechanism, a protocol constraint,
+session recording, and diagnostics. Built as one type they collapse into a
+struct that means everything and guarantees nothing.
+
+They separate cleanly along one seam: **what the user declares** versus **what
+resolution produces**. A profile is inert configuration. An overlay is the
+concrete, per-launch result of asking a specific adapter whether that profile
+can be honoured by that harness.
+
+### The decision: `LaunchProfile` is data, `LaunchOverlay` is its resolution
+
+```text
+LaunchProfile  (declarative, stored in configuration)
+    name, harness, backend resource, model, expected protocol,
+    approval selection, class
+
+        resolve(profile, adapter)  ->  Result<LaunchOverlay, Refusal>
+
+LaunchOverlay  (ephemeral, applies to exactly one child process)
+    args, env, generated configuration, mechanism notes
+```
+
+`HarnessLaunch` already *is* the child-process overlay mechanism — it takes
+args and env and nothing else can reach the child — so Phase 9A's line about
+representing the mechanisms "together as an ephemeral child-process launch
+overlay" is satisfied by building the overlay and handing it to
+`HarnessLaunch`, not by inventing a second launcher.
+
+Resolution is the only place allowed to turn a declaration into arguments, and
+it **refuses rather than invents**. A profile naming a mechanism the adapter
+does not declare is an error, never a guess at an environment-variable name.
+
+### The decision: the approval declaration carries argv, not prose
+
+This one was forced by the binaries, and it is the third time in this project
+that a declaration was derived from the wrong artifact.
+
+`ApprovalModes` stored one human-readable string per mode. Three of the seven
+values cannot be used as launch arguments at all:
+
+- **Claude Code** declared `"auto-mode"`. That is a *subcommand* — "Inspect or
+  reset auto mode classifier configuration". Appending it to a launch would run
+  the subcommand instead of starting a session. The flag that selects the mode
+  **for a session** is `--permission-mode auto`, one of six choices
+  (`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`).
+  Verified against Claude Code 2.1.245: an invalid value is rejected with the
+  allowed list, and `auto` is accepted.
+- **Codex** and **Cursor** declared sandbox as usage strings —
+  `"-s/--sandbox <read-only|workspace-write|danger-full-access>"` and
+  `"--sandbox <mode>"` — with placeholders no process can receive.
+
+So a mode now carries `args` (the exact argv that selects it) beside
+`description` (what the harness's own documentation says). Keeping both is the
+point: the description is for a human reading `glasshouse doctor`, and
+conflating them is precisely what produced an unlaunchable declaration.
+
+The predecessors: Antigravity's executable name was read from documentation
+rather than an install, and Codex's hook events were read from trust-record
+keys rather than its hook review screen. The pattern is the same each time —
+a real artifact, cited for a purpose it does not serve.
+
+### The decision: a default that falls back is not a request that is refused
+
+The map says the approval selection defaults "to its native automatic-review
+mode where one exists and never to a blanket bypass". Four of the seven
+harnesses have no automatic-review mode, so "where one exists" has to mean
+something precise:
+
+- A profile that **explicitly** asks for automatic review from a harness that
+  declares none is **refused**. That is the invariant the approvals decision
+  already records, and refusing is what keeps a user from believing a session
+  is being classified when it is not.
+- A profile that merely **took the default** and meets such a harness resolves
+  to the harness's *own* default — no approval argument at all. Not a bypass,
+  and not an error, because the user asked for nothing in particular and
+  Glasshouse changing nothing is the honest outcome.
+
+The asymmetry is deliberate. An explicit request is a claim about the session
+that Glasshouse must not silently fail to honour; a default is an absence of a
+claim.
+
+### The decision: a bypass needs a recorded acknowledgement, once, per harness
+
+Where a harness offers only a blanket bypass, the user may still choose it —
+they settled that — but not silently. Resolution refuses a bypass until an
+acknowledgement for that harness is recorded, and the prompt shows the mode in
+**the harness's own words**, which is what `description` is now for:
+OpenCode's `--auto` is "auto-approve permissions that are not explicitly denied
+(dangerous!)"; Antigravity's is "Auto-approve all tool permission requests
+without prompting".
+
+The acknowledgement is stored per harness in user-level configuration, so it is
+asked once. Asking every time is how a warning becomes noise, and noise is what
+made per-command approval useless in the first place.
+
+### The decision: a backend resource is a distinct type, and only `Native` resolves today
+
+"A provider, direct API, router, or gateway is a backend resource for a
+harness, not an interactive coding harness by itself" is enforced by there
+being no way to start a session from a `BackendResource`: sessions are started
+from a resolved harness executable, and that path takes an `IntegrationId`.
+
+`BackendResource::Native` is the only variant resolution accepts today.
+`DirectProvider` and `GlasshouseGateway` are representable and are **refused**
+with a diagnostic naming the phase that supplies them, because provider
+configuration, protocol metadata and secret storage are Phases 9C, 9D and 9E.
+Representing them now and refusing them is what makes the protocol constraint
+and the class marking real rather than decorative.
+
+### The decision: the Native profile is implied, never stored
+
+Every harness has a Native profile by construction rather than by a
+configuration entry. Nothing can delete it, so "keep native-subscription
+profiles available even when gateway providers are configured" is structural
+instead of a policy someone has to remember — and `glasshouse launch` with no
+profile is exactly the Native profile, so today's behaviour is the default
+path rather than a special case beside it.
+
+### The decision: profiles are configuration, and the project database has no room for them
+
+"Store launch-profile configuration separately from project memory" is
+satisfied by where the type lives: profiles are TOML in the user and project
+configuration layers, with the same `Layer` provenance every other setting
+carries. The project database gains a *reference* — which profile a session
+ran under — and no definition. There is no profile table, and a test says so.
+
+### Invariants a test must hold to
+
+1. No approval argument is a usage string: no element contains a space, `<`,
+   `>` or `|`.
+2. Claude Code's automatic review is `--permission-mode auto`, and never the
+   `auto-mode` subcommand.
+3. A profile explicitly requesting automatic review from a harness declaring
+   none is refused; a profile that took the default resolves to no approval
+   argument, never to a bypass.
+4. A bypass is refused until an acknowledgement for that harness is recorded,
+   and the acknowledgement is per harness rather than global.
+5. Resolution refuses a mechanism the adapter does not declare instead of
+   inventing an environment-variable name.
+6. A `BackendResource` cannot start a session; only a resolved harness can.
+7. The project database contains no launch-profile definition, only a
+   reference to one.
+
+---
+
 ## An approval declaration has to carry argv, not prose about argv
 
 ### The conflict

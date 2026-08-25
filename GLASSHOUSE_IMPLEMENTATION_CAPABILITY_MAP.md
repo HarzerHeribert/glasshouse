@@ -345,32 +345,32 @@ Fixed architectural requirements
 - A launch profile is the authoritative composition of harness, backend resource, model, wire-protocol compatibility, ephemeral child-process overlay, and response profile.
 - A provider, direct API, router, or gateway is a backend resource for an installed harness and is never an interactive coding agent by itself.
 
-☐ Introduce a launch-profile abstraction that describes how Glasshouse starts a harness without changing the user’s global harness installation.
+☑ Introduce a launch-profile abstraction that describes how Glasshouse starts a harness without changing the user’s global harness installation.
 ☐ Require every interactive Glasshouse session to be operated by a real installed coding harness.
 ☐ Define a launch profile as the combination of harness, backend resource, model selection, protocol compatibility, child-process configuration overlay, and response profile.
-☐ Treat a provider, direct API, router, or gateway as a backend resource for a harness rather than as an interactive coding harness by itself.
-☐ Give every harness a Native launch profile that uses the harness’s normal first-party authentication and configuration.
+☑ Treat a provider, direct API, router, or gateway as a backend resource for a harness rather than as an interactive coding harness by itself.
+☑ Give every harness a Native launch profile that uses the harness’s normal first-party authentication and configuration.
 ☐ Allow additional launch profiles such as Claude / OpenRouter, Claude / NVIDIA, or Codex / Custom Provider.
-☐ Store launch-profile configuration separately from project memory.
+☑ Store launch-profile configuration separately from project memory.
 ☐ Allow a launch profile to inject environment variables only into the child harness process.
-☐ Allow a launch profile to inject command-line arguments only into the child harness process.
-☐ Allow a launch profile to select the harness's own approval mode, defaulting to its native automatic-review mode where one exists and never to a blanket bypass.
-☐ Allow a blanket bypass on a harness that declares no automatic-review mode only after the user has been shown its risk once and acknowledged it, record that acknowledgement per harness, and never downgrade to a bypass silently.
+☑ Allow a launch profile to inject command-line arguments only into the child harness process.
+☑ Allow a launch profile to select the harness's own approval mode, defaulting to its native automatic-review mode where one exists and never to a blanket bypass.
+☑ Allow a blanket bypass on a harness that declares no automatic-review mode only after the user has been shown its risk once and acknowledged it, record that acknowledgement per harness, and never downgrade to a bypass silently.
 ☐ Allow a launch profile to use an isolated generated configuration file when a harness requires file-based provider configuration.
 ☐ Represent these mechanisms together as an ephemeral child-process launch overlay rather than assuming every harness can be redirected through environment variables alone.
-☐ Resolve the launch overlay through the selected HarnessAdapter and refuse unsupported combinations instead of inventing generic environment names.
-☐ Never modify the user’s normal global Claude Code or Codex configuration merely to launch a Glasshouse profile.
+☑ Resolve the launch overlay through the selected HarnessAdapter and refuse unsupported combinations instead of inventing generic environment names.
+☑ Never modify the user’s normal global Claude Code or Codex configuration merely to launch a Glasshouse profile.
 ☐ Prefer temporary or Glasshouse-owned generated configuration over editing third-party config files in place.
-☐ Record the launch profile used by every session.
+☑ Record the launch profile used by every session.
 ☐ Record the resolved harness, backend resource, model, protocol, pairing class, and response profile used by every session.
-☐ Show the active launch profile next to the harness in session details.
-☐ Show the resolved launch mechanism and overridden key names for diagnostics while redacting secret values.
-☐ Allow the user to select a launch profile when creating a session manually.
+☑ Show the active launch profile next to the harness in session details.
+☑ Show the resolved launch mechanism and overridden key names for diagnostics while redacting secret values.
+☑ Allow the user to select a launch profile when creating a session manually.
 ☐ Allow the router to select among enabled launch profiles when automatic routing is enabled.
-☐ Allow launch profiles to be marked native-subscription, direct-provider, or glasshouse-gateway.
-☐ Keep native-subscription profiles available even when gateway providers are configured.
-☐ Allow a launch profile to declare which wire protocol it expects from its backend.
-☐ Refuse to launch a profile when the selected provider cannot satisfy the required protocol unless an explicit translation adapter exists.
+☑ Allow launch profiles to be marked native-subscription, direct-provider, or glasshouse-gateway.
+☑ Keep native-subscription profiles available even when gateway providers are configured.
+☑ Allow a launch profile to declare which wire protocol it expects from its backend.
+☑ Refuse to launch a profile when the selected provider cannot satisfy the required protocol unless an explicit translation adapter exists.
 
 Phase 9B — Scoped harness wrappers and shims
 

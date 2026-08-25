@@ -74,9 +74,15 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         }
         Some(Command::Launch {
             harness,
+            profile,
             harness_args,
         }) => {
-            return launch_session(&runtime, harness.as_deref(), harness_args);
+            return launch_session(
+                &runtime,
+                harness.as_deref(),
+                profile.as_deref(),
+                harness_args,
+            );
         }
         Some(Command::Resume {
             session,
@@ -121,10 +127,12 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
 ///
 /// This is the production consumer of the sanctioned launch path: the harness
 /// is chosen and its executable resolved from configuration (project level
-/// overriding user level), and then started through
-/// [`HarnessLaunch`] — the only route that exists, and the one that derives
-/// the child's working directory from the active project rather than from
-/// whatever directory Glasshouse happened to be run in.
+/// overriding user level), the requested launch profile is resolved against
+/// its adapter (Phase 9A — see [`glasshouse::profile`]), and only then is
+/// anything started through [`HarnessLaunch`] — the only route that exists,
+/// and the one that derives the child's working directory from the active
+/// project rather than from whatever directory Glasshouse happened to be run
+/// in.
 ///
 /// Setup is deliberately not triggered here. A user who has named a harness
 /// has already said what they want; interrupting that with a first-run wizard
@@ -132,12 +140,38 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
 fn launch_session(
     runtime: &Runtime,
     harness: Option<&str>,
+    profile_name: Option<&str>,
     harness_args: &[String],
 ) -> anyhow::Result<ExitCode> {
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
     let effective = EffectiveConfig::new(&user, project.as_ref());
     let selection = session::select::select(harness, effective)?;
+
+    // Resolve the launch profile *before* anything is recorded or started.
+    // A refusal here must cost nothing: no session record, no process. See
+    // `glasshouse::profile::resolve`'s doc for why a refusal never falls back
+    // to a different mode.
+    let requested_profile = profile_name.unwrap_or(glasshouse::profile::NATIVE_PROFILE_NAME);
+    let launch_profile = match effective.launch_profile(requested_profile, selection.id()) {
+        Ok(resolved) => resolved.value,
+        Err(err) => {
+            eprintln!("glasshouse: {err}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+    let acknowledged_bypass = effective.bypass_acknowledged(selection.id()).value;
+    let overlay = match glasshouse::profile::resolve(
+        &launch_profile,
+        selection.adapter(),
+        acknowledged_bypass,
+    ) {
+        Ok(overlay) => overlay,
+        Err(refusal) => {
+            eprintln!("glasshouse: {refusal}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
 
     // Record the session before the harness exists, so a session that dies
     // during startup still leaves a trace. Failing to open the project
@@ -154,7 +188,10 @@ fn launch_session(
         .then(|| store.new_native_session_id())
         .transpose()?;
     let record = store.create(
-        NewSession::embedded(selection.id().slug()).with_native_session_id(native.clone()),
+        NewSession::embedded(selection.id().slug())
+            .with_native_session_id(native.clone())
+            .with_launch_profile(Some(launch_profile.name.clone()))
+            .with_backend_resource(Some(launch_profile.backend.slug())),
     )?;
 
     tracing::info!(
@@ -167,18 +204,27 @@ fn launch_session(
         executable = %selection.executable().path().display(),
         source = %selection.source(),
         root = %runtime.project().display_root().display(),
+        profile = %launch_profile.name,
+        backend = %launch_profile.backend.slug(),
+        mechanisms = %mechanism_summary(&overlay),
         "opening a harness session"
     );
 
-    // The adapter decides how its harness is opened; the user's own `--`
-    // arguments follow it.
-    let mut args = selection.start_args(native.as_deref(), harness_args.iter().map(String::as_str));
+    // Adapter args (and, for a harness that lets Glasshouse assign one, its
+    // session identifier) first — no user arguments yet, so the overlay's
+    // arguments land strictly between them and the user's own.
+    let mut args = selection.start_args(native.as_deref(), std::iter::empty::<&str>());
     let project_hooks_consent = effective.project_hooks(selection.id()).value;
     args.splice(
         0..0,
         install_hooks(runtime, &selection, &record.id, project_hooks_consent),
     );
     let launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
+    // The overlay is the only thing that may put its own arguments or
+    // environment onto the launch — see `LaunchOverlay::apply`'s doc.
+    let launch = overlay.apply(launch);
+    // The user's own `--` arguments always come last, so they can win.
+    let launch = launch.args(harness_args.iter().map(String::as_str));
 
     // From here on, a bookkeeping failure must never change what the user
     // sees. The session is real and running; losing a state transition is a
@@ -215,6 +261,23 @@ fn launch_session(
         eprintln!("glasshouse: the harness {status}");
     }
     Ok(exit_code_for(&status))
+}
+
+/// A one-line summary of a resolved overlay's mechanisms, for the "opening a
+/// harness session" log line — category and detail only, exactly what
+/// [`glasshouse::profile::LaunchOverlay::mechanisms`] exposes for rendering.
+/// An environment *value* is never in here, because the overlay never puts
+/// one in a `MechanismNote` to begin with.
+fn mechanism_summary(overlay: &glasshouse::profile::LaunchOverlay) -> String {
+    if overlay.mechanisms().is_empty() {
+        return "none".to_owned();
+    }
+    overlay
+        .mechanisms()
+        .iter()
+        .map(|note| format!("{}: {}", note.category, note.detail))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Install lifecycle hooks for a session that is about to start, returning
@@ -437,6 +500,7 @@ fn session_report(runtime: &Runtime) -> anyhow::Result<String> {
         session_row(
             "SESSION",
             "HARNESS",
+            "PROFILE",
             "STATE",
             "ROLE",
             "PRESENTED",
@@ -456,6 +520,11 @@ fn session_report(runtime: &Runtime) -> anyhow::Result<String> {
             session_row(
                 &short_id(&record.id),
                 &record.harness,
+                // A dash, not the word "native": a session recorded before
+                // Phase 9A ran under no profile at all, and that is a
+                // different fact from having run the Native profile — see
+                // `SessionRecord::launch_profile`'s doc.
+                record.launch_profile.as_deref().unwrap_or("-"),
                 state,
                 &record.role.to_string(),
                 &record.presentation.to_string(),
@@ -474,6 +543,7 @@ fn session_report(runtime: &Runtime) -> anyhow::Result<String> {
 fn session_row(
     session: &str,
     harness: &str,
+    profile: &str,
     state: &str,
     role: &str,
     presented: &str,
@@ -481,7 +551,10 @@ fn session_row(
 ) -> String {
     // Widths fit the longest value each column can hold: `resumable`,
     // `orchestrator`, `embedded`.
-    format!("{session:<12}  {harness:<14}  {state:<9}  {role:<12}  {presented:<9}  {activity}")
+    format!(
+        "{session:<12}  {harness:<14}  {profile:<12}  {state:<9}  {role:<12}  {presented:<9}  \
+         {activity}"
+    )
 }
 
 /// Enough of an identifier to name a session in conversation.
@@ -591,6 +664,117 @@ fn setup(runtime: &Runtime, trigger: SetupTrigger) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- a refused profile starts no process and records no session -------
+
+    /// A harness enabled with a decoy executable, so `session::select::select`
+    /// succeeds without a real install; the runtime it was bootstrapped
+    /// against comes back too, so the caller can inspect state afterward.
+    fn fixture_with_enabled_claude_code(tmp: &std::path::Path) -> Runtime {
+        let root = tmp.join("project");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+
+        let cli = Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            tmp.join("data").to_str().unwrap(),
+            "--config-dir",
+            tmp.join("config").to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = glasshouse::bootstrap(&cli, &root).unwrap();
+
+        let decoy = tmp.join("fake-claude");
+        std::fs::write(&decoy, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&decoy).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&decoy, perms).unwrap();
+        }
+
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        user.integrations_mut()
+            .entry(glasshouse::integrations::IntegrationId::ClaudeCode)
+            .set_enabled(true)
+            .set_executable(Some(decoy));
+        user.save(runtime.paths()).unwrap();
+
+        runtime
+    }
+
+    #[test]
+    fn a_refused_profile_starts_no_process_and_records_no_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = fixture_with_enabled_claude_code(tmp.path());
+
+        // A provider-backed profile is always refused in Phase 9A (Phase
+        // 9C/9D supply the provider configuration it would need).
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        let mut profile = glasshouse::config::ProfileConfig::new(
+            glasshouse::integrations::IntegrationId::ClaudeCode,
+        );
+        profile.set_backend(glasshouse::config::ProfileBackend::DirectProvider {
+            provider: "openrouter".to_owned(),
+        });
+        user.profiles_mut().set("gateway", profile);
+        user.save(runtime.paths()).unwrap();
+
+        let status = launch_session(&runtime, Some("claude-code"), Some("gateway"), &[]).unwrap();
+        assert_eq!(status, ExitCode::FAILURE);
+
+        let sessions = glasshouse::session::ProjectSessions::open(&runtime).unwrap();
+        assert!(
+            sessions.store().list().unwrap().is_empty(),
+            "a refused profile must record no session"
+        );
+    }
+
+    #[test]
+    fn an_unacknowledged_bypass_also_starts_no_process_and_records_no_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = fixture_with_enabled_claude_code(tmp.path());
+
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        let mut profile = glasshouse::config::ProfileConfig::new(
+            glasshouse::integrations::IntegrationId::ClaudeCode,
+        );
+        profile.set_approval(glasshouse::config::ProfileApproval::Bypass);
+        user.profiles_mut().set("yolo", profile);
+        user.save(runtime.paths()).unwrap();
+
+        let status = launch_session(&runtime, Some("claude-code"), Some("yolo"), &[]).unwrap();
+        assert_eq!(status, ExitCode::FAILURE);
+
+        let sessions = glasshouse::session::ProjectSessions::open(&runtime).unwrap();
+        assert!(sessions.store().list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_native_profile_launch_records_its_profile_name_and_backend() {
+        // Not a full launch (that needs a real PTY-attachable harness); this
+        // exercises everything `launch_session` does up to and including the
+        // session record, by stopping the resolved profile one step short of
+        // `HarnessLaunch` and checking what would have been recorded.
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = fixture_with_enabled_claude_code(tmp.path());
+        let user = UserConfig::load(runtime.paths()).unwrap();
+        let project = config::load_project_config(runtime.project()).unwrap();
+        let effective = EffectiveConfig::new(&user, project.as_ref());
+        let selection =
+            glasshouse::session::select::select(Some("claude-code"), effective).unwrap();
+
+        let resolved = effective
+            .launch_profile(glasshouse::profile::NATIVE_PROFILE_NAME, selection.id())
+            .unwrap()
+            .value;
+        assert_eq!(resolved.name, "native");
+        assert_eq!(resolved.backend.slug(), "native");
+
+        let overlay = glasshouse::profile::resolve(&resolved, selection.adapter(), false).unwrap();
+        assert!(mechanism_summary(&overlay).contains("automatic review"));
+    }
 
     // --- the hook handler never reads its payload -------------------------
 
@@ -734,10 +918,19 @@ mod tests {
     /// cannot drift apart. Checked here rather than trusted.
     #[test]
     fn listing_columns_line_up_between_the_header_and_a_row() {
-        let header = session_row("SESSION", "HARNESS", "STATE", "ROLE", "PRESENTED", "LAST");
+        let header = session_row(
+            "SESSION",
+            "HARNESS",
+            "PROFILE",
+            "STATE",
+            "ROLE",
+            "PRESENTED",
+            "LAST",
+        );
         let row = session_row(
             "abc123",
             "claude-code",
+            "native",
             "resumable",
             "orchestrator",
             "embedded",

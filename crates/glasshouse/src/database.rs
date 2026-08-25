@@ -45,9 +45,10 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// The highest schema version this build knows how to migrate to.
 ///
 /// Version 1 is the empty-but-initialized schema plus the `project_metadata`
-/// table. Version 2 adds `sessions`. Later migrations are appended to
+/// table. Version 2 adds `sessions`. Version 3 adds `sessions.launch_profile`
+/// and `sessions.backend_resource`. Later migrations are appended to
 /// [`MIGRATIONS`], and this constant moves with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 2;
+const SUPPORTED_SCHEMA_VERSION: i64 = 3;
 
 /// Migration `index + 1` upgrades a database from schema version `index` to
 /// version `index + 1`. Migrations run in order inside one transaction, so a
@@ -141,6 +142,17 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
     BEGIN
         SELECT RAISE(ABORT, 'session belongs to a different project');
     END;
+    ",
+    // 3: which launch profile a session ran under.
+    //
+    // A reference, never a definition: profiles are configuration, and the
+    // project database must not become a second place they live. NULL means a
+    // session recorded before this column existed, which is a different fact
+    // from a session that ran the Native profile — a sentinel default would
+    // erase that difference, so NULL stays NULL.
+    "
+    ALTER TABLE sessions ADD COLUMN launch_profile TEXT;
+    ALTER TABLE sessions ADD COLUMN backend_resource TEXT;
     ",
 ];
 

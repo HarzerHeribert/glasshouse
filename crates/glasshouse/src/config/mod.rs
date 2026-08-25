@@ -13,24 +13,31 @@
 //!
 //! The schema is deliberately tiny. The capability map is explicit that
 //! configuration should stay small until real usage demonstrates a need for
-//! more (Phase 49): no provider, launch-profile, routing, or budget fields
-//! belong here yet — those are later phases and would be speculative today.
+//! more (Phase 49): no provider, routing, or budget fields belong here yet —
+//! those are later phases and would be speculative today. Phase 9A's launch
+//! profiles are the one addition ahead of that: [`ProfileTable`] holds
+//! *inert* profile configuration (which harness, which backend resource,
+//! which approval mode) — never a resolved overlay, never a credential, and
+//! never the project's own memory. Resolving a stored profile into something
+//! that can actually launch a harness happens in [`crate::profile`], not
+//! here.
 //!
 //! ## No secrets here — structurally, not just by convention
 //!
-//! [`IntegrationConfig`], the only per-item shape either file stores, has
-//! exactly two fields: whether the user turned the integration on, and an
-//! optional path to its executable. Nothing in [`UserConfig`] or
-//! [`ProjectConfig`] can hold an API key, token, or any other credential —
-//! there is no field capable of it. That is Phase 9E's rule applied here:
-//! "Never write API keys into tracked `.glasshouse` project files" and
-//! "Store only secret references in provider configuration whenever
-//! possible." Provider credentials belong to the separate `SecretStore`
-//! abstraction (not built by this module), never to this one. See
+//! [`IntegrationConfig`] and [`ProfileConfig`], the only per-item shapes
+//! either file stores, hold onboarding decisions, executable overrides, and
+//! inert profile selections — never an API key, token, or any other
+//! credential. That is Phase 9E's rule applied here: "Never write API keys
+//! into tracked `.glasshouse` project files" and "Store only secret
+//! references in provider configuration whenever possible." A
+//! [`ProfileConfig::backend`] naming [`ProfileBackend::DirectProvider`]
+//! carries only the provider's own *name* — resolving that name to a
+//! credential is the separate `SecretStore` abstraction's job (not built by
+//! this module), never this one's. See
 //! [`tests::serialized_form_has_no_secret_capable_field`] for a structural
 //! guard, not just a string search.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -149,6 +156,13 @@ pub struct IntegrationConfig {
     /// `false` silently winning is precisely the wrong default for consent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     project_hooks: Option<bool>,
+    /// Acknowledgement that this harness's blanket approval bypass has been
+    /// shown to and accepted by the person running Glasshouse on this
+    /// machine — see [`EffectiveConfig::bypass_acknowledged`] for why this
+    /// field is read from the user layer only, never the project layer.
+    /// `None` means never asked, which must be treated as not acknowledged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bypass_acknowledged: Option<bool>,
 }
 
 impl IntegrationConfig {
@@ -190,6 +204,17 @@ impl IntegrationConfig {
 
     pub fn set_project_hooks(&mut self, consent: bool) -> &mut Self {
         self.project_hooks = Some(consent);
+        self
+    }
+
+    /// Whether the user has acknowledged this harness's blanket approval
+    /// bypass. `None` means never asked — see the field's own doc.
+    pub fn bypass_acknowledged(&self) -> Option<bool> {
+        self.bypass_acknowledged
+    }
+
+    pub fn set_bypass_acknowledged(&mut self, acknowledged: bool) -> &mut Self {
+        self.bypass_acknowledged = Some(acknowledged);
         self
     }
 }
@@ -255,6 +280,239 @@ impl IntegrationTable {
     }
 }
 
+/// Serializable form of [`crate::profile::BackendResource`].
+///
+/// Kept as its own type here, rather than deriving `Serialize`/`Deserialize`
+/// directly on the domain type in [`crate::profile`], because that module is
+/// deliberately free of any dependency on this crate's configuration or
+/// serialization shape — a launch profile is inert configuration only once
+/// it has been read *into* `crate::profile::LaunchProfile`; how it is spelled
+/// in TOML is this module's concern alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ProfileBackend {
+    #[default]
+    Native,
+    DirectProvider {
+        provider: String,
+    },
+    GlasshouseGateway,
+}
+
+/// Serializable form of [`crate::profile::ApprovalSelection`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProfileApproval {
+    #[default]
+    Default,
+    AutomaticReview,
+    Bypass,
+}
+
+/// One configured launch profile, as stored in a `[profiles.<name>]` table.
+///
+/// The profile's *name* is its key in [`ProfileTable`], not a field here —
+/// the same relationship [`IntegrationConfig`] has to its slug in
+/// [`IntegrationTable`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileConfig {
+    /// The harness this profile applies to, as an
+    /// [`IntegrationId::slug`].
+    harness: String,
+    #[serde(default, skip_serializing_if = "is_native_backend")]
+    backend: ProfileBackend,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    /// The expected wire protocol, as a [`crate::harness::WireProtocol`]
+    /// slug (`"anthropic-messages"`, `"openai-responses"`, or
+    /// `"openai-chat"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expected_protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "is_default_approval")]
+    approval: ProfileApproval,
+}
+
+fn is_native_backend(backend: &ProfileBackend) -> bool {
+    matches!(backend, ProfileBackend::Native)
+}
+
+fn is_default_approval(approval: &ProfileApproval) -> bool {
+    matches!(approval, ProfileApproval::Default)
+}
+
+/// Why a stored [`ProfileConfig`] could not be turned into a
+/// [`crate::profile::LaunchProfile`].
+#[derive(Debug, thiserror::Error)]
+pub enum ProfileConfigError {
+    #[error(
+        "launch profile `{name}` names harness `{harness}`, which Glasshouse does not know; \
+         fix or remove the profile's `harness` key"
+    )]
+    UnknownHarness { name: String, harness: String },
+    #[error(
+        "launch profile `{name}` names protocol `{protocol}`, which Glasshouse does not know; \
+         fix or remove the profile's `expected_protocol` key"
+    )]
+    UnknownProtocol { name: String, protocol: String },
+}
+
+impl ProfileConfig {
+    pub fn new(harness: IntegrationId) -> Self {
+        Self {
+            harness: harness.slug().to_owned(),
+            backend: ProfileBackend::default(),
+            model: None,
+            expected_protocol: None,
+            approval: ProfileApproval::default(),
+        }
+    }
+
+    pub fn harness_slug(&self) -> &str {
+        &self.harness
+    }
+
+    pub fn backend(&self) -> &ProfileBackend {
+        &self.backend
+    }
+
+    pub fn set_backend(&mut self, backend: ProfileBackend) -> &mut Self {
+        self.backend = backend;
+        self
+    }
+
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    pub fn set_model(&mut self, model: Option<String>) -> &mut Self {
+        self.model = model;
+        self
+    }
+
+    pub fn expected_protocol(&self) -> Option<&str> {
+        self.expected_protocol.as_deref()
+    }
+
+    pub fn set_expected_protocol(&mut self, protocol: Option<String>) -> &mut Self {
+        self.expected_protocol = protocol;
+        self
+    }
+
+    pub fn approval(&self) -> ProfileApproval {
+        self.approval
+    }
+
+    pub fn set_approval(&mut self, approval: ProfileApproval) -> &mut Self {
+        self.approval = approval;
+        self
+    }
+
+    /// Turn this stored configuration into the resolvable domain type,
+    /// naming it `name` — the key this entry was stored under.
+    pub fn to_launch_profile(
+        &self,
+        name: &str,
+    ) -> Result<crate::profile::LaunchProfile, ProfileConfigError> {
+        let harness = IntegrationId::ALL
+            .iter()
+            .copied()
+            .find(|id| id.slug() == self.harness)
+            .ok_or_else(|| ProfileConfigError::UnknownHarness {
+                name: name.to_owned(),
+                harness: self.harness.clone(),
+            })?;
+
+        let expected_protocol = self
+            .expected_protocol
+            .as_deref()
+            .map(|slug| {
+                wire_protocol_from_slug(slug).ok_or_else(|| ProfileConfigError::UnknownProtocol {
+                    name: name.to_owned(),
+                    protocol: slug.to_owned(),
+                })
+            })
+            .transpose()?;
+
+        let backend = match &self.backend {
+            ProfileBackend::Native => crate::profile::BackendResource::Native,
+            ProfileBackend::DirectProvider { provider } => {
+                crate::profile::BackendResource::DirectProvider {
+                    provider: provider.clone(),
+                }
+            }
+            ProfileBackend::GlasshouseGateway => crate::profile::BackendResource::GlasshouseGateway,
+        };
+
+        let approval = match self.approval {
+            ProfileApproval::Default => crate::profile::ApprovalSelection::Default,
+            ProfileApproval::AutomaticReview => crate::profile::ApprovalSelection::AutomaticReview,
+            ProfileApproval::Bypass => crate::profile::ApprovalSelection::Bypass,
+        };
+
+        Ok(crate::profile::LaunchProfile {
+            name: name.to_owned(),
+            harness,
+            backend,
+            model: self.model.clone(),
+            expected_protocol,
+            approval,
+        })
+    }
+}
+
+/// The reverse of [`crate::harness::WireProtocol::slug`]. Kept here, rather
+/// than as a method on that type, because `crate::harness` is the settled
+/// adapter contract (see its module doc) and parsing a *configuration*
+/// string is this module's concern, not an adapter's.
+fn wire_protocol_from_slug(slug: &str) -> Option<crate::harness::WireProtocol> {
+    use crate::harness::WireProtocol;
+    match slug {
+        "anthropic-messages" => Some(WireProtocol::AnthropicMessages),
+        "openai-responses" => Some(WireProtocol::OpenAiResponses),
+        "openai-chat" => Some(WireProtocol::OpenAiChat),
+        _ => None,
+    }
+}
+
+/// A map of configured launch profiles, keyed by profile name.
+///
+/// Profiles are configuration, never project memory: nothing here touches
+/// the project database, matching [`crate::profile`]'s own rule. The
+/// implied Native profile (see [`crate::profile::NATIVE_PROFILE_NAME`]) is
+/// never stored here — it exists for every harness by construction — so this
+/// table only ever holds profiles a user or project explicitly configured.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProfileTable(BTreeMap<String, ProfileConfig>);
+
+impl ProfileTable {
+    pub fn get(&self, name: &str) -> Option<&ProfileConfig> {
+        self.0.get(name)
+    }
+
+    pub fn set(&mut self, name: impl Into<String>, config: ProfileConfig) {
+        self.0.insert(name.into(), config);
+    }
+
+    pub fn remove(&mut self, name: &str) -> Option<ProfileConfig> {
+        self.0.remove(name)
+    }
+
+    /// Every configured profile name in this table (not including the
+    /// implied Native profile, which is never stored).
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &ProfileConfig)> {
+        self.0.iter().map(|(name, cfg)| (name.as_str(), cfg))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// Onboarding progress, persisted so the first-run wizard runs at most once
 /// per user (Phase 2C: "Persist onboarding choices in user-level Glasshouse
 /// configuration").
@@ -305,6 +563,8 @@ pub struct UserConfig {
     onboarding: OnboardingState,
     #[serde(default)]
     integrations: IntegrationTable,
+    #[serde(default)]
+    profiles: ProfileTable,
 }
 
 impl Default for UserConfig {
@@ -313,6 +573,7 @@ impl Default for UserConfig {
             version: CURRENT_SCHEMA_VERSION,
             onboarding: OnboardingState::default(),
             integrations: IntegrationTable::default(),
+            profiles: ProfileTable::default(),
         }
     }
 }
@@ -336,6 +597,14 @@ impl UserConfig {
 
     pub fn integrations_mut(&mut self) -> &mut IntegrationTable {
         &mut self.integrations
+    }
+
+    pub fn profiles(&self) -> &ProfileTable {
+        &self.profiles
+    }
+
+    pub fn profiles_mut(&mut self) -> &mut ProfileTable {
+        &mut self.profiles
     }
 
     /// Load the user-level configuration file named by `paths`.
@@ -382,6 +651,8 @@ pub struct ProjectConfig {
     version: u32,
     #[serde(default)]
     integrations: IntegrationTable,
+    #[serde(default)]
+    profiles: ProfileTable,
 }
 
 impl Default for ProjectConfig {
@@ -389,6 +660,7 @@ impl Default for ProjectConfig {
         Self {
             version: CURRENT_SCHEMA_VERSION,
             integrations: IntegrationTable::default(),
+            profiles: ProfileTable::default(),
         }
     }
 }
@@ -404,6 +676,14 @@ impl ProjectConfig {
 
     pub fn integrations_mut(&mut self) -> &mut IntegrationTable {
         &mut self.integrations
+    }
+
+    pub fn profiles(&self) -> &ProfileTable {
+        &self.profiles
+    }
+
+    pub fn profiles_mut(&mut self) -> &mut ProfileTable {
+        &mut self.profiles
     }
 }
 
@@ -555,6 +835,34 @@ impl<'a> EffectiveConfig<'a> {
         Layered::new(false, Layer::Default)
     }
 
+    /// Resolve whether the user has acknowledged `id`'s blanket approval
+    /// bypass, reporting which layer decided it. Falls back to `false`
+    /// (reported as [`Layer::Default`]) when the user layer has never
+    /// recorded a decision.
+    ///
+    /// **This deliberately consults `self.user` only — never
+    /// `self.project`.** Every other lookup on this type checks the project
+    /// layer first; this one must not, because a repository that could
+    /// pre-acknowledge a blanket permission bypass would be acknowledging it
+    /// on behalf of whoever cloned it, who has been shown nothing. The
+    /// acknowledgement this field records is a statement by a person about a
+    /// harness on *their own machine*, not a property of the project, so a
+    /// project-level `bypass_acknowledged = true` checked into a repository
+    /// must have no effect at all. Say this plainly in code, because the
+    /// deviation from every other lookup here reads as an oversight
+    /// otherwise — it is not one.
+    pub fn bypass_acknowledged(&self, id: IntegrationId) -> Layered<bool> {
+        if let Some(acknowledged) = self
+            .user
+            .integrations()
+            .get(id)
+            .and_then(IntegrationConfig::bypass_acknowledged)
+        {
+            return Layered::new(acknowledged, Layer::User);
+        }
+        Layered::new(false, Layer::Default)
+    }
+
     /// Resolve the explicit executable override for `id`, if any layer has
     /// recorded one. `None` means neither layer has an override, i.e. normal
     /// `PATH` discovery applies — there is no "default" executable path to
@@ -578,6 +886,91 @@ impl<'a> EffectiveConfig<'a> {
         }
         None
     }
+
+    /// Every launch profile name available: the implied
+    /// [`crate::profile::NATIVE_PROFILE_NAME`], plus every name either layer
+    /// has configured. Where both layers configure the same name, this still
+    /// lists it once — see [`EffectiveConfig::launch_profile`] for which
+    /// layer's definition wins.
+    pub fn profile_names(&self) -> Vec<String> {
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        names.insert(crate::profile::NATIVE_PROFILE_NAME.to_owned());
+        names.extend(self.user.profiles().names().map(str::to_owned));
+        if let Some(project) = self.project {
+            names.extend(project.profiles().names().map(str::to_owned));
+        }
+        names.into_iter().collect()
+    }
+
+    /// Resolve `name` to a [`crate::profile::LaunchProfile`] for `harness`,
+    /// reporting which layer supplied it.
+    ///
+    /// The implied Native profile is available for every harness regardless
+    /// of either layer — by construction rather than a configuration entry,
+    /// so adding gateway profiles can never remove it — and is built
+    /// directly for `harness` without a table lookup. For any other name,
+    /// the project layer's definition wins over the user layer's, matching
+    /// every other lookup on this type; and a profile that names a harness
+    /// other than `harness` is refused rather than silently substituted,
+    /// because that harness is what the caller has already selected (or the
+    /// user explicitly typed on the command line).
+    pub fn launch_profile(
+        &self,
+        name: &str,
+        harness: IntegrationId,
+    ) -> Result<Layered<crate::profile::LaunchProfile>, ProfileLookupError> {
+        if name == crate::profile::NATIVE_PROFILE_NAME {
+            return Ok(Layered::new(
+                crate::profile::LaunchProfile::native(harness),
+                Layer::Default,
+            ));
+        }
+
+        let found = if let Some(config) = self.project.and_then(|p| p.profiles().get(name)) {
+            Some((config, Layer::Project))
+        } else {
+            self.user
+                .profiles()
+                .get(name)
+                .map(|config| (config, Layer::User))
+        };
+
+        let Some((config, layer)) = found else {
+            return Err(ProfileLookupError::Unknown {
+                name: name.to_owned(),
+                known: self.profile_names(),
+            });
+        };
+
+        let profile = config.to_launch_profile(name)?;
+        if profile.harness != harness {
+            return Err(ProfileLookupError::HarnessMismatch {
+                name: name.to_owned(),
+                profile_harness: profile.harness,
+                requested_harness: harness,
+            });
+        }
+        Ok(Layered::new(profile, layer))
+    }
+}
+
+/// Why a launch profile named on the command line could not be resolved.
+#[derive(Debug, thiserror::Error)]
+pub enum ProfileLookupError {
+    #[error("`{name}` is not a known launch profile; valid names are: {}", .known.join(", "))]
+    Unknown { name: String, known: Vec<String> },
+    #[error(
+        "launch profile `{name}` is for {}, not {}; name the harness the profile itself \
+         belongs to, or choose a different profile",
+        .profile_harness.display_name(), .requested_harness.display_name()
+    )]
+    HarnessMismatch {
+        name: String,
+        profile_harness: IntegrationId,
+        requested_harness: IntegrationId,
+    },
+    #[error(transparent)]
+    Invalid(#[from] ProfileConfigError),
 }
 
 /// Load a TOML-serialized `T` from `path`, or `T::default()` if the file
@@ -734,6 +1127,13 @@ mod tests {
             .entry(IntegrationId::Codex)
             .set_enabled(false);
         config
+            .integrations_mut()
+            .entry(IntegrationId::Hermes)
+            .set_bypass_acknowledged(true);
+        let mut profile = ProfileConfig::new(IntegrationId::ClaudeCode);
+        profile.set_approval(ProfileApproval::AutomaticReview);
+        config.profiles_mut().set("fast", profile);
+        config
     }
 
     #[test]
@@ -772,6 +1172,17 @@ mod tests {
             loaded.integrations().is_enabled(IntegrationId::Codex),
             Some(false)
         );
+        assert_eq!(
+            loaded
+                .integrations()
+                .get(IntegrationId::Hermes)
+                .unwrap()
+                .bypass_acknowledged(),
+            Some(true)
+        );
+        let profile = loaded.profiles().get("fast").unwrap();
+        assert_eq!(profile.harness_slug(), "claude-code");
+        assert_eq!(profile.approval(), ProfileApproval::AutomaticReview);
     }
 
     #[test]
@@ -1066,6 +1477,105 @@ mod tests {
     }
 
     #[test]
+    fn effective_config_defaults_bypass_acknowledgement_to_withheld() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let acknowledged = effective.bypass_acknowledged(IntegrationId::Hermes);
+        assert!(!acknowledged.value);
+        assert_eq!(acknowledged.layer, Layer::Default);
+    }
+
+    /// Phase 9A: "Keep native-subscription profiles available even when
+    /// gateway providers are configured."
+    ///
+    /// The Native profile is implied rather than stored, so no amount of
+    /// configuration in either layer can displace it. This is the test that
+    /// fails if someone ever "unifies" the lookup by moving Native into the
+    /// table alongside everything else.
+    #[test]
+    fn a_configured_gateway_profile_never_displaces_the_native_one() {
+        let mut user = UserConfig::default();
+        let mut gateway = ProfileConfig::new(IntegrationId::ClaudeCode);
+        gateway.set_backend(ProfileBackend::DirectProvider {
+            provider: "openrouter".to_owned(),
+        });
+        user.profiles_mut().set("gateway", gateway);
+
+        let mut project = ProjectConfig::default();
+        let mut local = ProfileConfig::new(IntegrationId::Codex);
+        local.set_backend(ProfileBackend::GlasshouseGateway);
+        project.profiles_mut().set("local", local);
+
+        let effective = EffectiveConfig::new(&user, Some(&project));
+
+        let names = effective.profile_names();
+        assert!(
+            names
+                .iter()
+                .any(|n| n == crate::profile::NATIVE_PROFILE_NAME),
+            "the native profile must survive every configured profile: {names:?}"
+        );
+        assert!(names.iter().any(|n| n == "gateway"), "{names:?}");
+        assert!(names.iter().any(|n| n == "local"), "{names:?}");
+
+        // And it still resolves for a harness that has a gateway profile of
+        // its own configured — the case where a lookup that consulted the
+        // table first would go wrong.
+        let native = effective
+            .launch_profile(
+                crate::profile::NATIVE_PROFILE_NAME,
+                IntegrationId::ClaudeCode,
+            )
+            .expect("the native profile is available for every harness");
+        assert!(matches!(
+            native.value.backend,
+            crate::profile::BackendResource::Native
+        ));
+    }
+
+    #[test]
+    fn a_project_layer_cannot_acknowledge_a_bypass() {
+        // Unlike every other lookup on `EffectiveConfig`, a project-level
+        // acknowledgement must have no effect at all: acknowledging a
+        // blanket bypass is a statement by a person about a harness on their
+        // own machine, and a repository cannot make that statement on behalf
+        // of whoever cloned it.
+        let mut project = ProjectConfig::default();
+        project
+            .integrations_mut()
+            .entry(IntegrationId::Hermes)
+            .set_bypass_acknowledged(true);
+
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        let acknowledged = effective.bypass_acknowledged(IntegrationId::Hermes);
+        assert!(
+            !acknowledged.value,
+            "a project-level acknowledgement must not count"
+        );
+        assert_eq!(acknowledged.layer, Layer::Default);
+
+        // The user layer's own acknowledgement still applies, and still only
+        // for the harness it named.
+        let mut user_with_ack = UserConfig::default();
+        user_with_ack
+            .integrations_mut()
+            .entry(IntegrationId::Hermes)
+            .set_bypass_acknowledged(true);
+        let effective = EffectiveConfig::new(&user_with_ack, Some(&project));
+        let acknowledged = effective.bypass_acknowledged(IntegrationId::Hermes);
+        assert!(acknowledged.value);
+        assert_eq!(acknowledged.layer, Layer::User);
+
+        let other = effective.bypass_acknowledged(IntegrationId::Antigravity);
+        assert!(
+            !other.value,
+            "acknowledging Hermes must not acknowledge Antigravity"
+        );
+        assert_eq!(other.layer, Layer::Default);
+    }
+
+    #[test]
     fn project_config_layering_reports_the_correct_source_layer() {
         let mut user = UserConfig::default();
         user.integrations_mut()
@@ -1283,6 +1793,7 @@ mod tests {
             enabled: None,
             executable: Some(PathBuf::from("/opt/bin/claude")),
             project_hooks: None,
+            bypass_acknowledged: None,
         };
         let toml_text = toml::to_string_pretty(&no_decision).unwrap();
         assert!(
@@ -1293,11 +1804,16 @@ mod tests {
             !toml_text.contains("project_hooks"),
             "no-decision entry must not serialize a `project_hooks` key:\n{toml_text}"
         );
+        assert!(
+            !toml_text.contains("bypass_acknowledged"),
+            "no-decision entry must not serialize a `bypass_acknowledged` key:\n{toml_text}"
+        );
 
         let explicit_false = IntegrationConfig {
             enabled: Some(false),
             executable: None,
             project_hooks: None,
+            bypass_acknowledged: None,
         };
         let toml_text = toml::to_string_pretty(&explicit_false).unwrap();
         assert!(
@@ -1312,6 +1828,7 @@ mod tests {
             enabled: Some(true),
             executable: None,
             project_hooks: None,
+            bypass_acknowledged: None,
         };
         assert!(decided.enabled_or(false));
 
@@ -1319,12 +1836,129 @@ mod tests {
             enabled: Some(false),
             executable: None,
             project_hooks: None,
+            bypass_acknowledged: None,
         };
         assert!(!declined.enabled_or(true));
 
         let undecided = IntegrationConfig::default();
         assert!(undecided.enabled_or(true));
         assert!(!undecided.enabled_or(false));
+    }
+
+    // ---------------------------------------------------------------
+    // Launch profiles.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn the_native_profile_is_always_available_for_every_harness() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+
+        assert!(
+            effective
+                .profile_names()
+                .contains(&crate::profile::NATIVE_PROFILE_NAME.to_owned())
+        );
+
+        let resolved = effective
+            .launch_profile(crate::profile::NATIVE_PROFILE_NAME, IntegrationId::Codex)
+            .unwrap();
+        assert_eq!(resolved.layer, Layer::Default);
+        assert_eq!(resolved.value.harness, IntegrationId::Codex);
+        assert_eq!(
+            resolved.value.backend,
+            crate::profile::BackendResource::Native
+        );
+    }
+
+    #[test]
+    fn an_unknown_profile_name_lists_the_known_names() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+
+        let err = effective
+            .launch_profile("does-not-exist", IntegrationId::ClaudeCode)
+            .unwrap_err();
+        match err {
+            ProfileLookupError::Unknown { name, known } => {
+                assert_eq!(name, "does-not-exist");
+                assert!(known.contains(&crate::profile::NATIVE_PROFILE_NAME.to_owned()));
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_project_configured_profile_wins_over_a_user_configured_one_of_the_same_name() {
+        let mut user = UserConfig::default();
+        user.profiles_mut()
+            .set("fast", ProfileConfig::new(IntegrationId::ClaudeCode));
+
+        let mut project = ProjectConfig::default();
+        let mut project_profile = ProfileConfig::new(IntegrationId::ClaudeCode);
+        project_profile.set_approval(ProfileApproval::AutomaticReview);
+        project.profiles_mut().set("fast", project_profile);
+
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        let resolved = effective
+            .launch_profile("fast", IntegrationId::ClaudeCode)
+            .unwrap();
+        assert_eq!(resolved.layer, Layer::Project);
+        assert_eq!(
+            resolved.value.approval,
+            crate::profile::ApprovalSelection::AutomaticReview
+        );
+
+        let without_project = EffectiveConfig::new(&user, None);
+        let resolved = without_project
+            .launch_profile("fast", IntegrationId::ClaudeCode)
+            .unwrap();
+        assert_eq!(resolved.layer, Layer::User);
+        assert_eq!(
+            resolved.value.approval,
+            crate::profile::ApprovalSelection::Default
+        );
+    }
+
+    #[test]
+    fn a_profile_naming_a_different_harness_than_requested_is_refused() {
+        let mut user = UserConfig::default();
+        user.profiles_mut()
+            .set("fast", ProfileConfig::new(IntegrationId::ClaudeCode));
+        let effective = EffectiveConfig::new(&user, None);
+
+        let err = effective
+            .launch_profile("fast", IntegrationId::Codex)
+            .unwrap_err();
+        match err {
+            ProfileLookupError::HarnessMismatch {
+                name,
+                profile_harness,
+                requested_harness,
+            } => {
+                assert_eq!(name, "fast");
+                assert_eq!(profile_harness, IntegrationId::ClaudeCode);
+                assert_eq!(requested_harness, IntegrationId::Codex);
+            }
+            other => panic!("expected HarnessMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_profile_naming_an_unknown_harness_slug_is_reported_rather_than_guessed() {
+        let mut user = UserConfig::default();
+        let mut profile = ProfileConfig::new(IntegrationId::ClaudeCode);
+        profile.harness = "not-a-real-harness".to_owned();
+        user.profiles_mut().set("broken", profile);
+        let effective = EffectiveConfig::new(&user, None);
+
+        let err = effective
+            .launch_profile("broken", IntegrationId::ClaudeCode)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ProfileLookupError::Invalid(ProfileConfigError::UnknownHarness { .. })
+        ));
     }
 
     /// Structural guard, not a string search: enumerate every field this
@@ -1334,12 +1968,12 @@ mod tests {
     /// tracked `.glasshouse` file or the user config.
     #[test]
     fn serialized_form_has_no_secret_capable_field() {
-        // `IntegrationConfig` — the only per-item shape stored anywhere in
-        // this module — has exactly these three fields.
+        // `IntegrationConfig` has exactly these four fields.
         let cfg = IntegrationConfig {
             enabled: Some(true),
             executable: Some(PathBuf::from("/usr/bin/example")),
             project_hooks: Some(true),
+            bypass_acknowledged: Some(true),
         };
         let value = toml::Value::try_from(&cfg).unwrap();
         let table = value.as_table().unwrap();
@@ -1347,9 +1981,43 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            vec!["enabled", "executable", "project_hooks"],
+            vec![
+                "bypass_acknowledged",
+                "enabled",
+                "executable",
+                "project_hooks"
+            ],
             "IntegrationConfig grew a field — confirm it cannot hold a credential \
              before widening this list"
+        );
+
+        // `ProfileConfig` — the other per-item shape this module stores —
+        // likewise. `backend`'s `DirectProvider { provider }` payload is a
+        // provider *name*, not a credential; there is still no field here
+        // that could hold one.
+        let mut profile_cfg = ProfileConfig::new(IntegrationId::ClaudeCode);
+        profile_cfg
+            .set_backend(ProfileBackend::DirectProvider {
+                provider: "openrouter".to_owned(),
+            })
+            .set_model(Some("claude-opus".to_owned()))
+            .set_expected_protocol(Some("anthropic-messages".to_owned()))
+            .set_approval(ProfileApproval::Bypass);
+        let profile_value = toml::Value::try_from(&profile_cfg).unwrap();
+        let profile_table = profile_value.as_table().unwrap();
+        let mut profile_keys: Vec<&str> = profile_table.keys().map(String::as_str).collect();
+        profile_keys.sort_unstable();
+        assert_eq!(
+            profile_keys,
+            vec![
+                "approval",
+                "backend",
+                "expected_protocol",
+                "harness",
+                "model"
+            ],
+            "ProfileConfig grew a field — confirm it cannot hold a credential before \
+             widening this list"
         );
 
         // `UserConfig`'s top level, likewise.
@@ -1362,7 +2030,10 @@ mod tests {
             .map(String::as_str)
             .collect();
         user_keys.sort_unstable();
-        assert_eq!(user_keys, vec!["integrations", "onboarding", "version"]);
+        assert_eq!(
+            user_keys,
+            vec!["integrations", "onboarding", "profiles", "version"]
+        );
 
         // And the serialized TOML text itself contains none of the names a
         // secret field would plausibly carry, as a cheap extra check on top

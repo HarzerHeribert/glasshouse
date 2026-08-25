@@ -1739,6 +1739,29 @@ mod tests {
         }
     }
 
+    /// Phase 9A: "Never modify the user's normal global Claude Code or Codex
+    /// configuration merely to launch a Glasshouse profile."
+    ///
+    /// Resolution turns a declaration into arguments and environment for one
+    /// child process. It has no business touching the filesystem or the
+    /// ambient environment at all — and a module that never opens a file
+    /// cannot modify a user's global harness configuration. That is a
+    /// stronger guarantee than enumerating the paths it must avoid, and a
+    /// much cheaper one to keep true.
+    #[test]
+    fn resolving_a_launch_profile_touches_no_files() {
+        let code = production_code(include_str!("../profile/mod.rs"));
+        for forbidden in ["std::fs", "fs::", "File::", "OpenOptions", "std::env"] {
+            assert!(
+                !code.contains(forbidden),
+                "profile/mod.rs names `{forbidden}` in production code: resolving a launch \
+                 profile must not touch the filesystem or the ambient environment, because \
+                 that is what keeps it structurally unable to modify the user's global \
+                 harness configuration"
+            );
+        }
+    }
+
     /// "Keep adapter-specific parsing isolated from the core Glasshouse
     /// session model."
     #[test]

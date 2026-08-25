@@ -631,6 +631,8 @@ mod tests {
             presentation: SessionPresentation::Embedded,
             created_at: 1_000,
             last_activity_at: 1_000,
+            launch_profile: None,
+            backend_resource: None,
         }
     }
 

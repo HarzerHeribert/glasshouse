@@ -4,56 +4,65 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 9A is under way; 138 checked boxes, unchanged this batch.** `main`
-clean at `37605ad`, pushed, with CI `32875637992` **green on Linux, macOS,
-Windows and lint** — and all four new tests confirmed to have executed on the
-Windows runner by name, not inferred from an aggregate green. Phase 8 is nine
-of ten, Phase 6 twelve of thirteen.
+**Phase 9A is seventeen of twenty-six. 138 -> 155 checked boxes.** `main`
+clean. Phase 8 is nine of ten, Phase 6 twelve of thirteen.
 
-This batch checked no box on purpose. It corrected a declaration that Phase 9A
-is about to consume, and a correction is not a capability. The Phase 9A boxes
-wait for the profile abstraction that uses it — this project's own rule is that
-a mechanism with no production caller does not get its box, and it has been
-applied to `SessionRuntime` and to Phase 1 line 90 before now.
+The nine open Phase 9A lines are open for recorded reasons, not for lack of
+effort: **350** needs response profiles (9K); **353** needs provider templates
+(9C/9D); **355**, **359**, **360** and **363** need generated configuration and
+direct providers (9F); **365** needs pairing class and response profile
+(9J/9K); **369** needs the router (34-37). Each is in the evidence ledger with
+the phase that unblocks it.
 
-**Phase 9A has 26 unchecked lines, not 25** as an earlier checkpoint said. The
-map is authoritative and says 26.
-
-- **Phase 8 line 2 — capture the native Codex session identifier: closed.**
-  This is the line that unblocks Codex resume, and it is the first time a
-  Codex session gets a `Resumable` disposition.
-- **Phase 6** — harness adapters: eleven of twelve (communication style open).
-- **Phase 7** — Claude Code: eight of ten. Both open lines are honest gaps:
-  permission detection needs a permission prompt to fire (this machine runs
-  Claude Code in auto mode), and Claude Code 2.1.245 exposes no compaction
-  hook at all.
-
-A correction to an earlier revision of this file: its header said the checked
-count went "from 107 to 120" while its own body already described the
-131-box state. The authoritative count comes from the map, which is what the
-number above is read from.
-
-### The previous session's plan for this line was wrong, and the install said so
-
-The last checkpoint said: match rollout headers on `payload.cwd`, take
-`payload.id`. Read against all 555 real rollout files in `~/.codex/sessions`,
-that is not sufficient:
-
-- **Subagent threads write their own rollouts with their parent's `cwd`.**
-  There are 171 of them against 70 real interactive sessions, so matching on
-  `cwd` alone would have captured a subagent's identifier most of the time,
-  and `glasshouse resume` would have reopened a subagent thread wearing the
-  user's session's name.
-- **`payload.session_id` — the better-named field — is missing in 28 of 555.**
-  `payload.id` is present in all 555 and always equals the filename UUID.
-
-The rule that is exact on this install: `originator == "codex-tui"` **and** no
-`parent_thread_id`. It selects precisely the 70 real interactive sessions, with
-zero counterexamples. `source == "cli"` corroborates it in all 70 and is
-deliberately *not* a condition — every extra condition is another way to break
-on a Codex update. Full reasoning in `GLASSHOUSE_DESIGN_DECISIONS.md`.
+**A behaviour change worth stating plainly.** Every Codex session Glasshouse
+starts now carries `--approve-for-me`, and every Claude Code session
+`--permission-mode auto`, because the default launch profile selects the
+harness's own automatic-review mode. That is the recorded "Approvals"
+decision taking effect. It was verified against the real Codex — the session
+came up and showed Codex's own trust prompt — and the end-to-end PTY test now
+asserts the exact argv rather than the previous "no arguments at all".
 
 ## Verified completed work
+
+### This session — launch profiles, and a vertical slice that reaches production
+
+Phase 9A's abstraction landed with its production caller in the same batch,
+deliberately: a mechanism nothing calls does not get its box, and this project
+has already paid that price twice with `SessionRuntime` and Phase 1 line 90.
+
+- **A profile is data; an overlay is its resolution.** `resolve(profile,
+  adapter, acknowledged)` is the only place a declaration becomes arguments,
+  and it **refuses rather than invents** — six refusal variants, every one
+  naming the harness and what was asked for.
+- **A default that falls back is not a request that is refused.** An explicit
+  automatic-review request on a harness that has none is refused; a profile
+  that merely took the default gets no approval argument at all, never a
+  bypass.
+- **A bypass needs an acknowledgement**, per harness, **user layer only** — a
+  repository must not pre-acknowledge a blanket bypass for whoever clones it.
+- **Only `Native` resolves today.** `DirectProvider` and `GlasshouseGateway`
+  are representable and refused with a diagnostic naming the phase that
+  supplies them.
+
+**Verified against the real harness, not a fake one.** `glasshouse launch
+codex` was run from the built binary in a real terminal: Codex started with the
+injected `--approve-for-me` and displayed **its own workspace trust prompt** in
+the viewport — a native prompt staying interactive, which is the product
+invariant. It was declined; nothing was trusted. `glasshouse sessions` then
+showed `PROFILE = native`, `--profile bogus` was refused while leaving the
+session count unchanged, and the mechanism diagnostic read back from a real
+log.
+
+**Nine mutations, nine kills.** Two of the nine tests were added by the
+orchestrator, because two lines had no guard at all: line 362 (a source scan
+proving `profile/mod.rs` never touches the filesystem, so it cannot modify the
+user's global harness configuration) and line 371 (a configured gateway
+profile never displacing the implied Native one).
+
+**The worker was right against the packet, and honest about a gap.** Its own
+test comment records that no shipped profile can populate `env` yet, so the
+overlay had to be built directly to prove the mechanism — which is exactly why
+line 355 stays unchecked while line 356 (arguments) is closed.
 
 ### This session — the approval declaration had to carry argv, not prose
 

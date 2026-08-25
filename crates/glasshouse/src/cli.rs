@@ -126,6 +126,16 @@ pub enum Command {
         /// enabled, Glasshouse asks rather than guessing.
         harness: Option<String>,
 
+        /// Which launch profile to resolve the session through.
+        ///
+        /// Names a profile configured in `.glasshouse/config.toml` or the
+        /// user-level configuration file — see `glasshouse setup`. Absent
+        /// means the selected harness's implied Native profile, which uses
+        /// the harness's own first-party authentication and configuration
+        /// unchanged.
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+
         /// Arguments passed straight through to the harness, after `--`.
         ///
         /// Glasshouse does not interpret these; `glasshouse launch
@@ -182,12 +192,14 @@ mod tests {
         .unwrap();
         let Some(Command::Launch {
             harness,
+            profile,
             harness_args,
         }) = cli.command
         else {
             panic!("expected a launch command");
         };
         assert_eq!(harness.as_deref(), Some("claude-code"));
+        assert_eq!(profile, None);
         // Hyphenated arguments after `--` reach the harness untouched rather
         // than being parsed as Glasshouse options.
         assert_eq!(harness_args, vec!["--resume", "--model=x"]);
@@ -198,13 +210,37 @@ mod tests {
         let cli = Cli::try_parse_from(["glasshouse", "launch"]).unwrap();
         let Some(Command::Launch {
             harness,
+            profile,
             harness_args,
         }) = cli.command
         else {
             panic!("expected a launch command");
         };
         assert_eq!(harness, None);
+        assert_eq!(profile, None);
         assert!(harness_args.is_empty());
+    }
+
+    #[test]
+    fn parses_launch_with_an_explicit_profile() {
+        let cli = Cli::try_parse_from([
+            "glasshouse",
+            "launch",
+            "claude-code",
+            "--profile",
+            "fast",
+            "--",
+            "--resume",
+        ])
+        .unwrap();
+        let Some(Command::Launch {
+            harness, profile, ..
+        }) = cli.command
+        else {
+            panic!("expected a launch command");
+        };
+        assert_eq!(harness.as_deref(), Some("claude-code"));
+        assert_eq!(profile.as_deref(), Some("fast"));
     }
 
     #[test]

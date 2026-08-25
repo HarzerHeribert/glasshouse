@@ -216,6 +216,17 @@ pub struct SessionRecord {
     pub created_at: i64,
     /// Seconds since the Unix epoch.
     pub last_activity_at: i64,
+    /// The launch profile this session ran under, by name. `None` means a
+    /// session recorded before this column existed — a different fact from a
+    /// session that ran the Native profile, which is recorded as
+    /// `Some("native")`. A reference only: profiles themselves are
+    /// configuration (see [`crate::profile`] and [`crate::config`]), never
+    /// project memory.
+    pub launch_profile: Option<String>,
+    /// The resolved backend resource's [`crate::profile::BackendResource::slug`],
+    /// recorded for the same reason and with the same `None` meaning as
+    /// `launch_profile`.
+    pub backend_resource: Option<String>,
 }
 
 impl SessionRecord {
@@ -263,6 +274,13 @@ pub struct NewSession {
     /// Usually `None`: most harnesses only reveal an identifier once they are
     /// running.
     pub native_session_id: Option<String>,
+    /// The launch profile this session is starting under, by name. See
+    /// [`SessionRecord::launch_profile`] for what `None` means.
+    pub launch_profile: Option<String>,
+    /// The resolved backend resource, as
+    /// [`crate::profile::BackendResource::slug`]. See
+    /// [`SessionRecord::backend_resource`] for what `None` means.
+    pub backend_resource: Option<String>,
 }
 
 impl NewSession {
@@ -274,6 +292,8 @@ impl NewSession {
             role: SessionRole::Normal,
             presentation: SessionPresentation::Embedded,
             native_session_id: None,
+            launch_profile: None,
+            backend_resource: None,
         }
     }
 
@@ -294,6 +314,18 @@ impl NewSession {
     /// startup still has one, and nothing has to be discovered afterwards.
     pub fn with_native_session_id(mut self, native: Option<String>) -> Self {
         self.native_session_id = native;
+        self
+    }
+
+    /// Record which launch profile this session is starting under.
+    pub fn with_launch_profile(mut self, launch_profile: Option<String>) -> Self {
+        self.launch_profile = launch_profile;
+        self
+    }
+
+    /// Record the resolved backend resource this session is starting with.
+    pub fn with_backend_resource(mut self, backend_resource: Option<String>) -> Self {
+        self.backend_resource = backend_resource;
         self
     }
 }
@@ -413,7 +445,8 @@ fn system_clock() -> i64 {
 }
 
 const ALL_COLUMNS: &str = "id, project_id, harness, native_session_id, role, \
-                           lifecycle, presentation, created_at, last_activity_at";
+                           lifecycle, presentation, created_at, last_activity_at, \
+                           launch_profile, backend_resource";
 
 /// An open project database plus the sessions inside it.
 ///
@@ -549,13 +582,16 @@ impl<'a> SessionStore<'a> {
             presentation: new.presentation,
             created_at: now,
             last_activity_at: now,
+            launch_profile: new.launch_profile,
+            backend_resource: new.backend_resource,
         };
 
         self.conn
             .execute(
                 "INSERT INTO sessions (id, project_id, harness, native_session_id, \
-                 role, lifecycle, presentation, created_at, last_activity_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 role, lifecycle, presentation, created_at, last_activity_at, \
+                 launch_profile, backend_resource) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 rusqlite::params![
                     record.id.as_str(),
                     &record.project_id,
@@ -566,6 +602,8 @@ impl<'a> SessionStore<'a> {
                     record.presentation.as_str(),
                     record.created_at,
                     record.last_activity_at,
+                    &record.launch_profile,
+                    &record.backend_resource,
                 ],
             )
             .map_err(|source| SessionStoreError::Sql {
@@ -864,6 +902,8 @@ fn read_record(row: &Row<'_>) -> Result<SessionRecord, SessionStoreError> {
         presentation,
         created_at: row.get_unwrap(7),
         last_activity_at: row.get_unwrap(8),
+        launch_profile: row.get_unwrap(9),
+        backend_resource: row.get_unwrap(10),
     })
 }
 
@@ -1560,10 +1600,130 @@ mod tests {
                 "sessions.presentation",
                 "sessions.created_at",
                 "sessions.last_activity_at",
+                "sessions.launch_profile",
+                "sessions.backend_resource",
             ],
             "the project database schema changed; confirm the new column cannot \
              hold a provider credential before updating this list"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 9A — a launch profile is a reference here, never a definition.
+    // ---------------------------------------------------------------
+
+    /// The database schema has exactly a reference column for the profile a
+    /// session ran under, and no table defining what a profile *is* —
+    /// profiles are configuration, resolved in `crate::config`/
+    /// `crate::profile`, never project memory.
+    #[test]
+    fn no_launch_profile_definition_is_stored_in_the_project_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+
+        let mut statement = fixture
+            .conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' \
+                 ORDER BY name",
+            )
+            .unwrap();
+        let tables: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            tables,
+            vec!["project_metadata", "schema_migrations", "sessions"],
+            "no table defining launch profiles may exist in the project database"
+        );
+
+        let record = fixture
+            .store()
+            .create(
+                NewSession::embedded("claude-code")
+                    .with_launch_profile(Some("native".to_owned()))
+                    .with_backend_resource(Some("native".to_owned())),
+            )
+            .unwrap();
+        assert_eq!(record.launch_profile.as_deref(), Some("native"));
+        assert_eq!(record.backend_resource.as_deref(), Some("native"));
+
+        let read_back = fixture.store().get(&record.id).unwrap().unwrap();
+        assert_eq!(read_back.launch_profile.as_deref(), Some("native"));
+        assert_eq!(read_back.backend_resource.as_deref(), Some("native"));
+    }
+
+    /// Building a session without naming a profile leaves both columns NULL
+    /// rather than inventing a value — the same "None means not recorded"
+    /// rule the rest of this table already follows for `native_session_id`.
+    #[test]
+    fn a_session_with_no_recorded_profile_leaves_both_columns_null() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let record = fixture
+            .store()
+            .create(NewSession::embedded("claude-code"))
+            .unwrap();
+        assert_eq!(record.launch_profile, None);
+        assert_eq!(record.backend_resource, None);
+    }
+
+    /// An existing version-2 database gains the two launch-profile columns on
+    /// the next launch, with every existing session's data intact and both
+    /// new columns `NULL` — a session recorded before this migration ran is a
+    /// different fact from one that ran the Native profile, so NULL must
+    /// stay NULL rather than default to `"native"`.
+    #[test]
+    fn upgrading_a_version_2_database_preserves_every_existing_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let store = fixture.store();
+
+        let record = store
+            .create(NewSession::embedded("claude-code").with_role(SessionRole::Worker))
+            .unwrap();
+        store.set_native_session_id(&record.id, "native-1").unwrap();
+        store
+            .set_lifecycle(&record.id, SessionLifecycle::Stopped)
+            .unwrap();
+
+        // Roll the database back to what version 2 left behind: drop the two
+        // columns migration 3 adds, and forget that migration ran.
+        fixture
+            .conn
+            .execute_batch(
+                "ALTER TABLE sessions DROP COLUMN launch_profile;
+                 ALTER TABLE sessions DROP COLUMN backend_resource;
+                 DELETE FROM schema_migrations WHERE version = 3;",
+            )
+            .unwrap();
+
+        let reopened = fixture.reopen();
+        let version: i64 = reopened
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 3, "the launch must have applied migration 3");
+
+        let migrated_store = SessionStore::new(&reopened).unwrap();
+        let migrated = migrated_store
+            .get(&record.id)
+            .unwrap()
+            .expect("the pre-migration session must survive");
+        assert_eq!(migrated.id, record.id);
+        assert_eq!(migrated.harness, "claude-code");
+        assert_eq!(migrated.role, SessionRole::Worker);
+        assert_eq!(migrated.native_session_id.as_deref(), Some("native-1"));
+        assert_eq!(migrated.lifecycle, SessionLifecycle::Stopped);
+        assert_eq!(migrated.created_at, record.created_at);
+        assert_eq!(
+            migrated.launch_profile, None,
+            "a pre-migration session has no recorded profile — never a guessed default"
+        );
+        assert_eq!(migrated.backend_resource, None);
     }
 
     /// `project_metadata` is a key/value table, which is the one place a
@@ -1711,7 +1871,7 @@ mod tests {
                 "DROP TRIGGER sessions_reject_foreign_project_insert;
                  DROP TRIGGER sessions_reject_foreign_project_update;
                  DROP TABLE sessions;
-                 DELETE FROM schema_migrations WHERE version = 2;",
+                 DELETE FROM schema_migrations WHERE version IN (2, 3);",
             )
             .unwrap();
         drop(fixture.reopen());
@@ -1722,7 +1882,10 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 2, "the launch must have applied migration 2");
+        assert_eq!(
+            version, 3,
+            "the launch must have applied migrations 2 and 3"
+        );
 
         let store = SessionStore::new(&reopened).unwrap();
         assert_eq!(store.project_id(), project_id, "the binding survived");
