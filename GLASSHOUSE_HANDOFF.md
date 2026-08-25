@@ -4,7 +4,7 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 8 is eight of ten; Phase 6 is twelve of thirteen. 131 -> 137 checked boxes.** `main` clean at
+**Phase 8 is nine of ten; Phase 6 is twelve of thirteen. 131 -> 138 checked boxes.** `main` clean at
 `63bd260`. CI `32849951837` green on Linux, macOS, Windows and lint, with the
 Windows job confirmed to have executed both new end-to-end tests by name.
 
@@ -43,6 +43,20 @@ deliberately *not* a condition — every extra condition is another way to break
 on a Codex update. Full reasoning in `GLASSHOUSE_DESIGN_DECISIONS.md`.
 
 ## Verified completed work
+
+### This session — the permission cycle, watched from both ends
+
+Phase 8 line 8 closed. `glasshouse launch codex -- --sandbox read-only
+--ask-for-approval on-request` started a session Codex reported as "Read Only",
+which incidentally proves the `--` pass-through reaches the harness in
+production. Asked to create a file, Codex raised its own approval prompt and the
+record moved to **`lifecycle = 'waiting_for_user'`**; on approving, the file was
+created and the record moved to **`idle`**.
+
+`running -> waiting_for_user -> idle`, every transition written by a hook Codex
+fired, none of it inferred from the screen — which
+`nothing_derives_session_state_from_terminal_output` makes structurally
+impossible anyway.
 
 ### This session — Codex lifecycle hooks, watched running end to end
 

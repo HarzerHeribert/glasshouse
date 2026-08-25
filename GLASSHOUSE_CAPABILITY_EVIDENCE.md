@@ -110,6 +110,46 @@ Missing evidence:
 - Selecting a mode is Phase 9A, and unimplemented. This line is the declaration
   half only.
 
+### Phase 8 — Detect Codex waiting-for-user and permission states structurally when possible
+
+Contract: Given a Codex session Glasshouse started, when Codex stops to ask the
+user to allow something, Glasshouse records the session as waiting for the user
+— and records it moving on once they answer — without reading the terminal or
+inferring anything from what is on screen.
+
+State: COMPLETE (macOS; the mechanism is platform-independent and its unit
+coverage runs everywhere).
+
+Production evidence:
+- `harness/codex.rs: REPORTED_EVENTS` includes `PermissionRequest`.
+- `session/lifecycle.rs: lifecycle_for` — `"PermissionRequest" =>
+  WaitingForUser`. Shared with Claude Code, which spells it identically.
+- The hook chain proven in the entry below carries it.
+
+Regression evidence:
+- `codex_events_translate_to_the_states_they_mean` covers
+  `PermissionRequest -> WaitingForUser`.
+- `nothing_derives_session_state_from_terminal_output` — the state cannot have
+  come from reading the screen, because no production code may do that.
+
+Platform/external evidence — **the whole cycle was watched against the real
+binary**:
+- `glasshouse launch codex -- --sandbox read-only --ask-for-approval on-request`
+  (which also demonstrates the `--` pass-through reaching the harness: Codex
+  reported "Read Only").
+- Asked to create a file, Codex raised its own approval prompt — "Apply
+  proposed file edits / Yes, proceed" — and the session record moved to
+  **`lifecycle = 'waiting_for_user'`**.
+- On approving, the file was created and the record moved to
+  **`lifecycle = 'idle'`**.
+- So the observed cycle is `running -> waiting_for_user -> idle`, every
+  transition written by a hook Codex fired, none of it inferred from the
+  screen.
+
+Missing evidence:
+- Linux and Windows have not executed a real permission cycle; the translation
+  itself is unit-covered on all three.
+
 ### Phase 8 — Codex lifecycle hooks (three lines: integrate, translate, detect turn completion)
 
 Contract: Given a Codex session Glasshouse starts in a project where the user
