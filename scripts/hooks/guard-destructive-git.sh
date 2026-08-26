@@ -84,7 +84,17 @@ if printf '%s' "$flat" | grep -qE '(^|[;&|(] *)git +(-{1,2}[A-Za-z][^ ]* +([^-][
 fi
 
 printf '%s' "$flat" | grep -qE '(^|[;&|(] *)git +(-{1,2}[A-Za-z][^ ]* +([^-][^ ]* +)?)*restore\b' && deny "git restore"
-printf '%s' "$flat" | grep -qE '(^|[;&|(] *)git +(-{1,2}[A-Za-z][^ ]* +([^-][^ ]* +)?)*stash\b'   && deny "git stash"
-printf '%s' "$flat" | grep -qE '(^|[;&|(] *)git +(-{1,2}[A-Za-z][^ ]* +([^-][^ ]* +)?)*clean\b'   && deny "git clean"
+
+# `git stash` with no subcommand, or push/save, discards the working tree; drop
+# and clear destroy saved entries. `list` and `show` only read, and blocking a
+# read-only command is how a guard teaches people to route around it.
+if printf '%s' "$flat" | grep -qE '(^|[;&|(] *)git +(-{1,2}[A-Za-z][^ ]* +([^-][^ ]* +)?)*stash\b'; then
+  printf '%s' "$flat" | grep -qE 'stash +(list|show)\b' || deny "git stash"
+fi
+
+# `git clean -n` / `--dry-run` only reports what would go.
+if printf '%s' "$flat" | grep -qE '(^|[;&|(] *)git +(-{1,2}[A-Za-z][^ ]* +([^-][^ ]* +)?)*clean\b'; then
+  printf '%s' "$flat" | grep -qE 'clean +([^ ]+ +)*(-[a-zA-Z]*n[a-zA-Z]*|--dry-run)\b' || deny "git clean"
+fi
 
 exit 0
