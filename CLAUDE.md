@@ -14,6 +14,29 @@ working as the primary orchestrator, read these files completely in this order:
 9. `docs/process/orchestration-practice.md`
 10. `docs/process/orchestration-measurements.md`
 
+## If you are a worker, this list is not yours
+
+The ten documents above are the **orchestrator's** reading, and reading them
+costs about 175,000 tokens. A worker that reads them spends more context
+orienting than working — measured: a four-box package used 288k tokens, over
+half of it on documents it did not need.
+
+**A worker reads only this**, and its packet names anything extra:
+
+1. this file
+2. its own packet
+3. `docs/process/worker-capabilities.md` — what its tier may and may not decide
+4. the practice sections its packet names, by number
+5. `docs/product/evidence/phase-<id>.md` for the phases in its package
+6. its own box lines, quoted in the packet
+
+That is roughly 5,000 tokens instead of 175,000. `scripts/discover.py --phase
+<id>` prints items 5 and 6 together.
+
+**The orchestrator writing the packet owes the worker this scoping.** A packet
+that says "read CLAUDE.md and the files it names" has handed a Sonnet the
+orchestrator's job and will be paid for in context that produced nothing.
+
 The capability map is authoritative. Work in its stated order. Do not check a
 box until its evidence-ledger entry is `COMPLETE`. Only the primary Opus
 orchestrator integrates, commits, and updates project-status records.

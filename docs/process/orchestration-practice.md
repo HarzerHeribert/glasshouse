@@ -1743,3 +1743,42 @@ images at all — verified, not assumed: the host reports `linux / aarch64` and 
 manifest reports `windows / amd64`. No amount of local rigour buys Windows
 evidence. The only local route is a Windows 11 ARM virtual machine running the
 suite natively, and it is the one thing that could close Phase 4's interrupt box.
+
+---
+
+## §52 — the reading tax was never in the documents, it was in the packet template
+
+The evidence ledger was split into forty per-phase files to cut the orientation
+cost. Measured afterwards, the cost had **gone up**: 131,281 words, ~175,000
+tokens. Splitting a file changes what a reader *can* read. It changes nothing
+about what a reader is *told* to read.
+
+**And `CLAUDE.md` never told a worker to read all of it.** Its list opens
+*"Before working as the primary orchestrator…"*. The scoping was correct in the
+one file everybody blames.
+
+**The packet template was the leak.** Nine packets in this project's history
+open with *"Read `CLAUDE.md` and the files it names"* — which hands a Sonnet
+running a four-box package the orchestrator's entire 175k reading list. That is
+where `wire-disposable` spent more context orienting than working.
+
+A worker needs six things, and five of them are small:
+
+1. `CLAUDE.md`
+2. its packet
+3. `docs/process/worker-capabilities.md` — what its tier may and may not decide
+4. the practice sections its packet names, **by number**
+5. `docs/product/evidence/phase-<id>.md` for its phases
+6. its box lines, quoted in the packet
+
+**Measured: ~4,500 tokens against 175,000.** A factor of thirty-eight, and it
+cost one paragraph in `CLAUDE.md` and a corrected sentence in the template.
+`scripts/discover.py --phase <id>` prints items 5 and 6 together, which is what
+the split was for.
+
+**The transferable lesson is about where a cost lives.** The expensive thing
+looked like a document-layout problem and was an instruction problem, and the
+layout work — worth doing on its own merits — bought none of the saving by
+itself. **Before restructuring something to make it cheaper, find the sentence
+that makes it expensive.** If that sentence survives the restructure, so does
+the cost.
