@@ -494,3 +494,111 @@ before it reached `grep`. A count that returns zero for *both* states is not a
 finding about the document; it is a broken instrument, and it should have been
 disbelieved on sight rather than worked around. Percentages quoted in the
 handoff are worth re-deriving rather than inheriting.
+
+### Outcomes for 15–17, filled on integration (2026-08-26, by the incoming orchestrator)
+
+| | p06-adapter | p02b-status |
+|---|---|---|
+| harness / model | Codex `gpt-5.6-terra` | `agy-gh` (Gemini 3.7 Flash) |
+| boxes in packet | 1 | 1 |
+| **boxes closed** | **0** | **1** |
+| mutation proofs | 1 | 8 |
+| gates re-run by orchestrator | all 5 green, numbers exact | all 5 green, numbers exact |
+| decisive mutation re-run | yes, killed | yes, killed |
+| packet corrected by worker | yes | yes |
+| gaps surfaced rather than papered over | yes | yes |
+
+`2d-routing` was still running when this was written.
+
+**p06-adapter closed nothing, and that is the right outcome.** Its box needed
+one verified in-place communication-style mechanism, or a second harness with
+a verified mechanism of any kind — a bar this ledger recorded on 2026-08-25.
+The worker re-read all seven harnesses' native artifacts against newer
+binaries (claude 2.1.246, codex 0.149.1, agy 1.1.21, opencode 1.18.22,
+cursor-agent 2026.08.11, hermes 0.15.1, pi absent) and found neither. It then
+said so, unprompted, in a report whose own headline was `PASS`.
+
+The orchestrator's first reading was that the box *was* closable — "declare
+which mechanisms it supports" is satisfied by an honest "none observed", and
+Phase 9's `☑ Treat unsupported lifecycle information as unknown` is the same
+shape and is checked. **The ledger is what settled it**, because a previous
+session had written down a specific falsifiable closing bar rather than a
+verdict. That is the argument for recording criteria and not just conclusions:
+it survived a change of orchestrator and stopped a wrong tick.
+
+What the batch did buy: every adapter's declaration is now a named constant
+citing the artifact it was read from, and one test pins the whole seven-adapter
+table. Before it, flipping Claude Code's launch-only `--settings` mechanism to
+`StyleChange::InPlace` passed every gate in the repository. **A box that does
+not move can still be worth a batch**, and a tier that declines to overclaim is
+worth more than one that closes boxes optimistically.
+
+### The denominator, a third time — and the repository already had the answer
+
+This document's own "counting error worth recording" section replaced the
+handoff's *"254 checked (20%)"* with *"254 checked, 1216 open — 17%"*, and the
+outgoing session repeated the 17% in its handoff as a correction.
+
+`scripts/progress.py` — which writes the README block that the `lint` job
+checks on every push — reports **255 / 1267 mandatory (20%)**.
+
+Three numbers, three denominators, and the disagreement is not arithmetic:
+**1470 counts every `☐` in the file**, including the `Maybe / Experimental`
+phases, the `Explicit Non-Goals for V1` list and the `Product Rules` list —
+lines that are deliberately not work to be done, and one of which literally
+reads *"Do not build a graph database before demonstrated need."* Counting a
+non-goal as unfinished work makes the project look permanently 17% done.
+
+So the original 20% was right, by the only denominator the repository
+enforces. The correction was confidently reasoned, arrived with a good story
+about a mangled `grep`, and was still wrong, because it answered a question the
+repo already had an instrument for.
+
+**The rule this earns:** before re-deriving a headline number by hand, check
+whether a script in the repository already computes it — and if one does, its
+denominator is the definition, not a candidate. `grep -c '☐'` is a different
+question from "how much of the mandatory work is left", and only the second one
+belongs in a handoff.
+
+## Batch 18–19 — the team-lead tier, started 2026-08-26 ~14:35
+
+First round using **team leads that subcontract** (practice §10). Two Opus
+leads at effort `high`, each given a package far larger than a single worker
+packet, each free to spawn its own Sonnet subcontractors in visible cmux panes.
+The point is to find out whether pushing the review cycle down a level actually
+buys concurrency, since a lead's review cost is paid out of the lead's context
+rather than the orchestrator's.
+
+| | lead-memory | lead-events |
+|---|---|---|
+| harness / model | Claude Code / Opus 5, effort `high` | Claude Code / Opus 5, effort `high` |
+| phases | 20, 22, 23, 26 | 12, 13, 45 |
+| **open boxes in package** | **40** | **24** |
+| files owned | `src/memory/**`, `database.rs`, `cli.rs` | `src/events/**`, `src/session/**` |
+| worktree | `glasshouse-lead-memory` | `glasshouse-lead-events` |
+| surface | `surface:88` | `surface:89` |
+
+Both packets require a **delegation ledger** in the report: who was spawned, on
+what model, what was handed out, what came back, what the lead had to fix, and
+what it deliberately kept. Without that the arrangement cannot be measured, only
+assumed.
+
+Budget shape this round, which is itself a variable: Claude is on Max 5x and has
+headroom, so Sonnet subcontractors are cheap; Codex and Gemini share one €20
+subscription, so the leaf tier is rationed to inventories and scans.
+
+**A collision removed before anyone started.** Both packages needed a `mod` line
+in `lib.rs` — the one file two file-partitions could not both own. Declaring
+both modules empty in a scaffolding commit first cost one commit and removed the
+only overlap. Practice §9 says a partition is a claim about files that is
+checkable before anyone starts; this is the cheaper corollary — when the overlap
+is one line, the orchestrator can just take that line off the table.
+
+### Open questions for this round
+
+- Does a lead's delegation actually raise throughput per orchestrator review, or
+  does it mostly move the same serial review one level down?
+- Does an Opus lead delegate the things its packet nominated, or keep more than
+  it planned to? (The packets nominate specific work as "good to hand out"
+  precisely so the gap between plan and behaviour is visible.)
+- Is 40 boxes too large a package to stay coherent, compared with 24?
