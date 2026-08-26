@@ -10,7 +10,7 @@ use clap::Parser;
 
 use glasshouse::config;
 use glasshouse::integrations::IntegrationId;
-use glasshouse::shell::{self, SettingsEdit};
+use glasshouse::shell::{self, RoutingSettingsEdit, SettingsEdit};
 use glasshouse::{Cli, Runtime, bootstrap};
 
 fn runtime_for(workspace: &std::path::Path, data: &std::path::Path) -> Runtime {
@@ -218,4 +218,66 @@ fn a_save_only_touches_the_fields_an_edit_actually_named() {
         Some(std::path::Path::new("/usr/local/bin/codex")),
         "an untouched field must not be clobbered by an unrelated edit"
     );
+}
+
+/// Routing follows the same two explicit save paths as every other Settings
+/// section, and its per-field edit shape must not promote untouched values.
+#[test]
+fn routing_edits_persist_to_the_chosen_layer_without_clobbering_siblings() {
+    use glasshouse::config::{
+        EffectiveConfig, Layer, PremiumReservePercent, RouterCostMicroUsd, RouterLatencyMs,
+        RoutingModelChoice,
+    };
+
+    let workspace = new_workspace();
+    let data = tempfile::tempdir().unwrap();
+    let runtime = runtime_for(workspace.path(), data.path());
+
+    let mut user = config::UserConfig::load(runtime.paths()).unwrap();
+    user.routing_mut()
+        .set_model(Some(RoutingModelChoice::Automatic))
+        .set_max_router_latency(Some(RouterLatencyMs::try_from(1_500).unwrap()));
+    user.save(runtime.paths()).unwrap();
+
+    let user_edit = RoutingSettingsEdit {
+        max_cost: Some(RouterCostMicroUsd::try_from(2_500).unwrap()),
+        prefer_free: Some(false),
+        ..RoutingSettingsEdit::default()
+    };
+    shell::save_user_settings_with_routing(&runtime, &[], &[], &[], Some(&user_edit)).unwrap();
+    assert!(
+        !runtime
+            .project()
+            .display_root()
+            .join(".glasshouse")
+            .exists(),
+        "a user routing save wrote into the project"
+    );
+    let user = config::UserConfig::load(runtime.paths()).unwrap();
+    assert_eq!(user.routing().model(), Some(&RoutingModelChoice::Automatic));
+    assert_eq!(user.routing().max_router_latency().unwrap().get(), 1_500);
+    assert_eq!(user.routing().max_marginal_cost().unwrap().get(), 2_500);
+    assert_eq!(user.routing().prefer_free(), Some(false));
+
+    let project_edit = RoutingSettingsEdit {
+        max_latency: Some(RouterLatencyMs::try_from(350).unwrap()),
+        premium_reserve: Some(PremiumReservePercent::try_from(12).unwrap()),
+        ..RoutingSettingsEdit::default()
+    };
+    let path =
+        shell::save_project_settings_with_routing(&runtime, &[], &[], &[], Some(&project_edit))
+            .unwrap();
+    assert!(path.is_file());
+    let project = config::load_project_config(runtime.project())
+        .unwrap()
+        .expect("project routing config");
+    let effective = EffectiveConfig::new(&user, Some(&project));
+    assert_eq!(effective.max_router_latency().layer, Layer::Project);
+    assert_eq!(effective.max_router_latency().value.get(), 350);
+    assert_eq!(effective.max_router_cost().layer, Layer::User);
+    assert_eq!(effective.max_router_cost().value.get(), 2_500);
+    assert_eq!(effective.prefer_free_routing().layer, Layer::User);
+    assert!(!effective.prefer_free_routing().value);
+    assert_eq!(effective.premium_reserve().layer, Layer::Project);
+    assert_eq!(effective.premium_reserve().value.get(), 12);
 }

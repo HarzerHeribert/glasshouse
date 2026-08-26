@@ -54,7 +54,8 @@ use crate::tui::{AppEvent, DEFAULT_TICK, Event, EventSource, Screen};
 pub use state::{
     Action, HarnessRow, IntegrationRow, Mode, ModelRefresh, Overlay, OverviewState, ProbeKind,
     ProfileRow, ProfileSettingsEdit, ProviderNotice, ProviderProbeIntent, ProviderProbeResult,
-    ProviderRow, ProviderSettingsEdit, ReachabilityCheck, SettingsEdit, ShellState, ViewportGrid,
+    ProviderRow, ProviderSettingsEdit, ReachabilityCheck, RoutingRow, RoutingSettingsEdit,
+    SettingsEdit, ShellState, ViewportGrid,
 };
 
 /// Open the shell and run it until the user leaves.
@@ -153,8 +154,14 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                         send_session_text(&mut live, &mut state, id, text);
                     }
                     Action::OpenSettings => match build_settings(runtime) {
-                        Ok((harnesses, integrations, providers, profiles)) => {
-                            state.open_settings(harnesses, integrations, providers, profiles);
+                        Ok((harnesses, integrations, providers, profiles, routing)) => {
+                            state.open_settings_with_routing(
+                                harnesses,
+                                integrations,
+                                providers,
+                                profiles,
+                                routing,
+                            );
                         }
                         Err(err) => {
                             tracing::warn!(error = %err, "could not open settings");
@@ -165,16 +172,19 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                         let harness_edits = state.settings_edits();
                         let provider_edits = state.settings_provider_edits();
                         let profile_edits = state.settings_profile_edits();
+                        let routing_edit = state.settings_routing_edit();
                         if harness_edits.is_empty()
                             && provider_edits.is_empty()
                             && profile_edits.is_empty()
+                            && routing_edit.is_none()
                         {
                             state.set_status("no settings changes to save");
-                        } else if let Err(err) = save_user_settings(
+                        } else if let Err(err) = save_user_settings_with_routing(
                             runtime,
                             &harness_edits,
                             &provider_edits,
                             &profile_edits,
+                            routing_edit.as_ref(),
                         ) {
                             tracing::warn!(error = %err, "could not save user settings");
                             state.set_status(format!("could not save settings: {err:#}"));
@@ -187,17 +197,20 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                         let harness_edits = state.settings_edits();
                         let provider_edits = state.settings_provider_edits();
                         let profile_edits = state.settings_profile_edits();
+                        let routing_edit = state.settings_routing_edit();
                         if harness_edits.is_empty()
                             && provider_edits.is_empty()
                             && profile_edits.is_empty()
+                            && routing_edit.is_none()
                         {
                             state.set_status("no settings changes to save");
                         } else {
-                            match save_project_settings(
+                            match save_project_settings_with_routing(
                                 runtime,
                                 &harness_edits,
                                 &provider_edits,
                                 &profile_edits,
+                                routing_edit.as_ref(),
                             ) {
                                 Ok(path) => {
                                     state.set_status(format!("saved to {}", path.display()));
@@ -696,6 +709,7 @@ type SettingsRows = (
     Vec<IntegrationRow>,
     Vec<ProviderRow>,
     Vec<ProfileRow>,
+    RoutingRow,
 );
 
 /// Build the rows the Settings overlay shows, from a fresh [`Discovery`]
@@ -797,7 +811,22 @@ fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
         }
     }
 
-    Ok((harnesses, integrations, providers, profiles))
+    let routing_model = effective.routing_model();
+    let max_latency = effective.max_router_latency();
+    let max_cost = effective.max_router_cost();
+    let prefer_free = effective.prefer_free_routing();
+    let premium_reserve = effective.premium_reserve();
+    let configured_providers = providers.iter().map(|row| row.name.clone()).collect();
+    let routing = RoutingRow::new(
+        routing_model,
+        max_latency,
+        max_cost,
+        prefer_free,
+        premium_reserve,
+        configured_providers,
+    );
+
+    Ok((harnesses, integrations, providers, profiles, routing))
 }
 
 /// Re-read Settings' rows after a successful save and hand them to
@@ -807,9 +836,8 @@ fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
 /// the same non-fatal way as everything else in this module.
 fn refresh_settings_after_save(runtime: &Runtime, state: &mut ShellState) {
     match build_settings(runtime) {
-        Ok((harnesses, integrations, providers, profiles)) => {
-            state.refresh_settings(harnesses, integrations, providers, profiles)
-        }
+        Ok((harnesses, integrations, providers, profiles, routing)) => state
+            .refresh_settings_with_routing(harnesses, integrations, providers, profiles, routing),
         Err(err) => {
             tracing::warn!(error = %err, "could not refresh settings after saving");
         }
@@ -1156,6 +1184,24 @@ fn apply_profile_edits(table: &mut config::ProfileTable, edits: &[ProfileSetting
     }
 }
 
+fn apply_routing_edit(table: &mut config::RoutingConfig, edit: &RoutingSettingsEdit) {
+    if let Some(model) = &edit.model {
+        table.set_model(Some(model.clone()));
+    }
+    if let Some(value) = edit.max_latency {
+        table.set_max_router_latency(Some(value));
+    }
+    if let Some(value) = edit.max_cost {
+        table.set_max_marginal_cost(Some(value));
+    }
+    if let Some(value) = edit.prefer_free {
+        table.set_prefer_free(Some(value));
+    }
+    if let Some(value) = edit.premium_reserve {
+        table.set_premium_reserve(Some(value));
+    }
+}
+
 /// Write every pending Settings edit to the user-level configuration file.
 /// Never touches the project root — see the design decision's "writes
 /// default to the user layer".
@@ -1165,10 +1211,24 @@ pub fn save_user_settings(
     provider_edits: &[ProviderSettingsEdit],
     profile_edits: &[ProfileSettingsEdit],
 ) -> anyhow::Result<()> {
+    save_user_settings_with_routing(runtime, harness_edits, provider_edits, profile_edits, None)
+}
+
+/// User-level save including independently staged Routing fields.
+pub fn save_user_settings_with_routing(
+    runtime: &Runtime,
+    harness_edits: &[SettingsEdit],
+    provider_edits: &[ProviderSettingsEdit],
+    profile_edits: &[ProfileSettingsEdit],
+    routing_edit: Option<&RoutingSettingsEdit>,
+) -> anyhow::Result<()> {
     let mut config = UserConfig::load(runtime.paths())?;
     apply_settings_edits(config.integrations_mut(), harness_edits);
     apply_provider_edits(config.providers_mut(), provider_edits);
     apply_profile_edits(config.profiles_mut(), profile_edits);
+    if let Some(edit) = routing_edit {
+        apply_routing_edit(config.routing_mut(), edit);
+    }
     config.save(runtime.paths())?;
     Ok(())
 }
@@ -1186,10 +1246,26 @@ pub fn save_project_settings(
     provider_edits: &[ProviderSettingsEdit],
     profile_edits: &[ProfileSettingsEdit],
 ) -> anyhow::Result<std::path::PathBuf> {
+    save_project_settings_with_routing(runtime, harness_edits, provider_edits, profile_edits, None)
+}
+
+/// Project-level counterpart to [`save_user_settings_with_routing`]. The
+/// caller reaches this only after the same explicit `W` confirmation as all
+/// other project Settings edits.
+pub fn save_project_settings_with_routing(
+    runtime: &Runtime,
+    harness_edits: &[SettingsEdit],
+    provider_edits: &[ProviderSettingsEdit],
+    profile_edits: &[ProfileSettingsEdit],
+    routing_edit: Option<&RoutingSettingsEdit>,
+) -> anyhow::Result<std::path::PathBuf> {
     let mut project_config = config::load_project_config(runtime.project())?.unwrap_or_default();
     apply_settings_edits(project_config.integrations_mut(), harness_edits);
     apply_provider_edits(project_config.providers_mut(), provider_edits);
     apply_profile_edits(project_config.profiles_mut(), profile_edits);
+    if let Some(edit) = routing_edit {
+        apply_routing_edit(project_config.routing_mut(), edit);
+    }
     config::write_project_config_with_consent(runtime.project(), &project_config)?;
     Ok(runtime
         .project()
@@ -1337,7 +1413,7 @@ mod settings_persistence_tests {
 
         // Reload from disk — a fresh read, not the in-memory value just
         // written — to prove this is a persistence test and not a tautology.
-        let (harnesses, integrations, providers, profiles) =
+        let (harnesses, integrations, providers, profiles, _) =
             build_settings(&runtime).expect("settings must rebuild after the save");
         let _ = (harnesses, integrations, profiles);
         assert_eq!(providers.len(), 1);
@@ -1761,7 +1837,7 @@ mod settings_persistence_tests {
             ))
             .expect("the cache is written");
 
-        let (harnesses, integrations, providers, profiles) =
+        let (harnesses, integrations, providers, profiles, _) =
             build_settings(&runtime).expect("settings open");
 
         assert_eq!(
@@ -1823,7 +1899,7 @@ mod settings_persistence_tests {
         )
         .expect("configured");
 
-        let (_, _, providers, _) = build_settings(&runtime).expect("settings open");
+        let (_, _, providers, _, _) = build_settings(&runtime).expect("settings open");
         assert_eq!(fixture.connections(), 0);
         assert!(
             providers[0].models.is_none(),
@@ -1875,7 +1951,7 @@ mod settings_persistence_tests {
             ))
             .expect("stale cache written");
 
-        let (harnesses, integrations, providers, profiles) =
+        let (harnesses, integrations, providers, profiles, _) =
             build_settings(&runtime).expect("settings open");
         let mut state = ShellState::new("glasshouse", "/work", crate::VERSION, Vec::new());
         state.open_settings(harnesses, integrations, providers, profiles);
@@ -1920,7 +1996,7 @@ mod settings_persistence_tests {
 
         // On disk, and found by a completely fresh read — the thing that
         // makes the next start silent.
-        let (_, _, reopened, _) = build_settings(&runtime).expect("settings reopen");
+        let (_, _, reopened, _, _) = build_settings(&runtime).expect("settings reopen");
         let models = reopened[0].models.as_ref().expect("a cached catalogue");
         assert_eq!(models.len(), 3);
         assert_eq!(models.fetched_at(), fetched_at);
@@ -2248,7 +2324,7 @@ mod settings_persistence_tests {
         )
         .unwrap();
 
-        let (_, _, providers, profiles) = build_settings(&runtime).unwrap();
+        let (_, _, providers, profiles, _) = build_settings(&runtime).unwrap();
         assert!(!providers[0].config.enabled());
         assert!(!profiles[0].config.enabled());
     }

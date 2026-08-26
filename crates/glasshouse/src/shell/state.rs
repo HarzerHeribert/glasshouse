@@ -18,7 +18,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
 
 use crate::config::{
-    Layer, ProfileApproval, ProfileBackend, ProfileConfig, ProviderConfig, StoredCredentialRef,
+    Layer, Layered, PremiumReservePercent, ProfileApproval, ProfileBackend, ProfileConfig,
+    ProviderConfig, RouterCostMicroUsd, RouterLatencyMs, RoutingModelChoice, StoredCredentialRef,
 };
 use crate::harness::{Declared, WireProtocol};
 use crate::integrations::{IntegrationId, IntegrationKind, IntegrationStatus};
@@ -478,12 +479,35 @@ impl ShellState {
         providers: Vec<ProviderRow>,
         profiles: Vec<ProfileRow>,
     ) -> Action {
+        let configured_providers = providers.iter().map(|row| row.name.clone()).collect();
+        self.open_settings_with_routing(
+            harnesses,
+            integrations,
+            providers,
+            profiles,
+            RoutingRow::defaults(configured_providers),
+        )
+    }
+
+    /// Open Settings with the fully resolved routing-policy row supplied by
+    /// the run loop. Kept separate from [`ShellState::open_settings`] so
+    /// older in-module callers can construct unrelated settings fixtures
+    /// without repeating routing defaults.
+    pub fn open_settings_with_routing(
+        &mut self,
+        harnesses: Vec<HarnessRow>,
+        integrations: Vec<IntegrationRow>,
+        providers: Vec<ProviderRow>,
+        profiles: Vec<ProfileRow>,
+        routing: RoutingRow,
+    ) -> Action {
         self.overlay = Some(Overlay::Settings);
         self.settings = Some(SettingsState::new(
             harnesses,
             integrations,
             providers,
             profiles,
+            routing,
         ));
         Action::Redraw
     }
@@ -498,8 +522,27 @@ impl ShellState {
         providers: Vec<ProviderRow>,
         profiles: Vec<ProfileRow>,
     ) {
+        let configured_providers = providers.iter().map(|row| row.name.clone()).collect();
+        self.refresh_settings_with_routing(
+            harnesses,
+            integrations,
+            providers,
+            profiles,
+            RoutingRow::defaults(configured_providers),
+        );
+    }
+
+    /// Refresh Settings with a freshly resolved routing-policy row.
+    pub fn refresh_settings_with_routing(
+        &mut self,
+        harnesses: Vec<HarnessRow>,
+        integrations: Vec<IntegrationRow>,
+        providers: Vec<ProviderRow>,
+        profiles: Vec<ProfileRow>,
+        routing: RoutingRow,
+    ) {
         if let Some(settings) = self.settings.as_mut() {
-            settings.replace_rows(harnesses, integrations, providers, profiles);
+            settings.replace_rows(harnesses, integrations, providers, profiles, routing);
         }
     }
 
@@ -634,6 +677,12 @@ impl ShellState {
             .as_ref()
             .map(SettingsState::profile_edits)
             .unwrap_or_default()
+    }
+
+    /// The independently staged routing fields, if this Settings session
+    /// changed at least one of them.
+    pub fn settings_routing_edit(&self) -> Option<RoutingSettingsEdit> {
+        self.settings.as_ref()?.routing_edit()
     }
 
     /// Replace the session list, keeping the same session presented if it is
@@ -978,29 +1027,31 @@ impl ShellState {
 
 /// Which section of the Settings overlay has the cursor.
 ///
-/// Harnesses and Integrations shipped first, per the design decision: build
-/// only the section whose feature exists. Phase 2D adds Providers and Launch
-/// Profiles beside them, now that [`crate::config::ProviderConfig`] and
-/// [`crate::config::ProfileConfig`] both exist. Do not add a fifth here
-/// without first shipping the feature it would configure — Routing needs a
-/// routing-model configuration field nobody has designed yet, and Memory is
-/// Phase 20.
+/// Harnesses and Integrations shipped first. Providers and Launch Profiles
+/// followed once their configuration existed. Phase 2D adds Routing now that
+/// its policy fields are real, plus an explicitly transparent, read-only
+/// Memory section: memory itself is not in this build, so that tab offers no
+/// inert controls or speculative configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
     Harnesses,
     Integrations,
     Providers,
     LaunchProfiles,
+    Routing,
+    Memory,
 }
 
 impl SettingsSection {
     /// Tab order. `next`/`previous` cycle through this, so adding a section
     /// only ever means inserting it here.
-    const ORDER: [SettingsSection; 4] = [
+    const ORDER: [SettingsSection; 6] = [
         SettingsSection::Harnesses,
         SettingsSection::Integrations,
         SettingsSection::Providers,
         SettingsSection::LaunchProfiles,
+        SettingsSection::Routing,
+        SettingsSection::Memory,
     ];
 
     fn index(self) -> usize {
@@ -1122,6 +1173,60 @@ pub struct ProfileRow {
     pub layer: Layer,
 }
 
+/// The effective Routing section and the provenance of each independently
+/// layered field. Configured-provider names are retained only to validate a
+/// pinned `provider:model` choice before it is staged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingRow {
+    pub model: RoutingModelChoice,
+    pub model_layer: Layer,
+    pub max_latency: RouterLatencyMs,
+    pub max_latency_layer: Layer,
+    pub max_cost: RouterCostMicroUsd,
+    pub max_cost_layer: Layer,
+    pub prefer_free: bool,
+    pub prefer_free_layer: Layer,
+    pub premium_reserve: PremiumReservePercent,
+    pub premium_reserve_layer: Layer,
+    configured_providers: Vec<String>,
+}
+
+impl RoutingRow {
+    pub fn new(
+        model: Layered<RoutingModelChoice>,
+        max_latency: Layered<RouterLatencyMs>,
+        max_cost: Layered<RouterCostMicroUsd>,
+        prefer_free: Layered<bool>,
+        premium_reserve: Layered<PremiumReservePercent>,
+        configured_providers: Vec<String>,
+    ) -> Self {
+        Self {
+            model: model.value,
+            model_layer: model.layer,
+            max_latency: max_latency.value,
+            max_latency_layer: max_latency.layer,
+            max_cost: max_cost.value,
+            max_cost_layer: max_cost.layer,
+            prefer_free: prefer_free.value,
+            prefer_free_layer: prefer_free.layer,
+            premium_reserve: premium_reserve.value,
+            premium_reserve_layer: premium_reserve.layer,
+            configured_providers,
+        }
+    }
+
+    fn defaults(configured_providers: Vec<String>) -> Self {
+        Self::new(
+            Layered::new(RoutingModelChoice::Deterministic, Layer::Default),
+            Layered::new(RouterLatencyMs::DEFAULT, Layer::Default),
+            Layered::new(RouterCostMicroUsd::DEFAULT, Layer::Default),
+            Layered::new(true, Layer::Default),
+            Layered::new(PremiumReservePercent::DEFAULT, Layer::Default),
+            configured_providers,
+        )
+    }
+}
+
 /// One edit made to a [`HarnessRow`] this Settings session, not yet written
 /// anywhere. `None` in a field means that field was never touched this
 /// session; `Some(None)` in `executable` would mean "clear it", though
@@ -1160,6 +1265,27 @@ pub struct ProviderSettingsEdit {
 pub struct ProfileSettingsEdit {
     pub name: String,
     pub upsert: Option<ProfileConfig>,
+}
+
+/// Routing edits stay per-field so saving one preference never promotes the
+/// effective value of another field from its default or opposite layer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RoutingSettingsEdit {
+    pub model: Option<RoutingModelChoice>,
+    pub max_latency: Option<RouterLatencyMs>,
+    pub max_cost: Option<RouterCostMicroUsd>,
+    pub prefer_free: Option<bool>,
+    pub premium_reserve: Option<PremiumReservePercent>,
+}
+
+impl RoutingSettingsEdit {
+    pub fn is_empty(&self) -> bool {
+        self.model.is_none()
+            && self.max_latency.is_none()
+            && self.max_cost.is_none()
+            && self.prefer_free.is_none()
+            && self.premium_reserve.is_none()
+    }
 }
 
 /// The inline path editor's state while it is open, for the selected
@@ -1299,6 +1425,28 @@ struct ProfileTextInput {
 /// rendering.
 pub struct ProfileInputView<'a> {
     pub label: String,
+    pub buffer: &'a str,
+    pub error: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RoutingInputPurpose {
+    Model,
+    MaxLatency,
+    MaxCost,
+    PremiumReserve,
+}
+
+#[derive(Debug)]
+struct RoutingTextInput {
+    purpose: RoutingInputPurpose,
+    buffer: String,
+    error: Option<String>,
+}
+
+/// Read-only view of the active Routing-section field editor.
+pub struct RoutingInputView<'a> {
+    pub label: &'static str,
     pub buffer: &'a str,
     pub error: Option<&'a str>,
 }
@@ -1622,6 +1770,7 @@ pub struct SettingsState {
     integrations: Vec<IntegrationRow>,
     providers: Vec<ProviderRow>,
     profiles: Vec<ProfileRow>,
+    routing: RoutingRow,
     selected_harness: usize,
     selected_integration: usize,
     selected_provider: usize,
@@ -1633,6 +1782,7 @@ pub struct SettingsState {
     /// Staged profile edits this session, keyed by name — see
     /// [`ProfileSettingsEdit`].
     profile_edits: HashMap<String, Option<ProfileConfig>>,
+    routing_edit: RoutingSettingsEdit,
     path_input: Option<SettingsPathInput>,
     /// Whether the `W` confirmation prompt (design decision: "first shows
     /// the exact path to be created and requires a distinct confirmation")
@@ -1648,6 +1798,7 @@ pub struct SettingsState {
     confirm_credential_delete: Option<String>,
     provider_input: Option<ProviderTextInput>,
     profile_input: Option<ProfileTextInput>,
+    routing_input: Option<RoutingTextInput>,
     /// The last provider notice this session, and which provider it was for
     /// — a connectivity result or a model refresh, never both. Cleared by any
     /// other key the general dispatcher in [`SettingsState::handle_key`]
@@ -1669,6 +1820,7 @@ impl SettingsState {
         integrations: Vec<IntegrationRow>,
         providers: Vec<ProviderRow>,
         profiles: Vec<ProfileRow>,
+        routing: RoutingRow,
     ) -> Self {
         Self {
             section: SettingsSection::Harnesses,
@@ -1676,6 +1828,7 @@ impl SettingsState {
             integrations,
             providers,
             profiles,
+            routing,
             selected_harness: 0,
             selected_integration: 0,
             selected_provider: 0,
@@ -1683,11 +1836,13 @@ impl SettingsState {
             edits: HashMap::new(),
             provider_edits: HashMap::new(),
             profile_edits: HashMap::new(),
+            routing_edit: RoutingSettingsEdit::default(),
             path_input: None,
             confirm_project_write: false,
             confirm_credential_delete: None,
             provider_input: None,
             profile_input: None,
+            routing_input: None,
             provider_notice: None,
             pending_probe: None,
         }
@@ -1711,6 +1866,10 @@ impl SettingsState {
 
     pub fn profiles(&self) -> &[ProfileRow] {
         &self.profiles
+    }
+
+    pub fn routing(&self) -> &RoutingRow {
+        &self.routing
     }
 
     pub fn selected_harness(&self) -> usize {
@@ -1830,6 +1989,24 @@ impl SettingsState {
         })
     }
 
+    /// The active Routing-section editor, if any.
+    pub fn routing_input(&self) -> Option<RoutingInputView<'_>> {
+        let input = self.routing_input.as_ref()?;
+        let label = match input.purpose {
+            RoutingInputPurpose::Model => {
+                "Routing model (automatic, deterministic, or provider:model)"
+            }
+            RoutingInputPurpose::MaxLatency => "Maximum router latency (milliseconds)",
+            RoutingInputPurpose::MaxCost => "Maximum marginal cost (USD per decision)",
+            RoutingInputPurpose::PremiumReserve => "Premium reserve threshold (percent)",
+        };
+        Some(RoutingInputView {
+            label,
+            buffer: input.buffer.as_str(),
+            error: input.error.as_deref(),
+        })
+    }
+
     /// Every pending harness edit, for the run loop to apply when saving.
     fn edits(&self) -> Vec<SettingsEdit> {
         self.edits
@@ -1864,6 +2041,10 @@ impl SettingsState {
             .collect()
     }
 
+    fn routing_edit(&self) -> Option<RoutingSettingsEdit> {
+        (!self.routing_edit.is_empty()).then(|| self.routing_edit.clone())
+    }
+
     /// Replace the rows with freshly loaded ones (after a successful save)
     /// and clear every pending edit. The catalog is fixed-size, so the
     /// cursor is only ever clamped, never reset, and always stays on a real
@@ -1874,6 +2055,7 @@ impl SettingsState {
         integrations: Vec<IntegrationRow>,
         providers: Vec<ProviderRow>,
         profiles: Vec<ProfileRow>,
+        routing: RoutingRow,
     ) {
         self.selected_harness = self.selected_harness.min(harnesses.len().saturating_sub(1));
         self.selected_integration = self
@@ -1887,9 +2069,11 @@ impl SettingsState {
         self.integrations = integrations;
         self.providers = providers;
         self.profiles = profiles;
+        self.routing = routing;
         self.edits.clear();
         self.provider_edits.clear();
         self.profile_edits.clear();
+        self.routing_edit = RoutingSettingsEdit::default();
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> SettingsAction {
@@ -1901,6 +2085,9 @@ impl SettingsState {
         }
         if self.profile_input.is_some() {
             return self.handle_profile_input_key(key);
+        }
+        if self.routing_input.is_some() {
+            return self.handle_routing_input_key(key);
         }
         if let Some(provider) = self.confirm_credential_delete.clone() {
             return match key.code {
@@ -2074,6 +2261,28 @@ impl SettingsState {
                 self.remove_selected_profile();
                 SettingsAction::Redraw
             }
+            KeyCode::Char('m') if self.section == SettingsSection::Routing => {
+                self.start_routing_input(RoutingInputPurpose::Model);
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('l') if self.section == SettingsSection::Routing => {
+                self.start_routing_input(RoutingInputPurpose::MaxLatency);
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('c') if self.section == SettingsSection::Routing => {
+                self.start_routing_input(RoutingInputPurpose::MaxCost);
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('f') if self.section == SettingsSection::Routing => {
+                self.routing.prefer_free = !self.routing.prefer_free;
+                self.routing.prefer_free_layer = Layer::User;
+                self.routing_edit.prefer_free = Some(self.routing.prefer_free);
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('p') if self.section == SettingsSection::Routing => {
+                self.start_routing_input(RoutingInputPurpose::PremiumReserve);
+                SettingsAction::Redraw
+            }
             _ => SettingsAction::None,
         }
     }
@@ -2112,6 +2321,7 @@ impl SettingsState {
                 self.selected_profile =
                     (self.selected_profile as i32 + delta).clamp(0, last) as usize;
             }
+            SettingsSection::Routing | SettingsSection::Memory => {}
         }
     }
 
@@ -2779,6 +2989,133 @@ impl SettingsState {
         }
     }
 
+    // -------------------------------------------------------------
+    // Routing
+    // -------------------------------------------------------------
+
+    fn start_routing_input(&mut self, purpose: RoutingInputPurpose) {
+        let buffer = match purpose {
+            RoutingInputPurpose::Model => match &self.routing.model {
+                RoutingModelChoice::Automatic => "automatic".to_owned(),
+                RoutingModelChoice::Deterministic => "deterministic".to_owned(),
+                RoutingModelChoice::Pinned { provider, model } => {
+                    format!("{provider}:{model}")
+                }
+            },
+            RoutingInputPurpose::MaxLatency => self.routing.max_latency.get().to_string(),
+            RoutingInputPurpose::MaxCost => format_usd(self.routing.max_cost),
+            RoutingInputPurpose::PremiumReserve => self.routing.premium_reserve.get().to_string(),
+        };
+        self.routing_input = Some(RoutingTextInput {
+            purpose,
+            buffer,
+            error: None,
+        });
+    }
+
+    fn handle_routing_input_key(&mut self, key: KeyEvent) -> SettingsAction {
+        match key.code {
+            KeyCode::Esc => {
+                self.routing_input = None;
+                SettingsAction::Redraw
+            }
+            KeyCode::Enter => {
+                self.confirm_routing_input();
+                SettingsAction::Redraw
+            }
+            KeyCode::Backspace => {
+                if let Some(input) = self.routing_input.as_mut() {
+                    input.buffer.pop();
+                    input.error = None;
+                }
+                SettingsAction::Redraw
+            }
+            KeyCode::Char(c) => {
+                if let Some(input) = self.routing_input.as_mut() {
+                    input.buffer.push(c);
+                    input.error = None;
+                }
+                SettingsAction::Redraw
+            }
+            _ => SettingsAction::None,
+        }
+    }
+
+    fn confirm_routing_input(&mut self) {
+        let Some(input) = self.routing_input.take() else {
+            return;
+        };
+        let typed = input.buffer.trim();
+        let result = match input.purpose {
+            RoutingInputPurpose::Model => self.apply_routing_model(typed),
+            RoutingInputPurpose::MaxLatency => typed
+                .parse::<u32>()
+                .map_err(|_| "latency must be a whole number of milliseconds".to_owned())
+                .and_then(|value| RouterLatencyMs::try_from(value).map_err(|err| err.to_string()))
+                .map(|value| {
+                    self.routing.max_latency = value;
+                    self.routing.max_latency_layer = Layer::User;
+                    self.routing_edit.max_latency = Some(value);
+                }),
+            RoutingInputPurpose::MaxCost => parse_usd_micro(typed).map(|value| {
+                self.routing.max_cost = value;
+                self.routing.max_cost_layer = Layer::User;
+                self.routing_edit.max_cost = Some(value);
+            }),
+            RoutingInputPurpose::PremiumReserve => typed
+                .parse::<u16>()
+                .map_err(|_| "reserve must be a whole-number percentage".to_owned())
+                .and_then(|value| {
+                    PremiumReservePercent::try_from(value).map_err(|err| err.to_string())
+                })
+                .map(|value| {
+                    self.routing.premium_reserve = value;
+                    self.routing.premium_reserve_layer = Layer::User;
+                    self.routing_edit.premium_reserve = Some(value);
+                }),
+        };
+        if let Err(error) = result {
+            self.routing_input = Some(RoutingTextInput {
+                purpose: input.purpose,
+                buffer: input.buffer,
+                error: Some(error),
+            });
+        }
+    }
+
+    fn apply_routing_model(&mut self, typed: &str) -> Result<(), String> {
+        let choice = if typed.eq_ignore_ascii_case("automatic") {
+            RoutingModelChoice::Automatic
+        } else if typed.eq_ignore_ascii_case("deterministic") {
+            RoutingModelChoice::Deterministic
+        } else {
+            let Some((provider, model)) = typed.split_once(':') else {
+                return Err("use `automatic`, `deterministic`, or `provider:model`".to_owned());
+            };
+            let provider = provider.trim();
+            let model = model.trim();
+            if provider.is_empty() || model.is_empty() {
+                return Err("a pinned choice needs both a provider and model".to_owned());
+            }
+            if !self
+                .routing
+                .configured_providers
+                .iter()
+                .any(|configured| configured == provider)
+            {
+                return Err(format!("`{provider}` is not a configured provider"));
+            }
+            RoutingModelChoice::Pinned {
+                provider: provider.to_owned(),
+                model: model.to_owned(),
+            }
+        };
+        self.routing.model = choice.clone();
+        self.routing.model_layer = Layer::User;
+        self.routing_edit.model = Some(choice);
+        Ok(())
+    }
+
     fn handle_path_input_key(&mut self, key: KeyEvent) -> SettingsAction {
         match key.code {
             KeyCode::Esc => {
@@ -2826,6 +3163,40 @@ impl SettingsState {
             _ => SettingsAction::None,
         }
     }
+}
+
+/// Render exact micro-USD as a compact decimal dollar amount.
+pub fn format_usd(value: RouterCostMicroUsd) -> String {
+    let raw = value.get();
+    let dollars = raw / 1_000_000;
+    let fraction = raw % 1_000_000;
+    format!("{dollars}.{fraction:06}")
+}
+
+fn parse_usd_micro(text: &str) -> Result<RouterCostMicroUsd, String> {
+    let text = text.trim().strip_prefix('$').unwrap_or(text.trim());
+    if text.is_empty() || text.starts_with('-') {
+        return Err("cost must be a non-negative USD amount".to_owned());
+    }
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 6
+    {
+        return Err("cost must be USD with at most six decimal places".to_owned());
+    }
+    let whole = whole
+        .parse::<u32>()
+        .map_err(|_| "cost is too large".to_owned())?;
+    let fraction = format!("{fraction:0<6}")
+        .parse::<u32>()
+        .map_err(|_| "cost must be USD with at most six decimal places".to_owned())?;
+    let raw = whole
+        .checked_mul(1_000_000)
+        .and_then(|value| value.checked_add(fraction))
+        .ok_or_else(|| "cost is too large".to_owned())?;
+    RouterCostMicroUsd::try_from(raw).map_err(|err| err.to_string())
 }
 
 /// `Ctrl-]` — the one chord that returns to control mode from session mode.
@@ -4939,6 +5310,91 @@ mod settings_tests {
             ],
             "the recorded reference is not duplicated, and no declared variable is skipped"
         );
+    }
+
+    /// Phase 2D's Routing tab offers all three model modes and stages each
+    /// policy field independently. Invalid pins stay in the editor with an
+    /// explanation instead of silently degrading before they are saved.
+    #[test]
+    fn routing_settings_validate_and_stage_every_policy_control() {
+        fn replace_input(state: &mut ShellState, text: &str) {
+            for _ in 0..80 {
+                state.handle_key(press(KeyCode::Backspace));
+            }
+            type_text(state, text);
+            state.handle_key(press(KeyCode::Enter));
+        }
+
+        let routing = RoutingRow::new(
+            Layered::new(RoutingModelChoice::Deterministic, Layer::Default),
+            Layered::new(RouterLatencyMs::DEFAULT, Layer::Default),
+            Layered::new(RouterCostMicroUsd::DEFAULT, Layer::Default),
+            Layered::new(true, Layer::Default),
+            Layered::new(PremiumReservePercent::DEFAULT, Layer::Default),
+            vec!["openrouter".to_owned()],
+        );
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", Vec::new());
+        state.open_settings_with_routing(
+            Vec::new(),
+            Vec::new(),
+            sample_provider_rows(),
+            Vec::new(),
+            routing,
+        );
+        for _ in 0..4 {
+            state.handle_key(press(KeyCode::Tab));
+        }
+        assert_eq!(
+            state.settings().unwrap().section(),
+            SettingsSection::Routing
+        );
+
+        state.handle_key(press(KeyCode::Char('m')));
+        replace_input(&mut state, "missing:model");
+        let error = state
+            .settings()
+            .unwrap()
+            .routing_input()
+            .and_then(|input| input.error)
+            .unwrap_or_default();
+        assert!(error.contains("not a configured provider"), "{error}");
+        state.handle_key(press(KeyCode::Esc));
+
+        state.handle_key(press(KeyCode::Char('m')));
+        replace_input(&mut state, "automatic");
+        assert_eq!(
+            state.settings().unwrap().routing().model,
+            RoutingModelChoice::Automatic
+        );
+        state.handle_key(press(KeyCode::Char('m')));
+        replace_input(&mut state, "openrouter:openai/gpt-5-mini");
+        assert!(matches!(
+            &state.settings().unwrap().routing().model,
+            RoutingModelChoice::Pinned { .. }
+        ));
+        state.handle_key(press(KeyCode::Char('m')));
+        replace_input(&mut state, "deterministic");
+
+        state.handle_key(press(KeyCode::Char('l')));
+        replace_input(&mut state, "750");
+        state.handle_key(press(KeyCode::Char('c')));
+        replace_input(&mut state, "0.002500");
+        state.handle_key(press(KeyCode::Char('f')));
+        state.handle_key(press(KeyCode::Char('p')));
+        replace_input(&mut state, "12");
+
+        let edit = state.settings_routing_edit().expect("routing edit staged");
+        assert_eq!(edit.model, Some(RoutingModelChoice::Deterministic));
+        assert_eq!(edit.max_latency.unwrap().get(), 750);
+        assert_eq!(edit.max_cost.unwrap().get(), 2_500);
+        assert_eq!(edit.prefer_free, Some(false));
+        assert_eq!(edit.premium_reserve.unwrap().get(), 12);
+        let row = state.settings().unwrap().routing();
+        assert_eq!(row.model_layer, Layer::User);
+        assert_eq!(row.max_latency_layer, Layer::User);
+        assert_eq!(row.max_cost_layer, Layer::User);
+        assert_eq!(row.prefer_free_layer, Layer::User);
+        assert_eq!(row.premium_reserve_layer, Layer::User);
     }
 }
 

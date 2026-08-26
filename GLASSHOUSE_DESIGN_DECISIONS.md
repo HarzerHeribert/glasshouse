@@ -111,6 +111,49 @@ capability exists, invites them to look for it, and leaves the next
 implementer a shape to fill rather than a design to make — which is exactly how
 a settings screen accumulates dead controls.
 
+### Refined 2026-08-26: the test is what the control does, not whether its consumer exists
+
+The rule above — *build only the sections whose feature exists, and their map
+boxes stay unchecked until then* — was applied to the Routing and Memory
+sections and produced two different answers, which is how it earned a
+refinement rather than an exception.
+
+**Routing settings shipped, and its six boxes are checked**, while Phases
+9I-9K and 34-38 remain entirely unbuilt. Nothing routes yet. But the section is
+not a shell: `max_router_latency`, `max_marginal_cost`, `prefer_free`,
+`premium_reserve` and the model pin are validated typed values that resolve
+project -> user -> default, show their layer, persist through the same
+consent-gated writer as every other setting, and survive a reload. Using a
+control there changes a file on disk. That is a feature, and it is the one
+Phase 2D names.
+
+**Memory settings did not ship, and its box stays open.** The section exists
+and says, truthfully, "Project memory is not available in this build. There are
+no memory settings to save." That is honest and worth keeping — it is the
+opposite of the failure the original decision feared, since it tells the user a
+capability is *absent* rather than implying one is present. But a section with
+no settings in it is not a settings section, and the box says to add one.
+
+So the operative test is not *"does the consuming feature exist?"* but:
+
+> **Does using a control in this section do something real and durable?**
+
+If yes, the section may ship and its boxes may close, whatever consumes the
+value later. If no, it is a shape for someone else to fill, which is what the
+original decision was protecting against.
+
+Why the original wording needed changing rather than an exception: it ties a
+settings box to a *different phase's* completion, which makes Phase 2D
+unclosable for reasons that have nothing to do with settings. Providers and
+Launch Profiles already shipped this way as their features landed, so the rule
+was never actually tested against a section whose controls were real but whose
+consumer was not. Routing is that case.
+
+What this does not license: a section whose controls write a value no design
+has decided the meaning of. The routing values each have a defined range, a
+default, and a stated meaning in the map. Persisting a number nobody has
+defined is still a shell, and a durable one.
+
 ### The decision: writes default to the user layer, and the project layer needs consent
 
 Glasshouse's project-level file lives at `<root>/.glasshouse/config.toml`, which

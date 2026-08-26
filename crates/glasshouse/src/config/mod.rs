@@ -16,10 +16,10 @@
 //! more (Phase 49): a field belongs here once a user can actually make the
 //! decision it records, and not before. [`RoutingConfig`] is the newest such
 //! addition and shows where the line is — it stores *which* routing model
-//! the user picked in the first-run wizard, because Phase 2C asks them; it
-//! stores nothing about latency budgets, cost ceilings, health filtering or
-//! fallback chains, because Phases 2D, 34B and 34C are what ask those and
-//! inventing their answers today would be speculation. Phase 9A's launch
+//! the user picked in the first-run wizard, plus the bounded routing-policy
+//! preferences the Phase 2D settings view lets them change. It deliberately
+//! stores no health observations, live prices, or fallback decisions: those
+//! belong to the later router that consumes these preferences. Phase 9A's launch
 //! profiles are the same shape: [`ProfileTable`] holds
 //! *inert* profile configuration (which harness, which backend resource,
 //! which approval mode) — never a resolved overlay, never a credential, and
@@ -1112,6 +1112,148 @@ pub enum RoutingFallback {
     ProviderNotConfigured { provider: String, model: String },
 }
 
+/// A routing-policy scalar outside the range Glasshouse can use honestly.
+///
+/// These bounds are intentionally generous. They reject values that are
+/// almost certainly unit mistakes while leaving policy, including a
+/// zero-cost/free-only ceiling and a disabled zero-percent reserve, under the
+/// user's control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RoutingValueError {
+    #[error("router latency must be between {min_ms}ms and {max_ms}ms, not {value_ms}ms")]
+    Latency {
+        value_ms: u32,
+        min_ms: u32,
+        max_ms: u32,
+    },
+    #[error(
+        "router marginal cost must be at most {max_micro_usd} micro-USD per decision, not {value_micro_usd} micro-USD"
+    )]
+    Cost {
+        value_micro_usd: u32,
+        max_micro_usd: u32,
+    },
+    #[error("premium reserve must be between 0% and 100%, not {value}%")]
+    Reserve { value: u16 },
+}
+
+/// Maximum acceptable routing-model latency, in milliseconds.
+///
+/// Ten milliseconds is below any realistic end-to-end model decision but
+/// still permits a very fast local classifier. Sixty seconds is already far
+/// beyond interactive routing; a larger value is almost certainly seconds
+/// entered as milliseconds (or a policy that should disable model routing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct RouterLatencyMs(u32);
+
+impl RouterLatencyMs {
+    pub const MIN: u32 = 10;
+    pub const MAX: u32 = 60_000;
+    pub const DEFAULT: Self = Self(2_000);
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u32> for RouterLatencyMs {
+    type Error = RoutingValueError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        if (Self::MIN..=Self::MAX).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(RoutingValueError::Latency {
+                value_ms: value,
+                min_ms: Self::MIN,
+                max_ms: Self::MAX,
+            })
+        }
+    }
+}
+
+impl From<RouterLatencyMs> for u32 {
+    fn from(value: RouterLatencyMs) -> Self {
+        value.0
+    }
+}
+
+/// Maximum marginal price of one routing decision, in millionths of a US
+/// dollar.
+///
+/// Fixed-point microdollars keep a human-editable TOML integer exact and
+/// avoid floating-point comparisons in policy. One dollar is a deliberately
+/// high ceiling for a bounded classification call; larger values are treated
+/// as a unit mistake rather than accepted silently. Zero is valid and means
+/// that only zero-marginal-cost candidates satisfy the price policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct RouterCostMicroUsd(u32);
+
+impl RouterCostMicroUsd {
+    pub const MAX: u32 = 1_000_000;
+    pub const DEFAULT: Self = Self(1_000);
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u32> for RouterCostMicroUsd {
+    type Error = RoutingValueError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        if value <= Self::MAX {
+            Ok(Self(value))
+        } else {
+            Err(RoutingValueError::Cost {
+                value_micro_usd: value,
+                max_micro_usd: Self::MAX,
+            })
+        }
+    }
+}
+
+impl From<RouterCostMicroUsd> for u32 {
+    fn from(value: RouterCostMicroUsd) -> Self {
+        value.0
+    }
+}
+
+/// Remaining premium capacity below which routing protects the subscription.
+/// Zero disables the reserve and one hundred protects all remaining premium
+/// capacity from lower-priority routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u16", into = "u16")]
+pub struct PremiumReservePercent(u8);
+
+impl PremiumReservePercent {
+    pub const DEFAULT: Self = Self(20);
+
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<u16> for PremiumReservePercent {
+    type Error = RoutingValueError;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        if value <= 100 {
+            Ok(Self(value as u8))
+        } else {
+            Err(RoutingValueError::Reserve { value })
+        }
+    }
+}
+
+impl From<PremiumReservePercent> for u16 {
+    fn from(value: PremiumReservePercent) -> Self {
+        value.0.into()
+    }
+}
+
 impl std::fmt::Display for RoutingFallback {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1135,13 +1277,10 @@ impl std::fmt::Display for RoutingFallback {
 
 /// The `[routing]` table: how requests get classified.
 ///
-/// One field today. It is a table rather than a bare `routing_model` key
-/// because Phase 2D's Routing settings section adds four siblings to it — a
-/// maximum acceptable router latency, a maximum marginal cost per decision,
-/// whether to prefer free resources, and a premium-capacity reserve
-/// threshold — and those are scalars that belong next to the model choice,
-/// not inside it. Landing the table now means that batch adds fields; it
-/// does not migrate a key.
+/// The model choice and four bounded policy preferences belong together here:
+/// they describe how routing should classify, not live observations about any
+/// provider. Every field is optional so project and user layers can override
+/// one preference without copying the rest.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutingConfig {
     /// The recorded routing-model choice, or `None` for "never decided".
@@ -1165,6 +1304,14 @@ pub struct RoutingConfig {
     /// then say so, which a collapsed shape could not express.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<RoutingModelChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_router_latency_ms: Option<RouterLatencyMs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_marginal_cost_micro_usd: Option<RouterCostMicroUsd>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prefer_free: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    premium_reserve_percent: Option<PremiumReservePercent>,
 }
 
 impl RoutingConfig {
@@ -1179,9 +1326,49 @@ impl RoutingConfig {
         self
     }
 
+    pub fn max_router_latency(&self) -> Option<RouterLatencyMs> {
+        self.max_router_latency_ms
+    }
+
+    pub fn set_max_router_latency(&mut self, value: Option<RouterLatencyMs>) -> &mut Self {
+        self.max_router_latency_ms = value;
+        self
+    }
+
+    pub fn max_marginal_cost(&self) -> Option<RouterCostMicroUsd> {
+        self.max_marginal_cost_micro_usd
+    }
+
+    pub fn set_max_marginal_cost(&mut self, value: Option<RouterCostMicroUsd>) -> &mut Self {
+        self.max_marginal_cost_micro_usd = value;
+        self
+    }
+
+    pub fn prefer_free(&self) -> Option<bool> {
+        self.prefer_free
+    }
+
+    pub fn set_prefer_free(&mut self, value: Option<bool>) -> &mut Self {
+        self.prefer_free = value;
+        self
+    }
+
+    pub fn premium_reserve(&self) -> Option<PremiumReservePercent> {
+        self.premium_reserve_percent
+    }
+
+    pub fn set_premium_reserve(&mut self, value: Option<PremiumReservePercent>) -> &mut Self {
+        self.premium_reserve_percent = value;
+        self
+    }
+
     /// Whether this table would serialize to nothing at all.
     fn is_unset(&self) -> bool {
         self.model.is_none()
+            && self.max_router_latency_ms.is_none()
+            && self.max_marginal_cost_micro_usd.is_none()
+            && self.prefer_free.is_none()
+            && self.premium_reserve_percent.is_none()
     }
 }
 
@@ -1679,6 +1866,53 @@ impl<'a> EffectiveConfig<'a> {
             return Layered::new(choice.clone(), Layer::User);
         }
         Layered::new(RoutingModelChoice::Deterministic, Layer::Default)
+    }
+
+    /// Maximum router latency, resolved per field so a project can override
+    /// this limit without copying any other routing preference.
+    pub fn max_router_latency(&self) -> Layered<RouterLatencyMs> {
+        if let Some(value) = self.project.and_then(|p| p.routing().max_router_latency()) {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.routing().max_router_latency() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(RouterLatencyMs::DEFAULT, Layer::Default)
+    }
+
+    /// Maximum marginal cost of one routing decision, resolved per field.
+    pub fn max_router_cost(&self) -> Layered<RouterCostMicroUsd> {
+        if let Some(value) = self.project.and_then(|p| p.routing().max_marginal_cost()) {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.routing().max_marginal_cost() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(RouterCostMicroUsd::DEFAULT, Layer::Default)
+    }
+
+    /// Whether zero-marginal-cost resources are preferred after capability,
+    /// health, rate-limit, and latency requirements are satisfied.
+    pub fn prefer_free_routing(&self) -> Layered<bool> {
+        if let Some(value) = self.project.and_then(|p| p.routing().prefer_free()) {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.routing().prefer_free() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(true, Layer::Default)
+    }
+
+    /// Premium remaining-capacity threshold below which reserve protection
+    /// applies, resolved per field.
+    pub fn premium_reserve(&self) -> Layered<PremiumReservePercent> {
+        if let Some(value) = self.project.and_then(|p| p.routing().premium_reserve()) {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.routing().premium_reserve() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(PremiumReservePercent::DEFAULT, Layer::Default)
     }
 
     /// What will actually classify a request: the recorded choice from
@@ -3860,5 +4094,68 @@ mod tests {
             RoutingModelResolution::Heuristics(RoutingFallback::NotConfigured)
         );
         assert_eq!(resolution.layer, Layer::Default);
+    }
+
+    /// Phase 2D routing preferences are exact, bounded, independently
+    /// layered values. A real save/load proves their serde wiring; mixed
+    /// layers prove one project override does not copy its siblings; invalid
+    /// TOML proves absurd scalar values cannot enter through hand editing.
+    #[test]
+    fn routing_policy_values_round_trip_layer_independently_and_reject_absurd_inputs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
+
+        let latency_user = RouterLatencyMs::try_from(1_500).unwrap();
+        let cost_user = RouterCostMicroUsd::try_from(2_500).unwrap();
+        let reserve_user = PremiumReservePercent::try_from(15).unwrap();
+        let mut user = UserConfig::default();
+        user.routing_mut()
+            .set_max_router_latency(Some(latency_user))
+            .set_max_marginal_cost(Some(cost_user))
+            .set_prefer_free(Some(false))
+            .set_premium_reserve(Some(reserve_user));
+        user.save(&paths).unwrap();
+        let loaded = UserConfig::load(&paths).unwrap();
+        assert_eq!(loaded.routing(), user.routing());
+
+        let latency_project = RouterLatencyMs::try_from(350).unwrap();
+        let mut project = ProjectConfig::default();
+        project
+            .routing_mut()
+            .set_max_router_latency(Some(latency_project))
+            .set_prefer_free(Some(true));
+        let effective = EffectiveConfig::new(&loaded, Some(&project));
+        assert_eq!(
+            effective.max_router_latency(),
+            Layered::new(latency_project, Layer::Project)
+        );
+        assert_eq!(
+            effective.max_router_cost(),
+            Layered::new(cost_user, Layer::User)
+        );
+        assert_eq!(
+            effective.prefer_free_routing(),
+            Layered::new(true, Layer::Project)
+        );
+        assert_eq!(
+            effective.premium_reserve(),
+            Layered::new(reserve_user, Layer::User)
+        );
+
+        for invalid in [
+            "max_router_latency_ms = 0",
+            "max_router_latency_ms = 60001",
+            "max_marginal_cost_micro_usd = 1000001",
+            "premium_reserve_percent = 101",
+        ] {
+            let text = format!("version = 1\n[routing]\n{invalid}\n");
+            assert!(
+                toml::from_str::<UserConfig>(&text).is_err(),
+                "absurd routing policy was accepted: {invalid}"
+            );
+        }
+        assert_eq!(RouterLatencyMs::DEFAULT.get(), 2_000);
+        assert_eq!(RouterCostMicroUsd::DEFAULT.get(), 1_000);
+        assert_eq!(PremiumReservePercent::DEFAULT.get(), 20);
     }
 }

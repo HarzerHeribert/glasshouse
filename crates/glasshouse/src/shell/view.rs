@@ -16,13 +16,13 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 
-use crate::config::Layer;
+use crate::config::{Layer, RoutingModelChoice};
 use crate::provider::discovery::ProbeOutcome;
 use crate::session::{SessionDisposition, SessionPresentation, SessionRecord};
 
 use super::state::{
     Mode, Overlay, OverviewState, ProbeKind, ProviderRow, SettingsPathInputView, SettingsSection,
-    SettingsState, ShellState, ViewportGrid,
+    SettingsState, ShellState, ViewportGrid, format_usd,
 };
 
 /// The shell's fixed vertical chrome: title, root, session bar, viewport,
@@ -316,8 +316,8 @@ fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
             "up/down pick   m send text   c interrupt   esc back to session   q quit"
         }
         (Mode::Control, Some(Overlay::Settings)) => {
-            "tab section   up/down move   space toggle   enter/a/e/c/b/p/u/d edit   \
-             t/m test/models   w save   s/x secret   W project   r setup   esc close"
+            "tab section   up/down move   space toggle   section keys edit   \
+             w save   W project   r setup   esc close"
         }
         (Mode::Control, None) => {
             "tab session   enter session   n new   N headless   o overview   q quit"
@@ -514,6 +514,8 @@ fn render_settings(state: &ShellState, frame: &mut Frame, area: Rect) {
         labeled_text_input_lines(&input.label, &input.buffer, input.error)
     } else if let Some(input) = settings.profile_input() {
         labeled_text_input_lines(&input.label, input.buffer, input.error)
+    } else if let Some(input) = settings.routing_input() {
+        labeled_text_input_lines(input.label, input.buffer, input.error)
     } else if let Some((name, outcome)) = settings.provider_test_result() {
         provider_test_result_lines(name, outcome)
     } else if let Some((name, refresh)) = settings.provider_models_result() {
@@ -552,6 +554,8 @@ fn render_settings(state: &ShellState, frame: &mut Frame, area: Rect) {
         SettingsSection::Integrations => render_integration_rows(settings, frame, list_area),
         SettingsSection::Providers => render_provider_rows(settings, frame, list_area),
         SettingsSection::LaunchProfiles => render_profile_rows(settings, frame, list_area),
+        SettingsSection::Routing => render_routing(settings, frame, list_area),
+        SettingsSection::Memory => render_memory(frame, list_area),
     }
 
     if !bottom_lines.is_empty() {
@@ -563,6 +567,11 @@ fn render_settings(state: &ShellState, frame: &mut Frame, area: Rect) {
 }
 
 fn render_settings_tabs(settings: &SettingsState, frame: &mut Frame, area: Rect) {
+    let profiles_label = if area.width >= 75 {
+        "Launch Profiles"
+    } else {
+        "Profiles"
+    };
     let tab = |label: &str, active: bool| {
         let style = if active {
             Style::default()
@@ -591,9 +600,13 @@ fn render_settings_tabs(settings: &SettingsState, frame: &mut Frame, area: Rect)
         ),
         Span::raw(" "),
         tab(
-            "Launch Profiles",
+            profiles_label,
             settings.section() == SettingsSection::LaunchProfiles,
         ),
+        Span::raw(" "),
+        tab("Routing", settings.section() == SettingsSection::Routing),
+        Span::raw(" "),
+        tab("Memory", settings.section() == SettingsSection::Memory),
     ];
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -920,6 +933,66 @@ fn render_profile_rows(settings: &SettingsState, frame: &mut Frame, area: Rect) 
         )));
     }
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_routing(settings: &SettingsState, frame: &mut Frame, area: Rect) {
+    let routing = settings.routing();
+    let model = match &routing.model {
+        RoutingModelChoice::Automatic => "automatic".to_owned(),
+        RoutingModelChoice::Deterministic => "deterministic heuristics".to_owned(),
+        RoutingModelChoice::Pinned { provider, model } => format!("{provider}:{model}"),
+    };
+    let prefer_free = if routing.prefer_free { "yes" } else { "no" };
+    let lines = vec![
+        Line::from(format!(
+            "  Routing model             {model} {}",
+            layer_label(routing.model_layer)
+        )),
+        Line::from(format!(
+            "  Maximum router latency    {} ms {}",
+            routing.max_latency.get(),
+            layer_label(routing.max_latency_layer)
+        )),
+        Line::from(format!(
+            "  Maximum marginal cost     ${} per decision {}",
+            format_usd(routing.max_cost),
+            layer_label(routing.max_cost_layer)
+        )),
+        Line::from(format!(
+            "  Prefer free resources     {prefer_free} {}",
+            layer_label(routing.prefer_free_layer)
+        )),
+        Line::from(Span::styled(
+            "    Applied only after capability, health, rate-limit, and latency checks pass.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(format!(
+            "  Protect premium capacity  below {}% remaining {}",
+            routing.premium_reserve.get(),
+            layer_label(routing.premium_reserve_layer)
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  m model   l latency   c cost   f prefer-free   p premium reserve",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+fn render_memory(frame: &mut Frame, area: Rect) {
+    let lines = vec![
+        Line::from(Span::styled(
+            "Project memory is not available in this build.",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "There are no memory settings to save. This section will become editable only when memory exists.",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
 /// The `x` confirmation. Names the provider and says plainly that this one
@@ -1993,13 +2066,16 @@ mod tests {
 
 #[cfg(test)]
 mod settings_tests {
-    use crate::config::{ProfileConfig, ProviderConfig};
+    use crate::config::{
+        Layered, PremiumReservePercent, ProfileConfig, ProviderConfig, RouterCostMicroUsd,
+        RouterLatencyMs, RoutingModelChoice,
+    };
     use crate::integrations::{IntegrationId, IntegrationStatus};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use super::super::state::{HarnessRow, IntegrationRow, ProfileRow, ProviderRow};
+    use super::super::state::{HarnessRow, IntegrationRow, ProfileRow, ProviderRow, RoutingRow};
     use super::*;
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -2206,6 +2282,66 @@ mod settings_tests {
             profile_rows(),
         );
         state
+    }
+
+    /// Routing shows every policy with its own provenance and explains the
+    /// conditions on the free-resource preference. Memory is deliberately a
+    /// transparent section with no controls until the feature exists.
+    #[test]
+    fn routing_and_memory_sections_render_their_complete_honest_states() {
+        let routing = RoutingRow::new(
+            Layered::new(
+                RoutingModelChoice::Pinned {
+                    provider: "my-router".to_owned(),
+                    model: "openai/gpt-5-mini".to_owned(),
+                },
+                Layer::Project,
+            ),
+            Layered::new(RouterLatencyMs::try_from(800).unwrap(), Layer::User),
+            Layered::new(RouterCostMicroUsd::try_from(2_500).unwrap(), Layer::Default),
+            Layered::new(false, Layer::Project),
+            Layered::new(PremiumReservePercent::try_from(12).unwrap(), Layer::User),
+            vec!["my-router".to_owned()],
+        );
+        let mut state = ShellState::new("glasshouse", "/work/glasshouse", "0.1.0", Vec::new());
+        state.open_settings_with_routing(
+            harness_rows(),
+            integration_rows(),
+            provider_rows(),
+            profile_rows(),
+            routing,
+        );
+        for _ in 0..4 {
+            state.handle_key(press(KeyCode::Tab));
+        }
+        let routing_text = rendered(&state, 120, 32);
+        for expected in [
+            "my-router:openai/gpt-5-mini",
+            "800 ms",
+            "$0.002500",
+            "health, rate-limit, and latency",
+            "below 12%",
+            "(project)",
+            "(user)",
+            "(default)",
+        ] {
+            assert!(
+                routing_text.contains(expected),
+                "missing {expected:?}:\n{routing_text}"
+            );
+        }
+
+        state.handle_key(press(KeyCode::Tab));
+        let memory_text = rendered(&state, 120, 32);
+        assert!(memory_text.contains("Memory"), "{memory_text}");
+        assert!(
+            memory_text.contains("not available in this build"),
+            "{memory_text}"
+        );
+        assert!(
+            memory_text.contains("no memory settings to save"),
+            "{memory_text}"
+        );
     }
 
     /// Acceptance 1 (the render half): an empty Providers section shows an

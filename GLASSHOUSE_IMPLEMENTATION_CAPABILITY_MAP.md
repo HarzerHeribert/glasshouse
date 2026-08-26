@@ -178,12 +178,12 @@ Phase 2D — Settings foundation
 ☑ Add a Harnesses settings section.
 ☑ Add a Providers settings section.
 ☑ Add a Launch Profiles settings section.
-☐ Add a Routing settings section.
-☐ Allow the routing settings to select Automatic, a specific configured model, or deterministic-only classification.
-☐ Allow the routing settings to define a maximum acceptable router latency.
-☐ Allow the routing settings to define a maximum marginal cost per routing decision.
-☐ Allow the routing settings to prefer free resources for routing when they satisfy health and rate-limit requirements.
-☐ Allow the routing settings to reserve premium subscription capacity below a configurable remaining-capacity threshold.
+☑ Add a Routing settings section.
+☑ Allow the routing settings to select Automatic, a specific configured model, or deterministic-only classification.
+☑ Allow the routing settings to define a maximum acceptable router latency.
+☑ Allow the routing settings to define a maximum marginal cost per routing decision.
+☑ Allow the routing settings to prefer free resources for routing when they satisfy health and rate-limit requirements.
+☑ Allow the routing settings to reserve premium subscription capacity below a configurable remaining-capacity threshold.
 ☐ Add a Memory settings section.
 ☑ Add an Integrations settings section for optional tools such as cmux.
 ☑ Show whether each harness is detected and enabled.

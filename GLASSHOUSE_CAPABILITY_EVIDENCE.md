@@ -3117,6 +3117,73 @@ Known limit, recorded rather than fixed:
   distinction today; the first thing that will is a re-probe policy, and it
   will need a structural difference rather than a doc comment.
 
+### Phase 2D — the Routing settings section and its five policy controls (six of seven)
+
+Contract: Given a user who wants to constrain how Glasshouse will route work,
+when they open Routing settings, they can set the router model choice, a
+maximum acceptable router latency, a maximum marginal cost per decision, a
+free-resource preference and a premium-capacity reserve; each value is
+validated, shows which layer supplied it, and persists to the layer they chose
+without disturbing its siblings.
+
+State: COMPLETE for the six routing lines. **The seventh, "Add a Memory
+settings section", stays open** — see below.
+
+Production evidence:
+- `config/mod.rs` — `RouterLatencyMs` (`10..=60000`, default `2000`),
+  `RouterCostMicroUsd` (`0..=1000000`, default `1000`), `PremiumReservePercent`
+  (`0..=100`, default `20`), `RoutingModelChoice`. Each resolves project ->
+  user -> default independently, so setting one field never promotes its
+  siblings into another layer. Zero cost is a deliberate free-only ceiling and
+  zero reserve disables reserve protection; values past the maxima are refused
+  as likely unit errors rather than silently clamped.
+- `shell/state.rs`, `shell/view.rs` — the Routing tab; `m`, `l`, `c`, `f`, `p`
+  edit the five controls, and every displayed value carries its layer, per the
+  standing provenance invariant.
+- `shell/mod.rs: save_user_settings_with_routing` — routing edits go through
+  the existing writer, and the project layer still requires the separate `W`
+  confirmation. No new path to the repository-local file was created.
+
+Regression evidence:
+- `routing_policy_values_round_trip_layer_independently_and_reject_absurd_inputs`
+- `routing_settings_validate_and_stage_every_policy_control`
+- `routing_and_memory_sections_render_their_complete_honest_states`
+- `routing_edits_persist_to_the_chosen_layer_without_clobbering_siblings`
+- Four mutation proofs from the worker. The one decisive for *these* boxes was
+  re-run by the orchestrator on integrated `main`, because the whole argument
+  for closing them is that the controls do something durable:
+
+      (make the staged max_cost field never reach the saved routing table)
+      test routing_edits_persist_to_the_chosen_layer_without_clobbering_siblings ... FAILED
+      error: test failed, to rerun pass `-p glasshouse --test settings_persistence`
+      (restored)
+      test routing_edits_persist_to_the_chosen_layer_without_clobbering_siblings ... ok
+
+Design-decision conflict, resolved and recorded:
+- A standing decision said the settings view ships only sections whose feature
+  exists, and that the other four sections' **map boxes stay unchecked until
+  then**. Nothing routes yet, so that rule read literally would keep these six
+  boxes shut indefinitely for reasons belonging to Phase 34.
+- `GLASSHOUSE_DESIGN_DECISIONS.md` now records the refinement: the test is
+  whether using a control does something real and durable, not whether its
+  consumer exists. Routing passes it; Memory does not. The original rule had
+  never been tested against a section with real controls and no consumer,
+  because Providers and Launch Profiles both shipped alongside their features.
+
+Missing evidence — and why the seventh box is still open:
+- The Memory section renders "Project memory is not available in this build.
+  There are no memory settings to save." That is truthful and worth keeping;
+  it tells the user the capability is absent rather than implying it is
+  present. But **a section with no settings in it is not a settings section**,
+  and the box asks for one. It closes when memory has something to configure.
+- `lead-memory` is building Phase 20 now but owns `src/memory/**` only, not
+  `src/shell/**`. Whoever owns `shell/` next inherits this box, and the honest
+  placeholder is the handoff.
+- The five policy values are stored and read back; **nothing consumes them
+  yet**, and the UI says so — free preference is stated to apply only after
+  capability, health, rate-limit and latency checks pass. The router that
+  honours them is Phases 34-38.
+
 ### Phase 2B — Mark every detected integration as available, configured, unconfigured, unsupported-version, or unknown
 
 Contract: Given any integration discovery finds on this machine, when
