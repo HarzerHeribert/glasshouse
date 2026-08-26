@@ -687,3 +687,47 @@ The lead predicted "change 3 to 4" and stopped at the version assertion — the
 second failure is invisible until the first is fixed. Practice §23 says re-run
 a worker's decisive observations; this round it says re-run the ones it
 predicted would be boring.
+
+## Batch 20–21 — the team-lead tier again, with yesterday's findings written into the packets
+
+Second team-lead round, started 2026-08-26. The variable under test this time
+is **whether the previous round's lessons transfer through a packet**, rather
+than whether the tier works at all — that was answered by 49 boxes.
+
+| | lead-extract | lead-record |
+|---|---|---|
+| harness / model | Claude Code / Opus 5, effort `high` | Claude Code / Opus 5, effort `high` |
+| phases | 21, 21A | 18, 19, and Phase 12's four stranded lines |
+| **open boxes** | **25** | **28** |
+| files owned | `src/memory/**` | `src/events/**`, `src/checkpoint/**`, `src/session/**`, `src/shell/**`, `main.rs`, `database.rs`, `cli.rs` |
+| surface | `surface:94` | `surface:95` |
+
+Both packets carry an eight-point block of measured findings from batch 18–19 —
+freeze the API before delegating, pre-declare module stubs, stagger by expected
+size, `cargo fmt --all` crosses file partitions, a red gate can be the correct
+hand-over, report surviving mutations, no production caller means no box, and
+re-run the observations you predicted would be boring. Whether a lead follows
+advice it was given rather than rediscovering it is the thing to look for in
+the reports.
+
+### The partition moved, deliberately
+
+`lead-record` gets an unusually wide partition — `main.rs`, `shell/**` and
+`database.rs` included. **Every one of yesterday's stranded boxes was stranded
+by a file boundary, not by difficulty.** Four Phase 12 lines and four Phase 26
+lines sat finished-but-unreachable because the lead that built them could not
+add a caller. Widening one lead's partition and narrowing the other's is
+cheaper than a third round of "behaviour built, surface missing".
+
+The cost is that only one lead can hold `database.rs`, so `lead-extract` was
+told to report DDL rather than write it — the same constraint that produced a
+correct red gate last round.
+
+### Open questions for this round
+
+- Do the transferred lessons actually change behaviour, or does each lead
+  rediscover them anyway? (The reports will say: a lead that was told to freeze
+  its API first and did so will not report it as a discovery.)
+- Does a wide partition close the stranded boxes, or merely move the boundary?
+- Phase 19's checkpoints are the first capability whose value is cross-harness.
+  A checkpoint that only ever bootstraps the same harness proves little.
