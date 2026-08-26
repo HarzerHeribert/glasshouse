@@ -2886,6 +2886,14 @@ fn install_env_dump_harness(bin_dir: &std::path::Path, name: &str) -> std::path:
     path
 }
 
+fn dumped_env_values<'a>(output: &'a str, key: &str) -> Vec<&'a str> {
+    output
+        .lines()
+        .filter_map(|line| line.trim_end_matches('\r').split_once('='))
+        .filter_map(|(candidate, value)| candidate.eq_ignore_ascii_case(key).then_some(value))
+        .collect()
+}
+
 #[cfg(unix)]
 fn install_env_dump_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -2903,14 +2911,10 @@ fn install_env_dump_harness(bin_dir: &std::path::Path, name: &str) -> std::path:
 /// environment operations onto a launch — reaches the spawned harness and
 /// nothing else.
 ///
-/// No launch profile can produce an environment operation yet (every current
-/// overlay only ever adds *arguments* — see `profile::resolve`'s
-/// `BackendUnavailable` refusal, which is what stands between here and a
-/// provider-backed profile in Phase 9C/9D), so this goes straight at the
-/// seam a profile's overlay would use, through the real `HarnessLaunch` the
-/// production launch path builds. This is Phase 9B's own claim, proved
-/// rather than re-plumbed: "every override reaches only the child through
-/// `HarnessLaunch`".
+/// This isolates the final process boundary from profile resolution: the
+/// profile-backed tests below prove that `resolve` produces the operations,
+/// while this one proves that the same `HarnessLaunch::env` seam reaches only
+/// the child process.
 #[test]
 fn an_override_reaches_the_spawned_process_and_not_the_parent() {
     const KEY: &str = "GLASSHOUSE_SHIM_OVERRIDE_TEST";
@@ -2967,51 +2971,143 @@ fn the_users_environment_survives_except_for_explicit_overrides() {
         "the explicit override never reached the child:\n{output}"
     );
     // `PATH` is never named by this launch, so it must reach the child
-    // exactly as this process already has it -- inherited, not copied by hand.
-    //
-    // **Unix only, and that is a recorded gap rather than a convenience.**
-    //
-    // On `windows-latest` this assertion failed three times, and the third
-    // failure's message finally said why. It is not line wrapping and not
-    // terminal fidelity: the parent and the child genuinely disagree.
-    //
-    //     expected (this process): PATH=D:\A\GLASSHOUSE\GLASSHOUSE\TAR...
-    //     child reported:          Path=C:\Program Files\MongoDB\Server\...
-    //
-    // The child's `PATH` is the *system* one. This process's own `PATH` — a
-    // cargo test binary's, with the target directory prepended — is absent
-    // from it. Meanwhile the explicit override asserted above **did** reach
-    // the same child on the same run, so `CommandBuilder::env` works there
-    // and only *inherited* variables are in question.
-    //
-    // That points at `portable_pty::CommandBuilder` composing the child
-    // environment on Windows from the system/user environment rather than
-    // from the calling process, with explicit overrides layered on top. It is
-    // a strong reading of the evidence, not a proven one — nothing here has
-    // run on a real Windows host — so it is written down as an open question
-    // rather than worked around.
-    //
-    // Until it is settled, the capability-map line this proves
-    // ("preserve the user's existing shell environment except for explicit
-    // launch-profile overrides") is **unchecked for Windows**, and this
-    // assertion claims only the platform it can actually demonstrate.
-    // Loosening it into passing everywhere would have asserted a property the
-    // product may not have.
-    #[cfg(unix)]
-    {
-        const COMPARED: usize = 30;
-        let expected_head: String = expected_path.chars().take(COMPARED).collect();
-        let expected_entry = format!("PATH={expected_head}").to_ascii_uppercase();
+    // exactly as this process already has it. Glasshouse snapshots it
+    // explicitly because portable-pty's Windows defaults merge registry
+    // values over the process environment.
+    const COMPARED: usize = 30;
+    let expected_head: String = expected_path.chars().take(COMPARED).collect();
+    let expected_entry = format!("PATH={expected_head}").to_ascii_uppercase();
+    assert!(
+        output_upper.contains(&expected_entry),
+        "a variable the launch never named did not survive unchanged; expected the child's \
+         environment to open `{expected_entry}`:\n{output}"
+    );
+}
+
+/// A resolved profile's environment is an overlay, not a replacement.
+///
+/// The outer invocation plants values on a subprocess so this test never
+/// mutates the shared cargo-test process environment. The inner invocation
+/// resolves a real direct-provider profile and launches an env-dumping
+/// harness through the production PTY seam. It checks all four observable
+/// parts of the contract together: an unrelated variable and a distinctive
+/// PATH survive, TERM is not silently repaired, and the one profile-named
+/// variable replaces the user's value exactly once.
+#[test]
+fn a_profile_environment_is_parent_plus_declared_overrides() {
+    use glasshouse::harness::{Declared, WireProtocol, adapter_for};
+    use glasshouse::integrations::IntegrationId;
+    use glasshouse::profile::{BackendResource, LaunchProfile, Resolution, resolve};
+    use glasshouse::provider::{ProtocolSupport, Provider};
+    use glasshouse::secret::EnvironmentSecretStore;
+
+    const HELPER: &str = "GLASSHOUSE_P09B_ENV_HELPER";
+    const UNMENTIONED: &str = "P09B_USER_SHELL_SENTINEL_47A91";
+    const UNMENTIONED_VALUE: &str = "parent-value-survived";
+    const OVERRIDE: &str = "ANTHROPIC_BASE_URL";
+    const USER_VALUE: &str = "https://parent.invalid/anthropic";
+    const PROFILE_VALUE: &str = "https://profile.invalid/anthropic";
+
+    if std::env::var_os(HELPER).is_none() {
+        let current_path = std::env::var_os("PATH").expect("PATH in test process");
+        let path_marker = std::env::temp_dir().join("glasshouse-p09b-parent-path-marker");
+        let planted_path = std::env::join_paths(
+            std::iter::once(path_marker).chain(std::env::split_paths(&current_path)),
+        )
+        .expect("join planted PATH");
+        let helper = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "a_profile_environment_is_parent_plus_declared_overrides",
+                "--nocapture",
+            ])
+            .env(HELPER, "1")
+            .env(UNMENTIONED, UNMENTIONED_VALUE)
+            .env(OVERRIDE, USER_VALUE)
+            .env("TERM", "dumb")
+            .env("PATH", planted_path)
+            .output()
+            .expect("run isolated environment helper");
         assert!(
-            output_upper.contains(&expected_entry),
-            "a variable the launch never named did not survive unchanged; expected the child's \
-             environment to open `{expected_entry}`:\n{output}"
+            helper.status.success(),
+            "isolated helper failed\n--- stdout ---\n{}\n--- stderr ---\n{}\n--- end ---",
+            String::from_utf8_lossy(&helper.stdout),
+            String::from_utf8_lossy(&helper.stderr)
         );
+        return;
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (&expected_path, &output_upper);
-    }
+
+    let expected_path = std::env::var("PATH").expect("planted PATH in helper");
+    let provider = Provider {
+        name: "pty-p09b-provider".to_owned(),
+        protocols: vec![ProtocolSupport {
+            protocol: WireProtocol::AnthropicMessages,
+            base_url: PROFILE_VALUE.to_owned(),
+            streaming: Declared::Unverified,
+            tool_calls: Declared::Unverified,
+            reasoning: Declared::Unverified,
+        }],
+        model_list_endpoint: Declared::Unverified,
+        usage_telemetry: Declared::Unverified,
+        credential_env: Vec::new(),
+        headers: Vec::new(),
+    };
+    let mut profile = LaunchProfile::native(IntegrationId::ClaudeCode);
+    profile.name = "pty-p09b-profile".to_owned();
+    profile.backend = BackendResource::DirectProvider {
+        provider: provider.name.clone(),
+    };
+    let adapter = adapter_for(IntegrationId::ClaudeCode).expect("Claude Code adapter");
+    let secrets = EnvironmentSecretStore::new();
+    let resolution = Resolution {
+        adapter,
+        acknowledged_bypass: false,
+        provider: Some(&provider),
+        secrets: &secrets,
+    };
+    let overlay = resolve(&profile, &resolution).expect("resolve direct-provider profile");
+
+    assert_eq!(overlay.env().len(), 1, "unexpected profile env keys");
+    assert_eq!(overlay.env()[0].0, OVERRIDE);
+    assert_eq!(overlay.env()[0].1, PROFILE_VALUE);
+
+    let fixture = RuntimeFixture::new();
+    let path = install_env_dump_harness(&fixture.bin_dir, "env-dump-p09b-profile");
+    let launch = overlay.apply(fixture.launch(&path));
+    let mut session = Session::spawn_harness(&launch);
+    let status = session.wait_for_exit();
+    assert!(status.success(), "{status}");
+
+    let output = strip_terminal_sequences(&session.output());
+    assert_eq!(
+        dumped_env_values(&output, UNMENTIONED),
+        [UNMENTIONED_VALUE],
+        "an unmentioned parent variable changed"
+    );
+    assert_eq!(
+        dumped_env_values(&output, "PATH"),
+        [expected_path.as_str()],
+        "the planted parent PATH changed"
+    );
+    assert_eq!(
+        dumped_env_values(&output, "TERM"),
+        ["dumb"],
+        "an unmentioned TERM was altered"
+    );
+    assert_eq!(
+        dumped_env_values(&output, OVERRIDE),
+        [PROFILE_VALUE],
+        "the profile override was absent or duplicated"
+    );
+    assert!(
+        !output.contains(USER_VALUE),
+        "the user's overridden value remained in the child"
+    );
+    assert_eq!(
+        std::env::var(OVERRIDE).expect("parent override value"),
+        USER_VALUE,
+        "launch changed the parent environment"
+    );
 }
 
 /// Phase 9D, line 355, closed end to end rather than half.
@@ -3116,25 +3212,16 @@ fn a_direct_provider_profile_reaches_a_real_child_and_only_that_child() {
         "the credential's source variable was not cleaned up from this process"
     );
 
-    // `PATH`, which no launch operation named, arrives unchanged — the same
-    // assertion `the_users_environment_survives_except_for_explicit_overrides`
-    // makes, for the same Windows-vs-Unix reason documented there.
-    #[cfg(unix)]
-    {
-        const COMPARED: usize = 30;
-        let expected_head: String = expected_path.chars().take(COMPARED).collect();
-        let expected_entry = format!("PATH={expected_head}").to_ascii_uppercase();
-        let output_upper = output.to_ascii_uppercase();
-        assert!(
-            output_upper.contains(&expected_entry),
-            "PATH did not survive unchanged; expected the child's environment to open \
-             `{expected_entry}`:\n{output}"
-        );
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = &expected_path;
-    }
+    // `PATH`, which no launch operation named, arrives unchanged.
+    const COMPARED: usize = 30;
+    let expected_head: String = expected_path.chars().take(COMPARED).collect();
+    let expected_entry = format!("PATH={expected_head}").to_ascii_uppercase();
+    let output_upper = output.to_ascii_uppercase();
+    assert!(
+        output_upper.contains(&expected_entry),
+        "PATH did not survive unchanged; expected the child's environment to open \
+         `{expected_entry}`:\n{output}"
+    );
 }
 
 /// An embedded session answers the cursor-position query itself.

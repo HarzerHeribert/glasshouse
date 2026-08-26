@@ -381,7 +381,7 @@ Fixed architectural requirements
 
 ☑ Add glasshouse run <harness> --profile <profile> to launch a real harness with a selected Glasshouse launch profile outside the full Glasshouse TUI.
 ☑ Make glasshouse run inject configuration only into the spawned process and its descendants.
-☐ Preserve the user’s existing shell environment except for explicit launch-profile overrides.
+☑ Preserve the user’s existing shell environment except for explicit launch-profile overrides.
 ☑ Add an optional command for generating a lightweight user-owned shim such as claude-glasshouse when the user explicitly requests one.
 ☑ Make generated shims call glasshouse run instead of duplicating provider secrets or routing logic.
 ☑ Never create shell aliases or modify .zshrc, .bashrc, PowerShell profiles, or other shell startup files without explicit user action.

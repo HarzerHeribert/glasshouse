@@ -158,7 +158,7 @@ impl TerminalCommand {
             program: program.into(),
             args: Vec::new(),
             cwd: cwd.into(),
-            env: default_terminal_env(),
+            env: Vec::new(),
             env_removed: Vec::new(),
             size: TerminalSize::default(),
         }
@@ -265,6 +265,15 @@ impl TerminalCommand {
 
     fn into_builder(self) -> (CommandBuilder, TerminalSize) {
         let mut builder = CommandBuilder::new(&self.program);
+        // `portable-pty` adds platform defaults to its base environment. On
+        // Windows that includes registry values which can replace variables
+        // from this process, including PATH. Start from an exact snapshot of
+        // Glasshouse's own environment instead, then layer only the recorded
+        // child changes over it.
+        builder.env_clear();
+        for (key, value) in std::env::vars_os() {
+            builder.env(key, value);
+        }
         builder.args(&self.args);
         builder.cwd(&self.cwd);
         for (key, value) in &self.env {
@@ -278,23 +287,6 @@ impl TerminalCommand {
         }
         (builder, self.size)
     }
-}
-
-/// Environment every Glasshouse-started terminal process gets unless a caller
-/// overrides it.
-///
-/// Harness TUIs render badly or refuse colour output when `TERM` is missing or
-/// says the terminal is dumb, which happens whenever Glasshouse itself was
-/// started from a context without a terminal.
-fn default_terminal_env() -> Vec<(OsString, OsString)> {
-    let term = std::env::var_os("TERM").filter(|t| {
-        let t = t.to_string_lossy();
-        !t.is_empty() && t != "dumb"
-    });
-    vec![(
-        OsString::from("TERM"),
-        term.unwrap_or_else(|| OsString::from("xterm-256color")),
-    )]
 }
 
 /// How a child process finished.
@@ -816,15 +808,10 @@ mod tests {
     }
 
     #[test]
-    fn a_usable_term_is_always_set() {
+    fn a_new_command_records_no_implicit_environment_changes() {
         let cmd = TerminalCommand::new("/bin/sh", "/tmp");
-        let term = cmd
-            .env_overrides()
-            .iter()
-            .find(|(k, _)| k == "TERM")
-            .expect("TERM override");
-        assert!(!term.1.is_empty());
-        assert_ne!(term.1, OsString::from("dumb"));
+        assert!(cmd.env_overrides().is_empty(), "{:?}", cmd.env_overrides());
+        assert!(cmd.env_removals().is_empty(), "{:?}", cmd.env_removals());
     }
 
     /// A transient allocation failure must not reach the caller: `open_pty`

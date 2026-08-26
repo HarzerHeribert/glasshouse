@@ -505,6 +505,78 @@ stale — providers had been built by 9C/9D/9F since it was written.
 
 ---
 
+### Phase 9B — the child's environment, and Phase 9B at nine of nine
+
+Line, quoted exactly: "Preserve the user's existing shell environment except for
+explicit launch-profile overrides."
+
+Contract: Given a user with an existing shell environment, when Glasshouse
+launches a harness under a launch profile, the child sees the user's environment
+plus exactly the profile's declared overrides and nothing else — while
+preserving: no variable the user set is dropped, none is altered that the profile
+did not name, and nothing outside the spawned process tree is touched.
+
+State: **COMPLETE.** Phase 9B is **nine of nine**.
+
+**The line did not already hold**, which the packet had explicitly allowed for.
+Two production behaviours broke it, both at the common PTY boundary:
+
+1. `TerminalCommand::new` recorded a `TERM` override unconditionally, changing
+   an unset, empty or `dumb` value even though no profile named `TERM`.
+2. **`portable-pty` 0.9.0 rewrites the environment it was given.**
+   `CommandBuilder::new` starts from `std::env::vars_os()`, but its Windows
+   branch then merges registry-composed system and user values over that map —
+   including replacing `PATH`. On Unix it adds `SHELL` when the parent had none.
+
+The second is the find worth keeping. **A pre-existing smoke test had already
+observed that Windows `PATH` mismatch and responded by compiling its inheritance
+assertion out on Windows** — a known-wrong case papered over rather than fixed.
+`into_builder` now calls `env_clear()`, copies an exact snapshot of Glasshouse's
+own environment, and layers only the recorded overrides and removals on top. The
+two skipped assertions now run on Windows.
+
+**On removing the `TERM` fallback.** Its doc justified it by "Glasshouse itself
+was started from a context without a terminal" — but `session::attach` **refuses
+outright** unless both stdin and stdout are terminals, with a message telling the
+user to run from an interactive terminal. The motivating case cannot reach a
+harness launch, so the justification was stale. Recorded here so nobody restores
+it on the strength of that comment. A user who deliberately sets `TERM=dumb` now
+keeps it, which is what the line asks for.
+
+#### Evidence quality
+
+Three mutations by the worker, each killed, each reported with the named test's
+own result line: drop the parent snapshot; drop the profile overrides; add an
+unconditional `TERM`. The orchestrator ran a fourth, independent of that set —
+**apply the parent snapshot *after* the overrides, so the user's value wins over
+the profile's** — killed by the same test.
+
+**The worker could not run the full suite and said so rather than working around
+it.** Codex ran under `-s workspace-write -a never`, which denies loopback bind
+and Keychain access; 27 gateway and 3 secret tests failed on that alone. It
+reported the exact failure count, identified the cause, and stated that no
+production or test workaround had been added for infrastructure restrictions.
+**The orchestrator ran the suite unsandboxed: 777 passing, 0 failing**, which
+confirms all 30 were sandbox artifacts.
+
+#### First batch run on the Codex harness
+
+Model `gpt-5.6-sol` at `xhigh`, to match the effort the Claude Code workers run
+at. Notes for whoever runs the next one:
+
+- **Model identifiers need the full prefix.** `sol` is rejected on a ChatGPT
+  subscription account; it is `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`.
+- **Codex needs no bypass shim.** `-s workspace-write -a never` is a real
+  automatic-review mode, unlike Antigravity's blanket bypass — the same
+  distinction Glasshouse's own adapters record.
+- **That sandbox blocks loopback and Keychain**, so the orchestrator must run
+  the full suite for any Codex batch.
+- **It also blocks writing outside the worktree**, so the report path in the main
+  checkout was refused. The worker wrote to `/tmp` and said so. Future Codex
+  packets should put the report inside the worktree.
+
+---
+
 ### Phase 2C — the routing-model step, and Phase 2C at nineteen of nineteen
 
 Lines, quoted exactly:
