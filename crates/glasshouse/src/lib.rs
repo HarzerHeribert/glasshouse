@@ -5,6 +5,7 @@
 //! replacing them. One instance operates on exactly one project root, and every
 //! piece of state it keeps is physically separated per project.
 
+pub mod checkpoint;
 pub mod cli;
 pub mod config;
 mod database;
