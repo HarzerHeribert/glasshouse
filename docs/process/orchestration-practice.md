@@ -1923,3 +1923,36 @@ news.** Windows-only code paths have never executed — ConPTY's input mode amon
 them. Reconcile them in one sweep rather than one at a time, and do not let a
 first red discourage the work: it is the first time this project will have
 learned anything true about Windows since the one defect that runner caught.
+
+---
+
+## §57 — a parked question needs a way to be told it was answered
+
+`ask-user.sh` was built so the orchestrator could put a non-blocking decision in
+front of the user and carry on working. It parked the question, a Haiku session
+asked it, the user answered, and the answer was written to a file.
+
+**Nothing told the orchestrator.** The question was answered *two minutes* after
+it was asked and sat unread for an hour. The orchestrator found out because the
+user said so.
+
+The choice happened to match what was already running, so no work was
+misdirected — **and that is luck, not design.** Two of the four options would
+have meant an hour spent on the wrong package while the right answer sat on
+disk.
+
+**This is the third time this project has built a write with no read.** A worker
+report needed `worker-watch.sh`; an idle orchestrator needed
+`orchestrator-heartbeat.sh`; a parked answer needed `ask-user.sh --watch`. The
+shape is always the same: something is written to a file, the writer is
+satisfied, and no one is watching the file.
+
+**So the rule.** When you add a place where something lands — a report, an
+answer, a lock, a checkpoint — arm the watch for it **in the same change**, not
+when you notice it was missed. If the mechanism produces an artefact, ask who is
+watching for that artefact before you call it finished.
+
+    Monitor(command: "scripts/ask-user.sh --watch", persistent: true)
+
+Answers already on disk when the watch starts are not news; it marks them seen
+and reports only what lands afterwards.

@@ -18,6 +18,7 @@
 #   scripts/ask-user.sh <slug> "<question>" "<option>" ["<option>" ...]
 #   scripts/ask-user.sh --check <slug>      # answered yet? prints it if so
 #   scripts/ask-user.sh --list              # everything outstanding
+#   scripts/ask-user.sh --watch             # notify when any answer lands
 #
 # The answer lands in .agent-runtime/answers/<slug>.txt
 set -uo pipefail
@@ -27,6 +28,36 @@ ANS_DIR="$REPO/.agent-runtime/answers"
 mkdir -p "$ANS_DIR"
 
 case "${1:-}" in
+  --watch)
+    # THE DEFECT THIS FIXES
+    # ---------------------
+    # The first version of this script parked a question and wrote the answer to
+    # a file, and **nothing told the orchestrator the answer had arrived**. A
+    # question was answered two minutes after it was asked and sat unread for an
+    # hour; the orchestrator only found it because the user said so. It had
+    # built a way to park a question with no way to be told it was answered —
+    # the same gap `worker-watch.sh` exists to close for reports.
+    #
+    # Drive it with Monitor, persistent, ONE per orchestrator:
+    #   Monitor(command: "scripts/ask-user.sh --watch", persistent: true)
+    seen_dir="$ANS_DIR/.seen"
+    mkdir -p "$seen_dir"
+    # Anything already answered before the watch started is not news.
+    for a in "$ANS_DIR"/*.txt; do
+      [ -e "$a" ] || continue
+      touch "$seen_dir/$(basename "$a" .txt)"
+    done
+    while true; do
+      sleep 30
+      for a in "$ANS_DIR"/*.txt; do
+        [ -e "$a" ] || continue
+        slug="$(basename "$a" .txt)"
+        [ -e "$seen_dir/$slug" ] && continue
+        touch "$seen_dir/$slug"
+        echo "ANSWER RECEIVED for '$slug': $(head -c 300 "$a" | tr '\n' ' ')"
+      done
+    done
+    ;;
   --list)
     shopt -s nullglob
     open=("$ANS_DIR"/*.question)
