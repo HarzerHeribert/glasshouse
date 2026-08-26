@@ -28,11 +28,36 @@ def ticked_by_phase(map_path):
     return out
 
 
-def evidence_keys(evidence_dir):
-    keys = set()
-    for path in glob.glob(os.path.join(evidence_dir, "phase-*.md")):
-        keys.add(os.path.basename(path)[len("phase-"):-len(".md")].lower())
-    return keys
+def evidence_phases(evidence_dir):
+    """Every phase an evidence entry claims to be about.
+
+    Filenames are not enough, and trusting them overstated the gap. Entries live
+    under headings like `### Phase 19 — portable checkpoints`, and some sit in
+    `unfiled.md` or under a heading that names the phase mid-sentence
+    (`### Migration 7 — …`). Matching filenames alone reported Phases 13 and 19
+    as uncovered when both have entries — a false alarm that would have sent a
+    worker to write evidence that already exists.
+
+    So read the headings, and keep the filename as a second source.
+    """
+    found = set()
+    for path in glob.glob(os.path.join(evidence_dir, "*.md")):
+        base = os.path.basename(path)
+        if base.startswith("phase-"):
+            # A filename may name several phases: `phase-12-18-and-19.md`,
+            # `phase-9f-preflight.md`. Reading the stem as one opaque key
+            # matched none of them and reported three covered phases as bare —
+            # which is how this check twice overstated the gap. Split it.
+            stem = base[len("phase-"):-len(".md")].lower()
+            for part in re.split(r"-and-|-", stem):
+                if re.fullmatch(r"[0-9]+[a-z]?", part):
+                    found.add(part)
+        for line in open(path, encoding="utf-8"):
+            if not line.startswith("#"):
+                continue
+            for m in re.finditer(r"Phase ([0-9]+[A-Z]?)", line):
+                found.add(m.group(1).lower())
+    return found
 
 
 def main():
@@ -48,7 +73,7 @@ def main():
         return 2
 
     ticked = ticked_by_phase(args.map)
-    have = evidence_keys(args.evidence)
+    have = evidence_phases(args.evidence)
 
     uncovered = []
     for phase, count in sorted(ticked.items(), key=lambda kv: kv[0]):
@@ -60,13 +85,13 @@ def main():
 
     covered = len(ticked) - len(uncovered)
     print(f"evidence coverage: {covered}/{len(ticked)} phases with ticked boxes "
-          f"have an evidence file ({len(have)} files present)")
+          f"have evidence ({len(have)} phases referenced in the ledger)")
 
     if not uncovered:
         return 0
 
     boxes = sum(c for _, c in uncovered)
-    print(f"\n  {len(uncovered)} phase(s), {boxes} ticked box(es), with no evidence file:")
+    print(f"\n  {len(uncovered)} phase(s), {boxes} ticked box(es), with no evidence entry:")
     for phase, count in uncovered:
         print(f"    {phase}: {count} ticked")
     print("\n  A ticked box without an evidence entry is a claim with nothing behind it.")

@@ -1721,14 +1721,26 @@ and none of them could have justified a paid runner.
 *do not check a box until its evidence-ledger entry is COMPLETE*, and until now
 **nothing enforced that at all**. Its first run:
 
-    evidence coverage: 28/34 phases with ticked boxes have an evidence file
-      6 phase(s), 52 ticked box(es), with no evidence file
-      Phase 0, 13, 18, 19, 22, 23
+    evidence coverage: 33/34 phases with ticked boxes have evidence
+      1 phase(s), 8 ticked box(es), with no evidence entry
+      Phase 0
 
-Fifty-two ticked boxes with nothing behind them in the ledger. Most predate the
-discipline. **It ships warn-only**, with `--strict` to fail, for the reason §20
-gives from the other side: a gate that starts red is a gate people learn to
-override. Reconcile the backlog, then turn strict on.
+**Its first version said 52 boxes across six phases, and that was its own bug,
+reported to the user twice before it was checked.** Evidence files are named for
+the phases they cover and some cover several — `phase-12-18-and-19.md` — and the
+first parser read that stem as one opaque key matching none of 12, 18 or 19. A
+second version read headings too and still missed them, because the phases were
+named in the filename rather than in a heading.
+
+The real gap is Phase 0, eight boxes, ticked before the ledger existed.
+
+**It ships warn-only**, with `--strict` to fail, for the reason §20 gives from
+the other side: a gate that starts red is a gate people learn to override.
+
+**The lesson is not about parsing.** A check whose first run produces an alarming
+number is at its least trustworthy exactly when it is most persuasive. Verify
+the number before anyone acts on it — a worker dispatched on the 52 would have
+written evidence that already existed for five of the six phases.
 
 **A flake rate** — `ci-local.sh --flake`, `FLAKE_RUNS=10`. The residual SIGABRT
 in `pty_smoke` fails about once in thirty-seven full-suite runs, and a single
