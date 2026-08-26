@@ -172,8 +172,14 @@ impl NativeSecretStore {
     ///
     /// The probe reads an account that is never written, so the answer is
     /// "the store is reachable" and nothing else: no credential is read, and
-    /// [`keyring::Error::NoEntry`] — the expected outcome — counts as
-    /// success.
+    /// `keyring::Error::NoEntry` — the expected outcome — counts as success.
+    ///
+    /// That name is deliberately not a link. `keyring` is a macOS-only
+    /// dependency (see `crates/glasshouse/Cargo.toml`), so an intra-doc link
+    /// to it resolves on macOS and fails the rustdoc gate on Linux and
+    /// Windows. **Anything naming a platform-gated dependency in a doc
+    /// comment on an ungated item has the same problem** — the sibling rule to
+    /// the one `PROBE_ACCOUNT` earned about platform-gated code.
     pub fn detect() -> Result<Self, Unavailable> {
         backend::probe()?;
         Ok(Self { _probed: () })
