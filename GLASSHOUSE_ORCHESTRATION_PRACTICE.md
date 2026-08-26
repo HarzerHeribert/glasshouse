@@ -461,7 +461,26 @@ dependency failed with `can't find crate for core`. The cfg flip needs no
 toolchain at all.
 
 **The rule this earns:** anything used only by a platform-gated module needs the
-same gate as that module. When a batch adds a `cfg`-gated backend, compile the
+same gate as that module.
+
+**And the same rule applies to documentation, which is easy to miss.** On
+2026-08-26 the newly-enforced rustdoc gate went red on Linux with
+`unresolved link to keyring::Error::NoEntry`. `NativeSecretStore::detect` is
+public on every platform, but `keyring` is declared only under
+`cfg(target_os = "macos")` — so the link resolved on the machine it was written
+on and could not resolve anywhere else. A doc link is a compile-time reference
+like any other. **Naming a platform-gated dependency in the docs of an ungated
+item is the same defect as calling it from one**, and it fails a different gate,
+so it survives the check you would think of first.
+
+When you fix one, scan for the rest instead of letting CI find them one at a
+time:
+
+    grep -rnE '//[/!].*\[`?(keyring|windows_sys|libc|security_framework)' \
+      crates/glasshouse/src --include='*.rs'
+
+That took seconds and proved there was exactly one, which is a round trip to CI
+saved. When a batch adds a `cfg`-gated backend, compile the
 other side before pushing. This is the third local-reproduction recipe in this
 file, after CRLF (§15) and stale mutation binaries (§16) — all three exist
 because a green local run proved nothing about the platform that broke.
