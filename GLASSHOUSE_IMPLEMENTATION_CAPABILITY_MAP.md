@@ -146,7 +146,7 @@ Phase 2B — Agent and tool auto-detection
 ☑ Never print discovered API-key values during detection.
 ☑ Detect the presence of relevant provider environment variables without logging their secret contents.
 ☑ Detect known provider configuration files only when doing so does not require importing or modifying them.
-☐ Mark every detected integration as available, configured, unconfigured, unsupported-version, or unknown.
+☑ Mark every detected integration as available, configured, unconfigured, unsupported-version, or unknown.
 ☑ Keep discovery results advisory so the user can manually add a harness that auto-detection missed.
 ☑ Add glasshouse doctor output that reports discovered harnesses, versions, optional integrations, and actionable setup problems.
 

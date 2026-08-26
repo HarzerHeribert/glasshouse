@@ -3117,6 +3117,60 @@ Known limit, recorded rather than fixed:
   distinction today; the first thing that will is a re-probe policy, and it
   will need a structural difference rather than a doc comment.
 
+### Phase 2B — Mark every detected integration as available, configured, unconfigured, unsupported-version, or unknown
+
+Contract: Given any integration discovery finds on this machine, when
+Glasshouse reports it, it carries exactly one of the five capability states,
+and it never guesses "set up for use" from "present on disk".
+
+State: COMPLETE
+
+Production evidence:
+- `integrations/mod.rs: IntegrationStatus` — the five states, plus `NotFound`
+  for determinate absence (see the packet correction below).
+- `integrations/mod.rs: config_evidence` — Antigravity now answers
+  `ConfigEvidence::Unknown`. It had answered `Available` because `agy` was on
+  `PATH` and no configuration signal was known; Antigravity needs a login
+  Glasshouse cannot check, so that was a guess with a friendly name. `Unknown`
+  records that detection ran and could not tell: `problems` stays empty and
+  `is_usable()` stays true, because not knowing is not a fault.
+- cmux and llama.cpp answer `Available`: they need no per-user credential, so
+  presence really is availability.
+- `integrations/mod.rs: detect_one_with_prober` — injects the version prober
+  and the minimum-version lookup. `detect_one_with` keeps its old signature,
+  so no existing caller changed.
+
+Regression evidence:
+- `tests/integration_status.rs` — `every_detected_integration_carries_one_of_the_five_capability_states`,
+  `usable_detected_integrations_are_never_unsupported_version`,
+  `unconfigured_and_unknown_with_executable_are_not_treated_as_problems`.
+- Five further unit tests over the status branches and `config_evidence`.
+- Eight mutation proofs from the worker. The box-decisive one was re-run by
+  the orchestrator on integrated `main` rather than taken from the report:
+
+      (map ConfigEvidence::Available -> IntegrationStatus::NotFound)
+      test every_detected_integration_carries_one_of_the_five_capability_states ... FAILED
+      error: test failed, to rerun pass `-p glasshouse --test integration_status`
+      (restored)
+
+Platform/external evidence:
+- CI run `32969003195` on commit `c473bef`: **all seven jobs green** — `lint`,
+  `test` and `msrv` on `ubuntu-latest`, `macos-latest` and `windows-latest`.
+
+Packet correction, accepted:
+- The packet demanded "exactly five states, no more". The map's line scopes
+  those five to *detected* integrations; confirmed absence is a sixth,
+  determinate answer, and both `shell/` and `onboarding/` match on
+  `NotFound`. Removing it would have required editing `shell/`, which another
+  worker owned at the time. `NotFound` stays, and the five-state invariant is
+  asserted over detected integrations only — which is what the map says.
+
+Missing evidence:
+- `minimum_version()` returns `None` for every integration today, so the
+  `UnsupportedVersion` branch is proven through the injected seam rather than
+  by a real installed-but-too-old harness. The branch is reachable and tested;
+  no released floor has been declared yet.
+
 ### Phase 2B — Detect Antigravity when a supported Antigravity CLI executable is present
 
 Contract: Given a machine with the Antigravity CLI installed, when Glasshouse
