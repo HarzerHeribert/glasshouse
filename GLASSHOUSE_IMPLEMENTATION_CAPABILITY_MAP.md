@@ -650,6 +650,28 @@ Fixed architectural requirements
 ☐ Keep stopped but resumable sessions visible separately from live processes.
 ☐ Allow the user to close a Glasshouse session record without deleting the native provider history unless explicitly requested.
 
+Phase 10A — Session supervision
+
+Fixed architectural requirements
+
+- Supervision covers only sessions this project recorded. Glasshouse never adopts, quarantines, or reports on a process it did not start.
+- A process that is alive and no longer owned is a distinct condition from one that has stopped, and is never treated as either stopped or healthy.
+- Glasshouse reports and refuses; it never ends a session the user did not ask it to end.
+
+☐ Record a durable process identity for every session Glasshouse starts, including the process start time, so that a reused process identifier cannot match a stale record.
+☐ Discover, on start, the sessions this project previously recorded whose processes are still running.
+☐ Verify a discovered process against its recorded identity before treating it as the session it claims to be.
+☐ Adopt a verified live session rather than starting a second session beside it.
+☐ Refuse to start a session that would duplicate a live, verified session of the same record.
+☐ Detect a recorded session whose process is alive but whose identity no longer matches what was recorded, and mark it quarantined rather than reusing or replacing it.
+☐ Refuse to start a replacement while a quarantined process still holds the same resources.
+☐ Surface a quarantined session to the user with what is known about it and what it still holds.
+☐ Require a started session to become verifiably ready within a bounded time, and record a start that never became ready as a failure with a stated reason rather than as a session.
+☐ Restart a session that exits unexpectedly up to a bounded number of consecutive attempts, and stop with a stated reason when that bound is reached.
+☐ Reset the consecutive-restart count only when a restarted session has been verified healthy, never when it has merely been started.
+☐ Apply session lifecycle changes through a single ordered path so that two concurrent requests cannot interleave into a state neither requested.
+☐ Never deliver two inputs to the same session concurrently.
+
 Phase 11 — Session overview
 
 ☐ Add a session overview that lists all current project sessions in one screen.

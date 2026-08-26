@@ -1433,3 +1433,52 @@ credential that must not reach a log, a payload that must not be read — is not
 placeholder and no later phase retires it by arriving. The distinguishing
 question is whether the guard's own rationale names a *missing owner* or a
 *standing harm*.
+
+---
+
+## Supervision is about processes, and it reports rather than reaps
+
+**Added 2026-08-26** with Phase 10A, on the user's sign-off.
+
+Phase 10 models a session as a **record**: harness, profile, backend, state,
+presentation, last activity. Nothing in it describes a *process that is alive
+and no longer owned*, and that turned out to be the condition that actually
+hurts. Five runaway processes were found on the user's machine at 501% CPU,
+three of them Glasshouse sessions that had outlived the pane that started them
+by nineteen hours. Glasshouse could not see them and would have started more
+beside them.
+
+**Why a separate phase rather than more lines in Phase 10.** Adoption,
+identity verification and quarantine are about operating-system processes;
+Phase 10 is about what Glasshouse remembers. Filed together, the process
+concerns become an afterthought inside a phase whose subject is metadata — and
+the distinction is load-bearing, because a record can be wrong about a process
+in ways a record cannot detect from itself.
+
+**Identity is a pair, never a process id.** A process id alone is reused, so a
+stale record eventually matches a stranger — and the stranger is then adopted,
+signalled, or reported as the user's session. Recording the start time
+alongside it makes the match falsifiable.
+
+**The reset condition on restart is the whole design.** A consecutive-restart
+counter reset when a session is *started* turns a crash loop into an infinite
+one. It resets only on *verified healthy*.
+
+**Three limits, deliberately.**
+
+1. **Glasshouse never adopts a process it did not start.** Supervision is
+   scoped to this project's own records. A control plane that reaches for
+   unrelated processes is a different and much more dangerous product.
+2. **Quarantine reports and refuses; it never reaps.** Ending a session is the
+   user's decision. Something alive and unaccounted for is precisely the case
+   where Glasshouse understands least, and killing what you do not understand
+   is worse than saying so.
+3. **No daemon.** V1 remains a local terminal control plane. This is
+   supervision inside a running Glasshouse, not a background service — the same
+   line Phase 55 already draws.
+
+**Owed to prior art, and read for architecture only.** The lifecycle shape —
+adopt-or-replace on discovery, quarantine on identity change, readiness bounds,
+bounded respawn, one ordered path for state changes — comes from reading a
+publicly posted reconstruction of another vendor's agent coordinator. That
+repository carries no license; nothing was copied from it and nothing should be.

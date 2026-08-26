@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 392 / 1267 mandatory capabilities (30%)
+`████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 392 / 1280 mandatory capabilities (30%)
 
 <details>
-<summary>Per-phase breakdown (13 of 103 phases complete)</summary>
+<summary>Per-phase breakdown (13 of 104 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -52,6 +52,7 @@ the authoritative specification and tracks what is done.
 | Phase 9J — Harness-model pairing model | 0/20 |
 | Phase 9K — Harness-aware response profiles | 0/37 |
 | Phase 10 — Unified session model | 0/14 |
+| Phase 10A — Session supervision | 0/13 |
 | Phase 11 — Session overview | 0/10 |
 | Phase 12 — Unified lifecycle event bus | 7/8 |
 | Phase 13 — Direct session messaging | 7/7 ✅ |
