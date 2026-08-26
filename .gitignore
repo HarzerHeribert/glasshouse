@@ -4,3 +4,8 @@
 # Python bytecode from repository tooling.
 __pycache__/
 *.pyc
+
+# Codex reads project-local hooks from here, and Glasshouse writes this
+# path itself during a Codex launch — a tracked file would be overwritten by
+# the product under test. See practice section 22.
+.codex/

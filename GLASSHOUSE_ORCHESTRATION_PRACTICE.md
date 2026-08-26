@@ -657,6 +657,28 @@ that a private field cannot be set from outside its module, which is a language
 guarantee, not a property of this code. Before modifying a worker's tree to test
 something, ask whether the compiler already promises it.
 
+### The guard covers one harness, and the other one is not covered
+
+The `PreToolUse` guard registered in `.claude/settings.json` protects Claude
+Code workers only. Codex reads its hooks from `<project>/.codex/hooks.json`
+instead, and a copy of the Claude Code document dropped there does **not**
+work: it interpolates `$CLAUDE_PROJECT_DIR`, which is Claude Code's variable
+and not one Codex sets, so the command resolves to a path that does not exist.
+A safety gate whose command cannot resolve is decoration — the same finding as
+the dead MSRV and rustdoc gates, arrived at a third time.
+
+That path is also the one **Glasshouse itself writes** when a Codex launch
+installs project-local hooks, so a tracked `.codex/hooks.json` in this repo
+would be overwritten by the product under test. `.codex/` is therefore ignored,
+and the file is not committed.
+
+**So: a Codex worker in a worktree is not protected, and the rule above is the
+only thing standing between it and a deleted deliverable.** Closing this needs
+a document with a path Codex can actually resolve, trusted through Codex's own
+hook-review prompt, and *observed refusing a real `git checkout -- <path>`*
+before it is believed. Until then, do not assume a Codex worker is guarded.
+
+
 ## 23. Re-run a worker's decisive external observations yourself
 
 A worker that probes the outside world is reporting something you cannot
