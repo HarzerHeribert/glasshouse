@@ -454,3 +454,43 @@ it caught a worker whose tests did not compile. **Keep doing it, and stop
 counting it as a cost.** The expensive check is not the gate re-run; it is
 reading what the mechanism actually connects to, which is where both of this
 round's real findings came from.
+
+## Batch 15–17 — three concurrent workers, three harnesses, started 2026-08-26 14:15
+
+First round in which the three tiers run **simultaneously and in different
+harnesses**, rather than being compared across rounds. Partitioned by files,
+each packet naming the other two workers' directories under FORBIDDEN FILES.
+
+| | 2d-routing | p06-adapter | p02b-status |
+|---|---|---|---|
+| harness | Codex | Codex | agy-gh |
+| model | `gpt-5.6-sol` | `gpt-5.6-terra` | Gemini 3.7 Flash |
+| boxes in packet | **7** | 1 | 1 |
+| files owned | `src/shell/**`, `src/config/mod.rs` | `src/harness/**` | `src/integrations/**` |
+| worktree | `glasshouse-2d-routing` | `glasshouse-p06-adapter` | `glasshouse-p02b-status` |
+
+Outcome columns to be filled on integration, including the
+"gaps surfaced rather than papered over" column the previous round asked for.
+
+### Why these three and not the obvious three
+
+The first partition drawn was 2D settings + Phase 4 interrupt + Phase 6, and it
+was wrong: `grep -rl interrupt` puts the interrupt work in `src/shell/` as well
+as `src/pty/`, which is the settings worker's territory. **A partition is a
+claim about files, and it is checkable before anyone starts** — one `grep`
+per candidate batch is cheaper than discovering the overlap in a merge.
+
+Phase 4's interrupt box stays open deliberately. It is the one open box whose
+evidence can only come from `test (windows-latest)`, and **workers never push**,
+so it cannot be delegated without the orchestrator in the loop for every
+iteration. It belongs to a round where that round-trip is the main activity.
+
+### A counting error worth recording, because it moves a headline number
+
+The handoff reported "254 checked boxes (20%)". The map holds **1470** boxes:
+254 checked, **1216 open — 17%**. The first attempt to count them returned zero
+of each, because `☑` and `☐` are U+2611 and U+2610 and the pattern was mangled
+before it reached `grep`. A count that returns zero for *both* states is not a
+finding about the document; it is a broken instrument, and it should have been
+disbelieved on sight rather than worked around. Percentages quoted in the
+handoff are worth re-deriving rather than inheriting.
