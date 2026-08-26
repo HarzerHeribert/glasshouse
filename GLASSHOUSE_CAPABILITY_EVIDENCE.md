@@ -89,6 +89,24 @@ is a smaller commitment than a second crate on the secret path.
 `security add-generic-password` is not read. Storing it *through* Glasshouse is
 what puts this binary on the item's ACL.
 
+#### CI evidence — and the red run that preceded it
+
+`5b3a4cf` went **red on Linux, Windows and lint** while macOS stayed green.
+`PROBE_ACCOUNT` is read only inside the `#[cfg(target_os = "macos")]` backend
+but was declared outside it, so on every other target it is dead code, which
+`-D warnings` makes fatal. One constant, three red jobs, and a class of defect
+macOS CI structurally cannot catch.
+
+Fixed in `6cb9bf1` by giving the constant the same gate as the module that
+reads it. **CI green on Linux, macOS, Windows and lint** there.
+
+The fix was verified *before* pushing, by flipping every `target_os = "macos"`
+in that file to `"linux"` so this machine compiles the fallback arms instead —
+the same path the other platforms take. `rustup target add
+x86_64-unknown-linux-gnu` was tried first and did not work: the target installs
+but its `core`/`std` did not resolve. The cfg flip needs no toolchain at all and
+is recorded as practice §18.
+
 #### A durability caveat, measured rather than assumed
 
 | what | result |
