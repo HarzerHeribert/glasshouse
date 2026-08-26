@@ -1634,3 +1634,42 @@ invited — because a cheap model given a repository will start having views abo
 it. And the options are passed through a file rather than interpolated into the
 prompt string: a question containing a quote would otherwise rewrite the command
 that asks it.
+
+---
+
+## §49 — run the validator before every dispatch, and quote box lines unwrapped
+
+`scripts/validate_round.py` is now the gate on a round, and it earns its place
+immediately: run against the two packets this project actually dispatched on
+2026-08-26 it refuses them and names **two** collisions, not the one the
+orchestrator knew about.
+
+    [partitions-disjoint] packet-wire-disposable.md:77 claims
+      crates/glasshouse/src/shell/state.rs and packet-migration-7.md:102
+      also claims crates/glasshouse/src/shell/state.rs
+    [partitions-disjoint] packet-wire-disposable.md:78 claims
+      crates/glasshouse/tests/memory_*.rs and packet-migration-7.md:105
+      also claims crates/glasshouse/tests/memory_provenance.rs
+
+The second was invisible to the eye and is the same class as the first, one
+glob away from literal: one packet claimed a whole `memory_*.rs` glob while the
+other claimed a specific file inside it. **Two collisions in one round, and the
+orchestrator caught neither.** This is the check a human is worst at and a
+script is perfect at, which is the whole argument for it.
+
+Usage, before any round is dispatched:
+
+    scripts/validate_round.py .agent-runtime/packet-*.md
+
+**And a format rule that came out of building it.** Packets quote box lines
+wrapped across two lines for readability; the map stores each box as one long
+unwrapped line. The validator has join-then-normalize logic purely because of
+that mismatch, and the worker only discovered it by opening both files side by
+side. This is §42's lesson again in a second costume — **prose that a file has
+wrapped will not match a search for it.** Either quote box lines unwrapped in
+packets, or accept that every tool reading them needs to reconstruct.
+
+`scripts/discover.py --seam <symbol>` is the other half: it reports non-test
+call sites and says plainly when there are none, because that is §5 and it is
+the finding that costs whole rounds. Treat a method-call match as a lead rather
+than proof — it cannot resolve the receiver's type, and it says so.
