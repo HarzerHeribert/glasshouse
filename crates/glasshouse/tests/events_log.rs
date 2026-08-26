@@ -123,6 +123,11 @@ fn every_kind() -> Vec<LifecycleEvent> {
             resource: "glasshouse-gateway".to_owned(),
             reason: GatewayFailure::TimedOut,
         },
+        LifecycleEvent::GatewayBackendChanged {
+            provider: "anthropic".to_owned(),
+            model: "claude-sonnet-5".to_owned(),
+            cause: "failover".to_owned(),
+        },
     ]
 }
 

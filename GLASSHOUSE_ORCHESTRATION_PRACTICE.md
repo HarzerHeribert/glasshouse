@@ -1484,3 +1484,44 @@ files to prove its migration end to end, so it patched them locally, ran the
 full suite green, **reverted them to their exact committed byte content**
 (verified with an empty `git diff`), and reported the patches for the
 orchestrator to land. Verification without ownership, and no residue.
+
+---
+
+## §44 — a packet's hypothesis is an anchor; label it as killable and reward the kill
+
+The `pty-flake` packet named a cause: *on Linux, when the last slave descriptor
+closes, a read on the master can return `EIO`, and buffered output that was
+never read is gone.* It read plausibly, it fitted both symptoms, and **it was
+wrong.**
+
+The worker killed it with 600 trials — 200 at each of three delays, in the same
+container, with the child reaped before the first read — and lost **zero bytes**
+every time. Linux hands the reader everything that was written and *then*
+reports `EIO`.
+
+Then it found the real cause by instrumenting the failing assertion to keep
+looking after it failed: **a pty child's exit becomes observable before its
+output does**, because the exit comes from `waitpid` while the output must be
+copied by a different thread that, beside ~900 siblings, does not always get a
+slice in time. The window is 1.1ms–2.2ms wide and it was captured in situ.
+
+**Why this is worth a section.** A hypothesis in a packet carries the
+orchestrator's authority into work the orchestrator is not doing. A worker that
+takes it as a starting point will spend its batch confirming it, and a
+confirmation obtained by looking only where you were told to look is worth
+nothing. This packet survived that because it said *"Confirm it or kill it
+before fixing anything… if it is something else, say so, with the evidence"*
+and listed five alternatives. That sentence is why the report opens with a dead
+hypothesis instead of a fake confirmation.
+
+**So: state hypotheses, and state them as killable.** Give the reasoning and
+the precedent — they save real time — and then say plainly that the first job
+is to test the hypothesis, not to act on it. A packet that asserts a cause
+without that instruction is a packet that will get its cause back.
+
+**The corollary for reading reports:** when a worker says the packet's premise
+was wrong and shows the trials, that is the single most valuable paragraph in
+the report. It also means the *defect was different from what was budgeted for*
+— here, smaller: Glasshouse never lost a crashed harness's output, it reported
+it as absent when asked inside a two-millisecond window. Re-read the box against
+the real cause before deciding what the fix proved.

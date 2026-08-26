@@ -997,3 +997,65 @@ migration 7.
 3. **The Linux pty flake** (§34/§40) — a bounded wait on the observation, the
    same treatment `integrations/version.rs`'s ETXTBSY race got. It is a standing
    debt on the only gate this project has.
+
+## Batch 24 — three parallel single workers, and the flake that was a real defect
+
+Three workers started together on `81e9c16`, fully disjoint file sets, verified
+by intersecting their `YOURS` lists **after** the round (which is when the
+`shell/state.rs` double-assignment was found — see §43; it did not bite).
+
+| worker | model | boxes | outcome |
+|---|---|---|---|
+| `wire-disposable` | Sonnet, medium | 4 | **4 of 4**, Phase 9I now 13 of 14 |
+| `migration-7` | Sonnet, medium | 0 | migration landed, `seq` proven durable |
+| `pty-flake` | Opus, high | 0 | **the gate's random failures fixed** |
+
+**Two of the three closed no boxes and both were worth more than the one that
+did.** This is the round that tests whether a package has to be scored in
+boxes, and the answer is no: `migration-7` made Phase 9H's line 515 durable and
+proved the hazard nobody had noticed, and `pty-flake` repaired the only gate
+this project has. A box count would have scored this round 4 and missed both.
+
+### The flake, with rates
+
+**8 failures in 17 full-suite Linux runs before; 0 in 20 after.** Twenty runs
+rather than five because a residual 10% rate survives five clean runs 59% of the
+time and twenty only 12% — against a 47% baseline, 20/20 is decisive and 5/5
+would have proved nothing. This is what practice §34's "a flake needs a rate,
+not an anecdote" is for, and it is the first time the project has had one.
+
+**The orchestrator's hypothesis in the packet was wrong**, killed with 600
+trials (§44). The real cause was measured in situ: a pty child's exit is
+observable ~1.1–2.2ms before its output is. **Glasshouse never lost a crashed
+harness's output; it reported it as absent when asked inside that window** — a
+smaller defect than budgeted for, and one the gate could not distinguish from
+the larger one.
+
+A rarer, *different* failure survives at 1 in 37 and is documented with four
+hypotheses ruled out by data and a ranked list of where to look next.
+
+### What this says about worker tier
+
+`pty-flake` was the only Opus worker and it was the right call: the job was
+open-ended debugging with a wrong premise to overturn, 600-trial and 2400-spawn
+control experiments, and a judgement about whether the defect was in the product
+or the test. The two Sonnet workers did precisely specified work precisely, and
+`migration-7`'s handling of three cross-partition conflicts — patch locally,
+verify, **revert to exact committed bytes**, report the patches — is the
+standard for every tier.
+
+**Cost note.** `pty-flake` ran ~37 full workspace suites in Docker. That is real
+wall-clock and real CPU on the user's laptop, and it is why §40 says run the gate
+alone. Budget a flake hunt as a container-hours job, not a code-reading job.
+
+### Open questions for the next round
+
+- The residual `SIGABRT` at 1 in 37 keeps the gate occasionally red. Is a second
+  Opus batch on it worth it, or is the ranked list enough to hand to whoever
+  next sees it fail?
+- Phase 9I's last line (528) needs a feed for token-priced allowances, and the
+  gateway deliberately does not parse the headers that would supply it. Is that
+  a Phase 32 job rather than a 9I one?
+- Two rounds running, the highest-value findings have come from work that closed
+  no box. Should a round deliberately budget one worker for debt rather than
+  boxes?

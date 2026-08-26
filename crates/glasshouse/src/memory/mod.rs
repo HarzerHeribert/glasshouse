@@ -42,7 +42,10 @@ pub mod search;
 pub mod snapshot;
 mod store;
 
-pub use extract::{ExtractionModel, ExtractionOutcome, ExtractionTrigger, Extractor, ModelError};
+pub use extract::{
+    ExtractionModel, ExtractionOutcome, ExtractionTrigger, Extractor, ModelError,
+    disposable::RoutedNoModel,
+};
 pub use policy::{MemoryRefusal, admit};
 pub use store::{
     AuthorityChange, Classifier, Clock, ConflictResolver, DecisionProvenance, MemoryAuthority,

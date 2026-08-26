@@ -1661,6 +1661,9 @@ mod tests {
                 "lifecycle_events.exit_signal",
                 "lifecycle_events.resource",
                 "lifecycle_events.gateway_reason",
+                "lifecycle_events.gateway_provider",
+                "lifecycle_events.gateway_model",
+                "lifecycle_events.gateway_cause",
                 "lifecycle_events.observed_harness",
                 "lifecycle_events.observed_event",
                 "memories.id",
@@ -1846,8 +1849,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 6,
-            "the launch must have applied migrations 3, 4, 5 and 6"
+            version, 7,
+            "the launch must have applied migrations 3, 4, 5, 6 and 7"
         );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
@@ -2033,8 +2036,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 6,
-            "the launch must have applied migrations 2, 3, 4, 5 and 6"
+            version, 7,
+            "the launch must have applied migrations 2, 3, 4, 5, 6 and 7"
         );
 
         let store = SessionStore::new(&reopened).unwrap();

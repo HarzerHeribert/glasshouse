@@ -251,16 +251,28 @@ impl EventLog {
         observed: Option<&Observation>,
     ) -> Result<(), EventLogError> {
         let event = recorded.event();
-        let (turn_outcome, origin, bytes, exit_code, exit_signal, resource, gateway_reason) =
-            payload_columns(event);
+        let (
+            turn_outcome,
+            origin,
+            bytes,
+            exit_code,
+            exit_signal,
+            resource,
+            gateway_reason,
+            gateway_provider,
+            gateway_model,
+            gateway_cause,
+        ) = payload_columns(event);
 
         self.conn
             .execute(
                 "INSERT INTO lifecycle_events (
                      project_id, session_id, at, kind,
                      turn_outcome, origin, bytes, exit_code, exit_signal,
-                     resource, gateway_reason, observed_harness, observed_event
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                     resource, gateway_reason,
+                     gateway_provider, gateway_model, gateway_cause,
+                     observed_harness, observed_event
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 rusqlite::params![
                     &self.project_id,
                     recorded.session().as_str(),
@@ -273,6 +285,9 @@ impl EventLog {
                     exit_signal,
                     resource,
                     gateway_reason,
+                    gateway_provider,
+                    gateway_model,
+                    gateway_cause,
                     observed.map(|o| o.harness.as_str()),
                     observed.map(|o| o.event.as_str()),
                 ],
@@ -435,6 +450,7 @@ impl EventLog {
 
 const ALL_COLUMNS: &str = "seq, session_id, at, kind, turn_outcome, origin, bytes, \
                            exit_code, exit_signal, resource, gateway_reason, \
+                           gateway_provider, gateway_model, gateway_cause, \
                            observed_harness, observed_event";
 
 /// One event's variant payload, spread across the columns that hold it.
@@ -452,10 +468,13 @@ type PayloadColumns = (
     Option<String>,
     Option<String>,
     Option<&'static str>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
 );
 
 fn payload_columns(event: &LifecycleEvent) -> PayloadColumns {
-    let mut columns: PayloadColumns = (None, None, None, None, None, None, None);
+    let mut columns: PayloadColumns = (None, None, None, None, None, None, None, None, None, None);
     match event {
         LifecycleEvent::TurnEnded { outcome } => columns.0 = Some(outcome_sql(*outcome)),
         LifecycleEvent::TextDelivered { origin, bytes } => {
@@ -470,6 +489,15 @@ fn payload_columns(event: &LifecycleEvent) -> PayloadColumns {
         LifecycleEvent::GatewayUnhealthy { resource, reason } => {
             columns.5 = Some(resource.clone());
             columns.6 = Some(gateway_reason_sql(*reason));
+        }
+        LifecycleEvent::GatewayBackendChanged {
+            provider,
+            model,
+            cause,
+        } => {
+            columns.7 = Some(provider.clone());
+            columns.8 = Some(model.clone());
+            columns.9 = Some(cause.clone());
         }
         LifecycleEvent::SessionStarted
         | LifecycleEvent::SessionResumed
@@ -556,8 +584,11 @@ fn read_row(row: &rusqlite::Row<'_>) -> Result<LoggedEvent, EventLogError> {
     let exit_signal: Option<String> = row.get_unwrap(8);
     let resource: Option<String> = row.get_unwrap(9);
     let gateway_reason: Option<String> = row.get_unwrap(10);
-    let observed_harness: Option<String> = row.get_unwrap(11);
-    let observed_event: Option<String> = row.get_unwrap(12);
+    let gateway_provider: Option<String> = row.get_unwrap(11);
+    let gateway_model: Option<String> = row.get_unwrap(12);
+    let gateway_cause: Option<String> = row.get_unwrap(13);
+    let observed_harness: Option<String> = row.get_unwrap(14);
+    let observed_event: Option<String> = row.get_unwrap(15);
 
     let missing = |column: &'static str| EventLogError::MissingValue {
         seq,
@@ -609,6 +640,11 @@ fn read_row(row: &rusqlite::Row<'_>) -> Result<LoggedEvent, EventLogError> {
                     .ok_or_else(|| unknown("gateway_reason", stored.clone()))?,
             }
         }
+        "gateway_backend_changed" => LifecycleEvent::GatewayBackendChanged {
+            provider: gateway_provider.ok_or_else(|| missing("gateway_provider"))?,
+            model: gateway_model.ok_or_else(|| missing("gateway_model"))?,
+            cause: gateway_cause.ok_or_else(|| missing("gateway_cause"))?,
+        },
         // Named separately from the payload columns because the answer a
         // reader needs is different: an unknown *kind* is a row written by a
         // build that models something this one does not, and the useful thing
@@ -824,7 +860,8 @@ mod tests {
     #[test]
     fn each_kind_fills_exactly_its_own_columns() {
         let filled = |event: &LifecycleEvent| {
-            let (outcome, origin, bytes, code, signal, resource, reason) = payload_columns(event);
+            let (outcome, origin, bytes, code, signal, resource, reason, provider, model, cause) =
+                payload_columns(event);
             (
                 outcome.is_some(),
                 origin.is_some(),
@@ -833,44 +870,69 @@ mod tests {
                 signal.is_some(),
                 resource.is_some(),
                 reason.is_some(),
+                provider.is_some(),
+                model.is_some(),
+                cause.is_some(),
             )
         };
 
         assert_eq!(
             filled(&LifecycleEvent::SessionStarted),
-            (false, false, false, false, false, false, false)
+            (
+                false, false, false, false, false, false, false, false, false, false
+            )
         );
         assert_eq!(
             filled(&LifecycleEvent::TurnEnded {
                 outcome: TurnOutcome::Failed
             }),
-            (true, false, false, false, false, false, false)
+            (
+                true, false, false, false, false, false, false, false, false, false
+            )
         );
         assert_eq!(
             filled(&LifecycleEvent::TextDelivered {
                 origin: MessageOrigin::Machine,
                 bytes: 7
             }),
-            (false, true, true, false, false, false, false)
+            (
+                false, true, true, false, false, false, false, false, false, false
+            )
         );
         assert_eq!(
             filled(&LifecycleEvent::InterruptDelivered {
                 origin: MessageOrigin::UserKeystroke
             }),
-            (false, true, false, false, false, false, false)
+            (
+                false, true, false, false, false, false, false, false, false, false
+            )
         );
         assert_eq!(
             filled(&LifecycleEvent::ProcessExited {
                 exit: ProcessExit::from_parts(0, None)
             }),
-            (false, false, false, true, false, false, false)
+            (
+                false, false, false, true, false, false, false, false, false, false
+            )
         );
         assert_eq!(
             filled(&LifecycleEvent::GatewayUnhealthy {
                 resource: "gw".to_owned(),
                 reason: GatewayFailure::Rejected
             }),
-            (false, false, false, false, false, true, true)
+            (
+                false, false, false, false, false, true, true, false, false, false
+            )
+        );
+        assert_eq!(
+            filled(&LifecycleEvent::GatewayBackendChanged {
+                provider: "anthropic".to_owned(),
+                model: "claude".to_owned(),
+                cause: "failover".to_owned(),
+            }),
+            (
+                false, false, false, false, false, false, false, true, true, true
+            )
         );
     }
 
@@ -907,6 +969,12 @@ mod tests {
             LifecycleEvent::GatewayUnhealthy {
                 resource: String::new(),
                 reason: GatewayFailure::Rejected,
+            }
+            .kind(),
+            LifecycleEvent::GatewayBackendChanged {
+                provider: String::new(),
+                model: String::new(),
+                cause: String::new(),
             }
             .kind(),
         ];
@@ -1006,7 +1074,8 @@ mod tests {
                  seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, at INTEGER,
                  kind TEXT, turn_outcome TEXT, origin TEXT, bytes INTEGER,
                  exit_code INTEGER, exit_signal TEXT, resource TEXT,
-                 gateway_reason TEXT, observed_harness TEXT, observed_event TEXT);
+                 gateway_reason TEXT, gateway_provider TEXT, gateway_model TEXT,
+                 gateway_cause TEXT, observed_harness TEXT, observed_event TEXT);
              INSERT INTO lifecycle_events (session_id, at, kind)
              VALUES ('s', 1, 'turn_ended');",
         )
@@ -1042,7 +1111,8 @@ mod tests {
                  seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, at INTEGER,
                  kind TEXT, turn_outcome TEXT, origin TEXT, bytes INTEGER,
                  exit_code INTEGER, exit_signal TEXT, resource TEXT,
-                 gateway_reason TEXT, observed_harness TEXT, observed_event TEXT);
+                 gateway_reason TEXT, gateway_provider TEXT, gateway_model TEXT,
+                 gateway_cause TEXT, observed_harness TEXT, observed_event TEXT);
              INSERT INTO lifecycle_events (session_id, at, kind, observed_harness)
              VALUES ('s', 1, 'turn_started', 'some-harness');",
         )

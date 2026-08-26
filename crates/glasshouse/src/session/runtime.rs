@@ -24,8 +24,8 @@
 
 use std::collections::VecDeque;
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -43,6 +43,76 @@ pub const DEFAULT_SCROLLBACK_BYTES: usize = 256 * 1024;
 
 /// Size of one read from a pseudo-terminal.
 const READ_CHUNK: usize = 8 * 1024;
+
+/// How long [`SessionRuntime::crash_report`] will wait for a dead session's
+/// reader thread to finish before reporting what it has.
+///
+/// A ceiling, not a delay: the wait ends the instant the reader says it is
+/// done, which is the ordinary case and costs nothing measurable — the gap
+/// it closes was measured at 1.1ms to 2.2ms under the full workspace suite
+/// on Linux.
+///
+/// Deliberately the same 250ms `session::attach` allows its own output pump
+/// after a harness exits, and for the same two reasons. Waiting is necessary
+/// because a process's death outruns its last words; the *bound* is
+/// necessary because on Windows no end-of-file ever arrives while the pty is
+/// open, so there is nothing else to end the wait — a session whose output
+/// simply never ends would otherwise hang whoever asked about it. See
+/// [`SessionRuntime::crash_report`].
+const OUTPUT_DRAIN_WAIT: Duration = Duration::from_millis(250);
+
+/// "The pseudo-terminal has nothing more to give", and a way to wait for it.
+///
+/// A plain flag would be enough to *ask*; this exists to be *waited on*. The
+/// only thread that knows a session's output has finished is its reader, and
+/// the only way another thread can learn it promptly — rather than by
+/// sleeping and looking again, which is a guess wearing a number — is to be
+/// woken. See [`SessionRuntime::crash_report`], the one caller that waits.
+#[derive(Default)]
+struct OutputEnd {
+    ended: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl OutputEnd {
+    fn ended(&self) -> bool {
+        match self.ended.lock() {
+            Ok(ended) => *ended,
+            // A panic elsewhere must not make this unanswerable: the flag is
+            // a `bool` and cannot be left half-written, so the poisoned value
+            // is the real one.
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+
+    /// Called by the reader thread, once, when the pseudo-terminal is done.
+    fn finish(&self) {
+        match self.ended.lock() {
+            Ok(mut ended) => *ended = true,
+            Err(poisoned) => *poisoned.into_inner() = true,
+        }
+        self.changed.notify_all();
+    }
+
+    /// Block until the reader is done or `timeout` elapses; report which.
+    ///
+    /// A reader that panicked will never notify, so the timeout is what makes
+    /// this safe to call at all rather than a nicety.
+    fn wait_until_ended(&self, timeout: Duration) -> bool {
+        let Ok(ended) = self.ended.lock() else {
+            // The reader thread is gone. Nothing will ever notify, so waiting
+            // would only spend the whole timeout to learn that.
+            return false;
+        };
+        match self
+            .changed
+            .wait_timeout_while(ended, timeout, |ended| !*ended)
+        {
+            Ok((ended, _)) => *ended,
+            Err(poisoned) => *poisoned.into_inner().0,
+        }
+    }
+}
 
 /// A bounded record of what a session has printed.
 ///
@@ -239,8 +309,10 @@ pub struct LiveSession {
     pending_queries: Arc<Mutex<Vec<TerminalQuery>>>,
     /// Set by the reader thread when the pseudo-terminal reports end-of-file.
     /// Distinct from the process having exited: output can end first, and a
-    /// process can exit while output is still buffered.
-    output_ended: Arc<AtomicBool>,
+    /// process can exit while output is still buffered — which is not a
+    /// remark, it is the race [`SessionRuntime::crash_report`] exists to
+    /// close.
+    output_ended: Arc<OutputEnd>,
     presentation: SessionPresentation,
     exit: Option<ExitStatus>,
 }
@@ -305,7 +377,7 @@ impl LiveSession {
 
     /// True once the pseudo-terminal has no more output to give.
     pub fn output_ended(&self) -> bool {
-        self.output_ended.load(Ordering::SeqCst)
+        self.output_ended.ended()
     }
 
     pub fn process_id(&self) -> Option<u32> {
@@ -424,7 +496,7 @@ impl SessionRuntime {
     ) -> Result<&LiveSession> {
         let (process, output) = launch.spawn()?;
         let scrollback = Arc::new(Mutex::new(Scrollback::new(self.scrollback_bytes)));
-        let output_ended = Arc::new(AtomicBool::new(false));
+        let output_ended = Arc::new(OutputEnd::default());
         // Read back from the process rather than from the launch: this is the
         // size the pseudo-terminal actually got, which is what the harness will
         // be drawing for.
@@ -804,11 +876,52 @@ impl SessionRuntime {
     /// that Glasshouse closed itself: [`SessionRuntime::close`] removes the
     /// session before it signals, so a deliberate kill is never reported as a
     /// crash.
+    ///
+    /// # Why this waits
+    ///
+    /// **A process's exit becomes observable before its last output does.**
+    /// The exit comes from `waitpid`; the output has to travel through the
+    /// pseudo-terminal and be copied into the scrollback by this session's
+    /// reader thread, which is a *different* thread that may not have run
+    /// yet. Asking `poll_exits` and then reading the scrollback in the same
+    /// breath therefore reports a crashed worker as having said nothing —
+    /// which is what the Linux gate had been failing on at random for weeks
+    /// (`GLASSHOUSE_ORCHESTRATION_PRACTICE.md` §34), and which reproduced at
+    /// 8 runs in 17 beside the full workspace suite.
+    ///
+    /// `session::attach` — the other shape a harness runs in — has always
+    /// done this, and says so in `OUTPUT_DRAIN_GRACE`. This path is the one
+    /// that had not learned it.
+    ///
+    /// Nothing is ever lost when that happens: the bytes are in the kernel's
+    /// pty buffer and arrive about two milliseconds later. Linux hands a
+    /// reader everything that was written before it reports `EIO`, and a
+    /// probe of 200 trials per timing confirmed it never drops a byte, even
+    /// when the child is reaped before the first read. So this is not data
+    /// loss — it is a post-mortem written before the body stopped talking,
+    /// and the fix is to let it finish.
+    ///
+    /// # Why the wait is bounded
+    ///
+    /// Output is not guaranteed to end at all. A harness that crashed after
+    /// starting something of its own leaves that grandchild holding the pty
+    /// slave open, and the reader will sit there for as long as it lives —
+    /// see [`crate::pty::PtyOutput`], which records the same lifetime rule
+    /// from the other side. An unbounded wait here would hang a caller on
+    /// exactly the crash it most needs reporting, so the report is produced
+    /// either way and the ceiling is 250ms — the same grace `session::attach`
+    /// allows its own pump.
     pub fn crash_report(&self, id: &SessionId) -> Option<CrashReport> {
         let session = self.get(id)?;
         let exit = ProcessExit::from_status(session.exit()?);
         if !exit.is_crash() {
             return None;
+        }
+        if !session.output_ended.wait_until_ended(OUTPUT_DRAIN_WAIT) {
+            tracing::debug!(
+                session = %id,
+                "reporting a crash before its output ended; something still holds the terminal"
+            );
         }
         Some(CrashReport {
             session: id.clone(),
@@ -853,7 +966,7 @@ fn pump(
     scrollback: &Mutex<Scrollback>,
     screen: &Mutex<vt100::Parser>,
     pending_queries: &Mutex<Vec<TerminalQuery>>,
-    ended: &AtomicBool,
+    ended: &OutputEnd,
     events: &EventBus,
     session: &SessionId,
 ) {
@@ -894,7 +1007,7 @@ fn pump(
             }
         }
     }
-    ended.store(true, Ordering::SeqCst);
+    ended.finish();
     // A statement about a file descriptor, and nothing more. Publishing it as
     // its own event — rather than folding it into an exit, or letting a
     // consumer time the silence — is what keeps "the output stopped" from
@@ -909,6 +1022,66 @@ fn short(id: &SessionId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wait `crash_report` depends on costs nothing when there is
+    /// nothing to wait for, which is the ordinary case and the one that must
+    /// not slow a caller down.
+    #[test]
+    fn waiting_on_output_that_has_already_ended_returns_at_once() {
+        let end = OutputEnd::default();
+        end.finish();
+
+        let started = std::time::Instant::now();
+        assert!(end.wait_until_ended(Duration::from_secs(30)));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "an already-finished reader must not be waited for: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Output is not guaranteed to end: a crashed harness can leave something
+    /// of its own holding the pseudo-terminal open. The bound is what keeps
+    /// that from hanging whoever asked for the crash report.
+    #[test]
+    fn waiting_on_output_that_never_ends_gives_up_rather_than_hanging() {
+        let end = OutputEnd::default();
+
+        let started = std::time::Instant::now();
+        assert!(!end.wait_until_ended(Duration::from_millis(50)));
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "it gave up before the bound: {:?}",
+            started.elapsed()
+        );
+        assert!(!end.ended());
+    }
+
+    /// And the wait really is a wait, not a sleep of the full bound: a
+    /// reader finishing wakes it. Asserting only the returned `true` would
+    /// pass just as well against a timeout, which is the whole thing this
+    /// distinguishes.
+    #[test]
+    fn a_waiter_is_woken_by_the_reader_finishing_rather_than_by_the_bound() {
+        const BOUND: Duration = Duration::from_secs(30);
+        let end = Arc::new(OutputEnd::default());
+
+        let reader = Arc::clone(&end);
+        let finishing = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            reader.finish();
+        });
+
+        let started = std::time::Instant::now();
+        assert!(end.wait_until_ended(BOUND));
+        let waited = started.elapsed();
+        finishing.join().expect("the finishing thread");
+
+        assert!(
+            waited < BOUND / 2,
+            "the bound elapsed instead of the reader waking it: {waited:?}"
+        );
+    }
 
     #[test]
     fn scrollback_keeps_everything_within_its_bound() {

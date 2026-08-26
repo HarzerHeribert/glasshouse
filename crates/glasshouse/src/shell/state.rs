@@ -324,6 +324,11 @@ pub(crate) fn describe_event(event: &LifecycleEvent) -> String {
         LifecycleEvent::GatewayUnhealthy { resource, reason } => {
             format!("{resource} gateway {reason}")
         }
+        LifecycleEvent::GatewayBackendChanged {
+            provider,
+            model,
+            cause,
+        } => format!("gateway backend changed to {provider}/{model} ({cause})"),
     }
 }
 
@@ -6185,6 +6190,11 @@ mod activity_tests {
             LifecycleEvent::GatewayUnhealthy {
                 resource: "db".to_owned(),
                 reason: GatewayFailure::Unreachable,
+            },
+            LifecycleEvent::GatewayBackendChanged {
+                provider: "anthropic".to_owned(),
+                model: "claude".to_owned(),
+                cause: "failover".to_owned(),
             },
         ]
     }

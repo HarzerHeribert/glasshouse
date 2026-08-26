@@ -527,9 +527,9 @@ Fixed architectural requirements
 ☑ Allow provider instances to mark selected models as free-tier or zero-marginal-cost resources.
 ☐ Track request-pool limits separately from token-priced limits when a provider exposes request quotas.
 ☑ Track per-model free-tier health independently when a router exposes multiple free models.
-☐ Prefer free models for bounded Glasshouse support work such as classification, memory extraction, and reranking when quality is sufficient.
-☐ Allow explicitly configured free models such as Nemotron variants to participate in disposable-job routing.
-☐ Allow compatible free models to back full harness launch profiles only when protocol and tool behavior are adequate for that harness.
+☑ Prefer free models for bounded Glasshouse support work such as classification, memory extraction, and reranking when quality is sufficient.
+☑ Allow explicitly configured free models such as Nemotron variants to participate in disposable-job routing.
+☑ Allow compatible free models to back full harness launch profiles only when protocol and tool behavior are adequate for that harness.
 ☑ Keep interactive harness routing and disposable-support-job routing as separate policy classes.
 ☑ Avoid consuming scarce free requests on health probes when actual workload can provide health signals.
 ☑ Apply cooldowns to free models or providers that repeatedly return rate-limit or capacity failures.
@@ -537,7 +537,7 @@ Fixed architectural requirements
 ☑ Rotate among a provider's configured credentials when one is rate-limited or exhausted, and treat a single key's exhaustion as that key's limit rather than the provider's.
 ☑ Track request-pool and quota state per credential rather than only per provider, because two keys for the same router are two separate allowances.
 ☑ Allow Glasshouse's own automated evaluation and test runs to use configured zero-cost models, and never a metered resource without an explicit opt-in.
-☐ Show whether a free resource is being used because of user preference, quota preservation, or fallback.
+☑ Show whether a free resource is being used because of user preference, quota preservation, or fallback.
 
 Phase 9J — Harness-model pairing model
 

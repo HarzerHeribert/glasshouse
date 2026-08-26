@@ -700,7 +700,10 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(version, 6, "the launch must have applied migration 6");
+    assert_eq!(
+        version, 7,
+        "the launch must have applied migrations 6 and 7"
+    );
     drop(conn);
 
     let reopened = ProjectMemory::open(&migrated).unwrap();
@@ -722,5 +725,227 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
     assert_eq!(
         hits[0].id, pre_existing.id,
         "the pre-existing memory must still be findable by search after migration"
+    );
+}
+
+// -------------------------------------------------------------------------
+// Migration 7: `lifecycle_events.seq` must survive the rebuild that admits
+// `gateway_backend_changed`.
+// -------------------------------------------------------------------------
+
+/// `lifecycle_events.seq` is `INTEGER PRIMARY KEY AUTOINCREMENT`, and
+/// migration 6 made `memories.source_event_first` / `source_event_last`
+/// reference it. Migration 7 rebuilds `lifecycle_events` (SQLite cannot add
+/// a `CHECK` value) to admit `gateway_backend_changed`, and a rebuild that
+/// let `seq` renumber would silently re-point every extracted memory's
+/// provenance at the wrong events — nothing would fail, the data would just
+/// be wrong.
+///
+/// This records five real events through the bus and the log, takes a
+/// memory's provenance range over the middle three, rolls the database back
+/// to the version-6 shape migration 7 will see, then reopens through an
+/// ordinary bootstrap so migration 7 actually runs. The `seq` values and the
+/// *content* of the events they name must be identical afterwards.
+///
+/// This test was written and watched fail against a version of migration 7
+/// that let the rebuilt table's own `AUTOINCREMENT` assign fresh `seq`
+/// values instead of copying the old ones — see the packet's evidence
+/// standard. With the fix (copying `seq` explicitly, in
+/// `crates/glasshouse/src/database.rs`'s migration 7), it passes.
+#[test]
+fn a_memorys_provenance_survives_the_seq_rebuild() {
+    use glasshouse::events::{EventBus, EventLog, LifecycleEvent, MessageOrigin, TurnOutcome};
+    use glasshouse::session::SessionId;
+
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let bus = EventBus::new();
+    let log = EventLog::open(&fixture.runtime).unwrap();
+    let session = SessionId::new("s-1");
+
+    let five_events = [
+        LifecycleEvent::SessionStarted,
+        LifecycleEvent::TurnStarted,
+        LifecycleEvent::TextDelivered {
+            origin: MessageOrigin::Machine,
+            bytes: 10,
+        },
+        LifecycleEvent::TurnEnded {
+            outcome: TurnOutcome::Completed,
+        },
+        LifecycleEvent::OutputEnded,
+    ];
+    for event in five_events {
+        let recorded = bus.publish(&session, event);
+        log.append(&recorded, None).unwrap();
+    }
+
+    let logged_before = log.for_session(&session).unwrap();
+    assert_eq!(logged_before.len(), 5);
+    // The middle three: TurnStarted, TextDelivered, TurnEnded.
+    let first_seq = logged_before[1].seq;
+    let last_seq = logged_before[3].seq;
+    let named_before: Vec<LifecycleEvent> = logged_before[1..=3]
+        .iter()
+        .map(|logged| logged.event.clone())
+        .collect();
+
+    let memory = fixture.memory();
+    let store = memory.store();
+    let range = SourceEvents::new(first_seq, last_seq).unwrap();
+    let recorded_memory = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Decision,
+                "a decision extracted from the middle three events",
+            )
+            .with_source_events(Some(range)),
+        )
+        .unwrap();
+    assert_eq!(recorded_memory.source_events, Some(range));
+    drop(store);
+    drop(memory);
+
+    // Roll `lifecycle_events` back to the version-6 shape: no
+    // `gateway_backend_changed` kind, none of migration 7's three new
+    // columns. This is what migration 7 will see when it runs below.
+    let db_path = fixture.runtime.database_path();
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "DROP INDEX lifecycle_events_by_session;
+             DROP TRIGGER lifecycle_events_reject_foreign_project_insert;
+             DROP TRIGGER lifecycle_events_are_append_only_update;
+             DROP TRIGGER lifecycle_events_are_append_only_delete;
+
+             CREATE TABLE lifecycle_events_v6 (
+                 seq              INTEGER PRIMARY KEY AUTOINCREMENT,
+                 project_id       TEXT    NOT NULL,
+                 session_id       TEXT    NOT NULL,
+                 at               INTEGER NOT NULL,
+                 kind             TEXT    NOT NULL
+                     CHECK (kind IN ('session_started', 'session_resumed',
+                                     'turn_started', 'turn_ended',
+                                     'waiting_for_user', 'text_delivered',
+                                     'interrupt_delivered', 'process_exited',
+                                     'output_ended', 'gateway_unhealthy')),
+                 turn_outcome     TEXT
+                     CHECK (turn_outcome IS NULL OR
+                            turn_outcome IN ('completed', 'failed')),
+                 origin           TEXT
+                     CHECK (origin IS NULL OR
+                            origin IN ('user_keystroke', 'machine')),
+                 bytes            INTEGER,
+                 exit_code        INTEGER,
+                 exit_signal      TEXT,
+                 resource         TEXT,
+                 gateway_reason   TEXT
+                     CHECK (gateway_reason IS NULL OR
+                            gateway_reason IN ('unreachable', 'timed_out', 'rejected')),
+                 observed_harness TEXT,
+                 observed_event   TEXT,
+                 CHECK ((observed_harness IS NULL) = (observed_event IS NULL))
+             );
+
+             INSERT INTO lifecycle_events_v6 (
+                 seq, project_id, session_id, at, kind,
+                 turn_outcome, origin, bytes, exit_code, exit_signal,
+                 resource, gateway_reason, observed_harness, observed_event
+             )
+             SELECT
+                 seq, project_id, session_id, at, kind,
+                 turn_outcome, origin, bytes, exit_code, exit_signal,
+                 resource, gateway_reason, observed_harness, observed_event
+             FROM lifecycle_events;
+
+             DROP TABLE lifecycle_events;
+             ALTER TABLE lifecycle_events_v6 RENAME TO lifecycle_events;
+
+             CREATE INDEX lifecycle_events_by_session
+                 ON lifecycle_events (session_id, seq);
+
+             CREATE TRIGGER lifecycle_events_reject_foreign_project_insert
+             BEFORE INSERT ON lifecycle_events
+             FOR EACH ROW
+             WHEN NEW.project_id IS NOT (
+                 SELECT value FROM project_metadata WHERE key = 'project_id'
+             )
+             BEGIN
+                 SELECT RAISE(ABORT, 'event belongs to a different project');
+             END;
+
+             CREATE TRIGGER lifecycle_events_are_append_only_update
+             BEFORE UPDATE ON lifecycle_events
+             FOR EACH ROW
+             BEGIN
+                 SELECT RAISE(ABORT, 'the project event log is append-only');
+             END;
+
+             CREATE TRIGGER lifecycle_events_are_append_only_delete
+             BEFORE DELETE ON lifecycle_events
+             FOR EACH ROW
+             BEGIN
+                 SELECT RAISE(ABORT, 'the project event log is append-only');
+             END;
+
+             DELETE FROM schema_migrations WHERE version >= 7;",
+        )
+        .unwrap();
+
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 6, "the rollback must land on version 6");
+    }
+
+    // An ordinary bootstrap: migration 7 runs as part of it.
+    let cli = Cli::try_parse_from([
+        "glasshouse",
+        "--data-dir",
+        tmp.path().join("data").to_str().unwrap(),
+        "--config-dir",
+        tmp.path().join("config").to_str().unwrap(),
+    ])
+    .unwrap();
+    let migrated = glasshouse::bootstrap(&cli, fixture.runtime.project().root()).unwrap();
+
+    let conn = rusqlite::Connection::open(migrated.database_path()).unwrap();
+    let version: i64 = conn
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(version, 7, "the launch must have applied migration 7");
+    drop(conn);
+
+    // The memory's own range is untouched by the migration...
+    let reopened = ProjectMemory::open(&migrated).unwrap();
+    let store = reopened.store();
+    let intact = store
+        .get(&recorded_memory.id)
+        .unwrap()
+        .expect("the memory must survive the migration");
+    assert_eq!(
+        intact.source_events,
+        Some(range),
+        "migration 7 must not renumber the range a memory's provenance names"
+    );
+
+    // ...and the events that range names are still the same events, by
+    // content, not merely by an unchanged pair of integers.
+    let log_after = EventLog::open(&migrated).unwrap();
+    let logged_after = log_after.for_session(&session).unwrap();
+    assert_eq!(logged_after.len(), 5);
+    let named_after: Vec<LifecycleEvent> = logged_after[1..=3]
+        .iter()
+        .map(|logged| logged.event.clone())
+        .collect();
+    assert_eq!(
+        named_after, named_before,
+        "the seq range must still name the same events after the rebuild, \
+         not merely the same count of them"
     );
 }

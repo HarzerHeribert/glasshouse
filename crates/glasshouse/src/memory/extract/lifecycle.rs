@@ -83,6 +83,11 @@ pub fn describe(event: &LoggedEvent) -> String {
         LifecycleEvent::GatewayUnhealthy { resource, reason } => {
             format!("the backend resource `{resource}` stopped serving: {reason}")
         }
+        LifecycleEvent::GatewayBackendChanged {
+            provider,
+            model,
+            cause,
+        } => format!("the gateway backend changed to {provider}/{model} ({cause})"),
     };
 
     match &event.observed {

@@ -1038,9 +1038,19 @@ fn apply_gateway(
 /// [`Upstream`]. Unlike [`resolve`]'s direct-provider path they do not end at
 /// a child process: they stay in this process for the gateway's lifetime,
 /// which is the entire point of holding them here instead.
+/// `free` answers, by provider name, whether that provider has at least one
+/// model the user has marked free-tier — Phase 9I line 527's marking,
+/// reaching this path per line 532. `crate::profile` may not import
+/// `crate::config`, where that marking actually lives, so the caller passes
+/// the answer in rather than this function looking it up; `main.rs`'s own
+/// wrapper is where `ProviderConfig::free_models` and this closure meet. A
+/// provider `free` was never asked about — because a caller has nothing to
+/// mark, not because it is somehow known metered — answers `false`, which is
+/// [`Cost::Metered`]'s own fail-closed default carried one level up.
 pub fn gateway_upstream(
     providers: &[Provider],
     secrets: &dyn SecretStore,
+    free: &dyn Fn(&str) -> bool,
 ) -> Result<Upstream, GatewayUpstreamRefusal> {
     // This is the routing constraint before any selection. Its result has a
     // distinct type so a future model-quality scorer can only be handed
@@ -1076,13 +1086,14 @@ pub fn gateway_upstream(
                 gateway_routes(provider),
                 credential,
                 CredentialId::new(provider.name.clone(), reference),
-                // Nobody has marked anything free on this path yet: the
-                // free-tier marking of Phase 9I line 527 lives in
-                // `crate::config`'s provider entry, and reaches routing through
-                // the disposable-job path rather than through the gateway's
-                // interactive one. `Cost::Metered` is the fail-closed default
-                // and this is where a marking would arrive.
-                Cost::Metered,
+                // Phase 9I line 527's marking, handed in by the caller — see
+                // this function's own doc comment for why it arrives as a
+                // closure rather than a lookup made here.
+                if free(&provider.name) {
+                    Cost::Free
+                } else {
+                    Cost::Metered
+                },
             )?);
         }
     }
@@ -2434,7 +2445,7 @@ mod tests {
         );
         anthropic.credential_env = vec![CREDENTIAL_VAR.to_owned()];
 
-        let upstream = gateway_upstream(std::slice::from_ref(&anthropic), &secrets)
+        let upstream = gateway_upstream(std::slice::from_ref(&anthropic), &secrets, &|_| false)
             .expect("exactly one provider serves the ingress");
         let rendered = format!("{upstream:?}");
         assert!(rendered.contains("openrouter"), "{rendered}");
@@ -2450,8 +2461,9 @@ mod tests {
         let mut chat_only =
             provider_serving("chat", WireProtocol::OpenAiChat, "https://a.example/v1");
         chat_only.credential_env = vec![CREDENTIAL_VAR.to_owned()];
-        let chat_upstream = gateway_upstream(std::slice::from_ref(&chat_only), &secrets)
-            .expect("a provider serving one ingress protocol backs the gateway");
+        let chat_upstream =
+            gateway_upstream(std::slice::from_ref(&chat_only), &secrets, &|_| false)
+                .expect("a provider serving one ingress protocol backs the gateway");
         assert_eq!(chat_upstream.served_protocols(), vec!["openai-chat"]);
 
         // Nothing serving the ingress at all: a provider that serves none of
@@ -2463,11 +2475,11 @@ mod tests {
             "",
         );
         assert!(matches!(
-            gateway_upstream(std::slice::from_ref(&none), &secrets),
+            gateway_upstream(std::slice::from_ref(&none), &secrets, &|_| false),
             Err(GatewayUpstreamRefusal::NoProviderServesTheIngress { .. })
         ));
         assert!(matches!(
-            gateway_upstream(&[], &secrets),
+            gateway_upstream(&[], &secrets, &|_| false),
             Err(GatewayUpstreamRefusal::NoProviderServesTheIngress { .. })
         ));
 
@@ -2477,7 +2489,7 @@ mod tests {
         let mut no_url = provider_serving("no-url", WireProtocol::AnthropicMessages, "");
         no_url.credential_env = vec![CREDENTIAL_VAR.to_owned()];
         assert!(matches!(
-            gateway_upstream(&[no_url], &secrets),
+            gateway_upstream(&[no_url], &secrets, &|_| false),
             Err(GatewayUpstreamRefusal::NoProviderServesTheIngress { .. })
         ));
 
@@ -2491,7 +2503,7 @@ mod tests {
             "https://another.example/api",
         );
         second.credential_env = vec![CREDENTIAL_VAR.to_owned()];
-        let several = gateway_upstream(&[anthropic.clone(), second], &secrets)
+        let several = gateway_upstream(&[anthropic.clone(), second], &secrets, &|_| false)
             .expect("two protocol-compatible providers is an assignment, not a collision");
         assert_eq!(
             several.backends()[0].credential_id().provider(),
@@ -2512,12 +2524,49 @@ mod tests {
         // rather than launched without one — the gateway would otherwise
         // forward requests with an empty bearer token and the user would see
         // the provider's own 401.
-        match gateway_upstream(&[anthropic], &FakeSecrets::empty()) {
+        match gateway_upstream(&[anthropic], &FakeSecrets::empty(), &|_| false) {
             Err(GatewayUpstreamRefusal::CredentialUnavailable { variables, .. }) => {
                 assert_eq!(variables, vec![CREDENTIAL_VAR.to_owned()]);
             }
             other => panic!("expected CredentialUnavailable, got {other:?}"),
         }
+    }
+
+    /// Phase 9I line 532: a provider the caller's `free` closure names is a
+    /// `Cost::Free` backend; one it does not is still the fail-closed
+    /// `Cost::Metered` default. Two providers in one call, so the closure is
+    /// proven to answer per provider rather than for the whole launch.
+    #[test]
+    fn a_provider_the_caller_marks_free_backs_the_gateway_at_no_cost() {
+        let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
+
+        let mut free_provider = provider_serving(
+            "openrouter",
+            WireProtocol::AnthropicMessages,
+            "https://openrouter.ai/api",
+        );
+        free_provider.credential_env = vec![CREDENTIAL_VAR.to_owned()];
+        let mut metered_provider = provider_serving(
+            "another-router",
+            WireProtocol::AnthropicMessages,
+            "https://another.example/api",
+        );
+        metered_provider.credential_env = vec![CREDENTIAL_VAR.to_owned()];
+
+        let upstream = gateway_upstream(&[free_provider, metered_provider], &secrets, &|name| {
+            name == "openrouter"
+        })
+        .expect("two protocol-compatible providers is an assignment, not a collision");
+
+        let rendered = format!("{upstream:?}");
+        assert!(
+            rendered.contains("cost: \"free\""),
+            "the provider the closure marked free must back the gateway at no cost: {rendered}"
+        );
+        assert!(
+            rendered.contains("cost: \"metered\""),
+            "the provider the closure did not mark must stay the fail-closed default: {rendered}"
+        );
     }
 
     #[test]
@@ -2533,6 +2582,7 @@ mod tests {
                 declares_responses_without_a_destination,
             ],
             &FakeSecrets::empty(),
+            &|_| false,
         )
         .expect_err("no provider can route any protocol the gateway requires");
         let rendered = refusal.to_string();
@@ -2574,9 +2624,9 @@ mod tests {
         unusable.credential_env = vec![CREDENTIAL_VAR.to_owned()];
 
         let refusals = vec![
-            gateway_upstream(&[], &secrets).unwrap_err(),
-            gateway_upstream(&[anthropic], &FakeSecrets::empty()).unwrap_err(),
-            gateway_upstream(&[unusable], &secrets).unwrap_err(),
+            gateway_upstream(&[], &secrets, &|_| false).unwrap_err(),
+            gateway_upstream(&[anthropic], &FakeSecrets::empty(), &|_| false).unwrap_err(),
+            gateway_upstream(&[unusable], &secrets, &|_| false).unwrap_err(),
         ];
 
         let mut seen = std::collections::BTreeSet::new();

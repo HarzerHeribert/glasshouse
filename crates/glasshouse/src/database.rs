@@ -51,9 +51,13 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// and `sessions.backend_resource`. Version 4 adds `memories` and its FTS5
 /// index. Version 5 adds `lifecycle_events` and `checkpoints`. Version 6 adds
 /// event provenance and decision provenance to `memories`, and rebuilds the
-/// FTS5 index over the rationale. Later migrations are appended to
-/// [`MIGRATIONS`], and this constant moves with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 6;
+/// FTS5 index over the rationale. Version 7 admits `gateway_backend_changed`
+/// to `lifecycle_events.kind` and adds the three columns that carry it,
+/// rebuilding the table rather than altering its `CHECK` — see the
+/// migration's own doc comment for why `seq` survives that rebuild unchanged.
+/// Later migrations are appended to [`MIGRATIONS`], and this constant moves
+/// with them.
+const SUPPORTED_SCHEMA_VERSION: i64 = 7;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -62,7 +66,7 @@ const SUPPORTED_SCHEMA_VERSION: i64 = 6;
 /// A renamed variant otherwise compiles perfectly and then fails as a
 /// constraint violation on a background writer thread, where nobody is
 /// looking.
-pub(crate) const LIFECYCLE_EVENT_KINDS: [&str; 10] = [
+pub(crate) const LIFECYCLE_EVENT_KINDS: [&str; 11] = [
     "session_started",
     "session_resumed",
     "turn_started",
@@ -73,6 +77,7 @@ pub(crate) const LIFECYCLE_EVENT_KINDS: [&str; 10] = [
     "process_exited",
     "output_ended",
     "gateway_unhealthy",
+    "gateway_backend_changed",
 ];
 
 /// The largest checkpoint the project database will store, in bytes.
@@ -677,6 +682,123 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
         VALUES ('delete', OLD.rowid, OLD.subject, OLD.body, OLD.rationale);
         INSERT INTO memories_fts (rowid, subject, body, rationale)
         VALUES (NEW.rowid, NEW.subject, NEW.body, NEW.rationale);
+    END;
+    ",
+    // 7: `gateway_backend_changed` — Phase 9H's durable record of failover
+    // changing the provider or model serving a live session.
+    //
+    // # Why this rebuilds the table instead of altering its `CHECK`
+    //
+    // SQLite cannot add or drop a `CHECK` constraint. Migration 5's `kind`
+    // column is one, so admitting an eleventh value means rename, recreate,
+    // copy, drop, then recreate the index and all three triggers — the same
+    // cost migration 6 paid to add a column FTS5 could not `ALTER` in.
+    //
+    // # Why `seq` must survive this rebuild unchanged
+    //
+    // `lifecycle_events.seq` is `INTEGER PRIMARY KEY AUTOINCREMENT`, and
+    // migration 6 made `memories.source_event_first` and
+    // `memories.source_event_last` reference it. A rebuild that let `seq`
+    // renumber would silently re-point every extracted memory's provenance
+    // at the wrong events — nothing would fail, the data would just be
+    // wrong. So the copy below names `seq` explicitly in both the column
+    // list and the `SELECT`, rather than letting the new table's own
+    // `AUTOINCREMENT` assign fresh values, and the old table is dropped only
+    // after the copy has landed. SQLite's own `sqlite_sequence` bookkeeping
+    // follows an explicit-valued insert exactly as it follows a generated
+    // one, so the next event appended after this migration continues from
+    // the old table's highest `seq` rather than restarting at it.
+    // `a_memorys_provenance_survives_the_seq_rebuild` in
+    // `tests/events_lifecycle.rs` is the proof, exercised against a
+    // deliberately naive rebuild that lets `seq` renumber before this one
+    // was written.
+    //
+    // # The three new columns
+    //
+    // `provider`, `model` and `cause` are names only, never a credential —
+    // the same Phase 9 acceptance condition every other free-text column in
+    // this schema already meets. They are prefixed `gateway_` to keep them
+    // visually grouped with `gateway_reason` beside them, and because a bare
+    // `model` column beside `resource` would read as naming the same thing
+    // `gateway_unhealthy` already names with `resource`, when it does not.
+    "
+    CREATE TABLE lifecycle_events_new (
+        seq              INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id       TEXT    NOT NULL,
+        session_id       TEXT    NOT NULL,
+        at               INTEGER NOT NULL,
+        kind             TEXT    NOT NULL
+            CHECK (kind IN ('session_started', 'session_resumed',
+                            'turn_started', 'turn_ended',
+                            'waiting_for_user', 'text_delivered',
+                            'interrupt_delivered', 'process_exited',
+                            'output_ended', 'gateway_unhealthy',
+                            'gateway_backend_changed')),
+
+        -- Variant payloads, each NULL for the kinds that do not carry them.
+        turn_outcome     TEXT
+            CHECK (turn_outcome IS NULL OR
+                   turn_outcome IN ('completed', 'failed')),
+        origin           TEXT
+            CHECK (origin IS NULL OR
+                   origin IN ('user_keystroke', 'machine')),
+        bytes            INTEGER,
+        exit_code        INTEGER,
+        exit_signal      TEXT,
+        resource         TEXT,
+        gateway_reason   TEXT
+            CHECK (gateway_reason IS NULL OR
+                   gateway_reason IN ('unreachable', 'timed_out', 'rejected')),
+        gateway_provider TEXT,
+        gateway_model    TEXT,
+        gateway_cause    TEXT,
+
+        -- The harness report this was translated from, when it was translated
+        -- from one. Both or neither.
+        observed_harness TEXT,
+        observed_event   TEXT,
+        CHECK ((observed_harness IS NULL) = (observed_event IS NULL))
+    );
+
+    INSERT INTO lifecycle_events_new (
+        seq, project_id, session_id, at, kind,
+        turn_outcome, origin, bytes, exit_code, exit_signal,
+        resource, gateway_reason, observed_harness, observed_event
+    )
+    SELECT
+        seq, project_id, session_id, at, kind,
+        turn_outcome, origin, bytes, exit_code, exit_signal,
+        resource, gateway_reason, observed_harness, observed_event
+    FROM lifecycle_events;
+
+    DROP TABLE lifecycle_events;
+    ALTER TABLE lifecycle_events_new RENAME TO lifecycle_events;
+
+    CREATE INDEX lifecycle_events_by_session
+        ON lifecycle_events (session_id, seq);
+
+    CREATE TRIGGER lifecycle_events_reject_foreign_project_insert
+    BEFORE INSERT ON lifecycle_events
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'event belongs to a different project');
+    END;
+
+    CREATE TRIGGER lifecycle_events_are_append_only_update
+    BEFORE UPDATE ON lifecycle_events
+    FOR EACH ROW
+    BEGIN
+        SELECT RAISE(ABORT, 'the project event log is append-only');
+    END;
+
+    CREATE TRIGGER lifecycle_events_are_append_only_delete
+    BEFORE DELETE ON lifecycle_events
+    FOR EACH ROW
+    BEGIN
+        SELECT RAISE(ABORT, 'the project event log is append-only');
     END;
     ",
 ];

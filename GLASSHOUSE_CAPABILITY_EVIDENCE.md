@@ -5731,3 +5731,121 @@ today's honest answer is "it tries, every time, and reports it has no model."
 That is not the line. It closes the moment any model exists, at one line in
 `main.rs` passing a different `Box<dyn ExtractionModel>`, and 809 and 817 will
 close together for a reason that is about Phase 39 rather than about this box.
+
+---
+
+### Phase 9I — the disposable policy gets its caller (lines 530, 531, 532, 540)
+
+Contract: Glasshouse's own bounded support work asks the router which resource
+to use, prefers a free one, allows a configured free model to back a launch
+profile when the protocol is adequate, and says why the resource it used was
+chosen.
+
+State: COMPLETE
+
+Production evidence:
+- `memory::extract::disposable::RoutedNoModel` — an `ExtractionModel` that asks
+  `DisposableRouting::for_support_work` for a resource before doing anything.
+  `main.rs::report_hook` now passes it instead of `NoExtractionModel`, so the
+  policy is consulted on **every completed task** in the shipped binary.
+- 532 needed a second, smaller seam: `profile::gateway_upstream` built every
+  backend `Cost::Metered` because `crate::profile` may not import
+  `crate::config`, where the free marking lives. A caller-supplied predicate
+  closes it without adding that dependency.
+- **Still no model is called, and every new caller says so in words.** Lines
+  809 and 817 are untouched and remain open.
+
+Regression evidence — including the §35 check this packet required by name:
+- **Deleting the new call.** Mutating `report_hook` back to
+  `|| Box::new(NoExtractionModel)` makes
+  `report_hook_routes_extraction_through_disposable_extraction_model` FAIL,
+  naming the missing call. Restored: `ok`. The caller cannot be removed
+  silently, which is what §35 exists to check.
+- Mutating `main.rs`'s gateway `free` closure to `|_| false` →
+  `a_configured_free_model_backs_the_gateway_at_no_cost` FAILED with
+  `cost: "metered"`. Restored: `ok`.
+- Hardcoding `Cost::Metered` →
+  `profile::tests::a_provider_the_caller_marks_free_backs_the_gateway_at_no_cost`
+  FAILED. Restored: `ok`.
+- `a_disposable_choice_cannot_become_an_interactive_assignment` holds line 533's
+  separation of the two policy classes across the new caller.
+
+---
+
+### Migration 7 — `lifecycle_events` rebuilt, and `seq` proven durable
+
+Contract: The event log admits `gateway_backend_changed`, and rebuilding the
+table does not disturb the event identifiers that extracted memories point at.
+
+State: COMPLETE (closes no box by itself; makes Phase 9H line 515 durable)
+
+Production evidence:
+- SQLite cannot add or drop a `CHECK`, so admitting a new `kind` is a full
+  rebuild: rename, recreate, copy, drop, then recreate the index and all three
+  triggers. `LIFECYCLE_EVENT_KINDS` goes from 10 entries to 11, and
+  `LifecycleEvent::GatewayBackendChanged { provider, model, cause }` carries
+  **names only** — never a credential.
+- The two halves cannot be split:
+  `every_lifecycle_event_kind_is_one_the_schema_accepts` asserts the enum and
+  the schema constant are equal **in both directions**, so a variant without a
+  `CHECK` value fails immediately rather than becoming a constraint violation on
+  the event-writer thread where nobody is looking.
+
+**The load-bearing evidence is the `seq` test.** `memories.source_event_first`
+and `source_event_last` reference `lifecycle_events.seq`, which is
+`INTEGER PRIMARY KEY AUTOINCREMENT`. A rebuild that renumbers `seq` would
+silently re-point every extracted memory's provenance at the wrong events, and
+**nothing would fail** — the data would simply be wrong. The regression asserts
+a memory's event range still names the same events after the rebuild, and the
+mutation that lets `seq` renumber makes it FAIL.
+
+Orchestrator note: the worker needed three files outside its partition to prove
+this end to end. It patched them locally, ran the suite green, **reverted them
+to their exact committed byte content** (verified with an empty `git diff`), and
+reported the patches. The orchestrator applied them at integration — including
+one the packet never anticipated, in `session/store.rs`, which hard-codes every
+table's column list and two expected schema versions and would have compiled
+perfectly while failing three tests.
+
+---
+
+### Phase 45 — the crash report's race, and why the box was right anyway
+
+The Linux leg of the local gate had been failing randomly for days across two
+different pty tests (practice §34). Rate, measured under full workspace load in
+the container: **8 failures in 17 runs before; 0 in 20 after.**
+
+**The cause, measured rather than inferred.** A pty child's exit becomes
+observable before its output does: the exit comes from `waitpid`, while the
+output must cross the pseudo-terminal and be copied into a buffer by a
+*different thread* which, beside ~900 siblings, does not always get a CPU slice
+in time. Instrumenting the failing assertion to keep looking after it failed
+caught the window directly — at the moment of the empty read the output had not
+ended, and the bytes arrived **1.1ms to 2.2ms later**.
+
+**The orchestrator's hypothesis was wrong and the worker killed it with data.**
+The packet proposed that Linux discards unread buffered output when the last
+slave descriptor closes. It does not: 200 trials at each of three delays, child
+reaped before the first read, **600 trials, zero bytes lost**, `EIO` every time
+*after* the data. Linux hands the reader everything that was written and then
+reports end-of-file.
+
+**So the box stands and the defect was smaller than it looked.** Glasshouse
+never lost a crashed harness's output on Linux; `crash_report` *reported* it as
+absent when asked inside the window. The fix is `OutputEnd`, a `Mutex<bool>`
+plus a `Condvar`, so `crash_report` waits to be **woken** by the reader rather
+than sleeping and looking again — bounded at 250ms, deliberately the same bound
+`session::attach` already allows its own pump, because on Windows no
+end-of-file ever arrives while the pty is open and nothing else would end the
+wait.
+
+Known limit, recorded rather than hidden:
+- A **different**, rarer failure survives:
+  `a_direct_provider_profile_reaches_a_real_child_and_only_that_child`, once in
+  37 runs, with the child killed by `SIGABRT`. That is a child that died, not
+  output that had not arrived, and the drain fix does nothing for it. Ruled out
+  with evidence: the `EIO` hypothesis (600 trials), a non-blocking master fd
+  (portable-pty never sets `O_NONBLOCK`), `malloc` between `fork` and `exec`
+  (2400 spawns against 24 allocation-churning threads, 0 aborts), and
+  mislabelling (`strsignal(6)` really is `SIGABRT`). A ranked list of where to
+  look next is in the report.

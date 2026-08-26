@@ -27,7 +27,7 @@
 //! else instead of merely not hanging.
 
 use std::io::Read;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,15 @@ use clap::Parser as _;
 /// CI runner, short enough that a genuine hang fails instead of stalling.
 const TIMEOUT: Duration = Duration::from_secs(20);
 const POLL: Duration = Duration::from_millis(25);
+
+/// The poll interval [`Session::wait_for_exit`] uses while waiting for a dead
+/// child's output to finish arriving.
+///
+/// Much shorter than [`POLL`] on purpose. This wait is measured in
+/// milliseconds — the gap it closes was observed at 1.1ms to 2.2ms under the
+/// full workspace suite on Linux — so polling at [`POLL`] would spend an
+/// order of magnitude more time asleep than the thing it is waiting for.
+const DRAIN_POLL: Duration = Duration::from_millis(1);
 
 /// How long [`Session::spawn`] waits for a freshly spawned child's startup
 /// Device Status Report query before giving up on one arriving.
@@ -249,14 +258,20 @@ impl PatternScanner {
 struct Collector {
     buffer: Arc<Mutex<Vec<u8>>>,
     dsr_seen: Arc<AtomicUsize>,
+    /// Set when the read loop below ends, which is the only moment at which
+    /// [`Collector::text`] can be called *complete* rather than *current*.
+    /// See [`Session::wait_for_exit`], which is the reason it exists.
+    ended: Arc<AtomicBool>,
 }
 
 impl Collector {
     fn start(mut output: PtyOutput) -> Self {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let dsr_seen = Arc::new(AtomicUsize::new(0));
+        let ended = Arc::new(AtomicBool::new(false));
         let thread_buffer = Arc::clone(&buffer);
         let thread_dsr_seen = Arc::clone(&dsr_seen);
+        let thread_ended = Arc::clone(&ended);
 
         std::thread::spawn(move || {
             let mut scanner = PatternScanner::new(DSR_CURSOR_POSITION_QUERY);
@@ -275,13 +290,24 @@ impl Collector {
                     }
                 }
             }
+            thread_ended.store(true, Ordering::SeqCst);
         });
 
-        Self { buffer, dsr_seen }
+        Self {
+            buffer,
+            dsr_seen,
+            ended,
+        }
     }
 
     fn text(&self) -> String {
         String::from_utf8_lossy(&self.buffer.lock().unwrap()).into_owned()
+    }
+
+    /// True once the pseudo-terminal has given this collector everything it
+    /// is ever going to.
+    fn ended(&self) -> bool {
+        self.ended.load(Ordering::SeqCst)
     }
 }
 
@@ -369,13 +395,33 @@ impl Session {
         );
     }
 
-    /// Wait for the process to exit, answering any handshake queries along
-    /// the way, failing the test rather than hanging.
+    /// Wait for the process to exit *and* for its output to finish arriving,
+    /// answering any handshake queries along the way, failing the test rather
+    /// than hanging.
+    ///
+    /// **Both halves, because they are not the same event.** The exit comes
+    /// from `waitpid`; the child's last bytes still have to cross the
+    /// pseudo-terminal and be copied into [`Collector`]'s buffer by a
+    /// different thread. Returning on the exit alone hands every caller that
+    /// then reads [`Session::output`] a buffer that may still be filling —
+    /// which is precisely how `a_direct_provider_profile_reaches_a_real_child`
+    /// came to report a child that printed nothing — twice in 17 runs of the
+    /// full workspace suite on Linux. The missing bytes were never lost; they
+    /// landed about a millisecond later.
+    ///
+    /// The drain is bounded by the same [`TIMEOUT`] and does *not* fail the
+    /// test when it expires: output need not ever end — anything the child
+    /// left holding the pty keeps the reader alive — and a caller waiting on
+    /// the exit status has already got what it asked for.
     fn wait_for_exit(&mut self) -> glasshouse::pty::ExitStatus {
         let deadline = Instant::now() + TIMEOUT;
         while Instant::now() < deadline {
             self.answer_pending_queries();
             if let Some(status) = self.process.try_wait().expect("try_wait") {
+                while !self.collector.ended() && Instant::now() < deadline {
+                    self.answer_pending_queries();
+                    std::thread::sleep(DRAIN_POLL);
+                }
                 return status;
             }
             std::thread::sleep(POLL);

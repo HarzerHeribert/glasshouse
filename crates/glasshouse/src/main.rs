@@ -8,7 +8,7 @@ use glasshouse::checkpoint::{
     Checkpoint, CheckpointReason, CheckpointStore, Handoff, ProjectCheckpoints, Stored,
 };
 use glasshouse::cli::CheckpointCommand;
-use glasshouse::config::{self, EffectiveConfig, UserConfig};
+use glasshouse::config::{self, EffectiveConfig, ProjectConfig, UserConfig};
 use glasshouse::events::{
     EventBus, EventLog, LifecycleEvent, Observation, ProcessExit, TurnOutcome,
 };
@@ -286,7 +286,7 @@ fn launch_session(
     // with the instance on every path out.
     let gateway =
         match glasshouse::gateway::start_if_required(std::slice::from_ref(&launch_profile), || {
-            gateway_upstream(&effective, &secrets)
+            gateway_upstream(&user, project.as_ref(), &effective, &secrets)
         }) {
             Ok(gateway) => gateway,
             Err(err) => {
@@ -605,6 +605,8 @@ fn close_before_forced_exit(
 /// one is a refusal rather than a choice — is
 /// `glasshouse::profile::gateway_upstream`'s decision, not this function's.
 fn gateway_upstream(
+    user: &UserConfig,
+    project: Option<&ProjectConfig>,
     effective: &EffectiveConfig<'_>,
     secrets: &dyn glasshouse::secret::SecretStore,
 ) -> anyhow::Result<glasshouse::gateway::Upstream> {
@@ -612,7 +614,21 @@ fn gateway_upstream(
     for name in effective.provider_names() {
         providers.push(effective.configured_provider(&name)?.value);
     }
-    Ok(glasshouse::profile::gateway_upstream(&providers, secrets)?)
+    // Phase 9I line 532: a provider the user has marked at least one free
+    // model on backs this launch with `Cost::Free` rather than the fail-closed
+    // `Cost::Metered` every backend got before. Looked up the same way
+    // `disposable_candidates` looks it up — project layer winning over user —
+    // because `glasshouse::profile` may not import `glasshouse::config` to
+    // answer this itself.
+    let free = |name: &str| -> bool {
+        project
+            .and_then(|p| p.providers().get(name))
+            .or_else(|| user.providers().get(name))
+            .is_some_and(|config| !config.free_models().is_empty())
+    };
+    Ok(glasshouse::profile::gateway_upstream(
+        &providers, secrets, &free,
+    )?)
 }
 
 /// Generate one file that `exec`s `glasshouse run <harness> --profile
@@ -727,7 +743,121 @@ fn install_hooks(
 /// them is worth costing the user a turn. Glasshouse's bookkeeping is never
 /// more important than the session it is keeping books about.
 fn report_hook(runtime: &Runtime, session: &str, event: &str) {
-    report_hook_with(runtime, session, event, || Box::new(NoExtractionModel));
+    report_hook_with(runtime, session, event, || {
+        disposable_extraction_model(runtime)
+    });
+}
+
+/// Phase 9I lines 530, 531 and 540's production caller: route this
+/// extraction through `glasshouse::routing::disposable::DisposableRouting`
+/// over the free models the user has actually configured, and report the
+/// choice. Never actually calls a model — see
+/// [`glasshouse::memory::extract::disposable`], which is what this returns.
+///
+/// Falls back to [`NoExtractionModel`] when the configuration cannot be
+/// read at all — the same non-fatal-to-the-session posture
+/// [`report_hook_with`]'s own doc comment describes for every other failure
+/// on this path.
+fn disposable_extraction_model(runtime: &Runtime) -> Box<dyn glasshouse::memory::ExtractionModel> {
+    let user = match UserConfig::load(runtime.paths()) {
+        Ok(user) => user,
+        Err(err) => {
+            tracing::debug!(error = %err, "could not read configuration for disposable routing");
+            return Box::new(NoExtractionModel);
+        }
+    };
+    let project = match config::load_project_config(runtime.project()) {
+        Ok(project) => project,
+        Err(err) => {
+            tracing::debug!(error = %err, "could not read project configuration for disposable routing");
+            return Box::new(NoExtractionModel);
+        }
+    };
+    let effective = EffectiveConfig::new(&user, project.as_ref());
+    let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
+    let candidates = disposable_candidates(&user, project.as_ref(), &effective, &secrets);
+    let free_preferences = glasshouse::routing::free::FreePreferences::new()
+        .with_order(
+            effective
+                .free_resource_order()
+                .value
+                .iter()
+                .map(|order| order.to_key())
+                .collect(),
+        )
+        .with_disabled(
+            effective
+                .free_resource_disabled()
+                .value
+                .iter()
+                .map(|disabled| disabled.to_key())
+                .collect(),
+        )
+        .with_pin(
+            effective
+                .free_resource_pin()
+                .value
+                .as_ref()
+                .map(|pin| pin.to_key()),
+        );
+    let routing = glasshouse::routing::disposable::DisposableRouting::for_support_work(
+        effective.prefer_free_routing().value,
+        free_preferences,
+    );
+    Box::new(glasshouse::memory::RoutedNoModel::new(
+        glasshouse::routing::disposable::JobKind::MemoryExtraction,
+        &candidates,
+        &routing,
+    ))
+}
+
+/// Every free resource Glasshouse's disposable-job routing may choose from,
+/// built the same way `build_settings` builds a `ProviderRow`'s
+/// configuration in `shell/mod.rs`: a provider's whole configuration comes
+/// from whichever layer actually holds its name, project winning over user.
+///
+/// A provider that named no free models, or whose credential does not
+/// currently resolve, contributes nothing — never a candidate with an
+/// invented model name or a credential this process cannot actually use.
+fn disposable_candidates(
+    user: &UserConfig,
+    project: Option<&ProjectConfig>,
+    effective: &EffectiveConfig<'_>,
+    secrets: &dyn glasshouse::secret::SecretStore,
+) -> Vec<glasshouse::routing::disposable::DisposableCandidate> {
+    use glasshouse::routing::Cost;
+    use glasshouse::routing::CredentialId;
+    use glasshouse::routing::disposable::DisposableCandidate;
+    use glasshouse::secret::SecretRef;
+
+    let mut candidates = Vec::new();
+    for name in effective.provider_names() {
+        let found = project
+            .and_then(|p| p.providers().get(&name))
+            .or_else(|| user.providers().get(&name));
+        let Some(provider_config) = found else {
+            continue;
+        };
+        if !provider_config.enabled() || provider_config.free_models().is_empty() {
+            continue;
+        }
+        for var in provider_config.credential_env() {
+            let reference = SecretRef::Environment { var: var.clone() };
+            if secrets.resolve(&reference).is_none() {
+                continue;
+            }
+            let credential_id = CredentialId::new(name.clone(), reference);
+            for model in provider_config.free_models() {
+                candidates.push(DisposableCandidate::new(
+                    name.clone(),
+                    model.clone(),
+                    credential_id.clone(),
+                    Cost::Free,
+                ));
+            }
+        }
+    }
+    candidates
 }
 
 /// [`report_hook`] with the extraction model supplied.
@@ -2783,6 +2913,131 @@ mod tests {
         assert_eq!(
             glasshouse::memory::ModelError::Unavailable.to_string(),
             "no extraction model is available"
+        );
+    }
+
+    /// Phase 9I lines 530, 531 and 540, at the function `report_hook` itself
+    /// calls to get its model. A user-configured free model, written to disk
+    /// exactly as Settings would write it, is the one the disposable routing
+    /// policy names, and the description says plainly that no model was
+    /// called.
+    ///
+    /// **Not through `report_hook`'s own log line.** `run_extraction_after_turn`
+    /// reports its outcome only via `tracing`, and capturing that reliably
+    /// needs a thread-local subscriber — which this project's own
+    /// `gateway::ingress::tests::recorded` uses successfully in isolation, but
+    /// which proved to race `tracing`'s process-wide callsite interest cache
+    /// under `scripts/ci-local.sh`'s real concurrent load here: the exact
+    /// same assertion passed alone and failed, non-deterministically empty or
+    /// partial, run beside this crate's other ~1050 tests. A flaky gate is
+    /// worse than a narrower one, so this calls `disposable_extraction_model`
+    /// directly instead — the paired test below,
+    /// `report_hook_routes_extraction_through_disposable_extraction_model`,
+    /// is what proves `report_hook` itself still calls it.
+    #[test]
+    fn disposable_extraction_model_prefers_a_configured_free_model_and_names_the_reason() {
+        const VAR: &str = "GLASSHOUSE_TEST_ONLY_WIRE_DISPOSABLE_FREE_KEY";
+        // SAFETY: `VAR` is unique to this test and removed again below.
+        unsafe {
+            std::env::set_var(VAR, "sk-fabricated-test-value-not-a-real-credential");
+        }
+
+        let fixture = CliFixture::new();
+        let mut user = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let mut provider = glasshouse::config::ProviderConfig::new("openai-compatible");
+        provider.set_credential_env(vec![VAR.to_owned()]);
+        provider.set_free_models(vec!["nvidia/nemotron-nano-9b-v2:free".to_owned()]);
+        user.providers_mut()
+            .set("wire-disposable-test-provider", provider);
+        user.save(fixture.runtime.paths()).unwrap();
+
+        let model = disposable_extraction_model(&fixture.runtime);
+        let described = model.describe();
+
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+
+        assert!(
+            described.contains("nvidia/nemotron-nano-9b-v2:free"),
+            "the free model the user configured must be the one named: {described}"
+        );
+        assert!(
+            described.contains("no model was called"),
+            "an evaluation must never be mistakeable later for evidence a model did the work: \
+             {described}"
+        );
+    }
+
+    /// `report_hook` — not `report_hook_with`, which every fixture above
+    /// supplies its own fake model to — must itself ask
+    /// `disposable_extraction_model` for its model, and never
+    /// `NoExtractionModel` directly. A source scan, in the same style as
+    /// `hook_handler_source`'s: the alternative is a runtime assertion that
+    /// needs the model to actually run, and `report_hook`'s own body is two
+    /// lines specifically so that reading it settles the question.
+    #[test]
+    fn report_hook_routes_extraction_through_disposable_extraction_model() {
+        let full = include_str!("main.rs");
+        let start = full
+            .find("fn report_hook(runtime: &Runtime, session: &str, event: &str) {")
+            .expect("report_hook must exist in this file");
+        let after_start = &full[start..];
+        let end = after_start
+            .find("\n}")
+            .expect("report_hook must have a top-level closing brace");
+        let body = strip_comments(&after_start[..end]);
+
+        assert!(
+            body.contains("disposable_extraction_model"),
+            "report_hook must ask disposable_extraction_model for its model: {body}"
+        );
+        assert!(
+            !body.contains("NoExtractionModel"),
+            "report_hook must not name NoExtractionModel itself — that is \
+             disposable_extraction_model's own fallback for a configuration it could not read: \
+             {body}"
+        );
+    }
+
+    /// Phase 9I line 532, at the real production entry point — this file's
+    /// own `gateway_upstream` wrapper, not `glasshouse::profile::gateway_upstream`
+    /// directly. A provider the user marked a free model on, written to disk
+    /// exactly as Settings would write it, backs the gateway at `Cost::Free`.
+    #[test]
+    fn a_configured_free_model_backs_the_gateway_at_no_cost() {
+        const VAR: &str = "GLASSHOUSE_TEST_ONLY_WIRE_DISPOSABLE_GATEWAY_FREE_KEY";
+        // SAFETY: `VAR` is unique to this test and removed again below.
+        unsafe {
+            std::env::set_var(VAR, "sk-fabricated-test-value-not-a-real-credential");
+        }
+
+        let fixture = CliFixture::new();
+        let mut user = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let mut provider = glasshouse::config::ProviderConfig::new("anthropic-compatible");
+        provider.set_base_url(Some("https://example.invalid/api".to_owned()));
+        provider.set_credential_env(vec![VAR.to_owned()]);
+        provider.set_free_models(vec!["a-free-model".to_owned()]);
+        user.providers_mut()
+            .set("wire-disposable-gateway-provider", provider);
+        user.save(fixture.runtime.paths()).unwrap();
+
+        let user = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let project = config::load_project_config(fixture.runtime.project()).unwrap();
+        let effective = EffectiveConfig::new(&user, project.as_ref());
+        let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
+
+        let upstream = gateway_upstream(&user, project.as_ref(), &effective, &secrets).unwrap();
+        let rendered = format!("{upstream:?}");
+
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+
+        assert!(
+            rendered.contains("cost: \"free\""),
+            "a provider the user marked a free model on must back the gateway at no cost: \
+             {rendered}"
         );
     }
 

@@ -107,6 +107,13 @@ pub enum LifecycleEvent {
         resource: String,
         reason: GatewayFailure,
     },
+    /// The backend serving a gateway-backed session changed. Names only —
+    /// a provider, a model and a cause, never a credential.
+    GatewayBackendChanged {
+        provider: String,
+        model: String,
+        cause: String,
+    },
 }
 
 impl LifecycleEvent {
@@ -140,6 +147,7 @@ impl LifecycleEvent {
             Self::ProcessExited { .. } => "process_exited",
             Self::OutputEnded => "output_ended",
             Self::GatewayUnhealthy { .. } => "gateway_unhealthy",
+            Self::GatewayBackendChanged { .. } => "gateway_backend_changed",
         }
     }
 
@@ -157,7 +165,11 @@ impl LifecycleEvent {
             | Self::InterruptDelivered { .. }
             | Self::ProcessExited { .. }
             | Self::OutputEnded
-            | Self::GatewayUnhealthy { .. } => None,
+            | Self::GatewayUnhealthy { .. }
+            // A backend moving says nothing about whether the session
+            // itself is running: the harness is still alive on screen
+            // either side of a failover.
+            | Self::GatewayBackendChanged { .. } => None,
         }
     }
 }
@@ -595,6 +607,11 @@ mod tests {
             LifecycleEvent::GatewayUnhealthy {
                 resource: "r".to_owned(),
                 reason: GatewayFailure::TimedOut,
+            },
+            LifecycleEvent::GatewayBackendChanged {
+                provider: "p".to_owned(),
+                model: "m".to_owned(),
+                cause: "c".to_owned(),
             },
         ];
         let idle: Vec<&LifecycleEvent> = every

@@ -56,6 +56,7 @@
 pub mod authority;
 pub mod chunk;
 pub mod credentials;
+pub mod disposable;
 pub mod lifecycle;
 pub mod schema;
 
