@@ -53,6 +53,10 @@ blocks the next batch.
 | Records audit (redone) | orchestrator, one script | ~1 min | negligible | 1 script | 0 (read-only) | — | — | PASS — zero real drift found |
 | Dev shims | orchestrator solo | ~35 min | — | +2 shims, 3 docs | **0** | n/a (both guards proven both directions) | 1 (mine: conflated dev shim with product shim) | PASS, CI green |
 | MSRV correction | orchestrator solo | ~50 min | — | +1 script, 3 code sites, 4 docs | **0** | 1 gate mutation, killed | 0 | PASS, 6/6 CI jobs green |
+| 9G ingress ×2 | Opus **team lead**, 2 subcontractors | ~50 min | ~$29 | +1887/-182, 6 files | 2 (phase COMPLETE) | 8 by lead + 1 by orchestrator, all killed | 1 (mine, load bearing) | PASS, CI green |
+| 2C routing model | Opus **team lead**, subcontractors | ~55 min | — | +2450/-51, 4 files | 4 (phase COMPLETE) | 17 designed, 17 killed, 0 survived | 4 | PASS, CI green |
+| Rustdoc links | Sonnet | ~25 min | — | +22/-22, 12 files | **0** (made a gate real) | 1 gate mutation, killed | 0 | PASS |
+| 9B child env | **Codex `gpt-5.6-sol` xhigh** | ~17 min | subscription, 4% of weekly | +169/-95, 2 files | 1 (phase COMPLETE) | 3 by worker + 1 by orchestrator, all killed | 4 | PASS |
 
 ### What the first data point already says
 
@@ -294,3 +298,55 @@ conclude they were waste.
 chart and as a slope change everywhere else.** When you spend a session on
 something that closes no boxes, write down what recurring cost it removed, so
 the next orchestrator can tell the difference between that and drift.
+
+
+## The Codex tier — first data, and what it costs to run
+
+Added 2026-08-26 at the repository owner's request, alongside the existing
+Claude Code and Antigravity tiers. Model identifiers on a ChatGPT subscription
+are `gpt-5.6-sol` (frontier), `gpt-5.6-terra` (mid) and `gpt-5.6-luna` (fast) —
+the bare names are rejected. Run at `xhigh` to match the Claude Code workers.
+
+**First batch: one map line, seventeen minutes, and it found a real defect.**
+The line looked like a formality — "preserve the user's existing shell
+environment" — and the packet explicitly allowed "already correct, here is the
+regression test" as an outcome. It was not already correct: `portable-pty`
+0.9.0 merges Windows registry values over the environment it was handed,
+replacing `PATH`, and **a pre-existing test had responded by compiling its own
+assertion out on Windows.** The worker fixed the cause and re-enabled it.
+
+**Do not read boxes-per-hour across differently-sized batches.** One line in
+seventeen minutes is ~3.5 boxes/hour against a team lead's 19, and that
+comparison is meaningless: the lead's batch had ten boxes of related work to
+amortise its setup across, and this one spent most of its time auditing spawn
+paths to answer a yes/no question. What the number does say is that a
+single-line packet carries most of a multi-line packet's fixed cost, so **do not
+send single lines unless the line is the point.**
+
+### Three operational facts, all learned the hard way
+
+1. **Codex needs no bypass shim.** `-s workspace-write -a never` is a real
+   automatic-review mode, unlike Antigravity's blanket bypass. This is the same
+   distinction Glasshouse's own adapters record, and it makes Codex the cheaper
+   tier to run safely.
+2. **Its sandbox denies loopback bind and Keychain**, so ~27 gateway tests and
+   3 macOS secret tests fail on infrastructure alone. **The orchestrator must
+   run the full suite for every Codex batch.** Say so in the packet, or a
+   conscientious worker will burn time trying to make them pass — and a less
+   conscientious one will "fix" them.
+3. **Its sandbox denies writes outside the worktree.** Put the report path
+   *inside* the worktree. The first batch had its report write refused, wrote to
+   `/tmp`, and said so clearly — good behaviour recovering from a bad packet.
+
+### What it did with a bad packet
+
+Four packet corrections, and the important one was substantive: the packet
+asserted the PTY builder "inherits the parent environment by default", which is
+true of `std::process::Command` and **not** true of `portable-pty` on Windows.
+A worker that had taken the packet's word would have written a passing test and
+closed the box over a live defect.
+
+That is now four consecutive batches where the worker corrected the
+orchestrator's brief, across three different harnesses. **Packets are wrong
+often enough that "tell me what this packet got wrong" belongs in every one** —
+it is the cheapest review step available and it has never once come back empty.
