@@ -1820,3 +1820,38 @@ Deleting the *worktree* is a different question and stays the user's.
 **The measurement to keep:** 44GB reclaimed, zero source touched, and the disk
 went from 99% to 77%. Run `scripts/reap-worktrees.sh` at the end of any round
 that made more than two worktrees.
+
+---
+
+## §54 — a watchdog that goes blind must not report success, and must not quit
+
+The orchestrator heartbeat announced:
+
+    ORCHESTRATOR IDLE and the capability map has no open boxes left. Nothing to do.
+
+There were **1,091**. Then it exited, so nothing was watching any more.
+
+The cause was one fallback. Its open-box count was
+`grep -c '^☐' "$MAP" 2>/dev/null || echo 0` — and when the capability map moved
+to `docs/product/`, a monitor still holding the old path got a failed grep,
+turned it into **zero**, and read zero as *finished*.
+
+**Not-readable and none-left are different answers, and a `|| echo 0` collapses
+them into the more flattering one.** This is the same family as the two other
+defects this project has found in its own checks — a `chmod 000` test that passed
+because it ran as root, and a `grep -v '^./…'` exclusion that matched nothing on
+BSD grep. In every case a check reported success while measuring nothing.
+
+Two rules, and the second is the one that made this worse than an error:
+
+1. **A sentinel for "I cannot see" must be distinct from every real value.**
+   The count is now `blind` or a number, and `blind` says so loudly.
+2. **A watchdog does not exit on a read failure.** The map may be mid-move, a
+   filesystem may be briefly unavailable — quitting converts a transient blind
+   spot into a permanent one, silently. It logs, waits, and keeps watching.
+
+**And the operational note that produced it:** a long-running monitor holds the
+script it started with. Changing a script under a live watch does not update the
+watch. After a change that moves anything a monitor reads, **stop and re-arm
+every monitor** — the file on disk being correct is not the same as the running
+watch being correct.

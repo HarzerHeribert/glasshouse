@@ -64,8 +64,20 @@ workers_running() {
   pgrep -f '^(bash|/bin/bash).*worker-watch\.sh' >/dev/null 2>&1
 }
 
+MAP="$REPO/docs/product/capability-map.md"
+
+# Returns the open-box count, or the string "blind" when the map cannot be read.
+#
+# **`|| echo 0` was here and it was a real defect.** When the capability map
+# moved to docs/product/, a monitor still holding the old path got a failed grep,
+# turned it into zero, and announced "the capability map has no open boxes left.
+# Nothing to do" — then exited. There were 1,091. A watchdog that reports success
+# when it has gone blind is worse than no watchdog, because it also stops.
+#
+# Not-readable and none-left are different answers and must stay different.
 open_boxes() {
-  grep -c '^☐' "$REPO/docs/product/capability-map.md" 2>/dev/null || echo 0
+  [ -r "$MAP" ] || { echo blind; return; }
+  grep -c '^☐' "$MAP" 2>/dev/null || echo blind
 }
 
 quiet=0
@@ -95,6 +107,14 @@ while true; do
   [ "$quiet" -lt "$IDLE_CHECKS" ] && continue
 
   remaining="$(open_boxes)"
+  if [ "$remaining" = "blind" ]; then
+    # Loud, and keep going: the map may be mid-move, and a watchdog that quits
+    # on a transient read failure is a watchdog that quits.
+    echo "HEARTBEAT BLIND: cannot read $MAP — I cannot tell whether work remains. Check the path; I am still watching."
+    quiet=0
+    sleep 600
+    continue
+  fi
   if [ "$remaining" -eq 0 ]; then
     echo "ORCHESTRATOR IDLE and the capability map has no open boxes left. Nothing to do."
     exit 0
