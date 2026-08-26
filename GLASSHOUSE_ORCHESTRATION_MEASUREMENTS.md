@@ -402,3 +402,55 @@ That is now four consecutive batches where the worker corrected the
 orchestrator's brief, across three different harnesses. **Packets are wrong
 often enough that "tell me what this packet got wrong" belongs in every one** —
 it is the cheapest review step available and it has never once come back empty.
+
+---
+
+## Batch 13–14 — two concurrent workers, both integrated 2026-08-26 midday
+
+| | GH-P04-UNFOCUSED | GH-P09F-PREFLIGHT |
+|---|---|---|
+| tier | Claude Code, Sonnet implementer | Claude Code, Sonnet implementer |
+| boxes closed | **2 of 3** | **0 of 2** |
+| diffstat | +2056 / −45, 6 files | 2 files |
+| tests added | +29 (867 → 896) | +18 |
+| mutations | 11 run, 9 killed | see report |
+| packet corrections | 1 (`cli.rs`/`main.rs` missing from EXPECTED FILES) | 2, both substantive |
+| defects found by running the binary | **2** | 0 |
+| verdict | **excellent** | **excellent, and the zero is the point** |
+
+**Both workers corrected the orchestrator's packet. That is now six consecutive
+batches.** "Tell me what this packet got wrong" has never come back empty and
+remains the cheapest review step in this process.
+
+### The measurement that matters this round: a worker earning zero boxes was the
+### more valuable of the two
+
+P09F-PREFLIGHT closed no boxes and its report is the best artifact of the day.
+It refused to claim a production caller it did not have, wrote §0 as "the one
+thing to read before anything else: main.rs is not wired", and proposed exact
+wiring instead of quietly shipping the mechanism as done. **The orchestrator's
+review then found that the proposed wiring could never fire** — `select()`
+already resolves the executable — which is a finding only available because the
+worker surfaced the gap instead of burying it.
+
+A boxes-per-hour metric would score this worker at zero. It should not be read
+that way. **Add a column for "gaps surfaced rather than papered over", because
+the tier comparison is otherwise biased toward workers who close boxes on weak
+evidence.**
+
+### Orchestrator-side cost
+
+Two integrations, one CI round-trip wasted on a self-inflicted red (`README`
+progress block, now practice §24), one genuine finding requiring a rewritten
+follow-up packet. Reviewing two finished workers concurrently was comfortable;
+the earlier ceiling of three editing workers still looks right.
+
+### Open question answered
+
+*"Does verifying a worker's gates myself pay for itself?"* — This round, no
+defect was found by re-running gates: both workers' numbers were exactly right.
+But re-running is cheap (one backgrounded script) and the one time it mattered
+it caught a worker whose tests did not compile. **Keep doing it, and stop
+counting it as a cost.** The expensive check is not the gate re-run; it is
+reading what the mechanism actually connects to, which is where both of this
+round's real findings came from.
