@@ -4,11 +4,11 @@ Last updated: 2026-08-25 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 9G is seventeen of nineteen; 2D six of nineteen; Phase 9 five of
-seven; 2C fifteen of nineteen;
+**Phase 9E is eleven of thirteen; 9G seventeen of nineteen; 2D six of
+nineteen; Phase 9 five of seven; 2C fifteen of nineteen;
 9F eleven of thirteen; 9D eleven of fourteen; 9A nineteen of twenty-six;
 9E eight of thirteen; 9C eleven of twelve; 9B eight of nine.
-193 -> 238 checked boxes (18%).**
+193 -> 241 checked boxes (19%).**
 
 **One thing needs the user.** A real conversation identifier of theirs is
 committed in git history (one identifier, one commit, working tree already
@@ -40,6 +40,39 @@ session came up and showed Codex's own trust prompt — and the end-to-end PTY
 test asserts the exact argv.
 
 ## Verified completed work
+
+### This session — the macOS Keychain, and a hang that would have frozen the TUI
+
+Three Phase 9E lines. Credentials now resolve from the operating system's own
+secure store where one is available and from the environment where it is not,
+with the fallback **labelled** — `glasshouse doctor` prints "credentials resolve
+from: the macOS Keychain, then the process environment".
+
+**The defect that justifies the run-the-binary rule on its own.** `doctor`,
+pointed at a provider whose credential was in the Keychain, hung indefinitely —
+no output, no visible dialog. `SecKeychainFindGenericPassword` decrypts the
+item, decryption consults its access control list, and for an item this binary
+did not create the call blocks waiting for an authorization dialog a piped
+process never shows. The same read is on the path that starts a session, where
+it would have frozen the TUI. One `SecKeychainSetUserInteractionAllowed(0)`
+makes it fail cleanly and fall back instead.
+
+**A durability caveat, measured rather than assumed.** The ACL binds to the
+binary's code identity, so for an unsigned build — which Glasshouse is today —
+a rebuild breaks the link. Store, rebuild, read: does not read. For a signed
+release the designated requirement should be stable across versions, and that
+is explicitly *not* claimed. When configuration records a credential the store
+will not return, `doctor` says so and says what to do.
+
+**The orchestrator supplied the production caller.** The packet forbade
+`main.rs`, so the batch flagged rather than reached — `launch_session` now
+builds `PreferNativeSecretStore::detect()`. Without it the preference would
+have been true of the store, of `doctor` and of settings, but not of
+`glasshouse run`.
+
+**Windows and Linux stay unchecked**, as the packet required. Neither is
+provable from this machine, and `LOCALLY VERIFIED` with the platform gap
+recorded is the honest state.
 
 ### This session — settings that manage providers and profiles, and a test that was passing for the wrong reason
 

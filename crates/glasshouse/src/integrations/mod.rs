@@ -886,8 +886,34 @@ pub fn doctor_report(runtime: &crate::Runtime) -> String {
     // (an env var happens to be set), this one is what Glasshouse itself
     // would use to answer "what can this provider serve". Never a value:
     // see `write_provider_report`.
+    // Line 2 of Phase 9E, in the one place a user goes to find out what
+    // Glasshouse believes: which store a credential would actually be read
+    // from, said out loud. A fallback nobody is told about is a silent
+    // degradation, and this is what stops it being one.
+    let secrets = crate::secret::native::PreferNativeSecretStore::detect();
+    let _ = writeln!(out, "Secret storage");
+    let _ = writeln!(
+        out,
+        "  credentials resolve from: {}",
+        crate::secret::SecretStore::describe(&secrets)
+    );
+    if let Err(reason) = secrets.native() {
+        let _ = writeln!(
+            out,
+            "  native secure store:      unavailable ({})",
+            reason.reason()
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "  native secure store:      available, filed under service `{}`",
+            crate::secret::native::SERVICE
+        );
+    }
+    let _ = writeln!(out);
+
     let _ = writeln!(out, "Configured providers");
-    write_configured_providers_report(&mut out, runtime);
+    write_configured_providers_report(&mut out, runtime, &secrets);
     let _ = writeln!(out);
 
     let _ = writeln!(out, "Problems");
@@ -1077,7 +1103,11 @@ fn write_adapter_report(out: &mut String, adapter: &'static dyn crate::harness::
 /// else. A load failure is reported as a line in the report, not a panic:
 /// `doctor` is diagnostic, and a broken config file is exactly the kind of
 /// thing a user runs `doctor` to find out about.
-fn write_configured_providers_report(out: &mut String, runtime: &crate::Runtime) {
+fn write_configured_providers_report(
+    out: &mut String,
+    runtime: &crate::Runtime,
+    secrets: &crate::secret::native::PreferNativeSecretStore,
+) {
     use std::fmt::Write as _;
 
     let user = match crate::config::UserConfig::load(runtime.paths()) {
@@ -1103,8 +1133,18 @@ fn write_configured_providers_report(out: &mut String, runtime: &crate::Runtime)
     }
 
     for name in names {
+        // The stored-credential *record* comes from the configuration entry
+        // itself, which `Layered<Provider>` does not carry: `to_provider`
+        // resolves a template into the domain type and a stored reference is
+        // not part of that. Project wins over user, matching
+        // `EffectiveConfig::configured_provider`'s own precedence.
+        let stored = project
+            .as_ref()
+            .and_then(|p| p.providers().get(&name))
+            .or_else(|| user.providers().get(&name))
+            .and_then(crate::config::ProviderConfig::credential_store);
         match effective.configured_provider(&name) {
-            Ok(layered) => write_provider_report(out, &name, &layered),
+            Ok(layered) => write_provider_report(out, &name, &layered, secrets, stored),
             Err(err) => {
                 let _ = writeln!(out, "  {name}: {err}");
             }
@@ -1116,14 +1156,18 @@ fn write_configured_providers_report(out: &mut String, runtime: &crate::Runtime)
 /// URLs, its declared capabilities, and its credential variable names —
 /// **names only.**
 ///
-/// [`std::env::var_os`] is used rather than [`std::env::var`] to check
-/// whether each credential variable is set: this function must never hold
-/// the value, even transiently, and `var_os` is the version of that check
-/// that never decodes one.
+/// Presence is answered through [`crate::secret::SecretStore::is_present`],
+/// never [`crate::secret::SecretStore::resolve`]: this function must never
+/// hold a value, even transiently. Which of the store's two sources answered
+/// is printed alongside, so "is my key in the Keychain or in my shell
+/// profile" is a question this report answers rather than one a user has to
+/// infer from it.
 fn write_provider_report(
     out: &mut String,
     name: &str,
     layered: &crate::config::Layered<crate::provider::Provider>,
+    secrets: &crate::secret::native::PreferNativeSecretStore,
+    stored: Option<&crate::config::StoredCredentialRef>,
 ) {
     use std::fmt::Write as _;
 
@@ -1173,12 +1217,44 @@ fn write_provider_report(
             .credential_env
             .iter()
             .map(|var| {
-                let set = std::env::var_os(var).is_some();
-                let status = if set { "set" } else { "not set" };
-                format!("{var} ({status}, value hidden)")
+                let reference = crate::secret::SecretRef::Environment { var: var.clone() };
+                match secrets.source_of(&reference) {
+                    Some(source) => format!("{var} (set in {source}, value hidden)"),
+                    None => format!("{var} (not set, value hidden)"),
+                }
             })
             .collect();
         let _ = writeln!(out, "      credential env: {}", statuses.join(", "));
+    }
+
+    // A configuration that says "this key is in the OS store" and a store
+    // that does not answer it is exactly the state a user must be told
+    // about rather than left to infer from a credential silently coming
+    // from somewhere else. It has a real cause: on macOS an item's access
+    // control list names the binary that wrote it, so a credential stored
+    // by a different build of Glasshouse is not readable by this one — and
+    // Glasshouse asks for no authorization dialog, by design, because
+    // `doctor` and the session launcher must never block on one.
+    if let Some(stored) = stored {
+        let reference = stored.to_secret_ref();
+        let state = match secrets.native() {
+            Err(reason) => format!("recorded, but {}", reason.reason()),
+            Ok(native) => {
+                if crate::secret::SecretStore::is_present(native, &reference) {
+                    "present".to_owned()
+                } else {
+                    "recorded, but the store did not return it; it may have been removed, "
+                        .to_owned()
+                        + "or stored by a different build of Glasshouse — store it again"
+                }
+            }
+        };
+        let _ = writeln!(
+            out,
+            "      stored credential: {}/{} — {state}",
+            stored.service(),
+            stored.account(),
+        );
     }
 }
 
@@ -1935,6 +2011,87 @@ mod tests {
         assert!(
             report.contains(&format!("{VAR_NAME} (set")),
             "the doctor report must say the variable is set: {report}"
+        );
+    }
+
+    /// Phase 9E line 2 at the one surface a user runs to find out what
+    /// Glasshouse believes: the report says **which** store a credential
+    /// would be read from, and names the fallback when there is no native
+    /// one. A user must never have to guess whether their key is in the
+    /// Keychain or in a shell profile.
+    #[test]
+    fn the_doctor_report_says_which_secret_store_credentials_come_from() {
+        const VAR_NAME: &str = "GLASSHOUSE_DOCTOR_TEST_ONLY_STORE_LABEL_VAR";
+        const SECRET_VALUE: &str = "sk-doctor-store-label-test-0123456789abcd";
+
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let mut user = crate::config::UserConfig::load(runtime.paths()).unwrap();
+        let mut provider = crate::config::ProviderConfig::new("openrouter");
+        provider
+            .set_credential_env(vec![VAR_NAME.to_owned()])
+            .set_credential_store(Some(crate::config::StoredCredentialRef::new(
+                crate::secret::native::SERVICE,
+                VAR_NAME,
+            )));
+        user.providers_mut().set("store-label-test", provider);
+        user.save(runtime.paths()).unwrap();
+
+        // SAFETY: `VAR_NAME` is unique to this test and is removed again
+        // before any assertion that could fail.
+        unsafe {
+            std::env::set_var(VAR_NAME, SECRET_VALUE);
+        }
+        let report = doctor_report(&runtime);
+        unsafe {
+            std::env::remove_var(VAR_NAME);
+        }
+
+        // The value is never in the report, whichever store answered.
+        assert!(
+            !report.contains(SECRET_VALUE),
+            "the doctor report must never contain a credential's value"
+        );
+
+        assert!(
+            report.contains("Secret storage"),
+            "the report must have a secret-storage section: {report}"
+        );
+        // Whichever of the three arrangements is in force on the machine
+        // running this, the report must print that arrangement's own label —
+        // never nothing, and never a label for a different one.
+        let store = crate::secret::native::PreferNativeSecretStore::detect();
+        let label = crate::secret::SecretStore::describe(&store);
+        assert!(
+            report.contains(&format!("credentials resolve from: {label}")),
+            "the report must name the store that answers: {report}"
+        );
+        assert!(
+            [
+                crate::secret::native::NATIVE_FIRST_LABEL,
+                crate::secret::native::UNSUPPORTED_PLATFORM_LABEL,
+                crate::secret::native::STORE_UNREACHABLE_LABEL,
+            ]
+            .contains(&label),
+            "`{label}` is not one of the three arrangements this store can be in"
+        );
+
+        // Per credential, too: the environment answered this one, and the
+        // report says so rather than leaving the user to infer it.
+        assert!(
+            report.contains(&format!("{VAR_NAME} (set in process environment")),
+            "the report must say which source answered: {report}"
+        );
+
+        // A configuration that records a stored credential the store does
+        // not return is reported, not silently papered over with the
+        // environment's copy.
+        assert!(
+            report.contains(&format!(
+                "stored credential: {}/{VAR_NAME}",
+                crate::secret::native::SERVICE
+            )),
+            "the recorded stored credential must be named: {report}"
         );
     }
 }

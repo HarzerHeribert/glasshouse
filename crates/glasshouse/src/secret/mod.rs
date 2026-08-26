@@ -46,12 +46,15 @@
 //!   [`crate::launch::HarnessLaunch`] or [`mod@crate::config`] — the
 //!   dependency points one way, and a harness adapter is handed variable
 //!   *names* rather than a [`Secret`], so it has nothing to leak.
-//! - **It ships no native OS-backed store.** The macOS Keychain, Windows
-//!   Credential Manager and Secret Service each need a new dependency and
-//!   per-platform verification on real hardware. [`SecretStore`] is the seam
-//!   they will be added at, one at a time, each with its own evidence; until
-//!   then [`EnvironmentSecretStore`] is the only implementation, and it says
-//!   so in [`SecretStore::describe`] rather than pretending to be a keyring.
+//! - **It ships one native OS-backed store, not three.** [`SecretStore`] is
+//!   the seam they are added at, one at a time, each with its own evidence.
+//!   The macOS Keychain is here now, in [`mod@native`], because it can be
+//!   proven on the hardware this was written on. Windows Credential Manager
+//!   needs a real user session and the Secret Service needs a session bus;
+//!   neither has been proven, so neither is claimed, and
+//!   [`native::PreferNativeSecretStore`] says out loud in
+//!   [`SecretStore::describe`] which source is actually answering rather
+//!   than degrading to the environment in silence.
 //!
 //! # `redact` is belt and braces, not the boundary
 //!
@@ -63,6 +66,8 @@
 //! credential to a formatter and clean up afterwards.
 
 use std::fmt;
+
+pub mod native;
 
 /// What stands in for a credential everywhere one might otherwise be
 /// printed: the [`Debug`](std::fmt::Debug) rendering of a [`Secret`], and
@@ -87,7 +92,21 @@ pub const REDACTED: &str = "[redacted]";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecretRef {
     /// Read from this environment variable at the moment of use.
+    ///
+    /// Naming a variable is not the same as naming a *location*: this is the
+    /// only name Glasshouse has for a provider credential anywhere, and a
+    /// store is free to answer it from wherever it keeps credentials. That
+    /// is exactly what [`native::PreferNativeSecretStore`] does when it
+    /// prefers the Keychain.
     Environment { var: String },
+    /// Held in the operating system's own credential store, filed under
+    /// this service and account.
+    ///
+    /// Still two names and nothing else, so this variant is as safe to store
+    /// in configuration and to print as the other one. The value behind it
+    /// is produced by [`native::NativeSecretStore`], at the moment of use,
+    /// exactly like the environment's.
+    OsCredential { service: String, account: String },
 }
 
 /// Resolves a [`SecretRef`] into a value that is deliberately awkward to
@@ -136,13 +155,15 @@ impl fmt::Debug for Secret {
     }
 }
 
-/// The one [`SecretStore`] this phase ships: values come from the process
+/// The cross-platform [`SecretStore`]: values come from the process
 /// environment, read at the moment of use.
 ///
-/// This is the cross-platform source. It is not a secure store and does not
-/// claim to be one — [`SecretStore::describe`] says exactly what it is, so a
-/// diagnostic can tell a user where a credential came from without anyone
-/// having to infer it.
+/// It is not a secure store and does not claim to be one —
+/// [`SecretStore::describe`] says exactly what it is, so a diagnostic can
+/// tell a user where a credential came from without anyone having to infer
+/// it. It is also the fallback half of
+/// [`native::PreferNativeSecretStore`], which is what makes that fallback
+/// labelled rather than silent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EnvironmentSecretStore;
 
@@ -166,6 +187,11 @@ impl SecretStore for EnvironmentSecretStore {
             SecretRef::Environment { var } => std::env::var_os(var)
                 .and_then(|value| value.into_string().ok())
                 .map(Secret),
+            // Not this store's to answer. `None` rather than a guess at
+            // some environment variable derived from the account name: this
+            // store reads the environment, and a reference that names the
+            // OS store is asking something it cannot answer.
+            SecretRef::OsCredential { .. } => None,
         }
     }
 
@@ -176,6 +202,7 @@ impl SecretStore for EnvironmentSecretStore {
     fn is_present(&self, reference: &SecretRef) -> bool {
         match reference {
             SecretRef::Environment { var } => std::env::var_os(var).is_some(),
+            SecretRef::OsCredential { .. } => false,
         }
     }
 

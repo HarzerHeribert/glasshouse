@@ -11,15 +11,19 @@
 //! them.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
 
-use crate::config::{Layer, ProfileApproval, ProfileBackend, ProfileConfig, ProviderConfig};
+use crate::config::{
+    Layer, ProfileApproval, ProfileBackend, ProfileConfig, ProviderConfig, StoredCredentialRef,
+};
 use crate::integrations::{IntegrationId, IntegrationKind, IntegrationStatus};
 use crate::platform::exec;
-use crate::secret::{EnvironmentSecretStore, SecretStore};
+use crate::secret::native::{PreferNativeSecretStore, os_credential_for_variable};
+use crate::secret::{SecretRef, SecretStore};
 use crate::session::SessionRecord;
 
 /// A Glasshouse-owned screen drawn over the session viewport.
@@ -86,6 +90,16 @@ pub enum Action {
     /// configuration file. Only ever produced after the user has explicitly
     /// confirmed inside the Settings overlay — see [`SettingsState`].
     SaveProjectSettings,
+    /// Write the credential the user just typed into the operating system's
+    /// own secure store. The run loop performs the write — see
+    /// [`ShellState::take_provider_credential_entry`], which is also the
+    /// only way the typed value ever leaves the Settings overlay.
+    StoreProviderCredential,
+    /// Remove the selected provider's stored credential from the OS store
+    /// and drop the reference from its configuration. The run loop performs
+    /// the deletion — see
+    /// [`ShellState::selected_provider_stored_credentials`].
+    DeleteProviderCredential,
     /// Reopen the first-run wizard for a "reconfigure" invocation (Phase 2C:
     /// "Allow the onboarding wizard to be reopened later from settings").
     /// Discovery and reading `UserConfig` are file I/O this module
@@ -370,6 +384,73 @@ impl ShellState {
         }
     }
 
+    /// The provider a credential was just typed for, and the typed value —
+    /// **taken**, so the overlay no longer holds it once this returns.
+    ///
+    /// This is the only route by which a credential leaves the Settings
+    /// overlay, and the run loop's only use for it is to hand it straight to
+    /// [`crate::secret::native::NativeSecretStore::store`] and drop it. It
+    /// returns a bare `String` rather than a [`crate::secret::Secret`]
+    /// because a `Secret` is what comes *out* of a store — see that type's
+    /// own documentation on why its constructor stays private.
+    ///
+    /// `None` when no credential field is open, so a stray
+    /// [`Action::StoreProviderCredential`] does nothing rather than
+    /// consuming some other field's text.
+    pub fn take_provider_credential_entry(&mut self) -> Option<(String, String)> {
+        self.settings.as_mut()?.take_credential_entry()
+    }
+
+    /// The credential variable name `provider` declares first, which is the
+    /// name a newly stored credential is filed under.
+    ///
+    /// The **first** rather than a chosen one: a provider declaring several
+    /// is a pool, and choosing between them on cost or quota is a routing
+    /// decision this overlay does not make — the same rule
+    /// [`crate::provider::Provider::secret_refs`] and
+    /// `crate::profile::apply_direct_provider` already follow. The status
+    /// line names the variable actually used, so nothing is chosen silently.
+    pub fn provider_credential_variable(&self, provider: &str) -> Option<String> {
+        self.settings
+            .as_ref()?
+            .providers()
+            .iter()
+            .find(|row| row.name == provider)?
+            .config
+            .credential_env()
+            .first()
+            .cloned()
+    }
+
+    /// The selected provider and every reference its credential could be
+    /// stored under, for the run loop to delete — see
+    /// `SettingsState::selected_provider_stored_credentials`.
+    pub fn selected_provider_stored_credentials(&self) -> Option<(String, Vec<SecretRef>)> {
+        self.settings
+            .as_ref()?
+            .selected_provider_stored_credentials()
+    }
+
+    /// Record a successful store: the row shows it, and the configuration
+    /// change is staged like every other provider edit, to be written by the
+    /// next `w`/`W`.
+    pub fn record_provider_credential_stored(
+        &mut self,
+        provider: &str,
+        stored: StoredCredentialRef,
+    ) {
+        if let Some(settings) = self.settings.as_mut() {
+            settings.record_credential_stored(provider, stored);
+        }
+    }
+
+    /// Record a successful deletion — the configuration half of line 3.
+    pub fn record_provider_credential_cleared(&mut self, provider: &str) {
+        if let Some(settings) = self.settings.as_mut() {
+            settings.record_credential_cleared(provider);
+        }
+    }
+
     /// Every pending, unsaved harness Settings edit, for the run loop to
     /// apply to whichever configuration layer is being saved. Empty when
     /// Settings is not open or nothing has been edited yet.
@@ -481,6 +562,8 @@ impl ShellState {
             SettingsAction::SaveUser => Action::SaveUserSettings,
             SettingsAction::SaveProject => Action::SaveProjectSettings,
             SettingsAction::ReopenOnboarding => Action::ReopenOnboarding,
+            SettingsAction::StoreCredential => Action::StoreProviderCredential,
+            SettingsAction::DeleteCredential => Action::DeleteProviderCredential,
         }
     }
 
@@ -728,19 +811,60 @@ enum ProviderInputPurpose {
     EditCredentialEnv {
         name: String,
     },
+    /// Typing a credential to put in the OS's own secure store. **The one
+    /// purpose whose buffer is a value rather than a name**, which is why
+    /// [`ProviderTextInput`]'s `Debug` and
+    /// [`SettingsState::provider_input`] both treat every buffer as though
+    /// it were this one.
+    SetCredential {
+        name: String,
+    },
 }
 
-#[derive(Debug)]
+impl ProviderInputPurpose {
+    /// Whether the text being typed is a credential.
+    ///
+    /// Drives masking on screen. Deliberately a method on the purpose rather
+    /// than a flag set at each call site: a new secret-carrying purpose is
+    /// then one match arm away from being masked, not one forgotten
+    /// `masked: true` away from being echoed.
+    fn is_secret(&self) -> bool {
+        matches!(self, Self::SetCredential { .. })
+    }
+}
+
 struct ProviderTextInput {
     purpose: ProviderInputPurpose,
     buffer: String,
     error: Option<String>,
 }
 
+/// Renders the buffer as [`crate::secret::REDACTED`] **whatever the
+/// purpose**, so a credential cannot reach a log or a panic message through
+/// the derived `Debug` of any type that contains one — and so no purpose
+/// added later can leak by being forgotten here. What a user is typing into
+/// a field is not something a diagnostic needs; the purpose it is being
+/// typed for is, and that is kept.
+impl fmt::Debug for ProviderTextInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProviderTextInput")
+            .field("purpose", &self.purpose)
+            .field("buffer", &crate::secret::REDACTED)
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
 /// Read-only view of the active Providers-section text input, for rendering.
+///
+/// `buffer` is an owned `String` rather than a borrow of the input's own
+/// text on purpose: for a credential it is the **masked** rendering, built
+/// here, so the typed value never leaves [`SettingsState`] at all. A view
+/// that borrowed the real buffer would put the decision "mask it" in the
+/// renderer, where forgetting it once is a leak.
 pub struct ProviderInputView<'a> {
     pub label: String,
-    pub buffer: &'a str,
+    pub buffer: String,
     pub error: Option<&'a str>,
 }
 
@@ -888,6 +1012,14 @@ enum SettingsAction {
     SaveProject,
     /// `r`: reopen the first-run wizard. See [`Action::ReopenOnboarding`].
     ReopenOnboarding,
+    /// Enter was pressed on a non-empty credential field. The typed value is
+    /// still in the input; the run loop takes it with
+    /// [`ShellState::take_provider_credential_entry`] and writes it to the
+    /// OS store, because touching a keychain is I/O this module deliberately
+    /// does not hold — exactly like [`SettingsAction::SaveUser`].
+    StoreCredential,
+    /// `x`: delete the selected provider's stored credential.
+    DeleteCredential,
 }
 
 /// Everything the Settings overlay displays and edits.
@@ -927,6 +1059,14 @@ pub struct SettingsState {
     /// the exact path to be created and requires a distinct confirmation")
     /// is currently showing.
     confirm_project_write: bool,
+    /// The provider whose stored credential `x` is offering to delete, while
+    /// that confirmation is showing.
+    ///
+    /// Confirmed for the same reason `W` is, and more so: removing an item
+    /// from the operating system's own store is the one action in this
+    /// overlay that cannot be undone by declining to save. Every other
+    /// provider edit — `d` included — is staged in memory until `w`.
+    confirm_credential_delete: Option<String>,
     provider_input: Option<ProviderTextInput>,
     profile_input: Option<ProfileTextInput>,
     /// The last connectivity-precondition check run this session, and which
@@ -959,6 +1099,7 @@ impl SettingsState {
             profile_edits: HashMap::new(),
             path_input: None,
             confirm_project_write: false,
+            confirm_credential_delete: None,
             provider_input: None,
             profile_input: None,
             provider_test_result: None,
@@ -1005,6 +1146,11 @@ impl SettingsState {
         self.confirm_project_write
     }
 
+    /// The provider whose stored credential is awaiting a `y`/Esc, if any.
+    pub fn confirming_credential_delete(&self) -> Option<&str> {
+        self.confirm_credential_delete.as_deref()
+    }
+
     /// The active "add an explicit path" sub-mode, if any.
     pub fn path_input(&self) -> Option<SettingsPathInputView<'_>> {
         let input = self.path_input.as_ref()?;
@@ -1030,10 +1176,24 @@ impl SettingsState {
             ProviderInputPurpose::EditCredentialEnv { name } => {
                 format!("Credential variable name(s) for `{name}`, comma-separated")
             }
+            ProviderInputPurpose::SetCredential { name } => {
+                format!("Credential for `{name}` (stored in the OS secure store, not shown)")
+            }
+        };
+        // Masked here rather than in the renderer: the typed characters
+        // never leave this method, so no view, snapshot or test harness can
+        // reach them however it renders. The count of `*` follows the
+        // buffer's length, which is what makes a field a user is typing into
+        // usable at all — and is on that user's own screen, unlike a `Debug`
+        // or a log line, where `ProviderTextInput` reveals nothing.
+        let buffer = if input.purpose.is_secret() {
+            "*".repeat(input.buffer.chars().count())
+        } else {
+            input.buffer.clone()
         };
         Some(ProviderInputView {
             label,
-            buffer: input.buffer.as_str(),
+            buffer,
             error: input.error.as_deref(),
         })
     }
@@ -1146,6 +1306,34 @@ impl SettingsState {
         if self.profile_input.is_some() {
             return self.handle_profile_input_key(key);
         }
+        if let Some(provider) = self.confirm_credential_delete.clone() {
+            return match key.code {
+                KeyCode::Enter | KeyCode::Char('y') => {
+                    self.confirm_credential_delete = None;
+                    // The row must still be the one that was confirmed: a
+                    // confirmation that deleted whatever happens to be
+                    // selected now would be a different action from the one
+                    // the user agreed to.
+                    if self
+                        .providers
+                        .get(self.selected_provider)
+                        .is_some_and(|row| row.name == provider)
+                    {
+                        SettingsAction::DeleteCredential
+                    } else {
+                        SettingsAction::Redraw
+                    }
+                }
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    self.confirm_credential_delete = None;
+                    SettingsAction::Redraw
+                }
+                // Swallowed, exactly like the project-write confirmation:
+                // an explicit y/Enter or Esc/n, never "any key dismisses".
+                _ => SettingsAction::None,
+            };
+        }
+
         if self.confirm_project_write {
             return match key.code {
                 KeyCode::Enter | KeyCode::Char('y') => {
@@ -1231,6 +1419,17 @@ impl SettingsState {
             }
             KeyCode::Char('t') if self.section == SettingsSection::Providers => {
                 self.test_selected_provider();
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('s') if self.section == SettingsSection::Providers => {
+                self.start_set_provider_credential();
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('x') if self.section == SettingsSection::Providers => {
+                self.confirm_credential_delete = self
+                    .providers
+                    .get(self.selected_provider)
+                    .map(|row| row.name.clone());
                 SettingsAction::Redraw
             }
             KeyCode::Char('a') if self.section == SettingsSection::LaunchProfiles => {
@@ -1345,6 +1544,102 @@ impl SettingsState {
         });
     }
 
+    /// Open the masked credential field for the selected provider.
+    ///
+    /// The buffer starts empty and is never pre-filled from anywhere: there
+    /// is nothing to pre-fill it *with* that would not mean reading a
+    /// credential out of a store in order to display it.
+    fn start_set_provider_credential(&mut self) {
+        let Some(row) = self.providers.get(self.selected_provider) else {
+            return;
+        };
+        if row.config.credential_env().is_empty() {
+            self.provider_input = Some(ProviderTextInput {
+                purpose: ProviderInputPurpose::SetCredential {
+                    name: row.name.clone(),
+                },
+                buffer: String::new(),
+                error: Some(
+                    "this provider names no credential variable yet — set one with `c` first, \
+                     so the stored credential has a name to be found by"
+                        .to_owned(),
+                ),
+            });
+            return;
+        }
+        self.provider_input = Some(ProviderTextInput {
+            purpose: ProviderInputPurpose::SetCredential {
+                name: row.name.clone(),
+            },
+            buffer: String::new(),
+            error: None,
+        });
+    }
+
+    /// The provider the credential field is for, and what the user typed —
+    /// **taken**, so this method can be called once and the value is gone
+    /// from the overlay afterwards.
+    fn take_credential_entry(&mut self) -> Option<(String, String)> {
+        let input = self.provider_input.take()?;
+        let ProviderInputPurpose::SetCredential { name } = input.purpose else {
+            // Not a credential field: put it back rather than discarding an
+            // edit the user is in the middle of making.
+            self.provider_input = Some(input);
+            return None;
+        };
+        Some((name, input.buffer))
+    }
+
+    /// The selected provider and every reference under which its credential
+    /// could be stored.
+    ///
+    /// More than one, because a provider may declare a pool of credential
+    /// variable names and a stored reference may also have been recorded in
+    /// configuration. Deleting means deleting all of them: a "delete my
+    /// stored key" that left one of two copies behind would be a worse
+    /// answer than raising.
+    fn selected_provider_stored_credentials(&self) -> Option<(String, Vec<SecretRef>)> {
+        let row = self.providers.get(self.selected_provider)?;
+        let mut references: Vec<SecretRef> = Vec::new();
+        if let Some(stored) = row.config.credential_store() {
+            references.push(stored.to_secret_ref());
+        }
+        for var in row.config.credential_env() {
+            let reference = os_credential_for_variable(var);
+            if !references.contains(&reference) {
+                references.push(reference);
+            }
+        }
+        Some((row.name.clone(), references))
+    }
+
+    /// Record that `provider`'s credential now lives in the OS store, and
+    /// stage the configuration change that says so.
+    fn record_credential_stored(&mut self, provider: &str, stored: StoredCredentialRef) {
+        let Some(row) = self.providers.iter_mut().find(|row| row.name == provider) else {
+            return;
+        };
+        row.config.set_credential_store(Some(stored));
+        row.layer = Layer::User;
+        self.provider_edits
+            .insert(row.name.clone(), Some(row.config.clone()));
+    }
+
+    /// The configuration half of deleting a stored credential: the reference
+    /// goes, every other field stays.
+    fn record_credential_cleared(&mut self, provider: &str) {
+        let Some(row) = self.providers.iter_mut().find(|row| row.name == provider) else {
+            return;
+        };
+        if row.config.credential_store().is_none() {
+            return;
+        }
+        row.config.set_credential_store(None);
+        row.layer = Layer::User;
+        self.provider_edits
+            .insert(row.name.clone(), Some(row.config.clone()));
+    }
+
     fn toggle_selected_provider(&mut self) {
         let Some(row) = self.providers.get_mut(self.selected_provider) else {
             return;
@@ -1371,8 +1666,12 @@ impl SettingsState {
         let Some(row) = self.providers.get(self.selected_provider) else {
             return;
         };
+        // The store a launch would actually use, not just the environment:
+        // a key the user put in the Keychain is a key this check must count
+        // as present, or `t` would report a provider as unusable that
+        // launches perfectly well.
         let outcome =
-            check_provider_reachability(&row.name, &row.config, &EnvironmentSecretStore::new());
+            check_provider_reachability(&row.name, &row.config, &PreferNativeSecretStore::detect());
         self.provider_test_result = Some((row.name.clone(), outcome));
     }
 
@@ -1383,6 +1682,29 @@ impl SettingsState {
                 SettingsAction::Redraw
             }
             KeyCode::Enter => {
+                // A credential is not applied here: writing one to the OS
+                // store is I/O, so the input is left standing and the run
+                // loop takes the value out of it.
+                if self
+                    .provider_input
+                    .as_ref()
+                    .is_some_and(|input| input.purpose.is_secret())
+                {
+                    let empty = self
+                        .provider_input
+                        .as_ref()
+                        .is_some_and(|input| input.buffer.trim().is_empty());
+                    if empty {
+                        if let Some(input) = self.provider_input.as_mut() {
+                            input.error = Some(
+                                "a credential needs a value; press Esc to leave it unchanged"
+                                    .to_owned(),
+                            );
+                        }
+                        return SettingsAction::Redraw;
+                    }
+                    return SettingsAction::StoreCredential;
+                }
                 self.confirm_provider_input();
                 SettingsAction::Redraw
             }
@@ -1490,6 +1812,12 @@ impl SettingsState {
                     self.provider_edits.insert(name, Some(row.config.clone()));
                 }
             }
+            // Never reached: `handle_provider_input_key` answers Enter on a
+            // credential field with `SettingsAction::StoreCredential` and
+            // leaves the input standing, because storing one is I/O. Written
+            // as a no-op rather than a panic so that a future path into here
+            // discards the value instead of printing a backtrace next to it.
+            ProviderInputPurpose::SetCredential { .. } => {}
         }
     }
 
@@ -3258,5 +3586,268 @@ mod settings_tests {
         state.handle_key(press(KeyCode::Char('a')));
         assert!(state.settings().unwrap().profile_input().is_some());
         assert!(state.settings().unwrap().provider_test_result().is_none());
+    }
+
+    // --- storing and deleting a provider credential (Phase 9E) ----------
+
+    /// A provider row with a credential variable, so `s` has a name to file
+    /// a stored credential under.
+    fn credential_provider_rows() -> Vec<ProviderRow> {
+        let mut config = ProviderConfig::new("openrouter");
+        config
+            .set_base_url(Some("https://mirror.example.com/v1".to_owned()))
+            .set_credential_env(vec!["MY_ROUTER_KEY".to_owned()]);
+        vec![ProviderRow {
+            name: "my-router".to_owned(),
+            config,
+            layer: Layer::User,
+        }]
+    }
+
+    fn settings_with_credential_provider() -> ShellState {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", Vec::new());
+        state.open_settings(
+            Vec::new(),
+            Vec::new(),
+            credential_provider_rows(),
+            Vec::new(),
+        );
+        to_providers(state)
+    }
+
+    /// **Acceptance 5 for this module.** A credential typed into Settings is
+    /// masked on the way out to the renderer and redacted in every `Debug`
+    /// that could reach a log or a panic message. Asserted with
+    /// `!contains`, never `assert_eq!` on the secret material — a failing
+    /// `assert_eq!` prints both sides.
+    #[test]
+    fn a_typed_credential_is_masked_for_the_view_and_redacted_in_every_debug() {
+        const VALUE: &str = "sk-typed-into-settings-0123456789abcdef";
+
+        let mut state = settings_with_credential_provider();
+        state.handle_key(press(KeyCode::Char('s')));
+        type_text(&mut state, VALUE);
+
+        let view = state.settings().unwrap().provider_input().unwrap();
+        assert!(
+            !view.buffer.contains(VALUE),
+            "the typed credential reached the view: {}",
+            view.buffer
+        );
+        assert_eq!(
+            view.buffer,
+            "*".repeat(VALUE.chars().count()),
+            "a credential field is masked character for character"
+        );
+        assert!(
+            view.label.contains("my-router"),
+            "the field must say which provider it is for: {}",
+            view.label
+        );
+
+        let rendered = format!("{:?}", state.settings().unwrap());
+        assert!(
+            !rendered.contains(VALUE),
+            "a credential reached a Debug rendering:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(crate::secret::REDACTED),
+            "the buffer must render as the same marker `Secret` uses:\n{rendered}"
+        );
+
+        // ... and a field that is NOT a credential is still shown, so the
+        // masking is the purpose's doing rather than a blanket rule that
+        // would make every editor unusable.
+        state.handle_key(press(KeyCode::Esc));
+        state.handle_key(press(KeyCode::Char('e')));
+        type_text(&mut state, "https://example.invalid/v1");
+        let view = state.settings().unwrap().provider_input().unwrap();
+        assert!(
+            view.buffer.contains("example.invalid"),
+            "got {}",
+            view.buffer
+        );
+    }
+
+    /// Enter on a credential field does not apply it here — writing to a
+    /// keychain is I/O this module does not hold — it escalates, and the
+    /// value leaves the overlay exactly once.
+    #[test]
+    fn enter_on_a_credential_field_hands_the_value_to_the_run_loop_once() {
+        const VALUE: &str = "sk-handed-to-the-run-loop-0123456789abcd";
+
+        let mut state = settings_with_credential_provider();
+        state.handle_key(press(KeyCode::Char('s')));
+        type_text(&mut state, VALUE);
+        assert_eq!(
+            state.handle_key(press(KeyCode::Enter)),
+            Action::StoreProviderCredential
+        );
+
+        let taken = state.take_provider_credential_entry();
+        assert_eq!(
+            taken,
+            Some(("my-router".to_owned(), VALUE.to_owned())),
+            "the run loop gets the provider and the value"
+        );
+        // Taken means taken: a second call finds nothing, and the overlay
+        // no longer holds the value.
+        assert_eq!(state.take_provider_credential_entry(), None);
+        assert!(state.settings().unwrap().provider_input().is_none());
+        let rendered = format!("{:?}", state.settings().unwrap());
+        assert!(!rendered.contains(VALUE), "got {rendered}");
+    }
+
+    /// An empty field is refused with a message rather than storing an empty
+    /// credential, and Esc still leaves everything unchanged.
+    #[test]
+    fn an_empty_credential_field_is_refused_and_esc_changes_nothing() {
+        let mut state = settings_with_credential_provider();
+        state.handle_key(press(KeyCode::Char('s')));
+        assert_eq!(state.handle_key(press(KeyCode::Enter)), Action::Redraw);
+
+        let view = state.settings().unwrap().provider_input().unwrap();
+        assert!(
+            view.error.unwrap().contains("needs a value"),
+            "{:?}",
+            view.error
+        );
+
+        state.handle_key(press(KeyCode::Esc));
+        assert!(state.settings().unwrap().provider_input().is_none());
+        assert!(state.settings_provider_edits().is_empty());
+    }
+
+    /// A provider with no credential variable has no name to file a stored
+    /// credential under, and is told so rather than having one invented.
+    #[test]
+    fn storing_a_credential_needs_a_credential_variable_name_first() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", Vec::new());
+        state.open_settings(Vec::new(), Vec::new(), sample_provider_rows(), Vec::new());
+        let mut state = to_providers(state);
+
+        state.handle_key(press(KeyCode::Char('s')));
+        let view = state.settings().unwrap().provider_input().unwrap();
+        assert!(
+            view.error.unwrap().contains("names no credential variable"),
+            "{:?}",
+            view.error
+        );
+    }
+
+    /// **Acceptance 3, the configuration half.** Recording a stored
+    /// credential stages the *reference* — two names — and clearing it
+    /// removes exactly that, leaving every other field alone.
+    #[test]
+    fn recording_and_clearing_a_stored_credential_stages_only_the_reference() {
+        let mut state = settings_with_credential_provider();
+
+        let stored = StoredCredentialRef::new("glasshouse", "MY_ROUTER_KEY");
+        state.record_provider_credential_stored("my-router", stored.clone());
+
+        let row = &state.settings().unwrap().providers()[0];
+        assert_eq!(row.config.credential_store(), Some(&stored));
+        assert_eq!(
+            row.config.base_url(),
+            Some("https://mirror.example.com/v1"),
+            "recording a stored credential must not disturb any other field"
+        );
+        let edits = state.settings_provider_edits();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(
+            edits[0].upsert.as_ref().unwrap().credential_store(),
+            Some(&stored)
+        );
+
+        state.record_provider_credential_cleared("my-router");
+        let row = &state.settings().unwrap().providers()[0];
+        assert_eq!(row.config.credential_store(), None);
+        assert_eq!(
+            row.config.credential_env(),
+            &["MY_ROUTER_KEY".to_owned()],
+            "clearing the reference is not clearing the provider"
+        );
+        let edits = state.settings_provider_edits();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(
+            edits[0].upsert.as_ref().unwrap().credential_store(),
+            None,
+            "the staged edit must carry the cleared reference, or `w` would write it back"
+        );
+    }
+
+    /// Deleting reaches the OS store, which no other edit in this overlay
+    /// does, so it is confirmed first and Esc really does cancel.
+    #[test]
+    fn deleting_a_stored_credential_is_confirmed_first_and_esc_cancels() {
+        let mut state = settings_with_credential_provider();
+        state.record_provider_credential_stored(
+            "my-router",
+            StoredCredentialRef::new("glasshouse", "MY_ROUTER_KEY"),
+        );
+
+        state.handle_key(press(KeyCode::Char('x')));
+        assert_eq!(
+            state.settings().unwrap().confirming_credential_delete(),
+            Some("my-router")
+        );
+
+        // An unrelated key is swallowed, exactly like the project-write
+        // confirmation: never "any key dismisses".
+        assert_eq!(state.handle_key(press(KeyCode::Char('z'))), Action::None);
+        assert_eq!(
+            state.settings().unwrap().confirming_credential_delete(),
+            Some("my-router")
+        );
+
+        state.handle_key(press(KeyCode::Esc));
+        assert_eq!(
+            state.settings().unwrap().confirming_credential_delete(),
+            None
+        );
+        assert!(
+            state.settings().unwrap().providers()[0]
+                .config
+                .credential_store()
+                .is_some(),
+            "cancelling must change nothing"
+        );
+
+        // ... and confirming escalates to the run loop, which owns the I/O.
+        state.handle_key(press(KeyCode::Char('x')));
+        assert_eq!(
+            state.handle_key(press(KeyCode::Char('y'))),
+            Action::DeleteProviderCredential
+        );
+    }
+
+    /// Every reference the selected provider's credential could be stored
+    /// under, so a deletion cannot leave one of two copies behind.
+    #[test]
+    fn deletion_targets_both_the_recorded_reference_and_every_declared_variable() {
+        let mut config = ProviderConfig::new("openrouter");
+        config
+            .set_credential_env(vec!["FIRST_KEY".to_owned(), "SECOND_KEY".to_owned()])
+            .set_credential_store(Some(StoredCredentialRef::new("glasshouse", "FIRST_KEY")));
+        let rows = vec![ProviderRow {
+            name: "pool".to_owned(),
+            config,
+            layer: Layer::User,
+        }];
+
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", Vec::new());
+        state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());
+        let state = to_providers(state);
+
+        let (name, references) = state.selected_provider_stored_credentials().unwrap();
+        assert_eq!(name, "pool");
+        assert_eq!(
+            references,
+            vec![
+                os_credential_for_variable("FIRST_KEY"),
+                os_credential_for_variable("SECOND_KEY"),
+            ],
+            "the recorded reference is not duplicated, and no declared variable is skipped"
+        );
     }
 }

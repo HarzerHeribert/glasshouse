@@ -1205,7 +1205,13 @@ mod tests {
 
     impl crate::secret::SecretStore for FakeSecrets {
         fn resolve(&self, reference: &SecretRef) -> Option<crate::secret::Secret> {
-            let SecretRef::Environment { var } = reference;
+            // Forced by `SecretRef` gaining `OsCredential`: this fake holds
+            // variable names, so a reference naming the OS store is one it
+            // has nothing to answer with. No production line in this module
+            // changed.
+            let SecretRef::Environment { var } = reference else {
+                return None;
+            };
             self.0
                 .iter()
                 .find(|(name, _)| name == var)
@@ -1213,7 +1219,9 @@ mod tests {
         }
 
         fn is_present(&self, reference: &SecretRef) -> bool {
-            let SecretRef::Environment { var } = reference;
+            let SecretRef::Environment { var } = reference else {
+                return false;
+            };
             self.0.iter().any(|(name, _)| name == var)
         }
 

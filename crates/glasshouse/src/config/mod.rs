@@ -24,14 +24,16 @@
 //!
 //! ## No secrets here — structurally, not just by convention
 //!
-//! [`IntegrationConfig`] and [`ProfileConfig`], the only per-item shapes
-//! either file stores, hold onboarding decisions, executable overrides, and
-//! inert profile selections — never an API key, token, or any other
-//! credential. That is Phase 9E's rule applied here: "Never write API keys
-//! into tracked `.glasshouse` project files" and "Store only secret
-//! references in provider configuration whenever possible." A
-//! [`ProfileConfig::backend`] naming [`ProfileBackend::DirectProvider`]
-//! carries only the provider's own *name* — resolving that name to a
+//! [`IntegrationConfig`], [`ProfileConfig`] and [`ProviderConfig`], the
+//! per-item shapes either file stores, hold onboarding decisions, executable
+//! overrides, inert profile selections and *names* — never an API key,
+//! token, or any other credential. That is Phase 9E's rule applied here:
+//! "Never write API keys into tracked `.glasshouse` project files" and
+//! "Store only secret references in provider configuration whenever
+//! possible." A [`ProfileConfig::backend`] naming
+//! [`ProfileBackend::DirectProvider`] carries only the provider's own
+//! *name*; a [`ProviderConfig::credential_store`] carries a
+//! [`StoredCredentialRef`], which is two names. Resolving any of them to a
 //! credential is the separate `SecretStore` abstraction's job (not built by
 //! this module), never this one's. See
 //! [`tests::serialized_form_has_no_secret_capable_field`] for a structural
@@ -541,6 +543,29 @@ pub struct ProviderConfig {
     /// a user hold several keys for the same router.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     credential_env: Vec<String>,
+    /// Where this provider's credential is kept, when the user has put it in
+    /// the operating system's own secure store. **A reference — a service
+    /// and an account name — never a value.**
+    ///
+    /// This is the serialised shape of
+    /// [`crate::secret::SecretRef::OsCredential`], and it is exactly what
+    /// Phase 9E's "store only secret references in provider configuration"
+    /// means: the two names here are as safe to write into a tracked project
+    /// file as [`ProviderConfig::credential_env`]'s variable names already
+    /// are.
+    ///
+    /// # It records intent; it is not what makes resolution work
+    ///
+    /// [`crate::secret::native::PreferNativeSecretStore`] finds a stored
+    /// credential by the variable name a harness expects it in, whether or
+    /// not this field was ever saved. So a configuration file that has
+    /// drifted out of step with the keychain — a credential deleted with
+    /// this field still written, or the reverse — cannot cause a wrong
+    /// launch; the store is asked at the moment of use either way. What this
+    /// field is for is telling the *user* where their key is, and giving
+    /// deletion something to remove.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credential_store: Option<StoredCredentialRef>,
     /// Extra HTTP headers this provider needs, as name/value pairs — see
     /// [`crate::provider::Provider::headers`]. Configuration, not a
     /// credential: a header value here is written by the user into their own
@@ -601,12 +626,70 @@ pub enum ProviderConfigError {
     },
 }
 
+/// The on-disk shape of a [`crate::secret::SecretRef::OsCredential`].
+///
+/// Two names and nothing else, which is why it may be serialized at all —
+/// see [`ProviderConfig::credential_store`]. It lives here rather than in
+/// [`mod@crate::secret`] on purpose: that module's own tests forbid the word
+/// `Serialize` anywhere in its production code, so the shape a *reference*
+/// takes on disk is a configuration-schema decision and the value handling
+/// stays somewhere that can never be serialized. The two halves cannot
+/// drift, because [`StoredCredentialRef::to_secret_ref`] is the only bridge
+/// between them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredCredentialRef {
+    service: String,
+    account: String,
+}
+
+impl StoredCredentialRef {
+    pub fn new(service: impl Into<String>, account: impl Into<String>) -> Self {
+        Self {
+            service: service.into(),
+            account: account.into(),
+        }
+    }
+
+    pub fn service(&self) -> &str {
+        &self.service
+    }
+
+    pub fn account(&self) -> &str {
+        &self.account
+    }
+
+    /// The reference a [`crate::secret::SecretStore`] can be asked with.
+    pub fn to_secret_ref(&self) -> crate::secret::SecretRef {
+        crate::secret::SecretRef::OsCredential {
+            service: self.service.clone(),
+            account: self.account.clone(),
+        }
+    }
+
+    /// The stored shape of `reference`, or `None` for one that names no OS
+    /// credential.
+    ///
+    /// `None` rather than an invented service name: an
+    /// [`crate::secret::SecretRef::Environment`] reference is not a stored
+    /// credential, and writing one here as though it were would claim
+    /// something about where a key lives that nobody established.
+    pub fn from_secret_ref(reference: &crate::secret::SecretRef) -> Option<Self> {
+        match reference {
+            crate::secret::SecretRef::OsCredential { service, account } => {
+                Some(Self::new(service.clone(), account.clone()))
+            }
+            crate::secret::SecretRef::Environment { .. } => None,
+        }
+    }
+}
+
 impl ProviderConfig {
     pub fn new(template: impl Into<String>) -> Self {
         Self {
             template: template.into(),
             base_url: None,
             credential_env: Vec::new(),
+            credential_store: None,
             headers: Vec::new(),
             enabled: true,
         }
@@ -636,6 +719,19 @@ impl ProviderConfig {
 
     pub fn set_credential_env(&mut self, names: Vec<String>) -> &mut Self {
         self.credential_env = names;
+        self
+    }
+
+    /// Where this provider's credential is stored, when the user put it in
+    /// the OS's own secure store — see the field's own doc.
+    pub fn credential_store(&self) -> Option<&StoredCredentialRef> {
+        self.credential_store.as_ref()
+    }
+
+    /// `None` clears the record, which is the configuration half of
+    /// deleting a stored credential.
+    pub fn set_credential_store(&mut self, reference: Option<StoredCredentialRef>) -> &mut Self {
+        self.credential_store = reference;
         self
     }
 
@@ -1499,7 +1595,9 @@ mod tests {
 
     impl crate::secret::SecretStore for OneShotSecrets {
         fn resolve(&self, reference: &crate::secret::SecretRef) -> Option<crate::secret::Secret> {
-            let crate::secret::SecretRef::Environment { var } = reference;
+            let crate::secret::SecretRef::Environment { var } = reference else {
+                return None;
+            };
             (var == self.0).then(|| crate::secret::Secret::mint_for_test(self.1))
         }
 
@@ -2880,6 +2978,49 @@ mod tests {
              widening this list"
         );
 
+        // `ProviderConfig` — the shape that comes closest to a credential,
+        // since it is the one a provider's key is configured through. Its
+        // `credential_store` holds a `StoredCredentialRef`, which is two
+        // NAMES; there is still no field here that could hold a value.
+        let mut provider_cfg = ProviderConfig::new("openrouter");
+        provider_cfg
+            .set_base_url(Some("https://example.invalid".to_owned()))
+            .set_credential_env(vec!["OPENROUTER_API_KEY".to_owned()])
+            .set_credential_store(Some(StoredCredentialRef::new(
+                "glasshouse",
+                "OPENROUTER_API_KEY",
+            )))
+            .set_headers(vec![("X-Test".to_owned(), "1".to_owned())])
+            .set_enabled(false);
+        let provider_value = toml::Value::try_from(&provider_cfg).unwrap();
+        let provider_table = provider_value.as_table().unwrap();
+        let mut provider_keys: Vec<&str> = provider_table.keys().map(String::as_str).collect();
+        provider_keys.sort_unstable();
+        assert_eq!(
+            provider_keys,
+            vec![
+                "base_url",
+                "credential_env",
+                "credential_store",
+                "enabled",
+                "headers",
+                "template"
+            ],
+            "ProviderConfig grew a field — confirm it cannot hold a credential before \
+             widening this list"
+        );
+        // ... and the one field that names a secret store really does hold
+        // only names.
+        let stored = provider_table["credential_store"].as_table().unwrap();
+        let mut stored_keys: Vec<&str> = stored.keys().map(String::as_str).collect();
+        stored_keys.sort_unstable();
+        assert_eq!(
+            stored_keys,
+            vec!["account", "service"],
+            "StoredCredentialRef grew a field — a reference is a service and an account, \
+             and nothing else"
+        );
+
         // `UserConfig`'s top level, likewise.
         let user = fully_populated_user_config();
         let user_value = toml::Value::try_from(&user).unwrap();
@@ -2932,6 +3073,14 @@ mod tests {
         provider_cfg
             .set_base_url(Some("https://mirror.example.com/v1".to_owned()))
             .set_credential_env(vec!["OPENROUTER_API_KEY".to_owned()])
+            // Set, so the field is actually serialized and this list pins
+            // it: `skip_serializing_if = "Option::is_none"` means an unset
+            // one would be invisible here and the guard would pass without
+            // ever having seen it.
+            .set_credential_store(Some(StoredCredentialRef::new(
+                "glasshouse",
+                "OPENROUTER_API_KEY",
+            )))
             .set_headers(vec![("X-Org-Id".to_owned(), "acme".to_owned())])
             // Non-default, so the field actually appears below — see
             // `enabled_by_default`/`is_enabled_by_default`.
@@ -2945,6 +3094,7 @@ mod tests {
             vec![
                 "base_url",
                 "credential_env",
+                "credential_store",
                 "enabled",
                 "headers",
                 "template"
@@ -2952,7 +3102,9 @@ mod tests {
             "ProviderConfig grew a field — confirm it cannot hold a credential value \
              (as opposed to a variable name) before widening this list. `headers` holds \
              name/value pairs that are themselves configuration, never a credential — see \
-             ProviderConfig::set_headers's own doc for why that is safe."
+             ProviderConfig::set_headers's own doc for why that is safe; \
+             `credential_store` holds a service and an account NAME — see \
+             StoredCredentialRef."
         );
 
         // `ProviderTable` itself adds nothing beyond the map: every entry it
@@ -2973,10 +3125,82 @@ mod tests {
             vec![
                 "base_url",
                 "credential_env",
+                "credential_store",
                 "enabled",
                 "headers",
                 "template"
             ]
+        );
+    }
+
+    /// Acceptance 4: a `SecretRef` naming an OS credential survives a real
+    /// save/load round trip through a configuration file, and the file's own
+    /// text carries no value.
+    ///
+    /// A known credential is planted in the environment variable the
+    /// reference is named after *and* handed to the store, so a
+    /// serialisation that reached for either would be caught. Asserted with
+    /// `!contains`, never `assert_eq!` on the secret material — a failing
+    /// `assert_eq!` prints both sides.
+    #[test]
+    fn an_os_credential_reference_round_trips_through_configuration_without_its_value() {
+        const VAR: &str = "GLASSHOUSE_CONFIG_TEST_ONLY_STORED_VAR";
+        const VALUE: &str = "sk-config-round-trip-test-0123456789abcdef";
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
+
+        let reference = crate::secret::native::os_credential_for_variable(VAR);
+        let stored = StoredCredentialRef::from_secret_ref(&reference)
+            .expect("an OsCredential reference has a stored shape");
+
+        let mut provider = ProviderConfig::new("openrouter");
+        provider
+            .set_credential_env(vec![VAR.to_owned()])
+            .set_credential_store(Some(stored.clone()));
+
+        let mut user = UserConfig::default();
+        user.providers_mut().set("stored", provider);
+
+        // SAFETY: `VAR` is unique to this test and removed again below.
+        // Planted so that a serializer which resolved the reference — the
+        // failure this test exists to catch — would have something to leak.
+        unsafe {
+            std::env::set_var(VAR, VALUE);
+        }
+        let saved = user.save(&paths);
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+        saved.unwrap();
+
+        let path = paths.config_dir().join("config.toml");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains(VALUE),
+            "a credential value reached the configuration file:\n{text}"
+        );
+        assert!(text.contains(VAR), "the NAME must be there:\n{text}");
+        assert!(text.contains("glasshouse"), "got:\n{text}");
+
+        let loaded = UserConfig::load(&paths).unwrap();
+        let loaded_provider = loaded.providers().get("stored").unwrap();
+        assert_eq!(loaded_provider.credential_store(), Some(&stored));
+        assert_eq!(loaded_provider.credential_store().unwrap().account(), VAR);
+        assert_eq!(
+            loaded_provider.credential_store().unwrap().to_secret_ref(),
+            reference,
+            "the stored shape and the reference it came from must be the same thing"
+        );
+
+        // An environment reference has no stored shape — writing one here
+        // would claim something about where a key lives that nobody
+        // established.
+        assert_eq!(
+            StoredCredentialRef::from_secret_ref(&crate::secret::SecretRef::Environment {
+                var: VAR.to_owned()
+            }),
+            None
         );
     }
 }

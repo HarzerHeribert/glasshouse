@@ -40,6 +40,16 @@ vt100 = "0.16.2"
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+# macOS is the only platform whose native store Phase 9E can prove, so it is
+# the only platform that depends on `keyring` at all. Two consequences, both
+# deliberate: nothing on Linux or Windows can accidentally link keyring's
+# in-process **mock** store and report it as secure, and neither platform's
+# build grows a dependency for a capability its evidence ledger does not
+# claim. `apple-native` is 3.x's feature name for the Security-framework
+# backend — 4.x's `v1` is a different crate line and does not apply here.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
 

@@ -49,6 +49,90 @@ Missing evidence:
 
 ## Active entries
 
+### Phase 9E — the macOS Keychain, a labelled fallback, and a hang that would have frozen the TUI (three lines)
+
+Contract: Given a user who stores a provider credential, when Glasshouse needs
+it at launch, it resolves the value from the operating system's own secure store
+where one is available and from the environment otherwise — while preserving:
+the value never enters configuration, a log, a `Debug` or Git; the user can see
+**which** store answered and delete what is stored; and an unavailable native
+store is reported plainly rather than silently degraded.
+
+State: **COMPLETE** for the three lines. Phase 9E is eleven of thirteen.
+Windows Credential Manager and Secret Service stay **unchecked** — neither is
+provable from this machine, and the packet forbade checking them.
+
+#### The defect that justifies "run the binary" on its own
+
+`glasshouse doctor`, pointed at a provider whose credential was in the Keychain,
+**hung indefinitely** — exit 124 under `timeout 30`, no output, no visible
+dialog. The stack sample ends in
+`Security::SecurityServer::ClientSession::decrypt`.
+
+`SecKeychainFindGenericPassword` decrypts the item, and decryption consults the
+item's access control list. For an item **this binary did not create**, the list
+does not name it, so the call blocks waiting for a user to answer an
+authorization dialog that a piped process never shows. The same read is on the
+path that starts a session, where it would have frozen the TUI.
+
+Fixed with one `SecKeychainSetUserInteractionAllowed(0)` before the first
+Keychain call any store can make: the call now fails cleanly, resolution falls
+back to the environment, and `describe` says so. Re-run: exit 0, correct output,
+no hang.
+
+**Declared with a bare `#[link(name = "Security", kind = "framework")]` extern
+rather than a new direct dependency** — the framework is already linked via
+`keyring`. Accepted by the orchestrator: one FFI call with a trivial signature
+is a smaller commitment than a second crate on the secret path.
+
+**The cost, stated rather than hidden:** a credential filed by hand with
+`security add-generic-password` is not read. Storing it *through* Glasshouse is
+what puts this binary on the item's ACL.
+
+#### A durability caveat, measured rather than assumed
+
+| what | result |
+|---|---|
+| store and read in one process | reads |
+| store, read from a second invocation of the same binary | reads |
+| store, **rebuild the binary**, read | **does not read** |
+
+The ACL binds to the binary's code identity, so an **unsigned** build — which
+Glasshouse is today — breaks the link on rebuild. For a signed release the
+designated requirement should be the signing identity and stable across
+versions; **that is not verified and is not claimed.** When configuration
+records a credential the store will not return, `doctor` says so and says what
+to do.
+
+#### Production reachability — the one line the packet scoped out
+
+The packet forbade `main.rs`, so the batch left the launch path building an
+`EnvironmentSecretStore` and flagged it rather than reaching into a forbidden
+file. **The orchestrator made that change**: `launch_session` now builds
+`PreferNativeSecretStore::detect()`. Without it, "prefer the macOS Keychain"
+would have been true of the store, of `doctor` and of settings, but not of
+`glasshouse run` — and a mechanism with no production caller does not get its
+box.
+
+Verified against the built binary: `glasshouse doctor` exits 0 and reports
+`credentials resolve from: the macOS Keychain, then the process environment` —
+which is line 2's labelled fallback, in the shipped output.
+
+#### Mutations
+
+The orchestrator's own: making `PreferNativeSecretStore::detect` never prefer
+the native store **failed two tests**, including
+`macos_only_a_keychain_credential_reaches_a_launch_overlays_environment`.
+
+#### A forbidden file that could not be avoided, and was flagged
+
+`SecretRef` gaining an `OsCredential` variant breaks every exhaustive match on
+it, including one in a test fake inside `profile/mod.rs`. Production code in
+that module is untouched. This is the same class as `Provider` gaining a field
+two batches earlier: adding a variant to a shared enum is not a local change,
+and the honest response is to flag it rather than pretend the file was not
+edited.
+
 ### Phase 2D — the Providers and Launch Profiles settings sections (four lines)
 
 Contract: Given a user in the settings view, when they manage providers or

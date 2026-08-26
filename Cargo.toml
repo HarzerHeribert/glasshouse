@@ -18,6 +18,19 @@ ctrlc = { version = "3", features = ["termination"] }
 directories = "6"
 getrandom = "0.4"
 hex = "0.4"
+# The OS credential store, pinned to the 3.6 minor line. 4.x declares
+# `rust-version = "1.88.0"`; this workspace pins 1.85 and CI gates on
+# `rustup run 1.85.0 cargo check --locked`, so the 3→4 jump is an MSRV cliff
+# and `--locked` is the only thing between a routine `cargo update` and a red
+# gate. 3.6.3 declares `rust-version = "1.75"`.
+#
+# `default-features = false` and no platform feature *here* on purpose: with
+# no backend feature enabled, keyring 3.x resolves `keyring::default` to its
+# **mock** store, which accepts and returns credentials in-process and
+# persists nothing. That is precisely the silent degradation Phase 9E line 2
+# forbids, so the backend feature is enabled per target instead — see
+# `crates/glasshouse/Cargo.toml`, where only macOS turns on `apple-native`.
+keyring = { version = "3.6", default-features = false }
 ratatui = "0.30"
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

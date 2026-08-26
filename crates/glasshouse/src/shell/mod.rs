@@ -41,6 +41,8 @@ use crate::integrations::{Discovery, IntegrationId, IntegrationKind, Integration
 use crate::launch::HarnessLaunch;
 use crate::onboarding;
 use crate::pty::TerminalSize;
+use crate::secret;
+use crate::secret::SecretStore as _;
 use crate::session::{
     self, NewSession, ProjectSessions, RuntimeError, SessionId, SessionLifecycle, SessionRuntime,
 };
@@ -181,6 +183,12 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                                 }
                             }
                         }
+                    }
+                    Action::StoreProviderCredential => {
+                        store_provider_credential(&mut state);
+                    }
+                    Action::DeleteProviderCredential => {
+                        delete_provider_credential(&mut state);
                     }
                     Action::ReopenOnboarding => {
                         // The wizard drives its own `Screen`, so this
@@ -626,6 +634,121 @@ fn refresh_settings_after_save(runtime: &Runtime, state: &mut ShellState) {
             tracing::warn!(error = %err, "could not refresh settings after saving");
         }
     }
+}
+
+/// Write the credential the user just typed into the OS's own secure store.
+///
+/// # The whole lifetime of the value is this function
+///
+/// It is taken out of the Settings overlay (which no longer holds it), moved
+/// into [`crate::secret::native::NativeSecretStore::store`], and dropped at
+/// the closing brace. It is never logged, never put in a status line, and
+/// never returned: every `set_status` below names the provider and the store,
+/// and nothing else. That is the same rule
+/// [`crate::profile::resolve`] follows for the one credential a launch mints.
+fn store_provider_credential(state: &mut ShellState) {
+    let Some((provider, value)) = state.take_provider_credential_entry() else {
+        return;
+    };
+
+    let store = secret::native::PreferNativeSecretStore::detect();
+    let native = match store.native() {
+        Ok(native) => native,
+        Err(reason) => {
+            // Line 2: an unavailable native store is reported plainly, and
+            // the user is told what Glasshouse will read instead rather than
+            // being left to guess.
+            state.set_status(format!(
+                "cannot store a credential: {} — Glasshouse will read {} instead",
+                reason.reason(),
+                store.describe()
+            ));
+            return;
+        }
+    };
+
+    // Filed under the variable name the provider already declares, so the
+    // stored credential is found by exactly the reference
+    // `crate::profile::resolve` asks with — see
+    // `secret::native`'s "a reference names a credential".
+    let Some(var) = state.provider_credential_variable(&provider) else {
+        state.set_status(format!(
+            "`{provider}` names no credential variable to store a credential under"
+        ));
+        return;
+    };
+    let reference = secret::native::os_credential_for_variable(&var);
+
+    match native.store(&reference, &value) {
+        Ok(()) => {
+            let stored = config::StoredCredentialRef::new(secret::native::SERVICE, &var);
+            state.record_provider_credential_stored(&provider, stored);
+            state.set_status(format!(
+                "stored `{provider}`'s credential for {var} in {} — save with `w` to record it",
+                native.describe()
+            ));
+        }
+        Err(err) => {
+            tracing::warn!(provider = %provider, error = %err, "could not store a credential");
+            state.set_status(format!("could not store the credential: {err}"));
+        }
+    }
+}
+
+/// Delete the selected provider's stored credential — line 3.
+///
+/// Both halves, and both reported: the item leaves the OS store, and the
+/// reference leaves the provider's configuration. Deleting one that is not
+/// there is **not** an error; it is already the desired state, and saying so
+/// is better than raising — see
+/// [`crate::secret::native::Deletion::AlreadyAbsent`].
+fn delete_provider_credential(state: &mut ShellState) {
+    let Some((provider, references)) = state.selected_provider_stored_credentials() else {
+        return;
+    };
+
+    let store = secret::native::PreferNativeSecretStore::detect();
+    let native = match store.native() {
+        Ok(native) => native,
+        Err(reason) => {
+            state.set_status(format!(
+                "cannot delete a stored credential: {} — nothing is stored to delete",
+                reason.reason()
+            ));
+            return;
+        }
+    };
+
+    let mut removed = 0usize;
+    for reference in &references {
+        match native.delete(reference) {
+            Ok(secret::native::Deletion::Removed) => removed += 1,
+            Ok(secret::native::Deletion::AlreadyAbsent) => {}
+            Err(err) => {
+                tracing::warn!(
+                    provider = %provider,
+                    error = %err,
+                    "could not delete a stored credential"
+                );
+                state.set_status(format!("could not delete the stored credential: {err}"));
+                return;
+            }
+        }
+    }
+
+    // The configuration half runs whether or not the store held anything:
+    // a reference to a credential that is not there is exactly the record
+    // that should go.
+    state.record_provider_credential_cleared(&provider);
+    state.set_status(if removed > 0 {
+        format!(
+            "removed `{provider}`'s credential from {} and dropped the reference — \
+             save with `w`",
+            native.describe()
+        )
+    } else {
+        format!("`{provider}` had nothing stored in {}", native.describe())
+    });
 }
 
 /// Apply every pending Settings edit onto `table`, leaving any field an edit

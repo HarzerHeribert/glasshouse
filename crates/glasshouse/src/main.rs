@@ -198,7 +198,16 @@ fn launch_session(
         }
         _ => None,
     };
-    let secrets = glasshouse::secret::EnvironmentSecretStore::new();
+    // Phase 9E: prefer the operating system's own secure store where one is
+    // available, and fall back to the environment where it is not — the
+    // fallback is *labelled* rather than silent, so `glasshouse doctor` and
+    // the settings surface both say which store answered.
+    //
+    // This is the line that puts the native store on the path that actually
+    // starts a session. Without it "prefer the macOS Keychain" would be true
+    // of the store, of `doctor` and of settings, but not of `glasshouse run`
+    // — and a mechanism with no production caller does not get its box.
+    let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
 
     // Phase 9G: whether a local gateway exists at all is decided from the
     // active launch profiles, never from a flag — see

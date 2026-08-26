@@ -294,7 +294,7 @@ fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
         (Mode::Control, Some(Overlay::Overview)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::Settings)) => {
             "tab section   up/down move   space toggle   enter/a/e/c/b/p/u/d/t edit   \
-             w save   W save-project   r setup   esc close"
+             s/x secret   w save   W project   r setup   esc close"
         }
         (Mode::Control, None) => "tab session   enter session   n new   o overview   q quit",
     };
@@ -415,10 +415,15 @@ fn render_settings(state: &ShellState, frame: &mut Frame, area: Rect) {
     // an editor, not one relying on the other.
     let bottom_lines: Vec<Line> = if let Some(input) = settings.path_input() {
         settings_path_input_lines(&input)
+    } else if let Some(provider) = settings.confirming_credential_delete() {
+        credential_delete_confirm_lines(provider)
     } else if settings.confirming_project_write() {
         project_write_confirm_lines(state)
     } else if let Some(input) = settings.provider_input() {
-        labeled_text_input_lines(&input.label, input.buffer, input.error)
+        // `input.buffer` is already masked for a credential field — see
+        // `SettingsState::provider_input`. Nothing here decides that, which
+        // is the point: this renderer never sees a typed credential.
+        labeled_text_input_lines(&input.label, &input.buffer, input.error)
     } else if let Some(input) = settings.profile_input() {
         labeled_text_input_lines(&input.label, input.buffer, input.error)
     } else if let Some((name, outcome)) = settings.provider_test_result() {
@@ -632,11 +637,37 @@ fn render_provider_rows(settings: &SettingsState, frame: &mut Frame, area: Rect)
                         .iter()
                         .map(|var| {
                             // `var_os` only: presence must never decode a value.
+                            // Worded as "in the environment" rather than the
+                            // bare "set"/"not set" this said before there was
+                            // a second place a credential could be: a row
+                            // reading "(not set) — stored in the OS secure
+                            // store" is a contradiction on its face, and was
+                            // one until running the real binary showed it.
                             let set = std::env::var_os(var).is_some();
-                            format!("{var} ({})", if set { "set" } else { "not set" })
+                            let where_ = if set {
+                                "in the environment"
+                            } else {
+                                "not in the environment"
+                            };
+                            format!("{var} ({where_})")
                         })
                         .collect::<Vec<_>>()
                         .join(", ")
+                };
+                // Line 2 at the row level: read from the provider's own
+                // configuration, never by asking the keychain. A row is
+                // redrawn on every frame, and a keychain round trip per
+                // provider per frame would be both slow and — on macOS,
+                // where reading an item can consult its access control list
+                // — a way to make the TUI ask for permission while the user
+                // is scrolling.
+                let credential = match row.config.credential_store() {
+                    Some(stored) => format!(
+                        "{credential} — stored in the OS secure store as {}/{}",
+                        stored.service(),
+                        stored.account()
+                    ),
+                    None => credential,
                 };
                 (base_url, credential)
             }
@@ -709,6 +740,25 @@ fn render_profile_rows(settings: &SettingsState, frame: &mut Frame, area: Rect) 
         )));
     }
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The `x` confirmation. Names the provider and says plainly that this one
+/// is not undone by declining to save, because it is the only action in the
+/// Settings overlay that reaches outside Glasshouse's own configuration.
+fn credential_delete_confirm_lines(provider: &str) -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            format!(
+                "Delete `{provider}`'s credential from the OS secure store? \
+                 This cannot be undone by not saving."
+            ),
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(Span::styled(
+            "y/enter delete   esc/n cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ]
 }
 
 /// A single labeled text field with an optional error line, shared by every
@@ -1669,6 +1719,10 @@ mod settings_tests {
     fn no_credential_value_is_ever_rendered_across_every_settings_screen() {
         const VAR: &str = "GLASSHOUSE_VIEW_TEST_ONLY_SECRET_VAR";
         const SECRET_VALUE: &str = "sk-view-test-totally-real-looking-secret-xyz123";
+        /// A second credential, typed straight into the Settings overlay
+        /// rather than read from the environment — the Phase 9E path, and
+        /// the one that would echo on screen if the field were not masked.
+        const TYPED_VALUE: &str = "sk-view-test-typed-into-the-field-abc789";
 
         // SAFETY: `VAR` is unique to this test and is removed again below,
         // including before every early return this test has (it has none).
@@ -1748,6 +1802,49 @@ mod settings_tests {
         );
         screens.push(test_screen);
 
+        // Typing a credential into the OS-secure-store field. The masked
+        // rendering is asserted positively as well as with `!contains`, so
+        // a field that rendered nothing at all could not pass this by
+        // accident.
+        state.handle_key(press(KeyCode::Char('s')));
+        for c in TYPED_VALUE.chars() {
+            state.handle_key(press(KeyCode::Char(c)));
+        }
+        let credential_screen = rendered(&state, 100, 30);
+        screens.push(rendered(&state, 400, 60));
+        assert!(
+            credential_screen.contains(&"*".repeat(16)),
+            "a credential field must render as mask characters: {credential_screen}"
+        );
+        screens.push(credential_screen);
+        state.handle_key(press(KeyCode::Esc));
+
+        // The delete-a-stored-credential confirmation.
+        state.handle_key(press(KeyCode::Char('x')));
+        let confirm_screen = rendered(&state, 100, 30);
+        screens.push(rendered(&state, 400, 60));
+        assert!(
+            confirm_screen.contains("secure store"),
+            "the confirmation must say what it is about to do: {confirm_screen}"
+        );
+        screens.push(confirm_screen);
+        state.handle_key(press(KeyCode::Esc));
+
+        // A provider whose credential is recorded as living in the OS store
+        // says so on its row — line 2 at the row level — and still without
+        // a value anywhere near it.
+        state.record_provider_credential_stored(
+            "secret-test",
+            crate::config::StoredCredentialRef::new("glasshouse", VAR),
+        );
+        let stored_screen = rendered(&state, 400, 60);
+        assert!(
+            stored_screen.contains("stored in the OS secure store"),
+            "the row must say where the credential is kept: {stored_screen}"
+        );
+        screens.push(stored_screen);
+        screens.push(rendered(&state, 100, 30));
+
         // Launch Profiles.
         state.handle_key(press(KeyCode::Tab));
         screens.push(rendered(&state, 100, 30));
@@ -1763,10 +1860,12 @@ mod settings_tests {
         }
 
         for screen in &screens {
-            assert!(
-                !screen.contains(SECRET_VALUE),
-                "a credential value was rendered on screen:\n{screen}"
-            );
+            for value in [SECRET_VALUE, TYPED_VALUE] {
+                assert!(
+                    !screen.contains(value),
+                    "a credential value was rendered on screen:\n{screen}"
+                );
+            }
         }
     }
 
