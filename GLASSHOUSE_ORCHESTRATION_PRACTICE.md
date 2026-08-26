@@ -1260,3 +1260,61 @@ price.** OpenRouter answers `402 Insufficient credits` for `:free` models on an
 account that never purchased credits. The honest fallback is to report the `402`
 as the finding — which is what happened, and it exposed a real classification
 defect that no fixture would have produced.
+
+---
+
+## §39 — a relay to a live worker costs it a turn, and must be verified as if it were your own change
+
+Two mistakes in one relay, both mine, during batch 22–23.
+
+`lead-route` finished first and reported that its Phase 9H line 515 wanted a new
+`LifecycleEvent::GatewayBackendChanged`, which needs a new value in
+`lifecycle_events.kind`'s `CHECK`. `lead-mem6` was live and writing migration 6,
+so I relayed it as time-critical: *fold the new kind into the migration you are
+already writing, it costs you one string.*
+
+**It declined, and it was right on the merits.**
+
+- Migration 6 ALTERs `memories` and rebuilds `memories_fts`. **It does not touch
+  `lifecycle_events` at all**, so there was no rebuild to piggyback on.
+- That `CHECK` belongs to **migration 5**, which shipped and is append-only.
+  SQLite cannot add or drop a `CHECK`, so admitting a new kind means renaming,
+  recreating, copying, dropping and rebuilding that table and its three
+  triggers — which costs exactly the same in migration 7 as in 6.
+- And the risk was specific to that batch: `lifecycle_events.seq` is
+  `INTEGER PRIMARY KEY AUTOINCREMENT`, and migration 6 had just made
+  `memories.source_event_first`/`_last` reference it. **Rebuilding the referent
+  inside the migration that introduces the reference**, untested, at the end of
+  a batch, silently re-points every extracted memory's provenance if `seq`
+  renumbers.
+- The halves cannot be split either: `every_lifecycle_event_kind_is_one_the_schema_accepts`
+  asserts the variant set and `LIFECYCLE_EVENT_KINDS` are equal **in both
+  directions**, so the enum variant and the `CHECK` value must land together or
+  the suite fails immediately — and if it did not, the variant would fail as a
+  constraint violation on the event-writer thread, where nobody is looking.
+
+**The transferable mistake: I verified the fact and not the recommendation.** I
+checked that the `CHECK` existed and that SQLite cannot `ALTER` one — both true
+— and then relayed a *cost claim* ("one string", "cheaper now than later") that
+I had not checked at all. A relay carries your authority into a worker's batch.
+Verify the recommendation to the same standard you would verify your own edit,
+or send the fact and explicitly leave the judgement to the worker.
+
+**The second mistake: the relay ended the worker's turn.** `lead-mem6` was busy;
+the message arrived, it read it, and it went idle mid-batch with no report and
+three shells still open. Only a watch caught it. A `SendMessage` to a live
+worker is not free and is not asynchronous from the worker's point of view — it
+consumes a turn and can end one.
+
+**How to relay, then.** Prefer to hold non-urgent findings until the worker's
+report lands; a stranded box costs one follow-up batch, and a derailed lead
+costs the batch it was in. When it genuinely cannot wait, say in the first line
+that the message is optional, say what to do if the work is already settled, and
+say explicitly *do not stop for this*. And when a worker declines with reasoning
+this specific, the reasoning is the deliverable — it belongs in the ledger
+whether or not the change happens.
+
+**What it hands to the next batch.** Migration 7 is now a small, well-specified
+piece of work: own `database.rs`, `events/mod.rs` and `events/log.rs` together,
+rebuild `lifecycle_events` with `gateway_backend_changed`, and prove `seq`
+survives the rebuild with a test that stores a memory's event range across it.
