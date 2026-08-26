@@ -3009,10 +3009,27 @@ fn a_profile_environment_is_parent_plus_declared_overrides() {
     const PROFILE_VALUE: &str = "https://profile.invalid/anthropic";
 
     if std::env::var_os(HELPER).is_none() {
-        let current_path = std::env::var_os("PATH").expect("PATH in test process");
-        let path_marker = std::env::temp_dir().join("glasshouse-p09b-parent-path-marker");
+        // A *short*, deterministic PATH, not the runner's own. Two reasons,
+        // and the first cost a Windows CI round trip. The child dumps its
+        // environment through a pseudo-terminal, and a PTY wraps at its column
+        // width — so a value longer than the terminal is split across lines and
+        // `dumped_env_values`, which parses line by line, reads back a
+        // truncated value. GitHub's Windows runner has a PATH of roughly three
+        // thousand characters; this machine's is short enough that the bug was
+        // invisible locally. Second, a planted value the test chooses makes the
+        // assertion independent of whatever environment CI happens to have.
+        //
+        // The entries below are only what each dump harness needs to run:
+        // `env` lives in /usr/bin on Unix, and `set` is a cmd builtin needing
+        // no PATH at all on Windows.
+        let path_marker = std::env::temp_dir().join("gh-p09b-mark");
+        let minimal: &[&str] = if cfg!(windows) {
+            &["C:\\Windows\\System32"]
+        } else {
+            &["/usr/bin", "/bin"]
+        };
         let planted_path = std::env::join_paths(
-            std::iter::once(path_marker).chain(std::env::split_paths(&current_path)),
+            std::iter::once(path_marker).chain(minimal.iter().map(std::path::PathBuf::from)),
         )
         .expect("join planted PATH");
         let helper = std::process::Command::new(std::env::current_exe().expect("test executable"))
@@ -3073,7 +3090,11 @@ fn a_profile_environment_is_parent_plus_declared_overrides() {
 
     let fixture = RuntimeFixture::new();
     let path = install_env_dump_harness(&fixture.bin_dir, "env-dump-p09b-profile");
-    let launch = overlay.apply(fixture.launch(&path));
+    // Wide enough that no value this test plants can be wrapped by the
+    // pseudo-terminal and read back truncated — see the planted PATH above.
+    let launch = overlay
+        .apply(fixture.launch(&path))
+        .size(TerminalSize::new(24, 400));
     let mut session = Session::spawn_harness(&launch);
     let status = session.wait_for_exit();
     assert!(status.success(), "{status}");
