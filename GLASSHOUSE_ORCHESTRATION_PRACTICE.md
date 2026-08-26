@@ -620,3 +620,39 @@ macOS under a deliberately 3599-character `PATH`. The mechanism is real and the
 fix follows from it, but the proof is a green Windows job, not a local run. When
 that is the situation, say so in the commit rather than implying a verification
 you do not have.
+
+## 22. In a worker's worktree, `git checkout` is a delete
+
+**The orchestrator did this on 2026-08-26 and destroyed 161 lines of a finished
+worker's work**, with the rule already written down in its own memory. Writing
+it here too, because the memory note was not where the mistake happened.
+
+Workers never commit. **Their deliverable lives only as uncommitted changes**,
+so to git there is no difference between the worker's edits and yours. A
+path-wide `git checkout -- <file>` or `git restore <file>` reverts *the file*,
+not *your change to it*.
+
+What made it slip through is worth more than the rule. Every mutation run on
+`main` that morning had used a `cp` backup and a `cp` restore — correctly, a
+dozen times. The failure came from a probe: appending a small test to a worker's
+file to check whether a type boundary held, then reaching for `git checkout` to
+undo the append because it was "just a probe, not a mutation". **Those are the
+same operation.** The size of your edit says nothing about what the undo removes.
+
+    # in any worktree with uncommitted work — yours or a worker's
+    cp file /tmp/file.bak      # before
+    …probe…
+    cp /tmp/file.bak file      # after
+    touch file                 # so cargo rebuilds — see §16
+
+**Never `git checkout`, `git restore`, `git stash` or `git clean` in a worktree
+holding uncommitted work you did not personally create.** If you have already
+done it: the worker's session still has the context. Ask it to re-create what
+was lost, tell it the loss was yours, and say exactly which file — it wrote the
+code and will rebuild it faster and more accurately than you can reconstruct it
+from a diff you no longer have.
+
+**And a second-order lesson.** The probe itself was unnecessary: it was checking
+that a private field cannot be set from outside its module, which is a language
+guarantee, not a property of this code. Before modifying a worker's tree to test
+something, ask whether the compiler already promises it.

@@ -52,7 +52,7 @@ use crate::harness::{
 };
 use crate::integrations::IntegrationId;
 use crate::launch::HarnessLaunch;
-use crate::provider::Provider;
+use crate::provider::{ProtocolCompatibleProviders, Provider};
 use crate::secret::{SecretRef, SecretStore};
 
 /// The protocols the local gateway's ingress knows how to serve.
@@ -896,27 +896,30 @@ pub fn gateway_upstream(
     providers: &[Provider],
     secrets: &dyn SecretStore,
 ) -> Result<Upstream, GatewayUpstreamRefusal> {
-    let serves_the_ingress = |provider: &Provider| {
-        GATEWAY_INGRESS_PROTOCOLS
-            .iter()
-            .any(|protocol| declared_base_url(provider, *protocol).is_some())
-    };
-    let candidates: Vec<&Provider> = providers
-        .iter()
-        .filter(|provider| serves_the_ingress(provider))
-        .collect();
+    // This is the routing constraint before any selection. Its result has a
+    // distinct type so a future model-quality scorer can only be handed
+    // providers which have already passed it; it cannot accidentally rank the
+    // raw configured-provider slice and filter afterward.
+    let candidates =
+        ProtocolCompatibleProviders::for_any_protocol(providers, GATEWAY_INGRESS_PROTOCOLS);
 
-    let provider = match candidates.as_slice() {
-        [] => {
+    let provider = match candidates.len() {
+        0 => {
             return Err(GatewayUpstreamRefusal::NoProviderServesTheIngress {
                 protocols: GATEWAY_INGRESS_PROTOCOLS.to_vec(),
+                served: describe_provider_protocols(providers),
             });
         }
-        [only] => *only,
-        several => {
+        1 => candidates
+            .only()
+            .expect("one protocol-compatible candidate has exactly one provider"),
+        _ => {
             return Err(GatewayUpstreamRefusal::SeveralProvidersServeTheIngress {
                 protocols: GATEWAY_INGRESS_PROTOCOLS.to_vec(),
-                candidates: several.iter().map(|p| p.name.clone()).collect(),
+                candidates: candidates
+                    .iter()
+                    .map(|candidate| candidate.name().to_owned())
+                    .collect(),
             });
         }
     };
@@ -979,14 +982,19 @@ fn declared_base_url(provider: &Provider, protocol: WireProtocol) -> Option<&str
 pub enum GatewayUpstreamRefusal {
     #[error(
         "the local Glasshouse gateway can forward requests for {}, but no configured provider \
-         serves any of them with a base URL; configure one before launching a gateway-backed \
-         profile",
+         serves any of them with a base URL; configured declarations: {served}. Configure one \
+         before launching a gateway-backed profile",
         protocol_list(.protocols),
     )]
     NoProviderServesTheIngress {
         /// Every protocol the ingress offers — what the user could configure
         /// a provider for, not one of them picked out.
         protocols: Vec<WireProtocol>,
+        /// The configured providers' protocol declarations, including an
+        /// explicit marker for an empty base URL. This makes an empty
+        /// candidate set explain both what the ingress required and what was
+        /// actually declared.
+        served: String,
     },
 
     #[error(
@@ -1031,6 +1039,41 @@ fn protocol_list(protocols: &[WireProtocol]) -> String {
         .map(|protocol| protocol.slug())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The configured protocol declarations for a refusal after compatibility
+/// filtering left no candidates.
+///
+/// An empty base URL is named rather than elided: it is a declaration with no
+/// destination, which is precisely why it could not pass the filter.
+fn describe_provider_protocols(providers: &[Provider]) -> String {
+    if providers.is_empty() {
+        return "no configured providers".to_owned();
+    }
+
+    providers
+        .iter()
+        .map(|provider| {
+            let protocols = if provider.protocols.is_empty() {
+                "no protocol at all".to_owned()
+            } else {
+                provider
+                    .protocols
+                    .iter()
+                    .map(|support| {
+                        if support.base_url.is_empty() {
+                            format!("`{}` (no base URL)", support.protocol)
+                        } else {
+                            format!("`{}`", support.protocol)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            format!("`{}` declares {protocols}", provider.name)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Point one child process at `provider_name`, or refuse.
@@ -1079,20 +1122,8 @@ fn apply_direct_provider(
     }
 
     let protocol = choose_protocol(profile, cx.adapter, provider)?;
-    let support = provider
-        .serves(protocol)
-        .expect("the protocol was chosen because the provider serves it");
-
-    // The two generic templates ship an empty base URL on purpose: the URL
-    // is the user's to supply. Launching a harness against `""` must never
-    // happen, so this is a refusal and not a default.
-    if support.base_url.is_empty() {
-        return Err(Refusal::ProviderBaseUrlMissing {
-            profile: profile.name.clone(),
-            provider: provider.name.clone(),
-            protocol,
-        });
-    }
+    let base_url = declared_base_url(provider, protocol)
+        .expect("the protocol was chosen from protocol-compatible candidates");
 
     // A provider declaring several credential variables is a **pool**, and
     // choosing between them on cost, quota or region is a routing decision
@@ -1130,7 +1161,7 @@ fn apply_direct_provider(
     let request = DirectProviderRequest {
         provider_name: &provider.name,
         protocol,
-        base_url: &support.base_url,
+        base_url,
         model: profile.model.as_deref(),
         credential_var,
         headers: &provider.headers,
@@ -1189,11 +1220,13 @@ fn apply_direct_provider(
 /// Which protocol this launch will use.
 ///
 /// With no `expected_protocol`, it is **the first protocol the harness
-/// declares that the provider also serves** — deterministic by the harness's
-/// own declared order, which is the harness's own preference and not an
-/// ordering invented here. With one, it is that protocol and no other: an
-/// explicit request is a constraint, never a hint, and a provider that does
-/// not serve it is refused rather than quietly given a neighbouring one.
+/// declares that has a compatible provider candidate** — deterministic by the
+/// harness's own declared order, which is the harness's own preference and
+/// not an ordering invented here. A declaration with no base URL is excluded
+/// before that choice, so it cannot beat a later protocol that is routeable.
+/// With an expectation, it is that protocol and no other: an explicit request
+/// is a constraint, never a hint, and a provider that does not route it is
+/// refused rather than quietly given a neighbouring one.
 ///
 /// The harness's ability to serve an explicitly expected protocol has already
 /// been checked by [`resolve`], which refuses with [`Refusal::ProtocolMismatch`].
@@ -1210,15 +1243,48 @@ fn choose_protocol(
         .copied()
         .unwrap_or(&[]);
 
+    let compatible = |protocol| {
+        ProtocolCompatibleProviders::for_protocol(std::slice::from_ref(provider), protocol)
+            .only()
+            .is_some()
+    };
+
     let chosen = match profile.expected_protocol {
-        Some(expected) => provider.serves(expected).map(|_| expected),
+        Some(expected) => compatible(expected).then_some(expected),
         None => harness_protocols
             .iter()
             .copied()
-            .find(|protocol| provider.serves(*protocol).is_some()),
+            .find(|protocol| compatible(*protocol)),
     };
 
-    chosen.ok_or_else(|| Refusal::ProviderProtocolUnsupported {
+    if let Some(protocol) = chosen {
+        return Ok(protocol);
+    }
+
+    // Preserve the more specific diagnostic when the provider declared a
+    // matching protocol but gave it no destination. It still did not survive
+    // the compatibility filter above, and therefore cannot be selected or
+    // ranked.
+    let missing_base_url = match profile.expected_protocol {
+        Some(expected) => provider
+            .serves(expected)
+            .is_some_and(|support| support.base_url.is_empty())
+            .then_some(expected),
+        None => harness_protocols.iter().copied().find(|protocol| {
+            provider
+                .serves(*protocol)
+                .is_some_and(|support| support.base_url.is_empty())
+        }),
+    };
+    if let Some(protocol) = missing_base_url {
+        return Err(Refusal::ProviderBaseUrlMissing {
+            profile: profile.name.clone(),
+            provider: provider.name.clone(),
+            protocol,
+        });
+    }
+
+    Err(Refusal::ProviderProtocolUnsupported {
         profile: profile.name.clone(),
         harness: profile.harness,
         provider: provider.name.clone(),
@@ -1972,6 +2038,40 @@ mod tests {
             }
             other => panic!("expected CredentialUnavailable, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_empty_gateway_candidate_set_names_the_requirement_and_declarations() {
+        let declares_chat_without_a_destination =
+            provider_serving("chat-only", WireProtocol::OpenAiChat, "");
+        let declares_responses_without_a_destination =
+            provider_serving("responses-without-url", WireProtocol::OpenAiResponses, "");
+
+        let refusal = gateway_upstream(
+            &[
+                declares_chat_without_a_destination,
+                declares_responses_without_a_destination,
+            ],
+            &FakeSecrets::empty(),
+        )
+        .expect_err("no provider can route any protocol the gateway requires");
+        let rendered = refusal.to_string();
+
+        let GatewayUpstreamRefusal::NoProviderServesTheIngress { protocols, served } = refusal
+        else {
+            panic!("expected a no-compatible-provider refusal");
+        };
+        assert!(protocols.contains(&WireProtocol::AnthropicMessages));
+        assert!(
+            served.contains("`chat-only` declares `openai-chat` (no base URL)"),
+            "{served}"
+        );
+        assert!(
+            served.contains("`responses-without-url` declares `openai-responses` (no base URL)"),
+            "{served}"
+        );
+        assert!(rendered.contains("anthropic-messages"), "{rendered}");
+        assert!(rendered.contains(&served), "{rendered}");
     }
 
     /// Every rendering of a gateway upstream refusal, checked against a

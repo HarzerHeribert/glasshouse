@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 248 / 1267 mandatory capabilities (19%)
+`███████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 249 / 1267 mandatory capabilities (19%)
 
 <details>
-<summary>Per-phase breakdown (7 of 103 phases complete)</summary>
+<summary>Per-phase breakdown (8 of 103 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -42,7 +42,7 @@ the authoritative specification and tracks what is done.
 | Phase 9 — Antigravity adapter | 5/7 |
 | Phase 9A — Harness launch profiles | 19/26 |
 | Phase 9B — Scoped harness wrappers and shims | 9/9 ✅ |
-| Phase 9C — Provider protocol model | 11/12 |
+| Phase 9C — Provider protocol model | 12/12 ✅ |
 | Phase 9D — Built-in provider templates | 11/14 |
 | Phase 9E — Secret storage | 11/13 |
 | Phase 9F — Direct provider launch profiles | 11/13 |

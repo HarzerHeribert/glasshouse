@@ -144,6 +144,99 @@ impl Provider {
     }
 }
 
+/// Providers that passed a protocol-compatibility routing constraint.
+///
+/// Construct this only with [`ProtocolCompatibleProviders::for_protocol`] or
+/// [`ProtocolCompatibleProviders::for_any_protocol`]. Both constructors
+/// remove a provider that either does not declare the required protocol or
+/// has no base URL for it. A later model-quality scorer must accept this type,
+/// not a raw provider slice, so it has no unfiltered provider set to rank.
+#[derive(Debug)]
+pub struct ProtocolCompatibleProviders<'a> {
+    candidates: Vec<ProtocolCompatibleProvider<'a>>,
+}
+
+/// One provider that passed [`ProtocolCompatibleProviders`]' routing
+/// constraint.
+///
+/// Its field stays private so callers cannot mark an unchecked [`Provider`]
+/// compatible by constructing this value themselves.
+#[derive(Debug)]
+pub struct ProtocolCompatibleProvider<'a> {
+    provider: &'a Provider,
+}
+
+impl<'a> ProtocolCompatibleProviders<'a> {
+    /// Filter `providers` to those routeable over `required`.
+    ///
+    /// A protocol declaration with an empty base URL does not survive: there
+    /// is nowhere to send a request, so it is not compatible for routing.
+    pub fn for_protocol(providers: &'a [Provider], required: WireProtocol) -> Self {
+        Self::for_any_protocol(providers, &[required])
+    }
+
+    /// Filter `providers` to those routeable over at least one protocol in
+    /// `required`.
+    ///
+    /// This is for an ingress which can carry several protocols. A single
+    /// required protocol should use [`Self::for_protocol`].
+    pub fn for_any_protocol(providers: &'a [Provider], required: &[WireProtocol]) -> Self {
+        Self {
+            candidates: providers
+                .iter()
+                .filter(|provider| {
+                    required.iter().any(|protocol| {
+                        provider
+                            .serves(*protocol)
+                            .is_some_and(|support| !support.base_url.is_empty())
+                    })
+                })
+                .map(|provider| ProtocolCompatibleProvider { provider })
+                .collect(),
+        }
+    }
+
+    /// How many providers survived the routing constraint.
+    pub fn len(&self) -> usize {
+        self.candidates.len()
+    }
+
+    /// Whether no provider survived the routing constraint.
+    pub fn is_empty(&self) -> bool {
+        self.candidates.is_empty()
+    }
+
+    /// The one surviving provider, if there is exactly one.
+    pub fn only(&self) -> Option<&'a Provider> {
+        match self.candidates.as_slice() {
+            [candidate] => Some(candidate.provider),
+            [] | [_, _, ..] => None,
+        }
+    }
+
+    /// The surviving providers, still marked as protocol-compatible.
+    ///
+    /// This is the input shape a later ranking step must take. It exposes no
+    /// raw `Provider` collection that could be confused with an unfiltered
+    /// candidate set.
+    pub fn iter(&self) -> impl Iterator<Item = &ProtocolCompatibleProvider<'a>> {
+        self.candidates.iter()
+    }
+}
+
+impl ProtocolCompatibleProvider<'_> {
+    /// The configured provider's name, for a routing diagnostic or ranking
+    /// explanation.
+    pub fn name(&self) -> &str {
+        &self.provider.name
+    }
+
+    /// The provider after it passed the routing constraint.
+    pub fn provider(&self) -> &Provider {
+        self.provider
+    }
+}
+
 /// Whether an explicit adapter exists to translate `from` into `to`.
 ///
 /// Always `false` today, and that is the capability rather than a gap: V1
@@ -528,6 +621,74 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// This is deliberately a test-only stand-in for the model-quality
+    /// scorer Phase 34 will add. Its input is the filtered wrapper, not a
+    /// raw provider slice: attempting to call it with `&providers` does not
+    /// type-check. That makes compatibility filtering structurally precede
+    /// ranking without inventing a production scorer today.
+    fn rank_fixture_quality(candidates: &ProtocolCompatibleProviders<'_>) -> Vec<String> {
+        let mut ranked: Vec<(u8, String)> = candidates
+            .iter()
+            .map(|candidate| {
+                let quality = match candidate.name() {
+                    "incompatible-but-best" => 100,
+                    "responses-without-url" => 99,
+                    "compatible" => 1,
+                    other => panic!("unexpected candidate reached ranking: {other}"),
+                };
+                (quality, candidate.name().to_owned())
+            })
+            .collect();
+        ranked.sort_by_key(|(quality, _)| std::cmp::Reverse(*quality));
+        ranked.into_iter().map(|(_, name)| name).collect()
+    }
+
+    #[test]
+    fn protocol_compatibility_filters_the_candidate_set_before_fixture_quality_ranking() {
+        let providers = vec![
+            Provider {
+                name: "incompatible-but-best".to_owned(),
+                protocols: vec![support(WireProtocol::OpenAiChat, "https://chat.example/v1")],
+                model_list_endpoint: Declared::Unverified,
+                usage_telemetry: Declared::Unverified,
+                credential_env: vec![],
+                headers: vec![],
+            },
+            Provider {
+                name: "responses-without-url".to_owned(),
+                protocols: vec![support(WireProtocol::OpenAiResponses, "")],
+                model_list_endpoint: Declared::Unverified,
+                usage_telemetry: Declared::Unverified,
+                credential_env: vec![],
+                headers: vec![],
+            },
+            Provider {
+                name: "compatible".to_owned(),
+                protocols: vec![support(
+                    WireProtocol::OpenAiResponses,
+                    "https://responses.example/v1",
+                )],
+                model_list_endpoint: Declared::Unverified,
+                usage_telemetry: Declared::Unverified,
+                credential_env: vec![],
+                headers: vec![],
+            },
+        ];
+
+        let candidates =
+            ProtocolCompatibleProviders::for_protocol(&providers, WireProtocol::OpenAiResponses);
+        let names: std::collections::BTreeSet<&str> = candidates
+            .iter()
+            .map(ProtocolCompatibleProvider::name)
+            .collect();
+        assert_eq!(names, std::collections::BTreeSet::from(["compatible"]));
+
+        // The two excluded providers would win a quality-only score. They
+        // cannot reach it: ranking accepts the filtered wrapper above, and
+        // sees only the one compatible provider.
+        assert_eq!(rank_fixture_quality(&candidates), vec!["compatible"]);
     }
 
     // --- built-in templates ----------------------------------------------

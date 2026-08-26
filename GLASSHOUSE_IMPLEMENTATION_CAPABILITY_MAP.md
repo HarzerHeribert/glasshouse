@@ -404,7 +404,7 @@ Fixed architectural requirements
 ☑ Record whether a provider supports reasoning or thinking controls when known.
 ☑ Record whether a provider exposes a model-list endpoint.
 ☑ Record whether a provider exposes usage or rate-limit telemetry.
-☐ Treat protocol compatibility as a hard routing constraint before model-quality scoring.
+☑ Treat protocol compatibility as a hard routing constraint before model-quality scoring.
 ☑ Do not assume OpenAI-compatible chat completion support implies OpenAI Responses API compatibility.
 ☑ Do not assume an OpenAI-compatible model can transparently satisfy Claude Code’s Anthropic Messages behavior.
 ☑ Allow explicit protocol-translation adapters later without making translation mandatory for V1.
