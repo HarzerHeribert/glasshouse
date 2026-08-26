@@ -1525,3 +1525,53 @@ the report. It also means the *defect was different from what was budgeted for*
 — here, smaller: Glasshouse never lost a crashed harness's output, it reported
 it as absent when asked inside a two-millisecond window. Re-read the box against
 the real cause before deciding what the fix proved.
+
+---
+
+## §45 — the orchestrator's pane is never closed, and every session is remote-controllable
+
+Two operating facts that are not preferences, recorded because closing the
+wrong pane silently stops the whole fleet.
+
+**A `caffeinate` is holding the machine awake against the orchestrator's own
+session.** `caffeinate -i -m -w <pid>` waits on that process: while it lives the
+MacBook will not idle-sleep and the fleet keeps running unattended; when it
+exits, the machine sleeps and everything stops. So the orchestrator's cmux
+workspace is **never** closed — not to tidy up, not at the end of a round, not
+when handing off. A handoff opens a *new* workspace and the old one is left for
+the user to close.
+
+`scripts/close-worker.sh` refuses its own workspace for this reason, comparing
+against `cmux identify`. If that refusal ever fires, it is right.
+
+**Start every session with `--remote-control <name>`, not just the
+orchestrator.** This one runs as `glasshouse-orchestrator`, which is what makes
+it steerable from a phone. The point of a fleet you can leave alone is that when
+it *does* need you, you can reach it from wherever you are — and a worker
+started without a name can only be reached by walking back to the machine. It
+costs one flag at dispatch and there is no reason to omit it.
+
+---
+
+## §46 — closing a worker pane discards two things, so do it with the helper
+
+`scripts/close-worker.sh <workspace> <name>` exists because closing a pane by
+hand loses two things and both were paid for.
+
+1. **The conversation.** A finished worker holds an hour of reading. cmux
+   already stores its restart command — `cmux surface resume get` prints it
+   verbatim, session id included — and that command dies with the workspace
+   unless it is written down first. The helper captures every surface's line
+   into `.agent-runtime/resume/<name>.txt` **before** closing. A question that
+   surfaces two weeks later then costs one command instead of a re-derivation.
+2. **What the pane was running.** Four `glasshouse` processes were found
+   spinning at ~99% CPU, three of them nineteen hours old, orphaned by panes
+   that had been closed. The helper scans afterwards and says what it found.
+
+**It reports and never reaps**, deliberately matching the fixed requirement
+written into Phase 10A: a process that is alive and unaccounted for is exactly
+where the least is understood, and killing what you do not understand is worse
+than saying so. It prints the `kill -TERM` line and leaves the decision alone.
+
+This is the interim hook. When Phase 10A ships adoption, identity verification
+and quarantine, the product does this properly and the script retires.
