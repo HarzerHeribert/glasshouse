@@ -6,7 +6,32 @@ Last updated: 2026-08-26 (Europe/Berlin)
 
 **Phase 9G, 2C, 9B, 9C and 9D are COMPLETE.** 9E eleven of thirteen; 2D six of
 nineteen; Phase 9 five of seven; 9F eleven of thirteen; 9A nineteen of
-twenty-six; **254 checked boxes (20%).** Local suite **914 passing**.
+twenty-six; **352 checked boxes (27%).** Local suite **1145 passing**.
+
+## Next action
+
+**Migration 6 — memory event provenance and rationale**, whose DDL is written
+and reviewed in `lead-extract`'s §3 (the report calls it 5; it is 6, because
+`lifecycle_events` and `checkpoints` took 5 in commit `6e6166b`). It unlocks
+two Phase 21 boxes. The real work is not the three `ALTER`s: `memories_fts` is
+an external-content index over `subject` and `body` only, so making `rationale`
+searchable is a **rebuild** of that index and its three triggers. The extractor
+must then populate the two event columns with a test, or §5 leaves the box open
+regardless.
+
+Then: **give extraction a caller on a real lifecycle path.**
+`ExtractionTrigger::TaskCompleted` and `BeforeCompaction` exist and nothing
+publishes to either. The compaction half is blocked two phases deep — Phase 7
+line 307 and Phase 8 line 324 — because Glasshouse cannot observe a compaction
+from either harness today: Codex's catalogue *has* `PreCompact`/`PostCompact`
+and `harness/codex.rs` deliberately does not ask for them; Claude Code's
+observed catalogue does not list them at all.
+
+**Before sizing that packet, read practice §32.** Two team leads ran batch
+20–21 with the same model, effort and process. The one whose partition included
+`main.rs` closed 25 of 28 boxes; the one without it closed **zero** — its work
+was the strongest-evidenced in the batch and reachable from nothing. Size a
+package by the files a capability's production caller touches.
 
 **Phase 4 gained its unfocused-control lines.** `m` and `c` in the session
 overview act on a session the viewport is not showing, and `N` /
