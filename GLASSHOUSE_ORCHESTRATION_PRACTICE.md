@@ -513,7 +513,7 @@ already on `PATH`:
 
 | shim | what it does |
 |---|---|
-| `glasshouse` | execs `target/<profile>/glasshouse`, and **warns when sources are newer than the binary** — a stale dev binary prints plausible output from last week and costs an afternoon. `GLASSHOUSE_DEV_BUILD=1` builds first; it is off by default because it would take the `target/` lock out from under a running worker. |
+| `glasshouse` | execs `target/<profile>/glasshouse` **from the checkout you are standing in**, and **warns when sources are newer than the binary** — a stale dev binary prints plausible output from last week and costs an afternoon. `GLASSHOUSE_DEV_BUILD=1` builds first; it is off by default because it would take the `target/` lock out from under a running worker. |
 | `agy-gh` | execs `agy` with its blanket bypass, and **refuses to run outside a git work tree** (`AGY_GH_ANYWHERE=1` overrides). An auto-approving agent started in the wrong directory is the one real hazard, and the guard costs nothing. |
 
 **Do not confuse a dev shim with the product's shim.** `glasshouse shim` is
@@ -530,6 +530,19 @@ the user's face.
 Both were verified in both directions before being committed: the stale-source
 warning fires when a source file is touched and stays silent when it is not,
 and the work-tree guard refuses in `/tmp` and passes in the repository.
+
+**One correction, found by a worker on 2026-08-26 and worth knowing.** The first
+version resolved the repository from *the script's own location*, which is the
+main checkout. A worker in a git worktree running `glasshouse` through `PATH`
+therefore got the **main** checkout's binary — silently exercising code with
+none of its own changes — and the stale-source warning could not fire, because
+the worktree's sources are not newer than *that* binary. It now prefers the
+checkout the caller is standing in and says so when the two differ.
+
+**The general shape is worth more than the fix:** a tool that resolves context
+from where *it* lives rather than where it was *called* will be wrong for every
+worktree, and wrong silently. When a packet asks a worker to run the binary,
+that worker is in a worktree by definition.
 
 ## 20. A gate that cannot fail is not a gate — the MSRV case
 

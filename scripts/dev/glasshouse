@@ -30,7 +30,22 @@ while [ -L "$SELF" ]; do
     *)  SELF="$(dirname "$SELF")/$LINK" ;;
   esac
 done
-REPO="$(cd "$(dirname "$SELF")/../.." && pwd)"
+# Prefer the checkout the caller is standing in, not the one this script lives
+# in. A worker in a git worktree that runs `glasshouse` through PATH would
+# otherwise get the MAIN checkout's binary and silently test code containing
+# none of its own changes — and the stale-source warning below could not fire,
+# because the worktree's sources are not newer than *that* binary. A Phase 2C
+# worker hit exactly this on 2026-08-26.
+SCRIPT_REPO="$(cd "$(dirname "$SELF")/../.." && pwd)"
+REPO="$SCRIPT_REPO"
+if git_root="$(git rev-parse --show-toplevel 2>/dev/null)" \
+   && [ -f "$git_root/crates/glasshouse/Cargo.toml" ]; then
+  REPO="$git_root"
+fi
+if [ "$REPO" != "$SCRIPT_REPO" ]; then
+  echo "glasshouse (dev shim): using the checkout you are standing in," >&2
+  echo "  ${REPO}, not ${SCRIPT_REPO}" >&2
+fi
 
 PROFILE="${GLASSHOUSE_DEV_PROFILE:-debug}"
 BIN="$REPO/target/$PROFILE/glasshouse"

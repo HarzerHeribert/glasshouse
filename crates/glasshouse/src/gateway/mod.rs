@@ -1135,7 +1135,23 @@ mod tests {
             "dropping a gateway with a running accept loop took {elapsed:?}"
         );
 
-        let rebound = TcpListener::bind(address);
+        // Bounded retry, and it does not weaken the assertion. The gateway
+        // binds an *ephemeral* port, so between the drop above and this bind
+        // the kernel is free to hand that same port to any other test thread
+        // calling `bind(0)` — and this suite has many. That transient loss
+        // races as `AddrInUse` and is not this gateway holding anything: two
+        // workers hit it independently on 2026-08-26, once captured by name.
+        //
+        // If the gateway really had failed to release the descriptor, no
+        // number of retries would ever succeed, so the loop still fails for
+        // the reason the test exists. It only tolerates an unrelated binder
+        // holding the port briefly.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut rebound = TcpListener::bind(address);
+        while rebound.is_err() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            rebound = TcpListener::bind(address);
+        }
         assert!(
             rebound.is_ok(),
             "the gateway's port was still held after the gateway was dropped: {:?}",
