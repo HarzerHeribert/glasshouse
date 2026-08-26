@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use crate::config::{ProviderConfig, UserConfig};
+use crate::config::{ProviderConfig, RoutingModelChoice, RoutingModelResolution, UserConfig};
 use crate::harness::{ApprovalMode, adapter_for};
 use crate::integrations::{IntegrationId, IntegrationKind, IntegrationStatus};
 use crate::platform::exec;
@@ -60,10 +60,8 @@ pub struct IntegrationDetection {
 /// One screen of the wizard.
 ///
 /// An introduction, the interactive integration list, the optional
-/// bypass-acknowledgement step, the optional provider/gateway step, and a
-/// confirmation summary. Routing-model configuration is not a step here —
-/// see the module-level "Out of scope" note in `super`; that subsystem still
-/// does not exist.
+/// bypass-acknowledgement step, the optional provider/gateway step, the
+/// optional routing-model step, and a confirmation summary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
     /// What Glasshouse does and does not do, and the active project.
@@ -78,6 +76,16 @@ pub enum Step {
     /// Optional: configure a provider (or leave it for later). See
     /// `ProviderMode` for the sub-flow.
     Provider,
+    /// Optional: which model classifies requests before premium capacity is
+    /// spent — Automatic, a pinned model, or not yet. See `RoutingMode`.
+    ///
+    /// **After [`Step::Provider`], never before.** Phase 2C line 1 asks for
+    /// this step "after providers have been detected or configured", and the
+    /// order is load-bearing rather than cosmetic: pinning a model means
+    /// naming a configured provider, so a routing step the user reaches
+    /// before configuring one has nothing to offer but Automatic and Do
+    /// later.
+    Routing,
     /// Review the recorded decisions before finishing.
     Summary,
 }
@@ -278,6 +286,118 @@ pub enum ProviderStepView {
     },
 }
 
+/// Which of the three top-level offers is highlighted on [`Step::Routing`].
+///
+/// Exactly three, matching Phase 2C lines 2, 3 and 4 one for one — and
+/// matching Phase 2D's Routing settings section, which asks for the same
+/// three ("Automatic, a specific configured model, or deterministic-only
+/// classification").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutingChoice {
+    /// Line 2: Glasshouse picks the cheapest sufficiently fast configured
+    /// resource, at the moment it needs one.
+    Automatic,
+    /// Line 3: pin classification to one specific model.
+    ChooseModel,
+    /// Line 4: decide later; deterministic heuristics classify until then.
+    /// The default — see [`WizardState::new`].
+    DoLater,
+}
+
+/// Sub-mode of the optional routing-model step ([`Step::Routing`]).
+///
+/// The same shape as [`ProviderMode`], driven the same way: `Esc` steps back
+/// one level rather than cancelling the wizard (see
+/// [`WizardState::routing_step_back`]), and the deepest screen is a text
+/// field. "Choose model" needs two answers — which configured provider, then
+/// which model — because a model name alone would not say who to ask.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RoutingMode {
+    /// Choosing among the three offers. `notice` explains a press that did
+    /// nothing, and is cleared by the next keystroke that moves.
+    Choice {
+        choice: RoutingChoice,
+        notice: Option<String>,
+    },
+    /// Picking which configured provider the pinned model belongs to. Index
+    /// into [`WizardState::configured_providers`]'s own order.
+    PickProvider { selected: usize },
+    /// Typing the model name to pin.
+    ModelInput {
+        provider: String,
+        /// The row `provider` was picked from, so `Esc` returns there
+        /// instead of resetting to the top.
+        provider_index: usize,
+        buffer: String,
+        /// Set when the last `Enter` was rejected (an empty name); cleared
+        /// on the next keystroke or successful confirmation.
+        error: Option<String>,
+    },
+}
+
+/// One configured provider, as offered on the routing step's provider
+/// picker.
+#[derive(Debug, Clone)]
+pub struct RoutingProviderRow {
+    pub name: String,
+    pub template: String,
+    pub selected: bool,
+}
+
+/// What the wizard currently has recorded for the routing model, in the
+/// shape the Choice and Summary screens render.
+///
+/// [`Self::PinnedUnavailable`] is the degrade Phase 2C's behavioural
+/// contract requires: a configuration naming a model whose provider is no
+/// longer configured must fall back to deterministic heuristics *and say
+/// so*. Its `message` is not written here — it comes from
+/// [`crate::config::RoutingFallback`]'s own `Display`, the same string
+/// [`crate::config::EffectiveConfig::routing_model_resolution`] produces, so
+/// the wizard and the rest of Glasshouse cannot drift into explaining the
+/// same degrade two different ways.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoutingSelectionView {
+    /// Nothing recorded: deterministic heuristics classify.
+    NotConfigured,
+    /// Recorded as deterministic-only on purpose. Only reachable by seeding
+    /// from a configuration that says so — Phase 2D writes it, this wizard
+    /// does not.
+    Deterministic,
+    /// Glasshouse chooses at use time.
+    Automatic,
+    /// Pinned, and the provider it names is configured.
+    Pinned { provider: String, model: String },
+    /// Pinned, but the provider it names is not configured.
+    PinnedUnavailable {
+        provider: String,
+        model: String,
+        message: String,
+    },
+}
+
+/// Read-only view of the optional routing-model step, for rendering.
+#[derive(Debug, Clone)]
+pub enum RoutingStepView {
+    Choice {
+        selected: RoutingChoice,
+        /// What is recorded right now — seeded from configuration on a
+        /// reopen, or set by this run.
+        recorded: RoutingSelectionView,
+        /// Whether "Choose model" can be entered at all. `false` when no
+        /// provider is configured: there would be nothing to pin to.
+        can_choose_model: bool,
+        notice: Option<String>,
+    },
+    PickProvider {
+        options: Vec<RoutingProviderRow>,
+    },
+    ModelInput {
+        provider: String,
+        buffer: String,
+        error: Option<String>,
+    },
+}
+
 /// The wizard's complete mutable state.
 ///
 /// Constructed once per wizard run (first-run or a later "reconfigure") by
@@ -303,6 +423,19 @@ pub struct WizardState {
     /// any provider or credential into configuration at all (Phase 2C line
     /// 3/4).
     pending_provider: Option<(String, ProviderConfig)>,
+    routing_mode: RoutingMode,
+    /// The routing-model choice this run will write, or `None` for "no
+    /// routing model configured".
+    ///
+    /// Seeded from `existing` so a reopen shows what is already recorded,
+    /// and written verbatim by [`WizardState::apply_to`] — including the
+    /// `None`. That assignment is the one place this step deviates from the
+    /// provider step, which only ever *adds*: a provider table can hold many
+    /// entries and dropping one silently would lose work, whereas the
+    /// routing model is a single value the wizard always displays, so
+    /// pressing Enter on "Do later" has to be able to mean "not configured"
+    /// on a reopen too. Tabbing past the step changes nothing either way.
+    pending_routing: Option<RoutingModelChoice>,
     project_name: String,
     project_root: PathBuf,
     /// The version to record onboarding as completed at (`crate::VERSION` in
@@ -339,6 +472,7 @@ impl WizardState {
     ) -> Self {
         let rows = build_rows(detected, existing);
         let bypass_rows = build_bypass_rows(existing);
+        let pending_routing = existing.routing().model().cloned();
         let existing_providers = existing
             .providers()
             .iter()
@@ -358,6 +492,20 @@ impl WizardState {
             provider_mode: ProviderMode::Choice(ProviderChoice::DoLater),
             existing_providers,
             pending_provider: None,
+            // Highlight whatever is already recorded, so a reopen does not
+            // silently re-offer a different answer than the one on disk. On
+            // a genuine first run nothing is recorded, so this is "Do later"
+            // — the default Phase 2C line 4 requires, and what a user who
+            // tabs straight through therefore gets.
+            routing_mode: RoutingMode::Choice {
+                choice: match pending_routing {
+                    Some(RoutingModelChoice::Automatic) => RoutingChoice::Automatic,
+                    Some(RoutingModelChoice::Pinned { .. }) => RoutingChoice::ChooseModel,
+                    Some(RoutingModelChoice::Deterministic) | None => RoutingChoice::DoLater,
+                },
+                notice: None,
+            },
+            pending_routing,
             project_name,
             project_root,
             version,
@@ -499,6 +647,9 @@ impl WizardState {
                 if self.step == Step::Provider && self.provider_step_back() {
                     return Action::Redraw;
                 }
+                if self.step == Step::Routing && self.routing_step_back() {
+                    return Action::Redraw;
+                }
             }
             return Action::Cancel;
         }
@@ -521,6 +672,7 @@ impl WizardState {
             Step::Harnesses => self.handle_harnesses_key(key),
             Step::Bypass => self.handle_bypass_key(key),
             Step::Provider => self.handle_provider_key(key),
+            Step::Routing => self.handle_routing_key(key),
             Step::Summary => {
                 if matches!(key.code, KeyCode::Enter | KeyCode::Tab) {
                     Action::Finish
@@ -735,8 +887,11 @@ impl WizardState {
                 match choice {
                     // Line 3: "Do later" completes onboarding without ever
                     // touching `pending_provider`, so `apply_to` writes no
-                    // provider and no credential.
-                    ProviderChoice::DoLater => self.step = Step::Summary,
+                    // provider and no credential. It still goes on to the
+                    // routing step: declining a provider does not decline
+                    // Automatic or deterministic-only, both of which are
+                    // meaningful with no provider configured at all.
+                    ProviderChoice::DoLater => self.step = Step::Routing,
                     ProviderChoice::ConfigureNow => {
                         self.provider_mode = ProviderMode::PickTemplate { selected: 0 };
                     }
@@ -748,7 +903,7 @@ impl WizardState {
             // screen is what makes it genuinely optional (Phase 2C
             // acceptance test 1: "the wizard completes without it").
             KeyCode::Tab => {
-                self.step = Step::Summary;
+                self.step = Step::Routing;
                 Action::Redraw
             }
             _ => Action::None,
@@ -846,6 +1001,296 @@ impl WizardState {
         }
     }
 
+    /// Every configured provider's name, in the order the picker offers
+    /// them — the same list [`WizardState::configured_providers`] renders,
+    /// so a provider configured on the previous step is immediately
+    /// pinnable. This is what Phase 2C line 1's "after providers have been
+    /// detected or configured" buys.
+    fn configured_provider_names(&self) -> Vec<String> {
+        self.configured_providers()
+            .into_iter()
+            .map(|provider| provider.name)
+            .collect()
+    }
+
+    /// What the wizard has recorded for the routing model right now,
+    /// resolved against the providers that actually exist.
+    ///
+    /// Used by both the routing step and the Summary, so the two can never
+    /// disagree about what was chosen. A pinned model whose provider is not
+    /// configured comes back as `RoutingSelectionView::PinnedUnavailable`
+    /// carrying the shared explanation from
+    /// [`crate::config::RoutingFallback`] — the wizard never composes that
+    /// sentence itself.
+    ///
+    /// (`RoutingSelectionView` is deliberately not re-exported from
+    /// `super`, matching every other per-step view type in this module, so
+    /// it is named here in a code span rather than an intra-doc link.)
+    pub fn routing_selection(&self) -> RoutingSelectionView {
+        let Some(choice) = &self.pending_routing else {
+            return RoutingSelectionView::NotConfigured;
+        };
+        match choice {
+            RoutingModelChoice::Deterministic => RoutingSelectionView::Deterministic,
+            RoutingModelChoice::Automatic => RoutingSelectionView::Automatic,
+            RoutingModelChoice::Pinned { provider, model } => {
+                match choice.resolve(&self.configured_provider_names()) {
+                    RoutingModelResolution::Heuristics(reason) => {
+                        RoutingSelectionView::PinnedUnavailable {
+                            provider: provider.clone(),
+                            model: model.clone(),
+                            message: reason.to_string(),
+                        }
+                    }
+                    _ => RoutingSelectionView::Pinned {
+                        provider: provider.clone(),
+                        model: model.clone(),
+                    },
+                }
+            }
+        }
+    }
+
+    /// A read-only view of the current sub-screen of [`Step::Routing`], for
+    /// rendering.
+    pub fn routing_step(&self) -> RoutingStepView {
+        match &self.routing_mode {
+            RoutingMode::Choice { choice, notice } => RoutingStepView::Choice {
+                selected: *choice,
+                recorded: self.routing_selection(),
+                can_choose_model: !self.existing_providers.is_empty()
+                    || self.pending_provider.is_some(),
+                notice: notice.clone(),
+            },
+            RoutingMode::PickProvider { selected } => RoutingStepView::PickProvider {
+                options: self
+                    .configured_providers()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, provider)| RoutingProviderRow {
+                        name: provider.name,
+                        template: provider.template,
+                        selected: index == *selected,
+                    })
+                    .collect(),
+            },
+            RoutingMode::ModelInput {
+                provider,
+                buffer,
+                error,
+                ..
+            } => RoutingStepView::ModelInput {
+                provider: provider.clone(),
+                buffer: buffer.clone(),
+                error: error.clone(),
+            },
+        }
+    }
+
+    /// Step back one level inside [`Step::Routing`]'s sub-modes without
+    /// cancelling the wizard, exactly as
+    /// [`WizardState::provider_step_back`] does for the provider step.
+    /// Returns whether it consumed the key — `false` from the top-level
+    /// Choice screen.
+    fn routing_step_back(&mut self) -> bool {
+        match &self.routing_mode {
+            RoutingMode::Choice { .. } => false,
+            RoutingMode::PickProvider { .. } => {
+                self.routing_mode = RoutingMode::Choice {
+                    choice: RoutingChoice::ChooseModel,
+                    notice: None,
+                };
+                true
+            }
+            RoutingMode::ModelInput { provider_index, .. } => {
+                self.routing_mode = RoutingMode::PickProvider {
+                    selected: *provider_index,
+                };
+                true
+            }
+        }
+    }
+
+    fn handle_routing_key(&mut self, key: KeyEvent) -> Action {
+        match self.routing_mode {
+            RoutingMode::Choice { .. } => self.handle_routing_choice_key(key),
+            RoutingMode::PickProvider { .. } => self.handle_routing_provider_key(key),
+            RoutingMode::ModelInput { .. } => self.handle_routing_model_key(key),
+        }
+    }
+
+    fn handle_routing_choice_key(&mut self, key: KeyEvent) -> Action {
+        let RoutingMode::Choice { choice, .. } = &self.routing_mode else {
+            return Action::None;
+        };
+        let choice = *choice;
+        const ORDER: [RoutingChoice; 3] = [
+            RoutingChoice::Automatic,
+            RoutingChoice::ChooseModel,
+            RoutingChoice::DoLater,
+        ];
+        let index = ORDER.iter().position(|c| *c == choice).unwrap_or(0);
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.routing_mode = RoutingMode::Choice {
+                    choice: ORDER[index.saturating_sub(1)],
+                    notice: None,
+                };
+                Action::Redraw
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.routing_mode = RoutingMode::Choice {
+                    choice: ORDER[(index + 1).min(ORDER.len() - 1)],
+                    notice: None,
+                };
+                Action::Redraw
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                match choice {
+                    // Line 2: the *intent*, never a resolved model. Which
+                    // resource is cheapest and fast enough depends on
+                    // conditions that change after this wizard exits, so
+                    // Phase 34C decides it at use time.
+                    RoutingChoice::Automatic => {
+                        self.pending_routing = Some(RoutingModelChoice::Automatic);
+                        self.step = Step::Summary;
+                    }
+                    RoutingChoice::ChooseModel => {
+                        if self.configured_provider_names().is_empty() {
+                            // Saying nothing would read as a broken key.
+                            // There is genuinely nothing to pin to, and the
+                            // other two choices still work.
+                            self.routing_mode = RoutingMode::Choice {
+                                choice,
+                                notice: Some(
+                                    "Choose model needs a configured provider, and none is \
+                                     configured yet. Go back with Esc to add one, or pick \
+                                     Automatic or Do later."
+                                        .to_owned(),
+                                ),
+                            };
+                        } else {
+                            self.routing_mode = RoutingMode::PickProvider { selected: 0 };
+                        }
+                    }
+                    // Line 4: declining records nothing at all, and the
+                    // system stays on deterministic heuristics.
+                    RoutingChoice::DoLater => {
+                        self.pending_routing = None;
+                        self.step = Step::Summary;
+                    }
+                }
+                Action::Redraw
+            }
+            // `Tab` always means "continue", exactly as on every other
+            // optional step — and it leaves `pending_routing` alone, so
+            // tabbing past this screen on a first run records nothing and
+            // tabbing past it on a reopen preserves what is already there.
+            KeyCode::Tab => {
+                self.step = Step::Summary;
+                Action::Redraw
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn handle_routing_provider_key(&mut self, key: KeyEvent) -> Action {
+        let RoutingMode::PickProvider { selected } = &self.routing_mode else {
+            return Action::None;
+        };
+        let selected = *selected;
+        let providers = self.configured_provider_names();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.routing_mode = RoutingMode::PickProvider {
+                    selected: selected.saturating_sub(1),
+                };
+                Action::Redraw
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let last = providers.len().saturating_sub(1);
+                self.routing_mode = RoutingMode::PickProvider {
+                    selected: (selected + 1).min(last),
+                };
+                Action::Redraw
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let Some(provider) = providers.get(selected) else {
+                    return Action::None;
+                };
+                // Pre-fill the model already pinned to this same provider,
+                // so a reopen that only wants to change the provider does
+                // not make the user retype a name Glasshouse already knows.
+                let buffer = match &self.pending_routing {
+                    Some(RoutingModelChoice::Pinned {
+                        provider: pinned,
+                        model,
+                    }) if pinned == provider => model.clone(),
+                    _ => String::new(),
+                };
+                self.routing_mode = RoutingMode::ModelInput {
+                    provider: provider.clone(),
+                    provider_index: selected,
+                    buffer,
+                    error: None,
+                };
+                Action::Redraw
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn handle_routing_model_key(&mut self, key: KeyEvent) -> Action {
+        if !matches!(self.routing_mode, RoutingMode::ModelInput { .. }) {
+            return Action::None;
+        }
+        match key.code {
+            KeyCode::Enter => {
+                let RoutingMode::ModelInput {
+                    provider, buffer, ..
+                } = &self.routing_mode
+                else {
+                    return Action::None;
+                };
+                let trimmed = buffer.trim();
+                if trimmed.is_empty() {
+                    if let RoutingMode::ModelInput { error, .. } = &mut self.routing_mode {
+                        *error = Some("a model name is required to pin routing".to_owned());
+                    }
+                    return Action::Redraw;
+                }
+                // Two names and nothing else: this is a reference, in the
+                // same sense `StoredCredentialRef` is one. Nothing typed on
+                // this screen is ever a credential, and the provider named
+                // here is where the credential question already lives.
+                self.pending_routing = Some(RoutingModelChoice::Pinned {
+                    provider: provider.clone(),
+                    model: trimmed.to_owned(),
+                });
+                self.routing_mode = RoutingMode::Choice {
+                    choice: RoutingChoice::ChooseModel,
+                    notice: None,
+                };
+                Action::Redraw
+            }
+            KeyCode::Backspace => {
+                if let RoutingMode::ModelInput { buffer, error, .. } = &mut self.routing_mode {
+                    buffer.pop();
+                    *error = None;
+                }
+                Action::Redraw
+            }
+            KeyCode::Char(c) => {
+                if let RoutingMode::ModelInput { buffer, error, .. } = &mut self.routing_mode {
+                    buffer.push(c);
+                    *error = None;
+                }
+                Action::Redraw
+            }
+            _ => Action::None,
+        }
+    }
+
     /// Fill in a default explicit decision for every row the user never
     /// toggled: enabled when it has something usable, ignored otherwise.
     ///
@@ -882,6 +1327,12 @@ impl WizardState {
     /// none to begin with) and line 6 (a reopen that chooses "Do later"
     /// keeps whatever was already configured) with the same code path.
     ///
+    /// `pending_routing` is written verbatim, `None` included — see the
+    /// field's own documentation for why this one assigns where
+    /// `pending_provider` only ever adds. On a first run that declined the
+    /// routing step it is `None`, so the saved file has no `[routing]` table
+    /// at all and deterministic heuristics classify (Phase 2C line 4).
+    ///
     /// A `BypassRow` is written only when this run actually changed it
     /// (`acknowledged != seeded`, both starting equal on a fresh row, so an
     /// untouched one is never written at all) — Amendment 1's acceptance
@@ -910,6 +1361,7 @@ impl WizardState {
                 .providers_mut()
                 .set(name.clone(), provider_config.clone());
         }
+        config.routing_mut().set_model(self.pending_routing.clone());
         config.onboarding_mut().mark_completed(self.version.clone());
     }
 }
@@ -1083,8 +1535,13 @@ mod tests {
         assert_eq!(state.handle_key(key(KeyCode::Tab)), Action::Redraw);
         assert_eq!(state.step(), Step::Provider);
 
-        // Provider is optional: Tab skips it ("Do later") straight to
-        // Summary without ever touching `pending_provider`.
+        // Provider is optional: Tab skips it ("Do later") straight to the
+        // routing step without ever touching `pending_provider`.
+        assert_eq!(state.handle_key(key(KeyCode::Tab)), Action::Redraw);
+        assert_eq!(state.step(), Step::Routing);
+
+        // The routing step is optional too, and lands *after* Provider
+        // because pinning a model means naming a configured provider.
         assert_eq!(state.handle_key(key(KeyCode::Tab)), Action::Redraw);
         assert_eq!(state.step(), Step::Summary);
 
@@ -1136,7 +1593,8 @@ mod tests {
                 key(KeyCode::Tab), // Welcome -> Harnesses
                 key(KeyCode::Tab), // Harnesses -> Bypass
                 key(KeyCode::Tab), // Bypass (declined) -> Provider
-                key(KeyCode::Tab), // Provider (Do later) -> Summary
+                key(KeyCode::Tab), // Provider (Do later) -> Routing
+                key(KeyCode::Tab), // Routing (Do later) -> Summary
                 key(KeyCode::Enter),
             ],
         );
@@ -1412,6 +1870,8 @@ mod tests {
         // Do nothing but continue: Tab from the Choice screen, exactly like
         // Welcome and Harnesses.
         assert_eq!(state.handle_key(key(KeyCode::Tab)), Action::Redraw);
+        assert_eq!(state.step(), Step::Routing);
+        assert_eq!(state.handle_key(key(KeyCode::Tab)), Action::Redraw);
         assert_eq!(state.step(), Step::Summary);
         assert_eq!(state.handle_key(key(KeyCode::Enter)), Action::Finish);
 
@@ -1435,6 +1895,8 @@ mod tests {
         // so `Enter` here confirms it directly.
         let mut do_later = drive_to_provider(&all_harnesses_detected());
         assert_eq!(do_later.handle_key(key(KeyCode::Enter)), Action::Redraw);
+        assert_eq!(do_later.step(), Step::Routing);
+        assert_eq!(do_later.handle_key(key(KeyCode::Tab)), Action::Redraw);
         assert_eq!(do_later.step(), Step::Summary);
         assert_eq!(do_later.handle_key(key(KeyCode::Enter)), Action::Finish);
         let mut config = UserConfig::default();
@@ -1465,6 +1927,8 @@ mod tests {
             Action::Redraw
         );
         assert_eq!(configure_now.step(), Step::Provider);
+        assert_eq!(configure_now.handle_key(key(KeyCode::Tab)), Action::Redraw);
+        assert_eq!(configure_now.step(), Step::Routing);
         assert_eq!(configure_now.handle_key(key(KeyCode::Tab)), Action::Redraw);
         assert_eq!(configure_now.step(), Step::Summary);
         assert_eq!(
@@ -1545,6 +2009,8 @@ mod tests {
     #[test]
     fn do_later_leaves_glasshouse_usable_on_native_harnesses_with_no_provider_or_credential() {
         let mut state = drive_to_provider(&all_harnesses_detected());
+        assert_eq!(state.handle_key(key(KeyCode::Tab)), Action::Redraw); // Do later
+        assert_eq!(state.step(), Step::Routing);
         assert_eq!(state.handle_key(key(KeyCode::Tab)), Action::Redraw); // Do later
         assert_eq!(state.step(), Step::Summary);
         assert_eq!(state.handle_key(key(KeyCode::Enter)), Action::Finish);
@@ -1916,5 +2382,508 @@ mod tests {
                 row.id
             );
         }
+    }
+
+    // --- Phase 2C, the four routing-model lines -----------------------
+
+    /// Drive a fresh wizard to the routing step by declining everything
+    /// before it, which is exactly the path a user who tabs through takes.
+    fn drive_to_routing(detected: &[IntegrationDetection]) -> WizardState {
+        let mut state = drive_to_provider(detected);
+        state.handle_key(key(KeyCode::Tab)); // Provider (Do later) -> Routing
+        assert_eq!(state.step(), Step::Routing);
+        state
+    }
+
+    /// A wizard seeded with one already-configured provider, so "Choose
+    /// model" has something to pin to. This is the state a user reaches by
+    /// configuring a provider on the previous step, or by reopening the
+    /// wizard after having done so.
+    fn config_with_provider(name: &str) -> UserConfig {
+        let mut config = UserConfig::default();
+        config
+            .providers_mut()
+            .set(name.to_owned(), ProviderConfig::new("openrouter"));
+        config
+    }
+
+    fn drive_to_routing_with(existing: &UserConfig) -> WizardState {
+        let mut state = WizardState::new(
+            &all_harnesses_detected(),
+            existing,
+            "demo-project".to_owned(),
+            PathBuf::from("/home/user/demo-project"),
+            "1.2.3".to_owned(),
+        );
+        state.handle_key(key(KeyCode::Tab)); // Welcome -> Harnesses
+        state.handle_key(key(KeyCode::Tab)); // Harnesses -> Bypass
+        state.handle_key(key(KeyCode::Tab)); // Bypass -> Provider
+        state.handle_key(key(KeyCode::Tab)); // Provider -> Routing
+        assert_eq!(state.step(), Step::Routing);
+        state
+    }
+
+    /// Line 1: the step exists, and it sits *after* the provider step and
+    /// before the summary. The order is the line's own wording ("after
+    /// providers have been detected or configured") and it is load-bearing:
+    /// the assertion below that `Step::Routing` is unreachable before
+    /// `Step::Provider` is what a mutation moving the step earlier fails on.
+    #[test]
+    fn the_routing_step_comes_after_the_provider_step_and_before_the_summary() {
+        let mut state = new_state(&all_harnesses_detected());
+        let mut seen = vec![state.step()];
+        for _ in 0..4 {
+            state.handle_key(key(KeyCode::Tab));
+            seen.push(state.step());
+        }
+        assert_eq!(
+            seen,
+            vec![
+                Step::Welcome,
+                Step::Harnesses,
+                Step::Bypass,
+                Step::Provider,
+                Step::Routing,
+            ],
+            "the routing step must be the one immediately after Provider"
+        );
+
+        // ...and the next Tab reaches the Summary, so nothing sits between
+        // routing and the review screen.
+        state.handle_key(key(KeyCode::Tab));
+        assert_eq!(state.step(), Step::Summary);
+    }
+
+    /// Line 1 again, from the other side: the step is genuinely optional.
+    /// A mutation making `Step::Routing` refuse `Tab` until a choice is made
+    /// fails here.
+    #[test]
+    fn the_routing_step_is_reachable_and_the_wizard_completes_without_touching_it() {
+        let mut state = drive_to_routing(&all_harnesses_detected());
+        assert_eq!(state.handle_key(key(KeyCode::Tab)), Action::Redraw);
+        assert_eq!(state.step(), Step::Summary);
+        assert_eq!(state.handle_key(key(KeyCode::Enter)), Action::Finish);
+
+        let mut config = UserConfig::default();
+        state.apply_to(&mut config);
+        assert!(config.onboarding().completed());
+        assert_eq!(
+            config.routing().model(),
+            None,
+            "skipping the step must record no routing model at all"
+        );
+    }
+
+    /// Line 4, and the acceptance test that matters most: declining must
+    /// leave a *working* system, not merely a non-crashing one. So this
+    /// asserts what actually answers a routing question afterwards — the
+    /// deterministic-heuristics path — rather than only that the field is
+    /// empty.
+    #[test]
+    fn do_later_records_no_routing_model_and_deterministic_heuristics_answer() {
+        let mut state = drive_to_routing(&all_harnesses_detected());
+        // "Do later" is the default highlight, so Enter confirms it
+        // directly — a first run that tabs through gets the same outcome.
+        assert_eq!(state.handle_key(key(KeyCode::Enter)), Action::Redraw);
+        assert_eq!(state.step(), Step::Summary);
+        assert_eq!(state.handle_key(key(KeyCode::Enter)), Action::Finish);
+
+        let mut config = UserConfig::default();
+        state.apply_to(&mut config);
+
+        assert_eq!(config.routing().model(), None);
+        let effective = crate::config::EffectiveConfig::new(&config, None);
+        let resolved = effective.routing_model_resolution();
+        assert_eq!(
+            resolved.value,
+            crate::config::RoutingModelResolution::Heuristics(
+                crate::config::RoutingFallback::NotConfigured
+            ),
+            "with nothing configured, deterministic heuristics must be what answers"
+        );
+        assert_eq!(resolved.layer, crate::config::Layer::Default);
+    }
+
+    /// Line 2: "Automatic" records the *intent*. Selecting the cheapest
+    /// sufficiently fast resource is Phase 34C's job and depends on
+    /// conditions that change after this wizard exits, so a mutation that
+    /// resolved a concrete model here and stored that instead would freeze a
+    /// decision the map wants re-evaluated. Asserting the stored value is
+    /// exactly `Automatic` — not merely "something is stored" — is what
+    /// catches it.
+    #[test]
+    fn automatic_records_the_intent_and_never_a_resolved_model() {
+        let mut state = drive_to_routing_with(&config_with_provider("openrouter"));
+        // Default highlight is "Do later" (bottom of three); go up twice.
+        assert_eq!(state.handle_key(key(KeyCode::Up)), Action::Redraw);
+        assert_eq!(state.handle_key(key(KeyCode::Up)), Action::Redraw);
+        assert_eq!(state.handle_key(key(KeyCode::Enter)), Action::Redraw);
+        assert_eq!(state.step(), Step::Summary);
+        assert_eq!(state.handle_key(key(KeyCode::Enter)), Action::Finish);
+
+        let mut config = config_with_provider("openrouter");
+        state.apply_to(&mut config);
+        assert_eq!(
+            config.routing().model(),
+            Some(&RoutingModelChoice::Automatic),
+            "Automatic must be stored as the intent, with no model name in it"
+        );
+
+        // And it stays Automatic through resolution: nothing here picks a
+        // model on the user's behalf.
+        let effective = crate::config::EffectiveConfig::new(&config, None);
+        assert_eq!(
+            effective.routing_model_resolution().value,
+            crate::config::RoutingModelResolution::Automatic
+        );
+    }
+
+    /// Line 3: "Choose model" pins classification to a specific model, and
+    /// what gets stored is a provider-and-model *reference* — two names, the
+    /// same rule `StoredCredentialRef` follows. Nothing typed on that screen
+    /// is a credential.
+    #[test]
+    fn choose_model_records_a_provider_and_model_reference() {
+        let mut state = drive_to_routing_with(&config_with_provider("openrouter"));
+        assert_eq!(state.handle_key(key(KeyCode::Up)), Action::Redraw); // -> Choose model
+        assert_eq!(state.handle_key(key(KeyCode::Enter)), Action::Redraw); // -> PickProvider
+        assert!(matches!(
+            state.routing_step(),
+            RoutingStepView::PickProvider { .. }
+        ));
+        assert_eq!(state.handle_key(key(KeyCode::Enter)), Action::Redraw); // -> ModelInput
+        for c in "gpt-5.6-luna".chars() {
+            state.handle_key(char_key(c));
+        }
+        assert_eq!(state.handle_key(key(KeyCode::Enter)), Action::Redraw);
+
+        // Back on the Choice screen with the pin recorded and visible.
+        assert_eq!(state.step(), Step::Routing);
+        assert_eq!(
+            state.routing_selection(),
+            RoutingSelectionView::Pinned {
+                provider: "openrouter".to_owned(),
+                model: "gpt-5.6-luna".to_owned(),
+            }
+        );
+
+        state.handle_key(key(KeyCode::Tab));
+        assert_eq!(state.step(), Step::Summary);
+        let mut config = config_with_provider("openrouter");
+        state.apply_to(&mut config);
+        assert_eq!(
+            config.routing().model(),
+            Some(&RoutingModelChoice::Pinned {
+                provider: "openrouter".to_owned(),
+                model: "gpt-5.6-luna".to_owned(),
+            })
+        );
+    }
+
+    /// "Choose model" with nothing to choose from must say so rather than
+    /// doing nothing. A dead key on a first run — the case where no provider
+    /// is configured, which is the common one — reads as a broken wizard.
+    #[test]
+    fn choose_model_is_refused_with_a_notice_when_no_provider_is_configured() {
+        let mut state = drive_to_routing(&all_harnesses_detected());
+        assert_eq!(state.handle_key(key(KeyCode::Up)), Action::Redraw); // -> Choose model
+        assert_eq!(state.handle_key(key(KeyCode::Enter)), Action::Redraw);
+
+        // Still on the Choice screen, and the user has been told why.
+        let RoutingStepView::Choice {
+            can_choose_model,
+            notice,
+            ..
+        } = state.routing_step()
+        else {
+            panic!("Choose model must not open a picker with no providers to pick from");
+        };
+        assert!(!can_choose_model);
+        let notice = notice.expect("a press that does nothing must explain itself");
+        assert!(
+            notice.contains("configured provider"),
+            "notice must say what is missing, got: {notice}"
+        );
+
+        // And the other two choices still work, so this is a bounded refusal
+        // rather than a stuck screen.
+        assert_eq!(state.handle_key(key(KeyCode::Down)), Action::Redraw);
+        assert_eq!(state.handle_key(key(KeyCode::Enter)), Action::Redraw);
+        assert_eq!(state.step(), Step::Summary);
+    }
+
+    /// A provider configured on the *previous* step is immediately pinnable,
+    /// which is the whole reason line 1 puts this step after the provider
+    /// step rather than before it.
+    #[test]
+    fn a_provider_configured_this_run_can_be_pinned_immediately() {
+        let mut state = drive_to_provider(&all_harnesses_detected());
+        state.handle_key(key(KeyCode::Up)); // -> Configure now
+        state.handle_key(key(KeyCode::Enter)); // -> PickTemplate
+        let first = provider::templates()
+            .first()
+            .expect("at least one built-in template")
+            .name
+            .clone();
+        state.handle_key(key(KeyCode::Enter)); // record the first template
+        state.handle_key(key(KeyCode::Tab)); // -> Routing
+
+        assert_eq!(state.step(), Step::Routing);
+        let RoutingStepView::Choice {
+            can_choose_model, ..
+        } = state.routing_step()
+        else {
+            panic!("expected the Choice screen");
+        };
+        assert!(
+            can_choose_model,
+            "a provider configured one step earlier must be available to pin to"
+        );
+
+        state.handle_key(key(KeyCode::Up)); // -> Choose model
+        state.handle_key(key(KeyCode::Enter)); // -> PickProvider
+        let RoutingStepView::PickProvider { options } = state.routing_step() else {
+            panic!("expected the provider picker");
+        };
+        assert!(
+            options.iter().any(|row| row.name == first),
+            "the just-configured provider must be in the picker, got: {:?}",
+            options.iter().map(|r| &r.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// The behavioural contract's third clause: a configuration naming a
+    /// model whose provider has since disappeared degrades to deterministic
+    /// heuristics *and says so*. The message is not composed here — it comes
+    /// from `RoutingFallback`'s own `Display`, so the wizard and the rest of
+    /// Glasshouse cannot explain the same degrade two different ways.
+    #[test]
+    fn a_pinned_model_whose_provider_is_gone_degrades_to_heuristics_and_says_so() {
+        let mut existing = UserConfig::default();
+        existing
+            .routing_mut()
+            .set_model(Some(RoutingModelChoice::Pinned {
+                provider: "retired-router".to_owned(),
+                model: "gpt-5.6-luna".to_owned(),
+            }));
+        // No provider by that name is configured anywhere.
+        let state = drive_to_routing_with(&existing);
+
+        let RoutingSelectionView::PinnedUnavailable {
+            provider,
+            model,
+            message,
+        } = state.routing_selection()
+        else {
+            panic!(
+                "a pin naming an unconfigured provider must degrade, got {:?}",
+                state.routing_selection()
+            );
+        };
+        assert_eq!(provider, "retired-router");
+        assert_eq!(model, "gpt-5.6-luna");
+        assert!(
+            message.contains("retired-router") && message.contains("gpt-5.6-luna"),
+            "the degrade must name what went missing, got: {message}"
+        );
+        assert!(
+            message.contains("deterministic"),
+            "the degrade must say heuristics are answering, got: {message}"
+        );
+
+        // And it is not a startup failure: the wizard still finishes, and
+        // the recorded choice is preserved rather than silently wiped, so
+        // reconfiguring the provider restores the pin.
+        let mut state = state;
+        state.handle_key(key(KeyCode::Tab));
+        assert_eq!(state.handle_key(key(KeyCode::Enter)), Action::Finish);
+        let mut config = UserConfig::default();
+        state.apply_to(&mut config);
+        assert_eq!(
+            config.routing().model(),
+            Some(&RoutingModelChoice::Pinned {
+                provider: "retired-router".to_owned(),
+                model: "gpt-5.6-luna".to_owned(),
+            }),
+            "a degraded pin must be preserved, not deleted — the provider may come back"
+        );
+    }
+
+    /// Reopening from settings shows what is already recorded rather than
+    /// re-offering the default, and tabbing past the step changes nothing.
+    #[test]
+    fn reopening_preselects_the_recorded_routing_choice_and_tabbing_past_preserves_it() {
+        let mut existing = config_with_provider("openrouter");
+        existing
+            .routing_mut()
+            .set_model(Some(RoutingModelChoice::Automatic));
+        let mut state = drive_to_routing_with(&existing);
+
+        let RoutingStepView::Choice {
+            selected, recorded, ..
+        } = state.routing_step()
+        else {
+            panic!("expected the Choice screen");
+        };
+        assert_eq!(
+            selected,
+            RoutingChoice::Automatic,
+            "a reopen must highlight the choice already on disk, not the default"
+        );
+        assert_eq!(recorded, RoutingSelectionView::Automatic);
+
+        state.handle_key(key(KeyCode::Tab));
+        state.handle_key(key(KeyCode::Enter));
+        let mut config = existing.clone();
+        state.apply_to(&mut config);
+        assert_eq!(
+            config.routing().model(),
+            Some(&RoutingModelChoice::Automatic),
+            "tabbing past the step must not disturb what is recorded"
+        );
+    }
+
+    /// The only way to un-configure a routing model from the wizard, and it
+    /// takes a deliberate press. This is where the routing step deviates
+    /// from the provider step, which never removes anything — see
+    /// `WizardState::pending_routing`.
+    #[test]
+    fn enter_on_do_later_clears_a_previously_recorded_routing_choice() {
+        let mut existing = config_with_provider("openrouter");
+        existing
+            .routing_mut()
+            .set_model(Some(RoutingModelChoice::Automatic));
+        let mut state = drive_to_routing_with(&existing);
+
+        // Highlight starts on Automatic (the recorded choice); move down
+        // twice to "Do later" and confirm.
+        state.handle_key(key(KeyCode::Down));
+        state.handle_key(key(KeyCode::Down));
+        assert_eq!(state.handle_key(key(KeyCode::Enter)), Action::Redraw);
+        assert_eq!(state.step(), Step::Summary);
+        state.handle_key(key(KeyCode::Enter));
+
+        let mut config = existing.clone();
+        state.apply_to(&mut config);
+        assert_eq!(
+            config.routing().model(),
+            None,
+            "explicitly choosing Do later must clear the recorded choice"
+        );
+        // The providers it was pinned against are untouched: this step
+        // records a routing preference and nothing else.
+        assert!(config.providers().get("openrouter").is_some());
+    }
+
+    /// `Esc` inside the routing sub-screens steps back one level rather than
+    /// cancelling the whole wizard, exactly as it does on the provider step
+    /// and in the explicit-path input. Losing a half-finished wizard to a
+    /// habitual Esc is the failure this prevents.
+    #[test]
+    fn esc_steps_back_through_the_routing_sub_screens_without_cancelling() {
+        let mut state = drive_to_routing_with(&config_with_provider("openrouter"));
+        state.handle_key(key(KeyCode::Up)); // -> Choose model
+        state.handle_key(key(KeyCode::Enter)); // -> PickProvider
+        state.handle_key(key(KeyCode::Enter)); // -> ModelInput
+
+        assert_eq!(state.handle_key(key(KeyCode::Esc)), Action::Redraw);
+        assert!(matches!(
+            state.routing_step(),
+            RoutingStepView::PickProvider { .. }
+        ));
+        assert_eq!(state.handle_key(key(KeyCode::Esc)), Action::Redraw);
+        assert!(matches!(
+            state.routing_step(),
+            RoutingStepView::Choice { .. }
+        ));
+        // From the top-level Choice screen Esc means what it means
+        // everywhere else.
+        assert_eq!(state.handle_key(key(KeyCode::Esc)), Action::Cancel);
+    }
+
+    /// An empty model name is refused inline and the input stays open, the
+    /// same contract the explicit-path and base-URL fields already keep:
+    /// show the real problem and let the user correct it rather than
+    /// recording something that cannot work.
+    #[test]
+    fn an_empty_model_name_is_refused_and_the_input_stays_open() {
+        let mut state = drive_to_routing_with(&config_with_provider("openrouter"));
+        state.handle_key(key(KeyCode::Up)); // -> Choose model
+        state.handle_key(key(KeyCode::Enter)); // -> PickProvider
+        state.handle_key(key(KeyCode::Enter)); // -> ModelInput
+
+        state.handle_key(char_key(' '));
+        assert_eq!(state.handle_key(key(KeyCode::Enter)), Action::Redraw);
+        let RoutingStepView::ModelInput { error, .. } = state.routing_step() else {
+            panic!("an empty name must leave the input open");
+        };
+        assert!(
+            error.is_some(),
+            "an empty name must be explained, not eaten"
+        );
+        assert_eq!(
+            state.routing_selection(),
+            RoutingSelectionView::NotConfigured,
+            "a refused name must record nothing"
+        );
+
+        // Typing a real one then works.
+        for c in "llama3".chars() {
+            state.handle_key(char_key(c));
+        }
+        state.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            state.routing_selection(),
+            RoutingSelectionView::Pinned {
+                provider: "openrouter".to_owned(),
+                model: "llama3".to_owned(),
+            }
+        );
+    }
+
+    /// Acceptance 3, the path most users take: tab through every optional
+    /// step from a genuine first run and get a configuration that is
+    /// complete, saves and loads unchanged, and resolves to a working
+    /// routing answer. A new *required* step anywhere in the wizard breaks
+    /// this and nothing else would catch it.
+    #[test]
+    fn tabbing_through_every_optional_step_produces_a_valid_configuration() {
+        let mut state = new_state(&all_harnesses_detected());
+        let action = drive(
+            &mut state,
+            &[
+                key(KeyCode::Tab), // Welcome -> Harnesses
+                key(KeyCode::Tab), // Harnesses -> Bypass
+                key(KeyCode::Tab), // Bypass -> Provider
+                key(KeyCode::Tab), // Provider -> Routing
+                key(KeyCode::Tab), // Routing -> Summary
+                key(KeyCode::Tab), // finish
+            ],
+        );
+        assert_eq!(action, Action::Finish);
+
+        let mut config = UserConfig::default();
+        state.apply_to(&mut config);
+
+        assert!(config.onboarding().completed());
+        assert_eq!(config.routing().model(), None);
+        assert!(config.providers().is_empty());
+
+        // Valid on disk, not merely valid in memory: it survives the exact
+        // serialise/parse round trip `save`/`load` performs.
+        let text = toml::to_string_pretty(&config).expect("the config must serialize");
+        assert!(
+            !text.contains("[routing"),
+            "a wizard run that declined routing must write no routing table:\n{text}"
+        );
+        let reloaded: UserConfig = toml::from_str(&text).expect("the config must parse back");
+        assert_eq!(reloaded, config);
+
+        // And it resolves to something that works.
+        let effective = crate::config::EffectiveConfig::new(&reloaded, None);
+        assert!(matches!(
+            effective.routing_model_resolution().value,
+            crate::config::RoutingModelResolution::Heuristics(_)
+        ));
     }
 }

@@ -4,10 +4,10 @@ Last updated: 2026-08-26 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 9G is COMPLETE — nineteen of nineteen.** 9E eleven of thirteen; 2D six
-of nineteen; Phase 9 five of seven; 2C fifteen of nineteen; 9F eleven of
-thirteen; 9D eleven of fourteen; 9A nineteen of twenty-six; 9C eleven of
-twelve; 9B eight of nine. **243 checked boxes (19%).**
+**Phase 9G and Phase 2C are both COMPLETE — nineteen of nineteen each.** 9E
+eleven of thirteen; 2D six of nineteen; Phase 9 five of seven; 9F eleven of
+thirteen; 9D eleven of fourteen; 9A nineteen of twenty-six; 9C eleven of twelve;
+9B eight of nine. **247 checked boxes (19%).** Local suite **776 passing**.
 
 The local gateway now serves **all three wire protocols** — Anthropic Messages,
 OpenAI Responses and OpenAI Chat — from one upstream holding one credential,

@@ -6,27 +6,32 @@
 //! ignore each integration before the normal interface opens. This module is
 //! that wizard.
 //!
-//! # Out of scope, on purpose
+//! # What this wizard records, and what it deliberately does not
 //!
-//! The capability map's Phase 2C entry also lists provider/gateway
-//! configuration and routing-model configuration as optional first-run
-//! steps. Neither subsystem exists yet — providers, the gateway, and the
-//! routing model are Phases 9C/9D/34B, not built at the time this module
-//! was written. A "Configure now" screen for a provider that cannot be
-//! configured, or a routing-model picker with no models to route to, would
-//! be a button that leads nowhere: it looks finished but does nothing, which
-//! is worse than not being there. So this wizard does not implement those
-//! steps. It does not silently work around their absence either — Phase
-//! 2C's "Provide a clear Do later choice that completes onboarding without
-//! requiring any API keys" is satisfied structurally, not as a button: there
-//! is no provider step to defer, so onboarding always completes without ever
-//! asking for a key, which is also exactly what "Allow Glasshouse to be
-//! fully useful with only native subscription-backed harnesses configured"
-//! requires. The Summary screen says as much in one line so this is not a
-//! silent omission the user has to notice on their own. Those three
-//! checklist boxes stay unticked in the capability map until their
-//! subsystems exist; ticking them today would be describing behavior this
-//! build does not have.
+//! Five screens: a welcome, the integration list, an optional
+//! bypass-acknowledgement step, an optional provider step, and an optional
+//! routing-model step, then a summary. The last three are optional in the
+//! strong sense — a user who presses `Tab` through all of them finishes with
+//! a configuration that works, needs no API key, and asks nothing of a
+//! subsystem that is not built yet.
+//!
+//! The routing-model step is the newest, and it shows where this module
+//! draws its line. Phase 2C asks for three choices — Automatic, Choose
+//! model, and Do later — and this wizard offers exactly those three and
+//! *records which one the user picked*. It does not classify anything, does
+//! not choose a model for "Automatic", and does not build a fallback chain;
+//! those are Phases 34B and 34C, and a wizard that pretended to do them
+//! would be a screen that looks finished and does nothing. The choice is
+//! stored as a reference — a provider name and a model name, never a
+//! credential (see [`crate::config::RoutingModelChoice`]) — and "Do later"
+//! records nothing at all, leaving deterministic routing heuristics in
+//! charge. Both the Summary and the routing screen itself say so in a line,
+//! so a user who declines is told what they are getting rather than left to
+//! infer it.
+//!
+//! The same restraint applies one step earlier: the provider step configures
+//! a provider from a built-in template and stops there. The Glasshouse
+//! gateway is Phase 9D and is not part of this setup.
 //!
 //! # Architecture
 //!

@@ -16,8 +16,9 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use crate::integrations::{IntegrationId, IntegrationKind, IntegrationStatus};
 
 use super::state::{
-    BypassRowView, PathInputView, ProviderRow, ProviderStepView, ProviderTemplateRow, RowView,
-    Step, WizardState,
+    BypassRowView, PathInputView, ProviderRow, ProviderStepView, ProviderTemplateRow,
+    RoutingChoice, RoutingProviderRow, RoutingSelectionView, RoutingStepView, RowView, Step,
+    WizardState,
 };
 
 /// Draw the current step of `state` into `frame`.
@@ -45,6 +46,7 @@ pub fn render(state: &WizardState, frame: &mut Frame) {
         Step::Harnesses => render_harnesses(state, frame, body_area),
         Step::Bypass => render_bypass_step(state, frame, body_area),
         Step::Provider => render_provider_step(state, frame, body_area),
+        Step::Routing => render_routing_step(state, frame, body_area),
         Step::Summary => render_summary(state, frame, body_area),
     }
     render_footer(state, frame, footer_area);
@@ -56,6 +58,7 @@ fn render_title(state: &WizardState, frame: &mut Frame, area: Rect) {
         Step::Harnesses => "Glasshouse setup — harnesses & integrations",
         Step::Bypass => "Glasshouse setup — bypass acknowledgement (optional)",
         Step::Provider => "Glasshouse setup — provider (optional)",
+        Step::Routing => "Glasshouse setup — routing model (optional)",
         Step::Summary => "Glasshouse setup — review",
     };
     frame.render_widget(
@@ -373,6 +376,182 @@ fn render_provider_base_url(
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
+/// The optional routing-model step ([`Step::Routing`]): which model, if any,
+/// classifies a request before Glasshouse spends capacity on it, plus
+/// whichever sub-screen "Choose model" opened.
+///
+/// Deliberately the same shape as [`render_provider_step`] one step earlier —
+/// three offers, a picker, a text field — because the two optional steps are
+/// answered the same way and so should look and move the same way.
+fn render_routing_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    match state.routing_step() {
+        RoutingStepView::Choice {
+            selected,
+            recorded,
+            can_choose_model,
+            notice,
+        } => render_routing_choice(
+            selected,
+            &recorded,
+            can_choose_model,
+            notice.as_deref(),
+            frame,
+            area,
+        ),
+        RoutingStepView::PickProvider { options } => {
+            render_routing_providers(&options, frame, area)
+        }
+        RoutingStepView::ModelInput {
+            provider,
+            buffer,
+            error,
+        } => render_routing_model_input(&provider, &buffer, error.as_deref(), frame, area),
+    }
+}
+
+/// The three offers of [`RoutingChoice`], why the last key press did nothing,
+/// and what is recorded right now.
+///
+/// `can_choose_model` never removes the "Choose model" row. An option that
+/// vanishes reads as a bug in the wizard; an option that is present and says
+/// what it needs tells the user how to get it, which is why the unavailable
+/// wording names the missing prerequisite instead of the row simply not
+/// being drawn.
+fn render_routing_choice(
+    selected: RoutingChoice,
+    recorded: &RoutingSelectionView,
+    can_choose_model: bool,
+    notice: Option<&str>,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let choose_model = if can_choose_model {
+        "Choose model — pin classification to one specific model".to_owned()
+    } else {
+        "Choose model — pin classification to one specific model (unavailable: needs a \
+         configured provider)"
+            .to_owned()
+    };
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(
+            "Optional. Before spending premium agent capacity on a request, Glasshouse \
+             can ask one cheap, fast model to classify it and say which resource should \
+             handle it. Nothing is routed by this setting yet — it records the intent — \
+             and leaving it for later keeps a fully working system on deterministic \
+             routing heuristics.",
+        ),
+        Line::from(""),
+        choice_line(
+            "Automatic — the cheapest sufficiently fast configured resource, chosen when a \
+             decision is actually needed",
+            selected == RoutingChoice::Automatic,
+        ),
+        choice_line(&choose_model, selected == RoutingChoice::ChooseModel),
+        choice_line(
+            "Do later — deterministic routing heuristics until configured",
+            selected == RoutingChoice::DoLater,
+        ),
+    ];
+
+    // Yellow, not the red the input errors use: a notice reports a press that
+    // was refused for an ordinary reason, and nothing the user did was wrong.
+    // Red here would tell them they had made a mistake.
+    if let Some(notice) = notice {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            notice.to_owned(),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.extend(routing_selection_lines("Currently recorded:", recorded));
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+/// One sentence for whatever [`WizardState::routing_selection`] currently
+/// reports, prefixed by `label`.
+///
+/// Shared by the routing step and the Summary so the two cannot describe the
+/// same recorded choice differently. The
+/// [`RoutingSelectionView::PinnedUnavailable`] arm renders its `message`
+/// **verbatim** on its own line: that string is
+/// [`crate::config::RoutingFallback`]'s own explanation of the degrade, and
+/// restating it here in the wizard's words is exactly the drift the view type
+/// carries it to prevent.
+fn routing_selection_lines(label: &str, selection: &RoutingSelectionView) -> Vec<Line<'static>> {
+    let headline = match selection {
+        RoutingSelectionView::NotConfigured => "none configured; deterministic routing \
+             heuristics classify requests until one is, which is a working system rather \
+             than a gap."
+            .to_owned(),
+        RoutingSelectionView::Deterministic => "deterministic-only, on purpose — no model \
+             is asked, and deterministic routing heuristics classify requests."
+            .to_owned(),
+        RoutingSelectionView::Automatic => "automatic — the resource is chosen at the \
+             moment a decision is actually needed, not now."
+            .to_owned(),
+        RoutingSelectionView::Pinned { provider, model }
+        | RoutingSelectionView::PinnedUnavailable {
+            provider, model, ..
+        } => format!("`{model}` from provider `{provider}`."),
+    };
+    let mut lines = vec![Line::from(format!("{label} {headline}"))];
+    if let RoutingSelectionView::PinnedUnavailable { message, .. } = selection {
+        lines.push(Line::from(Span::styled(
+            message.clone(),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    lines
+}
+
+/// The providers a pinned routing model may be chosen from — the same set
+/// [`WizardState::configured_providers`] reports, so a provider configured a
+/// step earlier in this same run is offered here immediately.
+fn render_routing_providers(options: &[RoutingProviderRow], frame: &mut Frame, area: Rect) {
+    let mut lines = vec![
+        Line::from("Configured providers — choose the one the routing model belongs to:"),
+        Line::from(""),
+    ];
+    for option in options {
+        let cursor = if option.selected { "> " } else { "  " };
+        let mut style = Style::default();
+        if option.selected {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        lines.push(Line::from(Span::styled(
+            format!("{cursor}{:<20} template {}", option.name, option.template),
+            style,
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+/// The model-name field, which names the provider being pinned to in its own
+/// prompt — a model name alone would not say who is being asked.
+fn render_routing_model_input(
+    provider: &str,
+    buffer: &str,
+    error: Option<&str>,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let mut lines = vec![Line::from(format!(
+        "Routing model to pin from `{provider}`: {buffer}_"
+    ))];
+    if let Some(error) = error {
+        lines.push(Line::from(Span::styled(
+            error.to_owned(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
 fn render_summary(state: &WizardState, frame: &mut Frame, area: Rect) {
     let mut lines = vec![Line::from(
         "Setup is complete once you finish. These choices are saved to your \
@@ -385,17 +564,13 @@ fn render_summary(state: &WizardState, frame: &mut Frame, area: Rect) {
             Some(true) => "enabled",
             Some(false) | None => "ignored",
         };
-        let extra = if row.decision == Some(true) {
-            row.executable
-                .map(|p| format!(" ({})", p.display()))
-                .unwrap_or_default()
+        let head = format!("  {:<12} {decision}", row.id.display_name());
+        let path = if row.decision == Some(true) {
+            row.executable.map(|p| p.display().to_string())
         } else {
-            String::new()
+            None
         };
-        lines.push(Line::from(format!(
-            "  {:<12} {decision}{extra}",
-            row.id.display_name()
-        )));
+        lines.push(Line::from(summary_row(&head, path.as_deref(), area.width)));
     }
 
     let acknowledged: Vec<&str> = state
@@ -432,11 +607,63 @@ fn render_summary(state: &WizardState, frame: &mut Frame, area: Rect) {
         }
     }
     lines.push(Line::from(""));
+    lines.extend(routing_selection_lines(
+        "Routing model:",
+        &state.routing_selection(),
+    ));
+    // No blank separator before the gateway note, and the omission is
+    // load-bearing rather than an oversight: at 80x24 with every integration
+    // detected and a degraded pin to explain, this screen's worst case is
+    // exactly the 22 body rows it gets. That blank line was the twenty-third.
+    // `every_summary_section_survives_the_worst_case_at_80x24` is what keeps
+    // the next line anyone adds here from silently falling off the bottom
+    // instead — a wrapped paragraph has no scrollback, so nothing would say
+    // it had.
     lines.push(Line::from(
-        "The Glasshouse gateway and routing-model configuration are not part of this \
-         setup yet.",
+        "The Glasshouse gateway is not part of this setup yet.",
     ));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+/// One integration's Summary row, guaranteed to occupy exactly one terminal
+/// row.
+///
+/// The Summary is rendered as a wrapped paragraph, and a wrapped paragraph has
+/// no scrollback: anything past the bottom edge is not drawn, and nothing says
+/// so. An executable path is the one part of this screen whose length is set
+/// by the user's machine rather than by us — a harness installed under a
+/// macOS temporary directory produces a path near 90 characters, which wraps
+/// onto three rows at 80 columns. Ten such rows pushed the routing model, the
+/// providers and the gateway line clean off an 80x24 terminal, which is how
+/// the review screen came to omit the decision the user had just made. Found
+/// by running the binary; no rendering test caught it, because each one
+/// rendered a fixture with short paths.
+///
+/// So the path is elided from the *left*, keeping its tail: the executable's
+/// own name is what identifies it, and the directory prefix is both the long
+/// part and the part already shown in full on the Harnesses step.
+fn summary_row(head: &str, path: Option<&str>, width: u16) -> String {
+    let Some(path) = path else {
+        return head.to_owned();
+    };
+    let width = width as usize;
+    let head_len = head.chars().count();
+    // " (" + ")" around the path, and at least one character of path left to
+    // show. Below that there is no room for a path at all, and the decision
+    // itself matters more than where the binary lives.
+    let budget = width.saturating_sub(head_len + 3);
+    if budget == 0 {
+        return head.to_owned();
+    }
+    let path_len = path.chars().count();
+    if path_len <= budget {
+        return format!("{head} ({path})");
+    }
+    let tail: String = path
+        .chars()
+        .skip(path_len - budget.saturating_sub(1))
+        .collect();
+    format!("{head} (\u{2026}{tail})")
 }
 
 fn render_footer(state: &WizardState, frame: &mut Frame, area: Rect) {
@@ -461,6 +688,13 @@ fn render_footer(state: &WizardState, frame: &mut Frame, area: Rect) {
                 ProviderStepView::PickTemplate { .. } => "↑/↓ move   Enter/Space choose   Esc back",
                 ProviderStepView::BaseUrlInput { .. } => "Type URL   Enter confirm   Esc back",
             },
+            Step::Routing => match state.routing_step() {
+                RoutingStepView::Choice { .. } => {
+                    "↑/↓ choose   Enter/Space select   Tab skip   Esc cancel"
+                }
+                RoutingStepView::PickProvider { .. } => "↑/↓ move   Enter/Space choose   Esc back",
+                RoutingStepView::ModelInput { .. } => "Type model   Enter confirm   Esc back",
+            },
             Step::Summary => "Enter / Tab finish   Esc cancel",
         }
     };
@@ -475,7 +709,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use crate::config::UserConfig;
+    use crate::config::{ProviderConfig, RoutingModelChoice, UserConfig};
     use crate::integrations::{IntegrationId, IntegrationStatus};
 
     use super::super::state::{IntegrationDetection, WizardState};
@@ -618,28 +852,40 @@ mod tests {
         panic!("the wizard never reached the harnesses step");
     }
 
+    /// Every [`Step`] the wizard has, drawn at 80x24.
+    ///
+    /// Each stop asserts which step it actually reached. The previous version
+    /// of this test only *commented* that its last render was the Summary; it
+    /// was not — `Tab` does nothing in the provider template picker, so the
+    /// walk stopped one screen short and the Summary went unrendered here
+    /// while the comment said otherwise. A comment cannot fail, so the step is
+    /// asserted instead.
     #[test]
     fn every_step_renders_at_80x24_without_panicking() {
         let mut state = sample_state();
+        assert_eq!(state.step(), Step::Welcome);
         render_at(&state, 80, 24);
 
         state.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
             crossterm::event::KeyModifiers::NONE,
         ));
+        assert_eq!(state.step(), Step::Harnesses);
         render_at(&state, 80, 24);
 
         state.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Tab,
             crossterm::event::KeyModifiers::NONE,
         ));
-        render_at(&state, 80, 24); // Step::Bypass
+        assert_eq!(state.step(), Step::Bypass);
+        render_at(&state, 80, 24);
 
         state.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Tab,
             crossterm::event::KeyModifiers::NONE,
         ));
-        render_at(&state, 80, 24); // Step::Provider, Choice sub-mode
+        assert_eq!(state.step(), Step::Provider);
+        render_at(&state, 80, 24); // Choice sub-mode
 
         state.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Up,
@@ -651,11 +897,24 @@ mod tests {
         ));
         render_at(&state, 80, 24); // PickTemplate sub-mode
 
+        // Back out of the picker, then continue: `Tab` is inert inside it.
+        state.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
         state.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Tab,
             crossterm::event::KeyModifiers::NONE,
         ));
-        render_at(&state, 80, 24); // Step::Summary
+        assert_eq!(state.step(), Step::Routing);
+        render_at(&state, 80, 24); // Choice sub-mode
+
+        state.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Tab,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(state.step(), Step::Summary);
+        render_at(&state, 80, 24);
     }
 
     /// Every sub-screen of the optional provider step, including the
@@ -780,5 +1039,513 @@ mod tests {
     fn zero_area_does_not_panic() {
         let state = sample_state();
         render_at(&state, 0, 0);
+    }
+
+    /// The three offers of the routing step, each highlighted in turn.
+    ///
+    /// A reopen highlights whatever is recorded, and nothing is here, so the
+    /// screen opens on "Do later" — the Phase 2C line 4 default. Rendered at
+    /// 200 columns as well as 80 because every one of these labels wraps at
+    /// 80, and a wrapped label is a label a `contains` assertion can miss for
+    /// reasons that have nothing to do with the code (practice §17).
+    #[test]
+    fn every_routing_choice_renders_with_the_cursor_on_the_one_selected() {
+        const LABELS: [&str; 3] = [
+            "Do later — deterministic routing heuristics until configured",
+            "Choose model — pin classification to one specific model",
+            "Automatic — the cheapest sufficiently fast configured resource",
+        ];
+
+        let mut state = advance_to_routing(routing_state(&["my-router"], None));
+        for (presses, selected) in LABELS.iter().enumerate() {
+            for width in [80, 200] {
+                let screen = rendered_lines(&state, width, 24);
+                assert!(
+                    screen
+                        .iter()
+                        .any(|line| line.starts_with(&format!("> {selected}"))),
+                    "after {presses} moves up at {width} columns the cursor is not on \
+                     `{selected}`:\n{}",
+                    screen.join("\n")
+                );
+                for other in LABELS.iter().filter(|label| *label != selected) {
+                    assert!(
+                        screen
+                            .iter()
+                            .any(|line| line.starts_with(&format!("  {other}"))),
+                        "`{other}` is not offered unselected at {width} columns:\n{}",
+                        screen.join("\n")
+                    );
+                }
+            }
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Up,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+    }
+
+    /// "Choose model" needs two answers, and both screens render them: which
+    /// configured provider, then which model of that provider's.
+    #[test]
+    fn the_routing_provider_picker_and_the_model_field_render() {
+        let mut state = advance_to_routing(routing_state(&["my-router"], None));
+        state.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Up,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        state.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        for width in [80, 200] {
+            let screen = rendered_lines(&state, width, 24);
+            assert!(
+                screen
+                    .iter()
+                    .any(|line| line.contains("Configured providers")),
+                "the provider picker has no heading at {width} columns:\n{}",
+                screen.join("\n")
+            );
+            assert!(
+                screen
+                    .iter()
+                    .any(|line| line.starts_with("> my-router") && line.contains("openrouter")),
+                "the provider picker shows no cursor, name and template at {width} \
+                 columns:\n{}",
+                screen.join("\n")
+            );
+        }
+
+        state.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        for c in "haiku-cheap".chars() {
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(c),
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+        for width in [80, 200] {
+            let screen = rendered_lines(&state, width, 24);
+            assert!(
+                screen.iter().any(
+                    |line| line.contains("Routing model to pin from `my-router`: haiku-cheap_")
+                ),
+                "the model field does not name the provider, the buffer and the cursor at \
+                 {width} columns:\n{}",
+                screen.join("\n")
+            );
+        }
+
+        // An empty confirm is refused, and says so where the field is.
+        for _ in 0.."haiku-cheap".len() {
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Backspace,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+        state.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        for width in [80, 200] {
+            let screen = rendered_lines(&state, width, 24);
+            assert!(
+                screen
+                    .iter()
+                    .any(|line| line.contains("a model name is required to pin routing")),
+                "an empty model name is refused silently at {width} columns:\n{}",
+                screen.join("\n")
+            );
+        }
+    }
+
+    /// With no provider configured there is nothing to pin to, and the screen
+    /// says which prerequisite is missing rather than dropping the option.
+    ///
+    /// The full parenthetical is only asserted at 200 columns: at 80 it wraps
+    /// mid-phrase, so the short assertion there is the single word that
+    /// cannot be split.
+    #[test]
+    fn choose_model_says_why_it_is_unavailable_with_no_provider_configured() {
+        let mut state = advance_to_routing(routing_state(&[], None));
+
+        let narrow = rendered_lines(&state, 80, 24);
+        assert!(
+            narrow
+                .iter()
+                .any(|line| line.contains("Choose model") && line.contains("unavailable")),
+            "at 80 columns the Choose model row does not say it is unavailable:\n{}",
+            narrow.join("\n")
+        );
+        let wide = rendered_lines(&state, 200, 24);
+        assert!(
+            wide.iter().any(|line| line.contains(
+                "Choose model — pin classification to one specific model (unavailable: \
+                 needs a configured provider)"
+            )),
+            "at 200 columns the Choose model row does not name the missing \
+             prerequisite:\n{}",
+            wide.join("\n")
+        );
+
+        // Selecting it explains itself instead of reading as a dead key.
+        state.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Up,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        state.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(state.step(), Step::Routing);
+        assert!(
+            rendered_lines(&state, 80, 24)
+                .iter()
+                .any(|line| line.contains("Choose model needs a configured provider")),
+            "the refused press left no notice at 80 columns"
+        );
+        assert!(
+            rendered_lines(&state, 200, 24)
+                .iter()
+                .any(|line| line.contains(
+                    "Choose model needs a configured provider, and none is configured yet. Go \
+                 back with Esc to add one, or pick Automatic or Do later."
+                )),
+            "the refused press left no complete notice at 200 columns"
+        );
+    }
+
+    /// The degrade explanation from [`crate::config::RoutingFallback`] reaches
+    /// the screen verbatim, on the routing step and again on the Summary.
+    ///
+    /// Verbatim is the whole point: this sentence is written once, in
+    /// configuration, so the wizard cannot invent a second account of the same
+    /// degrade. Asserting on the whole of it needs 200 columns — at 80 it
+    /// wraps across three rows, and the substring asserted there is chosen to
+    /// sit inside the first of them.
+    #[test]
+    fn a_pinned_model_whose_provider_vanished_explains_itself_on_both_screens() {
+        let mut state = advance_to_routing(routing_state(
+            &[],
+            Some(RoutingModelChoice::Pinned {
+                provider: "vanished".to_owned(),
+                model: "haiku-cheap".to_owned(),
+            }),
+        ));
+
+        assert_routing_degrade_is_visible(&state, "the routing step");
+
+        state.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Tab,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(state.step(), Step::Summary);
+        assert_routing_degrade_is_visible(&state, "the Summary");
+    }
+
+    /// Both screens are checked the same way, so neither can drift into
+    /// paraphrasing while the other stays honest.
+    fn assert_routing_degrade_is_visible(state: &WizardState, screen_name: &str) {
+        const WHOLE: &str = "routing model `haiku-cheap` names provider `vanished`, which is \
+                             not configured; requests are classified by deterministic routing \
+                             heuristics until that provider is configured again";
+
+        let narrow = rendered_lines(state, 80, 24);
+        assert!(
+            narrow
+                .iter()
+                .any(|line| line.contains("names provider `vanished`, which is not configured")),
+            "{screen_name} does not explain the vanished provider at 80 columns:\n{}",
+            narrow.join("\n")
+        );
+        assert!(
+            narrow
+                .iter()
+                .any(|line| line.contains("`haiku-cheap`") && line.contains("`vanished`")),
+            "{screen_name} does not name the pinned model and its provider at 80 \
+             columns:\n{}",
+            narrow.join("\n")
+        );
+
+        let wide = rendered_lines(state, 200, 40);
+        assert!(
+            wide.iter().any(|line| line.contains(WHOLE)),
+            "{screen_name} does not carry the degrade explanation verbatim at 200 \
+             columns:\n{}",
+            wide.join("\n")
+        );
+    }
+
+    /// The Summary reports every recorded routing state, and no longer claims
+    /// that routing-model configuration is absent from this setup.
+    ///
+    /// The `!contains` half is asserted at 200 columns as well as 80: a stale
+    /// sentence that is merely truncated off a narrow screen is still in the
+    /// build (practice §17).
+    #[test]
+    fn the_summary_reports_whichever_routing_model_is_recorded() {
+        let cases = [
+            (
+                Vec::new(),
+                None,
+                "Routing model: none configured; deterministic routing heuristics classify \
+                 requests until one is, which is a working system rather than a gap.",
+            ),
+            (
+                Vec::new(),
+                Some(RoutingModelChoice::Deterministic),
+                "Routing model: deterministic-only, on purpose — no model is asked, and \
+                 deterministic routing heuristics classify requests.",
+            ),
+            (
+                Vec::new(),
+                Some(RoutingModelChoice::Automatic),
+                "Routing model: automatic — the resource is chosen at the moment a decision \
+                 is actually needed, not now.",
+            ),
+            (
+                vec!["my-router"],
+                Some(RoutingModelChoice::Pinned {
+                    provider: "my-router".to_owned(),
+                    model: "haiku-cheap".to_owned(),
+                }),
+                "Routing model: `haiku-cheap` from provider `my-router`.",
+            ),
+        ];
+
+        for (providers, routing, expected) in cases {
+            let mut state = advance_to_routing(routing_state(&providers, routing));
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Tab,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            assert_eq!(state.step(), Step::Summary);
+
+            let wide = rendered_lines(&state, 200, 40);
+            assert!(
+                wide.iter().any(|line| line.contains(expected)),
+                "the Summary does not report `{expected}`:\n{}",
+                wide.join("\n")
+            );
+            assert!(
+                wide.iter()
+                    .any(|line| line.contains("The Glasshouse gateway is not part of this setup")),
+                "the Summary stopped saying the gateway is still out of scope:\n{}",
+                wide.join("\n")
+            );
+            for (width, height) in [(80, 24), (200, 40)] {
+                let screen = rendered_lines(&state, width, height);
+                assert!(
+                    !screen
+                        .iter()
+                        .any(|line| line.contains("routing-model configuration are not part")),
+                    "the Summary still claims routing-model configuration is out of scope, \
+                     at {width}x{height}:\n{}",
+                    screen.join("\n")
+                );
+            }
+        }
+    }
+
+    /// Every sub-screen of the optional routing step, including the
+    /// model-name text field and its inline error, renders without panicking
+    /// at every terminal size this module already tests every other step at.
+    #[test]
+    fn every_routing_sub_screen_renders_without_panicking_at_every_size() {
+        for (width, height) in [(80, 24), (20, 5), (300, 100), (0, 0)] {
+            // No provider: the Choice screen with the unavailable wording,
+            // and the notice a refused "Choose model" leaves behind.
+            let mut bare = advance_to_routing(routing_state(&[], None));
+            render_at(&bare, width, height);
+            bare.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Up,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            bare.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            render_at(&bare, width, height); // Choice, with a notice
+
+            // A pinned model whose provider is gone: the longest string any
+            // of these screens can be asked to lay out.
+            let degraded = advance_to_routing(routing_state(
+                &[],
+                Some(RoutingModelChoice::Pinned {
+                    provider: "vanished".to_owned(),
+                    model: "haiku-cheap".to_owned(),
+                }),
+            ));
+            render_at(&degraded, width, height);
+
+            let mut state = advance_to_routing(routing_state(&["my-router"], None));
+            render_at(&state, width, height); // Choice
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Up,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            render_at(&state, width, height); // PickProvider
+
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            render_at(&state, width, height); // ModelInput, empty
+
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            render_at(&state, width, height); // ModelInput, refused and erroring
+
+            for c in "haiku-cheap".chars() {
+                state.handle_key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(c),
+                    crossterm::event::KeyModifiers::NONE,
+                ));
+            }
+            render_at(&state, width, height); // ModelInput, filled
+
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            render_at(&state, width, height); // Choice, with the pin recorded
+        }
+    }
+
+    /// A wizard seeded with `providers` already in configuration and
+    /// `routing` already recorded, so the routing step's reopen behaviour and
+    /// its degrade can both be reached without pressing a key.
+    fn routing_state(providers: &[&str], routing: Option<RoutingModelChoice>) -> WizardState {
+        let detected = vec![IntegrationDetection {
+            id: IntegrationId::ClaudeCode,
+            status: IntegrationStatus::Configured,
+            executable: Some("/usr/bin/claude".into()),
+            version: Some("1.2.3".to_owned()),
+        }];
+        let mut config = UserConfig::default();
+        for name in providers {
+            config
+                .providers_mut()
+                .set(*name, ProviderConfig::new("openrouter"));
+        }
+        config.routing_mut().set_model(routing);
+        WizardState::new(
+            &detected,
+            &config,
+            "glasshouse".to_owned(),
+            "/home/user/glasshouse".into(),
+            "0.1.0".to_owned(),
+        )
+    }
+
+    /// Move a fresh wizard to the routing step without touching any earlier
+    /// one, which is the path a user who tabs through the optional steps
+    /// takes.
+    fn advance_to_routing(state: WizardState) -> WizardState {
+        let mut state = advance_to_harnesses(state);
+        for _ in 0..3 {
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Tab,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+        assert_eq!(state.step(), Step::Routing);
+        state
+    }
+
+    /// The Summary's genuine worst case, at the size it promises to fit.
+    ///
+    /// Every integration in the catalogue detected with a realistic — that is,
+    /// long — executable path, a configured provider, and a pinned routing
+    /// model whose provider has vanished, so the four-row degrade explanation
+    /// is on screen too. This is not a hypothetical: running the shipped
+    /// binary on a machine with ten harnesses installed under a macOS
+    /// temporary directory dropped the entire `Routing model:` line and the
+    /// gateway note off the bottom, and nothing said so, because a wrapped
+    /// paragraph simply stops drawing.
+    ///
+    /// The screen has **no rows to spare** in this state. If you add a line to
+    /// `render_summary` and this test fails, that is the screen telling you it
+    /// is full — give it real scrolling rather than deleting an assertion
+    /// here.
+    #[test]
+    fn every_summary_section_survives_the_worst_case_at_80x24() {
+        let long = "/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/agent-shims/\
+                    DC30465E-5CC0-4172-A1E8-F17DB285B969";
+        let detected: Vec<IntegrationDetection> = IntegrationId::ALL
+            .iter()
+            .map(|&id| IntegrationDetection {
+                id,
+                status: IntegrationStatus::Configured,
+                executable: Some(format!("{long}/{}", id.slug()).into()),
+                version: None,
+            })
+            .collect();
+        let mut config = UserConfig::default();
+        config
+            .providers_mut()
+            .set("openrouter", ProviderConfig::new("openrouter"));
+        config
+            .routing_mut()
+            .set_model(Some(RoutingModelChoice::Pinned {
+                provider: "vanished-router".to_owned(),
+                model: "gpt-5.6-luna".to_owned(),
+            }));
+        let mut state = WizardState::new(
+            &detected,
+            &config,
+            "glasshouse".to_owned(),
+            "/home/user/glasshouse".into(),
+            "0.1.0".to_owned(),
+        );
+        let mut state = advance_to_routing({
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Tab,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            state
+        });
+        state.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Tab,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(state.step(), Step::Summary);
+
+        let lines = rendered_lines(&state, 80, 24);
+        let text = lines.join("\n");
+
+        // Every integration is exactly one row, so ten of them cost ten rows
+        // however long the machine's paths happen to be.
+        for &id in IntegrationId::ALL {
+            let name = id.display_name();
+            assert_eq!(
+                lines.iter().filter(|line| line.contains(name)).count(),
+                1,
+                "{name} must occupy exactly one Summary row at 80 columns, got:\n{text}"
+            );
+        }
+
+        for required in [
+            "Routing model:",
+            "gpt-5.6-luna",
+            "vanished-router",
+            "deterministic routing heuristics",
+            "The Glasshouse gateway is not part of this setup yet.",
+            "openrouter",
+        ] {
+            assert!(
+                text.contains(required),
+                "the Summary dropped {required:?} at 80x24 — the screen is full:\n{text}"
+            );
+        }
     }
 }

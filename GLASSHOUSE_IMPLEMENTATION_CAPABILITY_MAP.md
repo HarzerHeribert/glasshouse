@@ -159,10 +159,10 @@ Phase 2C — First-run onboarding
 ☑ Allow the user to add the path to a harness executable that was not detected automatically.
 ☑ Explain that Glasshouse launches the user’s existing harness binaries rather than installing replacement copies.
 ☑ Offer provider and gateway configuration as an optional first-run step.
-☐ Offer routing-model configuration as an optional first-run step after providers have been detected or configured.
-☐ Offer an Automatic routing-model choice that selects the cheapest sufficiently fast configured resource.
-☐ Offer a Choose model routing-model choice for users who want to pin classification to a specific model.
-☐ Offer a Do later choice for routing-model configuration and use deterministic routing heuristics until configured.
+☑ Offer routing-model configuration as an optional first-run step after providers have been detected or configured.
+☑ Offer an Automatic routing-model choice that selects the cheapest sufficiently fast configured resource.
+☑ Offer a Choose model routing-model choice for users who want to pin classification to a specific model.
+☑ Offer a Do later choice for routing-model configuration and use deterministic routing heuristics until configured.
 ☑ Provide a clear Configure now choice for provider and gateway setup.
 ☑ Provide a clear Do later choice that completes onboarding without requiring any API keys.
 ☑ Allow Glasshouse to be fully useful with only native subscription-backed harnesses configured.

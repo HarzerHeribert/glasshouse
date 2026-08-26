@@ -13,9 +13,14 @@
 //!
 //! The schema is deliberately tiny. The capability map is explicit that
 //! configuration should stay small until real usage demonstrates a need for
-//! more (Phase 49): no provider, routing, or budget fields belong here yet —
-//! those are later phases and would be speculative today. Phase 9A's launch
-//! profiles are the one addition ahead of that: [`ProfileTable`] holds
+//! more (Phase 49): a field belongs here once a user can actually make the
+//! decision it records, and not before. [`RoutingConfig`] is the newest such
+//! addition and shows where the line is — it stores *which* routing model
+//! the user picked in the first-run wizard, because Phase 2C asks them; it
+//! stores nothing about latency budgets, cost ceilings, health filtering or
+//! fallback chains, because Phases 2D, 34B and 34C are what ask those and
+//! inventing their answers today would be speculation. Phase 9A's launch
+//! profiles are the same shape: [`ProfileTable`] holds
 //! *inert* profile configuration (which harness, which backend resource,
 //! which approval mode) — never a resolved overlay, never a credential, and
 //! never the project's own memory. Resolving a stored profile into something
@@ -949,6 +954,237 @@ impl OnboardingState {
     }
 }
 
+/// Which routing model classifies a request, as recorded in configuration.
+///
+/// The routing model is the cheap, fast, replaceable component the capability
+/// map describes in its preamble: before spending premium agent capacity,
+/// Glasshouse may ask it to classify a request and estimate the capability
+/// tier the work needs. Phase 2C's job — and this type's — is only to record
+/// *which* of three answers the user gave. Actually asking a model anything
+/// is Phase 34B, and choosing one for [`RoutingModelChoice::Automatic`] is
+/// Phase 34C; neither is built here, and this type is deliberately shaped so
+/// neither has to be rewritten to read it.
+///
+/// # Why `Automatic` stores an intent and not a model
+///
+/// Phase 2C line 2 asks for a choice that "selects the cheapest sufficiently
+/// fast configured resource". That selection depends on provider health,
+/// rate-limit headroom, latency and price *at the moment of use* — every
+/// filter in Phase 34C is a live condition — so resolving it once during a
+/// first-run wizard and writing the winner down would freeze a decision the
+/// map explicitly wants re-evaluated ("Re-evaluate the automatic
+/// routing-model choice when its provider becomes degraded or
+/// rate-limited"). [`RoutingModelChoice::Automatic`] therefore carries no
+/// payload at all: it is the user saying "you pick", not a cached answer.
+///
+/// # This is a reference, never a credential
+///
+/// [`RoutingModelChoice::Pinned`] holds a provider *name* — a key into
+/// [`ProviderTable`] — and a model *name*. Both are as safe to write into a
+/// tracked project file as [`ProviderConfig::credential_env`]'s variable
+/// names already are, which is the same rule [`StoredCredentialRef`]
+/// follows. Resolving the named provider to an actual credential stays
+/// `SecretStore`'s job. See `tests::serialized_form_has_no_secret_capable_field`
+/// for the structural guard.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RoutingModelChoice {
+    /// No model classifies anything: deterministic routing heuristics do.
+    ///
+    /// This is the default, and it is a first-class outcome rather than an
+    /// absence — Phase 2C line 4 ("use deterministic routing heuristics
+    /// until configured") and Phase 2D's "deterministic-only classification"
+    /// are the same state, reached from opposite directions: the wizard's
+    /// "Do later" simply records nothing at all (see
+    /// [`RoutingConfig::model`]), and a settings screen that wants to say
+    /// "deterministic, on purpose, do not ask again" writes this variant
+    /// explicitly. Both resolve identically — see
+    /// [`RoutingModelChoice::resolve`].
+    #[default]
+    Deterministic,
+    /// Let Glasshouse choose among the configured resources at the moment it
+    /// needs one. Stored as an intent; Phase 34C does the choosing.
+    Automatic,
+    /// Classify with exactly this model, from exactly this configured
+    /// provider. Two names, no credential.
+    Pinned { provider: String, model: String },
+}
+
+impl RoutingModelChoice {
+    /// What this choice actually resolves to, given the provider names that
+    /// are configured right now.
+    ///
+    /// # A vanished provider is not a startup failure
+    ///
+    /// This is the one lookup in this module that refuses to return an
+    /// error. [`EffectiveConfig::configured_provider`] answers an unknown
+    /// name with [`ProviderLookupError::Unknown`], because a user who typed
+    /// `--provider nope` on the command line asked for something specific
+    /// and must be told it does not exist. A routing model is not that:
+    /// nobody asked for it this run, it is an optimisation over a system
+    /// that already works without it, and providers legitimately come and go
+    /// as keys are rotated and configuration is edited. So a
+    /// [`RoutingModelChoice::Pinned`] naming a provider that is no longer
+    /// configured degrades to [`RoutingModelResolution::Heuristics`] — with
+    /// a [`RoutingFallback`] that says which provider went missing, so the
+    /// degrade is visible rather than silent — instead of making Glasshouse
+    /// fail to start. Phase 34B's "Allow deterministic heuristics to remain
+    /// the final fallback when every routing model is unavailable" is the
+    /// same instinct one phase earlier.
+    ///
+    /// `configured` is provider *names* — [`EffectiveConfig::provider_names`]
+    /// in production. Whether a named provider is currently
+    /// [`ProviderConfig::enabled`] is deliberately not consulted: that field's
+    /// own documentation records that "deciding whether routing may actually
+    /// use a disabled provider is a later phase's job", and answering it here
+    /// would be that phase arriving early.
+    pub fn resolve(&self, configured: &[String]) -> RoutingModelResolution {
+        match self {
+            Self::Deterministic => {
+                RoutingModelResolution::Heuristics(RoutingFallback::DeterministicChosen)
+            }
+            Self::Automatic => RoutingModelResolution::Automatic,
+            Self::Pinned { provider, model } => {
+                if configured.iter().any(|name| name == provider) {
+                    RoutingModelResolution::Pinned {
+                        provider: provider.clone(),
+                        model: model.clone(),
+                    }
+                } else {
+                    RoutingModelResolution::Heuristics(RoutingFallback::ProviderNotConfigured {
+                        provider: provider.clone(),
+                        model: model.clone(),
+                    })
+                }
+            }
+        }
+    }
+}
+
+/// What will actually classify a request, after a recorded
+/// [`RoutingModelChoice`] has been checked against the providers that exist.
+///
+/// Three outcomes, and only one of them names a model. [`Self::Automatic`]
+/// is passed through unresolved on purpose — picking the cheapest
+/// sufficiently fast resource is Phase 34C's whole job, and this type
+/// refuses to guess at it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoutingModelResolution {
+    /// Deterministic routing heuristics classify the request. The
+    /// [`RoutingFallback`] says why, and is worth showing to the user when
+    /// it is not simply "you never configured one".
+    Heuristics(RoutingFallback),
+    /// Glasshouse picks a resource when it needs one (Phase 34C).
+    Automatic,
+    /// This exact provider and model, both still configured.
+    Pinned { provider: String, model: String },
+}
+
+impl RoutingModelResolution {
+    /// The reason deterministic heuristics are answering, or `None` when
+    /// they are not.
+    pub fn fallback(&self) -> Option<&RoutingFallback> {
+        match self {
+            Self::Heuristics(reason) => Some(reason),
+            Self::Automatic | Self::Pinned { .. } => None,
+        }
+    }
+}
+
+/// Why deterministic routing heuristics are classifying requests instead of
+/// a model.
+///
+/// Not an error type, deliberately: two of these three are ordinary,
+/// expected, fully working states, and giving them `std::error::Error` would
+/// invite a caller to treat "the user has not configured a routing model"
+/// as a failure. It carries a [`std::fmt::Display`] because the degrade must
+/// be *sayable* — Phase 2C's behavioural contract requires a configuration
+/// naming a model that has disappeared to degrade "and say so".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoutingFallback {
+    /// Nothing has ever been recorded — the wizard's "Do later", or a
+    /// configuration written before this field existed.
+    NotConfigured,
+    /// [`RoutingModelChoice::Deterministic`] was recorded explicitly.
+    DeterministicChosen,
+    /// A [`RoutingModelChoice::Pinned`] model names a provider that is not
+    /// in configuration any more.
+    ProviderNotConfigured { provider: String, model: String },
+}
+
+impl std::fmt::Display for RoutingFallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotConfigured => f.write_str(
+                "no routing model is configured; requests are classified by deterministic \
+                 routing heuristics",
+            ),
+            Self::DeterministicChosen => f.write_str(
+                "routing is set to deterministic-only; requests are classified by \
+                 deterministic routing heuristics",
+            ),
+            Self::ProviderNotConfigured { provider, model } => write!(
+                f,
+                "routing model `{model}` names provider `{provider}`, which is not \
+                 configured; requests are classified by deterministic routing heuristics \
+                 until that provider is configured again"
+            ),
+        }
+    }
+}
+
+/// The `[routing]` table: how requests get classified.
+///
+/// One field today. It is a table rather than a bare `routing_model` key
+/// because Phase 2D's Routing settings section adds four siblings to it — a
+/// maximum acceptable router latency, a maximum marginal cost per decision,
+/// whether to prefer free resources, and a premium-capacity reserve
+/// threshold — and those are scalars that belong next to the model choice,
+/// not inside it. Landing the table now means that batch adds fields; it
+/// does not migrate a key.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutingConfig {
+    /// The recorded routing-model choice, or `None` for "never decided".
+    ///
+    /// `None` is what the wizard's "Do later" writes, and it is why that
+    /// choice leaves *no routing model configured* in the literal sense:
+    /// `skip_serializing_if` means a first run that tabs straight through
+    /// produces a configuration file with no `[routing]` table in it at all.
+    /// It resolves exactly like [`RoutingModelChoice::Deterministic`] — see
+    /// [`EffectiveConfig::routing_model`] — so the two are behaviourally one
+    /// state with two spellings, and only the *reason* string tells them
+    /// apart.
+    ///
+    /// Keeping it an `Option` rather than collapsing it into
+    /// [`RoutingModelChoice::Deterministic`] is what makes layering work:
+    /// [`EffectiveConfig`] needs three states per layer — "this layer says
+    /// automatic", "this layer says deterministic", and "this layer says
+    /// nothing, ask the next one" — exactly like
+    /// [`IntegrationConfig::executable`]. A project that wants
+    /// deterministic-only classification *over* a user-level `automatic` can
+    /// then say so, which a collapsed shape could not express.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<RoutingModelChoice>,
+}
+
+impl RoutingConfig {
+    /// The recorded choice, or `None` when this layer has never recorded one.
+    pub fn model(&self) -> Option<&RoutingModelChoice> {
+        self.model.as_ref()
+    }
+
+    /// Record `choice`, or `None` to return this layer to "never decided".
+    pub fn set_model(&mut self, choice: Option<RoutingModelChoice>) -> &mut Self {
+        self.model = choice;
+        self
+    }
+
+    /// Whether this table would serialize to nothing at all.
+    fn is_unset(&self) -> bool {
+        self.model.is_none()
+    }
+}
+
 /// User-level Glasshouse configuration: `<config_dir>/config.toml`.
 ///
 /// Unknown top-level keys and unknown fields inside known tables are
@@ -967,6 +1203,10 @@ pub struct UserConfig {
     profiles: ProfileTable,
     #[serde(default)]
     providers: ProviderTable,
+    /// Skipped when empty so a first run that declines the routing-model
+    /// step writes no `[routing]` table at all — see [`RoutingConfig::model`].
+    #[serde(default, skip_serializing_if = "RoutingConfig::is_unset")]
+    routing: RoutingConfig,
 }
 
 impl Default for UserConfig {
@@ -977,6 +1217,7 @@ impl Default for UserConfig {
             integrations: IntegrationTable::default(),
             profiles: ProfileTable::default(),
             providers: ProviderTable::default(),
+            routing: RoutingConfig::default(),
         }
     }
 }
@@ -1016,6 +1257,14 @@ impl UserConfig {
 
     pub fn providers_mut(&mut self) -> &mut ProviderTable {
         &mut self.providers
+    }
+
+    pub fn routing(&self) -> &RoutingConfig {
+        &self.routing
+    }
+
+    pub fn routing_mut(&mut self) -> &mut RoutingConfig {
+        &mut self.routing
     }
 
     /// Load the user-level configuration file named by `paths`.
@@ -1066,6 +1315,12 @@ pub struct ProjectConfig {
     profiles: ProfileTable,
     #[serde(default)]
     providers: ProviderTable,
+    /// A project may override the routing-model choice, unlike
+    /// [`IntegrationConfig::bypass_acknowledged`] — see
+    /// [`EffectiveConfig::routing_model`] for why this is a preference and
+    /// that one is not.
+    #[serde(default, skip_serializing_if = "RoutingConfig::is_unset")]
+    routing: RoutingConfig,
 }
 
 impl Default for ProjectConfig {
@@ -1075,6 +1330,7 @@ impl Default for ProjectConfig {
             integrations: IntegrationTable::default(),
             profiles: ProfileTable::default(),
             providers: ProviderTable::default(),
+            routing: RoutingConfig::default(),
         }
     }
 }
@@ -1106,6 +1362,14 @@ impl ProjectConfig {
 
     pub fn providers_mut(&mut self) -> &mut ProviderTable {
         &mut self.providers
+    }
+
+    pub fn routing(&self) -> &RoutingConfig {
+        &self.routing
+    }
+
+    pub fn routing_mut(&mut self) -> &mut RoutingConfig {
+        &mut self.routing
     }
 }
 
@@ -1387,6 +1651,61 @@ impl<'a> EffectiveConfig<'a> {
             names.extend(project.providers().names().map(str::to_owned));
         }
         names.into_iter().collect()
+    }
+
+    /// Resolve which routing model classifies requests, reporting which
+    /// layer decided it.
+    ///
+    /// Project first, then user, then [`Layer::Default`] — the ordinary
+    /// layering every lookup on this type uses except
+    /// [`EffectiveConfig::bypass_acknowledged`], which consults the user
+    /// layer alone. This is deliberately *not* that exception. A bypass
+    /// acknowledgement is a safety attestation a person makes about their
+    /// own machine, so a repository must not be able to pre-acknowledge one
+    /// on behalf of whoever cloned it. A routing-model choice is a
+    /// preference about which cheap classifier to ask, it grants nothing and
+    /// attests to nothing, and a project that wants its own — deterministic
+    /// only in a repository whose work is uniform, say — is making an
+    /// ordinary configuration statement. So the normal rule applies.
+    ///
+    /// The [`Layer::Default`] case is [`RoutingModelChoice::Deterministic`]:
+    /// with nothing recorded anywhere, deterministic heuristics classify,
+    /// which is exactly Phase 2C line 4.
+    pub fn routing_model(&self) -> Layered<RoutingModelChoice> {
+        if let Some(choice) = self.project.and_then(|p| p.routing().model()) {
+            return Layered::new(choice.clone(), Layer::Project);
+        }
+        if let Some(choice) = self.user.routing().model() {
+            return Layered::new(choice.clone(), Layer::User);
+        }
+        Layered::new(RoutingModelChoice::Deterministic, Layer::Default)
+    }
+
+    /// What will actually classify a request: the recorded choice from
+    /// [`EffectiveConfig::routing_model`], checked against the providers
+    /// that are configured right now.
+    ///
+    /// This never fails. A pinned model whose provider has since been
+    /// removed degrades to [`RoutingModelResolution::Heuristics`] carrying a
+    /// [`RoutingFallback`] that says which one went missing — see
+    /// [`RoutingModelChoice::resolve`] for why this is the one lookup here
+    /// that will not return an error. The [`Layer`] reported is the layer the
+    /// *choice* came from, not a claim about where the degrade was decided.
+    ///
+    /// A choice nothing was ever recorded for reports
+    /// [`RoutingFallback::NotConfigured`] rather than
+    /// [`RoutingFallback::DeterministicChosen`], so a user who declined the
+    /// wizard's routing step and a user who deliberately picked
+    /// deterministic-only are told different, accurate things.
+    pub fn routing_model_resolution(&self) -> Layered<RoutingModelResolution> {
+        let Layered { value, layer } = self.routing_model();
+        let mut resolution = value.resolve(&self.provider_names());
+        if layer == Layer::Default
+            && let RoutingModelResolution::Heuristics(reason) = &mut resolution
+        {
+            *reason = RoutingFallback::NotConfigured;
+        }
+        Layered::new(resolution, layer)
     }
 
     /// Resolve `name` to a [`crate::provider::Provider`], reporting which
@@ -2978,6 +3297,27 @@ mod tests {
              widening this list"
         );
 
+        // `RoutingModelChoice::Pinned` — the newest stored shape, and the
+        // only variant of it that carries a payload. Both halves are NAMES:
+        // `provider` is a key into `ProviderTable` and `model` is a model
+        // name, exactly like `ProfileConfig`'s `backend`/`model` pair above.
+        // Turning either into an actual credential stays `SecretStore`'s job.
+        let pinned_routing = RoutingModelChoice::Pinned {
+            provider: "openrouter".to_owned(),
+            model: "gpt-5.6-luna".to_owned(),
+        };
+        let pinned_routing_value = toml::Value::try_from(&pinned_routing).unwrap();
+        let pinned_routing_table = pinned_routing_value.as_table().unwrap();
+        let mut pinned_routing_keys: Vec<&str> =
+            pinned_routing_table.keys().map(String::as_str).collect();
+        pinned_routing_keys.sort_unstable();
+        assert_eq!(
+            pinned_routing_keys,
+            vec!["kind", "model", "provider"],
+            "RoutingModelChoice::Pinned grew a field — confirm it cannot hold a credential \
+             before widening this list"
+        );
+
         // `ProviderConfig` — the shape that comes closest to a credential,
         // since it is the one a provider's key is configured through. Its
         // `credential_store` holds a `StoredCredentialRef`, which is two
@@ -3202,5 +3542,323 @@ mod tests {
             }),
             None
         );
+    }
+
+    /// Phase 2C's whole job is to *record* the choice, so the thing worth
+    /// proving is that it survives the process that made it. Each of the
+    /// three answers the wizard offers goes to disk through the real `save`
+    /// and comes back through the real `load` — a `toml::to_string` in
+    /// isolation would pass even if `UserConfig`'s `[routing]` table were
+    /// never wired into the file that is actually written.
+    #[test]
+    fn every_routing_model_choice_survives_a_real_save_and_load() {
+        fn round_trip(choice: Option<RoutingModelChoice>) -> UserConfig {
+            let tmp = tempfile::tempdir().unwrap();
+            let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
+
+            let mut user = fully_populated_user_config();
+            user.routing_mut().set_model(choice);
+            user.save(&paths).unwrap();
+
+            let loaded = UserConfig::load(&paths).unwrap();
+            assert_eq!(
+                loaded, user,
+                "recording a routing model must not disturb anything else in the file"
+            );
+            loaded
+        }
+
+        assert_eq!(
+            round_trip(Some(RoutingModelChoice::Automatic))
+                .routing()
+                .model(),
+            Some(&RoutingModelChoice::Automatic)
+        );
+
+        let pinned = RoutingModelChoice::Pinned {
+            provider: "openrouter".to_owned(),
+            model: "gpt-5.6-luna".to_owned(),
+        };
+        assert_eq!(
+            round_trip(Some(pinned.clone())).routing().model(),
+            Some(&pinned)
+        );
+
+        assert_eq!(
+            round_trip(Some(RoutingModelChoice::Deterministic))
+                .routing()
+                .model(),
+            Some(&RoutingModelChoice::Deterministic)
+        );
+
+        // "Do later" must read back as *nothing recorded* rather than as an
+        // explicit deterministic choice: the two resolve the same way but
+        // say different, accurate things about what the user decided.
+        let declined = round_trip(None);
+        assert_eq!(declined.routing().model(), None);
+        assert_eq!(
+            EffectiveConfig::new(&declined, None)
+                .routing_model_resolution()
+                .value,
+            RoutingModelResolution::Heuristics(RoutingFallback::NotConfigured)
+        );
+    }
+
+    /// Phase 2C line 4: declining the routing step leaves no routing model
+    /// configured *and* the system keeps working. Both halves are asserted,
+    /// and the second is the one that matters — "nothing crashed" is not the
+    /// contract, "deterministic heuristics are what answer" is.
+    #[test]
+    fn declining_the_routing_step_writes_no_routing_table_and_still_resolves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
+
+        let mut user = fully_populated_user_config();
+        user.routing_mut().set_model(None);
+        user.save(&paths).unwrap();
+
+        let text = std::fs::read_to_string(paths.user_config_file()).unwrap();
+        assert!(
+            !text.contains("routing"),
+            "\"Do later\" must leave no `[routing]` table at all, not an empty one:\n{text}"
+        );
+
+        let loaded = UserConfig::load(&paths).unwrap();
+        let effective = EffectiveConfig::new(&loaded, None);
+        let resolution = effective.routing_model_resolution();
+        assert_eq!(
+            resolution.value,
+            RoutingModelResolution::Heuristics(RoutingFallback::NotConfigured),
+            "deterministic heuristics must be what answers, and must say they are \
+             answering because nothing was ever configured"
+        );
+        assert_eq!(resolution.layer, Layer::Default);
+        assert_eq!(
+            effective.routing_model().value,
+            RoutingModelChoice::Deterministic
+        );
+    }
+
+    /// Phase 2C's behavioural contract: a configuration naming a routing
+    /// model whose provider has disappeared must degrade "and say so". It is
+    /// the one lookup in this module that refuses to return an error — a
+    /// routing model is an optimisation over a system that already works
+    /// without it, so a rotated key must not stop Glasshouse from starting.
+    #[test]
+    fn a_pinned_routing_model_whose_provider_is_gone_degrades_and_names_it() {
+        let mut user = UserConfig::default();
+        user.providers_mut()
+            .set("openrouter", ProviderConfig::new("openrouter"));
+        user.routing_mut()
+            .set_model(Some(RoutingModelChoice::Pinned {
+                provider: "retired-mirror".to_owned(),
+                model: "gpt-5.6-luna".to_owned(),
+            }));
+
+        let effective = EffectiveConfig::new(&user, None);
+        let resolution = effective.routing_model_resolution();
+        assert_eq!(
+            resolution.value,
+            RoutingModelResolution::Heuristics(RoutingFallback::ProviderNotConfigured {
+                provider: "retired-mirror".to_owned(),
+                model: "gpt-5.6-luna".to_owned(),
+            })
+        );
+        assert_eq!(
+            resolution.layer,
+            Layer::User,
+            "the layer reported is where the CHOICE came from, not a claim about \
+             where the degrade was decided"
+        );
+
+        // The degrade has to be *sayable*, and saying "your routing model is
+        // unavailable" without naming which one is not saying it.
+        let said = resolution.value.fallback().unwrap().to_string();
+        assert!(said.contains("`retired-mirror`"), "{said}");
+        assert!(said.contains("`gpt-5.6-luna`"), "{said}");
+        assert!(said.contains("which is not configured"), "{said}");
+        assert!(
+            said.contains("deterministic routing heuristics"),
+            "the message must say what is answering instead:\n{said}"
+        );
+
+        // The contrast that proves the degrade is a lookup and not a
+        // blanket refusal: the same shape pinned to a provider that *is*
+        // configured resolves to that model.
+        user.routing_mut()
+            .set_model(Some(RoutingModelChoice::Pinned {
+                provider: "openrouter".to_owned(),
+                model: "gpt-5.6-luna".to_owned(),
+            }));
+        assert_eq!(
+            EffectiveConfig::new(&user, None)
+                .routing_model_resolution()
+                .value,
+            RoutingModelResolution::Pinned {
+                provider: "openrouter".to_owned(),
+                model: "gpt-5.6-luna".to_owned(),
+            }
+        );
+    }
+
+    /// A routing-model choice grants nothing and attests to nothing, so it
+    /// layers by the ordinary rule rather than following
+    /// `bypass_acknowledged`'s user-layer-only exception. The first case is
+    /// the reason the stored field is an `Option` and not a plain enum: a
+    /// project saying "deterministic, on purpose" has to be able to override
+    /// a user-level `automatic`, which a collapsed shape could not express.
+    #[test]
+    fn a_routing_choice_layers_project_over_user_and_reports_the_deciding_layer() {
+        let mut user = UserConfig::default();
+        user.routing_mut()
+            .set_model(Some(RoutingModelChoice::Automatic));
+
+        let mut project = ProjectConfig::default();
+        project
+            .routing_mut()
+            .set_model(Some(RoutingModelChoice::Deterministic));
+
+        // Case 1: the project's explicit deterministic-only beats the user's
+        // automatic, and the reason given is "chosen", not "never set".
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        let chosen = effective.routing_model();
+        assert_eq!(chosen.value, RoutingModelChoice::Deterministic);
+        assert_eq!(chosen.layer, Layer::Project);
+        let resolution = effective.routing_model_resolution();
+        assert_eq!(
+            resolution.value,
+            RoutingModelResolution::Heuristics(RoutingFallback::DeterministicChosen)
+        );
+        assert_eq!(resolution.layer, Layer::Project);
+
+        // Case 2: a project that has recorded nothing falls through to the
+        // user layer rather than shadowing it with a default.
+        let silent = ProjectConfig::default();
+        let effective = EffectiveConfig::new(&user, Some(&silent));
+        let chosen = effective.routing_model();
+        assert_eq!(chosen.value, RoutingModelChoice::Automatic);
+        assert_eq!(chosen.layer, Layer::User);
+        let resolution = effective.routing_model_resolution();
+        assert_eq!(resolution.value, RoutingModelResolution::Automatic);
+        assert_eq!(resolution.layer, Layer::User);
+
+        // Case 3: neither layer decided, so the default answers — and says
+        // so with `NotConfigured`, not `DeterministicChosen`.
+        let undecided = UserConfig::default();
+        let effective = EffectiveConfig::new(&undecided, Some(&silent));
+        let chosen = effective.routing_model();
+        assert_eq!(chosen.value, RoutingModelChoice::Deterministic);
+        assert_eq!(chosen.layer, Layer::Default);
+        let resolution = effective.routing_model_resolution();
+        assert_eq!(
+            resolution.value,
+            RoutingModelResolution::Heuristics(RoutingFallback::NotConfigured)
+        );
+        assert_eq!(resolution.layer, Layer::Default);
+    }
+
+    /// A pin is two names — a key into `ProviderTable` and a model name —
+    /// and never a credential, alongside
+    /// [`serialized_form_has_no_secret_capable_field`]'s structural guard on
+    /// the same shape. This is the behavioural half: a real key is planted
+    /// in the environment the pinned provider's `credential_env` points at,
+    /// so a serializer that resolved the pin to a usable credential — the
+    /// failure this test exists to catch — would have something to leak.
+    #[test]
+    fn a_pinned_routing_model_persists_names_and_never_a_credential_value() {
+        const VAR: &str = "GLASSHOUSE_CONFIG_TEST_ONLY_ROUTING_PIN_VAR";
+        const VALUE: &str = "sk-or-v1-routingpin0123456789abcdef0123456789abcdef01234567";
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
+
+        let mut provider = ProviderConfig::new("openrouter");
+        provider
+            .set_credential_env(vec![VAR.to_owned()])
+            .set_credential_store(Some(StoredCredentialRef::new("glasshouse", VAR)));
+
+        let pinned = RoutingModelChoice::Pinned {
+            provider: "openrouter".to_owned(),
+            model: "gpt-5.6-luna".to_owned(),
+        };
+        let mut user = UserConfig::default();
+        user.providers_mut().set("openrouter", provider);
+        user.routing_mut().set_model(Some(pinned.clone()));
+
+        // SAFETY: `VAR` is unique to this test and removed again below.
+        unsafe {
+            std::env::set_var(VAR, VALUE);
+        }
+        let saved = user.save(&paths);
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+        saved.unwrap();
+
+        let text = std::fs::read_to_string(paths.user_config_file()).unwrap();
+        assert!(
+            !text.contains(VALUE),
+            "a credential value reached the configuration file:\n{text}"
+        );
+        assert!(
+            !text.contains("sk-or-v1-"),
+            "not even a prefix of a key belongs in a tracked configuration file:\n{text}"
+        );
+
+        // ... and the two names a pin is made of really are what got
+        // written, so the assertion above is not passing on an empty file.
+        assert!(text.contains("gpt-5.6-luna"), "{text}");
+        assert!(text.contains("openrouter"), "{text}");
+        assert!(text.contains("pinned"), "{text}");
+        assert!(text.contains(VAR), "the NAME must be there:\n{text}");
+
+        let loaded = UserConfig::load(&paths).unwrap();
+        assert_eq!(loaded.routing().model(), Some(&pinned));
+    }
+
+    /// Every configuration file on disk today was written before this field
+    /// existed, so the missing `[routing]` table is the ordinary case, not an
+    /// edge one — the same treatment this module already gives unknown and
+    /// missing keys. Written by hand rather than saved, because a config this
+    /// build produced could never be missing a key this build knows about.
+    #[test]
+    fn a_configuration_written_before_routing_existed_loads_with_nothing_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
+        std::fs::create_dir_all(paths.config_dir()).unwrap();
+        std::fs::write(
+            paths.user_config_file(),
+            r#"
+                version = 1
+
+                [onboarding]
+                completed = true
+                completed_at_version = "0.1.0"
+
+                [integrations.claude-code]
+                enabled = true
+
+                [providers.openrouter]
+                template = "openrouter"
+                credential_env = ["OPENROUTER_API_KEY"]
+            "#,
+        )
+        .unwrap();
+
+        let loaded = UserConfig::load(&paths).unwrap();
+        assert!(loaded.onboarding().completed());
+        assert_eq!(
+            loaded.routing().model(),
+            None,
+            "an older file must load as \"never decided\", not as some invented choice"
+        );
+
+        let effective = EffectiveConfig::new(&loaded, None);
+        let resolution = effective.routing_model_resolution();
+        assert_eq!(
+            resolution.value,
+            RoutingModelResolution::Heuristics(RoutingFallback::NotConfigured)
+        );
+        assert_eq!(resolution.layer, Layer::Default);
     }
 }
