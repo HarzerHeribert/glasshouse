@@ -1113,6 +1113,109 @@ pub fn all() -> impl Iterator<Item = &'static dyn HarnessAdapter> {
         .filter_map(adapter_for)
 }
 
+/// Whether a harness's declared executable candidates resolve to something
+/// installed and directly usable on this machine.
+///
+/// This answers Phase 9F line 466's precondition — "require the selected
+/// coding harness executable to be installed and usable before offering an
+/// interactive direct-provider or gateway-backed launch profile" — as a
+/// value, so [`crate::profile::resolve_checked`] can refuse on it without
+/// this crate's `profile` module having to search `PATH` itself.
+/// [`ExecutablePresence::detect`] performs the same search
+/// [`mod@crate::session::select`] and `glasshouse doctor` already do: every
+/// declared candidate name in turn, first usable one wins — see
+/// `integrations::resolve_first_usable_with`, which this mirrors.
+///
+/// **This is `PATH` discovery only.** It does not know about an explicitly
+/// configured executable path — that lookup belongs to
+/// [`mod@crate::session::select`], which reads configuration this crate's
+/// `harness` and `profile` modules deliberately do not import (see
+/// `profile`'s own module documentation). A caller that has already resolved
+/// a harness through `session::select` knows more than a fresh
+/// [`ExecutablePresence::detect`] call can, and should hand
+/// [`crate::profile::resolve_checked`] the [`ExecutablePresence::Usable`] it
+/// already established instead of asking this type to search `PATH` again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutablePresence {
+    /// A candidate resolved to something installed and directly usable.
+    Usable,
+    /// Every declared candidate name resolved to "not found": confirmed
+    /// absent, not merely unchecked.
+    NotFound,
+    /// At least one candidate was found but could not be used — for example
+    /// a Windows-interop-only `PATH` hit under WSL. More specific than
+    /// [`ExecutablePresence::NotFound`], and carries why, taken from
+    /// [`crate::platform::exec::ResolveError`]'s own message.
+    Unusable { reason: String },
+}
+
+impl ExecutablePresence {
+    pub fn is_usable(&self) -> bool {
+        matches!(self, Self::Usable)
+    }
+
+    /// Why this presence is not usable, in one sentence a `Refusal` can
+    /// print verbatim.
+    ///
+    /// "candidates tried: …" for [`ExecutablePresence::NotFound`] — the same
+    /// phrase `glasshouse doctor` already prints for a harness nowhere on
+    /// `PATH` — and the resolver's own reason for
+    /// [`ExecutablePresence::Unusable`]. `id` is needed only to list
+    /// candidate names; [`ExecutablePresence::Usable`] never calls this.
+    pub fn detail(&self, id: IntegrationId) -> String {
+        match self {
+            Self::Usable => String::new(),
+            Self::NotFound => {
+                format!(
+                    "candidates tried: {}",
+                    id.executable_candidates().join(", ")
+                )
+            }
+            Self::Unusable { reason } => reason.clone(),
+        }
+    }
+
+    /// Check the real machine: every name
+    /// [`IntegrationId::executable_candidates`] declares, against the real
+    /// `PATH`, in priority order.
+    pub fn detect(id: IntegrationId) -> Self {
+        Self::detect_with(id.executable_candidates(), crate::platform::exec::resolve)
+    }
+
+    /// Core of [`ExecutablePresence::detect`], with the resolver injected so
+    /// this can be exercised without depending on the real `PATH` — the same
+    /// pattern `integrations::resolve_first_usable_with`'s own tests use.
+    fn detect_with(
+        candidates: &[&str],
+        resolver: impl Fn(
+            &str,
+        ) -> Result<
+            crate::platform::exec::ResolvedExecutable,
+            crate::platform::exec::ResolveError,
+        >,
+    ) -> Self {
+        use crate::platform::exec::ResolveError;
+
+        let mut unusable_reason: Option<String> = None;
+        for &name in candidates {
+            match resolver(name) {
+                Ok(_) => return Self::Usable,
+                Err(
+                    err @ (ResolveError::WindowsInteropOnly { .. }
+                    | ResolveError::NotExecutable { .. }),
+                ) => {
+                    unusable_reason.get_or_insert_with(|| err.to_string());
+                }
+                Err(ResolveError::NotFound { .. }) => {}
+            }
+        }
+        match unusable_reason {
+            Some(reason) => Self::Unusable { reason },
+            None => Self::NotFound,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1175,6 +1278,69 @@ mod tests {
             .filter(|id| id.kind() == IntegrationKind::Harness)
             .collect();
         assert_eq!(listed, harnesses);
+    }
+
+    // --- executable presence (Phase 9F line 466) --------------------------
+
+    fn not_found(name: &str) -> crate::platform::exec::ResolveError {
+        crate::platform::exec::ResolveError::NotFound {
+            name: name.to_owned(),
+        }
+    }
+
+    /// A usable resolution, real enough to construct: this test binary's own
+    /// path always resolves as one via
+    /// [`crate::platform::exec::resolve_explicit`].
+    fn usable() -> crate::platform::exec::ResolvedExecutable {
+        crate::platform::exec::resolve_explicit(&std::env::current_exe().expect("a test binary"))
+            .expect("the running test binary resolves as usable")
+    }
+
+    #[test]
+    fn a_candidate_that_resolves_is_usable() {
+        let presence =
+            ExecutablePresence::detect_with(&["claude", "claude-code"], |_| Ok(usable()));
+        assert_eq!(presence, ExecutablePresence::Usable);
+        assert!(presence.is_usable());
+    }
+
+    #[test]
+    fn every_candidate_not_found_is_not_found_and_lists_every_candidate_tried() {
+        let presence = ExecutablePresence::detect_with(&["claude", "claude-code"], |name| {
+            Err(not_found(name))
+        });
+        assert_eq!(presence, ExecutablePresence::NotFound);
+        assert!(!presence.is_usable());
+        assert_eq!(
+            presence.detail(IntegrationId::ClaudeCode),
+            format!(
+                "candidates tried: {}",
+                IntegrationId::ClaudeCode.executable_candidates().join(", ")
+            )
+        );
+    }
+
+    /// A found-but-unusable hit outranks a later plain miss — the same
+    /// priority `integrations::resolve_first_usable_with` gives it, and for
+    /// the same reason: it is a more specific, more actionable finding.
+    #[test]
+    fn a_found_but_unusable_candidate_outranks_a_later_not_found() {
+        let presence = ExecutablePresence::detect_with(&["claude", "claude-code"], |name| {
+            if name == "claude" {
+                Err(crate::platform::exec::ResolveError::NotExecutable {
+                    path: PathBuf::from("/opt/claude"),
+                })
+            } else {
+                Err(not_found(name))
+            }
+        });
+        match &presence {
+            ExecutablePresence::Unusable { reason } => {
+                assert!(reason.contains("/opt/claude"), "{reason}");
+            }
+            other => panic!("expected Unusable, got {other:?}"),
+        }
+        assert!(!presence.is_usable());
     }
 
     #[test]

@@ -506,6 +506,20 @@ pub enum Refusal {
         harness: IntegrationId,
         backend: &'static str,
     },
+
+    #[error(
+        "launch profile `{profile}` for {} is backed by {backend}, but {}'s executable is not \
+         installed and usable ({detail}); install it, or point Glasshouse at it, before this \
+         profile can be offered",
+        .harness.display_name(),
+        .harness.display_name(),
+    )]
+    HarnessExecutableUnavailable {
+        profile: String,
+        harness: IntegrationId,
+        backend: &'static str,
+        detail: String,
+    },
 }
 
 /// Everything [`resolve`] needs besides the profile itself.
@@ -737,6 +751,50 @@ pub fn resolve_with_gateway(
     }
 
     Ok(overlay)
+}
+
+/// [`resolve_with_gateway`], plus Phase 9F line 466's precondition: refuse a
+/// direct-provider or gateway-backed profile before doing anything else if
+/// `harness_executable` says the harness's executable is not installed and
+/// usable. [`BackendResource::Native`] is unaffected — this check is never
+/// even consulted for one, so a `Native` profile's behaviour cannot change by
+/// so much as which branch runs.
+///
+/// # Why this takes the answer rather than finding it
+///
+/// [`resolve`] and [`resolve_with_gateway`] stay pure functions of the values
+/// in [`Resolution`] — no real `PATH` lookup as a side effect of resolving a
+/// profile whose caller never asked for one. That is not incidental: every
+/// existing caller of those two functions (`main.rs`'s own production launch
+/// path, `config`'s and `onboarding`'s tests, `tests/pty_smoke.rs`, and this
+/// module's own test suite) constructs profiles naming real harnesses —
+/// `Codex`, `Pi` — that are not all installed on every machine those tests
+/// run on, and none of them expects a `PATH` search to happen underneath it.
+/// A third, additional entry point that takes the executable check as a
+/// value keeps that guarantee intact while still letting a production caller
+/// opt in.
+///
+/// A caller that has already resolved the harness's executable — as
+/// `main.rs`'s `session::select::select` already does, before any launch
+/// profile is resolved — should hand back the [`crate::harness::ExecutablePresence::Usable`]
+/// it already established rather than pay for a second search. A caller that
+/// has not should call [`crate::harness::ExecutablePresence::detect`] itself,
+/// which performs the real check this precondition asks for.
+pub fn resolve_checked(
+    profile: &LaunchProfile,
+    cx: &Resolution<'_>,
+    gateway: Option<&Gateway>,
+    harness_executable: &crate::harness::ExecutablePresence,
+) -> Result<LaunchOverlay, Refusal> {
+    if !matches!(profile.backend, BackendResource::Native) && !harness_executable.is_usable() {
+        return Err(Refusal::HarnessExecutableUnavailable {
+            profile: profile.name.clone(),
+            harness: profile.harness,
+            backend: profile.backend.kind_description(),
+            detail: harness_executable.detail(profile.harness),
+        });
+    }
+    resolve_with_gateway(profile, cx, gateway)
 }
 
 /// Point one child process at the local gateway, or refuse.
@@ -1300,6 +1358,153 @@ fn choose_protocol(
             None => describe_protocols(harness_protocols),
         },
     })
+}
+
+/// What Phase 9F line 465 calls "a cheap capability check" for one launch
+/// profile: the exact request [`crate::provider::discovery::connectivity`]
+/// should send to prove "this credential, at this base URL, for this
+/// protocol, answers" — or, when the profile's backend gives no fixed
+/// combination to test, an honest reason there is nothing to check.
+///
+/// This never sends the request. [`crate::provider::discovery::connectivity`]
+/// blocks its calling thread for as long as
+/// [`crate::provider::discovery::ProbeTimeouts::default`] allows, so a caller
+/// that wants to check before starting an interactive session must run it off
+/// whatever thread draws the terminal — `shell::spawn_provider_probe`
+/// already does exactly that for a different Phase 9D line, and is the
+/// pattern a caller here should follow. [`capability_probe`] only decides
+/// whether a check is possible and, if so, what to send.
+#[derive(Debug)]
+pub enum CapabilityProbe {
+    /// No fixed protocol/base-URL combination exists to test. **Not a
+    /// failure** — the launch proceeds exactly as it would if this function
+    /// did not exist, and the caller's own report should say so rather than
+    /// treating this as an error.
+    Unavailable { reason: &'static str },
+    /// A request [`crate::provider::discovery::connectivity`] can make.
+    Available(crate::provider::discovery::ProbeRequest),
+}
+
+/// Build the [`CapabilityProbe`] for `profile`, or say why none is possible.
+///
+/// # Why a `Native` or gateway-backed profile always answers `Unavailable`
+///
+/// A [`BackendResource::Native`] profile talks to the harness's own account
+/// through a mechanism this crate never sees the credential or base URL
+/// for — there is nothing here to build a request from.
+///
+/// A [`BackendResource::GlasshouseGateway`] profile talks to Glasshouse's
+/// own local listener, not to a provider directly, and which upstream
+/// provider actually answers behind it is Phase 9H's sticky-routing
+/// decision — made per session, not by this profile. Probing the gateway's
+/// own loopback address would only prove the gateway this process just
+/// started is listening, which is not "this credential, at this base URL,
+/// for this protocol, answers" in the sense line 465 asks for; it is
+/// reported as unavailable rather than as a check that answers a different
+/// question than the one asked.
+///
+/// # Why a resolvable [`BackendResource::DirectProvider`] is always available
+///
+/// Once a protocol and base URL can be chosen at all — the same choice
+/// `apply_direct_provider` makes — [`crate::provider::discovery::ProbeTarget::BaseUrl`]
+/// is always a valid target, even when the provider has no established
+/// model-list endpoint. So "no check available" for a direct-provider
+/// profile only ever means the combination itself could not be resolved
+/// (unconfigured provider, no shared protocol, no base URL) — the same
+/// conditions under which [`resolve`] would refuse for an entirely separate
+/// reason, so there is nothing new for a probe to report either.
+///
+/// The credential is resolved the same way `apply_direct_provider` does — the
+/// first declared variable that currently has a value — but unlike there, a
+/// probe with none is still built: [`crate::provider::discovery`] sends no
+/// credential header when given `None`, and the resulting outcome
+/// ("reachable" or "unreachable" with no credential involved) is still
+/// information a report can use.
+pub fn capability_probe(profile: &LaunchProfile, cx: &Resolution<'_>) -> CapabilityProbe {
+    use crate::provider::discovery::{ProbeRequest, ProbeTarget};
+
+    let BackendResource::DirectProvider { .. } = &profile.backend else {
+        return CapabilityProbe::Unavailable {
+            reason: match profile.backend {
+                BackendResource::Native => {
+                    "a native profile uses the harness's own account, which this crate holds \
+                     no protocol, base URL or credential for"
+                }
+                BackendResource::GlasshouseGateway => {
+                    "a gateway-backed profile talks to Glasshouse's own local listener; which \
+                     upstream provider actually answers is decided per session, not by this \
+                     profile, so there is no fixed combination to test yet"
+                }
+                BackendResource::DirectProvider { .. } => {
+                    unreachable!("matched above")
+                }
+            },
+        };
+    };
+
+    let Some(provider) = cx.provider else {
+        return CapabilityProbe::Unavailable {
+            reason: "the profile's provider is not configured",
+        };
+    };
+
+    let Ok(protocol) = choose_protocol(profile, cx.adapter, provider) else {
+        return CapabilityProbe::Unavailable {
+            reason: "no protocol is common to what the provider serves and what the harness \
+                      can be pointed at",
+        };
+    };
+
+    let Some(base_url) = declared_base_url(provider, protocol) else {
+        return CapabilityProbe::Unavailable {
+            reason: "the provider declares no base URL for the chosen protocol",
+        };
+    };
+
+    let target = if provider.model_list_endpoint.is_known_present() {
+        ProbeTarget::ModelList
+    } else {
+        ProbeTarget::BaseUrl
+    };
+
+    // The same search `apply_direct_provider` performs: the first declared
+    // credential variable that currently resolves. `None` is not refused
+    // here the way it is there — a probe with no credential still answers a
+    // real question about the base URL and protocol.
+    let credential = provider.credential_env.iter().find_map(|var| {
+        cx.secrets
+            .resolve(&SecretRef::Environment { var: var.clone() })
+    });
+
+    CapabilityProbe::Available(ProbeRequest::new(
+        provider.name.clone(),
+        protocol,
+        base_url.to_owned(),
+        target,
+        provider.headers.clone(),
+        credential,
+    ))
+}
+
+/// Render what a capability check found, in the wording Phase 9F line 465
+/// asks for: distinguishing "it refused the credential" from "it never
+/// answered" rather than flattening either to "check failed".
+pub fn describe_probe_outcome(outcome: &crate::provider::discovery::ProbeOutcome) -> String {
+    use crate::provider::discovery::ProbeOutcome;
+
+    match outcome {
+        ProbeOutcome::Reached { status } => format!("reached (status {status})"),
+        ProbeOutcome::Rejected { status } => {
+            format!("reachable, but it rejected the credential (status {status})")
+        }
+        ProbeOutcome::Unexpected { status } => {
+            format!("reachable, but answered unexpectedly (status {status})")
+        }
+        ProbeOutcome::TimedOut { waited_ms } => {
+            format!("did not answer within {waited_ms}ms")
+        }
+        ProbeOutcome::Unreachable { reason } => format!("never answered: {reason}"),
+    }
 }
 
 /// A comma-separated list of protocol slugs, or an honest sentence when the
@@ -2936,6 +3141,16 @@ mod tests {
         bad_var.credential_env = vec!["9NOPE".to_owned()];
 
         let scenarios: Vec<(&str, Refusal)> = vec![
+            ("harness executable unavailable", {
+                let p = direct_profile(IntegrationId::ClaudeCode, "my-gateway");
+                resolve_checked(
+                    &p,
+                    &direct_cx(claude, &anthropic_provider(), &secrets),
+                    None,
+                    &crate::harness::ExecutablePresence::NotFound,
+                )
+                .unwrap_err()
+            }),
             ("gateway not running", {
                 let mut p = profile_for(IntegrationId::ClaudeCode);
                 p.backend = BackendResource::GlasshouseGateway;
@@ -3060,11 +3275,12 @@ mod tests {
                 Refusal::AutomaticReviewNeedsNativeBackend { .. } => {
                     "AutomaticReviewNeedsNativeBackend"
                 }
+                Refusal::HarnessExecutableUnavailable { .. } => "HarnessExecutableUnavailable",
             });
         }
         assert_eq!(
             seen.len(),
-            16,
+            17,
             "every Refusal variant must be exercised here: {seen:?}"
         );
     }
@@ -3293,5 +3509,433 @@ mod tests {
         assert_eq!(profile.class(), ProfileClass::DirectProvider);
         profile.backend = BackendResource::GlasshouseGateway;
         assert_eq!(profile.class(), ProfileClass::GlasshouseGateway);
+    }
+
+    // --- Phase 9F line 466: the executable precondition -------------------
+
+    use crate::harness::ExecutablePresence;
+
+    /// Acceptance test 1: a direct-provider profile naming a harness whose
+    /// executable is not installed is refused, names the harness and the
+    /// candidates tried, and starts nothing (there is no overlay to apply).
+    #[test]
+    fn a_direct_provider_profile_is_refused_when_the_executable_is_not_found() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let provider = anthropic_provider();
+        let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
+        let profile = direct_profile(IntegrationId::ClaudeCode, &provider.name);
+
+        let err = resolve_checked(
+            &profile,
+            &direct_cx(adapter, &provider, &secrets),
+            None,
+            &ExecutablePresence::NotFound,
+        )
+        .expect_err("an absent executable must refuse a direct-provider profile");
+
+        match &err {
+            Refusal::HarnessExecutableUnavailable {
+                harness, detail, ..
+            } => {
+                assert_eq!(*harness, IntegrationId::ClaudeCode);
+                assert!(detail.contains("candidates tried"), "{detail}");
+                for candidate in IntegrationId::ClaudeCode.executable_candidates() {
+                    assert!(detail.contains(candidate), "{detail}");
+                }
+            }
+            other => panic!("expected HarnessExecutableUnavailable, got {other:?}"),
+        }
+        let message = err.to_string();
+        assert!(message.contains("Claude Code"), "{message}");
+        assert!(message.contains("candidates tried"), "{message}");
+    }
+
+    /// Acceptance test 2: the same profile, with the executable present, is
+    /// not refused for that reason — and resolves exactly as plain
+    /// `resolve` would.
+    #[test]
+    fn the_same_profile_is_not_refused_when_the_executable_is_usable() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let provider = anthropic_provider();
+        let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
+        let profile = direct_profile(IntegrationId::ClaudeCode, &provider.name);
+        let cx = direct_cx(adapter, &provider, &secrets);
+
+        let checked = resolve_checked(&profile, &cx, None, &ExecutablePresence::Usable)
+            .expect("a usable executable must not be refused");
+        let unchecked =
+            resolve(&profile, &cx).expect("the same profile resolves without the check too");
+        assert_eq!(
+            env_value(&checked, "ANTHROPIC_BASE_URL"),
+            env_value(&unchecked, "ANTHROPIC_BASE_URL")
+        );
+        assert_eq!(rendered_args(&checked), rendered_args(&unchecked));
+    }
+
+    /// A found-but-unusable executable (a Windows-interop-only `PATH` hit,
+    /// for example) is refused too, and the refusal carries the resolver's
+    /// own reason rather than "candidates tried".
+    #[test]
+    fn an_unusable_executable_is_refused_with_its_own_reason() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let provider = anthropic_provider();
+        let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
+        let profile = direct_profile(IntegrationId::ClaudeCode, &provider.name);
+
+        let err = resolve_checked(
+            &profile,
+            &direct_cx(adapter, &provider, &secrets),
+            None,
+            &ExecutablePresence::Unusable {
+                reason: "found only in the Windows side of PATH".to_owned(),
+            },
+        )
+        .expect_err("an unusable executable must be refused");
+        match &err {
+            Refusal::HarnessExecutableUnavailable { detail, .. } => {
+                assert_eq!(detail, "found only in the Windows side of PATH");
+            }
+            other => panic!("expected HarnessExecutableUnavailable, got {other:?}"),
+        }
+    }
+
+    /// Acceptance test 3: a `Native` profile is unaffected by line 466's
+    /// check, byte for byte — an absent executable changes nothing about
+    /// it, because the check is never even consulted for one.
+    #[test]
+    fn a_native_profile_is_unaffected_by_the_executable_check() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let secrets = FakeSecrets::empty();
+        let profile = profile_for(IntegrationId::ClaudeCode);
+        let cx = native_cx(adapter, false, &secrets);
+
+        let via_checked = resolve_checked(&profile, &cx, None, &ExecutablePresence::NotFound)
+            .expect("a Native profile must resolve even when the check would refuse");
+        let via_plain = resolve(&profile, &cx).expect("plain resolve must agree");
+
+        assert_eq!(rendered_args(&via_checked), rendered_args(&via_plain));
+        assert!(via_checked.env().is_empty() && via_plain.env().is_empty());
+        assert_eq!(via_checked.mechanisms().len(), via_plain.mechanisms().len());
+    }
+
+    /// Acceptance test 6 (line 466's half): the check never reroutes to a
+    /// different backend — a refusal is the only effect it can have. Proven
+    /// by construction: `resolve_checked` either returns exactly what
+    /// `resolve_with_gateway` would, or refuses; there is no third path that
+    /// substitutes a different backend.
+    #[test]
+    fn the_executable_check_never_changes_which_backend_would_be_selected() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let provider = anthropic_provider();
+        let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
+        let profile = direct_profile(IntegrationId::ClaudeCode, &provider.name);
+        let cx = direct_cx(adapter, &provider, &secrets);
+
+        for presence in [
+            ExecutablePresence::Usable,
+            ExecutablePresence::NotFound,
+            ExecutablePresence::Unusable {
+                reason: "x".to_owned(),
+            },
+        ] {
+            let is_usable = presence.is_usable();
+            match resolve_checked(&profile, &cx, None, &presence) {
+                Ok(overlay) => {
+                    assert!(
+                        is_usable,
+                        "an unusable presence must never produce an overlay"
+                    );
+                    // Identical to what plain resolution against the same
+                    // provider produces — no different backend was chosen.
+                    let plain = resolve(&profile, &cx).unwrap();
+                    assert_eq!(rendered_args(&overlay), rendered_args(&plain));
+                }
+                Err(Refusal::HarnessExecutableUnavailable { .. }) => {
+                    assert!(!is_usable);
+                }
+                Err(other) => panic!("only the executable refusal may appear here: {other}"),
+            }
+        }
+    }
+
+    /// Acceptance test 7 (line 466's half): no credential leaks through the
+    /// new refusal's `Display` or `Debug`.
+    #[test]
+    fn the_executable_refusal_never_carries_a_credential() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let provider = anthropic_provider();
+        let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
+        let profile = direct_profile(IntegrationId::ClaudeCode, &provider.name);
+
+        let err = resolve_checked(
+            &profile,
+            &direct_cx(adapter, &provider, &secrets),
+            None,
+            &ExecutablePresence::NotFound,
+        )
+        .unwrap_err();
+        assert!(!err.to_string().contains(PLANTED_CREDENTIAL));
+        assert!(!format!("{err:?}").contains(PLANTED_CREDENTIAL));
+    }
+
+    /// A gateway-backed profile is covered by line 466 too, not only a
+    /// direct-provider one.
+    #[test]
+    fn a_gateway_backed_profile_is_also_refused_when_the_executable_is_not_found() {
+        let claude = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let secrets = FakeSecrets::empty();
+        let gateway = running_gateway();
+        let mut profile = profile_for(IntegrationId::ClaudeCode);
+        profile.backend = BackendResource::GlasshouseGateway;
+
+        let err = resolve_checked(
+            &profile,
+            &native_cx(claude, false, &secrets),
+            Some(&gateway),
+            &ExecutablePresence::NotFound,
+        )
+        .expect_err("a gateway-backed profile must be refused too");
+        assert!(matches!(err, Refusal::HarnessExecutableUnavailable { .. }));
+    }
+
+    // --- Phase 9F line 465: the capability check ---------------------------
+
+    /// Acceptance test 5: a provider for which no cheap check is available —
+    /// here, a gateway-backed profile, which has no fixed upstream
+    /// combination — reports that no check was made, and nothing about
+    /// resolving the profile itself changes because of it.
+    #[test]
+    fn a_gateway_backed_profile_has_no_capability_check_available() {
+        let claude = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let secrets = FakeSecrets::empty();
+        let mut profile = profile_for(IntegrationId::ClaudeCode);
+        profile.backend = BackendResource::GlasshouseGateway;
+        let cx = native_cx(claude, false, &secrets);
+
+        match capability_probe(&profile, &cx) {
+            CapabilityProbe::Unavailable { reason } => assert!(!reason.is_empty()),
+            CapabilityProbe::Available(_) => panic!("a gateway-backed profile has no check yet"),
+        }
+
+        // The launch itself proceeds regardless — a gateway-backed profile
+        // resolves (once a gateway is running) whether or not a capability
+        // check was ever considered.
+        let gateway = running_gateway();
+        resolve_with_gateway(&profile, &cx, Some(&gateway))
+            .expect("the absent capability check must not block the launch");
+    }
+
+    /// A `Native` profile has no capability check available either — there
+    /// is no protocol, base URL or credential this crate holds for it.
+    #[test]
+    fn a_native_profile_has_no_capability_check_available() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let secrets = FakeSecrets::empty();
+        let profile = profile_for(IntegrationId::ClaudeCode);
+        let cx = native_cx(adapter, false, &secrets);
+
+        match capability_probe(&profile, &cx) {
+            CapabilityProbe::Unavailable { reason } => assert!(!reason.is_empty()),
+            CapabilityProbe::Available(_) => panic!("a native profile has no check available"),
+        }
+    }
+
+    /// A resolvable direct-provider profile always has a check available,
+    /// even when the provider has no established model-list endpoint: the
+    /// base URL itself is still a valid target.
+    #[test]
+    fn a_resolvable_direct_provider_profile_always_has_a_check_available() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let provider = anthropic_provider();
+        assert!(
+            !provider.model_list_endpoint.is_known_present(),
+            "this test wants the base-URL-only path"
+        );
+        let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
+        let profile = direct_profile(IntegrationId::ClaudeCode, &provider.name);
+        let cx = direct_cx(adapter, &provider, &secrets);
+
+        let request = match capability_probe(&profile, &cx) {
+            CapabilityProbe::Available(request) => request,
+            CapabilityProbe::Unavailable { reason } => {
+                panic!("a resolvable provider must have a check available: {reason}")
+            }
+        };
+        assert_eq!(request.provider(), provider.name);
+        assert_eq!(request.protocol(), WireProtocol::AnthropicMessages);
+        assert_eq!(request.url(), "https://gateway.example/anthropic");
+    }
+
+    /// A direct-provider profile this crate cannot resolve (here: an
+    /// unconfigured provider) has no capability check available either —
+    /// the same "unavailable, not a failure" answer, for a different reason.
+    #[test]
+    fn an_unresolvable_direct_provider_profile_has_no_check_available() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let secrets = FakeSecrets::empty();
+        let profile = direct_profile(IntegrationId::ClaudeCode, "not-configured");
+        // `cx.provider` is `None`: the caller could not find "not-configured"
+        // in configuration, exactly as `resolve` would see it too.
+        let cx = native_cx(adapter, false, &secrets);
+
+        match capability_probe(&profile, &cx) {
+            CapabilityProbe::Unavailable { reason } => assert!(!reason.is_empty()),
+            CapabilityProbe::Available(_) => {
+                panic!("an unconfigured provider has nothing to probe")
+            }
+        }
+    }
+
+    /// Acceptance test 4 (formatting half): a `401` renders as
+    /// reachable-but-rejected, distinctly from a host that never answered —
+    /// the two must never read the same.
+    #[test]
+    fn describe_probe_outcome_distinguishes_rejected_from_unreachable() {
+        use crate::provider::discovery::ProbeOutcome;
+
+        let rejected = describe_probe_outcome(&ProbeOutcome::Rejected { status: 401 });
+        let unreachable = describe_probe_outcome(&ProbeOutcome::Unreachable {
+            reason: "the connection was refused".to_owned(),
+        });
+        assert_ne!(rejected, unreachable);
+        assert!(rejected.contains("401"));
+        assert!(rejected.contains("reachable"), "{rejected}");
+        assert!(unreachable.contains("never answered"), "{unreachable}");
+
+        let reached = describe_probe_outcome(&ProbeOutcome::Reached { status: 200 });
+        assert_ne!(reached, rejected);
+    }
+
+    /// End to end, over a real loopback socket: [`capability_probe`] builds
+    /// the request, and [`crate::provider::discovery::connectivity`] — the
+    /// same function a real caller would run off-thread — actually sends it.
+    /// Three real servers, three real distinctions: reached, reachable but
+    /// rejected, and never answered at all.
+    #[test]
+    fn a_capability_probe_composes_with_a_real_connectivity_check() {
+        use crate::provider::discovery::{ProbeOutcome, ProbeTimeouts, connectivity};
+        use crate::provider::fixture::FixtureProvider;
+
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
+        let quick = ProbeTimeouts {
+            connect: std::time::Duration::from_millis(500),
+            response: std::time::Duration::from_millis(400),
+            total: std::time::Duration::from_millis(900),
+        };
+
+        // A provider that answers.
+        let ok_fixture = FixtureProvider::answering("HTTP/1.1 200 OK", "", "{}");
+        let ok_provider = provider_serving(
+            "answers-ok",
+            WireProtocol::AnthropicMessages,
+            &ok_fixture.base_url(),
+        );
+        let ok_profile = direct_profile(IntegrationId::ClaudeCode, &ok_provider.name);
+        let request =
+            match capability_probe(&ok_profile, &direct_cx(adapter, &ok_provider, &secrets)) {
+                CapabilityProbe::Available(request) => request,
+                CapabilityProbe::Unavailable { reason } => panic!("expected a request: {reason}"),
+            };
+        let outcome = connectivity(&request, quick);
+        assert_eq!(outcome, ProbeOutcome::Reached { status: 200 });
+        assert!(describe_probe_outcome(&outcome).contains("reached"));
+
+        // A provider that answers, but rejects the credential.
+        let rejecting_fixture = FixtureProvider::answering("HTTP/1.1 401 Unauthorized", "", "{}");
+        let rejecting_provider = provider_serving(
+            "answers-401",
+            WireProtocol::AnthropicMessages,
+            &rejecting_fixture.base_url(),
+        );
+        let rejecting_profile = direct_profile(IntegrationId::ClaudeCode, &rejecting_provider.name);
+        let request = match capability_probe(
+            &rejecting_profile,
+            &direct_cx(adapter, &rejecting_provider, &secrets),
+        ) {
+            CapabilityProbe::Available(request) => request,
+            CapabilityProbe::Unavailable { reason } => panic!("expected a request: {reason}"),
+        };
+        let outcome = connectivity(&request, quick);
+        assert_eq!(outcome, ProbeOutcome::Rejected { status: 401 });
+        let described = describe_probe_outcome(&outcome);
+        assert!(described.contains("rejected"), "{described}");
+
+        // A provider that is not there at all — nothing listening.
+        let port = {
+            let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .expect("loopback is bindable");
+            listener
+                .local_addr()
+                .expect("a bound listener has an address")
+                .port()
+        };
+        let absent_provider = provider_serving(
+            "unreachable",
+            WireProtocol::AnthropicMessages,
+            &format!("http://127.0.0.1:{port}"),
+        );
+        let absent_profile = direct_profile(IntegrationId::ClaudeCode, &absent_provider.name);
+        let request = match capability_probe(
+            &absent_profile,
+            &direct_cx(adapter, &absent_provider, &secrets),
+        ) {
+            CapabilityProbe::Available(request) => request,
+            CapabilityProbe::Unavailable { reason } => panic!("expected a request: {reason}"),
+        };
+        let outcome = connectivity(&request, quick);
+        assert!(!outcome.answered(), "nothing was listening: {outcome:?}");
+        let described = describe_probe_outcome(&outcome);
+        assert!(described.contains("never answered"), "{described}");
+
+        // The three descriptions are all distinct — reached, rejected and
+        // unreachable never collapse into the same sentence.
+        let reached_desc = describe_probe_outcome(&ProbeOutcome::Reached { status: 200 });
+        assert_ne!(reached_desc, described);
+    }
+
+    /// Acceptance test 6 (line 465's half): nothing about a capability
+    /// probe's *outcome* can reach `resolve` at all — `capability_probe`
+    /// and `describe_probe_outcome` are read-only functions of a
+    /// [`ProbeRequest`]/[`ProbeOutcome`][crate::provider::discovery::ProbeOutcome]
+    /// that `resolve` never takes as input, so a failed check has no
+    /// mechanism by which it could reroute a launch to a different backend.
+    #[test]
+    fn a_capability_probe_cannot_influence_which_backend_resolve_selects() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let provider = anthropic_provider();
+        let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
+        let profile = direct_profile(IntegrationId::ClaudeCode, &provider.name);
+        let cx = direct_cx(adapter, &provider, &secrets);
+
+        let before = resolve(&profile, &cx).unwrap();
+        let _ = capability_probe(&profile, &cx);
+        let after = resolve(&profile, &cx).unwrap();
+        assert_eq!(rendered_args(&before), rendered_args(&after));
+        assert_eq!(
+            env_value(&before, "ANTHROPIC_BASE_URL"),
+            env_value(&after, "ANTHROPIC_BASE_URL")
+        );
+    }
+
+    /// Acceptance test 7 (line 465's half): the credential a capability
+    /// probe resolves reaches only the `ProbeRequest`'s private field —
+    /// never this module's own rendering of it.
+    #[test]
+    fn a_capability_probes_credential_never_reaches_this_modules_own_renderings() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let provider = anthropic_provider();
+        let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
+        let profile = direct_profile(IntegrationId::ClaudeCode, &provider.name);
+        let cx = direct_cx(adapter, &provider, &secrets);
+
+        let request = match capability_probe(&profile, &cx) {
+            CapabilityProbe::Available(request) => request,
+            CapabilityProbe::Unavailable { reason } => panic!("expected a request: {reason}"),
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains(PLANTED_CREDENTIAL), "{debug}");
+        assert!(debug.contains(crate::secret::REDACTED), "{debug}");
+        assert!(!request.url().contains(PLANTED_CREDENTIAL));
     }
 }
