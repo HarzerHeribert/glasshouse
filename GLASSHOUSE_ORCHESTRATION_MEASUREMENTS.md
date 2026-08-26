@@ -815,3 +815,64 @@ had hit the same shared volume from the other direction.
 - `lead-extract` spent its evidence on a capability with no consumer, and it
   was still the right work. How should a package that ends in a seam rather
   than a surface be scored, given the box count says zero?
+
+## Batch 22–23 — designed to answer §32's own open question
+
+Two Opus leads at effort `high`, started together on `d62bc7a`.
+
+| | `lead-mem6` | `lead-route` |
+|---|---|---|
+| package | 18 boxes — Phase 21 remainder (7) + Phase 21B (11) | 28 boxes — Phase 9H (14) + 9I (14) |
+| owns the contested file | **`main.rs`**, `cli.rs`, `database.rs` | `lib.rs`, `shell/**`, `gateway/**` |
+| caller lives in | `main.rs::report_hook` — its own partition | `gateway::start_if_required` — its own partition |
+| phases' prior state | 6 of 25 closed last round | **both untouched, 0 of 28** |
+
+### The design, and what it is testing
+
+§32's open question was: *with one `main.rs` and several leads, does the
+put-the-caller-in-the-partition rule serialize the leads?* This round says no,
+and the reason is worth writing down before the reports come back so it can be
+scored honestly.
+
+**`main.rs` was not the only caller site — it was the only one anybody looked
+for.** `lead-route`'s Phase 9H needs a provider/model assignment made when a
+session starts, and `main.rs::launch_session` is where the gateway is started —
+so the obvious reading is that both leads need `main.rs`. But
+`start_if_required` *is* `gateway/mod.rs`, which one lead owns outright: the
+assignment can be made where the gateway binds the profile, and the call site
+never changes.
+
+So the rule refines. **Do not ask "which file calls this?" — ask "which
+function must change?"** A caller that is a one-line invocation of a function
+in your own module is not a partition conflict; only a change to the invocation
+itself is. If that distinction holds, two leads can both satisfy §32 against a
+single `main.rs`, and the serialization §32 feared is mostly an artefact of
+reading call sites at file granularity.
+
+**The falsifier is stated in advance:** if `lead-route` comes back with a
+`main.rs` patch it could not avoid, the refinement is wrong and the answer to
+§32's question is "yes, it serializes" — in which case the thin-wiring-batch
+alternative should be tried next round rather than argued about.
+
+### The other thing this round tests
+
+`lead-route`'s package is **28 boxes of policy**, which is the ideal shape for
+building 28 mechanisms nothing calls — a cooldown nothing consults, a health
+score nothing reads. Its packet names that trap explicitly and asks it to name
+the code path that will *ask* each policy before writing it. Phase 9I's
+consumer is the `ExtractionModel` seam whose caller `lead-mem6` is building in
+the same round, which makes the two packages a genuine integration test of each
+other rather than two independent piles.
+
+### Questions to answer from the reports
+
+- Did the caller-granularity refinement hold, or did `lead-route` need
+  `main.rs` after all?
+- Phase 9I line 539 — *Glasshouse's own evaluation and test runs use zero-cost
+  models, never a metered resource without explicit opt-in* — is an acceptance
+  condition with real money behind it. Was it built as a control, or as a
+  default someone can change?
+- Does a package of pure policy lines produce a lower closable rate than a
+  package with obvious mechanisms, holding lead tier and effort constant?
+- Does the standing Linux pty flake (§34) get diagnosed by whoever owns
+  `pty_smoke.rs`, now that the attribution procedure is written down?
