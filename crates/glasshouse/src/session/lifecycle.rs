@@ -26,39 +26,95 @@
 //! stopped session in the records, which is worse than losing a note about a
 //! session that has already ended.
 
+use crate::events::{LifecycleEvent, RawObservation, TurnOutcome};
 use crate::session::SessionLifecycle;
 
-/// The Glasshouse state a harness event implies, or `None` when the event
-/// says nothing about the session's state.
+/// The Glasshouse lifecycle event a harness's own event means, or `None`
+/// when the event says nothing Glasshouse models.
+///
+/// **This is the only place in the crate that knows a harness's vocabulary.**
+/// Everything downstream sees [`LifecycleEvent`], which names no harness —
+/// that is Phase 12's architectural requirement, and
+/// `no_harness_is_named_in_the_core_event_stream` in [`crate::events`] is what
+/// keeps a second translator from growing somewhere else.
+///
+/// It is also the only place that constructs
+/// [`LifecycleEvent::TurnEnded`], the one event that carries a claim about
+/// the work itself. Its input is a harness's own report and nothing else — no
+/// exit status, no timer, no silence — so the inference the capability map
+/// forbids has nowhere to be written. `turn_completion_is_minted_in_exactly_
+/// one_place` fails if a second construction site appears.
 ///
 /// Event names are the harness's own, exactly as its adapter declares them.
-pub fn lifecycle_for(event: &str) -> Option<SessionLifecycle> {
+pub fn event_for(event: &str) -> Option<LifecycleEvent> {
     match event {
         // Codex only: the harness itself starting a session. Claude Code
         // 2.1.245 does not fire this event at all, so it never reaches this
         // function from that harness — see `session_start_is_not_among_the_
         // reported_events` in `harness/mod.rs`.
-        "SessionStart" => Some(SessionLifecycle::Running),
+        //
+        // Modelled as a turn starting rather than as
+        // `LifecycleEvent::SessionStarted`: by the time a harness says this,
+        // Glasshouse started the session itself and already recorded that.
+        // Two events for one fact would put the same session start in the
+        // stream twice with different timestamps.
+        "SessionStart" => Some(LifecycleEvent::TurnStarted),
         // A prompt was submitted, so the session is working.
-        "UserPromptSubmit" => Some(SessionLifecycle::Running),
+        "UserPromptSubmit" => Some(LifecycleEvent::TurnStarted),
         // The harness is asking the user to allow something and will not
-        // proceed until they answer.
-        "PermissionRequest" => Some(SessionLifecycle::WaitingForUser),
-        // The turn ended. `StopFailure` is the same state: the turn is over
-        // and the session is alive and waiting for whatever comes next — the
-        // *session* has not failed, and recording it as failed would make a
-        // perfectly usable session look dead.
-        "Stop" | "StopFailure" => Some(SessionLifecycle::Idle),
-        // Codex only, and deliberately NOT mapped to `SessionLifecycle::
-        // Stopped` or anything else. The operating system reporting the
-        // child process exiting is the authority for a session ending; a
-        // hook saying the same thing only adds a race against it, one this
-        // separate hook process could lose by arriving late. Named
+        // proceed until they answer. Distinct from idle, and recorded only
+        // because the harness said so.
+        "PermissionRequest" => Some(LifecycleEvent::WaitingForUser),
+        // The turn ended. `StopFailure` is a turn that ended badly, which is
+        // a different fact from a session that died: both leave the session
+        // alive and waiting for whatever comes next, and recording a failed
+        // turn as a failed session would make a perfectly usable session look
+        // dead in every listing.
+        "Stop" => Some(LifecycleEvent::TurnEnded {
+            outcome: TurnOutcome::Completed,
+        }),
+        "StopFailure" => Some(LifecycleEvent::TurnEnded {
+            outcome: TurnOutcome::Failed,
+        }),
+        // Codex only, and deliberately NOT translated. The operating system
+        // reporting the child process exiting is the authority for a session
+        // ending; a hook saying the same thing only adds a race against it,
+        // one this separate hook process could lose by arriving late. Named
         // explicitly, rather than falling through to the wildcard below, so
         // the omission reads as a decision and not an oversight.
         "SessionEnd" => None,
         _ => None,
     }
+}
+
+/// Translate a harness's event and preserve the raw observation for
+/// troubleshooting.
+///
+/// The debug line is written whether or not the event is recognised, because
+/// an unrecognised event is exactly the case someone will be debugging: a
+/// harness gained an event between releases and Glasshouse silently ignores
+/// it, which is correct behaviour and invisible without this.
+///
+/// Only the harness's name for the event travels. A hook payload also carries
+/// the user's prompt and the model's last message; Glasshouse's handler
+/// drains that stream without reading it, so there is nothing here to leak.
+/// See `GLASSHOUSE_DESIGN_DECISIONS.md`.
+pub fn observe(harness: &str, event: &str) -> Option<LifecycleEvent> {
+    RawObservation::new(harness, event).preserve();
+    event_for(event)
+}
+
+/// The Glasshouse state a harness event implies, or `None` when the event
+/// says nothing about the session's state.
+///
+/// A thin reading of [`event_for`]: the translation happens once, in one
+/// place, and this is the answer to the narrower question the session store
+/// asks. Two independent translations of the same vocabulary would eventually
+/// disagree.
+///
+/// Event names are the harness's own, exactly as its adapter declares them.
+pub fn lifecycle_for(event: &str) -> Option<SessionLifecycle> {
+    event_for(event)?.implied_state()
 }
 
 /// Whether `current` may be moved to `next` by a harness event.
@@ -151,15 +207,33 @@ mod tests {
         }
     }
 
-    /// Production source of a module, with its test module and comments
-    /// removed — the same reading the harness-adapter guards use.
+    /// Production source of a module: everything before its
+    /// `#[cfg(test)] mod tests` block, with comment lines removed.
+    ///
+    /// **Not** "everything before the first `#[cfg(test)]`", which is what
+    /// this helper did until a mutation caught it. `session/runtime.rs`
+    /// carries a `#[cfg(test)] const` two hundred lines in, so cutting at the
+    /// first attribute read a fifth of the file and silently exempted the
+    /// rest — including the exit path, which is exactly where a forbidden
+    /// inference would be written. A `TurnEnded` planted there survived the
+    /// scan. Anchoring on the attribute that actually introduces `mod tests`
+    /// is what makes the scan cover what it claims to cover.
+    ///
+    /// Reads by `str::lines`, which strips a carriage return for us, so the
+    /// scan is blind to line endings by construction rather than by anyone
+    /// remembering — see `GLASSHOUSE_ORCHESTRATION_PRACTICE.md` §14.
     fn production_code(source: &str) -> String {
-        source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("split always yields at least one part")
-            .lines()
+        let lines: Vec<&str> = source.lines().collect();
+        let end = lines
+            .windows(2)
+            .position(|pair| {
+                pair[0].trim_end() == "#[cfg(test)]" && pair[1].trim_end().starts_with("mod tests")
+            })
+            .unwrap_or(lines.len());
+        lines[..end]
+            .iter()
             .filter(|line| !line.trim_start().starts_with("//"))
+            .copied()
             .collect::<Vec<_>>()
             .join("\n")
     }

@@ -29,6 +29,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 
+use crate::events::{EventBus, LifecycleEvent, MessageOrigin, ProcessExit, RecordedEvent};
 use crate::launch::HarnessLaunch;
 use crate::pty::{ExitStatus, PtyOutput, PtyProcess, TerminalSize};
 use crate::session::{SessionId, SessionPresentation};
@@ -317,6 +318,13 @@ pub struct SessionRuntime {
     sessions: Vec<LiveSession>,
     focused: Option<SessionId>,
     scrollback_bytes: usize,
+    /// The one normalized lifecycle-event stream every session here feeds.
+    ///
+    /// Owned by the runtime rather than passed to each call, because the
+    /// thread that has to publish is not always the caller: a session's
+    /// reader thread reports its own output ending, and it can only do that
+    /// if it was handed a bus when it started.
+    events: EventBus,
 }
 
 impl std::fmt::Debug for SessionRuntime {
@@ -355,6 +363,24 @@ pub enum RuntimeError {
     },
 }
 
+/// What is left of a session after its process died.
+///
+/// Phase 45 requires that a crash costs neither the terminal output nor the
+/// event history. This is that promise as a value: everything in it was
+/// already held outside the process, so producing it involves no recovery and
+/// cannot itself fail.
+#[derive(Debug, Clone)]
+pub struct CrashReport {
+    pub session: SessionId,
+    /// How the process died, as the operating system reported it. Says
+    /// nothing about whether the work was finished — see [`ProcessExit`].
+    pub exit: ProcessExit,
+    /// The session's terminal output, within the scrollback bound.
+    pub output: String,
+    /// Every lifecycle event recorded for this session, oldest first.
+    pub history: Vec<RecordedEvent>,
+}
+
 impl SessionRuntime {
     pub fn new() -> Self {
         Self::with_scrollback_bytes(DEFAULT_SCROLLBACK_BYTES)
@@ -362,11 +388,26 @@ impl SessionRuntime {
 
     /// A runtime whose sessions keep `scrollback_bytes` of output each.
     pub fn with_scrollback_bytes(scrollback_bytes: usize) -> Self {
+        Self::with_event_bus(scrollback_bytes, EventBus::new())
+    }
+
+    /// A runtime publishing onto an event bus somebody else already owns.
+    ///
+    /// [`EventBus`] is cheap to clone and shares one stream, so this is how a
+    /// caller that already has consumers attached — a TUI, an orchestrator —
+    /// gets this runtime's events without having to subscribe twice.
+    pub fn with_event_bus(scrollback_bytes: usize, events: EventBus) -> Self {
         Self {
             sessions: Vec::new(),
             focused: None,
             scrollback_bytes,
+            events,
         }
+    }
+
+    /// The lifecycle events this runtime's sessions produce.
+    pub fn events(&self) -> &EventBus {
+        &self.events
     }
 
     /// Start a harness and keep it.
@@ -397,6 +438,16 @@ impl SessionRuntime {
             let pending_queries = Arc::clone(&pending_queries);
             let output_ended = Arc::clone(&output_ended);
             let name = format!("glasshouse-session-{}", short(&id));
+            // The bus travels into the reader thread rather than being
+            // consulted from the outside, because this thread is the only one
+            // that knows when the pseudo-terminal stopped giving output. It is
+            // also the thread that must never wait: a reader that blocks stops
+            // draining the terminal, whose buffer then fills, and the harness
+            // itself blocks on `write`. `EventBus::publish` is bounded work
+            // with no wait on any consumer, which is what makes putting it
+            // here safe — see `crate::events::bus`.
+            let events = self.events.clone();
+            let session = id.clone();
             std::thread::Builder::new()
                 .name(name)
                 .spawn(move || {
@@ -406,6 +457,8 @@ impl SessionRuntime {
                         &screen,
                         &pending_queries,
                         &output_ended,
+                        &events,
+                        &session,
                     )
                 })
                 .context("could not start the session output reader")?;
@@ -425,6 +478,8 @@ impl SessionRuntime {
         if self.focused.is_none() && focusable {
             self.focused = Some(id.clone());
         }
+
+        self.events.publish(&id, LifecycleEvent::SessionStarted);
 
         Ok(self.sessions.last().expect("the session was just pushed"))
     }
@@ -483,6 +538,17 @@ impl SessionRuntime {
             return Ok(false);
         };
         self.write_input(&id, bytes)?;
+        // The keyboard reached this session, so a person is at the other end
+        // of it. Recorded as such, and never merged with a machine-sent line:
+        // the harness cannot tell them apart, which is exactly why Glasshouse
+        // has to.
+        self.events.publish(
+            &id,
+            LifecycleEvent::TextDelivered {
+                origin: MessageOrigin::UserKeystroke,
+                bytes: bytes.len(),
+            },
+        );
         Ok(true)
     }
 
@@ -508,11 +574,52 @@ impl SessionRuntime {
     /// at, and it deliberately does not change focus: a message arriving in a
     /// background session must not yank the user out of the one they are in.
     pub fn send_text(&mut self, id: &SessionId, text: &str) -> Result<(), RuntimeError> {
-        self.write_input(id, text.as_bytes())
+        self.send_text_from(id, text, MessageOrigin::UserKeystroke)
+    }
+
+    /// Send text to a session and record who sent it.
+    ///
+    /// [`SessionRuntime::send_text`] is the same call with
+    /// [`MessageOrigin::UserKeystroke`], because its callers are places a
+    /// person typed something — the shell's send-a-line prompt, and the
+    /// keyboard. Anything Glasshouse originates goes through here with
+    /// [`MessageOrigin::Machine`] instead, and the two are separate records
+    /// for the whole life of the event log.
+    ///
+    /// The origin is a parameter rather than something inferred from the
+    /// text or the caller's stack, because there is no way to infer it. A
+    /// machine-sent line and a typed one are identical bytes.
+    pub fn send_text_from(
+        &mut self,
+        id: &SessionId,
+        text: &str,
+        origin: MessageOrigin,
+    ) -> Result<(), RuntimeError> {
+        self.write_input(id, text.as_bytes())?;
+        self.events.publish(
+            id,
+            LifecycleEvent::TextDelivered {
+                origin,
+                bytes: text.len(),
+            },
+        );
+        Ok(())
     }
 
     /// Interrupt a session, focused or not.
     pub fn interrupt(&mut self, id: &SessionId) -> Result<(), RuntimeError> {
+        self.interrupt_from(id, MessageOrigin::UserKeystroke)
+    }
+
+    /// Interrupt a session and record who asked for it.
+    ///
+    /// See [`SessionRuntime::send_text_from`] for why the origin is passed
+    /// rather than inferred.
+    pub fn interrupt_from(
+        &mut self,
+        id: &SessionId,
+        origin: MessageOrigin,
+    ) -> Result<(), RuntimeError> {
         let session = self.get_mut(id)?;
         if session.exit.is_some() {
             return Err(RuntimeError::Exited { id: id.clone() });
@@ -524,7 +631,10 @@ impl SessionRuntime {
                 id: id.clone(),
                 action: "interrupt",
                 source,
-            })
+            })?;
+        self.events
+            .publish(id, LifecycleEvent::InterruptDelivered { origin });
+        Ok(())
     }
 
     /// Tell a session's pseudo-terminal its window changed size.
@@ -567,9 +677,25 @@ impl SessionRuntime {
                 }
                 Ok(None) => {}
                 Err(error) => {
+                    // One session Glasshouse cannot ask about must not cost
+                    // the others their poll. This loop has no `?` in it for
+                    // that reason: a failed worker cannot take unrelated
+                    // sessions, or the Glasshouse instance, down with it.
                     tracing::warn!(session = %session.id, %error, "could not check on a session");
                 }
             }
+        }
+
+        // Published after the loop so that every session has been asked
+        // before any consumer is told about any of them. An event a
+        // subscriber acts on must not describe a half-polled runtime.
+        for (id, status) in &ended {
+            self.events.publish(
+                id,
+                LifecycleEvent::ProcessExited {
+                    exit: ProcessExit::from_status(status),
+                },
+            );
         }
 
         // Focus must not stay on something that is over, or the keyboard would
@@ -664,6 +790,34 @@ impl SessionRuntime {
         }
     }
 
+    /// Everything that survived a crash, or `None` if this session did not
+    /// crash.
+    ///
+    /// A crashed worker's terminal output and event history outlive it,
+    /// because neither belongs to the process: the scrollback is Glasshouse's
+    /// buffer and the history is the project's bus. The session stays in the
+    /// runtime after it exits for exactly this reason — removing it would be
+    /// the only way to lose the output, and `poll_exits` deliberately does
+    /// not.
+    ///
+    /// `None` for a session that is running, that exited on its own terms, or
+    /// that Glasshouse closed itself: [`SessionRuntime::close`] removes the
+    /// session before it signals, so a deliberate kill is never reported as a
+    /// crash.
+    pub fn crash_report(&self, id: &SessionId) -> Option<CrashReport> {
+        let session = self.get(id)?;
+        let exit = ProcessExit::from_status(session.exit()?);
+        if !exit.is_crash() {
+            return None;
+        }
+        Some(CrashReport {
+            session: id.clone(),
+            exit,
+            output: session.scrollback(),
+            history: self.events.history_for(id),
+        })
+    }
+
     /// Stop a session and forget it.
     ///
     /// Best effort on the signal: a process that has already gone is not a
@@ -700,6 +854,8 @@ fn pump(
     screen: &Mutex<vt100::Parser>,
     pending_queries: &Mutex<Vec<TerminalQuery>>,
     ended: &AtomicBool,
+    events: &EventBus,
+    session: &SessionId,
 ) {
     let mut buffer = [0u8; READ_CHUNK];
     let mut scanner = TerminalQueryScanner::default();
@@ -739,6 +895,11 @@ fn pump(
         }
     }
     ended.store(true, Ordering::SeqCst);
+    // A statement about a file descriptor, and nothing more. Publishing it as
+    // its own event — rather than folding it into an exit, or letting a
+    // consumer time the silence — is what keeps "the output stopped" from
+    // ever being read as "the work finished".
+    events.publish(session, LifecycleEvent::OutputEnded);
 }
 
 fn short(id: &SessionId) -> String {

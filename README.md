@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 261 / 1267 mandatory capabilities (20%)
+`████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 279 / 1267 mandatory capabilities (22%)
 
 <details>
-<summary>Per-phase breakdown (10 of 103 phases complete)</summary>
+<summary>Per-phase breakdown (11 of 103 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -53,8 +53,8 @@ the authoritative specification and tracks what is done.
 | Phase 9K — Harness-aware response profiles | 0/37 |
 | Phase 10 — Unified session model | 0/14 |
 | Phase 11 — Session overview | 0/10 |
-| Phase 12 — Unified lifecycle event bus | 0/8 |
-| Phase 13 — Direct session messaging | 0/7 |
+| Phase 12 — Unified lifecycle event bus | 4/8 |
+| Phase 13 — Direct session messaging | 7/7 ✅ |
 | Phase 14 — Orchestrator role | 0/11 |
 | Phase 15 — Orchestrator wake-up flow | 0/8 |
 | Phase 16 — Worker transparency | 0/7 |
@@ -117,7 +117,7 @@ the authoritative specification and tracks what is done.
 | Phase 42 — External control API | 0/13 |
 | Phase 43 — MCP surface for orchestrators | 0/10 |
 | Phase 44 — User control and override | 0/9 |
-| Phase 45 — Failure handling | 0/9 |
+| Phase 45 — Failure handling | 7/9 |
 | Phase 46 — Security and contamination tests | 0/8 |
 | Phase 47 — Observability without spectacle | 0/15 |
 | Phase 48 — CLI ergonomics | 0/8 |

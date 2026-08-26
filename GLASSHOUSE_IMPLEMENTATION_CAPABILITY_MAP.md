@@ -670,24 +670,24 @@ Fixed architectural requirements
 - There is one normalized core lifecycle-event stream shared by the TUI, router, memory, API, and MCP surfaces.
 - Adapters translate native observations into core events; consumers must not create competing harness-specific lifecycle architectures.
 
-☐ Define a harness-independent Glasshouse lifecycle-event enum.
+☑ Define a harness-independent Glasshouse lifecycle-event enum.
 ☐ Record every translated lifecycle event with session ID and timestamp.
 ☐ Deliver lifecycle events to the TUI without blocking the harness process.
 ☐ Deliver lifecycle events to the orchestration layer without coupling orchestration to a specific harness.
-☐ Distinguish process exit from successful turn completion.
-☐ Distinguish waiting-for-user from idle when the harness provides enough information.
+☑ Distinguish process exit from successful turn completion.
+☑ Distinguish waiting-for-user from idle when the harness provides enough information.
 ☐ Preserve raw adapter event payloads in debug logs when useful for troubleshooting.
-☐ Do not infer successful task completion solely because a child process became quiet.
+☑ Do not infer successful task completion solely because a child process became quiet.
 
 Phase 13 — Direct session messaging
 
-☐ Add an internal API for sending text to a specific live session.
-☐ Add an internal API for sending an interrupt to a specific live session.
-☐ Add an internal API for querying the lifecycle state of a specific session.
-☐ Add an internal API for listing all sessions in the current project.
-☐ Add an internal API for retrieving the most recent terminal output of a session.
-☐ Reject messaging attempts targeting sessions from another project.
-☐ Record machine-initiated messages separately from user keystrokes in the Glasshouse event log.
+☑ Add an internal API for sending text to a specific live session.
+☑ Add an internal API for sending an interrupt to a specific live session.
+☑ Add an internal API for querying the lifecycle state of a specific session.
+☑ Add an internal API for listing all sessions in the current project.
+☑ Add an internal API for retrieving the most recent terminal output of a session.
+☑ Reject messaging attempts targeting sessions from another project.
+☑ Record machine-initiated messages separately from user keystrokes in the Glasshouse event log.
 
 Phase 14 — Orchestrator role
 
@@ -1701,15 +1701,15 @@ Fixed architectural requirements
 - Glasshouse fails closed for incompatible protocols, missing harnesses, unsafe secret handling, and invalid launch profiles.
 - It must not silently fall back to a paid native backend, materially different model family, or weaker tool semantics.
 
-☐ Detect child-process crashes and mark the corresponding session failed.
-☐ Preserve terminal output and event history after a worker crashes.
+☑ Detect child-process crashes and mark the corresponding session failed.
+☑ Preserve terminal output and event history after a worker crashes.
 ☐ Preserve the most recent checkpoint after a worker crashes.
-☐ Allow a failed task to be resumed in the same native session when possible.
-☐ Allow a failed task to be handed off to a fresh session when appropriate.
-☐ Avoid automatically retrying destructive tasks on another harness without sufficient task-state information.
+☑ Allow a failed task to be resumed in the same native session when possible.
+☑ Allow a failed task to be handed off to a fresh session when appropriate.
+☑ Avoid automatically retrying destructive tasks on another harness without sufficient task-state information.
 ☐ Detect gateway failure separately from harness-process failure.
-☐ Degrade unhealthy gateway resources without affecting unrelated native subscriptions.
-☐ Ensure one failed worker cannot terminate unrelated sessions or the entire Glasshouse instance.
+☑ Degrade unhealthy gateway resources without affecting unrelated native subscriptions.
+☑ Ensure one failed worker cannot terminate unrelated sessions or the entire Glasshouse instance.
 
 Phase 46 — Security and contamination tests
 
