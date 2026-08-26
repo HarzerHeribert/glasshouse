@@ -4717,3 +4717,732 @@ fn every_startup_question_a_harness_asks_is_answered() {
 
     let _ = runtime.close(&id);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4's last three lines: text and interrupts to a session nobody is
+// looking at, and a session with no viewport at all.
+// ---------------------------------------------------------------------------
+//
+// The mechanisms live in `SessionRuntime` and are tested above. What is proved
+// here is the part a mechanism test cannot reach: that a **user** can get to
+// them, through the shipped binary, and that the session they were looking at
+// stays the session they are looking at.
+//
+// Every test below that asserts a session is (or is not) running calls
+// `poll_exits` first. `LiveSession::is_running` reports the status cached by
+// the last poll, not a fresh answer from the operating system, and a test that
+// forgets this has already stayed green through a mutation that killed the
+// session it was watching.
+
+/// A fake installed harness that keeps echoing every line it is given, rather
+/// than reading one and exiting.
+///
+/// Unix only, and so is every test that uses it: a `.cmd` harness reads with
+/// `set /p`, which wants a CRLF, while a real Enter key — and therefore
+/// `shell::state::encode`, and therefore the line the overview sends — is a
+/// bare carriage return. That difference is already recorded on
+/// `a_keystroke_typed_into_the_shell_reaches_a_real_harness_and_comes_back`.
+#[cfg(unix)]
+fn install_looping_echo_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join(name);
+    std::fs::write(
+        &path,
+        "#!/bin/sh\nwhile IFS= read -r line; do echo \"GOT:$line\"; done\n",
+    )
+    .expect("write looping echo harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// A fake installed harness that prints `marker` and then stays alive for
+/// roughly `seconds`, so a test can observe both what it said and that it is
+/// still running.
+#[cfg(windows)]
+fn install_marker_then_sleep_harness(
+    bin_dir: &std::path::Path,
+    name: &str,
+    marker: &str,
+    seconds: u32,
+) -> std::path::PathBuf {
+    let path = bin_dir.join(format!("{name}.cmd"));
+    std::fs::write(
+        &path,
+        format!("@echo off\r\necho {marker}\r\nping -n {seconds} 127.0.0.1 > nul\r\n"),
+    )
+    .expect("write marker-then-sleep harness");
+    path
+}
+
+#[cfg(unix)]
+fn install_marker_then_sleep_harness(
+    bin_dir: &std::path::Path,
+    name: &str,
+    marker: &str,
+    seconds: u32,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join(name);
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\necho {marker}\nsleep {seconds}\n"),
+    )
+    .expect("write marker-then-sleep harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// A fake installed harness that catches an interrupt, says so, and **keeps
+/// running** — which is the whole distinction Phase 4 line 2 rests on.
+///
+/// A trap is the only way to observe an interrupt as an interrupt rather than
+/// as a byte: it fires only if the `ETX` written into the pseudo-terminal is
+/// turned into a real `SIGINT` by the terminal's line discipline, which is
+/// what a user's own Ctrl-C does. A harness that merely printed whatever it
+/// read would pass a weaker test with the mechanism entirely broken.
+///
+/// Unix only, for the reason already recorded on
+/// `interrupt_is_delivered_as_a_terminal_interrupt`: there is no portable
+/// `cmd.exe` equivalent of "install a trap and prove it fired through the
+/// terminal", and a test that cannot fail on a real regression is worse than
+/// no test.
+#[cfg(unix)]
+fn install_interrupt_trap_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join(name);
+    std::fs::write(
+        &path,
+        // The ready file is how a caller with several of these running can
+        // tell they have *all* installed their traps. An interrupt arriving
+        // in the window between the process starting and `trap` executing
+        // takes the default action and kills the shell, which would make this
+        // harness prove the opposite of what it is for — and that window is
+        // wide enough to lose to, as one run of
+        // `an_interrupt_sent_from_the_overview_reaches_a_real_child` did
+        // before this existed. Named after the script and the pid, so
+        // sessions cannot overwrite each other's.
+        //
+        // Deliberately no `exit` in the trap: the session must still be
+        // running afterwards, so the loop continues.
+        "#!/bin/sh\ntrap 'echo CAUGHT-INTERRUPT' INT\necho TRAP-READY\n\
+         : > \"$0.ready.$$\"\nwhile true; do sleep 0.1; done\n",
+    )
+    .expect("write interrupt trap harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Wait until `count` sessions of the trap harness at `harness` have written
+/// their ready files, or fail rather than hang.
+#[cfg(unix)]
+fn wait_for_trap_harnesses(harness: &std::path::Path, count: usize) {
+    let dir = harness.parent().expect("the harness has a directory");
+    let prefix = format!(
+        "{}.ready.",
+        harness.file_name().expect("named").to_string_lossy()
+    );
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let ready = std::fs::read_dir(dir)
+            .expect("read the harness directory")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            .count();
+        if ready >= count {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "only {ready} of {count} trap harnesses became ready"
+        );
+        std::thread::sleep(POLL);
+    }
+}
+
+/// Phase 4 lines 2 and 3 of the packet's acceptance list, at the runtime
+/// layer, against a real child that can be observed to have *received* an
+/// interrupt rather than a double that records the call:
+///
+/// - the interrupt reaches a session that does **not** have focus;
+/// - focus does not move as a result;
+/// - and the session is **still running** afterwards, because interrupting is
+///   not killing. A harness that handles the signal keeps working, and nothing
+///   in Glasshouse may decide otherwise on its behalf.
+///
+/// `poll_exits` is called before the liveness assertion, deliberately and for
+/// the recorded reason: `is_running` answers from the last poll, so asserting
+/// it without polling would pass even if the interrupt had killed the child.
+#[cfg(unix)]
+#[test]
+fn an_interrupt_reaches_an_unfocused_session_and_leaves_it_running() {
+    let fixture = RuntimeFixture::new();
+    let holder_harness = install_sleep_harness(&fixture.bin_dir, "interrupt-holder", 30);
+    let trap_harness = install_interrupt_trap_harness(&fixture.bin_dir, "interrupt-target");
+    let holder_launch = fixture.launch(&holder_harness);
+    let trap_launch = fixture.launch(&trap_harness);
+
+    let mut runtime = SessionRuntime::new();
+    let id_holder = SessionId::new("interrupt-holder");
+    let id_target = SessionId::new("interrupt-target");
+    runtime
+        .start(
+            id_holder.clone(),
+            SessionPresentation::Embedded,
+            &holder_launch,
+        )
+        .expect("start holder");
+    runtime
+        .start(
+            id_target.clone(),
+            SessionPresentation::Embedded,
+            &trap_launch,
+        )
+        .expect("start target");
+
+    let mut dsr = DsrTracker::default();
+    settle(&mut runtime, &id_holder, &mut dsr);
+    // The trap has to be installed before the interrupt arrives, or the
+    // default action kills the shell and this test would prove the opposite
+    // of what it claims.
+    wait_for_text(&mut runtime, &id_target, &mut dsr, "TRAP-READY");
+
+    runtime.focus(&id_holder).expect("focus the holder");
+    assert_eq!(runtime.focused(), Some(&id_holder));
+    let pid_before = runtime.get(&id_target).and_then(LiveSession::process_id);
+
+    runtime
+        .interrupt(&id_target)
+        .expect("interrupt the unfocused session");
+
+    wait_for_text(&mut runtime, &id_target, &mut dsr, "CAUGHT-INTERRUPT");
+
+    assert_eq!(
+        runtime.focused(),
+        Some(&id_holder),
+        "interrupting another session must not move focus"
+    );
+
+    // Ask the operating system before believing anything about liveness.
+    runtime.poll_exits();
+    let target = runtime.get(&id_target).expect("the target is still held");
+    assert!(
+        target.is_running(),
+        "a harness that handled the interrupt must still be running"
+    );
+    assert!(target.exit().is_none(), "and must have no exit status");
+    assert_eq!(
+        runtime.get(&id_target).and_then(LiveSession::process_id),
+        pid_before,
+        "it must be the same process, not a restarted one"
+    );
+
+    // And the session that did have focus was never touched.
+    let holder = runtime.get(&id_holder).expect("the holder is still held");
+    assert!(holder.is_running());
+
+    runtime.close(&id_holder).expect("close holder");
+    runtime.close(&id_target).expect("close target");
+}
+
+/// Sending text to, or interrupting, a session whose process has ended is
+/// refused by name rather than silently dropped — the packet's acceptance
+/// test 5 at the layer that owns the processes.
+///
+/// The exit is established with `poll_exits` first, which is also what makes
+/// the refusal reachable: `RuntimeError::Exited` is raised from the exit
+/// status the last poll recorded.
+#[test]
+fn sending_to_a_session_that_has_ended_is_refused_by_name() {
+    let fixture = RuntimeFixture::new();
+    let harness = install_silent_harness(&fixture.bin_dir, "already-gone", 0);
+    let launch = fixture.launch(&harness);
+
+    let mut runtime = SessionRuntime::new();
+    let id = SessionId::new("already-gone-session");
+    runtime
+        .start(id.clone(), SessionPresentation::Embedded, &launch)
+        .expect("start silent");
+
+    let mut dsr = DsrTracker::default();
+    settle(&mut runtime, &id, &mut dsr);
+
+    let deadline = Instant::now() + TIMEOUT;
+    while runtime.get(&id).is_some_and(LiveSession::is_running) && Instant::now() < deadline {
+        dsr.answer(&mut runtime, &id);
+        runtime.poll_exits();
+        std::thread::sleep(POLL);
+    }
+    assert!(
+        !runtime.get(&id).expect("session held").is_running(),
+        "the harness never exited, so the refusal below could not be reached"
+    );
+
+    let sent = runtime.send_text(&id, "anyone there?\r").unwrap_err();
+    assert!(matches!(sent, RuntimeError::Exited { .. }), "{sent:?}");
+    assert!(
+        sent.to_string().contains(id.as_str()),
+        "the refusal must name the session: {sent}"
+    );
+
+    let interrupted = runtime.interrupt(&id).unwrap_err();
+    assert!(
+        matches!(interrupted, RuntimeError::Exited { .. }),
+        "{interrupted:?}"
+    );
+    assert!(
+        interrupted.to_string().contains(id.as_str()),
+        "the refusal must name the session: {interrupted}"
+    );
+
+    runtime.close(&id).expect("close");
+}
+
+/// A project set up so the shell can start sessions with one keystroke: a
+/// discovered project root, an isolated state and configuration directory,
+/// onboarding already done, and exactly one enabled harness.
+///
+/// Exactly one on purpose. `shell::start_session` resolves the harness with
+/// `session::select::select(None, …)`, which refuses ambiguity rather than
+/// guessing, so `n` only works at all when one harness is enabled.
+struct ShellFixture {
+    _tmp: tempfile::TempDir,
+    args: Vec<String>,
+    cwd: std::path::PathBuf,
+}
+
+impl ShellFixture {
+    fn new(install: impl FnOnce(&std::path::Path) -> std::path::PathBuf) -> Self {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_dir = tmp.path().join("proj");
+        std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let state_dir = tmp.path().join("state");
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&state_dir).expect("create state dir");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+        let harness = install(&bin_dir);
+        let toml_path = harness.display().to_string().replace('\\', "\\\\");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            format!(
+                "version = 1\n\n[onboarding]\ncompleted = true\n\n\
+                 [integrations.claude-code]\nenabled = true\nexecutable = \"{toml_path}\"\n"
+            ),
+        )
+        .expect("write user config");
+
+        let args = vec![
+            "--scope".to_owned(),
+            project_dir.display().to_string(),
+            "--data-dir".to_owned(),
+            state_dir.display().to_string(),
+            "--config-dir".to_owned(),
+            config_dir.display().to_string(),
+        ];
+        Self {
+            cwd: tmp.path().to_path_buf(),
+            _tmp: tmp,
+            args,
+        }
+    }
+
+    /// The shipped binary, with this fixture's project and directories, run
+    /// in a real pseudo-terminal.
+    fn spawn(&self, extra: &[&str]) -> Session {
+        let mut args = self.args.clone();
+        args.extend(extra.iter().map(|arg| (*arg).to_owned()));
+        Session::spawn(TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), &self.cwd).args(args))
+    }
+}
+
+/// **Phase 4 line 1, end to end through the shipped binary.**
+///
+/// Two real harnesses run in one Glasshouse. The user opens the overview,
+/// moves its cursor to the session they are *not* looking at, types a line at
+/// it, and the line reaches that child — while the viewport keeps showing the
+/// session it was already showing.
+///
+/// The two halves are proved separately, and the second is the one that
+/// matters:
+///
+/// - **It arrived, and it arrived *there*.** Tab moves the viewport onto that
+///   session and the harness's own reply is drawn. This is the decisive half:
+///   a run loop that sent the line to whichever session had focus instead
+///   fails here, with nothing ever appearing in the session it was addressed
+///   to.
+/// - **It did not arrive here.** Before the viewport is moved, the harness's
+///   reply prefix must not have appeared anywhere in the terminal stream —
+///   which would mean the line landed in the presented session, or that the
+///   viewport followed it across.
+///
+///   Sound but incomplete, and worth being exact about: a full-screen Ratatui
+///   application repaints *differentially*, so a run of text can reach the
+///   terminal split across cursor moves and a longer needle can be missed.
+///   The prefix is therefore kept short. An absence assertion here can fail
+///   to notice a violation; it cannot report one that did not happen.
+///
+/// The payload is short and chosen by the test (practice §21). It is also
+/// prefixed by the harness — `GOT:` — so the terminal echoing the typed bytes
+/// back cannot be mistaken for the harness having answered.
+#[cfg(unix)]
+#[test]
+fn a_line_sent_from_the_overview_reaches_a_session_the_viewport_is_not_showing() {
+    const PAYLOAD: &str = "ALPHA";
+    const REPLY: &str = "GOT:ALPHA";
+    /// Short, because a differential repaint can split a longer run — see the
+    /// doc comment above.
+    const REPLY_PREFIX: &str = "GOT";
+
+    let fixture = ShellFixture::new(|bin| install_looping_echo_harness(bin, "overview-echo"));
+    let mut shell = fixture.spawn(&[]);
+
+    shell.expect("root ");
+
+    // Two sessions. The first stays presented across the second's start —
+    // `ShellState::refresh` reconciles by identity — so the second is the one
+    // nobody is looking at.
+    shell.send("n");
+    shell.expect("claude-code");
+    shell.send("n");
+    shell.expect(" 2 ");
+
+    // The overview, with its cursor moved off the presented session. With
+    // exactly two sessions one `Down` always lands on the other one.
+    shell.send("o");
+    shell.expect("HARNESS");
+    shell.send("\x1b[B");
+    shell.send("m");
+    shell.expect("send to ");
+    shell.send(PAYLOAD);
+    shell.send("\r");
+    shell.expect("sent a line to session");
+
+    // Leave the overlay with `o` rather than a bare Escape, so the viewport is
+    // drawn again — and drawn for the session that was already there.
+    //
+    // `o` and not `\x1b` deliberately: a lone Escape byte followed closely by
+    // another is parsed by Crossterm as `Alt` + that key, so `ESC` then `\r`
+    // arrives as one `Alt-Enter` and the overlay never closes. `o` closes the
+    // overview too and is a single unambiguous byte.
+    shell.send("o");
+    shell.expect("tab session");
+
+    assert!(
+        !strip_terminal_sequences(&shell.output()).contains(REPLY_PREFIX),
+        "the line reached the session in the viewport, or the viewport followed it:\n\
+         --- output ---\n{}\n--- end ---",
+        strip_terminal_sequences(&shell.output())
+    );
+
+    // Now go and look at the session it was sent to. Its harness answered.
+    shell.send("\t");
+    shell.expect(REPLY);
+
+    shell.send("q");
+    let status = shell.wait_for_exit();
+    assert!(
+        status.success(),
+        "the shell should still exit cleanly on `q`: {status}\n--- output ---\n{}\n--- end ---",
+        shell.output()
+    );
+}
+
+/// **Phase 4 line 2, end to end through the shipped binary.**
+///
+/// `c` in the overview interrupts the session under the cursor, and the
+/// harness's own `SIGINT` trap proves the byte became a real terminal
+/// interrupt rather than input. The session it was sent to is the one the
+/// viewport is *not* showing, which is the case the capability exists for.
+#[cfg(unix)]
+#[test]
+fn an_interrupt_sent_from_the_overview_reaches_a_real_child() {
+    let mut harness = std::path::PathBuf::new();
+    let fixture = ShellFixture::new(|bin| {
+        harness = install_interrupt_trap_harness(bin, "overview-trap");
+        harness.clone()
+    });
+    let mut shell = fixture.spawn(&[]);
+
+    shell.expect("root ");
+    shell.send("n");
+    shell.expect("claude-code");
+    shell.send("n");
+    shell.expect(" 2 ");
+
+    // **Both** harnesses must have installed their traps before anything is
+    // interrupted. Only one of the two is on screen, so waiting for
+    // `TRAP-READY` would say nothing about the other — and the other is
+    // precisely the one this test interrupts. An interrupt landing in the
+    // window before `trap` runs kills the shell outright, which is how this
+    // test first failed.
+    wait_for_trap_harnesses(&harness, 2);
+
+    shell.send("o");
+    shell.expect("HARNESS");
+    shell.send("\x1b[B");
+    shell.send("c");
+    shell.expect("interrupted session");
+
+    // The trap's own output, read from the session it was aimed at rather
+    // than from the one on screen: leave the overlay (with `o`, see the note
+    // on the test above) and move the viewport across.
+    shell.send("o");
+    shell.expect("tab session");
+    shell.send("\t");
+    shell.expect("CAUGHT-INTERRUPT");
+
+    // Still running, which is the point: the harness caught the interrupt and
+    // carried on, and the overview still lists it as active.
+    shell.send("o");
+    shell.expect("active");
+
+    shell.send("o");
+    shell.expect("tab session");
+    shell.send("q");
+    let status = shell.wait_for_exit();
+    assert!(
+        status.success(),
+        "the shell should exit cleanly after an interrupt: {status}\n\
+         --- output ---\n{}\n--- end ---",
+        shell.output()
+    );
+}
+
+/// **Phase 4 line 3, end to end through the shipped binary.**
+///
+/// `N` starts a real harness with no viewport. It runs — its output really is
+/// being read, which the overview's `active` state depends on — it is listed,
+/// and **nothing it prints ever reaches the screen**, even though it is the
+/// only session in the project and therefore the one the session bar is
+/// presenting.
+///
+/// The marker is planted by the test and is short (practice §21). The absence
+/// assertion is over the whole captured stream, so it covers every frame the
+/// shell ever drew rather than whichever one happened to be last.
+#[test]
+fn a_session_started_headless_runs_and_is_listed_but_never_reaches_the_viewport() {
+    const MARKER: &str = "HEADLESS-ON-SCREEN";
+
+    // Stays alive, so "runs" is something the test observes rather than
+    // infers from output a process left behind on its way out.
+    let fixture =
+        ShellFixture::new(|bin| install_marker_then_sleep_harness(bin, "hidden", MARKER, 20));
+    let mut shell = fixture.spawn(&[]);
+
+    shell.expect("root ");
+    shell.send("N");
+
+    // The viewport is where a headless session announces itself: it says why
+    // it is empty rather than looking broken. Not the status bar — at eighty
+    // columns the key bindings have already taken the row, which is the trade
+    // `render_footer` documents and the reason the overview draws its own
+    // notes inside the popup.
+    shell.expect("runs with no viewport");
+
+    // Listed in the overview, and listed *as* headless.
+    shell.send("o");
+    shell.expect("PRESENTED");
+    shell.expect("headless");
+    shell.send("o");
+    shell.expect("tab session");
+
+    // Entering it is refused, so a keystroke can never land in a session the
+    // bar is not showing. Observed as the mode never changing rather than as
+    // the refusal text: at eighty columns a status note has almost no room
+    // left beside the key bindings, and the viewport's own line — checked
+    // above, and redrawn on every frame — is what actually tells the user.
+    // `the_shell_enters_and_leaves_session_mode_in_a_real_terminal` is the
+    // other half of this assertion: it proves the same keystroke *does*
+    // announce `SESSION MODE` for a session that has a viewport.
+    shell.send("\r");
+    shell.send("\t");
+    shell.expect("tab session");
+
+    shell.send("q");
+    let status = shell.wait_for_exit();
+    assert!(
+        status.success(),
+        "the shell should exit cleanly after a headless session: {status}\n\
+         --- output ---\n{}\n--- end ---",
+        shell.output()
+    );
+
+    let screen = strip_terminal_sequences(&shell.output());
+    assert!(
+        !screen.contains(MARKER),
+        "a headless session's output reached the viewport:\n--- output ---\n{screen}\n--- end ---"
+    );
+    assert!(
+        !screen.contains("SESSION MODE"),
+        "a headless session took the keyboard:\n--- output ---\n{screen}\n--- end ---"
+    );
+}
+
+/// **`glasshouse launch --headless`, end to end through the shipped binary.**
+///
+/// The launch side of line 3: a real harness runs in a real pseudo-terminal,
+/// inside the project root, and never takes the terminal it was started from
+/// — nothing it prints appears there. Glasshouse still propagates its exit
+/// code, and still records the session, with its presentation stored as
+/// `headless` so the shell's overview can say so about a session it did not
+/// start.
+///
+/// The exit code is distinctive rather than zero: a `--headless` that quietly
+/// started nothing would exit successfully and pass a weaker test.
+#[test]
+fn a_headless_launch_runs_the_harness_without_taking_the_terminal() {
+    const MARKER: &str = "HEADLESS-LAUNCH-SAID";
+    const EXIT_CODE: u8 = 23;
+
+    let fixture = ShellFixture::new(|bin| install_marker_harness(bin, "hidden", MARKER, EXIT_CODE));
+
+    let mut launch = fixture.spawn(&["launch", "claude-code", "--headless"]);
+    launch.expect("running headless");
+    let status = launch.wait_for_exit();
+    assert_eq!(
+        status.code(),
+        u32::from(EXIT_CODE),
+        "the harness's exit code must reach the caller: {status}\n--- output ---\n{}\n--- end ---",
+        launch.output()
+    );
+
+    let output = strip_terminal_sequences(&launch.output());
+    assert!(
+        !output.contains(MARKER),
+        "a headless launch put the harness's output on the terminal:\n\
+         --- output ---\n{output}\n--- end ---"
+    );
+
+    // Recorded, and recorded as headless.
+    let mut listing = fixture.spawn(&["sessions"]);
+    listing.wait_for_exit();
+    let listed = strip_terminal_sequences(&listing.output());
+    assert!(
+        listed.contains("headless"),
+        "the session must be recorded as headless:\n--- output ---\n{listed}\n--- end ---"
+    );
+}
+
+/// A fake installed harness that records its own process id, **ignores a
+/// hangup**, and then stays alive, so a test can go looking for it afterwards.
+///
+/// `trap '' HUP` is not decoration; without it this harness proves nothing.
+/// A process exiting closes its file descriptors, so the pseudo-terminal
+/// master goes with it and the kernel hangs up the session on the other end —
+/// an ordinary `/bin/sh` therefore dies on its own and a test built on one
+/// passes whether or not Glasshouse hung the harness up itself. That is
+/// exactly what happened here: the mutation removing the forced-exit cleanup
+/// survived until this line was added.
+///
+/// It is also the honest model of the harnesses Glasshouse actually runs. A
+/// real Claude Code 2.1.246, orphaned by a forced exit during this batch, was
+/// still running afterwards; that is the observation this harness stands in
+/// for.
+#[cfg(unix)]
+fn install_pid_recording_sleep_harness(
+    bin_dir: &std::path::Path,
+    name: &str,
+    seconds: u32,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join(name);
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\ntrap '' HUP\nprintf '%s' \"$$\" > \"$0.pid\"\n             while true; do sleep 1; done\n# {seconds}\n"
+        ),
+    )
+    .expect("write pid-recording harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// True while a process with this identifier exists.
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    std::process::Command::new("ps")
+        .arg("-p")
+        .arg(pid.to_string())
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+/// **A headless launch must not leave its harness behind when Glasshouse is
+/// interrupted.**
+///
+/// A real defect, found by sending a real `SIGINT` to a real
+/// `glasshouse launch --headless` and then looking for the child: it was
+/// still running, with nothing left able to reach it.
+///
+/// The cause is worth stating because it is not obvious from the code that
+/// broke. `shutdown::install_signal_handler` ends the process immediately
+/// when the terminal is not engaged — sound for a Glasshouse that has nothing
+/// to restore, and wrong for one holding a pseudo-terminal, because forced
+/// exit runs no destructor. A headless launch is the first path that is both.
+///
+/// Ctrl-C is delivered the way a user delivers it: an `ETX` byte into the
+/// pseudo-terminal Glasshouse itself is running in, which the line discipline
+/// turns into a real `SIGINT` for that process group. The harness is in a
+/// *different* pseudo-terminal — the one Glasshouse made for it — so it never
+/// receives the signal, which is exactly why something has to hang it up.
+#[cfg(unix)]
+#[test]
+fn interrupting_a_headless_launch_does_not_leave_the_harness_behind() {
+    let mut harness = std::path::PathBuf::new();
+    let fixture = ShellFixture::new(|bin| {
+        harness = install_pid_recording_sleep_harness(bin, "headless-orphan", 120);
+        harness.clone()
+    });
+
+    let mut launch = fixture.spawn(&["launch", "claude-code", "--headless"]);
+    launch.expect("running headless");
+
+    // The harness's own report of its identifier, not something derived from
+    // the process tree: a pid read out of `pgrep` could be Glasshouse's, and
+    // the test would then prove nothing about the child.
+    let pid_file = harness.with_file_name(format!(
+        "{}.pid",
+        harness.file_name().expect("named").to_string_lossy()
+    ));
+    let deadline = Instant::now() + TIMEOUT;
+    let pid: u32 = loop {
+        if let Ok(text) = std::fs::read_to_string(&pid_file)
+            && let Ok(pid) = text.trim().parse()
+        {
+            break pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the headless harness never recorded its process id"
+        );
+        std::thread::sleep(POLL);
+    };
+    assert!(process_exists(pid), "the harness should be running");
+
+    launch.process().interrupt().expect("interrupt glasshouse");
+    launch.wait_for_exit();
+
+    let deadline = Instant::now() + TIMEOUT;
+    while process_exists(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "the harness (pid {pid}) outlived the Glasshouse that started it"
+        );
+        std::thread::sleep(POLL);
+    }
+}

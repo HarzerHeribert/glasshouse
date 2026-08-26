@@ -46,14 +46,15 @@ use crate::pty::TerminalSize;
 use crate::secret;
 use crate::secret::SecretStore as _;
 use crate::session::{
-    self, NewSession, ProjectSessions, RuntimeError, SessionId, SessionLifecycle, SessionRuntime,
+    self, NewSession, ProjectSessions, RuntimeError, SessionId, SessionLifecycle,
+    SessionPresentation, SessionRuntime,
 };
 use crate::tui::{AppEvent, DEFAULT_TICK, Event, EventSource, Screen};
 
 pub use state::{
-    Action, HarnessRow, IntegrationRow, Mode, ModelRefresh, Overlay, ProbeKind, ProfileRow,
-    ProfileSettingsEdit, ProviderNotice, ProviderProbeIntent, ProviderProbeResult, ProviderRow,
-    ProviderSettingsEdit, ReachabilityCheck, SettingsEdit, ShellState, ViewportGrid,
+    Action, HarnessRow, IntegrationRow, Mode, ModelRefresh, Overlay, OverviewState, ProbeKind,
+    ProfileRow, ProfileSettingsEdit, ProviderNotice, ProviderProbeIntent, ProviderProbeResult,
+    ProviderRow, ProviderSettingsEdit, ReachabilityCheck, SettingsEdit, ShellState, ViewportGrid,
 };
 
 /// Open the shell and run it until the user leaves.
@@ -111,23 +112,46 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                             );
                         }
                     }
-                    Action::StartSession => match start_session(
-                        runtime,
-                        &mut live,
-                        &sessions,
-                        viewport_terminal_size(&screen),
-                        &mut index_snapshots,
-                    ) {
-                        Ok(()) => {
-                            if let Ok(records) = sessions.store().list() {
-                                state.refresh(records);
+                    Action::StartSession | Action::StartHeadlessSession => {
+                        let presentation = if matches!(action, Action::StartHeadlessSession) {
+                            SessionPresentation::Headless
+                        } else {
+                            SessionPresentation::Embedded
+                        };
+                        match start_session(
+                            runtime,
+                            &mut live,
+                            &sessions,
+                            presentation,
+                            viewport_terminal_size(&screen),
+                            &mut index_snapshots,
+                        ) {
+                            Ok(()) => {
+                                if let Ok(records) = sessions.store().list() {
+                                    state.refresh(records);
+                                }
+                                if presentation == SessionPresentation::Headless {
+                                    // A headless session draws no viewport by
+                                    // design, so `N` would otherwise be a key
+                                    // that appeared to do nothing. The
+                                    // viewport placeholder says so on every
+                                    // frame — see `view::render_viewport` —
+                                    // which is what carries the message on a
+                                    // terminal too narrow to leave room for
+                                    // this note beside the key bindings.
+                                    state.set_status("started a headless session — `o` lists it");
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!(error = %err, "could not start a session");
+                                state.set_status(format!("could not start a session: {err:#}"));
                             }
                         }
-                        Err(err) => {
-                            tracing::warn!(error = %err, "could not start a session");
-                            state.set_status(format!("could not start a session: {err:#}"));
-                        }
-                    },
+                    }
+                    Action::InterruptSession(id) => interrupt_session(&mut live, &mut state, id),
+                    Action::SendSessionText { id, text } => {
+                        send_session_text(&mut live, &mut state, id, text);
+                    }
                     Action::OpenSettings => match build_settings(runtime) {
                         Ok((harnesses, integrations, providers, profiles)) => {
                             state.open_settings(harnesses, integrations, providers, profiles);
@@ -318,9 +342,28 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     redraw = true;
                 }
 
+                // A headless session is skipped, and this is deliberately
+                // **not** where the guarantee lives: `view::render_viewport`
+                // refuses to draw one, which is what holds even for a grid
+                // that is merely stale. Removing the filter below therefore
+                // changes nothing anyone can see, and a mutation proving that
+                // was run rather than assumed.
+                //
+                // It stays for two things a test cannot observe. It keeps
+                // `state.viewport_grid()` an honest description of what is on
+                // screen rather than a screen that is deliberately not shown;
+                // and without it a headless session producing output would
+                // make the grid differ every tick, so the shell would repaint
+                // continuously for a session nobody is looking at.
+                //
+                // The runtime's own presentation is the authority — it is
+                // what `focus` refuses on — rather than the stored record,
+                // which can be about a session no longer running in this
+                // Glasshouse at all.
                 let grid = state
                     .active_session()
                     .and_then(|record| live.get(&record.id))
+                    .filter(|session| session.presentation() != SessionPresentation::Headless)
                     .map(|session| session.with_screen(build_viewport_grid))
                     .unwrap_or_default();
                 if grid != *state.viewport_grid() {
@@ -347,6 +390,81 @@ pub fn run(runtime: &Runtime) -> Result<()> {
     }
 }
 
+/// Interrupt one session, whether or not it is the one on screen.
+///
+/// The whole point of the capability, so it is worth being explicit about
+/// what this does **not** do: it does not focus the session, does not change
+/// which session the bar presents, and does not move the session's recorded
+/// lifecycle. A harness that handles the interrupt keeps running; one that
+/// exits because of it is noticed by `poll_exits` on the next tick, from the
+/// operating system rather than inferred here — the same rule that keeps
+/// session state out of terminal output everywhere else.
+///
+/// Whether the byte becomes a signal is the platform's business:
+/// `PtyProcess::interrupt` writes `ETX` into the session's terminal, and it
+/// is the Unix line discipline — or ConPTY's Win32 input mode — that turns
+/// that into an interrupt for the process group. Nothing here is
+/// platform-specific.
+fn interrupt_session(live: &mut SessionRuntime, state: &mut ShellState, id: &SessionId) {
+    let name = state::short_session_id(id);
+    match live.interrupt(id) {
+        Ok(()) => state.set_status(format!("interrupted session `{name}`")),
+        // Refused out loud, never silently: the runtime knows things the
+        // records do not — a session that exited since the last poll still
+        // reads as live in the store, and `ShellState` can only see the store.
+        Err(err) => {
+            tracing::warn!(session = %id, %err, "could not interrupt a session");
+            state.set_status(format!(
+                "cannot interrupt `{name}`: {}",
+                refusal_reason(&err)
+            ));
+        }
+    }
+}
+
+/// Why the runtime refused, *without* the session it refused about.
+///
+/// [`RuntimeError`]'s own `Display` names the session in full, which is right
+/// for a log line and wrong for a status note: the note has already named it,
+/// in the short form the overview's rows use, and a sentence carrying a
+/// twelve-character identifier and a thirty-two-character one is long enough
+/// to be clipped by the popup it is drawn in. Found by running the shipped
+/// binary — the refusal was correct and unreadable.
+fn refusal_reason(err: &RuntimeError) -> String {
+    match err {
+        RuntimeError::NotLive { .. } => "it is not running in this Glasshouse".to_owned(),
+        RuntimeError::Exited { .. } => "it has already exited".to_owned(),
+        RuntimeError::Headless { .. } => "it is headless and has no viewport".to_owned(),
+        RuntimeError::Io { source, .. } => source.to_string(),
+    }
+}
+
+/// Send one line to a session, whether or not it is the one on screen.
+///
+/// A carriage return is appended because this is a *line*: a bare `\r` is
+/// exactly what a real Enter key delivers to a terminal, which is what
+/// `state::encode` sends in session mode, so text arriving this way is
+/// indistinguishable to the harness from text somebody typed.
+///
+/// `SessionRuntime::send_text` does not touch focus, and neither does this —
+/// a line arriving in a background session must never pull the user out of
+/// the one they are working in.
+fn send_session_text(
+    live: &mut SessionRuntime,
+    state: &mut ShellState,
+    id: &SessionId,
+    text: &str,
+) {
+    let name = state::short_session_id(id);
+    match live.send_text(id, &format!("{text}\r")) {
+        Ok(()) => state.set_status(format!("sent a line to session `{name}`")),
+        Err(err) => {
+            tracing::warn!(session = %id, %err, "could not send text to a session");
+            state.set_status(format!("cannot send to `{name}`: {}", refusal_reason(&err)));
+        }
+    }
+}
+
 /// Bring the runtime's focus in line with whichever session the bar is
 /// presenting.
 ///
@@ -364,6 +482,12 @@ fn sync_focus(live: &mut SessionRuntime, state: &ShellState) {
     }
     match live.focus(&active.id) {
         Ok(()) | Err(RuntimeError::NotLive { .. }) => {}
+        // A headless session has no viewport to bring forward — that is what
+        // makes it headless. The bar moving onto one leaves the keyboard
+        // exactly where it was rather than logging a failure on every key,
+        // and the user is told the moment they try to enter it; see
+        // `ShellState::enter_session_mode`.
+        Err(RuntimeError::Headless { .. }) => {}
         Err(err) => tracing::warn!(session = %active.id, %err, "could not focus a session"),
     }
 }
@@ -444,6 +568,11 @@ fn build_viewport_grid(screen: &vt100::Screen) -> ViewportGrid {
 /// minus attaching to this process's own terminal: the shell attaches by
 /// giving the session the viewport once its output starts arriving, instead.
 ///
+/// `presentation` is the only difference between `n` and `N`. Everything
+/// else — harness selection, the recorded session, hooks, the launch — is
+/// deliberately shared, so a headless session is an ordinary session that is
+/// not shown rather than a second kind of thing.
+///
 /// `size` is the viewport's own inner size at the moment `n` was pressed —
 /// see `view::viewport_slot`'s doc comment for why that, and not the
 /// terminal's outer size, is what a harness must be told it has — rather
@@ -457,6 +586,7 @@ fn start_session(
     app_runtime: &Runtime,
     live: &mut SessionRuntime,
     sessions: &ProjectSessions,
+    presentation: SessionPresentation,
     size: TerminalSize,
     index_snapshots: &mut HashMap<SessionId, session::native_id::IndexSnapshot>,
 ) -> anyhow::Result<()> {
@@ -470,8 +600,14 @@ fn start_session(
         .assigns_native_session_id()
         .then(|| store.new_native_session_id())
         .transpose()?;
+    // The presentation is recorded before the process exists and is then the
+    // single source of truth for it: `live.start` below is handed
+    // `record.presentation`, so a session's stored presentation and its
+    // running one cannot disagree.
     let record = store.create(
-        NewSession::embedded(selection.id().slug()).with_native_session_id(native.clone()),
+        NewSession::embedded(selection.id().slug())
+            .with_presentation(presentation)
+            .with_native_session_id(native.clone()),
     )?;
 
     // Before the harness runs — see the declaration of `index_snapshots` in

@@ -136,6 +136,21 @@ pub enum Command {
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
 
+        /// Run the session with no terminal of its own.
+        ///
+        /// The harness still runs in a real pseudo-terminal, inside this
+        /// project's root, with its output captured — it simply never takes
+        /// over the terminal you started it from, and Glasshouse records it
+        /// as a headless session. Useful for a harness given its whole task
+        /// on the command line, and for starting one from a terminal you
+        /// want to keep.
+        ///
+        /// Glasshouse stays in the foreground until the harness exits: there
+        /// is no daemon behind this, and a session whose parent went away
+        /// would lose the pseudo-terminal it is reading from.
+        #[arg(long)]
+        headless: bool,
+
         /// Arguments passed straight through to the harness, after `--`.
         ///
         /// Glasshouse does not interpret these; `glasshouse launch
@@ -167,6 +182,21 @@ pub enum Command {
         /// unchanged.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+
+        /// Run the session with no terminal of its own.
+        ///
+        /// The harness still runs in a real pseudo-terminal, inside this
+        /// project's root, with its output captured — it simply never takes
+        /// over the terminal you started it from, and Glasshouse records it
+        /// as a headless session. Useful for a harness given its whole task
+        /// on the command line, and for starting one from a terminal you
+        /// want to keep.
+        ///
+        /// Glasshouse stays in the foreground until the harness exits: there
+        /// is no daemon behind this, and a session whose parent went away
+        /// would lose the pseudo-terminal it is reading from.
+        #[arg(long)]
+        headless: bool,
 
         /// Arguments passed straight through to the harness, after `--`.
         ///
@@ -260,6 +290,7 @@ mod tests {
         let Some(Command::Launch {
             harness,
             profile,
+            headless,
             harness_args,
         }) = cli.command
         else {
@@ -267,6 +298,10 @@ mod tests {
         };
         assert_eq!(harness.as_deref(), Some("claude-code"));
         assert_eq!(profile, None);
+        // A session takes the terminal unless it is explicitly told not to:
+        // the flag is opt-in, so a launch that does not name it is the
+        // attached one it has always been.
+        assert!(!headless);
         // Hyphenated arguments after `--` reach the harness untouched rather
         // than being parsed as Glasshouse options.
         assert_eq!(harness_args, vec!["--resume", "--model=x"]);
@@ -279,6 +314,7 @@ mod tests {
             harness,
             profile,
             harness_args,
+            ..
         }) = cli.command
         else {
             panic!("expected a launch command");
@@ -334,6 +370,7 @@ mod tests {
             harness,
             profile,
             harness_args,
+            ..
         }) = cli.command
         else {
             panic!("expected a run command");
@@ -350,6 +387,7 @@ mod tests {
             harness,
             profile,
             harness_args,
+            ..
         }) = cli.command
         else {
             panic!("expected a run command");
@@ -393,6 +431,7 @@ mod tests {
             harness: run_harness,
             profile: run_profile,
             harness_args: run_args,
+            ..
         }) = run.command
         else {
             panic!("expected a run command");
@@ -401,6 +440,7 @@ mod tests {
             harness: launch_harness,
             profile: launch_profile,
             harness_args: launch_args,
+            ..
         }) = launch.command
         else {
             panic!("expected a launch command");

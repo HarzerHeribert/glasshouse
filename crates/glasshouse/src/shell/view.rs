@@ -18,11 +18,11 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 
 use crate::config::Layer;
 use crate::provider::discovery::ProbeOutcome;
-use crate::session::{SessionDisposition, SessionRecord};
+use crate::session::{SessionDisposition, SessionPresentation, SessionRecord};
 
 use super::state::{
-    Mode, Overlay, ProbeKind, ProviderRow, SettingsPathInputView, SettingsSection, SettingsState,
-    ShellState, ViewportGrid,
+    Mode, Overlay, OverviewState, ProbeKind, ProviderRow, SettingsPathInputView, SettingsSection,
+    SettingsState, ShellState, ViewportGrid,
 };
 
 /// The shell's fixed vertical chrome: title, root, session bar, viewport,
@@ -227,8 +227,18 @@ impl Widget for GridView<'_> {
 /// its border and title, since there is no harness screen yet for a border
 /// to compete with.
 fn render_viewport(state: &ShellState, frame: &mut Frame, area: Rect) {
+    // A headless session never becomes the viewport's, and this is the last
+    // place that could go wrong. `shell::run` already declines to *build* a
+    // grid from one, which keeps `viewport_grid` an honest description of
+    // what is on screen; the check here is what makes the guarantee hold for
+    // a grid that is merely stale — the grid is rebuilt on the tick, so the
+    // frame drawn immediately after the bar moves onto a headless session
+    // still carries the previous session's screen.
+    let headless = state
+        .active_session()
+        .is_some_and(|session| session.presentation == SessionPresentation::Headless);
     let grid = state.viewport_grid();
-    if !grid.is_empty() {
+    if !headless && !grid.is_empty() {
         frame.render_widget(
             GridView {
                 grid,
@@ -260,7 +270,16 @@ fn render_viewport(state: &ShellState, frame: &mut Frame, area: Rect) {
             Line::from(format!("role          {}", session.role)),
             Line::from(""),
             Line::from(Span::styled(
-                "This viewport is reserved for the session's own terminal.",
+                // A headless session has a screen and is deliberately not
+                // shown it — see `shell::run`'s viewport-grid build. Saying
+                // which of the two cases this is matters: an empty viewport
+                // for a session that is running fine otherwise reads as a
+                // broken renderer.
+                if session.presentation == SessionPresentation::Headless {
+                    "This session is headless: it runs with no viewport."
+                } else {
+                    "This viewport is reserved for the session's own terminal."
+                },
                 Style::default().fg(Color::DarkGray),
             )),
         ],
@@ -293,12 +312,16 @@ fn render_viewport(state: &ShellState, frame: &mut Frame, area: Rect) {
 fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
     let hint = match (state.mode(), state.overlay()) {
         (Mode::Session, _) => "SESSION MODE -- keys go to the session -- ctrl-] for glasshouse",
-        (Mode::Control, Some(Overlay::Overview)) => "esc back to session   q quit",
+        (Mode::Control, Some(Overlay::Overview)) => {
+            "up/down pick   m send text   c interrupt   esc back to session   q quit"
+        }
         (Mode::Control, Some(Overlay::Settings)) => {
             "tab section   up/down move   space toggle   enter/a/e/c/b/p/u/d edit   \
              t/m test/models   w save   s/x secret   W project   r setup   esc close"
         }
-        (Mode::Control, None) => "tab session   enter session   n new   o overview   q quit",
+        (Mode::Control, None) => {
+            "tab session   enter session   n new   N headless   o overview   q quit"
+        }
     };
     let mut spans = vec![Span::styled(hint, Style::default().fg(Color::DarkGray))];
 
@@ -340,7 +363,7 @@ fn render_overview(state: &ShellState, frame: &mut Frame, area: Rect) {
 
     let mut lines = vec![Line::from(Span::styled(
         format!(
-            "{:<14}  {:<12}  {:<10}  {:<12}  {}",
+            "  {:<14}  {:<12}  {:<10}  {:<12}  {}",
             "HARNESS", "STATE", "ROLE", "PRESENTED", "SESSION"
         ),
         Style::default().add_modifier(Modifier::BOLD),
@@ -353,25 +376,78 @@ fn render_overview(state: &ShellState, frame: &mut Frame, area: Rect) {
         )));
     }
 
+    let cursor = state.overview().map(OverviewState::cursor);
     for (index, session) in state.sessions().iter().enumerate() {
-        let active = index == state.selected_index();
-        let style = if active {
+        // Two different facts, and conflating them is what would make the
+        // overview useless for its own capability: the *cursor* is the row a
+        // sent line or an interrupt acts on, and `(viewport)` marks the
+        // session the shell is presenting. They are usually different rows —
+        // that is the point — so each gets its own mark.
+        let selected = cursor == Some(index);
+        let style = if selected {
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
+        let presented = if index == state.selected_index() {
+            "  (viewport)"
+        } else {
+            ""
+        };
         lines.push(Line::from(Span::styled(
             format!(
-                "{:<14}  {:<12}  {:<10}  {:<12}  {}",
+                "{} {:<14}  {:<12}  {:<10}  {:<12}  {}{}",
+                if selected { ">" } else { " " },
                 session.harness,
                 disposition_label(session),
                 session.role,
                 session.presentation,
                 short_id(session),
+                presented,
             ),
             style,
+        )));
+    }
+
+    // A refusal about a row belongs beside the rows. The footer shows notes
+    // too, but the footer writes the key bindings first and lets the note
+    // clip — which is the right trade there and the wrong one here, because
+    // "`ab12cd34` is stopped, not running" clipped to its first thirty
+    // columns loses the identifier that makes it an answer. There is room
+    // inside the popup, so this is where the note is guaranteed to be
+    // readable.
+    if let Some(status) = state.status() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            status.to_owned(),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    // The one-line field for sending text to the session under the cursor.
+    // Drawn under the table rather than as its own popup so the row it is
+    // aimed at stays on screen while the line is typed — a field that hides
+    // its own target is how text ends up in the wrong session.
+    if let Some(entry) = state.overview().and_then(OverviewState::entry) {
+        let target = state
+            .overview_target()
+            .map(short_id)
+            .unwrap_or_else(|| "?".to_owned());
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("send to {target}: "),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            // A block cursor after the text, so an empty field still looks
+            // like a field waiting for input rather than a finished line.
+            Span::raw(format!("{entry}_")),
+        ]));
+        lines.push(Line::from(Span::styled(
+            "enter sends   esc cancels",
+            Style::default().fg(Color::DarkGray),
         )));
     }
 
@@ -387,8 +463,13 @@ fn disposition_label(session: &SessionRecord) -> &'static str {
     }
 }
 
+/// The abbreviated identifier a session is shown and referred to by.
+///
+/// Delegates to `state::short_session_id` rather than truncating here: every
+/// status note that names a session uses the same function, so a refusal can
+/// be matched by eye to the row it is about.
 fn short_id(session: &SessionRecord) -> String {
-    session.id.as_str().chars().take(12).collect()
+    super::state::short_session_id(&session.id)
 }
 
 /// The Settings overlay: Harnesses and Integrations, drawn over the shell
@@ -1379,6 +1460,188 @@ mod tests {
         assert!(text.contains("closed"), "disposition missing:\n{text}");
     }
 
+    /// The overview marks two different things, and confusing them would make
+    /// it useless for its own capability: `>` is the row an interrupt or a
+    /// sent line acts on, and `(viewport)` is the session the shell is
+    /// showing. This drives them apart and checks both are visible at once.
+    #[test]
+    fn the_overview_distinguishes_the_row_it_acts_on_from_the_one_on_screen() {
+        let mut state = two_live_sessions();
+        state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+        // Matched on the identifier *and* a column only the overview draws:
+        // the top bar names the presented session too, and it is the first
+        // line in the frame.
+        let text = rendered(&state, 120, 24);
+        let row = |needle: &str| {
+            text.lines()
+                .find(|line| line.contains(needle) && line.contains("embedded"))
+                .unwrap_or_else(|| panic!("no overview row for {needle}:\n{text}"))
+        };
+        let cursor_row = row("bbbbbbbbbbbb");
+        let viewport_row = row("aaaaaaaaaaaa");
+
+        assert!(
+            cursor_row.contains("> codex"),
+            "the cursor row must be marked:\n{text}"
+        );
+        assert!(
+            viewport_row.contains("(viewport)"),
+            "the presented session must say so:\n{text}"
+        );
+        assert!(
+            !viewport_row.contains("> claude-code"),
+            "the cursor is not on the presented session here:\n{text}"
+        );
+        assert!(
+            !cursor_row.contains("(viewport)"),
+            "the session under the cursor is not the one on screen:\n{text}"
+        );
+    }
+
+    /// Two *live* sessions, unlike [`sample`], whose second one has stopped:
+    /// every overview action is refused against a session that is not
+    /// running, so a stopped fixture would prove nothing about the actions.
+    fn two_live_sessions() -> ShellState {
+        ShellState::new(
+            "glasshouse",
+            "/Users/someone/projects/glasshouse",
+            "0.1.0",
+            vec![
+                record("aaaaaaaaaaaa1", "claude-code", SessionLifecycle::Running),
+                record("bbbbbbbbbbbb2", "codex", SessionLifecycle::Running),
+            ],
+        )
+    }
+
+    /// A refusal about a row in the overview must be readable at an ordinary
+    /// terminal width — identifier and state both. The footer clips a note
+    /// once the bindings have had their share, which is why the overview
+    /// draws it inside the popup as well.
+    #[test]
+    fn a_refusal_is_readable_inside_the_overview_at_a_hundred_columns() {
+        let mut state = ShellState::new(
+            "glasshouse",
+            "/Users/someone/projects/glasshouse",
+            "0.1.0",
+            vec![
+                record("aaaaaaaaaaaa1", "claude-code", SessionLifecycle::Running),
+                record("bbbbbbbbbbbb2", "codex", SessionLifecycle::Stopped),
+            ],
+        );
+        state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+
+        let text = rendered(&state, 100, 30);
+        let note = text
+            .lines()
+            .find(|line| line.contains("cannot interrupt"))
+            .unwrap_or_else(|| panic!("the refusal never reached the screen:\n{text}"));
+        assert!(
+            note.contains("bbbbbbbbbbbb"),
+            "the refusal must still name the session at 100 columns: `{note}`"
+        );
+        assert!(
+            note.contains("stopped"),
+            "the refusal must still name the state at 100 columns: `{note}`"
+        );
+    }
+
+    /// The field for sending a line names the session it is aimed at. A field
+    /// that hides its own target is how text ends up in the wrong session.
+    #[test]
+    fn the_send_field_names_the_session_it_is_aimed_at() {
+        let mut state = two_live_sessions();
+        state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        for c in "run the tests".chars() {
+            state.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+
+        let text = rendered(&state, 120, 30);
+        assert!(
+            text.contains("send to bbbbbbbbbbbb"),
+            "the field must name its target:\n{text}"
+        );
+        assert!(
+            text.contains("run the tests"),
+            "the typed line must be visible:\n{text}"
+        );
+        assert!(
+            text.contains("enter sends"),
+            "the field must say how to send it:\n{text}"
+        );
+    }
+
+    /// A headless session's screen must never reach the viewport, even when
+    /// a grid for it is sitting in the state — which is exactly what happens
+    /// on the frame drawn between the bar moving onto it and the next tick
+    /// rebuilding the grid.
+    ///
+    /// Rendered wide as well as narrow: an absence assertion against a
+    /// truncated frame is trivially true, which this project has already paid
+    /// for once (practice §17).
+    #[test]
+    fn a_headless_sessions_screen_never_reaches_the_viewport() {
+        let mut headless = record("hidden-one", "claude-code", SessionLifecycle::Running);
+        headless.presentation = SessionPresentation::Headless;
+        let mut state = ShellState::new("p", "/p", "0.1.0", vec![headless]);
+        state.set_viewport_grid(grid_from_lines(&["HEADLESS-SCREEN-BYTES"]));
+
+        for width in [100, 400] {
+            let text = rendered(&state, width, 24);
+            assert!(
+                !text.contains("HEADLESS-SCREEN-BYTES"),
+                "a headless session drew into the viewport at {width} columns:\n{text}"
+            );
+            assert!(
+                text.contains("headless"),
+                "and the viewport must say why it is empty:\n{text}"
+            );
+        }
+    }
+
+    /// The same grid, on an embedded session, *is* drawn — without this the
+    /// absence above would pass for a renderer that draws nothing at all.
+    #[test]
+    fn an_embedded_sessions_screen_does_reach_the_viewport() {
+        let mut state = ShellState::new(
+            "p",
+            "/p",
+            "0.1.0",
+            vec![record(
+                "shown-one",
+                "claude-code",
+                SessionLifecycle::Running,
+            )],
+        );
+        state.set_viewport_grid(grid_from_lines(&["HEADLESS-SCREEN-BYTES"]));
+
+        let text = rendered(&state, 400, 24);
+        assert!(
+            text.contains("HEADLESS-SCREEN-BYTES"),
+            "an embedded session's screen must be drawn:\n{text}"
+        );
+    }
+
+    /// The keys are only discoverable if the footer says they exist.
+    #[test]
+    fn the_footer_names_the_overview_and_headless_keys() {
+        let mut state = sample();
+        assert!(
+            last_row(&state, 120, 10).contains("N headless"),
+            "control mode must offer the headless key"
+        );
+
+        state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        let row = last_row(&state, 120, 10);
+        assert!(row.contains("m send text"), "got {row:?}");
+        assert!(row.contains("c interrupt"), "got {row:?}");
+    }
+
     /// Ratatui will happily panic on a zero-sized or one-cell area if any
     /// layout maths underflows. None here does, and this proves it.
     #[test]
@@ -1388,6 +1651,12 @@ mod tests {
             rendered(&state, w, h);
         }
         state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        for (w, h) in [(1, 1), (1, 40), (40, 1), (3, 3), (200, 60)] {
+            rendered(&state, w, h);
+        }
+        // The send field adds rows under the table, which is exactly the kind
+        // of growth that overruns a popup nobody re-measured.
+        state.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
         for (w, h) in [(1, 1), (1, 40), (40, 1), (3, 3), (200, 60)] {
             rendered(&state, w, h);
         }
@@ -1496,12 +1765,22 @@ mod tests {
 
     /// A key that could not do anything must explain itself in the status bar,
     /// or it reads as a broken keyboard.
+    ///
+    /// Measured at 120 columns rather than 100. Phase 4's `N headless` took
+    /// the control-mode bindings to about seventy columns, and the bindings
+    /// are written first on purpose, so at a hundred there is no longer room
+    /// for a whole note beside them — the same trade the footer's own doc
+    /// comment records paying when `t`/`m` arrived. It is paid here rather
+    /// than by dropping the binding because a binding nobody can see is a
+    /// feature nobody has, while a clipped note is still a note; and the
+    /// refusals *this* phase depends on are shown inside the overview
+    /// popup, where they are never clipped — see `render_overview`.
     #[test]
     fn the_status_bar_shows_a_note_next_to_the_bindings() {
         let mut state = ShellState::new("p", "/p", "0.1.0", vec![lone_session()]);
         state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
-        let bottom = last_row(&state, 100, 24);
+        let bottom = last_row(&state, 120, 24);
         assert!(
             bottom.contains("only one session"),
             "the note must reach the status bar: `{bottom}`"

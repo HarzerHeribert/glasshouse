@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 
 use std::io::IsTerminal;
 
@@ -10,7 +11,10 @@ use glasshouse::onboarding;
 use glasshouse::platform::HostPlatform;
 use glasshouse::pty::ExitStatus;
 use glasshouse::session;
-use glasshouse::session::{NewSession, ProjectSessions, SessionDisposition, SessionLifecycle};
+use glasshouse::session::{
+    NewSession, ProjectSessions, SessionDisposition, SessionId, SessionLifecycle,
+    SessionPresentation, SessionRuntime,
+};
 use glasshouse::shim::{self, ShimRequest};
 use glasshouse::{Cli, Command, Runtime, logging, shutdown};
 
@@ -81,17 +85,20 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         Some(Command::Launch {
             harness,
             profile,
+            headless,
             harness_args,
         })
         | Some(Command::Run {
             harness,
             profile,
+            headless,
             harness_args,
         }) => {
             return launch_session(
                 &runtime,
                 harness.as_deref(),
                 profile.as_deref(),
+                *headless,
                 harness_args,
             );
         }
@@ -161,6 +168,7 @@ fn launch_session(
     runtime: &Runtime,
     harness: Option<&str>,
     profile_name: Option<&str>,
+    headless: bool,
     harness_args: &[String],
 ) -> anyhow::Result<ExitCode> {
     let user = UserConfig::load(runtime.paths())?;
@@ -261,8 +269,18 @@ fn launch_session(
         .assigns_native_session_id()
         .then(|| store.new_native_session_id())
         .transpose()?;
+    // The presentation is recorded before the process exists and is the same
+    // value `run_headless` starts the session under, so a session's stored
+    // presentation and its running one cannot disagree — which is what lets
+    // the shell's overview say `headless` about a session it did not start.
+    let presentation = if headless {
+        SessionPresentation::Headless
+    } else {
+        SessionPresentation::Embedded
+    };
     let record = store.create(
         NewSession::embedded(selection.id().slug())
+            .with_presentation(presentation)
             .with_native_session_id(native.clone())
             .with_launch_profile(Some(launch_profile.name.clone()))
             .with_backend_resource(Some(launch_profile.backend.slug())),
@@ -289,6 +307,7 @@ fn launch_session(
         profile = %launch_profile.name,
         backend = %launch_profile.backend.slug(),
         mechanisms = %mechanism_summary(&overlay),
+        presentation = %presentation,
         "opening a harness session"
     );
 
@@ -314,7 +333,12 @@ fn launch_session(
     // database hiccup look like a harness failure.
     note_lifecycle(&store, &record.id, SessionLifecycle::Running);
 
-    let status = match session::attach(launch) {
+    let session = if headless {
+        run_headless(&record.id, launch)
+    } else {
+        session::attach(launch)
+    };
+    let status = match session {
         Ok(status) => status,
         Err(err) => {
             note_lifecycle(&store, &record.id, SessionLifecycle::Failed);
@@ -343,6 +367,103 @@ fn launch_session(
         eprintln!("glasshouse: the harness {status}");
     }
     Ok(exit_code_for(&status))
+}
+
+/// Run a harness session that never takes this terminal — Phase 4's headless
+/// presentation mode.
+///
+/// The mirror image of [`session::attach`]. The harness gets a real
+/// pseudo-terminal in the project root exactly as it always does, but this
+/// process's own terminal is never claimed: no raw mode, no alternate screen,
+/// no output relayed to standard output. What the harness prints goes into
+/// the session's own bounded scrollback, which is where an embedded session's
+/// output goes too. That is the whole of "a PTY continues running without
+/// occupying the visible session viewport" from the launch side; the shell
+/// side is `shell::run`, which never makes a headless session the viewport's.
+///
+/// Glasshouse stays in the foreground for the session's whole life on
+/// purpose. Returning early would drop the [`SessionRuntime`], and with it
+/// the pseudo-terminal the harness is writing to — a detached session needs a
+/// supervisor process, which is a different capability from this one.
+///
+/// **The terminal queries have to be answered here.** A headless session has
+/// no emulator on the other end: on Windows nothing gets past ConPTY's
+/// startup handshake without a reply, and on any platform a harness asking
+/// `ESC[6n` waits forever for one. [`SessionRuntime`] knows how to answer but
+/// cannot do it from its reader thread, so whoever owns the runtime must — in
+/// the shell that is the tick, and here it is this loop.
+///
+/// # A signal here is a forced exit, and that is why the cleanup exists
+///
+/// [`shutdown::install_signal_handler`] ends the process immediately when the
+/// terminal is not engaged, on the reasonable premise that a Glasshouse with
+/// nothing to restore has nothing to wind down. **This path breaks that
+/// premise**: it engages no terminal — that is what makes it headless — and
+/// it owns a child process that stops receiving a hangup the moment Glasshouse
+/// dies. Forced exit calls [`std::process::exit`], which runs no destructor,
+/// so without the registration below a Ctrl-C would leave the harness running
+/// with nothing left able to reach it.
+///
+/// Found by sending a real `SIGINT` to a real headless launch and looking for
+/// the child afterwards; it was still there. `shutdown`'s own documentation
+/// had already named this as the thing a second caller would have to get
+/// right, which is exactly what this is.
+///
+/// Deliberately **not** solved by claiming the terminal is engaged. That flag
+/// means "raw mode and the alternate screen are on", and `restore_terminal`
+/// acts on it — setting it here would write escape sequences to a terminal
+/// Glasshouse never touched.
+fn run_headless(id: &SessionId, launch: HarnessLaunch<'_>) -> anyhow::Result<ExitStatus> {
+    /// How often the loop wakes to answer queries and check on the child.
+    const POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+    let live = Arc::new(Mutex::new(SessionRuntime::new()));
+    lock(&live).start(id.clone(), SessionPresentation::Headless, &launch)?;
+
+    // Best effort by construction, exactly as `session::attach`'s is:
+    // `try_lock` gives up rather than risk blocking the one path whose whole
+    // purpose is to always work. The loop below holds the lock only for the
+    // moment it takes to poll, and never across its sleep. The guard
+    // unregisters on the way out, so the callback never outlives the session
+    // it refers to.
+    let _forced_exit = {
+        let live = Arc::clone(&live);
+        let id = id.clone();
+        shutdown::on_forced_exit(move || {
+            if let Ok(mut live) = live.try_lock() {
+                let _ = live.close(&id);
+            }
+        })
+    };
+
+    // A blocking process that prints nothing is indistinguishable from a hung
+    // one. On stderr, because standard output belongs to whatever the caller
+    // is piping this into.
+    eprintln!("glasshouse: session {id} is running headless; nothing is drawn here");
+
+    loop {
+        {
+            let mut live = lock(&live);
+            live.answer_terminal_queries();
+            for (ended, status) in live.poll_exits() {
+                if &ended == id {
+                    return Ok(status);
+                }
+            }
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// Take the headless runtime's lock, ignoring poisoning.
+///
+/// A panicking thread must not strand a live harness: the process is still
+/// running and still needs to be polled and eventually hung up, and refusing
+/// to touch the runtime would guarantee the orphan the registration above
+/// exists to prevent.
+fn lock(live: &Mutex<SessionRuntime>) -> std::sync::MutexGuard<'_, SessionRuntime> {
+    live.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The provider the local Glasshouse gateway forwards to, with its
@@ -902,7 +1023,8 @@ mod tests {
         user.profiles_mut().set("gateway", profile);
         user.save(runtime.paths()).unwrap();
 
-        let status = launch_session(&runtime, Some("claude-code"), Some("gateway"), &[]).unwrap();
+        let status =
+            launch_session(&runtime, Some("claude-code"), Some("gateway"), false, &[]).unwrap();
         assert_eq!(status, ExitCode::FAILURE);
 
         let sessions = glasshouse::session::ProjectSessions::open(&runtime).unwrap();
@@ -925,7 +1047,8 @@ mod tests {
         user.profiles_mut().set("yolo", profile);
         user.save(runtime.paths()).unwrap();
 
-        let status = launch_session(&runtime, Some("claude-code"), Some("yolo"), &[]).unwrap();
+        let status =
+            launch_session(&runtime, Some("claude-code"), Some("yolo"), false, &[]).unwrap();
         assert_eq!(status, ExitCode::FAILURE);
 
         let sessions = glasshouse::session::ProjectSessions::open(&runtime).unwrap();

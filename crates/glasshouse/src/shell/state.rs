@@ -27,7 +27,7 @@ use crate::provider::cache::ModelCatalogue;
 use crate::provider::discovery::{ProbeOutcome, ProbeTarget};
 use crate::secret::native::{PreferNativeSecretStore, os_credential_for_variable};
 use crate::secret::{SecretRef, SecretStore};
-use crate::session::SessionRecord;
+use crate::session::{SessionId, SessionPresentation, SessionRecord};
 
 /// A Glasshouse-owned screen drawn over the session viewport.
 ///
@@ -36,7 +36,11 @@ use crate::session::SessionRecord;
 /// than closing it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
-    /// Every session in the project, with the detail the bar has no room for.
+    /// Every session in the project, with the detail the bar has no room for,
+    /// and the one place a session can be acted on *without* being brought
+    /// into the viewport first. See [`OverviewState`] for the data behind it
+    /// — this marker carries none of it, exactly as [`Overlay::Settings`]
+    /// carries none of the Settings rows.
     Overview,
     /// Harnesses and Integrations configuration. See [`SettingsState`] for
     /// the data behind it — this marker carries none of it, the same way
@@ -114,6 +118,38 @@ pub enum Action {
     /// request leaves this module, and `shell::spawn_provider_probe`, which
     /// is the only thing that makes it.
     RunProviderProbe,
+    /// Start a new session with no viewport — Phase 4's headless
+    /// presentation mode. Identical to [`Action::StartSession`] in every
+    /// respect except the presentation the session is recorded and started
+    /// under, so there is exactly one place that knows how to start a
+    /// session; see `shell::start_session`.
+    StartHeadlessSession,
+    /// Interrupt the session the overview's cursor is on — Phase 4's "send
+    /// interrupt signals to a PTY session".
+    ///
+    /// Carries the session rather than leaving the run loop to re-derive it,
+    /// because the session acted on is deliberately **not** the one the bar
+    /// is presenting: re-reading "the active session" there would send the
+    /// interrupt to the wrong process, which is the entire failure this
+    /// capability exists to avoid.
+    ///
+    /// Interrupting is not killing. Nothing here moves a session's
+    /// lifecycle: a harness that handles the signal keeps running, and one
+    /// that exits because of it is noticed by the ordinary exit detection on
+    /// the next tick, from the process rather than inferred here.
+    InterruptSession(SessionId),
+    /// Send one line to the session the overview's cursor is on — Phase 4's
+    /// "send text programmatically without requiring the user to focus it".
+    ///
+    /// Carries its target for the same reason [`Action::InterruptSession`]
+    /// does. The run loop writes it and nothing else: **producing this must
+    /// not change which session has focus**, which is the half of the
+    /// capability that is easy to lose and the reason the tests assert it
+    /// separately from the text arriving.
+    SendSessionText {
+        id: SessionId,
+        text: String,
+    },
     /// Reopen the first-run wizard for a "reconfigure" invocation (Phase 2C:
     /// "Allow the onboarding wizard to be reopened later from settings").
     /// Discovery and reading `UserConfig` are file I/O this module
@@ -189,6 +225,49 @@ impl ViewportGrid {
     }
 }
 
+/// The session overview's own data: where its cursor is, and the line being
+/// typed at a session, if one is.
+///
+/// **The cursor is deliberately not the session bar's selection.** The bar's
+/// selection is what the viewport presents and what the runtime focuses (see
+/// `shell::sync_focus`); the overview's cursor is what the overview *acts
+/// on*. Sharing one index would make "send this to a session I am not
+/// looking at" impossible to express, which is precisely the capability the
+/// overview exists to provide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverviewState {
+    /// Index into [`ShellState::sessions`]. Reconciled by identity on every
+    /// refresh, exactly like the bar's selection — sessions are ordered by
+    /// last activity, so any refresh can reorder them and a held index would
+    /// silently move the cursor onto a different session.
+    cursor: usize,
+    /// The line being typed at the session under the cursor, or `None` when
+    /// no field is open. `Some("")` is an open, empty field — a different
+    /// state from no field at all, which is why this is not a bare `String`.
+    entry: Option<String>,
+}
+
+impl OverviewState {
+    /// Which row the cursor is on.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// The line being typed, or `None` when no field is open.
+    pub fn entry(&self) -> Option<&str> {
+        self.entry.as_deref()
+    }
+}
+
+/// The abbreviated session identifier the overview shows.
+///
+/// One definition, shared by the overview's rows and by every status note
+/// that names a session, so a refusal can be matched by eye to the row it is
+/// about. A full identifier is a UUID and would crowd the status row out.
+pub(crate) fn short_session_id(id: &SessionId) -> String {
+    id.as_str().chars().take(12).collect()
+}
+
 /// Everything the shell displays.
 pub struct ShellState {
     project_name: String,
@@ -216,6 +295,10 @@ pub struct ShellState {
     /// separate from `overlay` because it carries real data (rows, pending
     /// edits, sub-mode) that a plain `Copy` marker cannot.
     settings: Option<SettingsState>,
+    /// The Overview overlay's own data, or `None` when it is not open — the
+    /// same split as `settings`, and for the same reason. See
+    /// [`OverviewState`] for why its cursor is not `selected`.
+    overview: Option<OverviewState>,
 }
 
 impl ShellState {
@@ -236,6 +319,7 @@ impl ShellState {
             mode: Mode::Control,
             viewport_grid: ViewportGrid::default(),
             settings: None,
+            overview: None,
         }
     }
 
@@ -334,12 +418,32 @@ impl ShellState {
     }
 
     /// Open the session overview.
+    ///
+    /// The cursor starts on whichever session the bar is presenting, so the
+    /// overview opens looking at the same place the user already was; moving
+    /// it is how they reach a session they are *not* looking at.
     pub fn open_overview(&mut self) -> Action {
         if self.overlay == Some(Overlay::Overview) {
             return Action::None;
         }
         self.overlay = Some(Overlay::Overview);
+        self.overview = Some(OverviewState {
+            cursor: self.selected,
+            entry: None,
+        });
         Action::Redraw
+    }
+
+    /// The overview's own data, or `None` when it is not open.
+    pub fn overview(&self) -> Option<&OverviewState> {
+        self.overview.as_ref()
+    }
+
+    /// The session the overview's cursor is on — the one an interrupt or a
+    /// sent line acts on. `None` when the overview is closed or the project
+    /// has no sessions.
+    pub fn overview_target(&self) -> Option<&SessionRecord> {
+        self.sessions.get(self.overview.as_ref()?.cursor)
     }
 
     /// Leave whatever overlay is open and go back to the active session.
@@ -353,6 +457,7 @@ impl ShellState {
         }
         self.overlay = None;
         self.settings = None;
+        self.overview = None;
         Action::Redraw
     }
 
@@ -539,11 +644,21 @@ impl ShellState {
     /// would silently move the user to a different session.
     pub fn refresh(&mut self, sessions: Vec<SessionRecord>) -> Action {
         let active = self.active_session().map(|record| record.id.clone());
+        // The overview's cursor is reconciled the same way and for the same
+        // reason: it decides which session an interrupt is sent to, so a
+        // reorder that moved it silently would aim a signal at a process the
+        // user never pointed at.
+        let target = self.overview_target().map(|record| record.id.clone());
         let unchanged = sessions == self.sessions;
         self.sessions = sessions;
         self.selected = active
             .and_then(|id| self.sessions.iter().position(|record| record.id == id))
             .unwrap_or(0);
+        if let Some(overview) = self.overview.as_mut() {
+            overview.cursor = target
+                .and_then(|id| self.sessions.iter().position(|record| record.id == id))
+                .unwrap_or(0);
+        }
         if unchanged {
             Action::None
         } else {
@@ -573,13 +688,19 @@ impl ShellState {
             return self.handle_settings_key(key);
         }
 
-        // An overlay takes the keys it understands before anything else, so
-        // Escape means "leave this overlay" while one is open and "leave
-        // Glasshouse" only when none is.
-        if self.overlay.is_some() && matches!(key.code, KeyCode::Esc | KeyCode::Char('o')) {
-            return self.close_overlay();
+        // The Overview takes the keys it has meanings for — its own cursor,
+        // and the two that act on the session under it — and passes
+        // everything else through, so ordinary navigation keeps working
+        // underneath the popup.
+        if self.overlay == Some(Overlay::Overview) {
+            return self.handle_overview_key(key, had_status);
         }
 
+        self.handle_control_key(key, had_status)
+    }
+
+    /// Glasshouse's own bindings, with no overlay claiming the key first.
+    fn handle_control_key(&mut self, key: KeyEvent, had_status: bool) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('c' | 'C') if ctrl => Action::Quit,
@@ -591,6 +712,12 @@ impl ShellState {
             KeyCode::Char('s') => Action::OpenSettings,
             KeyCode::Enter | KeyCode::Char('i') => self.enter_session_mode(),
             KeyCode::Char('n') => Action::StartSession,
+            // Shift-N is the same session `n` starts, minus the viewport —
+            // Phase 4's headless presentation mode. Deliberately next to `n`
+            // rather than behind a prompt: the only difference between the
+            // two is where the session is shown, and a user who wants one
+            // wants the other's key.
+            KeyCode::Char('N') => Action::StartHeadlessSession,
             // Clearing a note is itself a visible change.
             _ if had_status => Action::Redraw,
             _ => Action::None,
@@ -620,6 +747,163 @@ impl ShellState {
         }
     }
 
+    /// Answer one key while the session overview is open.
+    ///
+    /// Unlike Settings, which owns every key, the Overview claims only the
+    /// keys it has a meaning for and passes the rest down: the popup is drawn
+    /// over a live shell, and Tab still moving between sessions underneath it
+    /// is a property worth keeping.
+    fn handle_overview_key(&mut self, key: KeyEvent, had_status: bool) -> Action {
+        // While a line is being typed every key belongs to it — the letters
+        // of a message must not also fire Glasshouse bindings, or typing
+        // "not now" would quit.
+        if self.overview.as_ref().is_some_and(|o| o.entry.is_some()) {
+            return self.handle_overview_entry_key(key);
+        }
+
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('o') => self.close_overlay(),
+            KeyCode::Up => self.move_overview_cursor(-1),
+            KeyCode::Down => self.move_overview_cursor(1),
+            // Not `Ctrl-C`, which still quits: this is the overview's own
+            // key for "interrupt the session on this row", and it acts on the
+            // cursor, never on the session in the viewport.
+            KeyCode::Char('c') if !ctrl => self.interrupt_overview_target(),
+            KeyCode::Char('m') if !ctrl => self.begin_overview_send(),
+            _ => self.handle_control_key(key, had_status),
+        }
+    }
+
+    /// Move the overview's cursor, wrapping — the same ring the session bar
+    /// is, for the same reason: stopping dead at the last row reads as a
+    /// broken key.
+    fn move_overview_cursor(&mut self, delta: isize) -> Action {
+        if self.sessions.is_empty() {
+            self.set_status("this project has no sessions to move between");
+            return Action::Redraw;
+        }
+        let len = self.sessions.len() as isize;
+        if let Some(overview) = self.overview.as_mut() {
+            overview.cursor = (overview.cursor as isize + delta).rem_euclid(len) as usize;
+        }
+        Action::Redraw
+    }
+
+    /// The session under the cursor, if something may be sent to it — and a
+    /// spoken refusal naming the session and the state it is actually in if
+    /// not.
+    ///
+    /// **Never a silent no-op.** A key that quietly does nothing is
+    /// indistinguishable from a frozen screen, and a user who has just asked
+    /// a background session to stop needs to know whether it was asked. The
+    /// same rule the provider probes are already held to.
+    ///
+    /// The state is read from the session record rather than from a process,
+    /// because this module holds no processes — the run loop reports the
+    /// runtime's own refusal on top of this one, for the narrower case of a
+    /// session whose record still says live because its exit has not been
+    /// polled yet.
+    fn actionable_overview_target(&mut self, verb: &str) -> Option<SessionId> {
+        let target = self
+            .overview_target()
+            .map(|record| (record.id.clone(), record.lifecycle));
+        match target {
+            None => {
+                self.set_status(format!("nothing to {verb}: this project has no sessions"));
+                None
+            }
+            Some((id, lifecycle)) if !lifecycle.is_live() => {
+                self.set_status(format!(
+                    "cannot {verb} session `{}`: it is {lifecycle}, not running",
+                    short_session_id(&id)
+                ));
+                None
+            }
+            Some((id, _)) => Some(id),
+        }
+    }
+
+    /// Interrupt the session under the cursor.
+    ///
+    /// Nothing about the shell changes: not the presented session, not focus,
+    /// not the session's recorded state. An interrupt is a byte delivered to
+    /// a terminal, and what the harness does about it is the harness's
+    /// business — a session that handles it is still running afterwards, and
+    /// one that exits is noticed by the ordinary exit detection.
+    fn interrupt_overview_target(&mut self) -> Action {
+        match self.actionable_overview_target("interrupt") {
+            Some(id) => Action::InterruptSession(id),
+            None => Action::Redraw,
+        }
+    }
+
+    /// Open the one-line field for sending text to the session under the
+    /// cursor, refusing up front if that session is not running.
+    fn begin_overview_send(&mut self) -> Action {
+        if self.actionable_overview_target("send text to").is_none() {
+            return Action::Redraw;
+        }
+        if let Some(overview) = self.overview.as_mut() {
+            overview.entry = Some(String::new());
+        }
+        Action::Redraw
+    }
+
+    /// Answer one key while the send field is open.
+    fn handle_overview_entry_key(&mut self, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(overview) = self.overview.as_mut() {
+                    overview.entry = None;
+                }
+                Action::Redraw
+            }
+            KeyCode::Enter => self.submit_overview_send(),
+            KeyCode::Backspace => {
+                if let Some(entry) = self.overview.as_mut().and_then(|o| o.entry.as_mut()) {
+                    entry.pop();
+                }
+                Action::Redraw
+            }
+            KeyCode::Char(c) if !ctrl => {
+                if let Some(entry) = self.overview.as_mut().and_then(|o| o.entry.as_mut()) {
+                    entry.push(c);
+                }
+                Action::Redraw
+            }
+            _ => Action::None,
+        }
+    }
+
+    /// Send what has been typed to the session under the cursor.
+    ///
+    /// The field is closed on every path out — a refused line and an empty
+    /// one both leave the overview where it was, rather than trapping the
+    /// user in a field that will not accept anything.
+    fn submit_overview_send(&mut self) -> Action {
+        let text = self
+            .overview
+            .as_ref()
+            .and_then(|overview| overview.entry.clone())
+            .unwrap_or_default();
+        if let Some(overview) = self.overview.as_mut() {
+            overview.entry = None;
+        }
+        if text.is_empty() {
+            self.set_status("nothing to send: the line was empty");
+            return Action::Redraw;
+        }
+        // Checked again here, not only when the field opened: a session can
+        // end while a line is being typed at it, and sending into a dead
+        // session must be refused out loud at the moment of sending.
+        match self.actionable_overview_target("send text to") {
+            Some(id) => Action::SendSessionText { id, text },
+            None => Action::Redraw,
+        }
+    }
+
     /// Enter session mode, giving the focused session's PTY the keyboard.
     ///
     /// Refused with nothing active: there would be nowhere to send the keys,
@@ -628,9 +912,27 @@ impl ShellState {
     /// session mode and an overlay must never coexist, which is what keeps
     /// "leaving an overlay returns to the mode you were in" simple, since
     /// that mode is by construction always control.
+    ///
+    /// Refused for a **headless** session for a sharper version of the same
+    /// reason. A headless session has no viewport, so the runtime refuses to
+    /// focus it (`RuntimeError::Headless`) and keystrokes would go to
+    /// whichever session held focus before — the user would be typing into a
+    /// session the bar is not showing. Saying no is the only honest answer.
     fn enter_session_mode(&mut self) -> Action {
-        if self.active_session().is_none() {
+        let Some(record) = self.active_session() else {
             self.set_status("no session to enter — start one with `n`");
+            return Action::Redraw;
+        };
+        if record.presentation == SessionPresentation::Headless {
+            let id = record.id.clone();
+            // Short on purpose: a status note shares its row with the key
+            // bindings, which are written first, so a long refusal is a
+            // clipped one. The viewport itself carries the full explanation
+            // on every frame — see `view::render_viewport`.
+            self.set_status(format!(
+                "`{}` is headless — no viewport to enter",
+                short_session_id(&id)
+            ));
             return Action::Redraw;
         }
         self.overlay = None;
@@ -4637,5 +4939,407 @@ mod settings_tests {
             ],
             "the recorded reference is not duplicated, and no declared variable is skipped"
         );
+    }
+}
+
+/// Phase 4's last three lines, at the layer that decides them: which session
+/// the overview acts on, that acting on it leaves the presented session
+/// alone, and that a session which is not running is refused out loud.
+///
+/// No processes here. What a byte does once it reaches a pseudo-terminal is
+/// `tests/pty_smoke.rs`'s business; what this module has to get right is the
+/// *aim* — and the aim is exactly what a test with a real process is worst
+/// at proving, because a runtime with one session cannot tell "sent to the
+/// session under the cursor" from "sent to whatever had focus".
+#[cfg(test)]
+mod overview_tests {
+    use super::*;
+    use crate::session::{SessionId, SessionLifecycle, SessionPresentation, SessionRole};
+
+    fn record(id: &str, lifecycle: SessionLifecycle) -> SessionRecord {
+        SessionRecord {
+            id: SessionId::new(id),
+            project_id: "p".to_owned(),
+            harness: "claude-code".to_owned(),
+            native_session_id: None,
+            role: SessionRole::Normal,
+            lifecycle,
+            presentation: SessionPresentation::Embedded,
+            created_at: 0,
+            last_activity_at: 0,
+            launch_profile: None,
+            backend_resource: None,
+        }
+    }
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn typed(state: &mut ShellState, text: &str) {
+        for c in text.chars() {
+            state.handle_key(press(KeyCode::Char(c)));
+        }
+    }
+
+    /// Two live sessions, the overview open, and the cursor moved onto the
+    /// one the shell is *not* presenting — the situation both of the first
+    /// two capability lines are about.
+    fn overview_on_the_other_session() -> ShellState {
+        let mut state = ShellState::new(
+            "p",
+            "/p",
+            "0.1.0",
+            vec![
+                record("presented", SessionLifecycle::Running),
+                record("background", SessionLifecycle::Running),
+            ],
+        );
+        state.handle_key(press(KeyCode::Char('o')));
+        state.handle_key(press(KeyCode::Down));
+        assert_eq!(
+            state.overview_target().map(|r| r.id.as_str()),
+            Some("background")
+        );
+        assert_eq!(
+            state.active_session().map(|r| r.id.as_str()),
+            Some("presented"),
+            "moving the overview cursor must not move the session bar"
+        );
+        state
+    }
+
+    /// Line 1, first half: a line typed in the overview is aimed at the
+    /// session under the cursor.
+    #[test]
+    fn a_line_sent_from_the_overview_is_aimed_at_the_session_under_the_cursor() {
+        let mut state = overview_on_the_other_session();
+
+        state.handle_key(press(KeyCode::Char('m')));
+        typed(&mut state, "status");
+        let action = state.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(
+            action,
+            Action::SendSessionText {
+                id: SessionId::new("background"),
+                text: "status".to_owned(),
+            }
+        );
+    }
+
+    /// Line 1, second half, and the half that is the whole point: **the
+    /// presented session does not change**. A capability that delivered the
+    /// text but pulled the user into the session receiving it would satisfy
+    /// the word "sending" and none of the intent.
+    #[test]
+    fn sending_a_line_leaves_the_presented_session_exactly_where_it_was() {
+        let mut state = overview_on_the_other_session();
+        let before = state.active_session().map(|record| record.id.clone());
+        let before_index = state.selected_index();
+
+        state.handle_key(press(KeyCode::Char('m')));
+        typed(&mut state, "hello");
+        state.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(state.active_session().map(|r| r.id.clone()), before);
+        assert_eq!(state.selected_index(), before_index);
+        assert_eq!(
+            state.mode(),
+            Mode::Control,
+            "sending text must not hand the keyboard to anything"
+        );
+    }
+
+    /// Line 2: the interrupt is aimed at the cursor's session, and nothing
+    /// else moves — including, deliberately, the session's own recorded
+    /// state. Interrupting is not killing.
+    #[test]
+    fn an_interrupt_from_the_overview_targets_the_cursor_and_moves_nothing_else() {
+        let mut state = overview_on_the_other_session();
+        let before = state.sessions().to_vec();
+        let presented = state.active_session().map(|record| record.id.clone());
+
+        let action = state.handle_key(press(KeyCode::Char('c')));
+
+        assert_eq!(
+            action,
+            Action::InterruptSession(SessionId::new("background"))
+        );
+        assert_eq!(state.active_session().map(|r| r.id.clone()), presented);
+        assert_eq!(
+            state.sessions(),
+            before.as_slice(),
+            "an interrupt must not move any session's lifecycle"
+        );
+    }
+
+    /// `Ctrl-C` is still how a user leaves Glasshouse. The overview's own
+    /// `c` must not have swallowed it.
+    #[test]
+    fn control_c_still_quits_while_the_overview_is_open() {
+        let mut state = overview_on_the_other_session();
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Action::Quit
+        );
+    }
+
+    /// A refusal names the session and the state it is actually in, and
+    /// produces no action at all — the acceptance condition for line 5 of the
+    /// packet, and the rule this project already applies to the provider
+    /// probes: a key that silently does nothing is indistinguishable from a
+    /// frozen screen.
+    #[test]
+    fn acting_on_a_session_that_is_not_running_is_refused_by_name_and_changes_nothing() {
+        for lifecycle in [
+            SessionLifecycle::Stopped,
+            SessionLifecycle::Failed,
+            SessionLifecycle::Closed,
+        ] {
+            for key in [KeyCode::Char('c'), KeyCode::Char('m')] {
+                let mut state = ShellState::new(
+                    "p",
+                    "/p",
+                    "0.1.0",
+                    vec![
+                        record("alive", SessionLifecycle::Running),
+                        record("finished", lifecycle),
+                    ],
+                );
+                state.handle_key(press(KeyCode::Char('o')));
+                state.handle_key(press(KeyCode::Down));
+                let before = state.sessions().to_vec();
+
+                let action = state.handle_key(press(key));
+
+                assert_eq!(action, Action::Redraw, "{lifecycle:?} {key:?}");
+                let status = state.status().unwrap_or_default().to_owned();
+                assert!(
+                    status.contains("finished"),
+                    "the refusal must name the session; got {status:?}"
+                );
+                assert!(
+                    status.contains(lifecycle.as_str()),
+                    "the refusal must name the state; got {status:?}"
+                );
+                assert_eq!(
+                    state.sessions(),
+                    before.as_slice(),
+                    "a refusal must change nothing"
+                );
+                assert!(
+                    state.overview().and_then(OverviewState::entry).is_none(),
+                    "a refused send must not leave a field open"
+                );
+            }
+        }
+    }
+
+    /// The session can end while the line is being typed at it. Checking only
+    /// when the field opened would send into a dead session and report
+    /// success.
+    #[test]
+    fn a_session_that_dies_while_the_line_is_typed_is_refused_at_the_moment_of_sending() {
+        let mut state = overview_on_the_other_session();
+        state.handle_key(press(KeyCode::Char('m')));
+        typed(&mut state, "too late");
+
+        state.refresh(vec![
+            record("presented", SessionLifecycle::Running),
+            record("background", SessionLifecycle::Stopped),
+        ]);
+
+        let action = state.handle_key(press(KeyCode::Enter));
+        assert_eq!(action, Action::Redraw, "nothing may be sent");
+        let status = state.status().unwrap_or_default().to_owned();
+        assert!(status.contains("background"), "got {status:?}");
+        assert!(status.contains("stopped"), "got {status:?}");
+    }
+
+    /// Every key belongs to the field while one is open. Without this,
+    /// typing a message containing `q` would quit Glasshouse — the same
+    /// class of failure the session-mode split exists to prevent.
+    #[test]
+    fn the_send_field_owns_every_key_including_the_bindings() {
+        let mut state = overview_on_the_other_session();
+        state.handle_key(press(KeyCode::Char('m')));
+
+        typed(&mut state, "quit now");
+        assert_eq!(
+            state.overview().and_then(OverviewState::entry),
+            Some("quit now")
+        );
+
+        state.handle_key(press(KeyCode::Backspace));
+        assert_eq!(
+            state.overview().and_then(OverviewState::entry),
+            Some("quit no")
+        );
+
+        let action = state.handle_key(press(KeyCode::Enter));
+        assert_eq!(
+            action,
+            Action::SendSessionText {
+                id: SessionId::new("background"),
+                text: "quit no".to_owned(),
+            }
+        );
+    }
+
+    /// Escape cancels the field and returns to the overview rather than
+    /// closing the overlay: leaving is one more Escape away, and a field that
+    /// took the whole overlay with it would lose the row the user was aiming
+    /// at.
+    #[test]
+    fn escape_cancels_the_field_and_keeps_the_overview_open() {
+        let mut state = overview_on_the_other_session();
+        state.handle_key(press(KeyCode::Char('m')));
+        typed(&mut state, "never mind");
+
+        assert_eq!(state.handle_key(press(KeyCode::Esc)), Action::Redraw);
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        assert!(state.overview().and_then(OverviewState::entry).is_none());
+    }
+
+    /// An empty line is refused rather than sent as a bare carriage return —
+    /// which a harness would read as a submitted empty prompt.
+    #[test]
+    fn an_empty_line_is_not_sent() {
+        let mut state = overview_on_the_other_session();
+        state.handle_key(press(KeyCode::Char('m')));
+
+        assert_eq!(state.handle_key(press(KeyCode::Enter)), Action::Redraw);
+        assert!(
+            state.status().unwrap_or_default().contains("empty"),
+            "got {:?}",
+            state.status()
+        );
+    }
+
+    /// Sessions are ordered by last activity, so any refresh can reorder
+    /// them. A cursor held as a bare index would then be pointing at a
+    /// different session — and the next `c` would interrupt the wrong
+    /// process, silently.
+    #[test]
+    fn a_reorder_carries_the_overview_cursor_with_its_session() {
+        let mut state = overview_on_the_other_session();
+
+        state.refresh(vec![
+            record("background", SessionLifecycle::Running),
+            record("presented", SessionLifecycle::Running),
+        ]);
+
+        assert_eq!(
+            state.overview_target().map(|r| r.id.as_str()),
+            Some("background"),
+            "the cursor must follow its session, not its row"
+        );
+        assert_eq!(
+            state.active_session().map(|r| r.id.as_str()),
+            Some("presented"),
+            "and so must the bar's own selection"
+        );
+    }
+
+    /// The cursor is a ring, like the session bar.
+    #[test]
+    fn the_overview_cursor_wraps_in_both_directions() {
+        let mut state = overview_on_the_other_session();
+        state.handle_key(press(KeyCode::Down));
+        assert_eq!(
+            state.overview_target().map(|r| r.id.as_str()),
+            Some("presented")
+        );
+        state.handle_key(press(KeyCode::Up));
+        assert_eq!(
+            state.overview_target().map(|r| r.id.as_str()),
+            Some("background")
+        );
+    }
+
+    /// Closing and reopening the overview puts the cursor back on the session
+    /// the bar is presenting, rather than resuming wherever it was left. A
+    /// stale cursor is how an interrupt reaches a session the user has
+    /// forgotten they pointed at.
+    #[test]
+    fn reopening_the_overview_starts_the_cursor_on_the_presented_session() {
+        let mut state = overview_on_the_other_session();
+        state.handle_key(press(KeyCode::Esc));
+        assert_eq!(state.overlay(), None);
+
+        state.handle_key(press(KeyCode::Char('o')));
+        assert_eq!(
+            state.overview_target().map(|r| r.id.as_str()),
+            Some("presented")
+        );
+    }
+
+    /// Tab still moves the session bar underneath the popup — the Overview is
+    /// a passive overlay and stayed one.
+    #[test]
+    fn ordinary_navigation_still_works_underneath_the_overview() {
+        let mut state = overview_on_the_other_session();
+        state.handle_key(press(KeyCode::Tab));
+        assert_eq!(
+            state.active_session().map(|r| r.id.as_str()),
+            Some("background")
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+    }
+
+    /// Line 3, at this layer: a headless session has no viewport, so there is
+    /// nothing to enter. Letting the user in would put their keystrokes into
+    /// whichever session held focus instead — the bar showing one session
+    /// while another receives the typing.
+    #[test]
+    fn a_headless_session_cannot_be_entered() {
+        let mut headless = record("hidden", SessionLifecycle::Running);
+        headless.presentation = SessionPresentation::Headless;
+        let mut state = ShellState::new("p", "/p", "0.1.0", vec![headless]);
+
+        for key in [press(KeyCode::Enter), press(KeyCode::Char('i'))] {
+            assert_eq!(state.handle_key(key), Action::Redraw);
+            assert_eq!(
+                state.mode(),
+                Mode::Control,
+                "a headless session must never take the keyboard"
+            );
+            let status = state.status().unwrap_or_default().to_owned();
+            assert!(status.contains("hidden"), "got {status:?}");
+            assert!(status.contains("headless"), "got {status:?}");
+        }
+    }
+
+    /// `N` is the headless twin of `n`, and `n` still starts an ordinary one.
+    #[test]
+    fn shift_n_starts_a_headless_session_and_n_still_starts_an_embedded_one() {
+        let mut state = ShellState::new("p", "/p", "0.1.0", vec![]);
+        assert_eq!(
+            state.handle_key(press(KeyCode::Char('n'))),
+            Action::StartSession
+        );
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT)),
+            Action::StartHeadlessSession
+        );
+    }
+
+    /// An empty project answers both overview keys with a note rather than
+    /// panicking on an index into nothing.
+    #[test]
+    fn an_empty_project_refuses_both_overview_actions() {
+        let mut state = ShellState::new("p", "/p", "0.1.0", vec![]);
+        state.handle_key(press(KeyCode::Char('o')));
+        assert!(state.overview_target().is_none());
+
+        for key in [
+            press(KeyCode::Char('c')),
+            press(KeyCode::Char('m')),
+            press(KeyCode::Down),
+        ] {
+            assert_eq!(state.handle_key(key), Action::Redraw);
+            assert!(state.status().is_some(), "{key:?} said nothing");
+        }
     }
 }
