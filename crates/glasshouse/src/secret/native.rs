@@ -71,6 +71,13 @@ pub const SERVICE: &str = "glasshouse";
 /// probing it reads nothing and — on macOS, where reading a missing generic
 /// password is answered from the keychain database without consulting an
 /// item's access control list — prompts for nothing.
+///
+/// Gated to the platforms that have a backend. Only the macOS `backend`
+/// module reads it, so on every other target it is dead code, and `-D
+/// warnings` makes dead code a hard error: this constant took Linux, Windows
+/// and lint red while macOS stayed green. **Anything here that only a
+/// platform-gated backend uses needs the same gate as that backend.**
+#[cfg(target_os = "macos")]
 const PROBE_ACCOUNT: &str = "glasshouse-availability-probe";
 
 /// The reference Glasshouse files the credential for `var` under.

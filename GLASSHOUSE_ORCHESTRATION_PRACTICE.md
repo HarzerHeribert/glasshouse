@@ -430,3 +430,37 @@ The same shape applies beyond a TUI — any assertion over truncated, paginated
 or elided output. This is the third distinct way this project has produced a
 test that passed for the wrong reason, after the vacuous poll loop and the
 mutation run against a cached binary.
+
+
+## 18. Compile the *other* platform's path locally, by flipping the cfg
+
+Phase 9E went red on Linux, Windows **and** lint while macOS stayed green, for
+one reason: a constant used only inside a `#[cfg(target_os = "macos")]` module
+was declared outside it, so on every other target it was dead code — and
+`-D warnings` makes dead code a hard error.
+
+macOS CI can never catch this. Neither can `cargo check`, run normally, on a
+Mac. But you do not need a Linux box:
+
+```sh
+cp crates/…/file.rs /tmp/file.orig
+python3 -c "import pathlib; p=pathlib.Path('crates/…/file.rs'); \
+  p.write_text(p.read_text().replace('target_os = \"macos\"','target_os = \"linux\"'))"
+cargo check --lib --all-features        # the NON-macOS path now compiles here
+cp /tmp/file.orig crates/…/file.rs      # restore, then `diff -q`
+```
+
+Flipping the gate excludes the macOS arms and includes the fallback ones, which
+is exactly the compilation the other platforms perform. It found the fix was
+complete in one run, with no second CI round-trip.
+
+`rustup target add x86_64-unknown-linux-gnu` was tried first and did **not**
+work here — the target installs but its `core`/`std` did not resolve, so every
+dependency failed with `can't find crate for core`. The cfg flip needs no
+toolchain at all.
+
+**The rule this earns:** anything used only by a platform-gated module needs the
+same gate as that module. When a batch adds a `cfg`-gated backend, compile the
+other side before pushing. This is the third local-reproduction recipe in this
+file, after CRLF (§15) and stale mutation binaries (§16) — all three exist
+because a green local run proved nothing about the platform that broke.
