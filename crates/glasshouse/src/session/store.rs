@@ -1558,7 +1558,20 @@ mod tests {
     /// legitimately has a column called `key`, and a credential column could
     /// just as easily be called `value`. Pinning the exact schema instead means
     /// any new column fails this test until someone updates the list, and that
-    /// is the moment to ask whether the new column can hold a secret.
+    /// is the moment to ask what the new column can hold.
+    ///
+    /// **What this test can and cannot prove.** It proves no column exists
+    /// whose *purpose* is to hold a credential, and that adding one is a
+    /// deliberate act somebody has to write down here. It does not prove a
+    /// credential can never be stored: `memories.subject` and `memories.body`
+    /// are free text, and free text can hold anything.
+    ///
+    /// That gap is real and is not closed by widening this list. It is closed
+    /// on the **producer** side — Phase 21's memory extractor must never be
+    /// fed, and must never emit, credential material, and that is an explicit
+    /// acceptance condition of Phase 21 rather than something inherited by
+    /// assumption. Recorded when migration 4 added the memory tables and the
+    /// worker adding them declined to certify otherwise.
     #[test]
     fn the_project_database_schema_has_nowhere_to_put_a_credential() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1588,6 +1601,29 @@ mod tests {
         assert_eq!(
             columns,
             vec![
+                "memories.id",
+                "memories.project_id",
+                "memories.kind",
+                "memories.authority",
+                "memories.status",
+                "memories.subject",
+                "memories.body",
+                "memories.source_session_id",
+                "memories.source_commit",
+                "memories.superseded_by",
+                "memories.created_at",
+                "memories.updated_at",
+                "memories_fts.subject",
+                "memories_fts.body",
+                "memories_fts_config.k",
+                "memories_fts_config.v",
+                "memories_fts_data.id",
+                "memories_fts_data.block",
+                "memories_fts_docsize.id",
+                "memories_fts_docsize.sz",
+                "memories_fts_idx.segid",
+                "memories_fts_idx.term",
+                "memories_fts_idx.pgno",
                 "project_metadata.key",
                 "project_metadata.value",
                 "schema_migrations.version",
@@ -1635,7 +1671,17 @@ mod tests {
             .collect();
         assert_eq!(
             tables,
-            vec!["project_metadata", "schema_migrations", "sessions"],
+            vec![
+                "memories",
+                "memories_fts",
+                "memories_fts_config",
+                "memories_fts_data",
+                "memories_fts_docsize",
+                "memories_fts_idx",
+                "project_metadata",
+                "schema_migrations",
+                "sessions",
+            ],
             "no table defining launch profiles may exist in the project database"
         );
 
@@ -1689,14 +1735,23 @@ mod tests {
             .set_lifecycle(&record.id, SessionLifecycle::Stopped)
             .unwrap();
 
-        // Roll the database back to what version 2 left behind: drop the two
-        // columns migration 3 adds, and forget that migration ran.
+        // Roll the database back to what version 2 left behind: drop what
+        // migrations 3 and 4 added, and forget that they ran.
+        //
+        // `DELETE ... WHERE version = 3` is what this said while 3 was the
+        // highest migration, and it stopped working the moment 4 existed. The
+        // runner resumes from `MAX(version)`, so deleting only row 3 leaves a
+        // *hole* — max is still 4, nothing re-applies, and the test failed
+        // later and confusingly with "no such column: launch_profile". Roll
+        // back a contiguous range, or do not roll back at all.
         fixture
             .conn
             .execute_batch(
                 "ALTER TABLE sessions DROP COLUMN launch_profile;
                  ALTER TABLE sessions DROP COLUMN backend_resource;
-                 DELETE FROM schema_migrations WHERE version = 3;",
+                 DROP TABLE IF EXISTS memories_fts;
+                 DROP TABLE IF EXISTS memories;
+                 DELETE FROM schema_migrations WHERE version >= 3;",
             )
             .unwrap();
 
@@ -1706,7 +1761,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 3, "the launch must have applied migration 3");
+        assert_eq!(version, 4, "the launch must have applied migration 4");
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
         let migrated = migrated_store
@@ -1865,13 +1920,19 @@ mod tests {
         let project_id = fixture.project_id().to_owned();
 
         // Wind the database back to what version 1 left behind.
+        //
+        // The deleted range must stay contiguous to the newest migration: the
+        // runner resumes from `MAX(version)`, so leaving a higher row behind
+        // makes it believe there is nothing to do. See the sibling test.
         fixture
             .conn
             .execute_batch(
                 "DROP TRIGGER sessions_reject_foreign_project_insert;
                  DROP TRIGGER sessions_reject_foreign_project_update;
                  DROP TABLE sessions;
-                 DELETE FROM schema_migrations WHERE version IN (2, 3);",
+                 DROP TABLE IF EXISTS memories_fts;
+                 DROP TABLE IF EXISTS memories;
+                 DELETE FROM schema_migrations WHERE version >= 2;",
             )
             .unwrap();
         drop(fixture.reopen());
@@ -1883,8 +1944,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 3,
-            "the launch must have applied migrations 2 and 3"
+            version, 4,
+            "the launch must have applied migrations 2, 3 and 4"
         );
 
         let store = SessionStore::new(&reopened).unwrap();

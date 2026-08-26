@@ -16,7 +16,7 @@ use glasshouse::session::{
     SessionPresentation, SessionRuntime,
 };
 use glasshouse::shim::{self, ShimRequest};
-use glasshouse::{Cli, Command, Runtime, logging, shutdown};
+use glasshouse::{Cli, Command, MemoryCommand, Runtime, logging, shutdown};
 
 use clap::Parser;
 
@@ -107,6 +107,19 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             harness_args,
         }) => {
             return resume_session(&runtime, session, harness_args);
+        }
+        Some(Command::Memory {
+            command:
+                MemoryCommand::Search {
+                    query,
+                    history,
+                    limit,
+                },
+        }) => {
+            print!(
+                "{}",
+                memory_report(&runtime, &query.join(" "), *history, *limit)?
+            );
         }
         Some(Command::Hook { session, event }) => {
             report_hook(&runtime, session, event);
@@ -799,6 +812,57 @@ fn note_lifecycle(
 ///
 /// Reads Glasshouse's own records rather than any harness's session files, so
 /// the list is the same whether or not a harness kept its own history.
+/// Render a memory search the way `session_report` renders sessions: the
+/// provenance is part of the answer, because a memory a reader cannot trace
+/// back to a session or a commit is one they have to take on trust.
+fn memory_report(
+    runtime: &Runtime,
+    query: &str,
+    history: bool,
+    limit: usize,
+) -> anyhow::Result<String> {
+    use std::fmt::Write as _;
+
+    use glasshouse::memory::ProjectMemory;
+    use glasshouse::memory::search::SearchScope;
+
+    let scope = if history {
+        SearchScope::Historical
+    } else {
+        SearchScope::Current
+    };
+
+    let memory = ProjectMemory::open(runtime)?;
+    let records = memory.store().search(query, scope, limit)?;
+
+    let mut out = String::new();
+    if records.is_empty() {
+        // Say which of the two questions was asked. "No memories" after a
+        // default search would otherwise read as "this project remembers
+        // nothing", when the history was simply not looked at.
+        if history {
+            writeln!(out, "No memories match {query:?}, including history.")?;
+        } else {
+            writeln!(
+                out,
+                "No current memories match {query:?}. Use --history to include \
+                 superseded and resolved ones."
+            )?;
+        }
+        return Ok(out);
+    }
+
+    for record in &records {
+        let subject = record.subject.as_deref().unwrap_or("(no subject)");
+        writeln!(out, "{}  {}  {subject}", record.kind, record.status)?;
+        writeln!(out, "    {}", record.body)?;
+        let session = record.source_session_id.as_deref().unwrap_or("unknown");
+        let commit = record.source_commit.as_deref().unwrap_or("unknown");
+        writeln!(out, "    from session {session}, commit {commit}")?;
+    }
+    Ok(out)
+}
+
 fn session_report(runtime: &Runtime) -> anyhow::Result<String> {
     use std::fmt::Write as _;
 

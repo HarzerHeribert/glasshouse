@@ -8,10 +8,12 @@
 //! from a caller.
 //!
 //! The module deliberately stays small: a deterministic migration mechanism
-//! (`schema_migrations`) plus the initial `project_metadata` table that binds
-//! the database to one project identifier. No sessions, credentials, WAL
-//! configuration, full-text search, or async wrappers — later phases add those
-//! on this foundation when they need them.
+//! (`schema_migrations`), the `project_metadata` table that binds the database
+//! to one project identifier, and the tables later phases have needed —
+//! `sessions` and, from version 4, `memories` with its FTS5 index. It holds no
+//! credentials, no WAL configuration, and no async wrappers; what a table
+//! *means* lives with the module that owns it ([`crate::session::store`],
+//! [`crate::memory`]), and only the schema itself lives here.
 //!
 //! Safety properties enforced on every open:
 //!
@@ -46,9 +48,10 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 ///
 /// Version 1 is the empty-but-initialized schema plus the `project_metadata`
 /// table. Version 2 adds `sessions`. Version 3 adds `sessions.launch_profile`
-/// and `sessions.backend_resource`. Later migrations are appended to
-/// [`MIGRATIONS`], and this constant moves with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 3;
+/// and `sessions.backend_resource`. Version 4 adds `memories` and its FTS5
+/// index. Later migrations are appended to [`MIGRATIONS`], and this constant
+/// moves with them.
+const SUPPORTED_SCHEMA_VERSION: i64 = 4;
 
 /// Migration `index + 1` upgrades a database from schema version `index` to
 /// version `index + 1`. Migrations run in order inside one transaction, so a
@@ -153,6 +156,182 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
     "
     ALTER TABLE sessions ADD COLUMN launch_profile TEXT;
     ALTER TABLE sessions ADD COLUMN backend_resource TEXT;
+    ",
+    // 4: durable project memory (Phase 20), its lifecycle (Phase 22) and the
+    // full-text index it is searched through (Phase 23).
+    //
+    // # Why `kind` and `authority` are two columns
+    //
+    // They answer different questions and Phase 21A depends on the answer to
+    // the second. `kind` is *what sort of thing was remembered* — Phase 20's
+    // six kinds. `authority` is *how binding it is* — Phase 21A's seven
+    // classes. The two lists overlap in spelling (`decision`, `constraint`
+    // appear in both) and that is precisely why they must not be one column: a
+    // `finding` can be an invariant, and a `decision` can have decayed to
+    // `historical`. Folding them together would make "this finding is binding"
+    // unrepresentable and would force Phase 21A to migrate the table.
+    //
+    // `authority` ships here, unused by any classifier yet, so that Phase 21A
+    // adds *classification* rather than a migration — the packet's explicit
+    // requirement. It is nullable on purpose: NULL means "no authority has
+    // been assigned", which is a different fact from every one of the seven
+    // classes, exactly as `sessions.launch_profile`'s NULL is a different fact
+    // from `'native'`. Retrieval must therefore treat NULL conservatively and
+    // never as an invariant; a sentinel default would have erased the
+    // distinction and quietly promoted unclassified text to some class.
+    //
+    // # Why `status` carries a seventh value
+    //
+    // Phase 20 requires "at least" active, superseded, rejected, resolved,
+    // needs_review and invalidated. Phase 22 requires "a conflict state for
+    // memories whose current truth cannot be resolved automatically", which is
+    // a lifecycle state and not an authority, so `conflicted` joins the same
+    // column rather than becoming a second flag two writers could disagree
+    // about.
+    //
+    // # Why this table has a rowid and `sessions` does not
+    //
+    // FTS5's external-content mode joins on `content_rowid`, so `memories`
+    // cannot be `WITHOUT ROWID`. That is the whole reason; nothing else about
+    // the table wants an implicit key.
+    //
+    // # Two triggers for project isolation, for the reason migration 2 gives
+    //
+    // A query can forget to filter by `project_id`; a `BEFORE INSERT` /
+    // `BEFORE UPDATE` guard cannot be forgotten. `IS NOT` rather than `<>` so
+    // that a missing binding row aborts instead of evaluating to NULL and
+    // letting the write through. The guard fails closed.
+    //
+    // # Two more for supersession, instead of a foreign key
+    //
+    // `PRAGMA foreign_keys` is off by default in SQLite, so a `REFERENCES`
+    // clause here would be decoration unless every connection remembered to
+    // turn it on. A trigger is enforced by the file itself no matter who opens
+    // it, and it is already this schema's idiom for exactly this reason.
+    //
+    // The two `CHECK`s beside them are the other half of Phase 22's
+    // "mark superseded memories as non-current": a row that names a
+    // superseder cannot also claim to be active, and nothing may supersede
+    // itself. A memory may still be `superseded` with `superseded_by` NULL —
+    // the map asks for the identifier only "when a direct supersession
+    // relationship is known".
+    "
+    CREATE TABLE memories (
+        id                TEXT PRIMARY KEY,
+        project_id        TEXT NOT NULL,
+        kind              TEXT NOT NULL
+            CHECK (kind IN ('decision', 'constraint', 'feature',
+                            'finding', 'failed_attempt', 'todo')),
+        authority         TEXT
+            CHECK (authority IS NULL OR authority IN
+                   ('invariant', 'constraint', 'decision', 'preference',
+                    'hypothesis', 'idea', 'historical')),
+        status            TEXT NOT NULL
+            CHECK (status IN ('active', 'superseded', 'rejected', 'resolved',
+                              'needs_review', 'invalidated', 'conflicted')),
+        subject           TEXT,
+        body              TEXT NOT NULL,
+        source_session_id TEXT,
+        source_commit     TEXT,
+        superseded_by     TEXT,
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL,
+
+        CHECK (superseded_by IS NULL OR superseded_by <> id),
+        CHECK (superseded_by IS NULL OR status = 'superseded')
+    );
+
+    -- Normal retrieval is active, most recently updated first; the history
+    -- search is the same index read with a different status.
+    CREATE INDEX memories_by_status_updated
+        ON memories (status, updated_at DESC);
+
+    -- The project snapshot groups by kind within the active status.
+    CREATE INDEX memories_by_kind_status
+        ON memories (kind, status);
+
+    -- Walking a supersession chain forwards, and finding what a given memory
+    -- replaced. Partial, because most memories supersede nothing.
+    CREATE INDEX memories_by_supersession
+        ON memories (superseded_by)
+        WHERE superseded_by IS NOT NULL;
+
+    CREATE TRIGGER memories_reject_foreign_project_insert
+    BEFORE INSERT ON memories
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'memory belongs to a different project');
+    END;
+
+    CREATE TRIGGER memories_reject_foreign_project_update
+    BEFORE UPDATE OF project_id ON memories
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'memory belongs to a different project');
+    END;
+
+    CREATE TRIGGER memories_reject_unknown_supersession_insert
+    BEFORE INSERT ON memories
+    FOR EACH ROW
+    WHEN NEW.superseded_by IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM memories WHERE id = NEW.superseded_by)
+    BEGIN
+        SELECT RAISE(ABORT, 'superseding memory does not exist');
+    END;
+
+    CREATE TRIGGER memories_reject_unknown_supersession_update
+    BEFORE UPDATE OF superseded_by ON memories
+    FOR EACH ROW
+    WHEN NEW.superseded_by IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM memories WHERE id = NEW.superseded_by)
+    BEGIN
+        SELECT RAISE(ABORT, 'superseding memory does not exist');
+    END;
+
+    -- Phase 23's index. External content, so the text lives once in
+    -- `memories` and the index holds only what BM25 needs; the three triggers
+    -- below are what keeps the two in step, and are the documented way to
+    -- drive an external-content FTS5 table.
+    --
+    -- `unicode61` with `remove_diacritics 2` is named rather than left to the
+    -- default so the tokenizer cannot change under the index when the bundled
+    -- SQLite moves.
+    CREATE VIRTUAL TABLE memories_fts USING fts5(
+        subject,
+        body,
+        content = 'memories',
+        content_rowid = 'rowid',
+        tokenize = 'unicode61 remove_diacritics 2'
+    );
+
+    CREATE TRIGGER memories_fts_after_insert
+    AFTER INSERT ON memories
+    BEGIN
+        INSERT INTO memories_fts (rowid, subject, body)
+        VALUES (NEW.rowid, NEW.subject, NEW.body);
+    END;
+
+    CREATE TRIGGER memories_fts_after_delete
+    AFTER DELETE ON memories
+    BEGIN
+        INSERT INTO memories_fts (memories_fts, rowid, subject, body)
+        VALUES ('delete', OLD.rowid, OLD.subject, OLD.body);
+    END;
+
+    CREATE TRIGGER memories_fts_after_update
+    AFTER UPDATE ON memories
+    BEGIN
+        INSERT INTO memories_fts (memories_fts, rowid, subject, body)
+        VALUES ('delete', OLD.rowid, OLD.subject, OLD.body);
+        INSERT INTO memories_fts (rowid, subject, body)
+        VALUES (NEW.rowid, NEW.subject, NEW.body);
+    END;
     ",
 ];
 

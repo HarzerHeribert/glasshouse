@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 279 / 1267 mandatory capabilities (22%)
+`█████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 310 / 1267 mandatory capabilities (24%)
 
 <details>
-<summary>Per-phase breakdown (11 of 103 phases complete)</summary>
+<summary>Per-phase breakdown (12 of 103 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -61,7 +61,7 @@ the authoritative specification and tracks what is done.
 | Phase 17 — cmux optional integration | 0/10 |
 | Phase 18 — Raw event recording | 0/10 |
 | Phase 19 — Portable session checkpoints | 0/14 |
-| Phase 20 — Minimal durable project memory | 0/18 |
+| Phase 20 — Minimal durable project memory | 16/18 |
 | Phase 21 — Memory extraction | 0/13 |
 | Phase 21A — Memory authority classes | 0/12 |
 | Phase 21B — Decision provenance and assumptions | 0/11 |
@@ -74,8 +74,8 @@ the authoritative specification and tracks what is done.
 | Phase 21I — Production-aware implementation checks | 0/11 |
 | Phase 21J — Implementation review checklist | 0/9 |
 | Phase 21K — Assumption-aware implementation guardrails | 0/43 |
-| Phase 22 — Memory lifecycle and supersession | 0/9 |
-| Phase 23 — Memory full-text search | 0/7 |
+| Phase 22 — Memory lifecycle and supersession | 8/9 |
+| Phase 23 — Memory full-text search | 7/7 ✅ |
 | Phase 24 — Memory reranking | 0/6 |
 | Phase 25 — Project knowledge view | 0/10 |
 | Phase 26 — Memory query for agents | 0/6 |

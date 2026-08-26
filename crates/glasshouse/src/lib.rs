@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub use cli::{Cli, Command};
+pub use cli::{Cli, Command, MemoryCommand};
 pub use paths::RuntimePaths;
 pub use project::{Project, ProjectId, ProjectScope, RootSource};
 

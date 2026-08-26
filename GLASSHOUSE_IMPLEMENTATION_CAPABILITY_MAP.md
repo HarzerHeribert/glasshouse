@@ -784,22 +784,22 @@ Fixed architectural requirements
 - Durable memory is project-scoped, minimal, provenance-aware, and stored locally in SQLite for V1.
 - It is not a complete transcript archive and must not treat every extracted statement as an enduring requirement.
 
-☐ Create a memory table in the project-specific SQLite database.
-☐ Support the memory kind decision.
-☐ Support the memory kind constraint.
-☐ Support the memory kind feature.
-☐ Support the memory kind finding.
-☐ Support the memory kind failed_attempt.
-☐ Support the memory kind todo.
-☐ Store a concise subject for each memory when available.
-☐ Store a concise durable body for each memory.
-☐ Store the source session ID for each extracted memory when available.
-☐ Store the source Git commit for each extracted memory when available.
-☐ Store creation and update timestamps for each memory.
-☐ Store a lifecycle status for each memory.
-☐ Support at least the statuses active, superseded, rejected, resolved, needs_review, and invalidated.
-☐ Do not store raw conversation filler as project memory.
-☐ Do not store temporary step-by-step plans as durable project memory unless they become an accepted project constraint or decision.
+☑ Create a memory table in the project-specific SQLite database.
+☑ Support the memory kind decision.
+☑ Support the memory kind constraint.
+☑ Support the memory kind feature.
+☑ Support the memory kind finding.
+☑ Support the memory kind failed_attempt.
+☑ Support the memory kind todo.
+☑ Store a concise subject for each memory when available.
+☑ Store a concise durable body for each memory.
+☑ Store the source session ID for each extracted memory when available.
+☑ Store the source Git commit for each extracted memory when available.
+☑ Store creation and update timestamps for each memory.
+☑ Store a lifecycle status for each memory.
+☑ Support at least the statuses active, superseded, rejected, resolved, needs_review, and invalidated.
+☑ Do not store raw conversation filler as project memory.
+☑ Do not store temporary step-by-step plans as durable project memory unless they become an accepted project constraint or decision.
 ☐ Do not store obvious source-code facts when rereading the source is cheaper and more reliable than maintaining the memory.
 ☐ Prefer storing information whose rediscovery would require significant exploration or reasoning.
 
@@ -1029,15 +1029,15 @@ User and orchestrator visibility
 
 Phase 22 — Memory lifecycle and supersession
 
-☐ Allow a new memory to supersede an older memory.
-☐ Mark superseded memories as non-current without deleting their history.
-☐ Prefer active current memories during normal retrieval.
-☐ Allow rejected decisions and failed approaches to remain searchable as historical knowledge.
-☐ Allow resolved todos to remain queryable without presenting them as open work.
-☐ Record the superseding memory identifier when a direct supersession relationship is known.
+☑ Allow a new memory to supersede an older memory.
+☑ Mark superseded memories as non-current without deleting their history.
+☑ Prefer active current memories during normal retrieval.
+☑ Allow rejected decisions and failed approaches to remain searchable as historical knowledge.
+☑ Allow resolved todos to remain queryable without presenting them as open work.
+☑ Record the superseding memory identifier when a direct supersession relationship is known.
 ☐ Avoid returning mutually contradictory current memories without flagging the conflict.
-☐ Add a conflict state for memories whose current truth cannot be resolved automatically.
-☐ Require human or stronger-agent review before automatically resolving ambiguous high-impact memory conflicts.
+☑ Add a conflict state for memories whose current truth cannot be resolved automatically.
+☑ Require human or stronger-agent review before automatically resolving ambiguous high-impact memory conflicts.
 
 Phase 23 — Memory full-text search
 
@@ -1046,13 +1046,13 @@ Fixed architectural requirements
 - Initial retrieval uses SQLite full-text search over project-local memory.
 - V1 must not introduce a vector database merely as speculative infrastructure.
 
-☐ Add an SQLite FTS5 index over memory subjects and bodies.
-☐ Add a Glasshouse command for searching project memory with free-form text.
-☐ Rank initial memory results with FTS/BM25-style lexical relevance.
-☐ Default memory search to current active knowledge while allowing historical search explicitly.
-☐ Return source session and commit provenance alongside search results when available.
-☐ Keep memory retrieval strictly inside the current project’s SQLite database.
-☐ Do not introduce a vector database until lexical retrieval is shown to be insufficient in real usage.
+☑ Add an SQLite FTS5 index over memory subjects and bodies.
+☑ Add a Glasshouse command for searching project memory with free-form text.
+☑ Rank initial memory results with FTS/BM25-style lexical relevance.
+☑ Default memory search to current active knowledge while allowing historical search explicitly.
+☑ Return source session and commit provenance alongside search results when available.
+☑ Keep memory retrieval strictly inside the current project’s SQLite database.
+☑ Do not introduce a vector database until lexical retrieval is shown to be insufficient in real usage.
 
 Phase 24 — Memory reranking
 

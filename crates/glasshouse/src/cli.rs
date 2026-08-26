@@ -80,6 +80,15 @@ pub enum Command {
     /// from whatever session files the harness writes for itself, so the list
     /// is the same whether or not a harness kept its own history.
     Sessions,
+    /// Search this project's durable memory.
+    ///
+    /// Memory is project-scoped: this reads the database belonging to the
+    /// project you are standing in, and there is no way to ask it for
+    /// another project's knowledge.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
     /// Report a harness lifecycle event. Run by harnesses, not by people.
     ///
     /// Glasshouse installs hooks that invoke this command, so a session's
@@ -515,4 +524,34 @@ mod tests {
                 .is_err()
         );
     }
+}
+
+/// What to do with this project's durable memory.
+///
+/// A subcommand rather than a bare `glasshouse memory <query>` because Phase
+/// 48 names the command `glasshouse memory search <query>`, and because
+/// memory will grow operations that are not searches.
+#[derive(Debug, Subcommand)]
+pub enum MemoryCommand {
+    /// Find memories matching free-form text.
+    ///
+    /// The text is not a query language: it is matched against every
+    /// memory's subject and body, best match first.
+    Search {
+        /// Free-form text to look for.
+        query: Vec<String>,
+
+        /// Include superseded, rejected, resolved, invalidated,
+        /// needs-review and conflicted memories.
+        ///
+        /// Off by default: current project knowledge is what a search
+        /// normally means, and history is an explicit ask.
+        #[arg(long)]
+        history: bool,
+
+        /// Most results to print.
+        #[arg(long, value_name = "N",
+              default_value_t = crate::memory::search::DEFAULT_SEARCH_LIMIT)]
+        limit: usize,
+    },
 }
