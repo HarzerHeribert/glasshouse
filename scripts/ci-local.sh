@@ -34,12 +34,13 @@
 #   scripts/ci-local.sh --linux      # container jobs only
 #   scripts/ci-local.sh --windows    # add the compile-only cross check
 #   scripts/ci-local.sh --flake      # measure the pty flake rate (FLAKE_RUNS=10)
+#   scripts/ci-local.sh --windows-vm # real Windows, via GLASSHOUSE_WINDOWS_HOST
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO" || exit 1
 
-DO_MAC=0; DO_LINUX=0; DO_WIN=0; DO_FLAKE=0
+DO_MAC=0; DO_LINUX=0; DO_WIN=0; DO_FLAKE=0; DO_WINVM=0
 if [ $# -eq 0 ]; then DO_MAC=1; DO_LINUX=1; fi
 for a in "$@"; do
   case "$a" in
@@ -47,6 +48,7 @@ for a in "$@"; do
     --linux)   DO_LINUX=1 ;;
     --windows) DO_WIN=1 ;;
     --flake)   DO_FLAKE=1 ;;
+    --windows-vm) DO_WINVM=1 ;;
     --all)     DO_MAC=1; DO_LINUX=1; DO_WIN=1 ;;
     *) echo "unknown option: $a" >&2; exit 2 ;;
   esac
@@ -155,6 +157,46 @@ if [ "$DO_LINUX" -eq 1 ]; then
        cargo clippy --locked --workspace --all-targets -- -D warnings'
     step "msrv (ubuntu) $MSRV" run_linux \
       "rustup toolchain install $MSRV --profile minimal && scripts/msrv-check.sh"
+  fi
+fi
+
+# --- Windows, for real, when a VM is available -------------------------------
+#
+# The one gap nothing local could close: Windows containers need a Windows
+# kernel, and this host is linux/aarch64. A Windows VM is the only local route,
+# and it is the only thing that can close Phase 4's interrupt box — every
+# interrupt test in the suite is `#[cfg(unix)]`, so a green `test
+# (windows-latest)` has always been the absence of evidence wearing the same
+# colour.
+#
+# Set GLASSHOUSE_WINDOWS_HOST to an ssh destination for the VM and this becomes
+# a real gate job. Unset, it says so and skips — it never pretends.
+#
+#   GLASSHOUSE_WINDOWS_HOST=eneas@win-vm scripts/ci-local.sh --windows-vm
+#
+# The VM needs: rustup with the msvc toolchain, git, and a checkout path given
+# by GLASSHOUSE_WINDOWS_PATH (default C:/glasshouse). The tree is pushed with
+# rsync-over-ssh rather than shared, for the same reason the Linux leg copies
+# instead of mounting: a shared source tree is a wrong-green waiting to happen.
+if [ "$DO_WINVM" -eq 1 ]; then
+  if [ -z "${GLASSHOUSE_WINDOWS_HOST:-}" ]; then
+    RESULTS+=("SKIP  windows VM — set GLASSHOUSE_WINDOWS_HOST=user@host")
+  else
+    WINPATH="${GLASSHOUSE_WINDOWS_PATH:-C:/glasshouse}"
+    win_run() {
+      # shellcheck disable=SC2029
+      ssh "$GLASSHOUSE_WINDOWS_HOST" "cd $WINPATH && $1"
+    }
+    step "windows VM / sync" sh -c \
+      "rsync -az --delete --exclude target --exclude .git ./ '$GLASSHOUSE_WINDOWS_HOST:$WINPATH/'"
+    step "windows VM / build" win_run \
+      'set RUSTFLAGS=-D warnings && cargo build --locked --workspace --all-targets'
+    step "windows VM / test" win_run \
+      'set RUSTFLAGS=-D warnings && cargo test --locked --workspace'
+    # The reason the VM exists. These are `#[cfg(windows)]` paths that have
+    # never executed anywhere: ConPTY's input mode, and interrupt delivery.
+    step "windows VM / pty + interrupt" win_run \
+      'cargo test --locked -p glasshouse --test pty_smoke -- --nocapture'
   fi
 fi
 

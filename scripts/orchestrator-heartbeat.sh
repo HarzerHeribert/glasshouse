@@ -66,6 +66,19 @@ workers_running() {
 
 MAP="$REPO/docs/product/capability-map.md"
 
+# The orchestrator's own context, as a percentage, or "unknown".
+#
+# The statusline writes this ~1/s; it is the only shell-readable source, because
+# Claude Code pushes the numbers to the statusline rather than to any API. When
+# it is absent the heartbeat still nudges — it just cannot advise on cost.
+context_pct() {
+  local d="${TMPDIR:-/tmp}/ccsl-data-${CCSL_SESSID:-unknown}"
+  [ -r "$d" ] || { echo unknown; return; }
+  local v
+  v="$(sed -n 's/^CTX_PCT=//p' "$d" | head -1)"
+  case "$v" in ''|*[!0-9]*) echo unknown;; *) echo "$v";; esac
+}
+
 # Returns the open-box count, or the string "blind" when the map cannot be read.
 #
 # **`|| echo 0` was here and it was a real defect.** When the capability map
@@ -121,7 +134,16 @@ while true; do
   fi
 
   if [ "$nudged" -eq 0 ]; then
-    echo "ORCHESTRATOR IDLE — nothing running, no worker waiting, ${remaining} boxes still open. Pick up the next package, or touch .agent-runtime/stopped if this is deliberate."
+    # Waking a large context is expensive, and the nudge that causes it should
+    # say so. At 700k tokens the correct move is to hand off to a fresh
+    # orchestrator, not to start a package — a successor with room does the
+    # work more cheaply than a predecessor without.
+    ctx="$(context_pct)"
+    if [ "$ctx" != "unknown" ] && [ "$ctx" -ge 55 ]; then
+      echo "ORCHESTRATOR IDLE at ${ctx}% context, ${remaining} boxes open. Do NOT start a package here — waking a context this large is expensive. Write the checkpoint and hand off to a fresh session: .agent-runtime/self-continue.sh context"
+    else
+      echo "ORCHESTRATOR IDLE — nothing running, no worker waiting, ${remaining} boxes still open. Pick up the next package, or touch .agent-runtime/stopped if this is deliberate."
+    fi
     nudged=1
     # Back off hard after the first nudge: repeating every 8 minutes would be
     # noise, and the point is to restart a stopped loop, not to hector.

@@ -1867,3 +1867,59 @@ script it started with. Changing a script under a live watch does not update the
 watch. After a change that moves anything a monitor reads, **stop and re-arm
 every monitor** — the file on disk being correct is not the same as the running
 watch being correct.
+
+---
+
+## §55 — a wake-up has a price, and the watchdog should quote it
+
+The heartbeat woke the orchestrator at **700,000 tokens of context** to say
+"pick up the next package". That wake was expensive and the advice was wrong:
+at that size the correct move is to write the checkpoint and hand off, because a
+successor with room does the work more cheaply than a predecessor without.
+
+**The watchdog knew nothing about cost.** It asked three questions — is the pane
+idle, is a worker running, does work remain — and none of them is *what does
+acting on this cost*. So it now reads `CTX_PCT` from the statusline feed and,
+above 55%, says **hand off** rather than **pick up**:
+
+    ORCHESTRATOR IDLE at 71% context, 1091 boxes open. Do NOT start a package
+    here — waking a context this large is expensive. Write the checkpoint and
+    hand off: .agent-runtime/self-continue.sh context
+
+When the feed is absent it still nudges; it just cannot advise, and says
+`unknown` rather than guessing — §54's rule about blindness applied to a second
+measurement.
+
+**The general form.** A signal that prompts an action should carry the cost of
+that action, or it will prompt the expensive version of it at the worst moment.
+The 75% context watch already existed and would have fired *eventually*; the
+heartbeat got there first with worse advice, because the two watches were not
+aware of each other.
+
+---
+
+## §56 — Windows is arriving, and the gate has a seat ready for it
+
+Every interrupt test in this suite is `#[cfg(unix)]`. Windows compiles them and
+runs none, so a green `test (windows-latest)` has always been the absence of
+evidence wearing the same colour — and Phase 4's interrupt box can be closed by
+nothing else.
+
+Windows containers need a Windows kernel and this host is `linux/aarch64`, so no
+amount of local rigour buys it. **A Windows VM does**, and one is being set up.
+
+`ci-local.sh --windows-vm` is ready for it now, so nothing has to be designed
+when the machine appears:
+
+    GLASSHOUSE_WINDOWS_HOST=user@win-vm scripts/ci-local.sh --windows-vm
+
+Unset, it **skips and says so** rather than passing — a leg that reports green
+without running is the failure this project keeps finding in its own checks. The
+tree is pushed with `rsync`, not shared: the Linux leg copies instead of mounting
+for the same reason, and a shared source tree is a wrong-green waiting to happen.
+
+**Expect a batch of failures on the first real run, and expect that to be good
+news.** Windows-only code paths have never executed — ConPTY's input mode among
+them. Reconcile them in one sweep rather than one at a time, and do not let a
+first red discourage the work: it is the first time this project will have
+learned anything true about Windows since the one defect that runner caught.
