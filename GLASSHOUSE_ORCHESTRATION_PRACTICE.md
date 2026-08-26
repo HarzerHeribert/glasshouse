@@ -976,3 +976,34 @@ This has not bitten yet. It is written down now because the conditions for it
 existed on 2026-08-26 (two Opus leads and four subcontractors on one account,
 the window at 87% with 43 minutes to reset) and the cost of finding out the
 hard way is a silently wrong integration.
+
+## §30 — the self-handoff lock was spent by a different session, and nobody would have noticed
+
+`self-continue.sh` is the mechanism that keeps an orchestrator from dying
+mid-batch: two Monitors watch context and the five-hour window, and on trigger
+it snapshots the tree and opens a fresh pane. A lock file makes it fire once.
+
+On 2026-08-26 the five-hour watch fired correctly at 92% and the script did
+**nothing**, reporting `already relaunched; doing nothing`. The lock had been
+written at 07:55 that morning by a **different session**, on a **different
+trigger** (`context`, not `ratelimit`). One shared `.relaunch.lock` meant the
+second session of the day inherited a safety net that had already been spent,
+and the watch then exited — so there was no net at all, at 92%, with two Opus
+leads and four subcontractors on the same account.
+
+**A fire-once lock must be scoped to the thing it fires for.** It is now
+`.relaunch-<session>-<mode>.lock`.
+
+A second bug was hiding behind the first. `ratelimit` mode reads
+`${TMPDIR}/ccsl-data-${CCSL_SESSID}` to learn when the window resets, and
+nothing exported `CCSL_SESSID` into the Monitor's environment. The path
+resolved to a file that does not exist, the reset time read as `0`, and the
+sleep was skipped — so had the lock not stopped it, it would have relaunched
+**straight back into the same spent window**. It now refuses to relaunch blind
+and says why, and the Monitor commands export the session id.
+
+Both bugs are the same shape as the MSRV gate in §20 and the Codex hook in §22:
+**a mechanism that had never once been observed doing its job.** The context
+trigger had fired successfully that morning, which is precisely why the lock
+existed to break the rate-limit trigger. Ask of any safety net: *what has it
+actually been seen to do, and under which trigger?*
