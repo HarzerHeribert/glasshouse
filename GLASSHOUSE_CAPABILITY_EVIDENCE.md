@@ -5401,3 +5401,174 @@ Blocked two phases deep:
   Claude Code's observed catalogue does not list them at all. Phase 7 line 307
   and Phase 8 line 324 are the boxes that unblock it.
   `ExtractionTrigger::BeforeCompaction` exists and waits.
+
+---
+
+### Phase 9H — sticky gateway routing, 13 of 14 (lines 505–518)
+
+Contract: Given a gateway-backed interactive session, Glasshouse assigns it one
+provider and model at start, keeps it there across normal turns, moves it only
+on a real provider failure to a backend that can actually serve the harness,
+and says so when it does.
+
+State: COMPLETE (line 511 excepted — see below)
+
+Production evidence:
+- `crates/glasshouse/src/routing/interactive.rs` — the policy, a pure function
+  of values with no clock and no network. `crates/glasshouse/src/gateway/session.rs`
+  feeds every finished exchange back into it.
+- **The assignment is made on the production launch path**, in
+  `profile::apply_gateway`, which `main.rs::launch_session` reaches through
+  `resolve_with_gateway`. `main.rs` was not modified.
+- **Verified against the shipped binary**, driven in a real terminal (the
+  binary refuses a piped stdin, correctly, so a cmux pane is the only way):
+  `glasshouse run claude-code --profile free-gateway` recorded
+  `gateway backend: nvidia/nemotron-3-ultra-550b-a55b:free on openrouter
+  (openrouter/OPENROUTER_API_KEY over anthropic-messages)` in its launch
+  mechanisms, then forwarded two real exchanges to OpenRouter over Anthropic
+  Messages, and the provider's status reached the harness byte for byte.
+- No credential reached the log, checked mechanically rather than by eye:
+  `grep -F "$OPENROUTER_API_KEY" gateway.log` found nothing, and no `sk-or-`
+  prefix appeared anywhere in it.
+
+Regression evidence — 25 mutations, 25 killed, three of them only after the
+survivor forced a fix. The load-bearing ones:
+- M2 the pin no longer stops failover → `a_pinned_session_does_not_fail_over_even_when_a_perfect_candidate_exists`
+  and `gateway::conformance::a_pinned_session_stays_on_its_failing_provider_and_never_reaches_the_other_one` both FAILED.
+- M3/M4 failover ignores protocol / tool semantics → `failover_never_crosses_a_protocol`,
+  `failover_never_weakens_what_is_established_about_tool_calls` FAILED.
+- M5 a different model is taken as a failover rather than offered as a
+  migration → `a_different_model_is_offered_as_a_migration_rather_than_taken` FAILED.
+- M22 the policy is asked on every turn rather than only after a failure →
+  three conformance tests FAILED. This is the stickiness line: a router that
+  re-decides each turn is not sticky even if it usually picks the same thing.
+- M25 → `every_turn_goes_to_the_assigned_backend_and_a_free_alternative_is_never_connected_to` FAILED.
+
+**The finding of the batch — a caller that every test bypasses is not a
+caller.** M18 deleted `apply_gateway`'s call to `Gateway::routing().bind` and
+**broke nothing**: all ten gateway conformance tests bound the assignment
+themselves in their own helper, so the whole suite passed against a build in
+which the production launch path recorded no assignment at all. Fixed by
+`profile::tests::resolving_a_gateway_backed_profile_assigns_the_session_a_provider_and_a_model`,
+which goes through the function `launch_session` actually calls; the mutation
+then FAILED. M24 was the same shape one layer down — `to_launch_profile`
+dropping the stored pin broke nothing, because the profile-side test built its
+`LaunchProfile` by hand.
+
+**A defect only the live run could find.** `402 Insufficient credits` was first
+classified as a healthy exchange: the first version mapped `401`/`403` to
+`CredentialRejected` and everything else to `Served`. A `402` is neither a
+provider outage nor a malformed request — it is *this account's key* being
+unable to pay, and another key on another account would serve. It now rotates
+like `401`/`403` (M20, M21). No fixture would have produced a `402`, because
+nobody would have thought to write one.
+
+Known limit, recorded rather than fixed:
+- **No live `200` was ever obtained.** OpenRouter answers `402` for `:free`
+  models on an account that has never purchased credits, so nothing in this
+  batch proves a free model *answered*. The free-pool health path is proven
+  against fixtures and against a real `402`, not against a real success. No box
+  was closed as if it had been.
+
+Orchestrator judgement, recorded because the lead asked for it to be overruled
+if wrong:
+- **Line 518 is closed on a profile-level reading of "pin".** The user records
+  a pin in configuration; it reaches the launch profile, round-trips (M24), and
+  turns automatic failover off at session start (M23). The line says the user
+  may pin a gateway-backed session and disable automatic failover, and that is
+  what happens. A pin typed at a *running* session is a richer capability the
+  line does not require; it would need `cli.rs` or a shell surface holding a
+  handle on a live gateway, and that work is scoped in the lead's §7.2.
+
+Not closable:
+- **511** *explicit session migration at a task boundary.* Built and proven as
+  a mechanism — `InteractiveRouting::migrate`, `SessionRouting::migrate`,
+  `SessionActivity`, mutation M8 killed by
+  `a_migration_is_refused_mid_turn_and_allowed_between_tasks` — with **no
+  production caller**. Nothing in the shipped binary can ask for a migration.
+  §5.
+
+---
+
+### Phase 9I — free-pool routing, 9 of 14 (lines 527–540)
+
+Contract: Given free and metered resources, Glasshouse tracks their allowances
+and health per credential, prefers free ones for disposable work, cools down
+what keeps failing, and never spends metered capacity on its own automated runs
+without an explicit opt-in.
+
+State: COMPLETE (five lines excepted — see below)
+
+Production evidence:
+- `crates/glasshouse/src/routing/free.rs` and `routing/disposable.rs` — kept as
+  a **separate policy class** from `interactive`, which is line 533 and the
+  load-bearing structural requirement of the phase.
+- **Keyed per credential, not per provider** (lines 537/538): two keys for the
+  same router are two allowances, and one key's exhaustion is that key's limit.
+  Fed by real gateway exchanges — a real `429` records `remaining: Some(0)`
+  against that credential.
+- Health comes from real workload, never from probes (line 534): `FreePool::observe`
+  is the only mutator of health and its input is a finished exchange, so the
+  quota a health check would protect is never spent checking it.
+- The Settings Routing screen renders order, disable and pin (line 536), and
+  renders a choice's reason through `UseReason`'s own `Display` — one spelling,
+  not two.
+
+Regression evidence:
+- M9 key free-pool state per provider instead of per credential →
+  `exhausting_one_key_leaves_the_other_key_of_the_same_router_alone` FAILED.
+- M10 one failure is enough for a cooldown → `one_failure_is_not_a_cooldown_and_two_are` FAILED.
+- M13 count a token-priced allowance down like a request pool →
+  `a_token_priced_allowance_is_never_asked_how_many_requests_are_left` FAILED.
+- M14 → `the_users_order_wins_and_a_disabled_resource_is_not_offered` FAILED.
+- M15 a pin silently falls back when it cannot serve →
+  `a_pinned_free_resource_that_cannot_serve_fails_the_job` FAILED.
+- **Line 539 is an acceptance condition with the user's money behind it, and it
+  has two mutations, not one.** M11 accept any opt-in value →
+  `only_the_exact_opt_in_value_counts` FAILED; M12 let an automated run inherit
+  `MeteredUse::Permitted` → `an_automated_run_cannot_inherit_permitted` FAILED.
+  An automated run must opt in explicitly and exactly; it cannot arrive at
+  permission by inheritance.
+
+Not closable, and **four of the five share one blocker**:
+- **530, 531, 532, 540** — the disposable policy class has **no production
+  caller anywhere in the binary**. `DisposableRouting::choose` does exactly what
+  line 530 describes and nothing calls it; `ShellState::record_disposable_choice`
+  is 540's seam and nothing calls it; 532's *"only when adequate"* half is
+  enforced and proven while the *"free models can back a launch profile"* half
+  is unreachable because `gateway_upstream` builds every backend `Cost::Metered`.
+  One `ExtractionModel` implementation that routes through this policy closes
+  all four. That is one batch, not four.
+- **528** — PARTIALLY VERIFIED. `Allowance` has one variant per kind with no
+  shared arithmetic (M13) and the request-pool half has a real production feed;
+  the token-priced half does not, because nothing reads a provider's pricing.
+  Deliberately **not** solved by parsing rate-limit headers on the forwarding
+  path: the gateway forwards headers without reading them, and a parser there
+  would make it a reader of the payload it exists to pass through.
+
+---
+
+### Phase 9G refined — the several-providers refusal is lifted, and why that is not a reversal
+
+`profile::gateway_upstream` used to refuse a configuration in which more than
+one provider served the gateway ingress. It now assigns the first in the user's
+configuration order and keeps the rest as failover candidates.
+`GatewayUpstreamRefusal::SeveralProvidersServeTheIngress` is **removed**,
+because an error variant that can never be produced is decoration (§20 applied
+to an enum).
+
+**This is the guard being retired by the phase it was holding a place for, not
+overridden.** 9G's objection was to a *silent* choice at a time when no phase
+owned the decision. 9H owns it now, and the choice is announced in the launch's
+own mechanism notes (`category: "gateway backend"`, carrying provider and model
+names and never a credential), pinnable (518), migratable in principle (511),
+and recorded on every change (515).
+
+Kept as a guard, it would have done the opposite of its purpose: a user with two
+configured routers could not start a gateway-backed session at all, and **every
+9H failover line would be unreachable by construction** — a temporary
+placeholder converted into a permanent block on the capability it was
+protecting. The alternative the lead offered — keep refusing until a launch
+profile can name its own gateway provider, at the cost of a field on
+`BackendResource::GlasshouseGateway` — is defensible and remains available if a
+later phase needs per-profile provider selection.

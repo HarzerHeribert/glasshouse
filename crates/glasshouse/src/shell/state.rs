@@ -18,8 +18,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
 
 use crate::config::{
-    Layer, Layered, PremiumReservePercent, ProfileApproval, ProfileBackend, ProfileConfig,
-    ProviderConfig, RouterCostMicroUsd, RouterLatencyMs, RoutingModelChoice, StoredCredentialRef,
+    FreeResourceRef, Layer, Layered, PremiumReservePercent, ProfileApproval, ProfileBackend,
+    ProfileConfig, ProviderConfig, RouterCostMicroUsd, RouterLatencyMs, RoutingModelChoice,
+    StoredCredentialRef,
 };
 use crate::events::{LifecycleEvent, MessageOrigin, RecordedEvent, TurnOutcome};
 use crate::harness::{Declared, WireProtocol};
@@ -27,6 +28,7 @@ use crate::integrations::{IntegrationId, IntegrationKind, IntegrationStatus};
 use crate::platform::exec;
 use crate::provider::cache::ModelCatalogue;
 use crate::provider::discovery::{ProbeOutcome, ProbeTarget};
+use crate::routing::disposable::DisposableChoice;
 use crate::secret::native::{PreferNativeSecretStore, os_credential_for_variable};
 use crate::secret::{SecretRef, SecretStore};
 use crate::session::{SessionId, SessionPresentation, SessionRecord};
@@ -603,6 +605,27 @@ impl ShellState {
     ) {
         if let Some(settings) = self.settings.as_mut() {
             settings.replace_rows(harnesses, integrations, providers, profiles, routing);
+        }
+    }
+
+    /// Record the most recent disposable-job routing choice, so the Routing
+    /// section can show why the free resource currently in use was chosen —
+    /// Phase 9I line 540.
+    ///
+    /// **This batch wires the display, not the feed.** Nothing in this
+    /// build calls this from a live router — there is no live router yet.
+    /// Feeding it from `crate::routing::disposable::DisposableRouting`'s
+    /// actual decisions, each time Glasshouse routes a disposable job, is
+    /// `lead-route`'s to wire once that production call site exists; see
+    /// this batch's report.
+    ///
+    /// A no-op when Settings is not open, matching every other
+    /// `*_with_routing` setter here — there is nowhere to hold the choice
+    /// otherwise, and the next [`ShellState::open_settings_with_routing`]
+    /// resolves a fresh [`RoutingRow`] anyway.
+    pub fn record_disposable_choice(&mut self, choice: DisposableChoice) {
+        if let Some(settings) = self.settings.as_mut() {
+            settings.record_disposable_choice(choice);
         }
     }
 
@@ -1273,6 +1296,15 @@ pub struct RoutingRow {
     pub prefer_free_layer: Layer,
     pub premium_reserve: PremiumReservePercent,
     pub premium_reserve_layer: Layer,
+    /// Phase 9I line 536: the user's preferred order over free resources.
+    pub free_order: Vec<FreeResourceRef>,
+    pub free_order_layer: Layer,
+    /// Free resources the user has disabled.
+    pub free_disabled: Vec<FreeResourceRef>,
+    pub free_disabled_layer: Layer,
+    /// The user's pinned free resource, if any.
+    pub free_pin: Option<FreeResourceRef>,
+    pub free_pin_layer: Layer,
     configured_providers: Vec<String>,
 }
 
@@ -1296,11 +1328,58 @@ impl RoutingRow {
             prefer_free_layer: prefer_free.layer,
             premium_reserve: premium_reserve.value,
             premium_reserve_layer: premium_reserve.layer,
+            free_order: Vec::new(),
+            free_order_layer: Layer::Default,
+            free_disabled: Vec::new(),
+            free_disabled_layer: Layer::Default,
+            free_pin: None,
+            free_pin_layer: Layer::Default,
             configured_providers,
         }
     }
 
-    fn defaults(configured_providers: Vec<String>) -> Self {
+    /// The same row, carrying the free-resource preferences resolved for it.
+    /// Kept as a builder rather than a wider [`RoutingRow::new`] so an
+    /// existing call site that has not been updated to resolve them still
+    /// compiles and gets [`Layer::Default`] empty preferences — see this
+    /// batch's report for the one call site (`shell::mod`'s `build_settings`)
+    /// that still needs to call this.
+    pub fn with_free_preferences(
+        mut self,
+        order: Layered<Vec<FreeResourceRef>>,
+        disabled: Layered<Vec<FreeResourceRef>>,
+        pin: Layered<Option<FreeResourceRef>>,
+    ) -> Self {
+        self.free_order = order.value;
+        self.free_order_layer = order.layer;
+        self.free_disabled = disabled.value;
+        self.free_disabled_layer = disabled.layer;
+        self.free_pin = pin.value;
+        self.free_pin_layer = pin.layer;
+        self
+    }
+
+    /// This row's three free-resource preferences, folded into the shape
+    /// [`crate::routing::disposable::DisposableRouting`] consumes — the
+    /// Settings-side counterpart to [`crate::config::RoutingConfig::free_preferences`].
+    pub fn free_preferences(&self) -> crate::routing::free::FreePreferences {
+        crate::routing::free::FreePreferences::new()
+            .with_order(
+                self.free_order
+                    .iter()
+                    .map(FreeResourceRef::to_key)
+                    .collect(),
+            )
+            .with_disabled(
+                self.free_disabled
+                    .iter()
+                    .map(FreeResourceRef::to_key)
+                    .collect(),
+            )
+            .with_pin(self.free_pin.as_ref().map(FreeResourceRef::to_key))
+    }
+
+    pub fn defaults(configured_providers: Vec<String>) -> Self {
         Self::new(
             Layered::new(RoutingModelChoice::Deterministic, Layer::Default),
             Layered::new(RouterLatencyMs::DEFAULT, Layer::Default),
@@ -1361,6 +1440,17 @@ pub struct RoutingSettingsEdit {
     pub max_cost: Option<RouterCostMicroUsd>,
     pub prefer_free: Option<bool>,
     pub premium_reserve: Option<PremiumReservePercent>,
+    /// `Some` when this session set a new order this session — including
+    /// `Some(Vec::new())`, an explicit clear.
+    pub free_order: Option<Vec<FreeResourceRef>>,
+    /// `Some` when this session set a new disabled list — see
+    /// [`RoutingSettingsEdit::free_order`].
+    pub free_disabled: Option<Vec<FreeResourceRef>>,
+    /// `Some(None)` when this session explicitly cleared the pin;
+    /// `Some(Some(_))` when it set one; `None` when untouched this session —
+    /// the same double-option shape `PendingEdit::executable` uses for the
+    /// same reason.
+    pub free_pin: Option<Option<FreeResourceRef>>,
 }
 
 impl RoutingSettingsEdit {
@@ -1370,6 +1460,9 @@ impl RoutingSettingsEdit {
             && self.max_cost.is_none()
             && self.prefer_free.is_none()
             && self.premium_reserve.is_none()
+            && self.free_order.is_none()
+            && self.free_disabled.is_none()
+            && self.free_pin.is_none()
     }
 }
 
@@ -1411,6 +1504,12 @@ enum ProviderInputPurpose {
         name: String,
     },
     EditCredentialEnv {
+        name: String,
+    },
+    /// Phase 9I line 527: which of this provider's models the user has
+    /// marked free-tier or zero-marginal-cost. Names only, comma-separated,
+    /// exactly like [`ProviderInputPurpose::EditCredentialEnv`].
+    EditFreeModels {
         name: String,
     },
     /// Typing a credential to put in the OS's own secure store. **The one
@@ -1520,6 +1619,14 @@ enum RoutingInputPurpose {
     MaxLatency,
     MaxCost,
     PremiumReserve,
+    /// Phase 9I line 536: `provider:model` pairs, comma-separated, in the
+    /// user's preferred order.
+    FreeOrder,
+    /// Same shape as [`RoutingInputPurpose::FreeOrder`], for the resources
+    /// the user has disabled.
+    FreeDisabled,
+    /// A single `provider:model`, or empty to clear the pin.
+    FreePin,
 }
 
 #[derive(Debug)]
@@ -1897,6 +2004,13 @@ pub struct SettingsState {
     /// [`ShellState::take_provider_probe_intent`], which is the only way one
     /// leaves this overlay.
     pending_probe: Option<ProviderProbeIntent>,
+    /// The most recent disposable-job routing choice, for Phase 9I line 540
+    /// — "show whether a free resource is being used because of user
+    /// preference, quota preservation, or fallback". Recorded by
+    /// [`ShellState::record_disposable_choice`]; there is no live router in
+    /// this build, so nothing here ever sets this on its own. See that
+    /// method's own doc for what still has to feed it.
+    last_disposable_choice: Option<DisposableChoice>,
 }
 
 impl SettingsState {
@@ -1930,6 +2044,7 @@ impl SettingsState {
             routing_input: None,
             provider_notice: None,
             pending_probe: None,
+            last_disposable_choice: None,
         }
     }
 
@@ -1955,6 +2070,17 @@ impl SettingsState {
 
     pub fn routing(&self) -> &RoutingRow {
         &self.routing
+    }
+
+    /// The most recent disposable-job routing choice, for the Routing
+    /// section to render its reason from — see
+    /// [`SettingsState::last_disposable_choice`]'s own field doc.
+    pub fn last_disposable_choice(&self) -> Option<&DisposableChoice> {
+        self.last_disposable_choice.as_ref()
+    }
+
+    fn record_disposable_choice(&mut self, choice: DisposableChoice) {
+        self.last_disposable_choice = Some(choice);
     }
 
     pub fn selected_harness(&self) -> usize {
@@ -2006,6 +2132,9 @@ impl SettingsState {
             ProviderInputPurpose::EditBaseUrl { name } => format!("Base URL for `{name}`"),
             ProviderInputPurpose::EditCredentialEnv { name } => {
                 format!("Credential variable name(s) for `{name}`, comma-separated")
+            }
+            ProviderInputPurpose::EditFreeModels { name } => {
+                format!("Free-tier model name(s) for `{name}`, comma-separated")
             }
             ProviderInputPurpose::SetCredential { name } => {
                 format!("Credential for `{name}` (stored in the OS secure store, not shown)")
@@ -2084,6 +2213,13 @@ impl SettingsState {
             RoutingInputPurpose::MaxLatency => "Maximum router latency (milliseconds)",
             RoutingInputPurpose::MaxCost => "Maximum marginal cost (USD per decision)",
             RoutingInputPurpose::PremiumReserve => "Premium reserve threshold (percent)",
+            RoutingInputPurpose::FreeOrder => {
+                "Free-resource order: provider:model, comma-separated"
+            }
+            RoutingInputPurpose::FreeDisabled => {
+                "Disabled free resources: provider:model, comma-separated"
+            }
+            RoutingInputPurpose::FreePin => "Pinned free resource: provider:model, or empty",
         };
         Some(RoutingInputView {
             label,
@@ -2281,6 +2417,10 @@ impl SettingsState {
                 self.start_edit_provider_credential_env();
                 SettingsAction::Redraw
             }
+            KeyCode::Char('f') if self.section == SettingsSection::Providers => {
+                self.start_edit_provider_free_models();
+                SettingsAction::Redraw
+            }
             KeyCode::Char(' ') if self.section == SettingsSection::Providers => {
                 self.toggle_selected_provider();
                 SettingsAction::Redraw
@@ -2368,6 +2508,18 @@ impl SettingsState {
                 self.start_routing_input(RoutingInputPurpose::PremiumReserve);
                 SettingsAction::Redraw
             }
+            KeyCode::Char('o') if self.section == SettingsSection::Routing => {
+                self.start_routing_input(RoutingInputPurpose::FreeOrder);
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('d') if self.section == SettingsSection::Routing => {
+                self.start_routing_input(RoutingInputPurpose::FreeDisabled);
+                SettingsAction::Redraw
+            }
+            KeyCode::Char('n') if self.section == SettingsSection::Routing => {
+                self.start_routing_input(RoutingInputPurpose::FreePin);
+                SettingsAction::Redraw
+            }
             _ => SettingsAction::None,
         }
     }
@@ -2445,6 +2597,19 @@ impl SettingsState {
                 name: row.name.clone(),
             },
             buffer: row.config.credential_env().join(","),
+            error: None,
+        });
+    }
+
+    fn start_edit_provider_free_models(&mut self) {
+        let Some(row) = self.providers.get(self.selected_provider) else {
+            return;
+        };
+        self.provider_input = Some(ProviderTextInput {
+            purpose: ProviderInputPurpose::EditFreeModels {
+                name: row.name.clone(),
+            },
+            buffer: row.config.free_models().join(","),
             error: None,
         });
     }
@@ -2823,6 +2988,19 @@ impl SettingsState {
                     self.provider_edits.insert(name, Some(row.config.clone()));
                 }
             }
+            ProviderInputPurpose::EditFreeModels { name } => {
+                let names: Vec<String> = typed
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                if let Some(row) = self.providers.iter_mut().find(|row| row.name == name) {
+                    row.config.set_free_models(names);
+                    row.layer = Layer::User;
+                    self.provider_edits.insert(name, Some(row.config.clone()));
+                }
+            }
             // Never reached: `handle_provider_input_key` answers Enter on a
             // credential field with `SettingsAction::StoreCredential` and
             // leaves the input standing, because storing one is I/O. Written
@@ -3090,6 +3268,16 @@ impl SettingsState {
             RoutingInputPurpose::MaxLatency => self.routing.max_latency.get().to_string(),
             RoutingInputPurpose::MaxCost => format_usd(self.routing.max_cost),
             RoutingInputPurpose::PremiumReserve => self.routing.premium_reserve.get().to_string(),
+            RoutingInputPurpose::FreeOrder => format_free_resource_list(&self.routing.free_order),
+            RoutingInputPurpose::FreeDisabled => {
+                format_free_resource_list(&self.routing.free_disabled)
+            }
+            RoutingInputPurpose::FreePin => self
+                .routing
+                .free_pin
+                .as_ref()
+                .map(format_free_resource_ref)
+                .unwrap_or_default(),
         };
         self.routing_input = Some(RoutingTextInput {
             purpose,
@@ -3158,6 +3346,28 @@ impl SettingsState {
                     self.routing.premium_reserve_layer = Layer::User;
                     self.routing_edit.premium_reserve = Some(value);
                 }),
+            RoutingInputPurpose::FreeOrder => parse_free_resource_list(typed).map(|value| {
+                self.routing.free_order = value.clone();
+                self.routing.free_order_layer = Layer::User;
+                self.routing_edit.free_order = Some(value);
+            }),
+            RoutingInputPurpose::FreeDisabled => parse_free_resource_list(typed).map(|value| {
+                self.routing.free_disabled = value.clone();
+                self.routing.free_disabled_layer = Layer::User;
+                self.routing_edit.free_disabled = Some(value);
+            }),
+            RoutingInputPurpose::FreePin => {
+                let pin = if typed.is_empty() {
+                    Ok(None)
+                } else {
+                    parse_free_resource_ref(typed).map(Some)
+                };
+                pin.map(|value| {
+                    self.routing.free_pin = value.clone();
+                    self.routing.free_pin_layer = Layer::User;
+                    self.routing_edit.free_pin = Some(value);
+                })
+            }
         };
         if let Err(error) = result {
             self.routing_input = Some(RoutingTextInput {
@@ -3282,6 +3492,52 @@ fn parse_usd_micro(text: &str) -> Result<RouterCostMicroUsd, String> {
         .and_then(|value| value.checked_add(fraction))
         .ok_or_else(|| "cost is too large".to_owned())?;
     RouterCostMicroUsd::try_from(raw).map_err(|err| err.to_string())
+}
+
+/// One `provider:model` field, as the Routing section's free-resource
+/// editors type it. Mirrors [`SettingsState::apply_routing_model`]'s own
+/// `provider:model` parsing for [`RoutingModelChoice::Pinned`], with the same
+/// deliberate omission: it does not require `provider` to already be a
+/// configured provider, because a free-resource preference — unlike a
+/// classifier pin — is allowed to name a provider not yet configured, and
+/// [`crate::config::RoutingConfig::free_resource_pin`]'s own doc is where
+/// that degrades visibly rather than failing.
+fn parse_free_resource_ref(typed: &str) -> Result<FreeResourceRef, String> {
+    let Some((provider, model)) = typed.split_once(':') else {
+        return Err(format!("`{typed}` must be `provider:model`"));
+    };
+    let provider = provider.trim();
+    let model = model.trim();
+    if provider.is_empty() || model.is_empty() {
+        return Err(format!(
+            "`{typed}` needs both a provider and a model, as `provider:model`"
+        ));
+    }
+    Ok(FreeResourceRef::new(provider, model))
+}
+
+/// A comma-separated list of `provider:model` fields, in the order typed —
+/// the shape both [`RoutingInputPurpose::FreeOrder`] and
+/// [`RoutingInputPurpose::FreeDisabled`] share.
+fn parse_free_resource_list(typed: &str) -> Result<Vec<FreeResourceRef>, String> {
+    typed
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(parse_free_resource_ref)
+        .collect()
+}
+
+fn format_free_resource_ref(entry: &FreeResourceRef) -> String {
+    format!("{}:{}", entry.provider(), entry.model())
+}
+
+fn format_free_resource_list(entries: &[FreeResourceRef]) -> String {
+    entries
+        .iter()
+        .map(format_free_resource_ref)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// `Ctrl-]` — the one chord that returns to control mode from session mode.

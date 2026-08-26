@@ -337,6 +337,15 @@ pub struct ProfileConfig {
     expected_protocol: Option<String>,
     #[serde(default, skip_serializing_if = "is_default_approval")]
     approval: ProfileApproval,
+    /// Phase 9H line 518: pin a gateway-backed session started through this
+    /// profile to the provider it is assigned, and turn automatic failover
+    /// off. See [`crate::profile::LaunchProfile::pin_gateway_backend`] for
+    /// why the pin lives on the profile rather than on a live command.
+    ///
+    /// A boolean, so a file written before this field existed loads as "not
+    /// pinned" — which is the behaviour those files already had.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pin_gateway_backend: bool,
     /// Whether this launch profile is currently enabled. Disabling is not
     /// removal — see [`ProfileConfig::set_enabled`] and the "disable is not
     /// delete" rule Phase 2D's Settings behavioural contract requires: every
@@ -392,6 +401,7 @@ impl ProfileConfig {
             model: None,
             expected_protocol: None,
             approval: ProfileApproval::default(),
+            pin_gateway_backend: false,
             enabled: true,
         }
     }
@@ -450,6 +460,17 @@ impl ProfileConfig {
         self
     }
 
+    /// Whether a gateway-backed session started through this profile is
+    /// pinned to its assigned provider — Phase 9H line 518.
+    pub fn pin_gateway_backend(&self) -> bool {
+        self.pin_gateway_backend
+    }
+
+    pub fn set_pin_gateway_backend(&mut self, pinned: bool) -> &mut Self {
+        self.pin_gateway_backend = pinned;
+        self
+    }
+
     /// Turn this stored configuration into the resolvable domain type,
     /// naming it `name` — the key this entry was stored under.
     pub fn to_launch_profile(
@@ -499,8 +520,18 @@ impl ProfileConfig {
             model: self.model.clone(),
             expected_protocol,
             approval,
+            pin_gateway_backend: self.pin_gateway_backend,
         })
     }
+}
+
+/// A `bool` that is only worth writing when it is `true`.
+///
+/// Used by `serde`'s `skip_serializing_if` so that an unpinned profile — which
+/// is every profile that has never been pinned — serialises to exactly what it
+/// did before the field existed.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The reverse of [`crate::harness::WireProtocol::slug`]. Kept here, rather
@@ -591,6 +622,17 @@ pub struct ProviderConfig {
         skip_serializing_if = "is_enabled_by_default"
     )]
     enabled: bool,
+    /// Model identifiers on this provider the user has marked free-tier or
+    /// zero-marginal-cost — Phase 9I lines 527 and 531. **Names only,
+    /// exactly like [`ProviderConfig::credential_env`]'s variable names.**
+    ///
+    /// Unmarked means metered. There is no inference here — no prefix match
+    /// on `:free`, no heuristic — because [`crate::routing::Cost::Metered`]
+    /// is the fail-closed default: a router that guessed a model was free
+    /// and was wrong spends the user's money. See
+    /// [`ProviderConfig::cost_of`], the one place that answer is computed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    free_models: Vec<String>,
 }
 
 /// Why a stored [`ProviderConfig`] could not be turned into a
@@ -697,6 +739,7 @@ impl ProviderConfig {
             credential_store: None,
             headers: Vec::new(),
             enabled: true,
+            free_models: Vec::new(),
         }
     }
 
@@ -761,6 +804,32 @@ impl ProviderConfig {
     pub fn set_enabled(&mut self, enabled: bool) -> &mut Self {
         self.enabled = enabled;
         self
+    }
+
+    /// The model identifiers on this provider marked free-tier or
+    /// zero-marginal-cost. See the field's own doc.
+    pub fn free_models(&self) -> &[String] {
+        &self.free_models
+    }
+
+    pub fn set_free_models(&mut self, models: Vec<String>) -> &mut Self {
+        self.free_models = models;
+        self
+    }
+
+    /// Whether `model` costs the user anything at the margin.
+    ///
+    /// The one place this lookup lives, so no call site re-implements it. A
+    /// model this provider has not named in [`ProviderConfig::free_models`]
+    /// answers [`crate::routing::Cost::Metered`] — including a model whose
+    /// name happens to end in `:free` or look free by any other convention.
+    /// There is no inference here; see the field's own doc for why.
+    pub fn cost_of(&self, model: &str) -> crate::routing::Cost {
+        if self.free_models.iter().any(|marked| marked == model) {
+            crate::routing::Cost::Free
+        } else {
+            crate::routing::Cost::Metered
+        }
     }
 
     /// Turn this stored configuration into the resolvable domain type,
@@ -840,6 +909,52 @@ fn unsafe_header_name_char(name: &str) -> Option<char> {
 /// name. Refused, never escaped.
 fn unsafe_header_value_char(value: &str) -> Option<char> {
     value.chars().find(|c| c.is_control())
+}
+
+/// A free resource by name, as configuration stores it — the serialisable
+/// counterpart to [`crate::routing::free::FreeResourceKey`].
+///
+/// That type is frozen in `crate::routing` and derives neither `Serialize`
+/// nor `Deserialize`, the same reason [`StoredCredentialRef`] exists beside
+/// [`crate::secret::SecretRef`] rather than that type growing serde impls of
+/// its own: the shape a *reference* takes on disk is a configuration-schema
+/// decision, kept separate from the domain type routing policy reasons
+/// about. [`FreeResourceRef::to_key`] and [`FreeResourceRef::from_key`] are
+/// the only bridge between the two, so they cannot drift.
+///
+/// Two names — a provider and a model — and nothing else, for the same
+/// reason [`RoutingModelChoice::Pinned`] holds only names: both are as safe
+/// to write into a tracked configuration file as
+/// [`ProviderConfig::credential_env`]'s variable names already are.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreeResourceRef {
+    provider: String,
+    model: String,
+}
+
+impl FreeResourceRef {
+    pub fn new(provider: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+        }
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    pub fn to_key(&self) -> crate::routing::free::FreeResourceKey {
+        crate::routing::free::FreeResourceKey::new(self.provider.clone(), self.model.clone())
+    }
+
+    pub fn from_key(key: &crate::routing::free::FreeResourceKey) -> Self {
+        Self::new(key.provider.clone(), key.model.clone())
+    }
 }
 
 /// A map of configured providers, keyed by provider name.
@@ -1312,6 +1427,30 @@ pub struct RoutingConfig {
     prefer_free: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     premium_reserve_percent: Option<PremiumReservePercent>,
+    /// The user's preferred order over free resources — Phase 9I line 536.
+    /// `None` is "this layer never recorded one", matching
+    /// [`RoutingConfig::model`]'s own reasoning, not "the user cleared it to
+    /// empty"; a project layer that wants to record an explicit empty order
+    /// writes `Some(Vec::new())`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    free_resource_order: Option<Vec<FreeResourceRef>>,
+    /// Free resources the user has disabled — Phase 9I line 536. Same
+    /// `None`-means-undecided reasoning as
+    /// [`RoutingConfig::free_resource_order`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    free_resource_disabled: Option<Vec<FreeResourceRef>>,
+    /// The user's pinned free resource, if any — Phase 9I line 536.
+    ///
+    /// A pin naming a provider that is no longer configured must not stop
+    /// Glasshouse from starting. This module never validates the name
+    /// against configured providers when loading or saving it — the same
+    /// reasoning [`RoutingModelChoice::resolve`] documents for
+    /// [`RoutingModelChoice::Pinned`]: providers legitimately come and go as
+    /// keys are rotated, and a stale pin degrades visibly, through
+    /// [`crate::routing::disposable::NoResource::PinnedResourceUnavailable`],
+    /// rather than refusing to load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    free_resource_pin: Option<FreeResourceRef>,
 }
 
 impl RoutingConfig {
@@ -1362,6 +1501,60 @@ impl RoutingConfig {
         self
     }
 
+    /// This layer's recorded free-resource order, or `None` for "never
+    /// decided".
+    pub fn free_resource_order(&self) -> Option<&[FreeResourceRef]> {
+        self.free_resource_order.as_deref()
+    }
+
+    pub fn set_free_resource_order(&mut self, value: Option<Vec<FreeResourceRef>>) -> &mut Self {
+        self.free_resource_order = value;
+        self
+    }
+
+    /// This layer's recorded disabled list, or `None` for "never decided".
+    pub fn free_resource_disabled(&self) -> Option<&[FreeResourceRef]> {
+        self.free_resource_disabled.as_deref()
+    }
+
+    pub fn set_free_resource_disabled(&mut self, value: Option<Vec<FreeResourceRef>>) -> &mut Self {
+        self.free_resource_disabled = value;
+        self
+    }
+
+    /// This layer's recorded pin, or `None` — either because no pin was
+    /// recorded, or because none was ever chosen. See the field's own doc.
+    pub fn free_resource_pin(&self) -> Option<&FreeResourceRef> {
+        self.free_resource_pin.as_ref()
+    }
+
+    pub fn set_free_resource_pin(&mut self, value: Option<FreeResourceRef>) -> &mut Self {
+        self.free_resource_pin = value;
+        self
+    }
+
+    /// This layer's three free-resource preferences, folded into the shape
+    /// [`crate::routing::disposable::DisposableRouting`] actually consumes.
+    /// A layer that recorded nothing produces
+    /// [`crate::routing::free::FreePreferences::new`]'s empty default for
+    /// whichever of the three it never decided.
+    pub fn free_preferences(&self) -> crate::routing::free::FreePreferences {
+        crate::routing::free::FreePreferences::new()
+            .with_order(
+                self.free_resource_order
+                    .as_ref()
+                    .map(|order| order.iter().map(FreeResourceRef::to_key).collect())
+                    .unwrap_or_default(),
+            )
+            .with_disabled(
+                self.free_resource_disabled
+                    .as_ref()
+                    .map(|disabled| disabled.iter().map(FreeResourceRef::to_key).collect())
+                    .unwrap_or_default(),
+            )
+            .with_pin(self.free_resource_pin.as_ref().map(FreeResourceRef::to_key))
+    }
+
     /// Whether this table would serialize to nothing at all.
     fn is_unset(&self) -> bool {
         self.model.is_none()
@@ -1369,6 +1562,9 @@ impl RoutingConfig {
             && self.max_marginal_cost_micro_usd.is_none()
             && self.prefer_free.is_none()
             && self.premium_reserve_percent.is_none()
+            && self.free_resource_order.is_none()
+            && self.free_resource_disabled.is_none()
+            && self.free_resource_pin.is_none()
     }
 }
 
@@ -1913,6 +2109,43 @@ impl<'a> EffectiveConfig<'a> {
             return Layered::new(value, Layer::User);
         }
         Layered::new(PremiumReservePercent::DEFAULT, Layer::Default)
+    }
+
+    /// The user's preferred order over free resources, resolved per field —
+    /// Phase 9I line 536.
+    pub fn free_resource_order(&self) -> Layered<Vec<FreeResourceRef>> {
+        if let Some(value) = self.project.and_then(|p| p.routing().free_resource_order()) {
+            return Layered::new(value.to_vec(), Layer::Project);
+        }
+        if let Some(value) = self.user.routing().free_resource_order() {
+            return Layered::new(value.to_vec(), Layer::User);
+        }
+        Layered::new(Vec::new(), Layer::Default)
+    }
+
+    /// Free resources the user has disabled, resolved per field.
+    pub fn free_resource_disabled(&self) -> Layered<Vec<FreeResourceRef>> {
+        if let Some(value) = self
+            .project
+            .and_then(|p| p.routing().free_resource_disabled())
+        {
+            return Layered::new(value.to_vec(), Layer::Project);
+        }
+        if let Some(value) = self.user.routing().free_resource_disabled() {
+            return Layered::new(value.to_vec(), Layer::User);
+        }
+        Layered::new(Vec::new(), Layer::Default)
+    }
+
+    /// The user's pinned free resource, resolved per field.
+    pub fn free_resource_pin(&self) -> Layered<Option<FreeResourceRef>> {
+        if let Some(value) = self.project.and_then(|p| p.routing().free_resource_pin()) {
+            return Layered::new(Some(value.clone()), Layer::Project);
+        }
+        if let Some(value) = self.user.routing().free_resource_pin() {
+            return Layered::new(Some(value.clone()), Layer::User);
+        }
+        Layered::new(None, Layer::Default)
     }
 
     /// What will actually classify a request: the recorded choice from
@@ -2541,6 +2774,50 @@ mod tests {
     /// configuration in either layer can displace it. This is the test that
     /// fails if someone ever "unifies" the lookup by moving Native into the
     /// table alongside everything else.
+    /// Phase 9H line 518, the storage half: a pin recorded in configuration
+    /// reaches the launch profile that applies it, and survives a save and a
+    /// load.
+    ///
+    /// **This test exists because a mutation survived without it.** Replacing
+    /// `to_launch_profile`'s `pin_gateway_backend` with a hard-coded `false`
+    /// broke nothing: the profile-side test that proves a pin turns failover
+    /// off builds its `LaunchProfile` by hand, so the one hop between stored
+    /// configuration and the value `apply_gateway` reads was uncovered.
+    #[test]
+    fn a_pin_recorded_in_configuration_reaches_the_launch_profile_and_round_trips() {
+        let mut stored = ProfileConfig::new(IntegrationId::ClaudeCode);
+        stored.set_backend(ProfileBackend::GlasshouseGateway);
+        assert!(
+            !stored.pin_gateway_backend(),
+            "a profile nobody pinned is not pinned"
+        );
+        stored.set_pin_gateway_backend(true);
+
+        let profile = stored
+            .to_launch_profile("pinned")
+            .expect("a known harness and backend");
+        assert!(
+            profile.pin_gateway_backend,
+            "the stored pin must reach the value `apply_gateway` reads"
+        );
+
+        // And a file written before the field existed loads as not pinned,
+        // which is the behaviour those files already had.
+        let toml = toml::to_string(&stored).expect("serializable");
+        assert!(toml.contains("pin_gateway_backend"), "{toml}");
+        let reloaded: ProfileConfig = toml::from_str(&toml).expect("round-trips");
+        assert!(reloaded.pin_gateway_backend());
+
+        let legacy: ProfileConfig =
+            toml::from_str("harness = \"claude-code\"").expect("a file without the field loads");
+        assert!(!legacy.pin_gateway_backend());
+        let legacy_toml = toml::to_string(&legacy).expect("serializable");
+        assert!(
+            !legacy_toml.contains("pin_gateway_backend"),
+            "an unpinned profile writes exactly what it wrote before: {legacy_toml}"
+        );
+    }
+
     #[test]
     fn a_configured_gateway_profile_never_displaces_the_native_one() {
         let mut user = UserConfig::default();
@@ -3565,7 +3842,8 @@ mod tests {
                 "OPENROUTER_API_KEY",
             )))
             .set_headers(vec![("X-Test".to_owned(), "1".to_owned())])
-            .set_enabled(false);
+            .set_enabled(false)
+            .set_free_models(vec!["nvidia/nemotron-nano-9b-v2:free".to_owned()]);
         let provider_value = toml::Value::try_from(&provider_cfg).unwrap();
         let provider_table = provider_value.as_table().unwrap();
         let mut provider_keys: Vec<&str> = provider_table.keys().map(String::as_str).collect();
@@ -3577,6 +3855,7 @@ mod tests {
                 "credential_env",
                 "credential_store",
                 "enabled",
+                "free_models",
                 "headers",
                 "template"
             ],

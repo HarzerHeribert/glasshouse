@@ -74,13 +74,13 @@
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::{Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ureq::Agent;
 
 use super::fixture::{FixtureUpstream, RecordedRequest};
 use super::ingress::{Exchange, Outcome, serve};
-use super::upstream::{Route, Upstream, agent};
+use super::upstream::{Route, Upstream, UpstreamBackend, agent};
 use super::{Gateway, GatewayToken};
 use crate::secret::{REDACTED, Secret, redact};
 
@@ -222,6 +222,12 @@ fn upstream_serving(routes: &[(&str, &str)]) -> Upstream {
             })
             .collect(),
         Secret::mint_for_test(PROVIDER_CREDENTIAL),
+        crate::routing::CredentialId::new(
+            "fixture",
+            crate::secret::SecretRef::Environment {
+                var: "FIXTURE_API_KEY".to_owned(),
+            },
+        ),
     )
     .expect("a loopback http URL is absolute and this credential is header-safe")
 }
@@ -1706,4 +1712,431 @@ fn no_rendering_the_new_ingresses_produce_carries_either_planted_secret() {
              the real one"
         );
     }
+}
+
+// --- Phase 9H: sticky routing, through a real gateway -----------------------
+
+/// The model a routed session is assigned, so that a failover between two
+/// providers serving it is a same-model move rather than a migration.
+const ROUTED_MODEL: &str = "the-routed-model";
+
+/// The harness a routed session belongs to. A slug, because the gateway may
+/// not name `crate::harness` — see [`mod@super`]'s header.
+const ROUTED_HARNESS: &str = "claude-code";
+
+/// An [`Upstream`] whose assigned backend is `first` and whose only failover
+/// candidate is `second`, both serving Anthropic Messages.
+///
+/// Two providers with two separate credentials, because that is the shape
+/// Phase 9H line 512's failover actually moves between, and because a single
+/// backend would make every assertion below trivially true.
+fn two_provider_upstream(first: &FixtureUpstream, second: &FixtureUpstream) -> Upstream {
+    two_provider_upstream_costing(first, second, crate::routing::Cost::Metered)
+}
+
+/// [`two_provider_upstream`], with the *candidate* backend's marginal cost
+/// under the caller's control.
+///
+/// Phase 9H line 509 is about a session not moving because *a free model is
+/// available*, so proving it needs the alternative to actually be free.
+fn two_provider_upstream_costing(
+    first: &FixtureUpstream,
+    second: &FixtureUpstream,
+    candidate_cost: crate::routing::Cost,
+) -> Upstream {
+    let backend = |name: &str, base_url: String, cost: crate::routing::Cost| {
+        UpstreamBackend::new(
+            name.to_owned(),
+            vec![Route::new(
+                ANTHROPIC_MESSAGES.to_owned(),
+                targets_for(ANTHROPIC_MESSAGES),
+                &base_url,
+            )],
+            Secret::mint_for_test(PROVIDER_CREDENTIAL),
+            crate::routing::CredentialId::new(
+                name,
+                crate::secret::SecretRef::Environment {
+                    var: format!("{}_API_KEY", name.to_uppercase().replace('-', "_")),
+                },
+            ),
+            cost,
+        )
+        .expect("a loopback http URL is absolute and this credential is header-safe")
+    };
+    Upstream::with_failover(vec![
+        backend(
+            "first-provider",
+            first.base_url(),
+            crate::routing::Cost::Metered,
+        ),
+        backend("second-provider", second.base_url(), candidate_cost),
+    ])
+    .expect("two backends is not none")
+}
+
+/// A running gateway in front of `first` and `second`, with a session already
+/// bound to the first — which is what `crate::profile::apply_gateway` does on
+/// a real launch.
+fn routed_gateway(first: &FixtureUpstream, second: &FixtureUpstream) -> Gateway {
+    let gateway =
+        Gateway::start(two_provider_upstream(first, second)).expect("loopback is bindable");
+    gateway.routing().bind(
+        ROUTED_HARNESS,
+        ANTHROPIC_MESSAGES,
+        crate::routing::AssignedModel::named(ROUTED_MODEL),
+        gateway.upstream(),
+    );
+    gateway
+}
+
+/// Wait, bounded, until `ready` answers true.
+///
+/// The gateway observes an exchange on the connection's own thread, after the
+/// client's socket has closed, so a test that asserted immediately would be
+/// asserting on a race. Practice §34 records what this project pays for
+/// assuming an observation has already landed: two pty tests that fail
+/// nondeterministically under load. A bounded wait is the fix that was
+/// prescribed there, applied here before it costs anything.
+///
+/// Panics with `what` rather than returning, so a failure names the condition
+/// that never became true instead of a later assertion's symptom.
+fn wait_until(what: &str, ready: impl Fn() -> bool) {
+    // Much shorter than `CLIENT_TIMEOUT`: this waits for a value another
+    // thread has already computed, not for a network hop, and a failing
+    // assertion that takes a minute to arrive is a gate people learn to skip.
+    const OBSERVATION_TIMEOUT: Duration = Duration::from_secs(15);
+    let deadline = Instant::now() + OBSERVATION_TIMEOUT;
+    while Instant::now() < deadline {
+        if ready() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("{what} did not happen within {OBSERVATION_TIMEOUT:?}");
+}
+
+/// Phase 9H lines 512, 513 and 515, end to end: a **real** provider failure
+/// moves a live session to a compatible backend, the move is recorded, and the
+/// next request actually reaches the other provider.
+///
+/// The provider's own `503` still reaches the harness byte for byte — failover
+/// is what happens *next*, not a rewriting of what the harness was told, which
+/// would be the gateway answering on a provider's behalf.
+#[test]
+fn a_real_provider_failure_moves_a_live_session_and_the_next_request_reaches_the_other_provider() {
+    let failing = FixtureUpstream::answering(
+        "HTTP/1.1 503 Service Unavailable",
+        "content-type: application/json\r\n",
+        r#"{"type":"error","error":{"type":"overloaded_error"}}"#,
+    );
+    let healthy = FixtureUpstream::answering(
+        "HTTP/1.1 200 OK",
+        "content-type: application/json\r\n",
+        r#"{"type":"message","content":[]}"#,
+    );
+    let gateway = routed_gateway(&failing, &healthy);
+    let token = gateway.token().expose().to_owned();
+
+    let assigned = gateway
+        .routing()
+        .assignment()
+        .expect("binding a session assigns a backend");
+    assert_eq!(assigned.provider(), "first-provider");
+    assert_eq!(assigned.harness(), ROUTED_HARNESS);
+
+    let first = send_and_read(gateway.address(), &messages_request(&token, "{}"));
+    assert!(
+        as_text(&first).starts_with("HTTP/1.1 503"),
+        "the provider's own error must still reach the harness: {}",
+        as_text(&first)
+    );
+
+    wait_until("the failed provider's exchange to be observed", || {
+        gateway
+            .routing()
+            .assignment()
+            .is_some_and(|current| current.provider() == "second-provider")
+    });
+
+    let second = send_and_read(gateway.address(), &messages_request(&token, "{}"));
+    assert!(
+        as_text(&second).starts_with("HTTP/1.1 200"),
+        "the session should now be served by the healthy provider: {}",
+        as_text(&second)
+    );
+    assert_eq!(
+        failing.requests().len(),
+        1,
+        "nothing may go back to the provider the session failed away from"
+    );
+    assert_eq!(
+        healthy.requests().len(),
+        1,
+        "the request after the failure must reach the other provider"
+    );
+
+    // Line 515: the change is recorded, and it says what moved.
+    let changes = gateway.routing().changes();
+    assert_eq!(changes.len(), 1, "one failover, one record: {changes:?}");
+    assert!(changes[0].changed_provider_or_model());
+    assert_eq!(changes[0].cause.as_str(), "failover");
+    // Line 516: and it warns, because a different provider holds a different
+    // prompt cache.
+    let warning = changes[0]
+        .cache_warning()
+        .expect("changing provider invalidates provider-side prompt caching");
+    assert!(warning.contains("invalidated"), "{warning}");
+    assert!(
+        !warning.contains(PROVIDER_CREDENTIAL),
+        "a routing warning must never carry a credential: {warning}"
+    );
+}
+
+/// Phase 9H line 518, end to end: a pinned session stays where it is, even
+/// when the backend it is on is failing and a perfectly good one is
+/// configured beside it.
+#[test]
+fn a_pinned_session_stays_on_its_failing_provider_and_never_reaches_the_other_one() {
+    let failing = FixtureUpstream::answering(
+        "HTTP/1.1 503 Service Unavailable",
+        "content-type: application/json\r\n",
+        r#"{"type":"error","error":{"type":"overloaded_error"}}"#,
+    );
+    let healthy = FixtureUpstream::answering(
+        "HTTP/1.1 200 OK",
+        "content-type: application/json\r\n",
+        r#"{"type":"message","content":[]}"#,
+    );
+    let gateway = routed_gateway(&failing, &healthy);
+    let token = gateway.token().expose().to_owned();
+
+    assert_eq!(
+        gateway.routing().pin_to_serving_provider().as_deref(),
+        Some("first-provider")
+    );
+
+    for _ in 0..3 {
+        let response = send_and_read(gateway.address(), &messages_request(&token, "{}"));
+        assert!(as_text(&response).starts_with("HTTP/1.1 503"));
+    }
+
+    assert_eq!(
+        gateway
+            .routing()
+            .assignment()
+            .expect("still assigned")
+            .provider(),
+        "first-provider",
+        "a pin turns automatic failover off"
+    );
+    assert_eq!(failing.requests().len(), 3);
+    assert_eq!(
+        healthy.connections(),
+        0,
+        "a pinned session must never open a connection to the provider it is pinned away from"
+    );
+    assert!(
+        gateway.routing().changes().is_empty(),
+        "nothing moved, so there is nothing to record"
+    );
+}
+
+/// Phase 9H line 512's word *real*: a `400` is the harness's own request being
+/// wrong, and moving the session would send the same malformed request to
+/// another provider.
+#[test]
+fn a_bad_request_does_not_move_a_live_session() {
+    let refuses = FixtureUpstream::answering(
+        "HTTP/1.1 400 Bad Request",
+        "content-type: application/json\r\n",
+        r#"{"type":"error","error":{"type":"invalid_request_error"}}"#,
+    );
+    let healthy = FixtureUpstream::answering(
+        "HTTP/1.1 200 OK",
+        "content-type: application/json\r\n",
+        r#"{"type":"message","content":[]}"#,
+    );
+    let gateway = routed_gateway(&refuses, &healthy);
+    let token = gateway.token().expose().to_owned();
+
+    let response = send_and_read(gateway.address(), &messages_request(&token, "{}"));
+    assert!(as_text(&response).starts_with("HTTP/1.1 400"));
+
+    // The second request proves the assignment did not move, and it proves it
+    // by where the request actually went rather than by reading state that
+    // might not have been written yet.
+    let again = send_and_read(gateway.address(), &messages_request(&token, "{}"));
+    assert!(as_text(&again).starts_with("HTTP/1.1 400"));
+    assert_eq!(refuses.requests().len(), 2);
+    assert_eq!(
+        healthy.connections(),
+        0,
+        "a malformed request is not a provider failure and must not move a session"
+    );
+    assert!(gateway.routing().changes().is_empty());
+}
+
+/// An [`Upstream`] with **one provider and two credentials** — Phase 9E's
+/// credential pool, which is what Phase 9I line 537's rotation moves between.
+///
+/// Both backends carry the same provider name on purpose: the thing under
+/// test is that one key's problem is that key's and not the provider's.
+fn two_credential_upstream(first: &FixtureUpstream, second: &FixtureUpstream) -> Upstream {
+    let backend = |var: &str, base_url: String| {
+        UpstreamBackend::new(
+            "one-provider".to_owned(),
+            vec![Route::new(
+                ANTHROPIC_MESSAGES.to_owned(),
+                targets_for(ANTHROPIC_MESSAGES),
+                &base_url,
+            )],
+            Secret::mint_for_test(PROVIDER_CREDENTIAL),
+            crate::routing::CredentialId::new(
+                "one-provider",
+                crate::secret::SecretRef::Environment {
+                    var: var.to_owned(),
+                },
+            ),
+            crate::routing::Cost::Free,
+        )
+        .expect("a loopback http URL is absolute and this credential is header-safe")
+    };
+    Upstream::with_failover(vec![
+        backend("PROVIDER_API_KEY", first.base_url()),
+        backend("PROVIDER_API_KEY_2", second.base_url()),
+    ])
+    .expect("two backends is not none")
+}
+
+/// Phase 9I lines 537 and 538, end to end, with the status a real router
+/// actually returned.
+///
+/// A live run of Claude Code through this gateway to OpenRouter on
+/// 2026-08-26 answered `402 Insufficient credits — this account never
+/// purchased credits` for a model OpenRouter lists as `:free`. That is the
+/// account's key being unable to pay, not the provider being down, so the
+/// session rotates to the provider's **other** key rather than abandoning the
+/// provider — and the provider is never marked failed.
+#[test]
+fn a_credential_the_provider_will_not_accept_rotates_to_the_same_providers_other_key() {
+    let refuses = FixtureUpstream::answering(
+        "HTTP/1.1 402 Payment Required",
+        "content-type: application/json\r\n",
+        r#"{"error":{"message":"Insufficient credits"}}"#,
+    );
+    let accepts = FixtureUpstream::answering(
+        "HTTP/1.1 200 OK",
+        "content-type: application/json\r\n",
+        r#"{"type":"message","content":[]}"#,
+    );
+    let gateway =
+        Gateway::start(two_credential_upstream(&refuses, &accepts)).expect("loopback is bindable");
+    gateway.routing().bind(
+        ROUTED_HARNESS,
+        ANTHROPIC_MESSAGES,
+        crate::routing::AssignedModel::named(ROUTED_MODEL),
+        gateway.upstream(),
+    );
+    let token = gateway.token().expose().to_owned();
+
+    let first = send_and_read(gateway.address(), &messages_request(&token, "{}"));
+    assert!(
+        as_text(&first).starts_with("HTTP/1.1 402"),
+        "the provider's own answer still reaches the harness: {}",
+        as_text(&first)
+    );
+
+    wait_until("the refused credential's exchange to be observed", || {
+        gateway.routing().assignment().is_some_and(|current| {
+            current.backend().credential().label() == "one-provider/PROVIDER_API_KEY_2"
+        })
+    });
+
+    let second = send_and_read(gateway.address(), &messages_request(&token, "{}"));
+    assert!(
+        as_text(&second).starts_with("HTTP/1.1 200"),
+        "the provider's other key must serve: {}",
+        as_text(&second)
+    );
+    assert_eq!(accepts.requests().len(), 1);
+    assert_eq!(refuses.requests().len(), 1);
+
+    let changes = gateway.routing().changes();
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0].cause.as_str(), "credential rotation");
+    assert!(
+        !changes[0].changed_provider_or_model(),
+        "one key's exhaustion is that key's limit, not the provider's: the provider and the \
+         model are unchanged"
+    );
+    // Phase 9H line 516's "likely": a provider-side cache is commonly scoped
+    // to the account a key belongs to, and nothing has established otherwise.
+    let warning = changes[0]
+        .cache_warning()
+        .expect("rotating a credential is worth a warning");
+    assert!(
+        warning.contains("likely"),
+        "a likelihood must be said as one: {warning}"
+    );
+    assert!(!warning.contains(PROVIDER_CREDENTIAL), "{warning}");
+}
+
+/// Phase 9H lines 508 and 509, end to end: turn after turn goes to the backend
+/// the session started on, and the **free** alternative configured beside it
+/// is never even connected to.
+///
+/// The free candidate is what makes this line 509 rather than a restatement of
+/// line 508: "avoid per-turn model switching ... solely because another free
+/// model is currently available" is a claim about a temptation, so the
+/// temptation has to be present for the test to mean anything.
+#[test]
+fn every_turn_goes_to_the_assigned_backend_and_a_free_alternative_is_never_connected_to() {
+    let assigned = FixtureUpstream::answering(
+        "HTTP/1.1 200 OK",
+        "content-type: application/json\r\n",
+        r#"{"type":"message","content":[]}"#,
+    );
+    let free_alternative = FixtureUpstream::answering(
+        "HTTP/1.1 200 OK",
+        "content-type: application/json\r\n",
+        r#"{"type":"message","content":[]}"#,
+    );
+    let gateway = Gateway::start(two_provider_upstream_costing(
+        &assigned,
+        &free_alternative,
+        crate::routing::Cost::Free,
+    ))
+    .expect("loopback is bindable");
+    gateway.routing().bind(
+        ROUTED_HARNESS,
+        ANTHROPIC_MESSAGES,
+        crate::routing::AssignedModel::named(ROUTED_MODEL),
+        gateway.upstream(),
+    );
+    let token = gateway.token().expose().to_owned();
+
+    for turn in 1..=4 {
+        let response = send_and_read(gateway.address(), &messages_request(&token, "{}"));
+        assert!(
+            as_text(&response).starts_with("HTTP/1.1 200"),
+            "turn {turn} should be served: {}",
+            as_text(&response)
+        );
+    }
+
+    assert_eq!(assigned.requests().len(), 4);
+    assert_eq!(
+        free_alternative.connections(),
+        0,
+        "a free model being available is not a reason to move a live session"
+    );
+    assert_eq!(
+        gateway
+            .routing()
+            .assignment()
+            .expect("still assigned")
+            .provider(),
+        "first-provider"
+    );
+    assert!(gateway.routing().changes().is_empty());
 }

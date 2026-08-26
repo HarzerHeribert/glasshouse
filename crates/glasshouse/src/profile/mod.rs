@@ -45,14 +45,16 @@
 use std::ffi::OsString;
 use std::fmt;
 
+use crate::gateway::upstream::UpstreamBackend;
 use crate::gateway::{Gateway, Route, Upstream};
 use crate::harness::{
-    ApprovalKind, ApprovalMode, CredentialPlacement, CredentialVarProblem, DirectProviderRequest,
-    HarnessAdapter, WireProtocol,
+    ApprovalKind, ApprovalMode, CredentialPlacement, CredentialVarProblem, Declared,
+    DirectProviderRequest, HarnessAdapter, WireProtocol,
 };
 use crate::integrations::IntegrationId;
 use crate::launch::HarnessLaunch;
 use crate::provider::{ProtocolCompatibleProviders, Provider};
+use crate::routing::{AssignedModel, Cost, CredentialId, ToolSemantics};
 use crate::secret::{SecretRef, SecretStore};
 
 /// The protocols the local gateway's ingress knows how to serve.
@@ -207,6 +209,25 @@ pub struct LaunchProfile {
     pub model: Option<String>,
     pub expected_protocol: Option<WireProtocol>,
     pub approval: ApprovalSelection,
+    /// Phase 9H line 518: pin a gateway-backed session to the provider it is
+    /// assigned at start, and turn automatic failover off.
+    ///
+    /// A property of the **profile** rather than a live command, because that
+    /// is where the user can actually say it today: a running gateway lives
+    /// inside one launch's stack frame, with no surface pointed at it. A
+    /// person who wants this session to stay on one backend, whatever
+    /// happens, records it once and every session started through the profile
+    /// honours it.
+    ///
+    /// It pins to *whichever* provider the session is assigned rather than to
+    /// a named one. Naming one would need the profile to choose a backend,
+    /// which is the decision `gateway_upstream` makes from the user's own
+    /// configuration order — and a pin that disagreed with it would be a
+    /// second, silent way to select a provider.
+    ///
+    /// Meaningless on a `Native` or `DirectProvider` backend, where there is
+    /// no gateway to pin: `apply_gateway` is the only reader.
+    pub pin_gateway_backend: bool,
 }
 
 impl LaunchProfile {
@@ -220,6 +241,7 @@ impl LaunchProfile {
             model: None,
             expected_protocol: None,
             approval: ApprovalSelection::Default,
+            pin_gateway_backend: false,
         }
     }
 
@@ -864,6 +886,36 @@ fn apply_gateway(
         });
     };
 
+    // Phase 9H lines 505, 506 and 507. This is the moment a session gets a
+    // backend, and it is the only place that knows all three of the harness,
+    // the protocol resolved for it, and the model the profile named — the
+    // gateway knows where to forward bytes and nothing else. Recording it
+    // here rather than at gateway start is what makes the assignment
+    // *belong to the harness-backed session* instead of to the process.
+    let model = match &profile.model {
+        Some(model) => AssignedModel::Named(model.clone()),
+        None => AssignedModel::HarnessDefault,
+    };
+    gateway.routing().bind(
+        profile.harness.slug(),
+        protocol.slug(),
+        model,
+        gateway.upstream(),
+    );
+
+    // Phase 9H line 518, applied where the assignment was just made. A pin
+    // recorded on the profile is the user's own statement, so it is honoured
+    // before the first request rather than after a failure has already moved
+    // the session.
+    if profile.pin_gateway_backend
+        && let Some(pinned) = gateway.routing().pin_to_serving_provider()
+    {
+        overlay.mechanisms.push(MechanismNote {
+            category: "gateway pin",
+            detail: format!("pinned to `{pinned}`; automatic failover is off"),
+        });
+    }
+
     let base_url = gateway.base_url();
     let request = DirectProviderRequest {
         provider_name: GATEWAY_PROVIDER_NAME,
@@ -908,48 +960,84 @@ fn apply_gateway(
         detail: format!("{base_url} over {protocol} — {}", plan.mechanism),
     });
 
+    // Phase 9H line 505, said out loud. `gateway_upstream`'s documentation
+    // argues that choosing a backend is legitimate here *because* the choice
+    // is announced, pinnable and reversible rather than silent; this is the
+    // announcement. Names only — `Assignment::label` is built from
+    // `CredentialId::label`, which is a provider and a variable name.
+    if let Some(assignment) = gateway.routing().assignment() {
+        overlay.mechanisms.push(MechanismNote {
+            category: "gateway backend",
+            detail: assignment.label(),
+        });
+    }
+
     Ok(())
 }
 
-/// Which configured provider the local gateway forwards to, with its
-/// credential resolved.
+/// Which configured providers the local gateway may forward to: the one it
+/// assigns now, and the ones a real provider failure may move a session to.
 ///
-/// # Why this refuses to choose
+/// # Phase 9G refused to choose here. Phase 9H chooses, and says so.
 ///
-/// [`BackendResource::GlasshouseGateway`] names no provider — it cannot,
-/// because which backend a gateway-backed session runs against is Phase 9H's
-/// *sticky routing* decision and belongs to the session, not to the profile.
-/// This phase therefore does the only thing that invents nothing: it takes
-/// the single configured provider that serves **any** protocol the ingress
-/// offers, and refuses when there is no such provider or more than one. A
+/// The previous version of this function refused a configuration in which more
+/// than one provider served the ingress, with a message explaining that
+/// *"choosing a backend per session is sticky routing rather than something a
+/// launch profile decides"*. That was right at the time and it is the line
+/// this phase exists to cross.
+///
+/// The objection Phase 9G actually raised was to a **silent** choice: *"a
 /// gateway that picked the alphabetically first of three routers would be
-/// making exactly the routing decision the map defers.
+/// making exactly the routing decision the map defers"*. What makes the
+/// choice legitimate now is not that this phase is allowed to be arbitrary —
+/// it is that the choice is no longer invisible or final:
+///
+/// - it is **recorded** as a [`crate::routing::interactive::Assignment`] the
+///   moment a profile binds a session, and reported in the launch's own
+///   mechanism note (Phase 9H lines 505 and 507);
+/// - the user can **pin** the session to one provider and turn automatic
+///   failover off (line 518);
+/// - the user can **migrate** the session to another provider at a task
+///   boundary (line 511);
+/// - and every change is **recorded** with its cache consequence (lines 515
+///   and 516).
+///
+/// A choice that is announced, pinnable and reversible is a different thing
+/// from a choice made behind the user's back, and the refusal was about the
+/// second. The order is the order the caller presents the providers in, which
+/// is the user's own configuration order; nothing here ranks providers on
+/// quality, because that is Phase 9J's job and it has no evidence yet.
+///
+/// **This is a judgement, and it is the one thing in this batch most worth
+/// disagreeing with.** The alternative — keep refusing until a launch profile
+/// can name its gateway provider — is defensible and costs a field on
+/// `BackendResource::GlasshouseGateway`. It was not taken because, with the
+/// refusal in place, a user with two configured routers cannot start a
+/// gateway-backed session at all, and every one of Phase 9H's failover lines
+/// is unreachable in production by construction.
+///
+/// # Several credentials for one provider are several backends
+///
+/// Phase 9E's last line allows *"several credentials for one provider to be
+/// held as a pool"*, and [`Provider::credential_env`] has always been a list.
+/// The previous version took *"the first that currently resolves"* and
+/// discarded the rest. Each one that resolves is now its own backend, which
+/// is what makes Phase 9I line 537's rotation — *"treat a single key's
+/// exhaustion as that key's limit rather than the provider's"* — something
+/// the gateway can actually do rather than something it can only describe.
 ///
 /// # One provider, every protocol it serves
 ///
-/// The candidate rule is per *provider*, not per protocol: a provider is a
-/// candidate if it serves at least one ingress protocol with a base URL, and
-/// the upstream then gets a [`Route`] for **each** protocol it serves. That
-/// is deliberate in both directions.
+/// Unchanged from Phase 9G, and its reasoning is unchanged with it. A provider
+/// is a candidate if it serves at least one ingress protocol with a base URL,
+/// and it gets a [`Route`] for **each** protocol it serves. Requiring all
+/// three would refuse every real configuration — no built-in template serves
+/// more than two.
 ///
-/// Requiring a provider to serve all three would refuse every real
-/// configuration — no built-in template serves more than two — and would
-/// make a Claude Code launch fail over a Responses upstream it was never
-/// going to use. Allowing several providers, one per protocol, would be
-/// Phase 9H's sticky routing built early: the gateway would be choosing
-/// backends, which is exactly what this function exists to refuse.
-///
-/// So a gateway serves what its one provider serves, and
-/// [`Gateway::served_protocols`] reports that narrower set to
-/// `apply_gateway`, which refuses a harness the ingress cannot carry —
-/// before a child process exists rather than at its first request.
-///
-/// The credential is resolved here, once, at start, and moved into the
-/// [`Upstream`] — **once**, however many protocols it serves. That is the
-/// second place in Glasshouse where a [`crate::secret::Secret`] exists — the
-/// first being [`resolve`]'s direct-provider path — and unlike that one it
-/// does not end at a child process: it stays in this process for the
-/// gateway's lifetime, which is the entire point of holding it here instead.
+/// Every credential is resolved here, once, at start, and moved into the
+/// [`Upstream`]. Unlike [`resolve`]'s direct-provider path they do not end at
+/// a child process: they stay in this process for the gateway's lifetime,
+/// which is the entire point of holding them here instead.
 pub fn gateway_upstream(
     providers: &[Provider],
     secrets: &dyn SecretStore,
@@ -961,32 +1049,66 @@ pub fn gateway_upstream(
     let candidates =
         ProtocolCompatibleProviders::for_any_protocol(providers, GATEWAY_INGRESS_PROTOCOLS);
 
-    let provider = match candidates.len() {
-        0 => {
-            return Err(GatewayUpstreamRefusal::NoProviderServesTheIngress {
-                protocols: GATEWAY_INGRESS_PROTOCOLS.to_vec(),
-                served: describe_provider_protocols(providers),
-            });
-        }
-        1 => candidates
-            .only()
-            .expect("one protocol-compatible candidate has exactly one provider"),
-        _ => {
-            return Err(GatewayUpstreamRefusal::SeveralProvidersServeTheIngress {
-                protocols: GATEWAY_INGRESS_PROTOCOLS.to_vec(),
-                candidates: candidates
-                    .iter()
-                    .map(|candidate| candidate.name().to_owned())
-                    .collect(),
-            });
-        }
-    };
+    if candidates.is_empty() {
+        return Err(GatewayUpstreamRefusal::NoProviderServesTheIngress {
+            protocols: GATEWAY_INGRESS_PROTOCOLS.to_vec(),
+            served: describe_provider_protocols(providers),
+        });
+    }
 
-    // One route per protocol this provider actually serves, in the ingress's
-    // own order. A protocol it does not serve gets no route, which is what
-    // makes a request for it a refusal rather than a request sent to some
-    // other protocol's base URL.
-    let routes: Vec<Route> = GATEWAY_INGRESS_PROTOCOLS
+    let mut backends = Vec::new();
+    let mut variables = Vec::new();
+    for candidate in candidates.iter() {
+        let provider = candidate.provider();
+        variables.extend(provider.credential_env.iter().cloned());
+        // Every credential that resolves, in the order the provider declared
+        // them. A variable with no value is skipped rather than refused: a
+        // user who has one of two keys set has one working backend, and
+        // failing the whole launch over the other would be worse than using
+        // what is there.
+        for var in &provider.credential_env {
+            let reference = SecretRef::Environment { var: var.clone() };
+            let Some(credential) = secrets.resolve(&reference) else {
+                continue;
+            };
+            backends.push(UpstreamBackend::new(
+                provider.name.clone(),
+                gateway_routes(provider),
+                credential,
+                CredentialId::new(provider.name.clone(), reference),
+                // Nobody has marked anything free on this path yet: the
+                // free-tier marking of Phase 9I line 527 lives in
+                // `crate::config`'s provider entry, and reaches routing through
+                // the disposable-job path rather than through the gateway's
+                // interactive one. `Cost::Metered` is the fail-closed default
+                // and this is where a marking would arrive.
+                Cost::Metered,
+            )?);
+        }
+    }
+
+    if backends.is_empty() {
+        return Err(GatewayUpstreamRefusal::CredentialUnavailable {
+            provider: candidates
+                .iter()
+                .map(|candidate| candidate.name().to_owned())
+                .collect::<Vec<_>>()
+                .join(", "),
+            variables,
+        });
+    }
+
+    Ok(Upstream::with_failover(backends)?)
+}
+
+/// One [`Route`] per ingress protocol `provider` actually serves, in the
+/// ingress's own order.
+///
+/// A protocol it does not serve gets no route, which is what makes a request
+/// for it a refusal rather than a request sent to some other protocol's base
+/// URL.
+fn gateway_routes(provider: &Provider) -> Vec<Route> {
+    GATEWAY_INGRESS_PROTOCOLS
         .iter()
         .filter_map(|protocol| {
             declared_base_url(provider, *protocol).map(|base_url| {
@@ -995,24 +1117,26 @@ pub fn gateway_upstream(
                     ingress_targets(*protocol),
                     base_url,
                 )
+                .with_tools(tool_semantics(provider, *protocol))
             })
         })
-        .collect();
+        .collect()
+}
 
-    // A provider declaring several credential variables is a pool, and
-    // choosing between them on cost or quota is a routing decision this
-    // phase does not make: take the first that currently resolves, exactly
-    // as `apply_direct_provider` does.
-    let credential = provider
-        .credential_env
-        .iter()
-        .find_map(|var| secrets.resolve(&SecretRef::Environment { var: var.clone() }))
-        .ok_or_else(|| GatewayUpstreamRefusal::CredentialUnavailable {
-            provider: provider.name.clone(),
-            variables: provider.credential_env.clone(),
-        })?;
-
-    Ok(Upstream::new(provider.name.clone(), routes, credential)?)
+/// What a provider declares about tool calls on one protocol, as the three
+/// states a routing policy needs.
+///
+/// [`Declared`] carries an evidence string that routing has no use for, and
+/// [`Declared::is_known_present`] collapses "verified absent" into "nobody
+/// checked" — which is exactly the distinction Phase 9H line 517 turns on. So
+/// the translation is explicit here rather than done with an existing helper
+/// that answers a different question.
+fn tool_semantics(provider: &Provider, protocol: WireProtocol) -> ToolSemantics {
+    match provider.serves(protocol).map(|support| &support.tool_calls) {
+        Some(Declared::Verified { value: true, .. }) => ToolSemantics::Verified,
+        Some(Declared::Verified { value: false, .. }) => ToolSemantics::KnownAbsent,
+        Some(Declared::Unverified) | None => ToolSemantics::Unverified,
+    }
 }
 
 /// The base URL `provider` declares for `protocol`, or `None` when it
@@ -1053,21 +1177,6 @@ pub enum GatewayUpstreamRefusal {
         /// candidate set explain both what the ingress required and what was
         /// actually declared.
         served: String,
-    },
-
-    #[error(
-        "the local Glasshouse gateway would have to choose between {} to serve its ingress \
-         ({}), and choosing a backend per session is sticky routing rather than something a \
-         launch profile decides; configure exactly one provider that serves them",
-        .candidates.join(", "),
-        protocol_list(.protocols),
-    )]
-    SeveralProvidersServeTheIngress {
-        /// Every protocol the ingress offers, so the message says what the
-        /// collision is about.
-        protocols: Vec<WireProtocol>,
-        /// Provider *names*, so the message can say which entries collided.
-        candidates: Vec<String>,
     },
 
     #[error(
@@ -1847,6 +1956,153 @@ mod tests {
         assert!(message.contains("gateway"), "{message}");
     }
 
+    /// Phase 9H lines 505, 506 and 507: resolving a gateway-backed profile —
+    /// which is what `main.rs`'s `launch_session` does, through this exact
+    /// function — is what gives the session its backend assignment.
+    ///
+    /// **This test exists because a mutation survived without it.** Deleting
+    /// `apply_gateway`'s call to `Gateway::routing().bind` broke nothing: the
+    /// gateway's own conformance tests bind the assignment themselves, so
+    /// every one of them passed against a build in which the production
+    /// launch path recorded no assignment at all. A capability whose only
+    /// caller can be deleted silently does not have a caller.
+    #[test]
+    fn resolving_a_gateway_backed_profile_assigns_the_session_a_provider_and_a_model() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let gateway = gateway_serving(&[WireProtocol::AnthropicMessages]);
+        let mut profile = profile_for(IntegrationId::ClaudeCode);
+        profile.backend = BackendResource::GlasshouseGateway;
+        profile.model = Some("a-named-model".to_owned());
+
+        assert!(
+            gateway.routing().assignment().is_none(),
+            "a gateway that no profile has resolved through has assigned nothing"
+        );
+
+        let overlay = resolve_with_gateway(
+            &profile,
+            &native_cx(adapter, false, &FakeSecrets::empty()),
+            Some(&gateway),
+        )
+        .expect("the gateway serves the protocol this harness speaks");
+
+        let assignment = gateway
+            .routing()
+            .assignment()
+            .expect("resolving a gateway-backed profile assigns its backend");
+        assert_eq!(assignment.harness(), IntegrationId::ClaudeCode.slug());
+        assert_eq!(assignment.provider(), "fixture");
+        assert_eq!(
+            assignment.protocol(),
+            WireProtocol::AnthropicMessages.slug()
+        );
+        assert_eq!(
+            assignment.backend().model(),
+            &AssignedModel::named("a-named-model")
+        );
+
+        // And the choice is announced rather than silent — the argument
+        // `gateway_upstream`'s own documentation rests on.
+        let announced = overlay
+            .mechanisms
+            .iter()
+            .find(|note| note.category == "gateway backend")
+            .expect("the assignment is reported in the launch's mechanism notes");
+        assert!(announced.detail.contains("a-named-model"), "{announced:?}");
+        assert!(announced.detail.contains("fixture"), "{announced:?}");
+        assert!(
+            !announced.detail.contains(PLANTED_CREDENTIAL),
+            "a mechanism note must name a credential and never carry one: {announced:?}"
+        );
+    }
+
+    /// A profile that names no model assigns none, and says so rather than
+    /// leaving a reader unable to tell "no model" from "we forgot".
+    #[test]
+    fn a_gateway_backed_profile_with_no_model_assigns_the_harnesss_own_default() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let gateway = gateway_serving(&[WireProtocol::AnthropicMessages]);
+        let mut profile = profile_for(IntegrationId::ClaudeCode);
+        profile.backend = BackendResource::GlasshouseGateway;
+        profile.model = None;
+
+        resolve_with_gateway(
+            &profile,
+            &native_cx(adapter, false, &FakeSecrets::empty()),
+            Some(&gateway),
+        )
+        .expect("a profile need not name a model");
+
+        let assignment = gateway.routing().assignment().expect("assigned");
+        assert_eq!(assignment.backend().model(), &AssignedModel::HarnessDefault);
+        assert!(
+            assignment.label().contains("the harness's own default"),
+            "{}",
+            assignment.label()
+        );
+    }
+
+    /// Phase 9H line 518, on the path a real launch takes: a profile that
+    /// records a pin turns automatic failover off before the session's first
+    /// request, and says so in the launch's own mechanism notes.
+    ///
+    /// The pin lives on the profile because that is where a user can state it
+    /// today — see [`LaunchProfile::pin_gateway_backend`]. A pin nobody can
+    /// set is not a capability.
+    #[test]
+    fn a_profile_that_records_a_pin_turns_automatic_failover_off_at_session_start() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let gateway = gateway_serving(&[WireProtocol::AnthropicMessages]);
+        let mut profile = profile_for(IntegrationId::ClaudeCode);
+        profile.backend = BackendResource::GlasshouseGateway;
+        profile.pin_gateway_backend = true;
+
+        let overlay = resolve_with_gateway(
+            &profile,
+            &native_cx(adapter, false, &FakeSecrets::empty()),
+            Some(&gateway),
+        )
+        .expect("the gateway serves the protocol this harness speaks");
+
+        assert_eq!(
+            gateway.routing().pin().provider(),
+            Some("fixture"),
+            "a profile that records a pin pins the session it starts"
+        );
+        let note = overlay
+            .mechanisms
+            .iter()
+            .find(|note| note.category == "gateway pin")
+            .expect("a pin is a mechanism worth reporting");
+        assert!(note.detail.contains("fixture"), "{note:?}");
+        assert!(note.detail.contains("failover is off"), "{note:?}");
+    }
+
+    /// And a profile that records no pin does not pin, so the default is the
+    /// behaviour every profile written before the field existed already had.
+    #[test]
+    fn a_profile_without_a_pin_leaves_automatic_failover_on() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let gateway = gateway_serving(&[WireProtocol::AnthropicMessages]);
+        let mut profile = profile_for(IntegrationId::ClaudeCode);
+        profile.backend = BackendResource::GlasshouseGateway;
+
+        let overlay = resolve_with_gateway(
+            &profile,
+            &native_cx(adapter, false, &FakeSecrets::empty()),
+            Some(&gateway),
+        )
+        .expect("resolvable");
+
+        assert_eq!(gateway.routing().pin().provider(), None);
+        assert!(
+            !overlay
+                .mechanisms
+                .iter()
+                .any(|note| note.category == "gateway pin")
+        );
+    }
+
     /// A running gateway serving `protocols`, for the tests below. Its
     /// upstream never has to answer: resolution reads the gateway's address
     /// and token and opens no connection at all.
@@ -1875,6 +2131,12 @@ mod tests {
                     })
                     .collect(),
                 crate::secret::Secret::mint_for_test(PLANTED_CREDENTIAL),
+                crate::routing::CredentialId::new(
+                    "fixture",
+                    crate::secret::SecretRef::Environment {
+                        var: "FIXTURE_API_KEY".to_owned(),
+                    },
+                ),
             )?)
         })
         .expect("loopback is bindable")
@@ -2219,19 +2481,32 @@ mod tests {
             Err(GatewayUpstreamRefusal::NoProviderServesTheIngress { .. })
         ));
 
-        // Several, which is a refusal rather than a pick.
+        // Several providers is Phase 9H's assignment plus its failover
+        // candidates, in configuration order — no longer the refusal Phase 9G
+        // answered with. See `gateway_upstream`'s own documentation for why
+        // choosing here is legitimate now and was not then.
         let mut second = provider_serving(
             "another-router",
             WireProtocol::AnthropicMessages,
             "https://another.example/api",
         );
         second.credential_env = vec![CREDENTIAL_VAR.to_owned()];
-        match gateway_upstream(&[anthropic.clone(), second], &secrets) {
-            Err(GatewayUpstreamRefusal::SeveralProvidersServeTheIngress { candidates, .. }) => {
-                assert_eq!(candidates, vec!["openrouter", "another-router"]);
-            }
-            other => panic!("expected a refusal naming both candidates, got {other:?}"),
-        }
+        let several = gateway_upstream(&[anthropic.clone(), second], &secrets)
+            .expect("two protocol-compatible providers is an assignment, not a collision");
+        assert_eq!(
+            several.backends()[0].credential_id().provider(),
+            "openrouter",
+            "the first configured provider is the one assigned"
+        );
+        assert_eq!(
+            several
+                .backends()
+                .iter()
+                .map(|backend| backend.credential_id().provider().to_owned())
+                .collect::<Vec<_>>(),
+            vec!["openrouter", "another-router"],
+            "the rest are where a real provider failure may move the session"
+        );
 
         // And a provider whose credential variable holds nothing is refused
         // rather than launched without one — the gateway would otherwise
@@ -2291,12 +2566,6 @@ mod tests {
             "https://openrouter.ai/api",
         );
         anthropic.credential_env = vec![CREDENTIAL_VAR.to_owned()];
-        let mut second = provider_serving(
-            "another-router",
-            WireProtocol::AnthropicMessages,
-            "https://another.example/api",
-        );
-        second.credential_env = vec![CREDENTIAL_VAR.to_owned()];
         let mut unusable = provider_serving(
             "unusable",
             WireProtocol::AnthropicMessages,
@@ -2306,7 +2575,6 @@ mod tests {
 
         let refusals = vec![
             gateway_upstream(&[], &secrets).unwrap_err(),
-            gateway_upstream(&[anthropic.clone(), second], &secrets).unwrap_err(),
             gateway_upstream(&[anthropic], &FakeSecrets::empty()).unwrap_err(),
             gateway_upstream(&[unusable], &secrets).unwrap_err(),
         ];
@@ -2319,12 +2587,11 @@ mod tests {
             assert!(!debug.contains(PLANTED_CREDENTIAL), "{debug}");
             seen.insert(match refusal {
                 GatewayUpstreamRefusal::NoProviderServesTheIngress { .. } => "none",
-                GatewayUpstreamRefusal::SeveralProvidersServeTheIngress { .. } => "several",
                 GatewayUpstreamRefusal::CredentialUnavailable { .. } => "credential",
                 GatewayUpstreamRefusal::Unusable(_) => "unusable",
             });
         }
-        assert_eq!(seen.len(), 4, "every variant must be exercised: {seen:?}");
+        assert_eq!(seen.len(), 3, "every variant must be exercised: {seen:?}");
     }
 
     /// A direct-provider profile whose provider the caller could not look up

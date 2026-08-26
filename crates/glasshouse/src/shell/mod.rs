@@ -1096,6 +1096,11 @@ fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
     let max_cost = effective.max_router_cost();
     let prefer_free = effective.prefer_free_routing();
     let premium_reserve = effective.premium_reserve();
+    // Phase 9I line 536: the user's own order, disabled list and pin over the
+    // free pool, layered exactly like every routing preference beside them.
+    let free_order = effective.free_resource_order();
+    let free_disabled = effective.free_resource_disabled();
+    let free_pin = effective.free_resource_pin();
     let configured_providers = providers.iter().map(|row| row.name.clone()).collect();
     let routing = RoutingRow::new(
         routing_model,
@@ -1104,7 +1109,8 @@ fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
         prefer_free,
         premium_reserve,
         configured_providers,
-    );
+    )
+    .with_free_preferences(free_order, free_disabled, free_pin);
 
     Ok((harnesses, integrations, providers, profiles, routing))
 }
@@ -1479,6 +1485,18 @@ fn apply_routing_edit(table: &mut config::RoutingConfig, edit: &RoutingSettingsE
     }
     if let Some(value) = edit.premium_reserve {
         table.set_premium_reserve(Some(value));
+    }
+    // Phase 9I line 536. The pin is a double `Option` because, unlike every
+    // preference above it, "no pin" is a state a user can choose explicitly
+    // rather than merely not having touched.
+    if let Some(value) = &edit.free_order {
+        table.set_free_resource_order(Some(value.clone()));
+    }
+    if let Some(value) = &edit.free_disabled {
+        table.set_free_resource_disabled(Some(value.clone()));
+    }
+    if let Some(value) = &edit.free_pin {
+        table.set_free_resource_pin(value.clone());
     }
 }
 

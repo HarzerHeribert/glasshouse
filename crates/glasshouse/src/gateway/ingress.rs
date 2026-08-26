@@ -332,7 +332,12 @@ fn forward(
     upstream: &Upstream,
     agent: &Agent,
 ) -> Exchange {
-    let Some(route) = upstream.route_for(&head.target) else {
+    // The serving backend is read **once**, here, and used for the whole of
+    // this exchange. Phase 9H's failover moves which backend serves from
+    // another thread; reading it twice would let one request take its route
+    // from one provider and its credential from another.
+    let serving = upstream.serving();
+    let Some(route) = serving.route_for(&head.target) else {
         refuse(
             out,
             StatusCode::NOT_FOUND,
@@ -367,7 +372,7 @@ fn forward(
         }
         request = request.header(name.clone(), value.clone());
     }
-    request = request.header(header::AUTHORIZATION, upstream.authorization());
+    request = request.header(header::AUTHORIZATION, serving.authorization());
 
     let body = match head.content_length {
         Some(length) => {

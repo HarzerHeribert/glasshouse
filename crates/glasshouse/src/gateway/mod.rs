@@ -74,6 +74,7 @@
 
 mod http;
 mod ingress;
+pub mod session;
 pub mod upstream;
 
 use std::fmt;
@@ -89,7 +90,8 @@ use anyhow::{Context, Result};
 use crate::profile::{BackendResource, LaunchProfile};
 use crate::secret::REDACTED;
 
-pub use upstream::{Route, Upstream, UpstreamError};
+pub use session::SessionRouting;
+pub use upstream::{Route, Upstream, UpstreamBackend, UpstreamError};
 
 /// The only interface a Glasshouse gateway ever binds.
 ///
@@ -243,6 +245,15 @@ pub struct Gateway {
     /// [`Debug`](fmt::Debug) renders the credential's redaction marker, not
     /// the credential — see [`Upstream`].
     upstream: Arc<Upstream>,
+    /// Which backend is serving this session, what has moved it, and what
+    /// real work has said about each resource — Phase 9H and Phase 9I.
+    ///
+    /// Shared with every connection thread rather than owned by the accept
+    /// loop, because a launch profile binds the assignment into it from the
+    /// main thread while connection threads observe into it. It holds no
+    /// credential value: an assignment names a credential, and
+    /// [`crate::routing::CredentialId`] is two names.
+    routing: Arc<SessionRouting>,
     /// Set by [`Drop`]; read by the accept loop every [`ACCEPT_POLL`].
     stop: Arc<AtomicBool>,
     /// `None` only after [`Drop`] has taken it.
@@ -271,6 +282,7 @@ impl Gateway {
         let token = Arc::new(GatewayToken::generate()?);
         let stop = Arc::new(AtomicBool::new(false));
         let upstream = Arc::new(upstream);
+        let routing = Arc::new(SessionRouting::new());
 
         let accept = std::thread::Builder::new()
             .name("glasshouse-gateway-accept".to_owned())
@@ -278,7 +290,8 @@ impl Gateway {
                 let token = Arc::clone(&token);
                 let stop = Arc::clone(&stop);
                 let upstream = Arc::clone(&upstream);
-                move || accept_loop(listener, stop, token, upstream)
+                let routing = Arc::clone(&routing);
+                move || accept_loop(listener, stop, token, upstream, routing)
             })
             .context("could not start the local Glasshouse gateway's accept thread")?;
 
@@ -286,6 +299,7 @@ impl Gateway {
             address,
             token,
             upstream,
+            routing,
             stop,
             accept: Some(accept),
         })
@@ -328,6 +342,25 @@ impl Gateway {
     pub fn served_protocols(&self) -> Vec<&str> {
         self.upstream.served_protocols()
     }
+
+    /// Which backend is serving this session, and everything that has moved
+    /// it — Phase 9H.
+    ///
+    /// The gateway holds this rather than owning any of the decisions in it:
+    /// [`mod@crate::routing::interactive`] decides, [`session`] applies, and
+    /// this is where a launch profile and a settings screen reach both.
+    pub fn routing(&self) -> &SessionRouting {
+        &self.routing
+    }
+
+    /// The upstream this gateway forwards through, for a caller that needs to
+    /// name one of its backends — a migration, or a settings screen listing
+    /// what a session could move to.
+    ///
+    /// No credential comes out with it: [`Upstream`] has no accessor for one.
+    pub fn upstream(&self) -> &Upstream {
+        &self.upstream
+    }
 }
 
 /// Stop accepting, join, and release the port.
@@ -355,6 +388,7 @@ fn accept_loop(
     stop: Arc<AtomicBool>,
     token: Arc<GatewayToken>,
     upstream: Arc<Upstream>,
+    routing: Arc<SessionRouting>,
 ) {
     // One agent for the life of the gateway: it owns the connection pool to
     // the provider, so a warm TLS connection survives from one request to
@@ -368,10 +402,18 @@ fn accept_loop(
                 let token = Arc::clone(&token);
                 let upstream = Arc::clone(&upstream);
                 let agent = Arc::clone(&agent);
+                let routing = Arc::clone(&routing);
                 let spawned = std::thread::Builder::new()
                     .name("glasshouse-gateway-exchange".to_owned())
                     .spawn(move || {
-                        ingress::serve(stream, &token, &upstream, &agent).record();
+                        let exchange = ingress::serve(stream, &token, &upstream, &agent);
+                        // Phase 9H and 9I's production feed. After the
+                        // exchange, so the routing lock is never held across
+                        // the provider hop, and before the log line, so a
+                        // failover the exchange caused is already recorded
+                        // when its own record is read.
+                        routing.observe_exchange(&upstream, &exchange, std::time::Instant::now());
+                        exchange.record();
                     });
                 if spawned.is_err() {
                     // No thread to serve it: the connection closes as the
@@ -476,6 +518,7 @@ mod tests {
             ("gateway/mod.rs", include_str!("mod.rs")),
             ("gateway/http.rs", include_str!("http.rs")),
             ("gateway/ingress.rs", include_str!("ingress.rs")),
+            ("gateway/session.rs", include_str!("session.rs")),
             ("gateway/upstream.rs", include_str!("upstream.rs")),
         ]
     }
@@ -509,6 +552,12 @@ mod tests {
                 base_url,
             )],
             Secret::mint_for_test(PROVIDER_CREDENTIAL),
+            crate::routing::CredentialId::new(
+                "fixture",
+                crate::secret::SecretRef::Environment {
+                    var: "FIXTURE_API_KEY".to_owned(),
+                },
+            ),
         )
         .expect("the fixture's base URL is absolute")
     }
@@ -1212,7 +1261,7 @@ mod tests {
         assert!(!production_code(tested).contains("crate::session"));
         // ... and the file list it runs over is not empty, which would make
         // every assertion in it vacuous.
-        assert_eq!(gateway_sources().len(), 4);
+        assert_eq!(gateway_sources().len(), 5);
     }
 
     /// No file in this directory may deserialize anything. The whole of

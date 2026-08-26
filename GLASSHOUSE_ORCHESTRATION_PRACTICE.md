@@ -1166,3 +1166,97 @@ the same treatment the ETXTBSY race got — a bounded wait on the observation
 rather than an assumption that the child's output has already been drained.**
 Until then, a Linux FAIL on a pty-shaped test is attributed, not assumed, and
 the attribution run is part of integrating any batch it appears in.
+
+---
+
+## §35 — a caller every test bypasses is not a caller
+
+§5 says a mechanism with no production caller does not get its box. `lead-route`
+found the sharper form, and it is the finding of batch 22–23.
+
+M18 deleted `apply_gateway`'s call to `Gateway::routing().bind` — the single
+line on the production launch path that records a session's provider assignment
+— and **nothing failed**. All ten gateway conformance tests bound the assignment
+themselves in their own helper, so the entire suite passed against a build where
+the shipped binary recorded no assignment at all. M24 was the same shape one
+layer down: `to_launch_profile` dropping the stored pin broke nothing, because
+the profile-side test constructed its `LaunchProfile` by hand.
+
+**A caller you can delete without a test noticing is, to the test suite, not a
+caller.** The box would have been ticked with the production path dead and a
+helper keeping the tests honest.
+
+**How to catch it, cheaply.** For every box you are about to close on "it has a
+caller now", mutate *the call itself* — not the callee. If the suite survives,
+your tests are all entering below the production entry point. The fix is one
+test that goes in through the function the binary actually calls:
+`resolving_a_gateway_backed_profile_assigns_the_session_a_provider_and_a_model`
+goes through `resolve_with_gateway`, which is what `main.rs::launch_session`
+calls, and it killed M18 immediately.
+
+This is why fixtures that "set up the world" are dangerous in exactly the phase
+where a capability is being wired: the helper that makes a test convenient is
+the helper that reproduces the production step you are trying to prove exists.
+
+---
+
+## §36 — ask whether a caller *exercises* the policy, not whether its file is in the partition
+
+§32 said: put the caller's file in the partition. Batch 22–23 shows that is
+necessary and not sufficient, and `lead-route` caught the packet — mine — being
+wrong about its own rule.
+
+The packet told `lead-route` that Phase 9I's consumer was `memory::extract`'s
+`ExtractionModel` seam, whose caller `lead-mem6` was building in the same round.
+That is true and irrelevant: the caller being built is a caller for
+**extraction**, not for **model selection**. `ReplyFromFile` calls no model, so
+nothing in the binary asks a router which resource a disposable job should use.
+Four of 9I's fourteen boxes were unclosable from that partition before the batch
+started, whatever was built in it.
+
+**The tell was available in advance and took one command:** `grep` for a call
+site of `ExtractionModel::complete` outside a test. It finds exactly one, in
+`main.rs`, behind `--reply-from`.
+
+**The refined rule.** Before sizing a package, for each capability name the
+function that will *ask* the policy or *use* the mechanism, and check that this
+function exists or is being built **for that purpose**. A seam being built by
+another lead is not a consumer of your policy unless someone is calling it with
+your policy's question. Write the grep in the packet, not the assumption.
+
+---
+
+## §37 — `cargo fmt --all` cannot be handed to a worker with a one-file scope
+
+Known since batch 18–19 as "`cargo fmt --all` crosses file partitions"; batch
+22–23 shows the sharper version, and it cost a subcontractor real time.
+
+`sub-route-tests` had a `FORBIDDEN FILES` list and a single writable test file,
+and its packet said to run `cargo fmt --all` as step one. It did, and the
+command reformatted two files in `src/routing/` that its own forbidden list
+named. It caught this itself, restored them, fell back to `rustfmt` on its one
+file, and reported it upward — which is the only reason anyone knows.
+
+**`cargo fmt -p <pkg> -- <file>` does not narrow to that file.** A packet with a
+narrow file list must say `rustfmt <the one file>` and nothing else, and the
+lead must run `cargo fmt --all` itself before its own gate.
+
+---
+
+## §38 — "run the binary" is not an instruction unless the packet says how
+
+Every packet in this project says the real defects come from running the shipped
+binary. `lead-route` pointed out that this is unactionable as written:
+`glasshouse run` refuses a session when stdin or stdout is not a terminal —
+correctly — and neither the `Bash` tool nor `script -q /dev/null` supplies one.
+
+**The answer is a cmux pane**, which is already the project's mandated idiom for
+workers. Say so for *probes* too, in the packet, with the command. A worker that
+cannot start the binary will substitute a fixture and report it as a run.
+
+Related, and worth one line in any packet promising live provider evidence:
+**an account's state decides whether a free request is servable, not the model's
+price.** OpenRouter answers `402 Insufficient credits` for `:free` models on an
+account that never purchased credits. The honest fallback is to report the `402`
+as the finding — which is what happened, and it exposed a real classification
+defect that no fixture would have produced.

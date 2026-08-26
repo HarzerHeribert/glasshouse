@@ -1398,3 +1398,38 @@ configuration is authored needs no guess at all.
 Recorded here rather than acted on: it is a direction that touches `profile`,
 `launch` and `shim` together, and it deserves its own batch with its own
 evidence rather than being folded into a review.
+
+---
+
+## A guard that outlives its reason blocks the capability it was protecting
+
+**Refined 2026-08-26**, integrating Phase 9H.
+
+Phase 9G's `gateway_upstream` refused any configuration in which more than one
+provider served the gateway ingress. The refusal was correct when written:
+choosing between providers is sticky routing, sticky routing was Phase 9H, and
+9H did not exist. Refusing beat choosing silently.
+
+Phase 9H now exists, and the same refusal would have made **every one of its
+fourteen lines unreachable by construction** — failover cannot be exercised in a
+configuration that is rejected for having something to fail over to. A user with
+two configured routers could not start a gateway-backed session at all.
+
+**The rule.** When a guard exists because *no phase owns a decision yet*, it is
+a placeholder, and the phase that takes ownership retires it. Retiring it is not
+overriding the earlier decision; leaving it in place is quietly converting a
+placeholder into a permanent block. The test is what the guard was objecting to:
+9G objected to a **silent** choice, not to a choice. A choice that is announced
+in the launch's mechanism notes, pinnable, migratable and recorded on every
+change is not the thing it refused.
+
+**And delete the variant.** `GatewayUpstreamRefusal::SeveralProvidersServeTheIngress`
+was removed rather than left unconstructed. An error variant nothing can produce
+is decoration, and a reader cannot tell decoration from a live guarantee — §20's
+"a gate that cannot fail is not a gate", applied to an enum.
+
+**What this does not license.** A guard that encodes a real invariant — a
+credential that must not reach a log, a payload that must not be read — is not a
+placeholder and no later phase retires it by arriving. The distinguishing
+question is whether the guard's own rationale names a *missing owner* or a
+*standing harm*.

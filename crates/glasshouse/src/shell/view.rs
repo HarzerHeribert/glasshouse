@@ -814,6 +814,17 @@ fn render_provider_rows(settings: &SettingsState, frame: &mut Frame, area: Rect)
             Style::default().fg(Color::DarkGray),
         )));
         lines.push(provider_models_line(row, now));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "      free-tier models: {}",
+                if row.config.free_models().is_empty() {
+                    "none marked".to_owned()
+                } else {
+                    row.config.free_models().join(", ")
+                }
+            ),
+            Style::default().fg(Color::DarkGray),
+        )));
     }
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -964,7 +975,7 @@ fn render_routing(settings: &SettingsState, frame: &mut Frame, area: Rect) {
         RoutingModelChoice::Pinned { provider, model } => format!("{provider}:{model}"),
     };
     let prefer_free = if routing.prefer_free { "yes" } else { "no" };
-    let lines = vec![
+    let mut lines = vec![
         Line::from(format!(
             "  Routing model             {model} {}",
             layer_label(routing.model_layer)
@@ -993,12 +1004,57 @@ fn render_routing(settings: &SettingsState, frame: &mut Frame, area: Rect) {
             layer_label(routing.premium_reserve_layer)
         )),
         Line::from(""),
-        Line::from(Span::styled(
-            "  m model   l latency   c cost   f prefer-free   p premium reserve",
-            Style::default().fg(Color::DarkGray),
+        Line::from(format!(
+            "  Free resource order      {} {}",
+            free_resource_list_label(&routing.free_order),
+            layer_label(routing.free_order_layer)
+        )),
+        Line::from(format!(
+            "  Disabled free resources  {} {}",
+            free_resource_list_label(&routing.free_disabled),
+            layer_label(routing.free_disabled_layer)
+        )),
+        Line::from(format!(
+            "  Pinned free resource     {} {}",
+            routing
+                .free_pin
+                .as_ref()
+                .map(|pin| format!("{}:{}", pin.provider(), pin.model()))
+                .unwrap_or_else(|| "(none)".to_owned()),
+            layer_label(routing.free_pin_layer)
         )),
     ];
+    if let Some(choice) = settings.last_disposable_choice() {
+        lines.push(Line::from(format!(
+            "  Free resource in use     {} on {} — {}",
+            choice.model(),
+            choice.provider(),
+            choice.reason()
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  m model   l latency   c cost   f prefer-free   p premium reserve   o free order   \
+         d disabled   n pin",
+        Style::default().fg(Color::DarkGray),
+    )));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+/// A comma-separated `provider:model` list for the Routing section, or a
+/// plain sentence when there is nothing to show — matching
+/// [`provider_models_line`]'s "none cached" phrasing for the same reason: an
+/// empty field reads as missing data, not as a deliberate empty list.
+fn free_resource_list_label(entries: &[crate::config::FreeResourceRef]) -> String {
+    if entries.is_empty() {
+        "(none)".to_owned()
+    } else {
+        entries
+            .iter()
+            .map(|entry| format!("{}:{}", entry.provider(), entry.model()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 fn render_memory(frame: &mut Frame, area: Rect) {

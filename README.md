@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 352 / 1267 mandatory capabilities (27%)
+`███████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 374 / 1267 mandatory capabilities (29%)
 
 <details>
 <summary>Per-phase breakdown (12 of 103 phases complete)</summary>
@@ -47,8 +47,8 @@ the authoritative specification and tracks what is done.
 | Phase 9E — Secret storage | 11/13 |
 | Phase 9F — Direct provider launch profiles | 11/13 |
 | Phase 9G — Glasshouse local gateway process | 19/19 ✅ |
-| Phase 9H — Sticky gateway routing for harness-backed interactive sessions | 0/14 |
-| Phase 9I — Free-pool routing | 0/14 |
+| Phase 9H — Sticky gateway routing for harness-backed interactive sessions | 13/14 |
+| Phase 9I — Free-pool routing | 9/14 |
 | Phase 9J — Harness-model pairing model | 0/20 |
 | Phase 9K — Harness-aware response profiles | 0/37 |
 | Phase 10 — Unified session model | 0/14 |

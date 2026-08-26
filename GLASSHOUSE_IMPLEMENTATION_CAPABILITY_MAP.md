@@ -502,20 +502,20 @@ Fixed architectural requirements
 - Interactive sessions are sticky to a compatible model and backend by default to preserve prompt-cache locality, context continuity, and tool semantics.
 - A material model-family change is an explicit migration decision, not transparent per-turn failover.
 
-☐ Assign an interactive harness-backed gateway session to a provider and model when the session starts.
-☐ Keep the harness identity and native session semantics explicit even when the backend is routed through a Glasshouse gateway.
-☐ Treat the gateway assignment as backend state belonging to the harness-backed session rather than as an independent agent session.
-☐ Keep the provider/model assignment sticky across normal turns by default.
-☐ Avoid per-turn model switching for interactive sessions solely because another free model is currently available.
-☐ Preserve prompt-cache locality as a routing objective for gateway-backed sessions.
+☑ Assign an interactive harness-backed gateway session to a provider and model when the session starts.
+☑ Keep the harness identity and native session semantics explicit even when the backend is routed through a Glasshouse gateway.
+☑ Treat the gateway assignment as backend state belonging to the harness-backed session rather than as an independent agent session.
+☑ Keep the provider/model assignment sticky across normal turns by default.
+☑ Avoid per-turn model switching for interactive sessions solely because another free model is currently available.
+☑ Preserve prompt-cache locality as a routing objective for gateway-backed sessions.
 ☐ Allow an explicit session migration to create a new provider/model assignment at a task boundary.
-☐ Allow failover to a compatible backend after a real provider failure when the user or routing policy permits it.
-☐ Prefer failover within the same model family and tool semantics before considering a cross-model migration.
-☐ Treat a material model-family change as a migration decision rather than a transparent provider failover.
-☐ Record when failover changes the provider or model serving a live session.
-☐ Warn when failover is likely to invalidate provider-side prompt caching.
-☐ Never fail over to a backend that cannot preserve the harness’s required protocol or tool semantics.
-☐ Allow the user to pin a gateway-backed session to one provider and disable automatic failover.
+☑ Allow failover to a compatible backend after a real provider failure when the user or routing policy permits it.
+☑ Prefer failover within the same model family and tool semantics before considering a cross-model migration.
+☑ Treat a material model-family change as a migration decision rather than a transparent provider failover.
+☑ Record when failover changes the provider or model serving a live session.
+☑ Warn when failover is likely to invalidate provider-side prompt caching.
+☑ Never fail over to a backend that cannot preserve the harness’s required protocol or tool semantics.
+☑ Allow the user to pin a gateway-backed session to one provider and disable automatic failover.
 
 Phase 9I — Free-pool routing
 
@@ -524,19 +524,19 @@ Fixed architectural requirements
 - Interactive harness routing and bounded internal support jobs are separate policy classes.
 - Free capacity may back an interactive profile only when the selected installed harness, protocol, and tool semantics remain compatible.
 
-☐ Allow provider instances to mark selected models as free-tier or zero-marginal-cost resources.
+☑ Allow provider instances to mark selected models as free-tier or zero-marginal-cost resources.
 ☐ Track request-pool limits separately from token-priced limits when a provider exposes request quotas.
-☐ Track per-model free-tier health independently when a router exposes multiple free models.
+☑ Track per-model free-tier health independently when a router exposes multiple free models.
 ☐ Prefer free models for bounded Glasshouse support work such as classification, memory extraction, and reranking when quality is sufficient.
 ☐ Allow explicitly configured free models such as Nemotron variants to participate in disposable-job routing.
 ☐ Allow compatible free models to back full harness launch profiles only when protocol and tool behavior are adequate for that harness.
-☐ Keep interactive harness routing and disposable-support-job routing as separate policy classes.
-☐ Avoid consuming scarce free requests on health probes when actual workload can provide health signals.
-☐ Apply cooldowns to free models or providers that repeatedly return rate-limit or capacity failures.
-☐ Allow the user to order, disable, or pin free resources from settings.
-☐ Rotate among a provider's configured credentials when one is rate-limited or exhausted, and treat a single key's exhaustion as that key's limit rather than the provider's.
-☐ Track request-pool and quota state per credential rather than only per provider, because two keys for the same router are two separate allowances.
-☐ Allow Glasshouse's own automated evaluation and test runs to use configured zero-cost models, and never a metered resource without an explicit opt-in.
+☑ Keep interactive harness routing and disposable-support-job routing as separate policy classes.
+☑ Avoid consuming scarce free requests on health probes when actual workload can provide health signals.
+☑ Apply cooldowns to free models or providers that repeatedly return rate-limit or capacity failures.
+☑ Allow the user to order, disable, or pin free resources from settings.
+☑ Rotate among a provider's configured credentials when one is rate-limited or exhausted, and treat a single key's exhaustion as that key's limit rather than the provider's.
+☑ Track request-pool and quota state per credential rather than only per provider, because two keys for the same router are two separate allowances.
+☑ Allow Glasshouse's own automated evaluation and test runs to use configured zero-cost models, and never a metered resource without an explicit opt-in.
 ☐ Show whether a free resource is being used because of user preference, quota preservation, or fallback.
 
 Phase 9J — Harness-model pairing model

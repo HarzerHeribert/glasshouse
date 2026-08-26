@@ -52,10 +52,13 @@
 //! response and leave the `content-encoding` header describing something the
 //! client is no longer being sent.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use ureq::Agent;
 use ureq::config::AutoHeaderValue;
 use ureq::http::{HeaderValue, Uri};
 
+use crate::routing::{AssignedModel, Backend, Cost, CredentialId, ToolSemantics};
 use crate::secret::Secret;
 
 /// The scheme-and-host prefix an upstream base URL must carry.
@@ -98,6 +101,16 @@ pub struct Route {
     /// The protocol's slug, from `WireProtocol::slug`. A name, never a
     /// credential.
     protocol: String,
+    /// What is established about this provider's tool-call behaviour **on
+    /// this protocol** — per protocol for the same reason the base URL is,
+    /// because a provider may carry tool calls on one and not another.
+    ///
+    /// Phase 9H line 517 refuses a failover that cannot preserve the
+    /// harness's tool semantics, and
+    /// [`crate::routing::interactive`] is where that comparison lives. It is
+    /// carried here because this is the value that already travels with a
+    /// protocol's destination.
+    tools: ToolSemantics,
     /// The version-independent path prefixes that belong to this protocol,
     /// composed by the caller that *can* see the protocol enum — see
     /// `crate::profile::ingress_targets`.
@@ -117,9 +130,26 @@ impl Route {
     pub fn new(protocol: String, targets: &'static [&'static str], base_url: &str) -> Self {
         Self {
             protocol,
+            tools: ToolSemantics::Unverified,
             targets,
             base_url: base_url.trim_end_matches('/').to_owned(),
         }
+    }
+
+    /// State what is established about tool calls on this protocol.
+    ///
+    /// A builder rather than a fourth argument to [`Route::new`], so that
+    /// every existing call site keeps meaning what it meant:
+    /// [`ToolSemantics::Unverified`] — "nobody checked" — which is what a
+    /// route that says nothing has always meant.
+    pub fn with_tools(mut self, tools: ToolSemantics) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    /// What is established about tool calls on this protocol.
+    pub fn tools(&self) -> ToolSemantics {
+        self.tools
     }
 
     /// The protocol's slug, for a diagnostic.
@@ -180,59 +210,47 @@ fn is_segment_prefix(path: &str, prefix: &str) -> bool {
     path == prefix || (path.starts_with(prefix) && path[prefix.len()..].starts_with('/'))
 }
 
-/// Where the gateway forwards, and the credential it forwards with.
+/// One provider the gateway can forward to: where each of its protocols
+/// lives, and the credential that goes with all of them.
 ///
-/// Built once per Glasshouse instance and shared by every connection thread.
-/// It is immutable: routing between several **providers** is Phase 9H's
-/// sticky assignment, and a mutable pointer here would be that phase's
-/// mechanism built early and without its evidence. Routing between the
-/// protocols of the *one* provider is not that decision — it is decided by
-/// the request target, which the harness already chose.
-pub struct Upstream {
+/// The credential is resolved once, at gateway start, and moved in. There is
+/// no accessor for it — only the crate-private `UpstreamBackend::authorization`,
+/// which produces the header the gateway attaches. A getter returning the
+/// value would be a second door into the one thing this module exists to keep
+/// behind one.
+pub struct UpstreamBackend {
     /// The provider's configured name. A name, for diagnostics — never a
     /// credential, and the same class of value `BackendResource::slug`
     /// already puts in a session record.
     provider: String,
-    /// One route per protocol this gateway serves. Never empty: an upstream
+    /// One route per protocol this backend serves. Never empty: a backend
     /// with nowhere to forward to is refused at construction.
     routes: Vec<Route>,
     /// The provider credential, resolved in-process and never leaving it.
     credential: Secret,
-}
-
-/// Why an [`Upstream`] could not be built.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum UpstreamError {
-    #[error(
-        "the provider `{provider}` serves none of the protocols the Glasshouse gateway's \
-         ingress offers, so the gateway would have nowhere to forward to"
-    )]
-    NoProtocolServed { provider: String },
-    #[error(
-        "the provider `{provider}` declares a base URL for {protocol} that is not an absolute \
-         http(s) URL, so the Glasshouse gateway has nowhere to forward to"
-    )]
-    BaseUrlNotAbsolute { provider: String, protocol: String },
-    #[error(
-        "the credential for the provider `{provider}` cannot be attached to a request; it \
-         contains a character that is not allowed in an HTTP header value"
-    )]
-    CredentialNotHeaderSafe { provider: String },
-}
-
-impl Upstream {
-    /// Build an upstream from a provider's name, one [`Route`] per protocol
-    /// it serves, and its resolved credential.
+    /// Which credential this is, **by name** — the environment variable or
+    /// the store service and account it was resolved through.
     ///
-    /// The credential is moved in and never comes back out: there is no
-    /// accessor for it, only the crate-private `authorization`, which produces
-    /// the header the gateway attaches. That is deliberate — a getter returning
-    /// the value would be a second door into the one thing this module
-    /// exists to keep behind one.
+    /// Phase 9I lines 537 and 538 need quota and health state keyed by the
+    /// credential rather than by the provider, and a key is a thing that gets
+    /// printed. This is the printable half; [`UpstreamBackend::credential`]
+    /// is the half that is not.
+    credential_id: CredentialId,
+    /// Whether this backend costs anything at the margin — Phase 9I line 527,
+    /// as the user marked it. [`Cost::Metered`] when nobody marked anything,
+    /// which is the fail-closed direction.
+    cost: Cost,
+}
+
+impl UpstreamBackend {
+    /// Build one backend from a provider's name, one [`Route`] per protocol
+    /// it serves, its resolved credential and that credential's name.
     pub fn new(
         provider: String,
         routes: Vec<Route>,
         credential: Secret,
+        credential_id: CredentialId,
+        cost: Cost,
     ) -> Result<Self, UpstreamError> {
         if routes.is_empty() {
             return Err(UpstreamError::NoProtocolServed { provider });
@@ -267,6 +285,8 @@ impl Upstream {
             provider,
             routes,
             credential,
+            credential_id,
+            cost,
         })
     }
 
@@ -275,13 +295,13 @@ impl Upstream {
         &self.provider
     }
 
-    /// The slug of every protocol this upstream can carry, in the order the
+    /// Which credential this backend uses, by name.
+    pub fn credential_id(&self) -> &CredentialId {
+        &self.credential_id
+    }
+
+    /// The slug of every protocol this backend can carry, in the order the
     /// routes were declared.
-    ///
-    /// Names only, and the caller that reads them — `crate::profile` — is
-    /// the one that knows what a slug means. This is how a gateway-backed
-    /// launch profile finds out what the running gateway can actually do
-    /// without this module learning what a wire protocol is.
     pub fn served_protocols(&self) -> Vec<&str> {
         self.routes.iter().map(Route::protocol).collect()
     }
@@ -305,15 +325,32 @@ impl Upstream {
     /// whole class of future accident.
     pub(super) fn authorization(&self) -> HeaderValue {
         let mut value = HeaderValue::from_str(&bearer(&self.credential))
-            .expect("checked when the upstream was built");
+            .expect("checked when the backend was built");
         value.set_sensitive(true);
         value
     }
-}
 
-/// `Bearer <credential>`, the one place the resolved value is read.
-fn bearer(credential: &Secret) -> String {
-    format!("Bearer {}", credential.expose())
+    /// This backend as a routing candidate for one protocol and one model, or
+    /// `None` when it does not serve that protocol.
+    ///
+    /// The translation from "a place to send bytes" to "a thing a routing
+    /// policy can compare" happens exactly here, so that
+    /// [`mod@crate::routing`] never has to learn what a base URL is and this
+    /// module never has to learn what a policy is.
+    pub fn as_routing_backend(&self, protocol: &str, model: &AssignedModel) -> Option<Backend> {
+        let route = self
+            .routes
+            .iter()
+            .find(|route| route.protocol() == protocol)?;
+        Some(Backend::new(
+            self.provider.clone(),
+            protocol.to_owned(),
+            model.clone(),
+            self.credential_id.clone(),
+            self.cost,
+            route.tools(),
+        ))
+    }
 }
 
 /// Prints the provider and its routes, and the credential's own redaction
@@ -324,14 +361,227 @@ fn bearer(credential: &Secret) -> String {
 /// hold must not be renderable, and a derive is one added field away from
 /// making it so. [`Secret`]'s own rendering would already print the marker;
 /// this makes that independent of it.
-impl std::fmt::Debug for Upstream {
+impl std::fmt::Debug for UpstreamBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Upstream")
+        f.debug_struct("UpstreamBackend")
             .field("provider", &self.provider)
             .field("routes", &self.routes)
             .field("credential", &crate::secret::REDACTED)
+            .field("credential_id", &self.credential_id.label())
+            .field("cost", &self.cost.as_str())
             .finish()
     }
+}
+
+/// Where the gateway forwards, and the credential it forwards with.
+///
+/// # One serving backend, and the ones it could move to
+///
+/// Built once per Glasshouse instance and shared by every connection thread.
+/// The **set** of backends is immutable; which of them is serving is an
+/// index, and moving that index is the whole of Phase 9H's failover.
+///
+/// Phase 9G deliberately left this as exactly one provider and said so:
+/// *"which backend a session runs against is Phase 9H's sticky routing"*, and
+/// `crate::profile::gateway_upstream` refused a configuration with more than
+/// one candidate rather than choosing between them. This is that phase. The
+/// first candidate in the user's own configuration order is **assigned**, and
+/// the rest are where a real provider failure may move the session — never
+/// per turn, never for a cheaper model, and never across a protocol or a
+/// weakening of tool semantics. [`crate::routing::interactive`] owns every
+/// one of those decisions; this type owns only the consequence.
+///
+/// # Why an index and not a lock over the backends
+///
+/// [`Secret`] is deliberately not `Clone` and can be minted only inside
+/// [`mod@crate::secret`], so a design that swapped a whole `Upstream` under a
+/// lock would have to resolve credentials again or move them between threads
+/// under contention. An index behind an [`AtomicUsize`] moves one machine
+/// word; every credential stays exactly where it was resolved, and a
+/// connection thread reads the serving backend once at the top of its
+/// exchange, so a failover between two of its reads is not possible.
+pub struct Upstream {
+    /// The assigned backend first, then failover candidates in the user's own
+    /// configuration order. Never empty.
+    backends: Vec<UpstreamBackend>,
+    /// Which of `backends` is serving. Only ever set to a valid index.
+    serving: AtomicUsize,
+}
+
+/// Why an [`Upstream`] could not be built.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum UpstreamError {
+    #[error(
+        "the provider `{provider}` serves none of the protocols the Glasshouse gateway's \
+         ingress offers, so the gateway would have nowhere to forward to"
+    )]
+    NoProtocolServed { provider: String },
+    #[error(
+        "the provider `{provider}` declares a base URL for {protocol} that is not an absolute \
+         http(s) URL, so the Glasshouse gateway has nowhere to forward to"
+    )]
+    BaseUrlNotAbsolute { provider: String, protocol: String },
+    #[error(
+        "the credential for the provider `{provider}` cannot be attached to a request; it \
+         contains a character that is not allowed in an HTTP header value"
+    )]
+    CredentialNotHeaderSafe { provider: String },
+    #[error("the Glasshouse gateway was given no provider to forward to")]
+    NoBackend,
+}
+
+impl Upstream {
+    /// One backend and no failover candidates.
+    ///
+    /// The shape every caller written before Phase 9H assumes, kept so that
+    /// those callers still say what they meant: a gateway with nowhere else
+    /// to go.
+    pub fn new(
+        provider: String,
+        routes: Vec<Route>,
+        credential: Secret,
+        credential_id: CredentialId,
+    ) -> Result<Self, UpstreamError> {
+        let backend = UpstreamBackend::new(
+            provider,
+            routes,
+            credential,
+            credential_id,
+            // Nobody said this backend was free, so it is metered — see
+            // `Cost`'s own documentation for why that is the safe direction.
+            Cost::Metered,
+        )?;
+        Ok(Self {
+            backends: vec![backend],
+            serving: AtomicUsize::new(0),
+        })
+    }
+
+    /// The assigned backend, followed by the candidates a real provider
+    /// failure may move the session to.
+    pub fn with_failover(backends: Vec<UpstreamBackend>) -> Result<Self, UpstreamError> {
+        if backends.is_empty() {
+            return Err(UpstreamError::NoBackend);
+        }
+        Ok(Self {
+            backends,
+            serving: AtomicUsize::new(0),
+        })
+    }
+
+    /// The backend currently serving.
+    ///
+    /// A connection thread calls this **once**, at the top of its exchange,
+    /// and uses the reference for the whole of it. That is what makes a
+    /// failover on another thread unable to split one request between two
+    /// providers.
+    pub(super) fn serving(&self) -> &UpstreamBackend {
+        let index = self.serving.load(Ordering::Relaxed);
+        self.backends
+            .get(index)
+            .expect("`serving` is only ever set to an index that exists")
+    }
+
+    /// Every backend, assigned first.
+    pub fn backends(&self) -> &[UpstreamBackend] {
+        &self.backends
+    }
+
+    /// The provider's name, for a diagnostic.
+    pub(super) fn provider(&self) -> &str {
+        self.serving().provider()
+    }
+
+    /// The slug of every protocol the **serving** backend can carry.
+    ///
+    /// The serving one and not the union, deliberately: a launch profile that
+    /// refused against the union would start a harness against an ingress
+    /// whose current backend has no route for it.
+    pub fn served_protocols(&self) -> Vec<&str> {
+        self.serving().served_protocols()
+    }
+
+    /// Move the session onto the backend using `credential`, and say whether
+    /// it moved.
+    ///
+    /// Keyed by [`CredentialId`] rather than by provider name because a
+    /// provider with two keys is two backends here — Phase 9E's credential
+    /// pool — and Phase 9I line 537's rotation moves between exactly those
+    /// two. A provider name would not distinguish them.
+    ///
+    /// `false` means no backend uses that credential, which a caller should
+    /// treat as a defect rather than as a refusal: the candidate it was given
+    /// came from this same list.
+    pub fn switch_to(&self, credential: &CredentialId) -> bool {
+        match self
+            .backends
+            .iter()
+            .position(|backend| backend.credential_id() == credential)
+        {
+            Some(index) => {
+                self.serving.store(index, Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Every credential configured for `provider`, in configuration order.
+    ///
+    /// What Phase 9I line 537's rotation is offered: *this provider's* other
+    /// keys, so that one key's exhaustion stays that key's limit.
+    pub fn credentials_of(&self, provider: &str) -> Vec<CredentialId> {
+        self.backends
+            .iter()
+            .filter(|backend| backend.provider() == provider)
+            .map(|backend| backend.credential_id().clone())
+            .collect()
+    }
+
+    /// The backend using `credential`, as a routing candidate for `protocol`
+    /// and `model`.
+    pub fn backend_for(
+        &self,
+        credential: &CredentialId,
+        protocol: &str,
+        model: &AssignedModel,
+    ) -> Option<Backend> {
+        self.backends
+            .iter()
+            .find(|backend| backend.credential_id() == credential)
+            .and_then(|backend| backend.as_routing_backend(protocol, model))
+    }
+
+    /// Every backend other than the serving one, as routing candidates for
+    /// `protocol` and `model`, in configuration order.
+    ///
+    /// This is what a failure decision is handed. A backend that does not
+    /// serve `protocol` is simply absent — it could never be a candidate, and
+    /// including it so that the policy could reject it would put the same
+    /// knowledge in two places.
+    pub fn failover_candidates(&self, protocol: &str, model: &AssignedModel) -> Vec<Backend> {
+        let serving = self.serving.load(Ordering::Relaxed);
+        self.backends
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != serving)
+            .filter_map(|(_, backend)| backend.as_routing_backend(protocol, model))
+            .collect()
+    }
+}
+
+impl std::fmt::Debug for Upstream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Upstream")
+            .field("serving", &self.serving.load(Ordering::Relaxed))
+            .field("backends", &self.backends)
+            .finish()
+    }
+}
+
+/// `Bearer <credential>`, the one place the resolved value is read.
+fn bearer(credential: &Secret) -> String {
+    format!("Bearer {}", credential.expose())
 }
 
 /// The one HTTP client the gateway uses, configured for pass-through.
@@ -387,11 +637,23 @@ mod tests {
         Route::new(protocol.to_owned(), targets, base_url)
     }
 
+    /// A credential identity for a test upstream: a provider name and a
+    /// variable name, both names.
+    fn test_credential_id(provider: &str) -> CredentialId {
+        CredentialId::new(
+            provider,
+            crate::secret::SecretRef::Environment {
+                var: format!("{}_API_KEY", provider.to_uppercase().replace('-', "_")),
+            },
+        )
+    }
+
     fn upstream_with(routes: Vec<Route>) -> Result<Upstream, UpstreamError> {
         Upstream::new(
             "test-provider".to_owned(),
             routes,
             Secret::mint_for_test("sk-test-credential-value"),
+            test_credential_id("test-provider"),
         )
     }
 
@@ -411,7 +673,7 @@ mod tests {
     }
 
     fn uri_for(upstream: &Upstream, target: &str) -> Option<String> {
-        let route = upstream.route_for(target)?;
+        let route = upstream.serving().route_for(target)?;
         Some(route.uri_for(target)?.to_string())
     }
 
@@ -491,7 +753,7 @@ mod tests {
             "https://elsewhere.example/v1/messages",
         ] {
             assert!(
-                upstream.route_for(target).is_none(),
+                upstream.serving().route_for(target).is_none(),
                 "{target:?} was routed somewhere"
             );
         }
@@ -503,9 +765,14 @@ mod tests {
     fn a_single_protocol_upstream_places_only_its_own_targets() {
         let upstream = upstream_at("https://openrouter.ai/api").expect("an absolute https URL");
         assert_eq!(upstream.served_protocols(), vec!["anthropic-messages"]);
-        assert!(upstream.route_for("/v1/messages").is_some());
-        assert!(upstream.route_for("/responses").is_none());
-        assert!(upstream.route_for("/v1/chat/completions").is_none());
+        assert!(upstream.serving().route_for("/v1/messages").is_some());
+        assert!(upstream.serving().route_for("/responses").is_none());
+        assert!(
+            upstream
+                .serving()
+                .route_for("/v1/chat/completions")
+                .is_none()
+        );
     }
 
     #[test]
@@ -556,6 +823,7 @@ mod tests {
             "test-provider".to_owned(),
             vec![route(ANTHROPIC, "https://openrouter.ai/api")],
             Secret::mint_for_test("value\r\nx-injected: yes"),
+            test_credential_id("test-provider"),
         );
         assert_eq!(
             injected.err(),
@@ -575,6 +843,7 @@ mod tests {
             "test-provider".to_owned(),
             vec![route(ANTHROPIC, "https://openrouter.ai/api")],
             Secret::mint_for_test(VALUE),
+            test_credential_id("test-provider"),
         )
         .expect("an absolute https URL");
 
@@ -603,10 +872,11 @@ mod tests {
             "test-provider".to_owned(),
             vec![route(ANTHROPIC, "https://openrouter.ai/api")],
             Secret::mint_for_test(VALUE),
+            test_credential_id("test-provider"),
         )
         .expect("an absolute https URL");
 
-        let header = upstream.authorization();
+        let header = upstream.serving().authorization();
         assert!(header.is_sensitive());
         let rendered = format!("{header:?}");
         assert!(
@@ -627,7 +897,7 @@ mod tests {
     fn every_route_forwards_with_the_one_credential_the_upstream_holds() {
         let upstream = three_protocol_upstream();
         assert_eq!(upstream.served_protocols().len(), 3);
-        let attached = upstream.authorization();
+        let attached = upstream.serving().authorization();
         assert!(attached.is_sensitive());
         assert_eq!(
             attached.as_bytes(),
@@ -639,6 +909,7 @@ mod tests {
     fn the_upstream_host_is_a_host_and_never_a_path() {
         let upstream = upstream_at("https://openrouter.ai/api").expect("an absolute https URL");
         let route = upstream
+            .serving()
             .route_for("/v1/messages")
             .expect("the anthropic route");
         assert_eq!(route.host(), "openrouter.ai");

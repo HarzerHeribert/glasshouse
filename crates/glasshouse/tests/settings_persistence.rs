@@ -281,3 +281,390 @@ fn routing_edits_persist_to_the_chosen_layer_without_clobbering_siblings() {
     assert_eq!(effective.premium_reserve().layer, Layer::Project);
     assert_eq!(effective.premium_reserve().value.get(), 12);
 }
+
+// -----------------------------------------------------------------------
+// Phase 9I: free resources in configuration and in Settings.
+// -----------------------------------------------------------------------
+
+/// Acceptance 1 — a model marked free-tier survives a save and a load.
+#[test]
+fn a_model_marked_free_tier_survives_a_save_and_a_load() {
+    let workspace = new_workspace();
+    let data = tempfile::tempdir().unwrap();
+    let runtime = runtime_for(workspace.path(), data.path());
+
+    let mut user = config::UserConfig::load(runtime.paths()).unwrap();
+    let mut provider = config::ProviderConfig::new("openrouter");
+    provider.set_free_models(vec!["nvidia/nemotron-nano-9b-v2:free".to_owned()]);
+    user.providers_mut().set("openrouter", provider);
+    user.save(runtime.paths()).unwrap();
+
+    let loaded = config::UserConfig::load(runtime.paths()).unwrap();
+    let loaded_provider = loaded.providers().get("openrouter").unwrap();
+    assert_eq!(
+        loaded_provider.free_models(),
+        &["nvidia/nemotron-nano-9b-v2:free".to_owned()]
+    );
+    assert_eq!(
+        loaded_provider.cost_of("nvidia/nemotron-nano-9b-v2:free"),
+        glasshouse::routing::Cost::Free
+    );
+}
+
+/// Acceptance 2 — a model nobody marked answers `Cost::Metered`, and no
+/// `:free` suffix or any other spelling changes that. The fail-closed
+/// direction: a router that guessed "free" and was wrong spends the user's
+/// money.
+#[test]
+fn an_unmarked_model_is_metered_and_a_free_looking_name_changes_nothing() {
+    let provider = config::ProviderConfig::new("openrouter");
+    for model in [
+        "nvidia/nemotron-nano-9b-v2:free",
+        "z-ai/glm-4.5-air:free",
+        "plain-metered-model",
+        "",
+    ] {
+        assert_eq!(
+            provider.cost_of(model),
+            glasshouse::routing::Cost::Metered,
+            "`{model}` must be metered until the user marks it, whatever its own name suggests"
+        );
+    }
+}
+
+/// Acceptance 3 — a configuration file written without the new fields loads
+/// with empty preferences and no error.
+#[test]
+fn a_config_file_written_before_free_resources_existed_loads_with_empty_preferences() {
+    let workspace = new_workspace();
+    let data = tempfile::tempdir().unwrap();
+    let runtime = runtime_for(workspace.path(), data.path());
+
+    std::fs::write(
+        runtime.paths().user_config_file(),
+        "[providers.openrouter]\ntemplate = \"openrouter\"\ncredential_env = [\"OPENROUTER_API_KEY\"]\n",
+    )
+    .unwrap();
+
+    let loaded = config::UserConfig::load(runtime.paths()).expect("must load without error");
+    let provider = loaded.providers().get("openrouter").unwrap();
+    assert!(provider.free_models().is_empty());
+    assert_eq!(
+        provider.cost_of("anything"),
+        glasshouse::routing::Cost::Metered
+    );
+
+    let preferences = loaded.routing().free_preferences();
+    assert!(preferences.order().is_empty());
+    assert!(preferences.disabled().is_empty());
+    assert_eq!(preferences.pin(), None);
+}
+
+/// Acceptance 4 — the user's order, disabled list and pin round-trip, and a
+/// pin naming a provider that is no longer configured degrades visibly
+/// rather than failing, through the frozen routing policy —
+/// `RoutingModelChoice::resolve`'s own reasoning, applied to a free-resource
+/// pin.
+#[test]
+fn free_resource_order_disabled_and_pin_round_trip_and_a_stale_pin_degrades_visibly() {
+    use glasshouse::config::FreeResourceRef;
+    use glasshouse::routing::disposable::{
+        DisposableCandidate, DisposableRouting, JobKind, NoResource,
+    };
+    use glasshouse::routing::free::FreePool;
+    use glasshouse::routing::{Cost, CredentialId};
+    use glasshouse::secret::SecretRef;
+
+    let workspace = new_workspace();
+    let data = tempfile::tempdir().unwrap();
+    let runtime = runtime_for(workspace.path(), data.path());
+
+    let mut user = config::UserConfig::load(runtime.paths()).unwrap();
+    user.routing_mut()
+        .set_free_resource_order(Some(vec![
+            FreeResourceRef::new("nous", "c-model"),
+            FreeResourceRef::new("openrouter", "b-model"),
+        ]))
+        .set_free_resource_disabled(Some(vec![FreeResourceRef::new("openrouter", "a-model")]))
+        .set_free_resource_pin(Some(FreeResourceRef::new(
+            "vanished-provider",
+            "gone-model",
+        )));
+    user.save(runtime.paths()).unwrap();
+
+    let loaded = config::UserConfig::load(runtime.paths()).unwrap();
+    assert_eq!(
+        loaded.routing().free_resource_order().unwrap(),
+        &[
+            FreeResourceRef::new("nous", "c-model"),
+            FreeResourceRef::new("openrouter", "b-model"),
+        ]
+    );
+    assert_eq!(
+        loaded.routing().free_resource_disabled().unwrap(),
+        &[FreeResourceRef::new("openrouter", "a-model")]
+    );
+    assert_eq!(
+        loaded.routing().free_resource_pin(),
+        Some(&FreeResourceRef::new("vanished-provider", "gone-model"))
+    );
+
+    // The stale pin was never validated against configured providers at
+    // load time — loading did not fail — and the frozen routing policy is
+    // where it degrades, visibly, rather than silently substituting another
+    // free resource.
+    let preferences = loaded.routing().free_preferences();
+    let routing = DisposableRouting::for_support_work(true, preferences);
+    let candidate = DisposableCandidate::new(
+        "openrouter",
+        "b-model",
+        CredentialId::new(
+            "openrouter",
+            SecretRef::Environment {
+                var: "OPENROUTER_API_KEY".to_owned(),
+            },
+        ),
+        Cost::Free,
+    );
+    let err = routing
+        .choose(
+            JobKind::Classification,
+            &[candidate],
+            &FreePool::new(),
+            std::time::Instant::now(),
+        )
+        .expect_err(
+            "a pin naming a provider nobody configured must not silently substitute another \
+             resource",
+        );
+    assert!(matches!(err, NoResource::PinnedResourceUnavailable { .. }));
+}
+
+fn rendered_settings(state: &glasshouse::shell::ShellState, width: u16, height: u16) -> String {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| glasshouse::shell::view::render(state, frame))
+        .expect("draw must not panic");
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Acceptance 5 — the Routing settings screen renders the reason for the
+/// resource in use, for each of the three `UseReason` values, using that
+/// type's own words — there is exactly one spelling of those three phrases
+/// and it is `UseReason::Display`'s.
+#[test]
+fn routing_settings_render_the_disposable_choice_reason_in_the_types_own_words() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use glasshouse::routing::disposable::{DisposableCandidate, DisposableRouting, JobKind};
+    use glasshouse::routing::free::{FreePool, FreePreferences, FreeResource, WorkloadOutcome};
+    use glasshouse::routing::{Cost, CredentialId, UseReason};
+    use glasshouse::secret::SecretRef;
+    use glasshouse::shell::{HarnessRow, ProfileRow, ProviderRow, ShellState};
+
+    fn credential(provider: &str) -> CredentialId {
+        CredentialId::new(
+            provider,
+            SecretRef::Environment {
+                var: format!("{}_API_KEY", provider.to_uppercase()),
+            },
+        )
+    }
+
+    for reason in [
+        UseReason::UserPreference,
+        UseReason::QuotaPreservation,
+        UseReason::Fallback,
+    ] {
+        let (routing, candidates, pool) = match reason {
+            UseReason::UserPreference => (
+                DisposableRouting::for_support_work(true, FreePreferences::new()),
+                vec![DisposableCandidate::new(
+                    "openrouter",
+                    "a-free-model",
+                    credential("openrouter"),
+                    Cost::Free,
+                )],
+                FreePool::new(),
+            ),
+            UseReason::QuotaPreservation => (
+                DisposableRouting::for_support_work(false, FreePreferences::new()),
+                vec![DisposableCandidate::new(
+                    "openrouter",
+                    "a-free-model",
+                    credential("openrouter"),
+                    Cost::Free,
+                )],
+                FreePool::new(),
+            ),
+            UseReason::Fallback => {
+                let mut pool = FreePool::new();
+                let first_credential = credential("openrouter");
+                for _ in 0..2 {
+                    pool.observe(
+                        &FreeResource::new(first_credential.clone(), "first-model"),
+                        WorkloadOutcome::CapacityFailure,
+                        std::time::Instant::now(),
+                    );
+                }
+                (
+                    DisposableRouting::for_support_work(true, FreePreferences::new()),
+                    vec![
+                        DisposableCandidate::new(
+                            "openrouter",
+                            "first-model",
+                            first_credential,
+                            Cost::Free,
+                        ),
+                        DisposableCandidate::new(
+                            "openrouter",
+                            "second-model",
+                            credential("openrouter"),
+                            Cost::Free,
+                        ),
+                    ],
+                    pool,
+                )
+            }
+        };
+
+        let choice = routing
+            .choose(
+                JobKind::Classification,
+                &candidates,
+                &pool,
+                std::time::Instant::now(),
+            )
+            .expect("configured");
+        assert_eq!(choice.reason(), reason);
+
+        let mut state = ShellState::new("p", "/work/p", "0.1.0", Vec::new());
+        state.open_settings(
+            Vec::<HarnessRow>::new(),
+            Vec::new(),
+            Vec::<ProviderRow>::new(),
+            Vec::<ProfileRow>::new(),
+        );
+        state.record_disposable_choice(choice);
+        // Harnesses, Integrations, Providers, Launch Profiles, Routing.
+        for _ in 0..4 {
+            state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
+
+        let text = rendered_settings(&state, 100, 30);
+        assert!(
+            text.contains(reason.as_str()),
+            "the Routing screen must show `{}` in `UseReason`'s own words:\n{text}",
+            reason.as_str()
+        );
+    }
+}
+
+/// Acceptance 6 — a credential value planted in the environment never
+/// appears in any Providers or Routing render, at a realistic width **and**
+/// at 400 columns, while exercising the two editors this batch adds: a
+/// provider's free-model markings and the Routing section's free-resource
+/// preferences.
+#[test]
+fn no_credential_value_leaks_through_the_free_resource_editors() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use glasshouse::config::Layer;
+    use glasshouse::shell::{HarnessRow, ProfileRow, ProviderRow, ShellState};
+
+    const VAR: &str = "GLASSHOUSE_FREE_RESOURCE_TEST_ONLY_SECRET_VAR";
+    const SECRET_VALUE: &str = "sk-free-resource-test-totally-real-looking-secret-xyz123";
+
+    // SAFETY: `VAR` is unique to this test and removed again below.
+    unsafe {
+        std::env::set_var(VAR, SECRET_VALUE);
+    }
+
+    let mut provider_config = config::ProviderConfig::new("openrouter");
+    provider_config.set_credential_env(vec![VAR.to_owned()]);
+    provider_config.set_free_models(vec!["nvidia/nemotron-nano-9b-v2:free".to_owned()]);
+    let providers = vec![ProviderRow::new(
+        "secret-test",
+        provider_config,
+        Layer::User,
+    )];
+
+    let mut state = ShellState::new("p", "/work/p", "0.1.0", Vec::new());
+    state.open_settings(
+        Vec::<HarnessRow>::new(),
+        Vec::new(),
+        providers,
+        Vec::<ProfileRow>::new(),
+    );
+
+    let press = |state: &mut ShellState, code: KeyCode| {
+        state.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+    };
+
+    let mut screens = Vec::new();
+
+    // Providers: the free-model editor open on the planted provider.
+    press(&mut state, KeyCode::Tab);
+    press(&mut state, KeyCode::Tab);
+    screens.push(rendered_settings(&state, 100, 30));
+    screens.push(rendered_settings(&state, 400, 60));
+    press(&mut state, KeyCode::Char('f'));
+    for c in "another-free-model".chars() {
+        press(&mut state, KeyCode::Char(c));
+    }
+    screens.push(rendered_settings(&state, 100, 30));
+    screens.push(rendered_settings(&state, 400, 60));
+    press(&mut state, KeyCode::Enter);
+    screens.push(rendered_settings(&state, 100, 30));
+    screens.push(rendered_settings(&state, 400, 60));
+
+    // Routing: the order, disabled and pin editors, each typed and confirmed.
+    press(&mut state, KeyCode::Tab);
+    press(&mut state, KeyCode::Tab);
+    for (key, typed) in [
+        (
+            KeyCode::Char('o'),
+            "openrouter:a-free-model,nous:b-free-model",
+        ),
+        (KeyCode::Char('d'), "openrouter:c-free-model"),
+        (KeyCode::Char('n'), "openrouter:a-free-model"),
+    ] {
+        press(&mut state, key);
+        for c in typed.chars() {
+            press(&mut state, KeyCode::Char(c));
+        }
+        screens.push(rendered_settings(&state, 100, 30));
+        screens.push(rendered_settings(&state, 400, 60));
+        press(&mut state, KeyCode::Enter);
+        screens.push(rendered_settings(&state, 100, 30));
+        screens.push(rendered_settings(&state, 400, 60));
+    }
+
+    // SAFETY: matches the `set_var` above.
+    unsafe {
+        std::env::remove_var(VAR);
+    }
+
+    for screen in &screens {
+        assert!(
+            !screen.contains(SECRET_VALUE),
+            "the planted credential's value leaked into a render:\n{screen}"
+        );
+    }
+    // The variable's NAME must still be shown — the redaction is of the
+    // value, never of the reference to it.
+    assert!(
+        screens.iter().any(|screen| screen.contains(VAR)),
+        "the credential variable name must still be shown somewhere"
+    );
+}

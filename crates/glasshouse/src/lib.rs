@@ -23,6 +23,7 @@ pub mod profile;
 pub mod project;
 pub mod provider;
 pub mod pty;
+pub mod routing;
 pub mod secret;
 pub mod session;
 pub mod shell;
