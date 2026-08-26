@@ -536,6 +536,37 @@ mod tests {
         path
     }
 
+    /// Run `probe_version`, retrying only while Linux reports ETXTBSY.
+    ///
+    /// See the call sites for why this exists. Bounded at one second; any
+    /// other error is returned to the caller's `unwrap` unchanged.
+    #[cfg(unix)]
+    fn spawn_retrying_on_text_file_busy(
+        exe: &ResolvedExecutable,
+        project: &Project,
+    ) -> Option<Version> {
+        let mut attempt = 0;
+        loop {
+            match probe_version(exe, "--version", project, DEFAULT_PROBE_TIMEOUT) {
+                Err(ProbeError::Spawn { ref source, .. })
+                    if source.raw_os_error() == Some(26) && attempt < 50 =>
+                {
+                    attempt += 1;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                other => break other.unwrap(),
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn spawn_retrying_on_text_file_busy(
+        exe: &ResolvedExecutable,
+        project: &Project,
+    ) -> Option<Version> {
+        probe_version(exe, "--version", project, DEFAULT_PROBE_TIMEOUT).unwrap()
+    }
+
     #[test]
     fn version_probe_child_starts_in_the_active_project_root() {
         let (guard, project) = test_project();
@@ -551,7 +582,22 @@ mod tests {
         // its own binary, finds nothing and exits 23.
         std::fs::write(project.display_root().join(CWD_MARKER), b"").unwrap();
 
-        let probed = probe_version(&exe, "--version", &project, DEFAULT_PROBE_TIMEOUT).unwrap();
+        // ETXTBSY, and it is the test harness's race rather than Glasshouse's.
+        //
+        // Both tests here write an executable and immediately run it while
+        // the other tests in this binary are forking. A child that inherits
+        // the still-open write descriptor keeps the file open for writing,
+        // and Linux then refuses to exec it with "text file busy" (errno 26).
+        // macOS does not enforce that, which is why this only ever failed in
+        // the Linux container, only under the full suite, and never alone —
+        // it passed three times of three in isolation while failing beside
+        // 865 siblings.
+        //
+        // Production never writes a program and then runs it, so retrying
+        // asserts nothing false about the product. The retry is bounded and
+        // every other spawn failure is raised immediately, so a genuine
+        // "cannot start the child" still fails this test.
+        let probed = spawn_retrying_on_text_file_busy(&exe, &project);
 
         // A bare "expected Some, got None" here says nothing about *why* the
         // child could not see the marker, and this test only runs on the
@@ -606,7 +652,22 @@ mod tests {
         let exe = exec::resolve_explicit(&path).unwrap();
 
         // Deliberately no marker written.
-        let probed = probe_version(&exe, "--version", &project, DEFAULT_PROBE_TIMEOUT).unwrap();
+        // ETXTBSY, and it is the test harness's race rather than Glasshouse's.
+        //
+        // Both tests here write an executable and immediately run it while
+        // the other tests in this binary are forking. A child that inherits
+        // the still-open write descriptor keeps the file open for writing,
+        // and Linux then refuses to exec it with "text file busy" (errno 26).
+        // macOS does not enforce that, which is why this only ever failed in
+        // the Linux container, only under the full suite, and never alone —
+        // it passed three times of three in isolation while failing beside
+        // 865 siblings.
+        //
+        // Production never writes a program and then runs it, so retrying
+        // asserts nothing false about the product. The retry is bounded and
+        // every other spawn failure is raised immediately, so a genuine
+        // "cannot start the child" still fails this test.
+        let probed = spawn_retrying_on_text_file_busy(&exe, &project);
         assert!(
             probed.is_none(),
             "the probe must not report a version without the marker: {probed:?}"

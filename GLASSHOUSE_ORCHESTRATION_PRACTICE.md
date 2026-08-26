@@ -1007,3 +1007,64 @@ Both bugs are the same shape as the MSRV gate in §20 and the Codex hook in §22
 trigger had fired successfully that morning, which is precisely why the lock
 existed to break the rate-limit trigger. Ask of any safety net: *what has it
 actually been seen to do, and under which trigger?*
+
+## §31 — the local gate had two defects, and a worker found the one that mattered
+
+`scripts/ci-local.sh` was written on 2026-08-26 to replace CI. Within hours it
+had told two separate lies, and it is worth recording that **the tool built to
+enforce the evidence standard was itself the least-evidenced thing in the
+repository.**
+
+### The step that could not fail
+
+`run_linux` nested its step inside `su ci -c "…$1…"`. The step string contains
+`RUSTFLAGS="-D warnings"`, whose quote closed the `su -c` string early: the
+command was mangled and its exit status meaningless. `test (ubuntu)` reported
+PASS unconditionally.
+
+`lead-record` found it — not by reading the script, but by **distrusting a PASS
+on a tree it had personally just watched fail by hand in the same container**,
+and then applying §20 to the gate. Measured both directions: a step running
+`RUSTFLAGS="-D warnings" false` exited `0` before and `1` after.
+
+`lint (ubuntu)` and `msrv (ubuntu)` carry no embedded quotes and were always
+genuine; macOS runs natively and was always genuine. Only Linux *test* coverage
+was fake, for `dc80bc2` and `a53877a`.
+
+**Fix:** pass the step through the environment (`-e STEP="$1"`) and run
+`runuser -u ci -- bash -c 'eval "$STEP"'`. Never interpolate a command into a
+quoted string you also control the quoting of.
+
+### The container tree was a union of every worktree that ever ran the script
+
+One shared `glasshouse-ci-home` volume, and `tar -x` writes over a tree without
+removing what is no longer in it. `lead-record` ran the gate from its own
+worktree; the next run extracted `main` on top; the build then compiled
+`main` **plus** `tests/checkpoint_portability.rs` from another branch, and
+failed on a file `main` does not contain. Two leads running the gate
+concurrently also raced on that one volume.
+
+The failure mode is loud in this direction and silent in the other: a file
+deleted in the source survives in the container and keeps compiling.
+
+**Fix:** volumes keyed to the worktree (`glasshouse-ci-home-<hash of repo>`),
+and `rm -rf /home/ci/repo` before every extract. The build cache at
+`/home/ci/target` is deliberately kept.
+
+### And underneath both, a real Linux-only flake
+
+With the gate honest, `version_probe_child_starts_in_the_active_project_root`
+failed — **only on Linux, only under the full suite, never alone** (three of
+three in isolation, beside 865 siblings it failed). It writes an executable and
+immediately runs it while other tests fork; a child inheriting the still-open
+write descriptor makes Linux refuse the exec with ETXTBSY. macOS does not
+enforce that, so it had never been seen locally, and CI had been lucky.
+
+Both call sites now retry on errno 26, bounded, with every other spawn error
+raised immediately. Production never writes a program and then runs it, so the
+retry asserts nothing false about Glasshouse.
+
+**The transferable part:** a gate is a product, and it deserves the same
+question as any other — *what change would make this fail?* Two of the three
+findings here were invisible to reading and needed the gate to be run against a
+tree already known to be broken.

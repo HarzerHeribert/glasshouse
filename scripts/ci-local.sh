@@ -89,7 +89,12 @@ if [ "$DO_LINUX" -eq 1 ]; then
     # A separate CARGO_TARGET_DIR inside the container: Linux artifacts must
     # never land in the host's target/, and a shared one would make every
     # local build recompile the world in both directions.
-    docker volume create glasshouse-ci-home >/dev/null 2>&1
+    # Volumes are keyed to THIS worktree. One shared pair was wrong twice
+    # over: two team leads running this concurrently raced on the same
+    # /home/ci, and a lead's worktree left files behind that then compiled
+    # into main's build. A build cache may be shared; a source tree may not.
+    TAG="$(printf '%s' "$REPO" | shasum | cut -c1-12)"
+    docker volume create "glasshouse-ci-home-$TAG" >/dev/null 2>&1
     docker volume create glasshouse-ci-registry >/dev/null 2>&1
     # Two things here are not incidental; both were found by this script
     # producing a red on a tree that real ubuntu-latest had passed.
@@ -106,19 +111,33 @@ if [ "$DO_LINUX" -eq 1 ]; then
     run_linux() {
       docker run --rm \
         -v "$REPO":/src:ro \
-        -v glasshouse-ci-home:/home/ci \
+        -v "glasshouse-ci-home-$TAG":/home/ci \
         -v glasshouse-ci-registry:/usr/local/cargo/registry \
         -e CARGO_TERM_COLOR=always \
+        -e STEP="$1" \
         rust:latest bash -c '
           set -e
           id -u ci >/dev/null 2>&1 || useradd -m -u 1000 ci
+          # Wipe before extracting. `tar -x` writes over a tree, it never
+          # removes what is no longer in the source — so a file deleted (or
+          # belonging to a different worktree) survives and compiles. That is
+          # how tests/checkpoint_portability.rs from another branch broke a
+          # build of main, and it could as easily have hidden a failure.
+          # /home/ci/target is deliberately NOT wiped: it is the build cache.
+          rm -rf /home/ci/repo
           mkdir -p /home/ci/repo
           tar -C /src --exclude=./target -cf - . | tar -C /home/ci/repo -xf -
           chown -R ci:ci /home/ci
           # rustup/cargo homes are root-owned in the image; the msrv step
           # installs a toolchain and must be able to write them.
           chown -R ci:ci /usr/local/rustup /usr/local/cargo
-          su ci -c "export CARGO_TARGET_DIR=/home/ci/target PATH=/usr/local/cargo/bin:\$PATH; cd /home/ci/repo && '"$1"'"
+          # The step arrives as $STEP in the environment and is never
+          # interpolated into a quoted string. It used to be nested inside
+          # su -c "…$1…", and a step containing RUSTFLAGS="-D warnings" closed
+          # that string early: the command was mangled and its exit status
+          # meaningless, so `test (ubuntu)` reported PASS on a tree that had
+          # just failed by hand. A gate that cannot fail is not a gate (§20).
+          runuser -u ci -- bash -c '"'"'cd /home/ci/repo && export CARGO_TARGET_DIR=/home/ci/target && eval "$STEP"'"'"'
         '
     }
     step "test (ubuntu) / build+test" run_linux \
