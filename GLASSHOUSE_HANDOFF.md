@@ -6,7 +6,27 @@ Last updated: 2026-08-26 (Europe/Berlin)
 
 **Phase 9G, 2C, 9B, 9C and 9D are COMPLETE.** 9E eleven of thirteen; 2D six of
 nineteen; Phase 9 five of seven; 9F eleven of thirteen; 9A nineteen of
-twenty-six; **252 checked boxes (19%).** Local suite **865 passing**.
+twenty-six; **254 checked boxes (20%).** Local suite **914 passing**.
+
+**Phase 4 gained its unfocused-control lines.** `m` and `c` in the session
+overview act on a session the viewport is not showing, and `N` /
+`glasshouse launch --headless` runs a harness that never takes the terminal.
+The load-bearing change was the smallest: the overview used to highlight the
+same index that drives focus, so "send text without focusing it" was not
+expressible at all until the overview got its own cursor.
+
+**The interrupt box is deliberately still open.** Every interrupt test in the
+suite is `#[cfg(unix)]`, so Windows compiles them and runs none — a green
+`test (windows-latest)` is the absence of evidence wearing the same colour.
+ConPTY's `PSEUDOCONSOLE_WIN32_INPUT_MODE` path has never executed.
+
+**Two Phase 9F mechanisms landed with both boxes open, and the reason is the
+transferable part.** `resolve_checked` was about to be wired into
+`launch_session`, where `session::select::select` has *already* resolved the
+executable and errored if it were unusable — so the call would have passed
+`Usable` unconditionally and the refusal could never fire. Line 466's verb is
+*offering*; line 465's is *starting*. **When a mechanism's proposed call site
+cannot produce the failure the line describes, the box is not close to done.**
 
 **Phase 9D closed at fourteen of fourteen.** A provider connectivity test is a
 real bounded request now rather than a precondition check, a model list can be

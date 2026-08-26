@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 252 / 1267 mandatory capabilities (19%)
+`████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 254 / 1267 mandatory capabilities (20%)
 
 <details>
 <summary>Per-phase breakdown (9 of 103 phases complete)</summary>
@@ -34,7 +34,7 @@ the authoritative specification and tracks what is done.
 | Phase 2D — Settings foundation | 13/20 |
 | Phase 2 — Persistent project state | 10/10 ✅ |
 | Phase 3 — TUI shell | 11/12 |
-| Phase 4 — Generic PTY session runtime | 9/12 |
+| Phase 4 — Generic PTY session runtime | 11/12 |
 | Phase 5 — Native terminal embedding | 8/8 ✅ |
 | Phase 6 — Harness adapter interface | 12/13 |
 | Phase 7 — Claude Code adapter | 8/10 |

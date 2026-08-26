@@ -701,3 +701,24 @@ thirteen mutations, verified 339 leaf quotes mechanically, found two real
 defects by running the binary, and volunteered five things its own packet got
 wrong. The flaw was visible *in its own doc comment* precisely because it
 explained itself. A less careful worker leaves nothing to catch.
+
+## §24 — checking a box is three edits, not one
+
+`lint` went red on `dc78129` for `Check README progress block`, and the failure
+was correct. Checking a map box changes three files, and the third is easy to
+forget because a script writes it:
+
+1. the map (`☐` → `☑`),
+2. the evidence ledger entry (`State:` → `COMPLETE`, with the CI run cited),
+3. **`README.md`'s progress block — regenerate it with `scripts/progress.py`
+   and stage it in the same commit.**
+
+`progress.py` rewrites the block as a side effect of being run for a count. So
+the trap is specific: running it *after* committing gives you the right number
+on screen and a stale number in the commit. Run it **before** staging, and let
+`git status --short` in the same call show you the README is dirty.
+
+The CI job exists because the README is what a reader sees first, and a
+progress claim that disagrees with the map is exactly the kind of quiet
+inaccuracy this project's ledger discipline is meant to prevent. Cheap failure,
+correctly placed.
