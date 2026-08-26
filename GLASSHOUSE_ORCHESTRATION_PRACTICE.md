@@ -754,3 +754,42 @@ exercised on macOS too.
 
 Third time a Windows job has caught something every local gate hid. The pattern
 has not changed: local green says nothing about the platform that broke.
+
+## §26 — a single `try_lock` is a coin flip, not "best effort"
+
+`test (macos-latest)` went red on `3ec4973` for
+`interrupting_a_headless_launch_does_not_leave_the_harness_behind`, then
+**passed on rerun against the identical commit.** Intermittent, so a race.
+
+The mechanism, established rather than assumed:
+
+- `SessionRuntime::close` sends `ProcessSignal::Kill`, so if it runs the child
+  dies — reading that eliminated the competing theory that the fake harness's
+  `trap '' HUP` was letting it survive.
+- The child survived, therefore `close` never ran.
+- The forced-exit callback got **one** `try_lock` on the runtime, and the
+  headless poll loop takes that same lock every 20ms. One attempt, no retry.
+
+**Measured: 1 orphan in 100 runs under 3x CPU load.** `shutdown`'s rule —
+never wait indefinitely, because failing to exit is worse than failing to
+clean up — was honoured to the letter and still produced the wrong answer.
+The fix is a *bounded* retry: it keeps the guarantee that matters (it always
+returns, quickly) and removes the coin flip. Poisoning is now treated as
+ownership rather than as a reason to give up, since a poisoned mutex would
+otherwise make every retry fail for as long as we were willing to try.
+
+### The transferable parts
+
+1. **"Best effort" must still make an effort.** If a cleanup path gets one
+   attempt at a contended resource and silently does nothing on failure, its
+   failure rate is the contention rate — and nothing above it retries.
+2. **Reproduce before fixing, and put the machine under load to do it.** The
+   first attempt was 0/25 on an idle machine and proved nothing. 3x CPU count
+   in spinners turned it into 1/100. An unreproducible race is a theory.
+3. **Then make it deterministic.** A probabilistic regression that fires once
+   in a hundred runs is not a regression test. Holding the lock on purpose
+   turns it into one that fails every time — and the one-shot mutation kills
+   it with the exact message, which a 1-in-100 test never could.
+4. **A rerun is a cheap experiment.** Re-running just the failed job answered
+   "intermittent or environmental?" for almost nothing, and that answer
+   decided the entire investigation.

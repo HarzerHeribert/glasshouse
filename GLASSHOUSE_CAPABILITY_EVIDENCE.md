@@ -4584,6 +4584,25 @@ Failure/isolation evidence:
   caller and it is safe by construction. Note that a headless launch and an
   attached session cannot both be live in one process today, so two concurrent
   callers are not yet exercised.
+- **A second defect, found by CI and fixed in `close_before_forced_exit`.** The
+  first fix took a single `try_lock` on the runtime, and the headless poll loop
+  takes that same lock every 20ms — so cleanup was a coin flip with no retry
+  anywhere above it, and losing it orphaned the harness permanently. It
+  surfaced as an intermittent red `test (macos-latest)` on `3ec4973` that
+  passed on rerun against the identical commit, and was then **reproduced
+  locally at 1 orphan in 100 runs under 3x CPU load**. `close` sends
+  `ProcessSignal::Kill`, which is how the competing theory — the fake harness's
+  `trap '' HUP` letting it survive — was eliminated by reading rather than
+  guessing.
+- The repair is a bounded retry, and it is covered by a **deterministic**
+  regression rather than the 1-in-100 one: `hold_lock_for` takes the lock on
+  purpose, so `a_forced_exit_cleanup_waits_out_a_briefly_held_lock` fails every
+  time without the fix. Proved in both directions — the one-shot mutation kills
+  it with "the cleanup gave up while the lock was merely busy".
+  `a_forced_exit_cleanup_gives_up_rather_than_hanging` asserts the bound is
+  honoured, because a forced exit that will not exit is the worse failure, and
+  `a_single_attempt_loses_the_race_that_the_bound_wins` pins the pre-fix
+  behaviour so it cannot quietly return.
 
 Platform/external evidence:
 - CI run `32957790931` on commit `9d9483b`: **all seven jobs green** — `lint`,

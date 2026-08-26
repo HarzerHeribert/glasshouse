@@ -430,9 +430,7 @@ fn run_headless(id: &SessionId, launch: HarnessLaunch<'_>) -> anyhow::Result<Exi
         let live = Arc::clone(&live);
         let id = id.clone();
         shutdown::on_forced_exit(move || {
-            if let Ok(mut live) = live.try_lock() {
-                let _ = live.close(&id);
-            }
+            close_before_forced_exit(&live, &id, FORCED_EXIT_BOUND);
         })
     };
 
@@ -464,6 +462,62 @@ fn run_headless(id: &SessionId, launch: HarnessLaunch<'_>) -> anyhow::Result<Exi
 fn lock(live: &Mutex<SessionRuntime>) -> std::sync::MutexGuard<'_, SessionRuntime> {
     live.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// How long a forced-exit cleanup may spend trying to reach the runtime.
+///
+/// Far below any threshold a person would read as a hang, and far above the
+/// microseconds the poll loop actually holds the lock for.
+const FORCED_EXIT_BOUND: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Close `id` on the way out of a forced exit, retrying briefly rather than
+/// once.
+///
+/// [`glasshouse::shutdown`]'s rule is that a forced-exit callback must never
+/// wait indefinitely: failing to clean up is survivable, failing to exit is
+/// not. A **single** `try_lock` honours the letter of that rule and still
+/// gets the wrong answer. The headless poll loop takes this same lock every
+/// `POLL`, so one attempt is a coin flip, and losing it orphans a real
+/// harness permanently with no second chance — there is no retry anywhere
+/// above this.
+///
+/// That is not theoretical. It was **measured at 1 orphan in 100 runs under
+/// 3x CPU load**, and it turned up first as an intermittent red
+/// `test (macos-latest)` that passed on rerun against the identical commit.
+///
+/// A bound keeps the guarantee that actually matters — this returns, always,
+/// and quickly — while removing the coin flip. Poisoning is treated as
+/// ownership rather than as a reason to give up, for the same reason
+/// [`lock`] does: a panicked thread must not strand a live child, and a
+/// poisoned mutex would otherwise make `try_lock` fail for as long as we were
+/// willing to retry.
+///
+/// Returns whether the runtime was reached.
+fn close_before_forced_exit(
+    live: &Mutex<SessionRuntime>,
+    id: &SessionId,
+    bound: std::time::Duration,
+) -> bool {
+    const RETRY: std::time::Duration = std::time::Duration::from_millis(1);
+    let deadline = std::time::Instant::now() + bound;
+    loop {
+        match live.try_lock() {
+            Ok(mut live) => {
+                let _ = live.close(id);
+                return true;
+            }
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                let _ = poisoned.into_inner().close(id);
+                return true;
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(RETRY);
+            }
+        }
+    }
 }
 
 /// The provider the local Glasshouse gateway forwards to, with its
@@ -929,6 +983,100 @@ fn setup(runtime: &Runtime, trigger: SetupTrigger) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hold the runtime's lock for `held`, signalling once it is definitely
+    /// taken so a test never races its own fixture.
+    fn hold_lock_for(
+        live: &Arc<Mutex<SessionRuntime>>,
+        held: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let live = Arc::clone(live);
+        let (taken, is_taken) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let guard = live
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            taken.send(()).expect("the test is still waiting");
+            std::thread::sleep(held);
+            drop(guard);
+        });
+        is_taken.recv().expect("the holder thread took the lock");
+        holder
+    }
+
+    /// The regression for the orphan race, made deterministic.
+    ///
+    /// The end-to-end version of this lives in `pty_smoke` and is
+    /// probabilistic — it caught the defect once in a hundred runs under
+    /// load, and once on macOS CI. This one holds the lock on purpose, so it
+    /// fails every time rather than one time in a hundred.
+    #[test]
+    fn a_forced_exit_cleanup_waits_out_a_briefly_held_lock() {
+        let live = Arc::new(Mutex::new(SessionRuntime::new()));
+        let holder = hold_lock_for(&live, std::time::Duration::from_millis(100));
+
+        let reached = close_before_forced_exit(
+            &live,
+            &SessionId::new("headless"),
+            std::time::Duration::from_secs(5),
+        );
+
+        assert!(
+            reached,
+            "the cleanup gave up while the lock was merely busy, which is how a \
+             real harness gets orphaned"
+        );
+        holder.join().expect("holder thread");
+    }
+
+    /// The other direction, and the reason the bound exists at all: a lock
+    /// that is never released must not keep the process from exiting.
+    #[test]
+    fn a_forced_exit_cleanup_gives_up_rather_than_hanging() {
+        let live = Arc::new(Mutex::new(SessionRuntime::new()));
+        let holder = hold_lock_for(&live, std::time::Duration::from_secs(3));
+
+        let started = std::time::Instant::now();
+        let reached = close_before_forced_exit(
+            &live,
+            &SessionId::new("headless"),
+            std::time::Duration::from_millis(50),
+        );
+        let waited = started.elapsed();
+
+        assert!(
+            !reached,
+            "nothing could have reached a lock held throughout"
+        );
+        assert!(
+            waited < std::time::Duration::from_secs(2),
+            "the bound was not honoured: waited {waited:?}, which on the real \
+             forced-exit path is a process that will not die"
+        );
+        holder.join().expect("holder thread");
+    }
+
+    /// What the code did before the bound existed, kept as a test so the
+    /// defect cannot quietly return: a single attempt against a busy lock
+    /// simply loses, and a lost attempt is a permanently orphaned harness.
+    #[test]
+    fn a_single_attempt_loses_the_race_that_the_bound_wins() {
+        let live = Arc::new(Mutex::new(SessionRuntime::new()));
+        let holder = hold_lock_for(&live, std::time::Duration::from_millis(200));
+
+        let one_shot = close_before_forced_exit(
+            &live,
+            &SessionId::new("headless"),
+            std::time::Duration::ZERO,
+        );
+
+        assert!(
+            !one_shot,
+            "if a zero bound now succeeds, the retry loop stopped being what \
+             makes this safe and this test is no longer measuring anything"
+        );
+        holder.join().expect("holder thread");
+    }
 
     /// This file's own source, with its `#[cfg(test)]` block (and `//`
     /// comments) stripped — the same idiom as
