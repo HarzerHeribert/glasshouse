@@ -31,7 +31,7 @@
 //! # Architecture
 //!
 //! The state machine ([`state::WizardState`]), the rendering
-//! ([`view::render`]), and the event loop ([`run`]) are three separate
+//! (`view::render`), and the event loop ([`run`]) are three separate
 //! pieces — see `state`'s module documentation for why. Only [`run`] touches
 //! a terminal; everything else is unit-tested directly.
 

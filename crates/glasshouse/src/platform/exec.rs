@@ -95,7 +95,7 @@ impl ResolvedExecutable {
     /// shims, and this logic needs to be exercised by tests on any host, not
     /// just when actually compiled for Windows. What *is* platform-specific
     /// is which files ever get classified as [`LaunchKind::WindowsScript`]
-    /// in the first place — see [`classify_launch_kind`].
+    /// in the first place — see `classify_launch_kind`.
     pub fn spawn_command<I, S>(&self, args: I) -> Result<(PathBuf, Vec<OsString>), LaunchError>
     where
         I: IntoIterator<Item = S>,

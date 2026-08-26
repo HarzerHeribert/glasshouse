@@ -312,7 +312,7 @@ fn harness_slugs() -> String {
 /// Resolve the harness and executable for a session about to be opened.
 ///
 /// `requested` is an explicit harness slug (`Some`) or automatic selection
-/// (`None`). Uses the real machine resolvers; see [`select_with`] for the
+/// (`None`). Uses the real machine resolvers; see `select_with` for the
 /// injectable form used by tests.
 pub fn select(
     requested: Option<&str>,

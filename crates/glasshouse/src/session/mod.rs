@@ -4,9 +4,9 @@
 //! inside the active project root and never anywhere else. Opening one has
 //! two halves, and this module holds both:
 //!
-//! - [`select`] decides *which* harness and *which* executable, refusing
+//! - [`fn@select`] decides *which* harness and *which* executable, refusing
 //!   ambiguity rather than guessing;
-//! - [`attach`] hands the terminal to it and stays out of the way.
+//! - [`fn@attach`] hands the terminal to it and stays out of the way.
 //!
 //! [`store`] holds the third: Glasshouse's own durable record of the sessions
 //! in this project, kept independently of whatever session files the harness

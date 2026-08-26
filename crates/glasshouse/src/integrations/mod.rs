@@ -355,7 +355,7 @@ impl Discovery {
     /// absence itself is actionable: Glasshouse cannot do anything useful
     /// without at least one harness to launch. Absence of any individual
     /// optional integration, or of one harness among several, is not by
-    /// itself a problem — see [`detect_one`] for why plain absence produces
+    /// itself a problem — see `detect_one` for why plain absence produces
     /// no per-integration problem entry.
     pub fn problems(&self) -> Vec<String> {
         let mut problems: Vec<String> = self

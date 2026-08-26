@@ -120,7 +120,7 @@ pub enum Action {
 /// `row * cols + col`.
 ///
 /// Empty — `rows` or `cols` is zero — when no live session has produced a
-/// screen yet, which [`super::view::render_viewport`] takes as its signal to
+/// screen yet, which `super::view::render_viewport` takes as its signal to
 /// fall back to the placeholder.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ViewportGrid {
@@ -276,7 +276,7 @@ impl ShellState {
     }
 
     /// The screen currently shown in the session viewport. Empty until the
-    /// run loop has set it, which [`super::view::render_viewport`] uses to
+    /// run loop has set it, which `super::view::render_viewport` uses to
     /// decide whether to draw it in place of the placeholder.
     pub fn viewport_grid(&self) -> &ViewportGrid {
         &self.viewport_grid
@@ -742,7 +742,7 @@ struct PendingEdit {
     executable: Option<Option<PathBuf>>,
 }
 
-/// A [`PendingEdit`] together with the harness it belongs to, in the shape
+/// A `PendingEdit` together with the harness it belongs to, in the shape
 /// the run loop applies to a [`crate::config::IntegrationTable`] when saving.
 #[derive(Debug, Clone)]
 pub struct SettingsEdit {
@@ -1032,7 +1032,7 @@ enum SettingsAction {
 /// the moment a row is edited, it is shown as destined for the user layer,
 /// even though nothing has been written yet. If the user instead saves with
 /// `W`, the row's layer is corrected the next time the run loop calls
-/// [`SettingsState::replace_rows`] after that write succeeds — which is also
+/// `SettingsState::replace_rows` after that write succeeds — which is also
 /// what clears `edits`, since by then every pending change has actually
 /// landed on disk and a fresh read is the honest source of truth for "which
 /// layer supplied this value" from then on.

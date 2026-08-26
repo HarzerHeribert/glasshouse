@@ -58,7 +58,7 @@ impl ProjectScope {
     /// This is the public constructor. Callers that already hold a canonical
     /// path (such as [`crate::project::Project::discover`], which
     /// canonicalizes before making any access-control decision) can still
-    /// reach the crate-private [`ProjectScope::new`] to skip the redundant
+    /// reach the crate-private `ProjectScope::new` to skip the redundant
     /// syscall.
     pub fn for_root(root: &Path) -> std::io::Result<Self> {
         Ok(Self::new(std::fs::canonicalize(root)?))

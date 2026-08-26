@@ -2,7 +2,7 @@
 //!
 //! Terminating a process is one of the few things that genuinely differs
 //! between platforms: Unix has signals and process groups, Windows has
-//! neither natively — [`JobHandle`] is what gives Windows an equivalent to
+//! neither natively — `JobHandle` is what gives Windows an equivalent to
 //! "kill the whole tree". The difference is confined to this file so callers
 //! only ever see [`ProcessSignal`].
 

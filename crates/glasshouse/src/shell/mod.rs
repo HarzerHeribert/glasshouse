@@ -19,8 +19,8 @@
 //!
 //! The viewport shows the focused session's own screen, converted each tick
 //! from its `vt100::Parser` into a [`state::ViewportGrid`] — see
-//! [`build_viewport_grid`] — and drawn cell by cell by
-//! [`view::render_viewport`]. The run loop is also the one place that
+//! `build_viewport_grid` — and drawn cell by cell by
+//! `view::render_viewport`. The run loop is also the one place that
 //! answers a session's cursor-position queries (see
 //! [`crate::session::runtime::SessionRuntime::answer_terminal_queries`]'s doc
 //! comment on why an embedded session must, unlike `session::attach`) and

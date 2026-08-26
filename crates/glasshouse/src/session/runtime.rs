@@ -1,6 +1,6 @@
 //! Several live harness sessions at once.
 //!
-//! [`crate::session::attach`] runs exactly one harness and gives it the user's
+//! [`fn@crate::session::attach`] runs exactly one harness and gives it the user's
 //! terminal for the whole of its life. That is the right shape for
 //! `glasshouse launch` and the wrong shape for an interface that shows several
 //! sessions: its input pump cannot be cancelled, so it relies on the process

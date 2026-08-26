@@ -5,7 +5,7 @@
 //! - `<config_dir>/config.toml` — user-level. Onboarding decisions and
 //!   per-integration enable/executable overrides. Loaded by every run;
 //!   never created automatically for you to lose data to — a missing file
-//!   just means the defaults apply (see [`load`]).
+//!   just means the defaults apply (see [`UserConfig::load`]).
 //! - `<project root>/.glasshouse/config.toml` — project-level, optional,
 //!   and layered *over* the user file (see [`EffectiveConfig`]). It is
 //!   never written except in response to an explicit user decision — see
@@ -36,7 +36,7 @@
 //! [`StoredCredentialRef`], which is two names. Resolving any of them to a
 //! credential is the separate `SecretStore` abstraction's job (not built by
 //! this module), never this one's. See
-//! [`tests::serialized_form_has_no_secret_capable_field`] for a structural
+//! `tests::serialized_form_has_no_secret_capable_field` for a structural
 //! guard, not just a string search.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -106,7 +106,7 @@ pub enum ConfigError {
     },
 
     /// The file's `version` is newer than this build understands. Reading it
-    /// (see [`load`] / [`load_project_config`]) still succeeds — refusing to
+    /// (see [`UserConfig::load`] / [`load_project_config`]) still succeeds — refusing to
     /// even parse a file some other Glasshouse install wrote would be an
     /// unnecessary hostility. Only *writing* is refused, because this build
     /// cannot know what the newer fields mean and would otherwise silently
@@ -1037,7 +1037,7 @@ impl UserConfig {
     /// That situation only arises by loading a newer file and saving it back
     /// unmodified or by constructing a [`UserConfig`] with an inflated
     /// version by hand; a config this build created itself always carries
-    /// [`CURRENT_SCHEMA_VERSION`] and never hits it.
+    /// `CURRENT_SCHEMA_VERSION` and never hits it.
     pub fn save(&self, paths: &RuntimePaths) -> Result<(), ConfigError> {
         let path = paths.user_config_file();
         if self.version > CURRENT_SCHEMA_VERSION {

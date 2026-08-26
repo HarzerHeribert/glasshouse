@@ -65,6 +65,15 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
+      # Enforced from 2026-08-26. This gate existed in the SDLC for months and
+      # had never once passed — 22 broken intra-doc links, tracked as a
+      # "baseline 23" number instead of being fixed. A gate that lives only in
+      # a document rots; put it where it runs.
+      - name: Rustdoc
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
       - name: Check README progress block
         run: python3 scripts/progress.py --check
 

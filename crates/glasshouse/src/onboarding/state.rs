@@ -46,7 +46,7 @@ use crate::tui::is_quit_key;
 /// a [`WizardState`]), and tests need to
 /// construct arbitrary detection results — including the "cmux was not
 /// detected" case — without depending on what happens to be installed on the
-/// machine running the tests. [`super::detections_from`] maps a real
+/// machine running the tests. `super::detections_from` maps a real
 /// `Discovery` into this shape at the boundary; every field here is read
 /// through `DetectedIntegration`'s public getters.
 #[derive(Debug, Clone)]
@@ -867,9 +867,9 @@ impl WizardState {
     /// Apply every recorded decision to `config` and mark onboarding
     /// completed at this wizard's version.
     ///
-    /// Assumes [`WizardState::finalize_pending_decisions`] has already run
+    /// Assumes `WizardState::finalize_pending_decisions` has already run
     /// (true for every reachable path to [`Action::Finish`] — see
-    /// [`WizardState::handle_harnesses_key`]); a row somehow still `None`
+    /// `WizardState::handle_harnesses_key`); a row somehow still `None`
     /// here is written as ignored rather than panicking, since a config
     /// write is not the place to enforce an internal invariant with a crash.
     ///
