@@ -1273,3 +1273,96 @@ below 1.88", and that is what a declared MSRV is for.
 - The `msrv` CI job reads the version out of `Cargo.toml` rather than repeating
   it, so the manifest and the gate cannot drift. It found this defect on its
   first run, on all three platforms, which is the whole argument for having it.
+
+---
+
+## Subscription auth and key auth do not mix, and a gateway launch should be one atomic artifact
+
+_Raised by the repository owner, 2026-08-26, while reviewing the Phase 9G
+`/models` refusal. Recorded as direction; not yet implemented._
+
+**The principle, in the owner's terms.** A harness authenticated by
+subscription (OAuth, a `claude.ai` login) and a harness authenticated by an API
+key are two different things, and Glasshouse should not turn one into the other
+by mutating its environment. When a launch is backed by a gateway key rather
+than the user's own subscription, the credential should arrive through a
+**generated shim** — one atomic launch artifact — rather than by configuring a
+harness on the fly.
+
+### The hazard is real and this project already probed it
+
+From the Phase 9F evidence, established against the real binary:
+
+> `ANTHROPIC_AUTH_TOKEN` **wins over the user's claude.ai login for that child
+> and leaves it untouched on disk** — the harness said so itself.
+
+That is the whole problem in one line. Set the variable and the subscription is
+still logged in, still valid, still on disk — and silently not the thing paying
+for the session. Nothing on screen distinguishes the two states. A user who
+believes they are spending their subscription may be spending gateway credits,
+or the reverse, and the only way to find out is to look at a bill.
+
+**One facet of this was already discovered independently.** Phase 9A's
+`--permission-mode auto` composes a classifier call that a third-party gateway
+cannot serve, so a gateway-backed Claude Code session would have come up with
+its tools blocked. The fix made `resolve` backend-aware. That was treated as a
+one-off; under this principle it is an instance — **a gateway-backed session is
+a different kind of session, not a subscription session with extra environment
+variables**, and features that assume the native backend do not survive the
+substitution.
+
+### What already exists
+
+- `LaunchProfile` is already marked `native-subscription | direct-provider |
+  glasshouse-gateway` (map line 370, checked), so the taxonomy is not new.
+- `resolve` is already backend-aware for approval modes.
+- **`glasshouse shim` already generates exactly the artifact this asks for**
+  (Phase 9B). It `exec`s `glasshouse run <harness> --profile <name>`.
+
+So the mechanism is built. What is missing is that **nothing makes it the
+mandatory path** for a non-native launch, and nothing refuses the mixed state.
+
+### One correction to the shape, which matters
+
+**The shim must not carry the credential.** A key written into a file on disk is
+strictly worse than one passed to a child process — it persists, it is readable,
+it outlives the session, and it is exactly what `crate::secret` exists to
+prevent. The generated shim therefore stays what it is today: a stable name that
+`exec`s `glasshouse run`, with the credential resolved **in-process, per
+launch**, and never written anywhere.
+
+That is not a weakening of the idea. The value the owner is pointing at is
+**atomicity of configuration**, not relocation of the secret: one named artifact
+that fully determines harness, provider, protocol, approval mode and credential
+source, instead of a set of environment mutations applied to a harness that also
+has its own ambient auth. The shim already delivers that; it simply is not
+required.
+
+### What this would change
+
+1. **Refuse the mixed state rather than silently winning.** A gateway-backed or
+   direct-provider launch of a harness that also holds a live native session
+   should say so — and say which one will serve the session — instead of letting
+   precedence decide invisibly.
+2. **Make the shim the sanctioned launch path for non-native profiles**, so a
+   gateway session is started by name and not by an environment a user assembled.
+3. **Treat "works on the native backend" as a property to be re-established per
+   backend**, the way approval modes now are.
+
+### It reframes the `/models` question, and better than the alternative
+
+Phase 9G left Codex's `GET /models` refused, because `/models` is a catalogue
+endpoint all three protocols define and placing it means choosing a protocol for
+a request naming none. The orchestrator's instinct was a routing tie-break.
+
+**That was the wrong layer.** Under this principle the answer is to settle it at
+*configuration* time — in what the profile or shim writes into the harness's own
+provider configuration — rather than at *gateway routing* time. Codex asks its
+configured base URL for a catalogue regardless of how it was configured; a
+gateway guessing which protocol an unqualified `/models` meant is a tie-break
+invented to paper over a configuration that never said. Fixing it where the
+configuration is authored needs no guess at all.
+
+Recorded here rather than acted on: it is a direction that touches `profile`,
+`launch` and `shim` together, and it deserves its own batch with its own
+evidence rather than being folded into a review.
