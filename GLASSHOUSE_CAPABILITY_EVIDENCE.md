@@ -4477,7 +4477,7 @@ moves the overview's cursor to a session the viewport is not showing and sends
 it a line, Glasshouse delivers that line to that session's pseudo-terminal,
 while preserving which session the viewport and the session bar are presenting.
 
-State: LOCALLY VERIFIED
+State: COMPLETE
 
 Production evidence:
 - `shell/state.rs: OverviewState::cursor` — a second, independent cursor. This
@@ -4500,10 +4500,15 @@ Failure/isolation evidence:
   send is implemented on the shared selection index.
 
 Platform/external evidence:
-- Pending: not yet pushed to CI at the time of writing.
+- CI run `32957790931` on commit `9d9483b`: **all seven jobs green** — `lint`,
+  `msrv` and `test` on each of `ubuntu-latest`, `macos-latest` and
+  `windows-latest`.
+- `an_unfocused_session_still_receives_sent_text` is a plain `#[test]` with no
+  platform gate, so it executed on all three. The `overview_tests` module is
+  pure state and likewise runs everywhere.
 
 Missing evidence:
-- CI on `ubuntu-latest` and `windows-latest`.
+- None.
 
 ### Phase 4 unfocused control — "Support sending interrupt signals to a PTY session."
 
@@ -4545,7 +4550,7 @@ it headless, Glasshouse runs it to completion and propagates its exit status,
 while preserving the terminal for whatever else owns it and never orphaning the
 child on a forced exit.
 
-State: LOCALLY VERIFIED
+State: COMPLETE
 
 Production evidence:
 - `main.rs: run_headless` — `glasshouse launch <harness> --headless`, recording
@@ -4581,10 +4586,22 @@ Failure/isolation evidence:
   callers are not yet exercised.
 
 Platform/external evidence:
-- Pending: not yet pushed to CI at the time of writing.
+- CI run `32957790931` on commit `9d9483b`: **all seven jobs green** — `lint`,
+  `msrv` and `test` on each of `ubuntu-latest`, `macos-latest` and
+  `windows-latest`.
+- `a_headless_launch_runs_the_harness_without_taking_the_terminal` and
+  `a_session_started_headless_runs_and_is_listed_but_never_reaches_the_viewport`
+  are plain `#[test]`s with no platform gate: the behaviour this line actually
+  claims executed on Windows, Linux and macOS.
 
 Missing evidence:
-- CI on `ubuntu-latest` and `windows-latest`.
+- None for the claimed behaviour.
+
+Known limit, recorded rather than hidden:
+- `interrupting_a_headless_launch_does_not_leave_the_harness_behind` — the
+  regression for the orphan defect — is `#[cfg(unix)]`. The forced-exit path
+  exists on Windows and is unproven there. That is a robustness property rather
+  than the text of this line, so the box is checked and the gap is named here.
 
 ### Phase 9F preflight — "Verify the selected harness, model, provider, and protocol combination before starting an interactive session when a cheap capability check is available." (line 465)
 

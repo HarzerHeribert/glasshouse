@@ -245,13 +245,13 @@ Fixed architectural requirements
 ☑ Stream PTY output continuously into an in-memory terminal buffer.
 ☑ Forward user keystrokes from the active Glasshouse session to the active PTY.
 ☑ Forward terminal resize events from Glasshouse to the child PTY.
-☐ Support sending text programmatically to a PTY session without requiring the user to focus it.
+☑ Support sending text programmatically to a PTY session without requiring the user to focus it.
 ☐ Support sending interrupt signals to a PTY session.
 ☑ Detect process exit independently from textual terminal output.
 ☑ Preserve a bounded terminal scrollback buffer for each live session.
 ☑ Keep inactive PTY sessions running while the user views another session.
 ☑ Ensure switching sessions changes only the presentation focus and does not restart the underlying process.
-☐ Add a headless presentation mode in which a PTY continues running without occupying the visible session viewport.
+☑ Add a headless presentation mode in which a PTY continues running without occupying the visible session viewport.
 
 Phase 5 — Native terminal embedding
 
