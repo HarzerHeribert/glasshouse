@@ -602,3 +602,88 @@ is one line, the orchestrator can just take that line off the table.
   it planned to? (The packets nominate specific work as "good to hand out"
   precisely so the gap between plan and behaviour is visible.)
 - Is 40 boxes too large a package to stay coherent, compared with 24?
+
+### Outcomes for 18–19 — the team-lead tier works, and the review cost moves rather than shrinks
+
+| | lead-memory | lead-events |
+|---|---|---|
+| package | 40 open boxes (Phases 20/22/23/26) | 24 open boxes (Phases 12/13/45) |
+| **boxes closed on integration** | **31** | **18** |
+| subcontractors | 2 Sonnet (`mem-search`, `mem-snapshot`) | 2 Sonnet (`ev-api`, `ev-recovery`) |
+| mutations | 30, all run by the lead — 29 killed, 1 explained survivor | 25, all run by the lead |
+| lead wall-clock | ~31 min | ~35 min |
+| gates on arrival | 4 of 5 green; test gate red by design (see below) | 5 of 5 green |
+| packet corrections | 4 | 3 |
+| orchestrator work to land it | CLI surface + 4 reconciled tests, one a real find | none beyond gates |
+
+**49 boxes from two leads in one round.** The previous three-worker round
+closed one. That is the headline, and the rest of this entry is why it is not
+the whole story.
+
+### The three questions this round was opened with
+
+**Does a lead's delegation raise throughput, or move the same serial review one
+level down?** Both leads answered independently and agreed: it moves, and it
+still pays. `lead-events` measured its subs at 34% of new lines and estimated
+30–40% of wall-clock saved against 10–15% given back in packet-writing and
+review. `lead-memory` was blunter: *"I still had to read both diffs line by
+line, re-run every gate, and write every mutation — the review cost did not
+shrink, it moved."* The gain is real but it is parallelism, not less work.
+
+**Does an Opus lead delegate what its packet nominated?** No — and the
+deviation was correct both times. Each packet nominated the enums and their
+round-trip tests as good to hand out; `lead-memory` kept them, because they
+were the frozen API both subs built against and handing them out *would have
+serialized the batch*. Both leads independently concluded that **the API must
+be frozen before anything is delegated**, which is the real precondition the
+packets should have stated instead of a list of nominees.
+
+**Is 40 boxes too large a package compared with 24?** No. The 40-box package
+closed 31 and enumerated the other 9 with reasons. Size was not the limit;
+**file ownership was.** Four of `lead-memory`'s ten open boxes were blocked
+on six lines in `main.rs`, and its own report says so in its second sentence.
+
+### What was not anticipated
+
+**The `lib.rs` stub trick propagated down a level on its own.** Both leads
+pre-declared `pub mod x;` with stub files before starting their subs, so no sub
+ever had to edit a shared file — the same move made for them one level up,
+reinvented by both without being told. A technique that survives being passed
+down is worth writing into the packet template.
+
+**A subcontractor caught its own lead's mistakes.** `mem-snapshot` reported that
+`lead-memory`'s own `mod.rs` and `store.rs` failed the clippy and rustdoc gates
+— a `dead_code` accessor, three `should_implement_trait`, a `collapsible_if`,
+three private intra-doc links — which the lead had not yet run. Delegation
+caught errors **upward**. The lead then caught the sub's report claiming it had
+touched no forbidden file when `cargo fmt --all` had reformatted one, which is
+the next finding.
+
+**`cargo fmt --all` edits files you do not own.** It is in every packet's gate
+list and it ignores file partitions entirely. A worker told to touch nothing
+outside its list will violate that instruction by running its own gates. Only
+the diff catches it, never the worker's sentence about it. Packets should say
+so.
+
+**Stagger by expected size, not by clock.** `lead-events` staggered its two subs
+by ~15 minutes per practice §1 and they finished within a minute of each other
+anyway, because the second task was much smaller. The advice as written
+optimises the wrong variable.
+
+**A red gate can be the correct deliverable.** `lead-memory` handed over a
+failing test gate on purpose: migration 4 legitimately broke four tests in a
+file another worker owned, and the packet forbade touching it. It reported exit
+101 in its own gate table, in bold, with the exact replacement values. That is
+better than a green gate obtained by editing a forbidden file, and the ledger
+should stop treating "all gates green" as the only acceptable hand-over.
+
+### The finding that only re-running produced
+
+Three of those four tests were pinned constants. The fourth was a **hole in a
+rollback**: both migration tests simulated an older database by deleting *some*
+`schema_migrations` rows, and the runner resumes from `MAX(version)`, so once
+migration 4 existed the deletion left the max untouched and nothing re-applied.
+The lead predicted "change 3 to 4" and stopped at the version assertion — the
+second failure is invisible until the first is fixed. Practice §23 says re-run
+a worker's decisive observations; this round it says re-run the ones it
+predicted would be boring.
