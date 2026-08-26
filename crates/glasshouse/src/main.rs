@@ -116,19 +116,31 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         }) => {
             return resume_session(&runtime, session, harness_args);
         }
-        Some(Command::Memory {
-            command:
-                MemoryCommand::Search {
-                    query,
-                    history,
-                    limit,
-                },
-        }) => {
-            print!(
-                "{}",
-                memory_report(&runtime, &query.join(" "), *history, *limit)?
-            );
-        }
+        Some(Command::Memory { command }) => match command {
+            MemoryCommand::Search {
+                query,
+                history,
+                limit,
+            } => {
+                print!(
+                    "{}",
+                    memory_report(&runtime, &query.join(" "), *history, *limit)?
+                );
+            }
+            MemoryCommand::Promote { id, authority } => {
+                print!("{}", memory_promote(&runtime, id, authority)?);
+            }
+            MemoryCommand::Extract {
+                session,
+                activity,
+                reply_from,
+            } => {
+                print!(
+                    "{}",
+                    memory_extract(&runtime, session, activity, reply_from)?
+                );
+            }
+        },
         Some(Command::Checkpoint { command }) => {
             return checkpoint_command(&runtime, command);
         }
@@ -1199,13 +1211,14 @@ fn note_lifecycle(
     }
 }
 
-/// The `glasshouse sessions` listing.
-///
-/// Reads Glasshouse's own records rather than any harness's session files, so
-/// the list is the same whether or not a harness kept its own history.
 /// Render a memory search the way `session_report` renders sessions: the
 /// provenance is part of the answer, because a memory a reader cannot trace
 /// back to a session or a commit is one they have to take on trust.
+///
+/// The authority class is part of the answer for the same reason. Phase 21A's
+/// fixed requirement is that retrieval preserve the distinction rather than
+/// flatten every remembered statement into equally authoritative text, and
+/// this is the one surface a person reaches.
 fn memory_report(
     runtime: &Runtime,
     query: &str,
@@ -1245,11 +1258,167 @@ fn memory_report(
 
     for record in &records {
         let subject = record.subject.as_deref().unwrap_or("(no subject)");
-        writeln!(out, "{}  {}  {subject}", record.kind, record.status)?;
+        // Phase 21A: retrieval must preserve the authority distinction rather
+        // than flattening every memory into equally authoritative text. An
+        // unclassified memory says so; it does not borrow a class.
+        let authority = record.authority.map_or("unclassified", |a| a.as_str());
+        writeln!(
+            out,
+            "{}  {}  {authority}  {subject}",
+            record.kind, record.status
+        )?;
         writeln!(out, "    {}", record.body)?;
         let session = record.source_session_id.as_deref().unwrap_or("unknown");
         let commit = record.source_commit.as_deref().unwrap_or("unknown");
         writeln!(out, "    from session {session}, commit {commit}")?;
+    }
+    Ok(out)
+}
+
+/// `glasshouse memory promote <id> <authority>` — Phase 21A's explicit
+/// promotion. `Classifier::Reviewed`, because the person typing this is the
+/// review the class requires.
+fn memory_promote(runtime: &Runtime, id: &str, authority: &str) -> anyhow::Result<String> {
+    use glasshouse::memory::{AuthorityChange, Classifier, MemoryAuthority, ProjectMemory};
+
+    let wanted = match authority {
+        "unclassified" | "none" => None,
+        other => Some(MemoryAuthority::from_stored(other).ok_or_else(|| {
+            anyhow::anyhow!(
+                "`{other}` is not an authority class; use one of {} or `unclassified`",
+                MemoryAuthority::ALL
+                    .iter()
+                    .map(|a| a.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?),
+    };
+
+    let memory = ProjectMemory::open(runtime)?;
+    let store = memory.store();
+    let resolved = store.resolve_id(id)?;
+    let (record, change) = store.set_authority(&resolved, wanted, Classifier::Reviewed)?;
+
+    Ok(match change {
+        AuthorityChange::Changed => format!(
+            "{} is now {}\n",
+            record.id,
+            record.authority.map_or("unclassified", |a| a.as_str())
+        ),
+        AuthorityChange::Unchanged => format!(
+            "{} was already {}\n",
+            record.id,
+            record.authority.map_or("unclassified", |a| a.as_str())
+        ),
+    })
+}
+
+/// A model's reply read from a file, for `glasshouse memory extract`.
+///
+/// [`describe`](glasshouse::memory::ExtractionModel::describe) says plainly
+/// that nothing was called, and that string is stored on the outcome and
+/// printed on every run. An evaluation run must never be mistaken later for
+/// evidence that a model performed extraction — that capability is Phase 39's
+/// and is not built.
+struct ReplyFromFile(String);
+
+impl glasshouse::memory::ExtractionModel for ReplyFromFile {
+    fn describe(&self) -> String {
+        "file (evaluation harness; no model was called)".to_owned()
+    }
+
+    fn complete(
+        &self,
+        _prompt: &glasshouse::memory::extract::Prompt,
+    ) -> Result<String, glasshouse::memory::ModelError> {
+        Ok(self.0.clone())
+    }
+}
+
+/// `glasshouse memory extract` — Phase 21's manual run, for debugging and
+/// evaluating extraction itself.
+///
+/// Everything except the model call is the production path: the chunk is
+/// bounded and scrubbed by `SessionChunk::build`, the reply goes through the
+/// same contract validation, credential screen, conservative classification
+/// and duplicate check, and what survives is written to the project's real
+/// memory store.
+fn memory_extract(
+    runtime: &Runtime,
+    session: &str,
+    activity: &std::path::Path,
+    reply_from: &std::path::Path,
+) -> anyhow::Result<String> {
+    use std::fmt::Write as _;
+
+    use anyhow::Context as _;
+    use glasshouse::memory::extract::chunk::{ChunkLimits, SessionChunk};
+    use glasshouse::memory::{ExtractionTrigger, Extractor, ProjectMemory};
+
+    let activity_text = std::fs::read_to_string(activity)
+        .with_context(|| format!("read session activity from {}", activity.display()))?;
+    let reply = std::fs::read_to_string(reply_from)
+        .with_context(|| format!("read the model reply from {}", reply_from.display()))?;
+
+    let chunk = SessionChunk::build(
+        session,
+        None::<String>,
+        activity_text.lines().map(str::to_owned),
+        ChunkLimits::default(),
+    );
+
+    let memory = ProjectMemory::open(runtime)?;
+    let store = memory.store();
+    let model = ReplyFromFile(reply);
+    let outcome = Extractor::new(&store, &model).run(&chunk, ExtractionTrigger::Manual);
+
+    let mut out = String::new();
+    writeln!(out, "trigger {}, model {}", outcome.trigger, outcome.model)?;
+    writeln!(
+        out,
+        "activity: {} entries, {} dropped, {} truncated, {} credentials redacted",
+        chunk.entries().len(),
+        outcome.activity_dropped,
+        outcome.activity_truncated,
+        outcome.redactions
+    )?;
+
+    if let Some(failure) = &outcome.failure {
+        writeln!(out, "extraction produced nothing: {failure}")?;
+        return Ok(out);
+    }
+
+    writeln!(
+        out,
+        "stored {}, {} duplicate, {} speculative, {} rejected",
+        outcome.stored(),
+        outcome.duplicates,
+        outcome.speculative,
+        outcome.rejected.len()
+    )?;
+    for id in &outcome.recorded {
+        writeln!(out, "    stored    {id}")?;
+    }
+    for (id, classification) in &outcome.lowered {
+        // Name the rule that bound, not just the outcome: the point of
+        // reporting a lowering at all is that a reader can see *why* the
+        // model's declared class was not the stored one.
+        let reasons = classification
+            .reasons
+            .iter()
+            .map(|r| r.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        writeln!(
+            out,
+            "    lowered   {id}  {} -> {} ({reasons})",
+            classification.declared.as_str(),
+            classification.stored.as_str()
+        )?;
+    }
+    for rejection in &outcome.rejected {
+        writeln!(out, "    rejected  {rejection}")?;
     }
     Ok(out)
 }
@@ -1883,5 +2052,175 @@ mod tests {
             starts(&row),
             "columns must start at the same offsets:\n{header}\n{row}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 21 / 21A — the command surfaces, which is where these
+    // capabilities become true of a program a person can run rather than of
+    // a Rust API nothing calls.
+    // ---------------------------------------------------------------------
+
+    /// A bootstrapped project, with its temp directories kept alive.
+    struct CliFixture {
+        _workspace: tempfile::TempDir,
+        _data: tempfile::TempDir,
+        runtime: Runtime,
+    }
+
+    impl CliFixture {
+        fn new() -> Self {
+            let workspace = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(workspace.path().join(".git")).unwrap();
+            let data = tempfile::tempdir().unwrap();
+            let cli = Cli::try_parse_from([
+                "glasshouse",
+                "--data-dir",
+                data.path().to_str().unwrap(),
+                "--config-dir",
+                data.path().to_str().unwrap(),
+            ])
+            .unwrap();
+            let runtime = glasshouse::bootstrap(&cli, workspace.path()).unwrap();
+            Self {
+                _workspace: workspace,
+                _data: data,
+                runtime,
+            }
+        }
+    }
+
+    /// Phase 21A's fixed architectural requirement, at the only surface a
+    /// person reaches: retrieval preserves the authority distinction rather
+    /// than flattening every remembered statement into equally authoritative
+    /// text.
+    ///
+    /// Drives all seven classes rather than a sample, from
+    /// `MemoryAuthority::ALL`, so an eighth class fails here rather than
+    /// being quietly unprintable.
+    #[test]
+    fn a_memory_search_names_the_authority_class_of_every_result() {
+        use glasshouse::memory::{MemoryAuthority, MemoryKind, NewMemory, ProjectMemory};
+
+        let fixture = CliFixture::new();
+        let project = ProjectMemory::open(&fixture.runtime).unwrap();
+        let store = project.store();
+
+        for authority in MemoryAuthority::ALL {
+            store
+                .record(
+                    NewMemory::new(
+                        MemoryKind::Finding,
+                        format!("The kestrel deploy is {}.", authority.as_str()),
+                    )
+                    .with_authority(Some(*authority)),
+                )
+                .unwrap();
+        }
+        // An unclassified memory says so. It must not borrow a neighbour's
+        // class, and it must not be indistinguishable from a classified one.
+        store
+            .record(NewMemory::new(
+                MemoryKind::Finding,
+                "The kestrel deploy was never classified.",
+            ))
+            .unwrap();
+
+        let report = memory_report(&fixture.runtime, "kestrel", false, 20).unwrap();
+
+        for authority in MemoryAuthority::ALL {
+            assert!(
+                report.contains(authority.as_str()),
+                "`{}` is missing from a search that returned it:\n{report}",
+                authority.as_str()
+            );
+        }
+        assert!(
+            report.contains("unclassified"),
+            "an unclassified memory must say so:\n{report}"
+        );
+    }
+
+    /// Phase 21A — a person can promote and demote explicitly, and only a
+    /// person can reach `invariant` at all.
+    #[test]
+    fn a_person_can_promote_a_memory_and_demote_it_again() {
+        use glasshouse::memory::{MemoryKind, NewMemory, ProjectMemory};
+
+        let fixture = CliFixture::new();
+        let project = ProjectMemory::open(&fixture.runtime).unwrap();
+        let id = project
+            .store()
+            .record(NewMemory::new(
+                MemoryKind::Decision,
+                "Sessions are keyed by project, not by directory.",
+            ))
+            .unwrap()
+            .id;
+
+        let promoted = memory_promote(&fixture.runtime, id.as_str(), "invariant").unwrap();
+        assert!(promoted.contains("invariant"), "{promoted}");
+        assert_eq!(
+            project.store().get(&id).unwrap().unwrap().authority,
+            Some(glasshouse::memory::MemoryAuthority::Invariant)
+        );
+
+        // Demotion is never refused: 21A's concern is memories becoming
+        // binding without anyone deciding they should.
+        let demoted = memory_promote(&fixture.runtime, id.as_str(), "preference").unwrap();
+        assert!(demoted.contains("preference"), "{demoted}");
+
+        let cleared = memory_promote(&fixture.runtime, id.as_str(), "unclassified").unwrap();
+        assert!(cleared.contains("unclassified"), "{cleared}");
+        assert_eq!(project.store().get(&id).unwrap().unwrap().authority, None);
+
+        // A class that does not exist is refused by name rather than
+        // silently storing nothing.
+        let refused = memory_promote(&fixture.runtime, id.as_str(), "extremely-important");
+        assert!(refused.is_err());
+    }
+
+    /// Phase 21 — extraction runs manually, for debugging and evaluation.
+    ///
+    /// The model half is supplied from a file, which is what makes this
+    /// runnable before Phase 39 exists. Everything else is the production
+    /// path, and the assertions below are on that: the reply is validated,
+    /// classified conservatively, screened and stored.
+    #[test]
+    fn a_manual_extraction_runs_the_whole_pipeline_and_says_no_model_was_called() {
+        use glasshouse::memory::ProjectMemory;
+        use glasshouse::memory::search::SearchScope;
+
+        let fixture = CliFixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let activity = dir.path().join("activity.txt");
+        let reply = dir.path().join("reply.json");
+        std::fs::write(&activity, "the kestrel migration ran twice\n").unwrap();
+        std::fs::write(
+            &reply,
+            r#"{"memories":[{"kind":"finding","authority":"constraint",
+                 "disposition":"accepted","support":"established",
+                 "confidence":"certain",
+                 "rationale":"the runner resumes from MAX(version)",
+                 "body":"A migration rollback must delete a contiguous range."}]}"#,
+        )
+        .unwrap();
+
+        let report = memory_extract(&fixture.runtime, "s-1", &activity, &reply).unwrap();
+
+        assert!(report.contains("stored 1"), "{report}");
+        // The output must never let an evaluation run be mistaken later for
+        // evidence that a model performed extraction.
+        assert!(
+            report.contains("no model was called"),
+            "the run must say a model was not called:\n{report}"
+        );
+
+        let stored = ProjectMemory::open(&fixture.runtime)
+            .unwrap()
+            .store()
+            .search("migration", SearchScope::Current, 10)
+            .unwrap();
+        assert_eq!(stored.len(), 1, "the memory reached the real store");
+        assert_eq!(stored[0].source_session_id.as_deref(), Some("s-1"));
     }
 }

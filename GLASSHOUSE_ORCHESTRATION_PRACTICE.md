@@ -1068,3 +1068,101 @@ retry asserts nothing false about Glasshouse.
 question as any other — *what change would make this fail?* Two of the three
 findings here were invisible to reading and needed the gate to be run against a
 tree already known to be broken.
+
+---
+
+## §32 — put the caller's file in the partition, or the batch ends in a patch
+
+Observed three times now, and the third was a controlled comparison.
+
+`lead-record` and `lead-extract` ran the same round: same model, same effort,
+same process, packages of 28 and 25 boxes. `lead-record` had a **wide**
+partition — `main.rs`, `shell/**`, `database.rs` — and closed **25 of 28 from
+its own worktree**. `lead-extract` had a partition covering only
+`memory/**`, produced the strongest evidence in the batch — 23 mutations, 22
+killed, +81 tests — and closed **zero**. Not one box. Everything it built was
+reachable from nothing, because *nothing in the shipped binary produced a
+memory*, and all three lines that would give the extractor a caller live in
+`main.rs`.
+
+Two patches it wrote but was forbidden to apply — 2 lines and ~40 lines — took
+it from 0 to 17.
+
+**The rule.** Before sizing a package, find where each capability's production
+caller will live. If that file is not in the partition, the batch cannot close
+the box no matter how good the work is (§5: a mechanism with no production
+caller does not get its box). Either widen the partition to include it, or
+schedule a thin wiring batch straight after, and say which in the packet.
+
+**The corollary, which corrects a question this project kept asking.** "Is 40
+boxes too large for one lead?" was the wrong question — neither lead ran out of
+context or time. What bounded the result was partition width. **Size a package
+by the files a capability's production path touches, not by how many lines the
+map lists.**
+
+**Ask the lead for the patch.** `lead-extract`'s report is the model: exact
+text, exact insertion point, verified against the live file rather than
+recalled, plus the compile fact that made it non-obvious (`main.rs`'s command
+match has no `_` arm, so adding a `cli.rs` variant alone does not build). That
+turned a lost batch into a twenty-minute integration.
+
+---
+
+## §33 — a lead may hand you a judgement; take it, and say which way you went
+
+`lead-extract` built `glasshouse memory extract --reply-from <file>`: the whole
+extraction pipeline with the model's reply supplied by hand, because Phase 39
+does not exist and there is nothing to call. It then declined to decide whether
+that satisfies the map's *"Allow memory extraction to run manually for
+debugging and evaluation"*, wrote down the argument both ways, and left the box
+open with the reasoning attached.
+
+That is correct behaviour and worth protecting. A worker that assumes the
+generous reading gets a box ticked on a caller that does not do what the line
+says; a worker that assumes the strict one strands finished work.
+
+**What the orchestrator owes back is a decision with its reasoning in the
+ledger**, not a silent tick. Here: the manual-extraction line is **closed** —
+a person really can run extraction for debugging and evaluation, and the
+command says `no model was called` on every run so the evaluation can never be
+mistaken later for evidence a model did it. The adjacent line the lead offered
+to close with it, *"Keep memory-extraction failure non-fatal to the coding
+session"*, stays **open**: a CLI invocation is not a coding session, and
+nothing is at risk when extraction fails inside one. Same caller, two different
+answers, because the two sentences describe different callers.
+
+---
+
+## §34 — the Linux gate is flaky under load, and it was flaky before your batch
+
+Integrating `lead-extract`, `scripts/ci-local.sh` reported one FAIL:
+`events_lifecycle::a_crashed_worker_leaves_its_output_and_its_event_history_behind`,
+Linux only, `the crashed worker's terminal output must survive it; got ""`. The
+batch had touched nothing within reach of it.
+
+**Do not fix it, and do not wave it through. Attribute it.** Run the same
+container, same step, on a tree at `HEAD` without your changes:
+
+- the test alone on `HEAD` → **passed**;
+- the **full workspace** on `HEAD` → `events_lifecycle` passed and
+  `pty_smoke::a_recorded_antigravity_conversation_is_resumed_through_its_own_flag`
+  **failed** instead, with `no resumable session in the listing`.
+
+Two trees, two different tests, one class of failure: a child's output not
+observed in time under Linux container load. It is nondeterministic, it lives
+on `HEAD`, and it is not the batch's.
+
+**Why the full-suite run is the load-bearing step.** Every one of these passes
+alone and fails beside ~900 siblings — the same shape as the ETXTBSY fork/exec
+race in `integrations/version.rs`. Running the single failing test to "check"
+it will always tell you it is fine, which is the most misleading answer
+available.
+
+**What this costs, and the standing debt.** A gate that fails at random teaches
+people to ignore it, which is §20's problem wearing the opposite mask: a gate
+that cannot fail proves nothing, and a gate that fails for no reason gets
+overridden. Recorded here rather than papered over: **the Linux pty tests need
+the same treatment the ETXTBSY race got — a bounded wait on the observation
+rather than an assumption that the child's output has already been drained.**
+Until then, a Linux FAIL on a pty-shaped test is attributed, not assumed, and
+the attribution run is part of integrating any batch it appears in.

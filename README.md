@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`██████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 335 / 1267 mandatory capabilities (26%)
+`███████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 352 / 1267 mandatory capabilities (27%)
 
 <details>
 <summary>Per-phase breakdown (12 of 103 phases complete)</summary>
@@ -62,8 +62,8 @@ the authoritative specification and tracks what is done.
 | Phase 18 — Raw event recording | 9/10 |
 | Phase 19 — Portable session checkpoints | 13/14 |
 | Phase 20 — Minimal durable project memory | 16/18 |
-| Phase 21 — Memory extraction | 0/13 |
-| Phase 21A — Memory authority classes | 0/12 |
+| Phase 21 — Memory extraction | 6/13 |
+| Phase 21A — Memory authority classes | 11/12 |
 | Phase 21B — Decision provenance and assumptions | 0/11 |
 | Phase 21C — Validity conditions and invalidation | 0/11 |
 | Phase 21D — Memory age and relevance decay | 0/9 |

@@ -431,6 +431,57 @@ pub enum ConflictResolver {
     Reviewed,
 }
 
+/// Who is changing a memory's authority class.
+///
+/// Phase 21A's last line allows *"users or trusted review agents to promote or
+/// demote memory authority explicitly"*, and its neighbour forbids promoting
+/// uncertain memories to invariants automatically. Those two lines together
+/// mean the operation needs to know who is asking, so there is no default:
+/// an argument that could be omitted would be, and the omission would always
+/// fall on the automatic side.
+///
+/// Deliberately a second enum with the same shape as [`ConflictResolver`]
+/// rather than a reuse of it, for the reason [`Clock`] gives about its own
+/// duplication: the two answer different questions — *may this conflict be
+/// settled?* and *may this authority be raised?* — and one enum serving both
+/// would mean a future change to one silently changing the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Classifier {
+    /// The memory extractor, or any agent acting on its own judgment
+    /// mid-task. May lower an authority freely and may raise one only to a
+    /// class below [`MemoryAuthority::Invariant`].
+    Extractor,
+    /// A person, or an agent the user has put in a review role. May set any
+    /// class, including [`MemoryAuthority::Invariant`].
+    Reviewed,
+}
+
+impl Classifier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Extractor => "extractor",
+            Self::Reviewed => "reviewed",
+        }
+    }
+}
+
+impl fmt::Display for Classifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+/// What an authority change did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorityChange {
+    /// The memory now carries a class it did not carry before.
+    Changed,
+    /// It already carried exactly this class. Reported rather than treated as
+    /// a change so an idempotent re-run is distinguishable from a real
+    /// promotion in an audit.
+    Unchanged,
+}
+
 /// Reads the wall clock, in seconds since the Unix epoch.
 ///
 /// Injected rather than called directly so tests can assert on exact
@@ -901,6 +952,109 @@ impl<'a> MemoryStore<'a> {
         }
 
         self.set_status(id, outcome)
+    }
+
+    /// Promote or demote a memory's authority class — Phase 21A.
+    ///
+    /// # Only a reviewer may create an invariant
+    ///
+    /// An [`Classifier::Extractor`] caller may set any class except
+    /// [`MemoryAuthority::Invariant`], and is refused with
+    /// [`MemoryStoreError::ReviewRequired`] if it tries. That is the storage
+    /// half of the rule `super::extract::authority` implements on the
+    /// producer side, and the two are deliberately independent: the extractor
+    /// cannot *construct* an invariant, and the store would not *accept* one
+    /// from it either. A single control would be a single thing to forget.
+    ///
+    /// Lowering is never refused, whoever asks. Phase 21A's concern is
+    /// memories that become binding without anyone deciding they should;
+    /// a memory becoming *less* binding needs no protection, and requiring
+    /// review to demote an over-confident classification would leave the
+    /// over-confident classification in place.
+    ///
+    /// Passing `None` clears the class back to unclassified, which
+    /// retrieval already treats conservatively — see [`MemoryAuthority`].
+    pub fn set_authority(
+        &self,
+        id: &MemoryId,
+        authority: Option<MemoryAuthority>,
+        by: Classifier,
+    ) -> Result<(MemoryRecord, AuthorityChange), MemoryStoreError> {
+        let record = self
+            .get(id)?
+            .ok_or_else(|| MemoryStoreError::NotFound { id: id.clone() })?;
+
+        if by == Classifier::Extractor && authority == Some(MemoryAuthority::Invariant) {
+            return Err(MemoryStoreError::ReviewRequired {
+                id: record.id,
+                impact: MemoryAuthority::Invariant.as_str(),
+            });
+        }
+
+        if record.authority == authority {
+            return Ok((record, AuthorityChange::Unchanged));
+        }
+
+        self.conn
+            .execute(
+                "UPDATE memories SET authority = ?2, updated_at = ?3 WHERE id = ?1",
+                rusqlite::params![
+                    id.as_str(),
+                    authority.map(MemoryAuthority::as_str),
+                    (self.clock)(),
+                ],
+            )
+            .map_err(|source| MemoryStoreError::Sql {
+                action: "change a memory's authority",
+                source,
+            })?;
+
+        let updated = self
+            .get(id)?
+            .ok_or_else(|| MemoryStoreError::NotFound { id: id.clone() })?;
+        Ok((updated, AuthorityChange::Changed))
+    }
+
+    /// Every current memory whose authority may be presented to an agent as a
+    /// rule — Phase 21A's *"retrieve current active invariants and constraints
+    /// separately from historical decisions"*.
+    ///
+    /// Filters on [`MemoryAuthority::is_binding`] rather than on a list of
+    /// class names written out in SQL, so a class added to the enum is
+    /// classified in exactly one place. An **unclassified** memory is not
+    /// binding and does not appear: `None` means nobody has judged how binding
+    /// it is, and the conservative reading of unknown is "not a rule".
+    pub fn binding(&self, limit: usize) -> Result<Vec<MemoryRecord>, MemoryStoreError> {
+        let mut statement = self
+            .conn
+            .prepare(&format!(
+                "SELECT {ALL_COLUMNS} FROM memories \
+                 WHERE project_id = ?1 AND status = ?2 AND authority IS NOT NULL \
+                 ORDER BY updated_at DESC, id ASC"
+            ))
+            .map_err(|source| MemoryStoreError::Sql {
+                action: "prepare the binding-memory listing",
+                source,
+            })?;
+        let rows = statement
+            .query_map(
+                rusqlite::params![&self.project_id, MemoryStatus::Active.as_str()],
+                row_to_record,
+            )
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|source| MemoryStoreError::Sql {
+                action: "list binding memories",
+                source,
+            })?;
+
+        let mut kept = Vec::new();
+        for row in rows {
+            let record = row?;
+            if record.authority.is_some_and(MemoryAuthority::is_binding) && kept.len() < limit {
+                kept.push(record);
+            }
+        }
+        Ok(kept)
     }
 
     /// How many memories this project holds, by status.

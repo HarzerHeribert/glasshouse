@@ -805,18 +805,18 @@ Fixed architectural requirements
 
 Phase 21 — Memory extraction
 
-☐ Define a structured JSON schema for extracting durable memories from session activity.
+☑ Define a structured JSON schema for extracting durable memories from session activity.
 ☐ Allow a configurable cheap or local model to perform memory extraction.
-☐ Feed the extractor bounded session/event chunks rather than entire unbounded session histories.
-☐ Require the extractor to classify every emitted memory into one supported memory kind.
+☑ Feed the extractor bounded session/event chunks rather than entire unbounded session histories.
+☑ Require the extractor to classify every emitted memory into one supported memory kind.
 ☐ Require the extractor to omit speculative claims that were not established during the session.
-☐ Require the extractor to distinguish failed approaches from accepted decisions.
+☑ Require the extractor to distinguish failed approaches from accepted decisions.
 ☐ Require the extractor to preserve concise rationale when a decision’s rationale is important.
-☐ Require the extractor to avoid duplicating an existing active memory when nothing materially changed.
+☑ Require the extractor to avoid duplicating an existing active memory when nothing materially changed.
 ☐ Store the originating session and event references so extracted memory retains provenance.
 ☐ Allow memory extraction to run after task completion.
 ☐ Allow memory extraction to run before or around native prompt compaction.
-☐ Allow memory extraction to run manually for debugging and evaluation.
+☑ Allow memory extraction to run manually for debugging and evaluation.
 ☐ Keep memory-extraction failure non-fatal to the coding session.
 
 Phase 21A — Memory authority classes
@@ -826,18 +826,18 @@ Fixed architectural requirements
 - Hard invariants, accepted decisions, working assumptions, experiments, user preferences, and historical ideas are distinct authority classes.
 - Retrieval and injection must preserve those distinctions instead of flattening all memories into equally authoritative text.
 
-☐ Classify durable memory by authority rather than treating every remembered statement as an equally strong rule.
-☐ Support the authority class invariant for facts or requirements that should not be violated without explicit review.
-☐ Support the authority class constraint for currently binding technical, security, legal, compatibility, or product limits.
-☐ Support the authority class decision for an accepted implementation or architecture choice that may later be revisited.
-☐ Support the authority class preference for a desired direction that should not force unnecessary complexity.
-☐ Support the authority class hypothesis for a belief that still requires validation.
-☐ Support the authority class idea for exploratory possibilities that must never be injected as binding instructions.
-☐ Support the authority class historical for context that is useful for understanding the project but should not direct current implementation.
+☑ Classify durable memory by authority rather than treating every remembered statement as an equally strong rule.
+☑ Support the authority class invariant for facts or requirements that should not be violated without explicit review.
+☑ Support the authority class constraint for currently binding technical, security, legal, compatibility, or product limits.
+☑ Support the authority class decision for an accepted implementation or architecture choice that may later be revisited.
+☑ Support the authority class preference for a desired direction that should not force unnecessary complexity.
+☑ Support the authority class hypothesis for a belief that still requires validation.
+☑ Support the authority class idea for exploratory possibilities that must never be injected as binding instructions.
+☑ Support the authority class historical for context that is useful for understanding the project but should not direct current implementation.
 ☐ Require memory extraction to distinguish a hard requirement from a convenient implementation choice.
-☐ Require memory extraction to distinguish an accepted decision from an idea that was merely discussed enthusiastically.
-☐ Treat uncertain authority classification conservatively and avoid promoting uncertain memories to invariants automatically.
-☐ Allow users or trusted review agents to promote or demote memory authority explicitly.
+☑ Require memory extraction to distinguish an accepted decision from an idea that was merely discussed enthusiastically.
+☑ Treat uncertain authority classification conservatively and avoid promoting uncertain memories to invariants automatically.
+☑ Allow users or trusted review agents to promote or demote memory authority explicitly.
 
 Phase 21B — Decision provenance and assumptions
 

@@ -5128,3 +5128,276 @@ Known limit, recorded rather than fixed:
   explicit executable path; `session::select` honours both. `resolve_checked`
   therefore takes the answer as a value rather than calling `detect` itself.
   Any offering call site must not reintroduce the disagreement.
+
+---
+
+### Phase 21 extraction contract — "Define a structured JSON schema…", "Feed the extractor bounded session/event chunks…", "Require the extractor to classify every emitted memory into one supported memory kind.", "Require the extractor to distinguish failed approaches from accepted decisions.", "Require the extractor to avoid duplicating an existing active memory when nothing materially changed."
+
+Contract: Given a model reply, Glasshouse admits only elements that satisfy a
+declared schema, refuses the rest by name, and never stores a memory the
+project already holds.
+
+State: COMPLETE
+
+Production evidence:
+- `memory/extract/schema.rs` — `RESPONSE_SCHEMA` plus a parser enforcing eight
+  refusal rules. `the_response_schema_names_every_value_the_parser_accepts`
+  pins the schema against `MemoryKind::ALL` and `MemoryAuthority::ALL`, so a
+  class added to the store without being added to the prompt fails a test
+  rather than silently never being asked for.
+- `memory/extract/chunk.rs` — `SessionChunk::build` is the only constructor and
+  applies three caps. The load-bearing one is the whole-chunk cap: a thousand
+  entries each just under the per-entry cap is an unbounded history assembled
+  out of bounded parts, which is exactly what the map's line forbids.
+- Failed-versus-accepted is enforced as a consistency rule with teeth:
+  `disposition: abandoned` ⟺ `kind: failed_attempt`, and any other pairing is
+  refused as `ConflatedDisposition` rather than reclassified. Guessing which
+  half a confused element meant would put Glasshouse's judgment behind the
+  model's confusion.
+- Duplicate detection normalizes case, whitespace runs and trailing sentence
+  punctuation, against every active memory in the project *and* against what
+  the run has already added. Deliberately nothing subtler: stemming would start
+  deciding two different statements are the same, and a duplicate check that
+  silently discards a real memory is worse than one that stores a near-duplicate.
+- Reached from the shipped binary by `glasshouse memory extract`.
+
+Regression evidence (mutation-proven, all run by the lead in a private
+`CARGO_TARGET_DIR`, restored and verified with `diff -q`):
+- M12 default an unknown `kind` to `finding`:
+  `test memory::extract::schema::tests::every_memory_must_name_a_supported_kind ... ok`
+  → `... FAILED` → `... ok`.
+- M4 delete the whole-chunk character cap:
+  `test a_whole_session_history_cannot_reach_the_model ... ok` → `... FAILED` → `... ok`.
+- M9 delete the conflated-disposition refusal:
+  `test memory::extract::schema::tests::an_abandoned_approach_cannot_be_filed_as_a_decision ... ok`
+  → `... FAILED` → `... ok`.
+- M7, M17, M18 (delete the duplicate branch; drop `to_lowercase`; drop the
+  whitespace collapse) — all killed by
+  `a_memory_the_project_already_holds_is_not_stored_again` and
+  `a_reformatted_duplicate_is_still_a_duplicate`.
+- M22/M23 make `memories` defaultable again — killed. The absent-key case is
+  not pedantry: `extract_json_object` takes the first `{` wherever it sits, so
+  a reply wrapped in an array had its inner object read as the whole envelope,
+  found no `memories` key, defaulted to empty, and reported **"found nothing"
+  with no failure at all** — indistinguishable from a model that looked and
+  found nothing. Found by a subcontractor probing envelope shapes.
+
+Failure/isolation evidence:
+- Every refusal is per element, so one unreadable memory never discards the
+  readable ones beside it. `Rejection::Store` renders a message rather than
+  carrying the error, because the memory's text was screened before that point.
+
+Known limit, recorded rather than fixed:
+- **M19 survived and the filter was kept.** Replacing `WHERE project_id = ?1`
+  with `WHERE ?1 IS NOT NULL` in the duplicate query kills no test: project
+  isolation here is *structural*, since every project has its own database
+  file. The filter is defence in depth against a future where one file holds
+  two projects. This is the second independent lead to report this same
+  survivor in this module. If a third does, the right answer is one test
+  asserting the *structure* — that no two projects share a file — rather than
+  three more survivors.
+
+---
+
+### Phase 21 credential acceptance condition — the extractor is never shown, and never emits, credential material
+
+Contract: Given session activity or an already-stored memory containing a
+credential, no credential reaches the model, and no memory carrying one is
+stored.
+
+State: COMPLETE
+
+Production evidence:
+- Three choke points, not one rule to remember. `SessionChunk::build` scrubs
+  (so no chunk anywhere in the program holds un-scrubbed activity);
+  `Prompt::build` scrubs the already-stored memories it quotes back (a row
+  written before this module existed never passed a screen); `schema::judge`
+  screens each emitted element **before reading any of its fields** and
+  refuses it whole — so a credential in a field the contract does not even
+  read is still caught.
+- The two directions are deliberately asymmetric — **scrubbed in, refused
+  out**. A session that printed a key still contains everything else the
+  project learned that hour, so discarding the hour would lose more than it
+  protects. A memory is small and discrete, so losing one costs one, and a
+  *redacted* secret in a durable row still carries its neighbourhood.
+
+Regression evidence:
+- M1 drop the scrub on every entry → `the_model_is_never_shown_a_credential_from_session_activity` FAILED → ok.
+- M2 drop the scrub on quoted existing memories → `the_model_is_never_shown_a_credential_from_an_already_stored_memory` FAILED → ok.
+- M3 drop the output screen → `a_memory_carrying_a_credential_is_never_stored` FAILED → ok.
+- M15 drop the assignment check from `screen` → `anything_scrub_removes_is_something_screen_refuses` FAILED → ok.
+- **M14, the false-positive direction, and the one to point at if only one
+  mattered.** Dropping the digit requirement on an assigned value makes
+  `secret: memory-belongs-to-the-project` a credential, and a real memory is
+  refused: `prose_that_merely_mentions_a_secret_is_not_an_assignment` FAILED →
+  ok. An over-eager recognizer gets turned off, taking the protection with it,
+  so this direction needs a mutation as much as the other one does.
+
+---
+
+### Phase 21 manual extraction — "Allow memory extraction to run manually for debugging and evaluation." (line 818)
+
+Contract: Given a session's activity and a model reply, a person can run
+extraction from the shipped binary and see what was stored, lowered, dropped
+and refused.
+
+State: COMPLETE
+
+Production evidence:
+- `glasshouse memory extract --session <id> --activity <path> --reply-from <path>`
+  in `main.rs`. Everything except the model call is the production path: the
+  chunk is bounded and scrubbed by `SessionChunk::build`, the reply goes
+  through the same contract validation, credential screen, conservative
+  classification and duplicate check, and what survives is written to the
+  project's real memory store.
+- Run against the shipped binary on a scratch project. Two memories in, both
+  stored, and the second — declared `invariant` with `disposition: proposed` —
+  reported as
+  `lowered   1d35ff9d…  invariant -> idea (this was proposed and not accepted, so it is an idea and never an instruction)`.
+- **`--reply-from` is a model *substitute*, not a model call, and the output
+  says so on every run**: `model file (evaluation harness; no model was
+  called)`. The configurable-model line above stays open, deliberately.
+
+Regression evidence (`main.rs` unit tests, macOS):
+- `test tests::a_manual_extraction_runs_the_whole_pipeline_and_says_no_model_was_called ... ok`
+- MC `describe()` returns `"gpt-5.6"` instead of naming the file → `... FAILED` → `... ok`.
+- MD feed the pipeline `std::iter::empty()` instead of the activity file → `... FAILED` → `... ok`.
+
+Known limit, recorded rather than fixed:
+- The orchestrator's judgment, recorded because the lead deliberately declined
+  to make it: this line is closed and the neighbouring
+  *"Keep memory-extraction failure non-fatal to the coding session"* is **not**,
+  even though both turn on the extractor having a caller. A CLI invocation
+  *is* a manual run for debugging and evaluation; it is **not** a coding
+  session, and nothing is at risk when extraction fails inside it. Closing the
+  second on this caller would be closing it on a caller its sentence does not
+  describe.
+
+---
+
+### Phase 21A authority classes — all seven classes, classification by authority, conservative classification, explicit promotion (lines 828–841)
+
+Contract: Given memories of differing authority, Glasshouse stores the class,
+honours it distinctly, never lets automatic extraction mint an invariant, and
+lets a person promote or demote explicitly.
+
+State: COMPLETE
+
+Production evidence:
+- `MemoryAuthority` with seven classes, each round-tripping through SQLite
+  unchanged, driven from `MemoryAuthority::ALL` so an eighth class fails a test
+  rather than passing unnoticed. `is_binding()` and `MemoryStore::binding()`
+  honour them distinctly.
+- **`glasshouse memory search` prints the class.** This is the fixed
+  architectural requirement — *retrieval must preserve the distinctions instead
+  of flattening all memories into equally authoritative text* — and until this
+  batch the one surface a person could reach dropped `authority` on the floor.
+  An unclassified memory prints `unclassified`; it does not borrow a class.
+- `glasshouse memory promote <id> <authority>` sets any class including
+  `invariant`, as `Classifier::Reviewed` — the person typing it is the review
+  the class requires. Demotion is never refused by either classifier: 21A's
+  concern is memories becoming binding without anyone deciding they should, and
+  requiring review to *demote* would leave an over-confident classification in
+  place.
+- **An extractor may not mint an invariant, at all**, and two independent
+  controls enforce it: the producer cannot construct one (`EXTRACTOR_CEILING`
+  is `Constraint`) and the store will not accept one from `Classifier::Extractor`.
+  The map's line reads *"avoid promoting **uncertain** memories to invariants"*,
+  which sounds like a certain one could be promoted. It cannot be, and the map
+  answers this itself: Phase 21K requires model confidence to be treated as a
+  presentation characteristic and never as evidence, so the only certainty an
+  extractor has access to is not evidence of anything.
+- `disposition` is what makes *"an idea discussed enthusiastically"* checkable
+  rather than hoped for: `proposed` caps authority at `idea`, so no stated
+  confidence can turn a proposal into a decision. Verified in a real binary
+  run, above.
+
+Regression evidence:
+- `test tests::a_memory_search_names_the_authority_class_of_every_result ... ok`
+  — drives all seven classes from `MemoryAuthority::ALL` plus an unclassified
+  memory. MA (drop `{authority}` from the search line) → `... FAILED` → `... ok`.
+- `test tests::a_person_can_promote_a_memory_and_demote_it_again ... ok`
+  — promote to `invariant`, demote to `preference`, clear to `unclassified`,
+  and refuse a class that does not exist. MB (`Classifier::Extractor` instead
+  of `Reviewed`) → `... FAILED` → `... ok`.
+- M13 remove the extractor ceiling:
+  `test memory::extract::authority::tests::no_extraction_can_produce_an_invariant ... ok`
+  → `... FAILED` → `... ok`. `no_input_triple_yields_an_invariant` walks all
+  7 × 3 × 3 = 63 inputs.
+- M21 remove the store's refusal:
+  `test an_extractor_may_not_mint_an_invariant_and_nothing_is_written ... ok`
+  → `... FAILED` → `... ok`. **Killed only by a subcontractor's test.**
+- M20 remove `binding()`'s `is_binding` filter:
+  `test binding_returns_only_active_binding_classified_memories ... ok`
+  → `... FAILED` → `... ok`. **Also killed only by a subcontractor's test.**
+- M8 store the declared authority rather than the conservative one:
+  `a_model_cannot_write_an_invariant_into_this_project` FAILED → ok.
+
+Known limit, recorded rather than fixed:
+- `idea`'s *"must never be injected as binding instructions"* is half-proved:
+  `is_binding()` is false and `binding()` excludes it, but the **injection**
+  half is Phase 27 and unbuilt, so nothing can violate it yet. That is an
+  absence of risk, not evidence, and it is recorded as such.
+
+---
+
+### Phase 21 — the five extraction lines that stay open, and why
+
+Recorded so a later session does not re-derive them.
+
+- *Allow a configurable cheap or local model to perform memory extraction.* —
+  **Phase 39.** There is no way to call a model in this codebase.
+  `ExtractionModel` is the seam and `ExtractionOutcome::model` is where
+  Phase 39's *"record which resource performed important memory extraction"*
+  lands. The seam is deliberately **synchronous** (this codebase has no async
+  runtime, and extraction runs on a thread so it never blocks a PTY drain),
+  `Send + Sync`, and its error type takes a `&'static str` so a provider's
+  error body — which can echo the request, and the request is a prompt —
+  cannot be routed into a Glasshouse diagnostic.
+- *Require the extractor to omit speculative claims that were not established.*
+  — **half-enforced, and the gap is real.** A memory marked
+  `support: speculative` is dropped and counted (M11 killed). A memory
+  *wrongly* marked `established` is stored, and no code here can catch it:
+  whether a claim was established is a judgment about the session, which is
+  the same thing `memory/policy.rs` already declined to fake at the storage
+  layer. Needs extraction evaluation against a real model.
+- *Require the extractor to preserve concise rationale when a decision's
+  rationale is important.* — enforced where importance is decidable (a
+  `decision` declared `invariant`, `constraint` or `decision` **must** carry a
+  rationale or it is refused, M10 killed; capped at 400 characters for
+  "concise"), but "important" is approximated by "binding", and there is no
+  `memories.rationale` column, so it is folded into the body behind
+  `RATIONALE_MARKER` and renders as `Why:` in a search. Findable, but a
+  consumer cannot ask for a decision *without* its rationale.
+- *Store the originating session and event references.* — the session half is
+  done and proved; the **event** half has nowhere to go. The DDL is written
+  and reviewed, below.
+- *Allow memory extraction to run after task completion* / *before or around
+  native prompt compaction.* — no caller exists for either. See the migration
+  note and Phase 7/8 note below.
+
+Migration ready to apply, deliberately not applied this batch:
+- Three columns on `memories` — `source_event_first`, `source_event_last`
+  (the `RecordedEvent::seq` range of the chunk; a range and not a single id,
+  because extraction reads a slice and a memory is rarely traceable to one
+  event; nullable, because a hand-written memory having no event range is a
+  different fact from an empty one) and `rationale`.
+- **It is migration 6, not 5** — `lead-record` took 5 for `lifecycle_events`
+  and `checkpoints` in the batch immediately before this one. The DDL as
+  written in that report says 5.
+- **`rationale` can hold a credential, exactly like `subject` and `body`, and
+  must not be certified otherwise.** The control stays on the producer:
+  `judge` screens the whole element before reading any field, so coverage is
+  automatic as long as `rationale` stays inside the element.
+- `memories_fts` is an external-content index over `subject` and `body` only.
+  Making `rationale` searchable is a **rebuild** of the index and its three
+  triggers, not an `ALTER` — which is why this is a real migration rather than
+  three column additions, and why it was not squeezed into this batch.
+
+Blocked two phases deep:
+- Extraction around compaction cannot be observed today from either harness.
+  Codex's hook catalogue *has* `PreCompact`/`PostCompact` and
+  `harness/codex.rs`'s `REPORTED_EVENTS` deliberately does not ask for them;
+  Claude Code's observed catalogue does not list them at all. Phase 7 line 307
+  and Phase 8 line 324 are the boxes that unblock it.
+  `ExtractionTrigger::BeforeCompaction` exists and waits.

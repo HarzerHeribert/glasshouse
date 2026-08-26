@@ -731,3 +731,87 @@ correct red gate last round.
 - Does a wide partition close the stranded boxes, or merely move the boundary?
 - Phase 19's checkpoints are the first capability whose value is cross-harness.
   A checkpoint that only ever bootstraps the same harness proves little.
+
+## Batch 20–21 outcome — two Opus team leads, and the answers to the round's questions
+
+| | `lead-record` | `lead-extract` |
+|---|---|---|
+| package | 28 boxes (Phases 19/26/45) | 25 boxes (Phases 21/21A) |
+| partition | wide — `main.rs`, `shell/**`, `database.rs` | narrow — `memory/**` only |
+| subcontractors | 2 (Sonnet 5, medium) | 3 (Sonnet 5, medium) |
+| mutations | 13 run, 3 first-run survivors, all then killed | 23 run, 22 killed, 1 predicted survivor |
+| boxes closed | **25 of 28** | **17 of 25** |
+| closable *as delivered* | 25 | **0** |
+
+**Answer to "does a wide partition close the stranded boxes, or merely move the
+boundary?" — it closes them, decisively, and the control group proves it.**
+The two leads ran the same round with the same model, effort and process, and
+differed mainly in partition width. The wide one closed 25 of 28 from its own
+worktree. The narrow one closed **zero** — not for want of quality (23
+mutations, 22 killed, +81 tests, the strongest evidence in the batch) but
+because *nothing in the shipped binary produced a memory*, and every line that
+would give the extractor a caller lived in `main.rs`, which it was forbidden.
+Two `main.rs` patches, 2 lines and ~40 lines, took it from 0 to 17.
+
+This is now observed three times — `lead-memory` (4 of 10 boxes blocked on six
+lines of `main.rs`), `lead-record`'s two caller-only boxes, and this. It is a
+rule, not a pattern: **a producer phase must have its trigger's file in the
+partition, or the batch ends in a patch instead of a tick.** The packet
+template gets that line.
+
+**Answer to "do transferred lessons change behaviour, or does each lead
+rediscover them?" — they change behaviour, and the evidence is what the reports
+*stopped* saying.** Neither lead reported freezing its API first as a
+discovery; both did it and moved on. `lead-extract` reported its surviving
+mutation with reasoning and a decision to keep the code, which is exactly what
+the transferred block asked for, rather than presenting 23/23 killed. The
+lessons that were *not* transferred are the ones that got rediscovered: the
+`MAX(version)` rollback trap surfaced for the third time in a third file, and
+the shared-mutable-state hazard for the sixth.
+
+**Answer to "is 40 boxes too large?" — the question was wrong.** Neither lead's
+count was limited by box count. `lead-record`'s 28 and `lead-extract`'s 25 both
+finished inside their context. What bounded the result was **file partition
+width**, not package size. Size the package by the files a capability's
+production caller lives in, and stop sizing it by how many lines the map lists.
+
+### The measurement that pays for the whole team-lead arrangement
+
+Across the two batches, **five mutations were killed only by a subcontractor's
+tests** — three in `lead-extract` (M20, M21, M23), two reported by the 9G lead
+earlier. A lead's own tests are written by whoever wrote the code and inherit
+its blind spots; a subcontractor writing tests against a frozen API does not
+share them. This is the third independent observation and the strongest
+argument in this ledger for paying the lead tier's review cost.
+
+Second only to it: **`lead-record` had three mutations survive on their first
+run**, each exposing a claim nothing tested — including one where the box's own
+subject (an `observe()` call) could be deleted and only a debug log noticed.
+Three boxes would have been ticked on nothing. Mutation testing is not a
+formality in this process; it is where the batch's real defects are found.
+
+### One zero-box finding worth more than most closed boxes
+
+`lead-extract` established, and reproduced in both directions, that
+`scripts/ci-local.sh`'s three Linux jobs **could not run from a git worktree at
+all** — one docker volume shared by every checkout, and `.git` is a directory
+in the main checkout but a *file* in a worktree, so `tar` refused the copy and
+all three jobs reported FAIL having compiled nothing. Every editing worker on
+this project is in a worktree by definition, so a third of the gate had been
+silently unavailable to all of them, failing in the shape of a broken build.
+Diagnosed, not applied — the file was not in its partition and other workers
+were live. Fixed by the orchestrator during `lead-record`'s integration, which
+had hit the same shared volume from the other direction.
+
+### Open questions for the next round
+
+- The wide-partition rule says put the caller's file in the partition. With one
+  `main.rs` and several leads, does that serialize the leads — and if it does,
+  is a thin "wiring" batch after each round cheaper than the serialization?
+- Both leads independently reported the same surviving mutation (a
+  `project_id` filter made redundant by structural per-project database files).
+  Is one test asserting the *structure* the right answer, and does it retire
+  the survivor in both places?
+- `lead-extract` spent its evidence on a capability with no consumer, and it
+  was still the right work. How should a package that ends in a seam rather
+  than a surface be scored, given the box count says zero?

@@ -663,4 +663,39 @@ pub enum MemoryCommand {
               default_value_t = crate::memory::search::DEFAULT_SEARCH_LIMIT)]
         limit: usize,
     },
+
+    /// Promote or demote a memory's authority class.
+    ///
+    /// The only way to create an `invariant`: automatic extraction is capped
+    /// at `constraint`, because the only certainty it has access to is a
+    /// model's report of its own confidence, and Phase 21K requires that be
+    /// treated as presentation rather than evidence.
+    Promote {
+        /// The memory, or the leading part of its identifier.
+        id: String,
+
+        /// The class to set, or `unclassified` to clear it.
+        #[arg(value_name = "AUTHORITY")]
+        authority: String,
+    },
+
+    /// Run memory extraction over a session's recorded activity.
+    ///
+    /// `--reply-from` supplies a model's reply from a file, which is what
+    /// makes this usable before Phase 39 exists: everything except the model
+    /// call runs for real. It is an evaluation harness, not a model call, and
+    /// the output says so on every run.
+    Extract {
+        /// The session the activity belongs to.
+        #[arg(long)]
+        session: String,
+
+        /// A file holding the activity, one entry per line.
+        #[arg(long, value_name = "PATH")]
+        activity: std::path::PathBuf,
+
+        /// A file holding a model's reply, instead of calling a model.
+        #[arg(long, value_name = "PATH")]
+        reply_from: std::path::PathBuf,
+    },
 }
