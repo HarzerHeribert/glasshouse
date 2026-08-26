@@ -686,13 +686,32 @@ pub enum MemoryCommand {
     /// call runs for real. It is an evaluation harness, not a model call, and
     /// the output says so on every run.
     Extract {
-        /// The session the activity belongs to.
+        /// The session the activity belongs to, or the leading part of its
+        /// identifier when reading from the event log.
         #[arg(long)]
         session: String,
 
         /// A file holding the activity, one entry per line.
-        #[arg(long, value_name = "PATH")]
-        activity: std::path::PathBuf,
+        ///
+        /// Mutually exclusive with `--from-events`, and one of the two is
+        /// required: extraction is never run over activity nobody chose.
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with = "from_events",
+            required_unless_present = "from_events"
+        )]
+        activity: Option<std::path::PathBuf>,
+
+        /// Read the activity from this session's own recorded lifecycle
+        /// events instead of from a file.
+        ///
+        /// This is the same material automatic extraction reads after a
+        /// completed turn, and the memories it produces carry the range of
+        /// the event log they came from. It carries no conversation: the
+        /// project event log has no column one could reach.
+        #[arg(long)]
+        from_events: bool,
 
         /// A file holding a model's reply, instead of calling a model.
         #[arg(long, value_name = "PATH")]

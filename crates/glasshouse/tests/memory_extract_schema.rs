@@ -10,14 +10,16 @@ use std::sync::Mutex;
 
 use glasshouse::memory::extract::chunk::{ChunkLimits, SessionChunk};
 use glasshouse::memory::extract::schema::{
-    self, Confidence, Disposition, ExtractedMemory, MAX_BODY_CHARS, MAX_RATIONALE_CHARS,
-    MAX_SUBJECT_CHARS, PROMPT_CONTRACT, RATIONALE_MARKER, RESPONSE_SCHEMA, Refusal, Support,
-    Verdict,
+    self, Confidence, Disposition, ExtractedMemory, MAX_BODY_CHARS, MAX_EXCERPT_CHARS,
+    MAX_PROVENANCE_CHARS, MAX_RATIONALE_CHARS, MAX_SUBJECT_CHARS, PROMPT_CONTRACT, RESPONSE_SCHEMA,
+    Refusal, Support, Verdict,
 };
 use glasshouse::memory::extract::{
     ExtractionFailure, ExtractionModel, ExtractionTrigger, Extractor, ModelError, Prompt, Rejection,
 };
-use glasshouse::memory::{MemoryAuthority, MemoryKind, MemoryStatus, ProjectMemory};
+use glasshouse::memory::{
+    DecisionProvenance, MemoryAuthority, MemoryKind, MemoryStatus, ProjectMemory,
+};
 use glasshouse::{Cli, Runtime};
 
 use clap::Parser;
@@ -255,10 +257,10 @@ fn every_stored_memory_carries_the_chunks_session_and_commit() {
 /// Line: "preserve concise rationale when a decision's rationale is
 /// important."
 ///
-/// Subject, body and rationale survive intact, and the rationale arrives
-/// folded into the stored body at `RATIONALE_MARKER`.
+/// Subject, body and rationale all survive intact, and — from migration 6 —
+/// the rationale arrives in its own column rather than folded into the body.
 #[test]
-fn subject_body_and_rationale_survive_with_the_rationale_folded_into_the_body() {
+fn subject_body_and_rationale_survive_into_their_own_columns() {
     let tmp = tempdir();
     let fixture = Fixture::new(tmp.path(), "alpha");
     let memory = fixture.memory();
@@ -277,12 +279,10 @@ fn subject_body_and_rationale_survive_with_the_rationale_folded_into_the_body() 
     assert_eq!(outcome.stored(), 1);
     let record = store.get(&outcome.recorded[0]).unwrap().unwrap();
     assert_eq!(record.subject.as_deref(), Some("pty reader threading"));
+    assert_eq!(record.body, "Use blocking threads for the pty reader");
     assert_eq!(
-        record.body,
-        format!(
-            "Use blocking threads for the pty reader{RATIONALE_MARKER}no async runtime is in \
-             the dependency set"
-        )
+        record.provenance.rationale.as_deref(),
+        Some("no async runtime is in the dependency set")
     );
 }
 
@@ -919,11 +919,10 @@ fn a_rejection_carries_the_exact_refusal_it_was_refused_for() {
     ));
 }
 
-/// `ExtractedMemory::stored_body` (reached indirectly, through `judge`, since
-/// the extractor never hands one back directly) folds a rationale in with
-/// `RATIONALE_MARKER`, matching what actually lands in the store.
+/// A kept memory reached through `judge` carries its rationale beside the
+/// body, not inside it — the shape migration 6 replaced the fold with.
 #[test]
-fn a_kept_memorys_stored_body_folds_in_the_rationale() {
+fn a_kept_memory_carries_its_rationale_beside_the_body() {
     let json = MemoryJson::new("decision", "Use blocking threads")
         .authority("decision")
         .rationale("no async runtime is in the dependency set")
@@ -938,9 +937,10 @@ fn a_kept_memorys_stored_body_folds_in_the_rationale() {
     } = &memory;
     assert_eq!(*disposition, Disposition::Accepted);
     assert_eq!(*confidence, Confidence::Certain);
+    assert_eq!(memory.body, "Use blocking threads");
     assert_eq!(
-        memory.stored_body(),
-        format!("Use blocking threads{RATIONALE_MARKER}no async runtime is in the dependency set")
+        memory.provenance.rationale.as_deref(),
+        Some("no async runtime is in the dependency set")
     );
 }
 
@@ -1014,4 +1014,279 @@ fn the_contract_enums_have_the_sizes_the_contract_documents() {
     assert_eq!(Support::ALL.len(), 2);
     assert_eq!(Disposition::ALL.len(), 3);
     assert_eq!(Confidence::ALL.len(), 3);
+}
+
+// -------------------------------------------------------------------------
+// F. Phase 21B — the nine new provenance fields, through the contract.
+// -------------------------------------------------------------------------
+
+/// The eight free-text fields Phase 21B added, in the order
+/// `DecisionProvenance` declares them. `project_phase` is not here: it is a
+/// fixed vocabulary, not a length-bounded string, and is covered by its own
+/// test below.
+const NEW_PROVENANCE_TEXT_FIELDS: [&str; 8] = [
+    "problem",
+    "assumptions",
+    "scale_assumptions",
+    "security_assumptions",
+    "compatibility_assumptions",
+    "operational_assumptions",
+    "evidence",
+    "source_excerpt",
+];
+
+/// Every field `DecisionProvenance` carries, read by name, for tests that
+/// loop over the map's fields without one match arm per test.
+fn provenance_field(provenance: &DecisionProvenance, field: &str) -> Option<String> {
+    match field {
+        "problem" => provenance.problem.clone(),
+        "assumptions" => provenance.assumptions.clone(),
+        "scale_assumptions" => provenance.scale_assumptions.clone(),
+        "security_assumptions" => provenance.security_assumptions.clone(),
+        "compatibility_assumptions" => provenance.compatibility_assumptions.clone(),
+        "operational_assumptions" => provenance.operational_assumptions.clone(),
+        "evidence" => provenance.evidence.clone(),
+        "source_excerpt" => provenance.source_excerpt.clone(),
+        other => panic!("unknown provenance field `{other}`"),
+    }
+}
+
+fn with_provenance_field(field: &str, value: &str) -> String {
+    format!(
+        r#"{{"kind":"decision","authority":"historical","disposition":"accepted",
+             "support":"established","confidence":"certain","body":"x",
+             "{field}":{}}}"#,
+        serde_json::to_string(value).unwrap()
+    )
+}
+
+/// Each of the nine new fields is optional, trimmed, and bounded, refused by
+/// name when too long — `MAX_PROVENANCE_CHARS` for the seven general ones,
+/// `MAX_EXCERPT_CHARS` for `source_excerpt`.
+///
+/// Line: "require the extractor to preserve concise rationale ... " and the
+/// nine Phase 21B storage lines this contract is now the producer for.
+///
+/// Mutation: make `optional()` skip its `bound()` call, or make `optional()`
+/// return `Some(text)` without trimming.
+#[test]
+fn each_new_provenance_text_field_is_optional_trimmed_and_bounded_by_name() {
+    // The premise the whole test rests on: if these two constants were ever
+    // collapsed into one, the assertions below would still pass by
+    // coincidence, so it is checked directly.
+    assert_ne!(
+        MAX_PROVENANCE_CHARS, MAX_EXCERPT_CHARS,
+        "the excerpt's bound must be its own constant, not the general one \
+         wearing a second name"
+    );
+
+    for field in NEW_PROVENANCE_TEXT_FIELDS {
+        let limit = if field == "source_excerpt" {
+            MAX_EXCERPT_CHARS
+        } else {
+            MAX_PROVENANCE_CHARS
+        };
+
+        // Optional: absent is accepted and keeps every field `None`.
+        let bare = r#"{"kind":"decision","authority":"historical","disposition":"accepted",
+                        "support":"established","confidence":"certain","body":"x"}"#;
+        let Ok(Verdict::Keep(memory)) = schema::judge(&serde_json::from_str(bare).unwrap()) else {
+            panic!("a memory with none of the new fields must still be kept");
+        };
+        assert_eq!(provenance_field(&memory.provenance, field), None);
+
+        // Trimmed: surrounding whitespace does not count toward the bound and
+        // does not survive into the stored value.
+        let padded = with_provenance_field(field, "  a padded value  ");
+        let Ok(Verdict::Keep(memory)) = schema::judge(&serde_json::from_str(&padded).unwrap())
+        else {
+            panic!("field `{field}` with padding whitespace was refused");
+        };
+        assert_eq!(
+            provenance_field(&memory.provenance, field),
+            Some("a padded value".to_owned()),
+            "field `{field}` did not trim"
+        );
+
+        // Bounded, and refused by the right name at one over the limit.
+        let long = with_provenance_field(field, &"x".repeat(limit + 1));
+        let result = schema::judge(&serde_json::from_str(&long).unwrap());
+        assert!(
+            matches!(result, Err(Refusal::TooLong { field: f, .. }) if f == field),
+            "field `{field}` at {}+1 chars gave {result:?}",
+            limit
+        );
+
+        // Exactly at the limit is accepted, which proves the boundary is
+        // where the field name says it is rather than off by one.
+        let exact = with_provenance_field(field, &"x".repeat(limit));
+        assert!(
+            matches!(
+                schema::judge(&serde_json::from_str(&exact).unwrap()),
+                Ok(Verdict::Keep(_))
+            ),
+            "field `{field}` at exactly {limit} chars was refused"
+        );
+    }
+}
+
+/// Whitespace-only is absence, not the empty string, through `judge` — the
+/// same rule `NewMemory::with_subject` and `DecisionProvenance`'s own module
+/// documentation state: "nobody recorded one" and "the empty string" must not
+/// become the same fact.
+#[test]
+fn whitespace_only_provenance_fields_are_absence_not_the_empty_string_through_judge() {
+    for field in NEW_PROVENANCE_TEXT_FIELDS {
+        let json = with_provenance_field(field, "   \n\t  ");
+        let Ok(Verdict::Keep(memory)) = schema::judge(&serde_json::from_str(&json).unwrap()) else {
+            panic!("field `{field}` with whitespace-only was refused rather than absent");
+        };
+        assert_eq!(
+            provenance_field(&memory.provenance, field),
+            None,
+            "field `{field}` stored whitespace as a value instead of treating it as absent"
+        );
+    }
+}
+
+/// `project_phase` is the one provenance field with a fixed vocabulary: a
+/// value outside the map's five is refused naming the field, and each of the
+/// five is accepted — reached through the public `judge`, not the module's
+/// own unit test.
+#[test]
+fn a_project_phase_outside_the_maps_five_is_refused_by_name_and_each_of_the_five_is_accepted() {
+    let unknown = with_provenance_field("project_phase", "general-availability");
+    assert!(matches!(
+        schema::judge(&serde_json::from_str(&unknown).unwrap()),
+        Err(Refusal::UnknownValue {
+            field: "project_phase",
+            ..
+        })
+    ));
+
+    for phase in ["prototype", "alpha", "beta", "production", "migration"] {
+        let json = with_provenance_field("project_phase", phase);
+        assert!(
+            matches!(
+                schema::judge(&serde_json::from_str(&json).unwrap()),
+                Ok(Verdict::Keep(_))
+            ),
+            "project_phase `{phase}` was refused"
+        );
+    }
+}
+
+/// The acceptance condition of Phase 21, applied to every one of the ten
+/// provenance fields in turn: a credential planted in any one of them is
+/// refused whole, and the refusal's own text never contains it.
+///
+/// This must not be approximate — the screen runs over the whole element's
+/// serialized text before any field is read, so it does not matter which
+/// field carries the credential, and this test proves that for all ten
+/// rather than assuming it holds for the ones already covered elsewhere.
+///
+/// Mutation: move `credentials::screen` in `judge` to after the fields are
+/// parsed.
+#[test]
+fn a_credential_planted_in_each_of_the_ten_provenance_fields_is_refused_whole() {
+    let planted = "hunter2xyzabcdefghijklmn";
+    let fields = [
+        "rationale",
+        "project_phase",
+        "problem",
+        "assumptions",
+        "scale_assumptions",
+        "security_assumptions",
+        "compatibility_assumptions",
+        "operational_assumptions",
+        "evidence",
+        "source_excerpt",
+    ];
+    assert_eq!(
+        fields.len(),
+        10,
+        "this must cover all ten provenance fields"
+    );
+
+    for field in fields {
+        let json = with_provenance_field(field, &format!("the gateway needs API_KEY={planted}"));
+        let result = schema::judge(&serde_json::from_str(&json).unwrap());
+        assert!(
+            matches!(result, Err(Refusal::Credential(_))),
+            "field `{field}` carrying a credential gave {result:?}"
+        );
+        let rendered = format!("{}", result.unwrap_err());
+        assert!(
+            !rendered.contains(planted),
+            "field `{field}`'s refusal echoed the credential: {rendered}"
+        );
+    }
+}
+
+/// The contract tells the model what the validator enforces: for every one of
+/// the nine new fields, the *assembled prompt* — not just `RESPONSE_SCHEMA`
+/// or `PROMPT_CONTRACT` in isolation — carries the rule. `schema.rs` already
+/// has a unit test pinning `PROMPT_CONTRACT` and `RESPONSE_SCHEMA` against
+/// each other; this is the part that test cannot see, because `Prompt::build`
+/// is what a model is actually shown.
+#[test]
+fn the_assembled_prompt_carries_every_phase_21b_field_and_the_lower_confidence_rule() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let memory = fixture.memory();
+    let store = memory.store();
+
+    let model = Canned::new(envelope(&[]));
+    let chunk = chunk_of(&["we settled the architecture"]);
+    let _ = Extractor::new(&store, &model).run(&chunk, ExtractionTrigger::Manual);
+
+    let seen = model.seen.lock().unwrap();
+    let prompt = &seen[0];
+
+    for field in [
+        "project_phase",
+        "problem",
+        "assumptions",
+        "scale_assumptions",
+        "security_assumptions",
+        "compatibility_assumptions",
+        "operational_assumptions",
+        "evidence",
+        "source_excerpt",
+    ] {
+        assert!(
+            prompt.contains(field),
+            "the assembled prompt never mentions `{field}`"
+        );
+    }
+    assert!(
+        prompt.contains("lower-confidence"),
+        "rule 13 — a decision with neither rationale nor assumptions is \
+         lower-confidence — must reach the assembled prompt"
+    );
+}
+
+/// A binding decision still needs its rationale now that the rationale lives
+/// in `provenance` rather than being a field of its own — and a decision that
+/// records *assumptions but no rationale* is still refused when binding. The
+/// lower-confidence rule (rule 13, `is_thin`) and this refusal rule (rule 8,
+/// `MissingRationale`) are different rules with different triggers: the first
+/// only ever makes a memory read as less binding in ranking, and the second
+/// refuses storage outright. A reader should be able to see both apply to the
+/// same "assumptions but no rationale" shape without either one silently
+/// standing in for the other.
+#[test]
+fn a_binding_decision_with_assumptions_but_no_rationale_is_still_refused() {
+    let json = r#"{"kind":"decision","authority":"constraint","disposition":"accepted",
+                    "support":"established","confidence":"certain",
+                    "body":"Use blocking threads for the gateway.",
+                    "assumptions":"no async runtime is in the dependency set"}"#;
+    let result = schema::judge(&serde_json::from_str(json).unwrap());
+    assert_eq!(
+        result,
+        Err(Refusal::MissingRationale {
+            declared: MemoryAuthority::Constraint,
+        }),
+        "an assumption alone must not satisfy a binding decision's rationale requirement"
+    );
 }

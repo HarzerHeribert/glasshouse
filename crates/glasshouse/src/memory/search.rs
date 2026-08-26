@@ -15,6 +15,17 @@
 //! ever builds from something other than a fixed literal is a column list it
 //! wrote itself.
 //!
+//! # What the index covers
+//!
+//! `memories_fts` indexes `subject`, `body` and — from migration 6 —
+//! `rationale`. The rationale is searchable because until that migration it
+//! *was* the body: the extractor folded it in behind a marker precisely so a
+//! search for the reason would find the decision. The eight other Phase 21B
+//! provenance columns are deliberately not indexed; they describe a decision
+//! somebody has already found rather than supplying the words they would
+//! look for, and every indexed column shifts BM25's weighting of the ones
+//! that matter.
+//!
 //! # BM25 direction
 //!
 //! SQLite's `bm25()` returns a *more negative* number for a *better* match.
@@ -22,7 +33,10 @@
 //! this is asserted directly in the integration tests rather than trusted by
 //! reading the manual once.
 
-use super::store::{MemoryRecord, MemoryStatus, MemoryStore, MemoryStoreError, row_to_record};
+use super::store::{
+    MemoryAuthority, MemoryKind, MemoryRecord, MemoryStatus, MemoryStore, MemoryStoreError,
+    row_to_record,
+};
 
 /// How much of a project's memory a search is allowed to see.
 ///
@@ -59,8 +73,15 @@ pub const DEFAULT_SEARCH_LIMIT: usize = 20;
 const QUALIFIED_COLUMNS: &str = "memories.id, memories.project_id, memories.kind, \
                                  memories.authority, memories.status, memories.subject, \
                                  memories.body, memories.source_session_id, \
-                                 memories.source_commit, memories.superseded_by, \
-                                 memories.created_at, memories.updated_at";
+                                 memories.source_commit, memories.source_event_first, \
+                                 memories.source_event_last, memories.superseded_by, \
+                                 memories.created_at, memories.updated_at, \
+                                 memories.rationale, memories.project_phase, \
+                                 memories.problem, memories.assumptions, \
+                                 memories.scale_assumptions, memories.security_assumptions, \
+                                 memories.compatibility_assumptions, \
+                                 memories.operational_assumptions, memories.evidence, \
+                                 memories.source_excerpt";
 
 /// Turn free-form text into a safe FTS5 `MATCH` expression, or `None` if
 /// nothing in it could be searched for.
@@ -154,6 +175,73 @@ impl<'a> MemoryStore<'a> {
                 source,
             })?;
 
-        rows.into_iter().collect()
+        let mut records: Vec<MemoryRecord> = rows.into_iter().collect::<Result<_, _>>()?;
+        demote_thin_decisions(&mut records);
+        Ok(records)
+    }
+}
+
+/// Phase 21B: *"treat a decision with missing rationale and missing
+/// assumptions as lower-confidence than a well-proven decision of the same
+/// authority class"*.
+///
+/// # Why this is a permutation and not an `ORDER BY`
+///
+/// The obvious implementation — sorting thin decisions to the bottom of the
+/// whole result set — reads the line as *"lower-confidence than
+/// everything"*, which is not what it says and would be a real search
+/// regression: a perfectly relevant decision would fall behind a
+/// barely-relevant memory of some unrelated kind. The line has two
+/// qualifiers and both are load-bearing. It compares a decision against **a
+/// decision**, and against one **of the same authority class**.
+///
+/// So the relevance order BM25 produced is left almost entirely alone: every
+/// record that is not a [`MemoryKind::Decision`] keeps its position exactly,
+/// and so does every authority class as a whole. The only thing that moves
+/// is the order of the decisions *within* one authority class, where a
+/// decision that recorded neither why it was made nor what it assumed is put
+/// behind one that did.
+///
+/// A search returning one decision is therefore unchanged, and so is a
+/// search returning a decision and a finding. A search returning two
+/// `decision`-class decisions puts the better-proven one first however the
+/// text happened to match.
+///
+/// Unclassified memories (`authority IS NULL`) form their own group, because
+/// `None` is a distinct fact from every class and not a class to merge into.
+///
+/// The sort is stable, so two decisions that are both thin, or both
+/// well-proven, keep their BM25 order relative to each other.
+fn demote_thin_decisions(records: &mut [MemoryRecord]) {
+    let classes: Vec<Option<MemoryAuthority>> = {
+        let mut seen: Vec<Option<MemoryAuthority>> = Vec::new();
+        for record in records.iter() {
+            if !seen.contains(&record.authority) {
+                seen.push(record.authority);
+            }
+        }
+        seen
+    };
+
+    for class in classes {
+        let slots: Vec<usize> = records
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| record.authority == class && record.kind == MemoryKind::Decision)
+            .map(|(index, _)| index)
+            .collect();
+        if slots.len() < 2 {
+            continue;
+        }
+
+        let mut ordered = slots.clone();
+        ordered.sort_by_key(|&index| records[index].is_lower_confidence_decision());
+        let moved: Vec<MemoryRecord> = ordered
+            .into_iter()
+            .map(|index| records[index].clone())
+            .collect();
+        for (slot, record) in slots.into_iter().zip(moved) {
+            records[slot] = record;
+        }
     }
 }

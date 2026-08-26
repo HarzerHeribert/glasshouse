@@ -45,6 +45,7 @@ mod store;
 pub use extract::{ExtractionModel, ExtractionOutcome, ExtractionTrigger, Extractor, ModelError};
 pub use policy::{MemoryRefusal, admit};
 pub use store::{
-    AuthorityChange, Classifier, Clock, ConflictResolver, MemoryAuthority, MemoryId, MemoryKind,
-    MemoryRecord, MemoryStatus, MemoryStore, MemoryStoreError, NewMemory, ProjectMemory,
+    AuthorityChange, Classifier, Clock, ConflictResolver, DecisionProvenance, MemoryAuthority,
+    MemoryId, MemoryKind, MemoryRecord, MemoryStatus, MemoryStore, MemoryStoreError, NewMemory,
+    ProjectMemory, ProjectPhase, SourceEvents,
 };

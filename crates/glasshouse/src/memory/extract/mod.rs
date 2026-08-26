@@ -56,6 +56,7 @@
 pub mod authority;
 pub mod chunk;
 pub mod credentials;
+pub mod lifecycle;
 pub mod schema;
 
 use std::fmt;
@@ -474,7 +475,7 @@ impl<'a> Extractor<'a> {
         seen: &mut Vec<String>,
         outcome: &mut ExtractionOutcome,
     ) {
-        let body = memory.stored_body();
+        let body = memory.body.clone();
         let key = normalize(&body);
 
         // Phase 21: avoid duplicating an existing active memory when nothing
@@ -497,7 +498,20 @@ impl<'a> Extractor<'a> {
             .with_subject(memory.subject.clone())
             .with_authority(Some(classification.stored))
             .with_source_session(Some(chunk.session_id()))
-            .with_source_commit(chunk.commit());
+            .with_source_commit(chunk.commit())
+            // Phase 21: *store the originating session and event references
+            // so extracted memory retains provenance.* The session was
+            // already carried; the event range is what says **which part** of
+            // it this memory came from, and it is the chunk's because the
+            // chunk is the only thing that knows what was actually shown to
+            // the model.
+            .with_source_events(chunk.source_events())
+            // Phase 21B, in one move. The provenance is validated on the way
+            // out of `schema::judge` and stored as it stands; nothing here
+            // re-derives or defaults any of it, because an assumption
+            // Glasshouse invented would be indistinguishable in the store
+            // from one a session established.
+            .with_provenance(memory.provenance.clone());
 
         match self.store.record(new) {
             Ok(record) => {

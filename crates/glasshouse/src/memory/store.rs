@@ -179,6 +179,32 @@ impl MemoryStatus {
     }
 }
 
+/// The stage a project was in when a decision was made — Phase 21B's own
+/// list, verbatim.
+///
+/// Recorded because the memory-validity principle turns on it: *"a decision
+/// made during an alpha prototype … should not automatically constrain a
+/// production implementation weeks later"*. A decision cannot be judged stale
+/// without knowing what it was made under, and nothing else in a memory
+/// carries that.
+///
+/// A fixed set rather than free text, so that Phase 21C can compare the phase
+/// a memory was made in against the project's current one without parsing
+/// somebody's prose. Migration 6's `CHECK` lists exactly these strings, and
+/// `every_project_phase_the_type_supports_is_one_the_schema_accepts` reads
+/// that list back out of the migration to keep the two in step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ProjectPhase {
+    /// Exploratory code that nothing depends on yet.
+    Prototype,
+    Alpha,
+    Beta,
+    /// Serving real users.
+    Production,
+    /// Moving from one architecture, platform or version to another.
+    Migration,
+}
+
 macro_rules! sql_enum {
     ($ty:ty { $($variant:ident => $text:literal),+ $(,)? }) => {
         impl $ty {
@@ -242,6 +268,14 @@ sql_enum!(MemoryAuthority {
     Historical => "historical",
 });
 
+sql_enum!(ProjectPhase {
+    Prototype => "prototype",
+    Alpha => "alpha",
+    Beta => "beta",
+    Production => "production",
+    Migration => "migration",
+});
+
 sql_enum!(MemoryStatus {
     Active => "active",
     Superseded => "superseded",
@@ -251,6 +285,143 @@ sql_enum!(MemoryStatus {
     Invalidated => "invalidated",
     Conflicted => "conflicted",
 });
+
+/// The slice of the project event log a memory was extracted from.
+///
+/// A **range**, not an identifier. Extraction is fed a bounded chunk of a
+/// session's recorded events and produces memories from the whole of it, so
+/// naming one event would be a precision the producer does not have. Both
+/// ends are inclusive positions in `lifecycle_events.seq`, and migration 6's
+/// two triggers refuse a row that names one end without the other or names
+/// them out of order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceEvents {
+    /// The first event position the extraction slice covered, inclusive.
+    pub first: i64,
+    /// The last, inclusive. Never less than [`SourceEvents::first`].
+    pub last: i64,
+}
+
+impl SourceEvents {
+    /// A range over `first..=last`, or `None` if the two are the wrong way
+    /// round.
+    ///
+    /// Refused here as well as by the trigger so that a caller finds out
+    /// before it reaches SQLite, and so the invariant is stated once in Rust
+    /// rather than being a property only the database knows.
+    pub fn new(first: i64, last: i64) -> Option<Self> {
+        (first <= last).then_some(Self { first, last })
+    }
+
+    /// How many event positions the slice spans, both ends included.
+    ///
+    /// Never zero: a range that exists covers at least one position, which
+    /// is why this is `span` and not `len` — there is no empty case for an
+    /// `is_empty` to report, and `None` is what "no range" looks like.
+    pub fn span(self) -> u64 {
+        (self.last - self.first).unsigned_abs() + 1
+    }
+}
+
+impl fmt::Display for SourceEvents {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.first == self.last {
+            f.pad(&format!("event {}", self.first))
+        } else {
+            f.pad(&format!("events {}-{}", self.first, self.last))
+        }
+    }
+}
+
+/// Why a durable decision was made, and what it assumed — Phase 21B.
+///
+/// # Why these are fields and not one blob of prose
+///
+/// The memory-validity principle is that *"an old decision is not still
+/// correct merely because it was remembered"*. Deciding whether a decision
+/// still holds means checking its assumptions against the project as it is
+/// now, and that is only mechanisable if the assumptions are separable: a
+/// scale assumption is rechecked against a benchmark, a security assumption
+/// against a new requirement, a compatibility assumption against a platform
+/// bump. Phase 21C is the phase that does the rechecking; this is the shape
+/// it needs to find.
+///
+/// # `None` means "not known", never "none"
+///
+/// Every field is optional and absent is never the same as empty. A decision
+/// that recorded no security assumption is a decision nobody asked that
+/// question about; a decision that recorded *"none: this path handles no
+/// user data"* has answered it. Collapsing the two would make Phase 21B's
+/// *"when they influenced the decision"* unrepresentable, and would make
+/// [`DecisionProvenance::is_thin`] — which drives Phase 21B's
+/// lower-confidence rule — meaningless.
+///
+/// # Every field here is free text, and free text can hold a credential
+///
+/// The same statement `subject` and `body` carry, recorded in migration 6
+/// rather than left to be inferred. The control is on the producer side:
+/// `super::extract::schema::judge` screens each emitted element **whole**,
+/// before reading any field, so a field added to this struct is covered
+/// automatically. [`DecisionProvenance::source_excerpt`] is the sharpest of
+/// them because it is verbatim session text.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DecisionProvenance {
+    /// Why the decision was made, in a sentence — Phase 21B's first line,
+    /// *"when the rationale materially affects whether the decision remains
+    /// valid"*.
+    pub rationale: Option<String>,
+    /// The stage the project was in at the time.
+    pub project_phase: Option<ProjectPhase>,
+    /// The task or problem the decision was meant to solve.
+    pub problem: Option<String>,
+    /// The assumptions that made it reasonable, where none of the four
+    /// specific kinds below fits.
+    pub assumptions: Option<String>,
+    /// Expected user count, request volume, data size, latency target or
+    /// deployment topology, where one influenced the decision.
+    pub scale_assumptions: Option<String>,
+    /// Security assumptions, where they influenced the decision.
+    pub security_assumptions: Option<String>,
+    /// Compatibility assumptions, where they influenced the decision.
+    pub compatibility_assumptions: Option<String>,
+    /// Operational assumptions — single-instance versus distributed
+    /// deployment, and the like.
+    pub operational_assumptions: Option<String>,
+    /// Benchmark results, production incidents, tests, commits or external
+    /// requirements the decision rests on.
+    pub evidence: Option<String>,
+    /// Enough of the original wording, or a reference to it, to audit how
+    /// the memory was derived — Phase 21B's last line.
+    pub source_excerpt: Option<String>,
+}
+
+impl DecisionProvenance {
+    /// Whether any assumption at all was recorded, of any of the five kinds.
+    pub fn has_assumptions(&self) -> bool {
+        self.assumptions.is_some()
+            || self.scale_assumptions.is_some()
+            || self.security_assumptions.is_some()
+            || self.compatibility_assumptions.is_some()
+            || self.operational_assumptions.is_some()
+    }
+
+    /// Whether this is Phase 21B's *"missing rationale and missing
+    /// assumptions"* — the condition that makes a decision lower-confidence
+    /// than a well-proven one of the same authority class.
+    ///
+    /// **And** rather than **or**, because that is what the line says: a
+    /// decision that recorded why it was made is not thin merely because it
+    /// listed no assumptions, and one that listed its assumptions is not
+    /// thin merely because the reason was obvious.
+    pub fn is_thin(&self) -> bool {
+        self.rationale.is_none() && !self.has_assumptions()
+    }
+
+    /// Whether anything at all was recorded.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
 
 /// One stored memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,6 +449,13 @@ pub struct MemoryRecord {
     pub source_session_id: Option<String>,
     /// The Git commit the project was at when this was learned, when known.
     pub source_commit: Option<String>,
+    /// The slice of the project event log this was extracted from, when it
+    /// was extracted from one. `None` for a memory whose activity came from
+    /// somewhere the event log does not reach — a file of session activity
+    /// handed to `glasshouse memory extract`, say.
+    pub source_events: Option<SourceEvents>,
+    /// Why the decision in this memory was made, and what it assumed.
+    pub provenance: DecisionProvenance,
     /// The memory that replaced this one, when a direct supersession
     /// relationship is known. `None` on a superseded memory means it was
     /// retired without a single identifiable successor.
@@ -303,6 +481,21 @@ impl MemoryRecord {
     pub fn is_open_todo(&self) -> bool {
         self.kind == MemoryKind::Todo && self.status.is_open_work()
     }
+
+    /// Whether this is a decision Phase 21B calls lower-confidence: one with
+    /// *"missing rationale and missing assumptions"*.
+    ///
+    /// Restricted to [`MemoryKind::Decision`] because that is the line's own
+    /// subject. A `finding` with no assumptions is not a decision that failed
+    /// to record its reasoning; it is a fact somebody established, and
+    /// demoting it would be inventing a rule the map does not state.
+    ///
+    /// This is what [`MemoryStore::binding`] orders by, so that a decision
+    /// nobody wrote a reason for never reaches an agent ahead of a
+    /// well-proven one — see that method.
+    pub fn is_lower_confidence_decision(&self) -> bool {
+        self.kind == MemoryKind::Decision && self.provenance.is_thin()
+    }
 }
 
 /// What a caller supplies to record a memory.
@@ -320,6 +513,11 @@ pub struct NewMemory {
     pub authority: Option<MemoryAuthority>,
     pub source_session_id: Option<String>,
     pub source_commit: Option<String>,
+    /// The event-log slice this was extracted from, when there was one.
+    pub source_events: Option<SourceEvents>,
+    /// Phase 21B's decision provenance. Defaults to all-absent, which is what
+    /// a caller that knows none of it should store.
+    pub provenance: DecisionProvenance,
 }
 
 impl NewMemory {
@@ -334,6 +532,8 @@ impl NewMemory {
             authority: None,
             source_session_id: None,
             source_commit: None,
+            source_events: None,
+            provenance: DecisionProvenance::default(),
         }
     }
 
@@ -369,6 +569,39 @@ impl NewMemory {
         self.source_commit = commit
             .map(Into::into)
             .filter(|value| !value.trim().is_empty());
+        self
+    }
+
+    /// Record which slice of the project event log this came from.
+    pub fn with_source_events(mut self, events: Option<SourceEvents>) -> Self {
+        self.source_events = events;
+        self
+    }
+
+    /// Record why the decision was made and what it assumed.
+    ///
+    /// Whitespace-only strings are stored as `None` for the same reason
+    /// [`NewMemory::with_subject`] does it: "nobody recorded a rationale" and
+    /// "the rationale is the empty string" are the same fact, and only one of
+    /// them should be representable.
+    pub fn with_provenance(mut self, provenance: DecisionProvenance) -> Self {
+        fn tidy(value: Option<String>) -> Option<String> {
+            value
+                .map(|text| text.trim().to_owned())
+                .filter(|text| !text.is_empty())
+        }
+        self.provenance = DecisionProvenance {
+            rationale: tidy(provenance.rationale),
+            project_phase: provenance.project_phase,
+            problem: tidy(provenance.problem),
+            assumptions: tidy(provenance.assumptions),
+            scale_assumptions: tidy(provenance.scale_assumptions),
+            security_assumptions: tidy(provenance.security_assumptions),
+            compatibility_assumptions: tidy(provenance.compatibility_assumptions),
+            operational_assumptions: tidy(provenance.operational_assumptions),
+            evidence: tidy(provenance.evidence),
+            source_excerpt: tidy(provenance.source_excerpt),
+        };
         self
     }
 }
@@ -512,8 +745,12 @@ fn system_clock() -> i64 {
 
 /// Every column of `memories`, in the order [`row_to_record`] reads them.
 pub(super) const ALL_COLUMNS: &str = "id, project_id, kind, authority, status, subject, body, \
-                                      source_session_id, source_commit, superseded_by, \
-                                      created_at, updated_at";
+                                      source_session_id, source_commit, source_event_first, \
+                                      source_event_last, superseded_by, created_at, updated_at, \
+                                      rationale, project_phase, problem, assumptions, \
+                                      scale_assumptions, security_assumptions, \
+                                      compatibility_assumptions, operational_assumptions, \
+                                      evidence, source_excerpt";
 
 /// An open project database plus the memories inside it.
 ///
@@ -655,6 +892,8 @@ impl<'a> MemoryStore<'a> {
             body: new.body,
             source_session_id: new.source_session_id,
             source_commit: new.source_commit,
+            source_events: new.source_events,
+            provenance: new.provenance,
             superseded_by: None,
             created_at: now,
             updated_at: now,
@@ -663,8 +902,13 @@ impl<'a> MemoryStore<'a> {
         self.conn
             .execute(
                 "INSERT INTO memories (id, project_id, kind, authority, status, subject, \
-                 body, source_session_id, source_commit, superseded_by, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 body, source_session_id, source_commit, source_event_first, \
+                 source_event_last, superseded_by, created_at, updated_at, rationale, \
+                 project_phase, problem, assumptions, scale_assumptions, \
+                 security_assumptions, compatibility_assumptions, \
+                 operational_assumptions, evidence, source_excerpt) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, \
+                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
                 rusqlite::params![
                     record.id.as_str(),
                     &record.project_id,
@@ -675,9 +919,21 @@ impl<'a> MemoryStore<'a> {
                     &record.body,
                     &record.source_session_id,
                     &record.source_commit,
+                    record.source_events.map(|events| events.first),
+                    record.source_events.map(|events| events.last),
                     record.superseded_by.as_ref().map(MemoryId::as_str),
                     record.created_at,
                     record.updated_at,
+                    &record.provenance.rationale,
+                    record.provenance.project_phase.map(ProjectPhase::as_str),
+                    &record.provenance.problem,
+                    &record.provenance.assumptions,
+                    &record.provenance.scale_assumptions,
+                    &record.provenance.security_assumptions,
+                    &record.provenance.compatibility_assumptions,
+                    &record.provenance.operational_assumptions,
+                    &record.provenance.evidence,
+                    &record.provenance.source_excerpt,
                 ],
             )
             .map_err(|source| MemoryStoreError::Sql {
@@ -1115,6 +1371,54 @@ pub(super) fn row_to_record(
         },
     };
 
+    let phase_text: Option<String> = row.get("project_phase")?;
+    let project_phase = match phase_text {
+        None => None,
+        Some(text) => match ProjectPhase::from_stored(&text) {
+            Some(phase) => Some(phase),
+            None => {
+                return Ok(Err(MemoryStoreError::UnknownValue {
+                    id,
+                    column: "project_phase",
+                    value: text,
+                }));
+            }
+        },
+    };
+
+    // Both or neither, and in order: migration 6's two triggers refuse
+    // anything else on the way in, so a row that fails this came from
+    // somewhere those triggers do not run — a hand-edited file. Reported as
+    // an unreadable value rather than silently halved, for the reason the
+    // enums above are: nothing here substitutes a default for a value it
+    // cannot read.
+    let first: Option<i64> = row.get("source_event_first")?;
+    let last: Option<i64> = row.get("source_event_last")?;
+    let source_events = match (first, last) {
+        (None, None) => None,
+        (Some(first), Some(last)) => match SourceEvents::new(first, last) {
+            Some(events) => Some(events),
+            None => {
+                return Ok(Err(MemoryStoreError::UnknownValue {
+                    id,
+                    column: "source_event_first",
+                    value: format!("{first}..{last}"),
+                }));
+            }
+        },
+        (present, _) => {
+            return Ok(Err(MemoryStoreError::UnknownValue {
+                id,
+                column: if present.is_some() {
+                    "source_event_last"
+                } else {
+                    "source_event_first"
+                },
+                value: "absent".to_owned(),
+            }));
+        }
+    };
+
     Ok(Ok(MemoryRecord {
         id,
         project_id: row.get("project_id")?,
@@ -1125,6 +1429,19 @@ pub(super) fn row_to_record(
         body: row.get("body")?,
         source_session_id: row.get("source_session_id")?,
         source_commit: row.get("source_commit")?,
+        source_events,
+        provenance: DecisionProvenance {
+            rationale: row.get("rationale")?,
+            project_phase,
+            problem: row.get("problem")?,
+            assumptions: row.get("assumptions")?,
+            scale_assumptions: row.get("scale_assumptions")?,
+            security_assumptions: row.get("security_assumptions")?,
+            compatibility_assumptions: row.get("compatibility_assumptions")?,
+            operational_assumptions: row.get("operational_assumptions")?,
+            evidence: row.get("evidence")?,
+            source_excerpt: row.get("source_excerpt")?,
+        },
         superseded_by: row.get::<_, Option<String>>("superseded_by")?.map(MemoryId),
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,

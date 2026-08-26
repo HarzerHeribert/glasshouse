@@ -44,22 +44,8 @@
 
 use serde::Deserialize;
 
-use super::super::store::{MemoryAuthority, MemoryKind};
+use super::super::store::{DecisionProvenance, MemoryAuthority, MemoryKind, ProjectPhase};
 use super::credentials::{self, CredentialFound};
-
-/// Joins a memory's body to its rationale.
-///
-/// # This is a workaround, and the finding is recorded rather than hidden
-///
-/// Phase 21 requires the extractor to *preserve* concise rationale, and
-/// `memories` has no `rationale` column — Phase 21B is the phase that adds
-/// one. Folding it into the body preserves it, keeps it in the FTS5 index
-/// where a search for the reason finds the decision, and needs no migration.
-///
-/// It is not the right long-term home: a consumer cannot ask for a decision
-/// *without* its rationale, and a rationale cannot be revised independently.
-/// The exact DDL Phase 21B needs is in this batch's report.
-pub const RATIONALE_MARKER: &str = "\n\nWhy: ";
 
 /// The longest subject accepted.
 pub const MAX_SUBJECT_CHARS: usize = 120;
@@ -75,6 +61,25 @@ pub const MAX_BODY_CHARS: usize = 1_000;
 
 /// The longest rationale accepted. Phase 21 says *concise*.
 pub const MAX_RATIONALE_CHARS: usize = 400;
+
+/// The longest any single Phase 21B provenance field may be.
+///
+/// Shorter than the body, because each of these is one clause of an answer
+/// and not the memory itself: *what problem this solved*, *what it assumed
+/// about scale*. A paragraph in one of them is a sign the model is
+/// summarising the session again, which is the thing this whole module
+/// exists not to do.
+pub const MAX_PROVENANCE_CHARS: usize = 300;
+
+/// The longest source excerpt accepted.
+///
+/// Larger than the other provenance fields because it is a **quotation**
+/// rather than a summary — Phase 21B asks to *"preserve the original wording
+/// … sufficiently to audit how a remembered decision was derived"*, and a
+/// clipped quotation audits nothing. Still bounded, and refused rather than
+/// truncated for the reason [`MAX_BODY_CHARS`] is: a quotation cut short
+/// reads as complete and is not.
+pub const MAX_EXCERPT_CHARS: usize = 500;
 
 /// Whether a claim was established during the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,18 +177,15 @@ pub struct ExtractedMemory {
     pub confidence: Confidence,
     pub subject: Option<String>,
     pub body: String,
-    pub rationale: Option<String>,
-}
-
-impl ExtractedMemory {
-    /// The body as it will be stored, with the rationale folded in when
-    /// there is one. See [`RATIONALE_MARKER`].
-    pub fn stored_body(&self) -> String {
-        match &self.rationale {
-            Some(rationale) => format!("{}{RATIONALE_MARKER}{rationale}", self.body),
-            None => self.body.clone(),
-        }
-    }
+    /// Phase 21B: why the decision was made, and what it assumed.
+    ///
+    /// **The rationale used to be folded into `body`** behind a marker,
+    /// because `memories` had nowhere else to put it and folding kept it in
+    /// the FTS5 index. Migration 6 gave it a column and rebuilt the index
+    /// over it, so the fold is gone: a consumer can now ask for a decision
+    /// without its reasoning, and the reasoning can be revised without
+    /// rewriting the decision.
+    pub provenance: DecisionProvenance,
 }
 
 /// Why an emitted memory was not accepted.
@@ -249,7 +251,13 @@ pub enum Refusal {
 }
 
 /// What validation decided about one emitted element.
+///
+/// `Keep` is much larger than `Speculative`, and deliberately not boxed: a
+/// verdict is produced and consumed within one loop iteration in
+/// [`super::Extractor::run`], never stored and never collected, so boxing it
+/// would buy an allocation per emitted memory and save nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Verdict {
     /// Store it.
     Keep(ExtractedMemory),
@@ -303,6 +311,24 @@ struct RawMemory {
     body: Option<String>,
     #[serde(default)]
     rationale: Option<String>,
+    #[serde(default)]
+    project_phase: Option<String>,
+    #[serde(default)]
+    problem: Option<String>,
+    #[serde(default)]
+    assumptions: Option<String>,
+    #[serde(default)]
+    scale_assumptions: Option<String>,
+    #[serde(default)]
+    security_assumptions: Option<String>,
+    #[serde(default)]
+    compatibility_assumptions: Option<String>,
+    #[serde(default)]
+    operational_assumptions: Option<String>,
+    #[serde(default)]
+    evidence: Option<String>,
+    #[serde(default)]
+    source_excerpt: Option<String>,
 }
 
 /// Read a model's whole reply into elements, or fail.
@@ -414,10 +440,52 @@ pub fn judge(element: &serde_json::Value) -> Result<Verdict, Refusal> {
         bound("subject", subject, MAX_SUBJECT_CHARS)?;
     }
 
-    let rationale = raw.rationale.filter(|r| !r.trim().is_empty());
-    if let Some(rationale) = &rationale {
-        bound("rationale", rationale, MAX_RATIONALE_CHARS)?;
-    }
+    let rationale = optional("rationale", raw.rationale, MAX_RATIONALE_CHARS)?;
+
+    // Phase 21B, one field per line of the map. Every one is optional: the
+    // map says "when known", "when they can be extracted reliably", "when
+    // they influenced the decision", and a model that invents an assumption
+    // to fill a required field has manufactured exactly the speculative
+    // claim rule 3 forbids.
+    let provenance = DecisionProvenance {
+        rationale,
+        project_phase: match raw.project_phase.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(value) => {
+                Some(
+                    ProjectPhase::from_stored(value).ok_or_else(|| Refusal::UnknownValue {
+                        field: "project_phase",
+                        value: value.to_owned(),
+                        expected: PROJECT_PHASES,
+                    })?,
+                )
+            }
+        },
+        problem: optional("problem", raw.problem, MAX_PROVENANCE_CHARS)?,
+        assumptions: optional("assumptions", raw.assumptions, MAX_PROVENANCE_CHARS)?,
+        scale_assumptions: optional(
+            "scale_assumptions",
+            raw.scale_assumptions,
+            MAX_PROVENANCE_CHARS,
+        )?,
+        security_assumptions: optional(
+            "security_assumptions",
+            raw.security_assumptions,
+            MAX_PROVENANCE_CHARS,
+        )?,
+        compatibility_assumptions: optional(
+            "compatibility_assumptions",
+            raw.compatibility_assumptions,
+            MAX_PROVENANCE_CHARS,
+        )?,
+        operational_assumptions: optional(
+            "operational_assumptions",
+            raw.operational_assumptions,
+            MAX_PROVENANCE_CHARS,
+        )?,
+        evidence: optional("evidence", raw.evidence, MAX_PROVENANCE_CHARS)?,
+        source_excerpt: optional("source_excerpt", raw.source_excerpt, MAX_EXCERPT_CHARS)?,
+    };
 
     // Phase 21: distinguish failed approaches from accepted decisions.
     let conflated = match (kind, disposition) {
@@ -431,7 +499,10 @@ pub fn judge(element: &serde_json::Value) -> Result<Verdict, Refusal> {
     }
 
     // Phase 21: preserve concise rationale where importance is decidable.
-    if kind == MemoryKind::Decision && declared_authority.is_binding() && rationale.is_none() {
+    if kind == MemoryKind::Decision
+        && declared_authority.is_binding()
+        && provenance.rationale.is_none()
+    {
         return Err(Refusal::MissingRationale {
             declared: declared_authority,
         });
@@ -444,8 +515,31 @@ pub fn judge(element: &serde_json::Value) -> Result<Verdict, Refusal> {
         confidence,
         subject: subject.map(|s| s.trim().to_owned()),
         body: body.trim().to_owned(),
-        rationale: rationale.map(|r| r.trim().to_owned()),
+        provenance,
     }))
+}
+
+/// A field the contract does not require: absent, or present, trimmed and
+/// bounded.
+///
+/// Whitespace-only becomes `None` rather than `Some("")` for the reason
+/// `NewMemory::with_subject` gives — "nobody recorded one" and "the empty
+/// string" are the same fact and only one of them should be representable —
+/// and the bound is a **refusal**, not a truncation, for the reason
+/// [`MAX_BODY_CHARS`] gives.
+fn optional(
+    field: &'static str,
+    value: Option<String>,
+    limit: usize,
+) -> Result<Option<String>, Refusal> {
+    let Some(text) = value
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+    else {
+        return Ok(None);
+    };
+    bound(field, &text, limit)?;
+    Ok(Some(text))
 }
 
 fn required_enum<T>(
@@ -489,6 +583,7 @@ const AUTHORITIES: &str =
 const DISPOSITIONS: &str = "accepted, abandoned, proposed";
 const SUPPORTS: &str = "established, speculative";
 const CONFIDENCES: &str = "certain, probable, unsure";
+const PROJECT_PHASES: &str = "prototype, alpha, beta, production, migration";
 
 /// The JSON Schema the model is given.
 ///
@@ -520,7 +615,19 @@ pub const RESPONSE_SCHEMA: &str = r#"{
           "confidence":  { "enum": ["certain", "probable", "unsure"] },
           "subject":   { "type": "string", "maxLength": 120 },
           "body":      { "type": "string", "maxLength": 1000 },
-          "rationale": { "type": "string", "maxLength": 400 }
+          "rationale": { "type": "string", "maxLength": 400 },
+
+          "project_phase": {
+            "enum": ["prototype", "alpha", "beta", "production", "migration"]
+          },
+          "problem":                   { "type": "string", "maxLength": 300 },
+          "assumptions":               { "type": "string", "maxLength": 300 },
+          "scale_assumptions":         { "type": "string", "maxLength": 300 },
+          "security_assumptions":      { "type": "string", "maxLength": 300 },
+          "compatibility_assumptions": { "type": "string", "maxLength": 300 },
+          "operational_assumptions":   { "type": "string", "maxLength": 300 },
+          "evidence":                  { "type": "string", "maxLength": 300 },
+          "source_excerpt":            { "type": "string", "maxLength": 500 }
         }
       }
     }
@@ -580,6 +687,26 @@ Rules, in order of importance:
     material changed. The existing memories are listed below, if any.
 10. Be honest in `confidence`. It is used only to make a memory less \
     binding, never more.
+11. Record what would let a future agent decide whether the memory is still \
+    true, and leave every one of these out when you do not know it. An \
+    invented assumption is a speculative claim under rule 3. \
+    `project_phase` is the stage the project was in — one of `prototype`, \
+    `alpha`, `beta`, `production`, `migration`. `problem` is the task the \
+    decision was meant to solve. `assumptions` is what made it reasonable, \
+    and there are four narrower fields for the kinds that go stale on their \
+    own: `scale_assumptions` (user count, request volume, data size, latency \
+    target, deployment topology), `security_assumptions`, \
+    `compatibility_assumptions` and `operational_assumptions` \
+    (single-instance versus distributed, and the like). `evidence` names \
+    benchmark results, incidents, tests, commits or external requirements \
+    the memory rests on.
+12. `source_excerpt` is the original wording, quoted, when it is what makes \
+    the memory auditable later — not a paraphrase and not the whole \
+    exchange. Rule 1 applies to it exactly as it applies to `body`: a \
+    quotation containing a credential is a memory discarded whole.
+13. A decision that records neither a rationale nor any assumption is \
+    treated as lower-confidence than one that does. That is not a reason to \
+    invent either.
 
 Reply with one JSON object matching this schema and nothing else:
 ";
@@ -741,21 +868,197 @@ mod tests {
         ));
     }
 
+    /// Migration 6 gave the rationale a column, so the body is the body.
+    ///
+    /// The assertion that matters is the **negative** one: this test replaced
+    /// `the_rationale_is_folded_into_the_stored_body`, and a fold that came
+    /// back would put the reason into the text every duplicate check
+    /// normalizes and every consumer prints as the memory itself.
     #[test]
-    fn the_rationale_is_folded_into_the_stored_body() {
-        let memory = ExtractedMemory {
-            kind: MemoryKind::Decision,
-            declared_authority: MemoryAuthority::Decision,
-            disposition: Disposition::Accepted,
-            confidence: Confidence::Certain,
-            subject: None,
-            body: "Use blocking threads.".to_owned(),
-            rationale: Some("no async runtime".to_owned()),
+    fn a_rationale_is_kept_beside_the_body_and_never_inside_it() {
+        let Verdict::Keep(memory) = judge(&element(
+            r#"{"kind":"decision","authority":"decision","disposition":"accepted",
+                "support":"established","confidence":"certain",
+                "rationale":"no async runtime is in the dependency set",
+                "body":"Use blocking threads."}"#,
+        ))
+        .unwrap() else {
+            panic!("expected a kept memory");
         };
+
+        assert_eq!(memory.body, "Use blocking threads.");
         assert_eq!(
-            memory.stored_body(),
-            "Use blocking threads.\n\nWhy: no async runtime"
+            memory.provenance.rationale.as_deref(),
+            Some("no async runtime is in the dependency set")
         );
+        assert!(
+            !memory.body.contains("async runtime"),
+            "the rationale must not be folded into the body"
+        );
+    }
+
+    /// Phase 21B, every field the map names, through the contract in one go.
+    #[test]
+    fn every_provenance_field_the_map_names_survives_validation() {
+        let Verdict::Keep(memory) = judge(&element(
+            r#"{"kind":"decision","authority":"decision","disposition":"accepted",
+                "support":"established","confidence":"certain",
+                "body":"Store checkpoints in SQLite.",
+                "rationale":"the project database is already open",
+                "project_phase":"alpha",
+                "problem":"handing a session's context to a fresh one",
+                "assumptions":"one machine holds the project",
+                "scale_assumptions":"tens of sessions, not thousands",
+                "security_assumptions":"the database file is owner-only",
+                "compatibility_assumptions":"SQLite ships with the binary",
+                "operational_assumptions":"single-instance, no daemon",
+                "evidence":"the size cap is enforced by a CHECK",
+                "source_excerpt":"we agreed checkpoints go in the project db"}"#,
+        ))
+        .unwrap() else {
+            panic!("expected a kept memory");
+        };
+
+        let provenance = &memory.provenance;
+        assert_eq!(provenance.project_phase, Some(ProjectPhase::Alpha));
+        assert_eq!(
+            provenance.problem.as_deref(),
+            Some("handing a session's context to a fresh one")
+        );
+        assert_eq!(
+            provenance.assumptions.as_deref(),
+            Some("one machine holds the project")
+        );
+        assert_eq!(
+            provenance.scale_assumptions.as_deref(),
+            Some("tens of sessions, not thousands")
+        );
+        assert_eq!(
+            provenance.security_assumptions.as_deref(),
+            Some("the database file is owner-only")
+        );
+        assert_eq!(
+            provenance.compatibility_assumptions.as_deref(),
+            Some("SQLite ships with the binary")
+        );
+        assert_eq!(
+            provenance.operational_assumptions.as_deref(),
+            Some("single-instance, no daemon")
+        );
+        assert_eq!(
+            provenance.evidence.as_deref(),
+            Some("the size cap is enforced by a CHECK")
+        );
+        assert_eq!(
+            provenance.source_excerpt.as_deref(),
+            Some("we agreed checkpoints go in the project db")
+        );
+        assert!(!provenance.is_thin());
+    }
+
+    /// The map says *"when known"* of every one of them, so a memory that
+    /// knows none of them is a valid memory and not a refused one — and it
+    /// is the shape Phase 21B calls lower-confidence.
+    #[test]
+    fn a_memory_that_records_no_provenance_is_kept_and_reads_as_thin() {
+        let Verdict::Keep(memory) = judge(&element(
+            r#"{"kind":"decision","authority":"preference","disposition":"accepted",
+                "support":"established","confidence":"probable",
+                "body":"Prefer explicit matches over wildcards."}"#,
+        ))
+        .unwrap() else {
+            panic!("expected a kept memory");
+        };
+        assert!(memory.provenance.is_empty());
+        assert!(memory.provenance.is_thin());
+    }
+
+    /// An assumption on its own is enough: the map's condition is *"missing
+    /// rationale **and** missing assumptions"*.
+    #[test]
+    fn an_assumption_alone_is_enough_to_stop_a_decision_reading_as_thin() {
+        let Verdict::Keep(memory) = judge(&element(
+            r#"{"kind":"decision","authority":"preference","disposition":"accepted",
+                "support":"established","confidence":"probable",
+                "security_assumptions":"no user data crosses this path",
+                "body":"Log the request path."}"#,
+        ))
+        .unwrap() else {
+            panic!("expected a kept memory");
+        };
+        assert!(memory.provenance.rationale.is_none());
+        assert!(memory.provenance.has_assumptions());
+        assert!(!memory.provenance.is_thin());
+    }
+
+    /// `project_phase` is the one provenance field with a fixed vocabulary,
+    /// and it is refused here rather than at the `CHECK` — a constraint
+    /// violation on an extraction thread names a column, not a memory.
+    #[test]
+    fn a_project_phase_outside_the_maps_five_is_refused_by_name() {
+        let unknown = element(
+            r#"{"kind":"decision","authority":"preference","disposition":"accepted",
+                "support":"established","confidence":"certain",
+                "project_phase":"late-night","body":"Ship it."}"#,
+        );
+        assert!(matches!(
+            judge(&unknown),
+            Err(Refusal::UnknownValue {
+                field: "project_phase",
+                ..
+            })
+        ));
+
+        for phase in ProjectPhase::ALL {
+            let accepted = element(&format!(
+                r#"{{"kind":"decision","authority":"preference","disposition":"accepted",
+                     "support":"established","confidence":"certain",
+                     "project_phase":"{}","body":"Ship it."}}"#,
+                phase.as_str()
+            ));
+            let Verdict::Keep(memory) = judge(&accepted).unwrap() else {
+                panic!("expected `{phase}` to be accepted");
+            };
+            assert_eq!(memory.provenance.project_phase, Some(*phase));
+        }
+    }
+
+    /// A quotation is the field most likely to carry one, because it is
+    /// verbatim session text rather than a model's paraphrase — and the
+    /// screen runs over the whole element before any field is read, so it
+    /// needs no per-field rule to cover it.
+    #[test]
+    fn a_credential_inside_a_source_excerpt_is_refused_like_any_other() {
+        let planted = "hunter2xyzabcdefghijklmn";
+        let leaking = element(&format!(
+            r#"{{"kind":"decision","authority":"preference","disposition":"accepted",
+                 "support":"established","confidence":"certain",
+                 "source_excerpt":"we set API_KEY={planted} and it worked",
+                 "body":"The gateway needs a key."}}"#
+        ));
+        let err = judge(&leaking).unwrap_err();
+        assert!(matches!(err, Refusal::Credential(_)));
+        assert!(!format!("{err}").contains(planted));
+    }
+
+    /// Over-long provenance is refused rather than truncated, for the reason
+    /// an over-long body is: a clipped quotation audits nothing and a
+    /// clipped assumption reads as the whole assumption.
+    #[test]
+    fn over_long_provenance_is_refused_rather_than_truncated() {
+        let long = "x".repeat(MAX_PROVENANCE_CHARS + 1);
+        let element = element(&format!(
+            r#"{{"kind":"decision","authority":"preference","disposition":"accepted",
+                 "support":"established","confidence":"certain",
+                 "scale_assumptions":"{long}","body":"Ship it."}}"#
+        ));
+        assert!(matches!(
+            judge(&element),
+            Err(Refusal::TooLong {
+                field: "scale_assumptions",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -852,6 +1155,44 @@ mod tests {
         assert!(RESPONSE_SCHEMA.contains(&MAX_SUBJECT_CHARS.to_string()));
         assert!(RESPONSE_SCHEMA.contains(&MAX_BODY_CHARS.to_string()));
         assert!(RESPONSE_SCHEMA.contains(&MAX_RATIONALE_CHARS.to_string()));
+        assert!(RESPONSE_SCHEMA.contains(&MAX_PROVENANCE_CHARS.to_string()));
+        assert!(RESPONSE_SCHEMA.contains(&MAX_EXCERPT_CHARS.to_string()));
+    }
+
+    /// A provenance field the store has a column for and the schema never
+    /// mentions is a column no model will ever fill — the same argument
+    /// `the_response_schema_names_every_value_the_parser_accepts` makes for
+    /// the enums, applied to Phase 21B's nine fields.
+    #[test]
+    fn the_response_schema_asks_for_every_provenance_field_the_store_keeps() {
+        for field in [
+            "rationale",
+            "project_phase",
+            "problem",
+            "assumptions",
+            "scale_assumptions",
+            "security_assumptions",
+            "compatibility_assumptions",
+            "operational_assumptions",
+            "evidence",
+            "source_excerpt",
+        ] {
+            assert!(
+                RESPONSE_SCHEMA.contains(&format!("\"{field}\"")),
+                "the schema never asks for `{field}`"
+            );
+            assert!(
+                PROMPT_CONTRACT.contains(field),
+                "the contract never explains `{field}` to the model"
+            );
+        }
+
+        for phase in ProjectPhase::ALL {
+            assert!(
+                RESPONSE_SCHEMA.contains(phase.as_str()),
+                "the schema never names the project phase `{phase}`"
+            );
+        }
     }
 
     #[test]

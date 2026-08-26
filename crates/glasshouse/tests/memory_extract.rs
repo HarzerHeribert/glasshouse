@@ -23,19 +23,24 @@
 //! that **no failure here can reach the coding session**.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 
+use glasshouse::events::{EventBus, EventLog, LifecycleEvent, TurnOutcome};
 use glasshouse::memory::extract::chunk::{ChunkLimits, SessionChunk};
-use glasshouse::memory::extract::schema::RATIONALE_MARKER;
+use glasshouse::memory::extract::lifecycle;
 use glasshouse::memory::extract::{
     ExtractionFailure, ExtractionModel, ExtractionOutcome, ExtractionTrigger, Extractor,
     ModelError, Prompt, Rejection,
 };
 use glasshouse::memory::{
-    MemoryAuthority, MemoryKind, MemoryStatus, ProjectMemory, search::SearchScope,
+    DecisionProvenance, MemoryAuthority, MemoryKind, MemoryStatus, ProjectMemory, ProjectPhase,
+    SourceEvents, search::SearchScope,
 };
+use glasshouse::session::SessionId;
+use glasshouse::session::store::Clock;
 use glasshouse::{Cli, Runtime};
 
 /// A value shaped like a real key, built here rather than pasted, so nothing
@@ -188,6 +193,24 @@ fn stored(fixture: &Fixture) -> Vec<(MemoryKind, Option<MemoryAuthority>, String
         .into_iter()
         .map(|record| (record.kind, record.authority, record.body))
         .collect()
+}
+
+/// A clock that advances by `step` each call, for [`EventBus`]'s history —
+/// copied from `tests/events_log.rs`'s own helper of the same shape.
+fn ticking(start: i64, step: i64) -> Clock {
+    let next = AtomicI64::new(start);
+    Arc::new(move || next.fetch_add(step, Ordering::SeqCst))
+}
+
+/// Append `events` for `session` through a real [`EventLog`], returning what
+/// was written, oldest first, exactly as [`EventLog::recent_for_session`]
+/// would read it back.
+fn log_events(log: &EventLog, session: &SessionId, events: Vec<LifecycleEvent>) {
+    let bus = EventBus::with_history_and_clock(events.len().max(1), ticking(1_700_000_000, 1));
+    for event in events {
+        let recorded = bus.publish(session, event);
+        log.append(&recorded, None).unwrap();
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -772,8 +795,11 @@ fn an_enthusiastic_proposal_is_stored_as_an_idea_and_is_not_binding() {
     );
 }
 
+/// Migration 6 gave the rationale its own column and rebuilt the FTS5 index
+/// over it, so this asserts the two halves that used to be one: the body is
+/// *only* the body, and the reason is still findable by searching for it.
 #[test]
-fn the_rationale_survives_into_the_stored_body() {
+fn the_rationale_is_stored_beside_the_body_and_is_still_searchable() {
     let tmp = tempdir();
     let fixture = Fixture::new(tmp.path(), "alpha");
 
@@ -786,22 +812,25 @@ fn the_rationale_survives_into_the_stored_body() {
 
     let rows = stored(&fixture);
     assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].2, "Use blocking threads for the gateway.");
     assert!(
-        rows[0]
-            .2
-            .starts_with("Use blocking threads for the gateway.")
+        !rows[0].2.contains("async runtime"),
+        "the rationale must no longer be folded into the body"
     );
-    assert!(rows[0].2.contains(RATIONALE_MARKER.trim_start()));
-    assert!(rows[0].2.contains("no async runtime"));
 
-    // And it is searchable, which is the point of folding it in rather than
-    // dropping it: a search for the reason finds the decision.
+    // The reason is in its own column, and still in the index: that is what
+    // migration 6's FTS5 rebuild is for, and dropping `rationale` from the
+    // virtual table would leave this the only thing that notices.
     let memory = fixture.memory();
-    let found = memory
-        .store()
+    let store = memory.store();
+    let found = store
         .search("async runtime", SearchScope::Current, 10)
         .unwrap();
     assert_eq!(found.len(), 1);
+    assert_eq!(
+        found[0].provenance.rationale.as_deref(),
+        Some("no async runtime is in the dependency set")
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -892,4 +921,348 @@ fn the_duplicate_check_does_not_see_another_projects_memories() {
         "beta's extraction was deduplicated against alpha's memory"
     );
     assert_eq!(second.duplicates, 0);
+}
+
+// -------------------------------------------------------------------------
+// Phase 21B — provenance, end to end: reply in, columns out
+// -------------------------------------------------------------------------
+
+/// Line: "store the originating session and event references so extracted
+/// memory retains provenance" plus the nine Phase 21B storage lines, all in
+/// one round trip.
+///
+/// Mutation: drop one field from the `DecisionProvenance` literal in
+/// `schema::judge`, or delete `.with_provenance(...)` from
+/// `Extractor::store_one`.
+#[test]
+fn a_reply_carrying_every_phase_21b_field_lands_in_every_column() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let model = Canned::new(reply(&[r#"{"kind":"decision","authority":"constraint",
+             "disposition":"accepted","support":"established","confidence":"certain",
+             "body":"Store checkpoints in SQLite.",
+             "rationale":"the project database is already open",
+             "project_phase":"alpha",
+             "problem":"handing a session's context to a fresh one",
+             "assumptions":"one machine holds the project",
+             "scale_assumptions":"tens of sessions, not thousands",
+             "security_assumptions":"the database file is owner-only",
+             "compatibility_assumptions":"SQLite ships with the binary",
+             "operational_assumptions":"single-instance, no daemon",
+             "evidence":"the size cap is enforced by a CHECK",
+             "source_excerpt":"we agreed checkpoints go in the project db"}"#
+        .to_owned()]));
+    let outcome = extract(
+        &fixture,
+        &model,
+        &chunk(&["we settled the checkpoint format"]),
+    );
+
+    assert_eq!(outcome.stored(), 1);
+    let memory = fixture.memory();
+    let record = memory.store().get(&outcome.recorded[0]).unwrap().unwrap();
+
+    let expected = DecisionProvenance {
+        rationale: Some("the project database is already open".to_owned()),
+        project_phase: Some(ProjectPhase::Alpha),
+        problem: Some("handing a session's context to a fresh one".to_owned()),
+        assumptions: Some("one machine holds the project".to_owned()),
+        scale_assumptions: Some("tens of sessions, not thousands".to_owned()),
+        security_assumptions: Some("the database file is owner-only".to_owned()),
+        compatibility_assumptions: Some("SQLite ships with the binary".to_owned()),
+        operational_assumptions: Some("single-instance, no daemon".to_owned()),
+        evidence: Some("the size cap is enforced by a CHECK".to_owned()),
+        source_excerpt: Some("we agreed checkpoints go in the project db".to_owned()),
+    };
+    assert_eq!(record.provenance, expected);
+    assert_eq!(record.body, "Store checkpoints in SQLite.");
+
+    // The fold is gone: none of the ten provenance values are duplicated into
+    // the body text migration 6's FTS5 rebuild indexes as `body`.
+    for value in [
+        "the project database is already open",
+        "handing a session's context to a fresh one",
+        "one machine holds the project",
+        "tens of sessions, not thousands",
+        "the database file is owner-only",
+        "SQLite ships with the binary",
+        "single-instance, no daemon",
+        "the size cap is enforced by a CHECK",
+        "we agreed checkpoints go in the project db",
+    ] {
+        assert!(
+            !record.body.contains(value),
+            "the body still carries `{value}`, which belongs to provenance"
+        );
+    }
+}
+
+/// The map says "when known" of every one of the nine fields, so a reply
+/// naming none of them still stores the memory rather than being refused for
+/// an invented value it never had.
+#[test]
+fn a_reply_carrying_no_phase_21b_field_still_stores_the_memory_with_everything_none() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let model = Canned::new(reply(&[memory_json(
+        "finding",
+        "historical",
+        "ConPTY reflows long lines",
+    )]));
+    let outcome = extract(&fixture, &model, &chunk(&["we watched ConPTY behave"]));
+
+    assert_eq!(outcome.stored(), 1);
+    let memory = fixture.memory();
+    let record = memory.store().get(&outcome.recorded[0]).unwrap().unwrap();
+    assert_eq!(record.provenance, DecisionProvenance::default());
+}
+
+// -------------------------------------------------------------------------
+// Phase 21 — extraction over a session's recorded events
+// -------------------------------------------------------------------------
+
+/// Line: "feed the extractor bounded session/event chunks rather than entire
+/// unbounded session histories" — the **event** half, read back through a
+/// real [`EventLog`] rather than a file of activity.
+///
+/// Mutation: in `lifecycle::chunk_for_session`, use `events` instead of
+/// `window` when computing the range (i.e. always claim the whole slice
+/// handed in, regardless of what the chunk's own budget kept).
+#[test]
+fn extraction_over_a_sessions_recorded_events_stores_the_source_event_range() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let session = SessionId::new("session-in-the-log");
+
+    let log = EventLog::open(&fixture.runtime).unwrap();
+    log_events(
+        &log,
+        &session,
+        (0..5)
+            .map(|_| LifecycleEvent::TurnEnded {
+                outcome: TurnOutcome::Completed,
+            })
+            .collect(),
+    );
+
+    let events = log
+        .recent_for_session(&session, lifecycle::EVENT_WINDOW)
+        .unwrap();
+    assert_eq!(
+        events.len(),
+        5,
+        "all five recorded events should be read back"
+    );
+    let expected = SourceEvents::new(events.first().unwrap().seq, events.last().unwrap().seq);
+
+    let chunk =
+        lifecycle::chunk_for_session(&session, &events, Some("a938fcc"), ChunkLimits::default());
+
+    let model = Canned::new(reply(&[memory_json(
+        "finding",
+        "historical",
+        "the session ended five turns cleanly",
+    )]));
+    let outcome = extract(&fixture, &model, &chunk);
+    assert_eq!(outcome.stored(), 1);
+
+    let memory = fixture.memory();
+    let record = memory.store().get(&outcome.recorded[0]).unwrap().unwrap();
+    assert_eq!(
+        record.source_session_id.as_deref(),
+        Some("session-in-the-log")
+    );
+    assert_eq!(record.source_events, expected);
+}
+
+/// The property `lifecycle.rs`'s own module documentation calls "the
+/// difference between provenance and a guess": when the chunk's budget drops
+/// the oldest events, the stored range must start *after* them, not at the
+/// beginning of the whole slice that was handed in.
+///
+/// `lifecycle.rs`'s unit tests cover the arithmetic in isolation; this proves
+/// it survives the trip through a real store.
+///
+/// Mutation: same as above — make `chunk_for_session` use the whole `events`
+/// slice for its range instead of the surviving window.
+#[test]
+fn a_chunk_whose_budget_dropped_the_oldest_events_does_not_claim_them_as_source() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let session = SessionId::new("session-with-a-long-history");
+
+    let log = EventLog::open(&fixture.runtime).unwrap();
+    log_events(
+        &log,
+        &session,
+        (0..20)
+            .map(|_| LifecycleEvent::TurnEnded {
+                outcome: TurnOutcome::Completed,
+            })
+            .collect(),
+    );
+
+    let events = log
+        .recent_for_session(&session, lifecycle::EVENT_WINDOW)
+        .unwrap();
+    assert_eq!(events.len(), 20);
+
+    let tight = ChunkLimits {
+        max_entries: 4,
+        max_entry_chars: 2_000,
+        max_total_chars: 24_000,
+    };
+    let chunk = lifecycle::chunk_for_session(&session, &events, None, tight);
+    assert_eq!(
+        chunk.entries().len(),
+        4,
+        "the tight budget should have bound the chunk"
+    );
+
+    // Only the newest four survived; the range must start after the sixteen
+    // that were dropped, not at the head of the whole session.
+    let surviving = &events[events.len() - 4..];
+    let expected = SourceEvents::new(
+        surviving.first().unwrap().seq,
+        surviving.last().unwrap().seq,
+    );
+    assert_ne!(
+        expected,
+        SourceEvents::new(events.first().unwrap().seq, events.last().unwrap().seq),
+        "the test is only meaningful if the surviving range differs from the whole slice"
+    );
+
+    let model = Canned::new(reply(&[memory_json(
+        "finding",
+        "historical",
+        "only the recent turns are what the model actually saw",
+    )]));
+    let outcome = extract(&fixture, &model, &chunk);
+    assert_eq!(outcome.stored(), 1);
+
+    let memory = fixture.memory();
+    let record = memory.store().get(&outcome.recorded[0]).unwrap().unwrap();
+    assert_eq!(
+        record.source_events, expected,
+        "the stored range must not claim events the budget dropped"
+    );
+}
+
+/// There is no API to put a conversation payload into an event-derived
+/// chunk — [`LifecycleEvent`] has no field a hook payload could reach, per
+/// `lifecycle.rs`'s own module documentation — so the property worth pinning
+/// is positive: every entry a chunk built from events carries is one of
+/// `lifecycle::describe`'s own sentences, built from a [`LoggedEvent`] alone.
+///
+/// This is worth pinning because a future writer who adds a payload column to
+/// `LifecycleEvent` (or a field a hook payload could fill) and then threads it
+/// into `describe` would silently turn this bounded, safe-by-construction
+/// source into one that can carry conversation text — and nothing else here
+/// would catch that.
+#[test]
+fn an_event_chunk_carries_no_conversation_only_lifecycles_own_sentences() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let session = SessionId::new("session-shape-only");
+
+    let log = EventLog::open(&fixture.runtime).unwrap();
+    log_events(
+        &log,
+        &session,
+        vec![
+            LifecycleEvent::SessionStarted,
+            LifecycleEvent::TurnStarted,
+            LifecycleEvent::TurnEnded {
+                outcome: TurnOutcome::Completed,
+            },
+        ],
+    );
+
+    let events = log
+        .recent_for_session(&session, lifecycle::EVENT_WINDOW)
+        .unwrap();
+    let chunk = lifecycle::chunk_for_session(&session, &events, None, ChunkLimits::default());
+
+    assert_eq!(chunk.entries().len(), events.len());
+    for (entry, event) in chunk.entries().iter().zip(events.iter()) {
+        assert_eq!(
+            entry,
+            &lifecycle::describe(event),
+            "a chunk entry was not one of lifecycle::describe's own sentences"
+        );
+    }
+
+    let prompt = Prompt::build(&chunk, &[]);
+    assert!(prompt.as_str().contains("the session's process started"));
+    assert!(prompt.as_str().contains("the harness started working"));
+    assert!(prompt.as_str().contains("a turn ended, completed"));
+}
+
+// -------------------------------------------------------------------------
+// Phase 21 — the duplicate key after the rationale moved out of the body
+// -------------------------------------------------------------------------
+
+/// Migration 6 moved the rationale out of the body, and the duplicate check
+/// (`extract::normalize` / `extract::duplicate_key`) has only ever read the
+/// body (and subject). So two replies with the same body and a **different**
+/// rationale are duplicates of each other: the second is not stored, and the
+/// first's rationale is left exactly as it was.
+///
+/// **Judgement: this is right, but only barely, and it is worth someone
+/// deciding on purpose rather than by omission.** Phase 21's duplicate rule
+/// is "avoid duplicating an existing active memory when nothing materially
+/// changed" — the same phrase `Extractor::store_one`'s own doc comment quotes.
+/// A changed rationale for the same accepted decision is not a new fact about
+/// the project; it is often a model re-deriving *why* something already true
+/// is true, which is not "material change" in the sense the map means. But it
+/// is also information that is silently thrown away: nothing here supersedes
+/// the old memory with the new rationale, or merges the two, so a better
+/// rationale offered by a later extraction is lost rather than recorded. If
+/// Phase 21C's revalidation work ever wants "the most recent reasoning for a
+/// standing decision" to be retrievable, this is the exact case it would need
+/// to handle differently — probably by updating the existing row's rationale
+/// in place rather than either duplicating or discarding.
+#[test]
+fn two_replies_with_the_same_body_and_different_rationales_are_duplicates_of_each_other() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let body = "Use blocking threads for the gateway.";
+    let first = Canned::new(reply(&[format!(
+        r#"{{"kind":"decision","authority":"constraint","disposition":"accepted",
+             "support":"established","confidence":"certain","body":"{body}",
+             "rationale":"no async runtime is in the dependency set"}}"#
+    )]));
+    let outcome1 = extract(&fixture, &first, &chunk(&["monday"]));
+    assert_eq!(outcome1.stored(), 1);
+
+    let second = Canned::new(reply(&[format!(
+        r#"{{"kind":"decision","authority":"constraint","disposition":"accepted",
+             "support":"established","confidence":"certain","body":"{body}",
+             "rationale":"blocking threads are simpler to reason about here"}}"#
+    )]));
+    let outcome2 = extract(&fixture, &second, &chunk(&["tuesday"]));
+
+    assert_eq!(
+        outcome2.stored(),
+        0,
+        "a changed rationale alone stored the same decision a second time"
+    );
+    assert_eq!(outcome2.duplicates, 1);
+
+    let memory = fixture.memory();
+    let store = memory.store();
+    let rows = store.with_status(MemoryStatus::Active, 10).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the duplicate must not have created a second row"
+    );
+    assert_eq!(
+        rows[0].provenance.rationale.as_deref(),
+        Some("no async runtime is in the dependency set"),
+        "a skipped duplicate must not overwrite the rationale the first row recorded"
+    );
 }

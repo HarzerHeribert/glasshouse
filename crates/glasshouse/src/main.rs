@@ -9,7 +9,9 @@ use glasshouse::checkpoint::{
 };
 use glasshouse::cli::CheckpointCommand;
 use glasshouse::config::{self, EffectiveConfig, UserConfig};
-use glasshouse::events::{EventBus, EventLog, LifecycleEvent, Observation, ProcessExit};
+use glasshouse::events::{
+    EventBus, EventLog, LifecycleEvent, Observation, ProcessExit, TurnOutcome,
+};
 use glasshouse::integrations::Discovery;
 use glasshouse::launch::HarnessLaunch;
 use glasshouse::onboarding;
@@ -133,11 +135,18 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             MemoryCommand::Extract {
                 session,
                 activity,
+                from_events,
                 reply_from,
             } => {
                 print!(
                     "{}",
-                    memory_extract(&runtime, session, activity, reply_from)?
+                    memory_extract(
+                        &runtime,
+                        session,
+                        activity.as_deref(),
+                        *from_events,
+                        reply_from
+                    )?
                 );
             }
         },
@@ -145,6 +154,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             return checkpoint_command(&runtime, command);
         }
         Some(Command::Hook { session, event }) => {
+            install_quiet_panic_hook();
             report_hook(&runtime, session, event);
         }
         Some(Command::Shim {
@@ -717,6 +727,26 @@ fn install_hooks(
 /// them is worth costing the user a turn. Glasshouse's bookkeeping is never
 /// more important than the session it is keeping books about.
 fn report_hook(runtime: &Runtime, session: &str, event: &str) {
+    report_hook_with(runtime, session, event, || Box::new(NoExtractionModel));
+}
+
+/// [`report_hook`] with the extraction model supplied.
+///
+/// The model is the one thing on this path that does not exist yet — Phase 39
+/// owns the provider interface, and [`NoExtractionModel`] is what production
+/// passes until it does. Everything else here *is* the production path:
+/// the session lookup, the translation, the event record, the state change
+/// and the extraction call are all the shipped code, which is why the seam is
+/// here and not one level up.
+///
+/// A factory rather than a reference, because extraction runs on its own
+/// thread and needs something it can own.
+fn report_hook_with(
+    runtime: &Runtime,
+    session: &str,
+    event: &str,
+    model: impl Fn() -> Box<dyn glasshouse::memory::ExtractionModel>,
+) {
     // Codex writes its payload to the hook's stdin, and a process that never
     // reads it can leave the harness writing into a closed pipe. Glasshouse
     // has the event name and the session identifier from its own argv, so
@@ -770,6 +800,28 @@ fn report_hook(runtime: &Runtime, session: &str, event: &str) {
             Observation::new(&record.harness, event),
         );
 
+        // Phase 21: *allow memory extraction to run after task completion.*
+        //
+        // This is the one place a harness tells Glasshouse that a task
+        // finished, and `TurnEnded { Completed }` is the only event that
+        // carries that claim — `session::lifecycle::event_for` is its single
+        // construction site, and a source-scanning test fails if a second one
+        // appears. So this is where the trigger belongs.
+        //
+        // Ordered **after** the event is recorded, on purpose: the log is the
+        // material extraction reads, and a turn's own closing event should be
+        // in it. Ordered **before** the state change for no reason at all
+        // beyond it reading better; `run_extraction_after_turn` cannot fail
+        // in a way the rest of this function could notice.
+        if matches!(
+            translated,
+            LifecycleEvent::TurnEnded {
+                outcome: TurnOutcome::Completed
+            }
+        ) {
+            run_extraction_after_turn(runtime, &id, model());
+        }
+
         let Some(next) = translated.implied_state() else {
             // A translated event that says nothing about the session's state
             // — it is in the log and that is all it was ever going to do.
@@ -793,6 +845,182 @@ fn report_hook(runtime: &Runtime, session: &str, event: &str) {
     if let Err(err) = outcome {
         tracing::warn!(error = %err, event, "could not record a harness event");
     }
+}
+
+/// The extraction model Glasshouse has in production, which is none.
+///
+/// Phase 21 has two separate lines here and they are separate on purpose:
+/// *"allow memory extraction to run after task completion"* is about the
+/// **trigger**, and *"allow a configurable cheap or local model to perform
+/// memory extraction"* is about the **model**. The trigger is built; the
+/// model is Phase 39's disposable-job provider and does not exist.
+///
+/// So extraction really does run after every completed turn, and it really
+/// does report `no extraction model is available` every time — which is
+/// exactly the shape [`glasshouse::memory::ExtractionOutcome`] exists to
+/// carry, and exactly the failure Phase 21's *"keep memory-extraction failure
+/// non-fatal to the coding session"* is about. Naming itself plainly matters
+/// as much as it does for `glasshouse memory extract`: a log line saying a
+/// model ran when none did would be worse than no line.
+struct NoExtractionModel;
+
+impl glasshouse::memory::ExtractionModel for NoExtractionModel {
+    fn describe(&self) -> String {
+        "none configured (Phase 39 supplies the provider)".to_owned()
+    }
+
+    fn complete(
+        &self,
+        _prompt: &glasshouse::memory::extract::Prompt,
+    ) -> Result<String, glasshouse::memory::ModelError> {
+        Err(glasshouse::memory::ModelError::Unavailable)
+    }
+}
+
+/// How long a hook process will wait for extraction before going on without
+/// it.
+///
+/// The number is chosen against what is on the other side of it: this process
+/// is run **by the harness, inside the user's session**, and Claude Code
+/// treats a hook's exit as a gate on the turn. A model that hangs must
+/// therefore cost the user a bounded pause and not an open-ended one.
+///
+/// Deliberately not "however long the model takes". Extraction is a support
+/// job; a coding session waiting on one has the relationship backwards.
+const EXTRACTION_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run memory extraction over what this session has done, after a completed
+/// turn.
+///
+/// # Nothing here can hurt the session, and that is the design
+///
+/// Phase 21: *"keep memory-extraction failure non-fatal to the coding
+/// session."* Four different failures are absorbed here and none of them
+/// reaches [`report_hook`]:
+///
+/// - the project database will not open, or the event log will not read —
+///   logged, and the function returns;
+/// - the model is unavailable, refuses, or answers rubbish —
+///   [`glasshouse::memory::Extractor::run`] has no error channel at all and
+///   describes it on the outcome;
+/// - the model **panics** — caught inside `run`, reported as an outcome;
+/// - the model **hangs** — the work is on its own thread and this waits
+///   [`EXTRACTION_BOUND`], then leaves it behind. The thread dies when the
+///   process exits moments later, having written nothing: the store is only
+///   touched after the model answers.
+///
+/// # Why a thread and not just a call
+///
+/// The only thing that buys is the bound, and the bound is the whole point.
+/// This codebase has no async runtime and [`glasshouse::memory::ExtractionModel`]
+/// is deliberately synchronous, so a thread is the mechanism; `ExtractionModel`
+/// is `Send + Sync` for precisely this reason.
+///
+/// Everything cheap happens before the thread starts — opening the database,
+/// reading a bounded window of the log, scrubbing and bounding the chunk — so
+/// what is on the far side of the bound is the model call and the insert, and
+/// a timeout means the model, not Glasshouse.
+fn run_extraction_after_turn(
+    runtime: &Runtime,
+    id: &SessionId,
+    model: Box<dyn glasshouse::memory::ExtractionModel>,
+) {
+    use glasshouse::memory::extract::chunk::ChunkLimits;
+    use glasshouse::memory::extract::lifecycle::{EVENT_WINDOW, chunk_for_session};
+    use glasshouse::memory::{ExtractionTrigger, Extractor, ProjectMemory};
+
+    let prepared = (|| -> anyhow::Result<_> {
+        let log = EventLog::open(runtime)?;
+        let events = log.recent_for_session(id, EVENT_WINDOW)?;
+        let memory = ProjectMemory::open(runtime)?;
+        Ok((memory, events))
+    })();
+
+    let (memory, events) = match prepared {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            tracing::warn!(
+                session = %id,
+                error = %format!("{err:#}"),
+                "could not read this session's history for memory extraction"
+            );
+            return;
+        }
+    };
+
+    // The commit is deliberately not read here. `checkpoint::git` knows how
+    // to find one and this process does not need to: a memory's commit is
+    // "where the project was when this was learned", and a hook process runs
+    // while the user's tree is mid-edit. `glasshouse memory extract` takes
+    // the session's activity from a person who knows; this path takes what
+    // the log holds and claims nothing more.
+    let chunk = chunk_for_session(id, &events, None, ChunkLimits::default());
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let session = id.clone();
+    std::thread::spawn(move || {
+        let store = memory.store();
+        let outcome =
+            Extractor::new(&store, model.as_ref()).run(&chunk, ExtractionTrigger::TaskCompleted);
+        // A closed receiver means the bound expired and nobody is listening.
+        // That is a normal outcome here, not an error.
+        let _ = tx.send(outcome);
+        drop(session);
+    });
+
+    match rx.recv_timeout(EXTRACTION_BOUND) {
+        Ok(outcome) => match &outcome.failure {
+            None => tracing::info!(
+                session = %id,
+                model = outcome.model,
+                stored = outcome.stored(),
+                duplicates = outcome.duplicates,
+                speculative = outcome.speculative,
+                rejected = outcome.rejected.len(),
+                "memory extraction ran after a completed task"
+            ),
+            Some(failure) => tracing::info!(
+                session = %id,
+                model = outcome.model,
+                reason = %failure,
+                "memory extraction after a completed task produced nothing"
+            ),
+        },
+        Err(_) => tracing::warn!(
+            session = %id,
+            bound_ms = EXTRACTION_BOUND.as_millis(),
+            "memory extraction did not finish within its bound; the session is unaffected"
+        ),
+    }
+}
+
+/// Send panic information to the log instead of to the user's terminal.
+///
+/// # Why a process-global is the right call *here*
+///
+/// `memory::extract` records the caveat that it cannot fix: it catches a
+/// panicking extraction model with `catch_unwind`, but the **default panic
+/// hook has already printed to stderr** by then. Setting a global from a
+/// library module would be that module deciding something about every program
+/// that links it, which is why it did not.
+///
+/// This is not a library module. It is the `glasshouse hook` command, a
+/// process the harness runs **inside the user's session**, and whose stderr
+/// the harness may show them. A Rust backtrace appearing in the middle of
+/// somebody's coding session because a support job fell over is the same
+/// defect as the hook failing: Glasshouse's bookkeeping is never more
+/// important than the session it keeps books about.
+///
+/// The panic is not swallowed — it is logged, with the payload and the
+/// location, where `--log-file` will show it.
+fn install_quiet_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|at| format!("{}:{}", at.file(), at.line()))
+            .unwrap_or_else(|| "unknown location".to_owned());
+        tracing::error!(location, panic = %info, "a glasshouse hook process panicked");
+    }));
 }
 
 /// Records lifecycle events durably from a command that is about to exit.
@@ -1262,17 +1490,74 @@ fn memory_report(
         // than flattening every memory into equally authoritative text. An
         // unclassified memory says so; it does not borrow a class.
         let authority = record.authority.map_or("unclassified", |a| a.as_str());
+        // Phase 21B: *"treat a decision with missing rationale and missing
+        // assumptions as lower-confidence."* The ranking already does it —
+        // `memory::search::demote_thin_decisions` puts such a decision behind
+        // a better-proven one of its own class. Saying so here is the other
+        // half: a reader who cannot see *why* a decision sank has been given
+        // a reordering and no reason for it.
+        let confidence = if record.is_lower_confidence_decision() {
+            "  lower-confidence"
+        } else {
+            ""
+        };
         writeln!(
             out,
-            "{}  {}  {authority}  {subject}",
+            "{}  {}  {authority}{confidence}  {subject}",
             record.kind, record.status
         )?;
         writeln!(out, "    {}", record.body)?;
+        let provenance = provenance_lines(record);
+        if !provenance.is_empty() {
+            writeln!(out, "{provenance}")?;
+        }
         let session = record.source_session_id.as_deref().unwrap_or("unknown");
         let commit = record.source_commit.as_deref().unwrap_or("unknown");
-        writeln!(out, "    from session {session}, commit {commit}")?;
+        let events = record
+            .source_events
+            .map_or_else(|| "no event range".to_owned(), |events| events.to_string());
+        writeln!(out, "    from session {session}, commit {commit}, {events}")?;
     }
     Ok(out)
+}
+
+/// The Phase 21B provenance a search result carries, one labelled line per
+/// field that has one.
+///
+/// Absent fields print nothing rather than `unknown`. There are nine of them
+/// and a memory rarely has more than two; printing the absences would bury
+/// the memory under a form. The one place absence *is* stated is the
+/// `lower-confidence` marker beside the authority, which is where it changes
+/// what the reader should do.
+fn provenance_lines(record: &glasshouse::memory::MemoryRecord) -> String {
+    use std::fmt::Write as _;
+
+    let provenance = &record.provenance;
+    let fields: [(&str, Option<&str>); 9] = [
+        ("why", provenance.rationale.as_deref()),
+        ("problem", provenance.problem.as_deref()),
+        ("assumes", provenance.assumptions.as_deref()),
+        ("scale", provenance.scale_assumptions.as_deref()),
+        ("security", provenance.security_assumptions.as_deref()),
+        ("compat", provenance.compatibility_assumptions.as_deref()),
+        ("ops", provenance.operational_assumptions.as_deref()),
+        ("evidence", provenance.evidence.as_deref()),
+        ("quoted", provenance.source_excerpt.as_deref()),
+    ];
+
+    let mut out = String::new();
+    if let Some(phase) = provenance.project_phase {
+        let _ = writeln!(out, "    phase      {phase}");
+    }
+    for (label, value) in fields {
+        if let Some(value) = value {
+            let _ = writeln!(out, "    {label:<10} {value}");
+        }
+    }
+    // The caller adds its own newline, so hand back a block without a
+    // trailing blank line when there is nothing to say.
+    out.pop();
+    out
 }
 
 /// `glasshouse memory promote <id> <authority>` — Phase 21A's explicit
@@ -1347,26 +1632,52 @@ impl glasshouse::memory::ExtractionModel for ReplyFromFile {
 fn memory_extract(
     runtime: &Runtime,
     session: &str,
-    activity: &std::path::Path,
+    activity: Option<&std::path::Path>,
+    from_events: bool,
     reply_from: &std::path::Path,
 ) -> anyhow::Result<String> {
     use std::fmt::Write as _;
 
     use anyhow::Context as _;
     use glasshouse::memory::extract::chunk::{ChunkLimits, SessionChunk};
+    use glasshouse::memory::extract::lifecycle::{EVENT_WINDOW, chunk_for_session};
     use glasshouse::memory::{ExtractionTrigger, Extractor, ProjectMemory};
 
-    let activity_text = std::fs::read_to_string(activity)
-        .with_context(|| format!("read session activity from {}", activity.display()))?;
     let reply = std::fs::read_to_string(reply_from)
         .with_context(|| format!("read the model reply from {}", reply_from.display()))?;
 
-    let chunk = SessionChunk::build(
-        session,
-        None::<String>,
-        activity_text.lines().map(str::to_owned),
-        ChunkLimits::default(),
-    );
+    // Two sources, and the difference between them is the provenance.
+    //
+    // A file of activity is text a person chose, and a memory extracted from
+    // it can name the session but not which part of it — there is no event
+    // range to name. The event log can: `chunk_for_session` narrows the range
+    // to what actually reached the model, and every memory this run stores
+    // carries it. That is Phase 21's *"store the originating session and
+    // event references"* with a caller a person can actually run.
+    let (chunk, source) = if from_events {
+        let sessions = ProjectSessions::open(runtime)?;
+        let id = sessions.store().resolve_id(session)?;
+        let log = EventLog::open(runtime)?;
+        let events = log.recent_for_session(&id, EVENT_WINDOW)?;
+        let read = events.len();
+        (
+            chunk_for_session(&id, &events, None, ChunkLimits::default()),
+            format!("{read} recorded events for session {id}"),
+        )
+    } else {
+        let activity = activity.expect("clap requires --activity unless --from-events");
+        let activity_text = std::fs::read_to_string(activity)
+            .with_context(|| format!("read session activity from {}", activity.display()))?;
+        (
+            SessionChunk::build(
+                session,
+                None::<String>,
+                activity_text.lines().map(str::to_owned),
+                ChunkLimits::default(),
+            ),
+            format!("{}", activity.display()),
+        )
+    };
 
     let memory = ProjectMemory::open(runtime)?;
     let store = memory.store();
@@ -1375,6 +1686,7 @@ fn memory_extract(
 
     let mut out = String::new();
     writeln!(out, "trigger {}, model {}", outcome.trigger, outcome.model)?;
+    writeln!(out, "source: {source}")?;
     writeln!(
         out,
         "activity: {} entries, {} dropped, {} truncated, {} credentials redacted",
@@ -1383,6 +1695,9 @@ fn memory_extract(
         outcome.activity_truncated,
         outcome.redactions
     )?;
+    if let Some(events) = chunk.source_events() {
+        writeln!(out, "provenance: {events} of this project's log")?;
+    }
 
     if let Some(failure) = &outcome.failure {
         writeln!(out, "extraction produced nothing: {failure}")?;
@@ -1896,16 +2211,23 @@ mod tests {
         "last_assistant_message",
     ];
 
-    /// `report_hook`'s own source, isolated from the rest of this file. A
+    /// The hook handler's own source, isolated from the rest of this file. A
     /// whole-file scan would trip on legitimate, unrelated code — this
     /// module's own `native_session_id` and `cwd` locals are not the Codex
     /// payload fields of the same or similar name — so this extracts just
     /// the one function the design decision is actually about.
+    ///
+    /// **`report_hook_with`, not `report_hook`.** The two were one function
+    /// until extraction needed a model seam; `report_hook` is now a
+    /// two-line wrapper and scanning *it* would pass trivially, which is
+    /// this test's own stated failure mode — a scan over the wrong span
+    /// passing for the wrong reason. The anchor assertion below is what
+    /// caught the split when it happened.
     fn hook_handler_source() -> &'static str {
         let full = include_str!("main.rs");
         let start = full
-            .find("fn report_hook(")
-            .expect("report_hook must exist in this file");
+            .find("fn report_hook_with(")
+            .expect("report_hook_with must exist in this file");
         let after_start = &full[start..];
         // `"\n}"` rather than `"\n}\n"`: on Windows this file is checked out
         // with CRLF endings, so the closing brace reads `\r\n}\r\n` and a
@@ -2179,6 +2501,399 @@ mod tests {
         assert!(refused.is_err());
     }
 
+    // ---------------------------------------------------------------------
+    // Phase 21 — extraction after task completion, and the promise that its
+    // failure never costs the coding session anything.
+    //
+    // These drive `report_hook_with`, which *is* `glasshouse hook`: the same
+    // session lookup, the same translation, the same event record, the same
+    // state change. Only the model is supplied, because the model is the one
+    // piece Phase 39 owns and nothing has built.
+    // ---------------------------------------------------------------------
+
+    /// An extraction model whose reply is fixed, and which records that it
+    /// was asked.
+    struct Canned {
+        reply: String,
+        asked: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl glasshouse::memory::ExtractionModel for Canned {
+        fn describe(&self) -> String {
+            "test/canned".to_owned()
+        }
+        fn complete(
+            &self,
+            _prompt: &glasshouse::memory::extract::Prompt,
+        ) -> Result<String, glasshouse::memory::ModelError> {
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.reply.clone())
+        }
+    }
+
+    /// A model that does the one thing a support job must never be able to do
+    /// to the session that triggered it.
+    struct Hostile(HostileKind);
+
+    enum HostileKind {
+        Refuses,
+        Panics,
+        Hangs,
+    }
+
+    impl glasshouse::memory::ExtractionModel for Hostile {
+        fn describe(&self) -> String {
+            "test/hostile".to_owned()
+        }
+        fn complete(
+            &self,
+            _prompt: &glasshouse::memory::extract::Prompt,
+        ) -> Result<String, glasshouse::memory::ModelError> {
+            match self.0 {
+                HostileKind::Refuses => Err(glasshouse::memory::ModelError::Refused),
+                HostileKind::Panics => panic!("the extraction model fell over"),
+                // Far longer than `EXTRACTION_BOUND`, so the test measures the
+                // bound rather than the sleep.
+                HostileKind::Hangs => {
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    Ok(String::new())
+                }
+            }
+        }
+    }
+
+    const ONE_FINDING: &str = r#"{"memories":[{"kind":"finding","authority":"constraint",
+         "disposition":"accepted","support":"established","confidence":"certain",
+         "rationale":"the hook process is the only thing that sees a turn end",
+         "project_phase":"alpha",
+         "body":"Extraction after a task runs in the hook process."}]}"#;
+
+    /// A session this project has recorded, ready to receive a harness event.
+    fn recorded_session(runtime: &Runtime) -> glasshouse::session::SessionId {
+        use glasshouse::session::NewSession;
+
+        let sessions = ProjectSessions::open(runtime).unwrap();
+        let record = sessions
+            .store()
+            .create(NewSession::embedded("claude-code"))
+            .unwrap();
+        record.id
+    }
+
+    fn stored_memories(runtime: &Runtime) -> Vec<glasshouse::memory::MemoryRecord> {
+        use glasshouse::memory::ProjectMemory;
+        use glasshouse::memory::search::SearchScope;
+
+        ProjectMemory::open(runtime)
+            .unwrap()
+            .store()
+            .search("extraction", SearchScope::Current, 10)
+            .unwrap()
+    }
+
+    /// Line: *"Allow memory extraction to run after task completion."*
+    ///
+    /// The trigger is a harness saying `Stop`, which is the only report
+    /// `session::lifecycle::event_for` turns into a completed turn. What the
+    /// stored memory carries is the other half of the evidence: the session
+    /// it came from, and the **range of this project's event log** the
+    /// extractor was actually shown — Phase 21's *"store the originating
+    /// session and event references so extracted memory retains
+    /// provenance."*
+    #[test]
+    fn a_completed_task_runs_extraction_and_the_memory_names_where_it_came_from() {
+        let fixture = CliFixture::new();
+        let id = recorded_session(&fixture.runtime);
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        {
+            let asked = std::sync::Arc::clone(&asked);
+            report_hook_with(&fixture.runtime, id.as_str(), "Stop", move || {
+                Box::new(Canned {
+                    reply: ONE_FINDING.to_owned(),
+                    asked: std::sync::Arc::clone(&asked),
+                })
+            });
+        }
+
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a completed task must ask the extraction model exactly once"
+        );
+
+        let stored = stored_memories(&fixture.runtime);
+        assert_eq!(stored.len(), 1, "the memory reached the project's store");
+        assert_eq!(stored[0].source_session_id.as_deref(), Some(id.as_str()));
+        let events = stored[0]
+            .source_events
+            .expect("a memory extracted from the event log names the slice it came from");
+        assert!(
+            events.first >= 1 && events.last >= events.first,
+            "the provenance range must name real log positions, got {events}"
+        );
+        assert_eq!(
+            stored[0].provenance.project_phase,
+            Some(glasshouse::memory::ProjectPhase::Alpha)
+        );
+    }
+
+    /// The trigger is *task completion*, not *any harness event*.
+    ///
+    /// `StopFailure` is a turn that ended badly and `UserPromptSubmit` is a
+    /// turn starting; neither is a completed task, and extraction that ran on
+    /// them would be extraction running on a schedule rather than on the map's
+    /// line. This is the discriminating half of the test above — without it,
+    /// "runs after task completion" would be satisfied by "runs always".
+    #[test]
+    fn an_event_that_is_not_a_completed_task_asks_no_model() {
+        for event in ["StopFailure", "UserPromptSubmit", "PermissionRequest"] {
+            let fixture = CliFixture::new();
+            let id = recorded_session(&fixture.runtime);
+            let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+            {
+                let asked = std::sync::Arc::clone(&asked);
+                report_hook_with(&fixture.runtime, id.as_str(), event, move || {
+                    Box::new(Canned {
+                        reply: ONE_FINDING.to_owned(),
+                        asked: std::sync::Arc::clone(&asked),
+                    })
+                });
+            }
+
+            assert_eq!(
+                asked.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "`{event}` is not a completed task and must not run extraction"
+            );
+            assert!(stored_memories(&fixture.runtime).is_empty());
+        }
+    }
+
+    /// Line: *"Keep memory-extraction failure non-fatal to the coding
+    /// session."*
+    ///
+    /// This is the line's real setting: a `glasshouse hook` process running
+    /// **inside the user's session**, where Claude Code treats a non-zero
+    /// exit as a veto on the turn. Three failures a support job can produce,
+    /// and after each one the session must be exactly as it would have been
+    /// with no extraction at all — the event recorded, the lifecycle applied,
+    /// nothing propagated.
+    ///
+    /// Note what is *not* asserted: that extraction succeeded. It did not,
+    /// three times. That is the point.
+    #[test]
+    fn a_failing_extraction_model_costs_the_coding_session_nothing() {
+        use glasshouse::session::SessionLifecycle;
+
+        for kind in [HostileKind::Refuses, HostileKind::Panics] {
+            let fixture = CliFixture::new();
+            let id = recorded_session(&fixture.runtime);
+
+            report_hook_with(&fixture.runtime, id.as_str(), "Stop", move || {
+                Box::new(Hostile(match kind {
+                    HostileKind::Refuses => HostileKind::Refuses,
+                    HostileKind::Panics => HostileKind::Panics,
+                    HostileKind::Hangs => HostileKind::Hangs,
+                }))
+            });
+
+            // The session's own bookkeeping happened anyway.
+            let sessions = ProjectSessions::open(&fixture.runtime).unwrap();
+            let record = sessions.store().get(&id).unwrap().unwrap();
+            assert_eq!(
+                record.lifecycle,
+                SessionLifecycle::Idle,
+                "a failed extraction must not stop the turn being recorded as ended"
+            );
+
+            let log = EventLog::open(&fixture.runtime).unwrap();
+            assert_eq!(
+                log.for_session(&id).unwrap().len(),
+                1,
+                "the lifecycle event is recorded whatever extraction did"
+            );
+            assert!(stored_memories(&fixture.runtime).is_empty());
+        }
+    }
+
+    /// The fourth failure, and the only one a `Result` could never have
+    /// absorbed: a model that never answers at all.
+    ///
+    /// `EXTRACTION_BOUND` is what stands between a hung provider and a user
+    /// whose turn will not finish. The model here sleeps for a minute; the
+    /// hook must be long gone.
+    #[test]
+    fn an_extraction_model_that_never_answers_is_abandoned_at_its_bound() {
+        use glasshouse::session::SessionLifecycle;
+
+        let fixture = CliFixture::new();
+        let id = recorded_session(&fixture.runtime);
+
+        let started = std::time::Instant::now();
+        report_hook_with(&fixture.runtime, id.as_str(), "Stop", || {
+            Box::new(Hostile(HostileKind::Hangs))
+        });
+        let waited = started.elapsed();
+
+        assert!(
+            waited < EXTRACTION_BOUND * 3,
+            "the hook waited {waited:?} on a model that sleeps for a minute;              the bound is {EXTRACTION_BOUND:?}"
+        );
+        assert!(
+            waited >= EXTRACTION_BOUND,
+            "waiting {waited:?} means the bound was not what ended the wait"
+        );
+
+        let sessions = ProjectSessions::open(&fixture.runtime).unwrap();
+        assert_eq!(
+            sessions.store().get(&id).unwrap().unwrap().lifecycle,
+            SessionLifecycle::Idle
+        );
+        assert!(stored_memories(&fixture.runtime).is_empty());
+    }
+
+    /// What the shipped binary does today, stated as a test so it cannot
+    /// quietly become something else.
+    ///
+    /// Phase 21 has two lines here and only one of them is built: the
+    /// trigger is real and the **model is Phase 39's**. So a real
+    /// `glasshouse hook` runs extraction after every completed task and
+    /// reports that no model is available — and `NoExtractionModel::describe`
+    /// says so in words, for the same reason `glasshouse memory extract`
+    /// prints `no model was called`: an evaluation must never be mistakeable
+    /// later for evidence a model did the work.
+    #[test]
+    fn the_shipped_binary_runs_extraction_after_a_task_and_reports_that_it_has_no_model() {
+        use glasshouse::memory::ExtractionModel as _;
+
+        let fixture = CliFixture::new();
+        let id = recorded_session(&fixture.runtime);
+
+        // The production entry point, with production's own model.
+        report_hook(&fixture.runtime, id.as_str(), "Stop");
+
+        assert!(stored_memories(&fixture.runtime).is_empty());
+        let described = NoExtractionModel.describe();
+        assert!(
+            described.contains("none configured"),
+            "the production model must name itself as absent: {described}"
+        );
+        assert_eq!(
+            glasshouse::memory::ModelError::Unavailable.to_string(),
+            "no extraction model is available"
+        );
+    }
+
+    /// Line: *"Treat a decision with missing rationale and missing
+    /// assumptions as lower-confidence than a well-proven decision of the
+    /// same authority class"*, at the surface a person reads.
+    ///
+    /// The ranking is the behaviour — `memory::search::demote_thin_decisions`
+    /// puts such a decision behind a better-proven one of its own class, and
+    /// four tests in `memory_provenance.rs` pin each clause of that. This is
+    /// the other half, and it is not decoration: a reader handed a reordering
+    /// with no reason for it has been given a mystery. The word `unclassified`
+    /// earned its place in this output for the same reason.
+    ///
+    /// It also pins the negative case, which is where a label goes wrong: a
+    /// decision that recorded *why* must not be marked, and neither must a
+    /// finding that recorded nothing — the map's line is about decisions.
+    #[test]
+    fn a_search_marks_a_thinly_provenanced_decision_and_shows_the_provenance_of_the_others() {
+        use glasshouse::memory::{
+            DecisionProvenance, MemoryAuthority, MemoryKind, NewMemory, ProjectMemory, ProjectPhase,
+        };
+
+        let fixture = CliFixture::new();
+        let project = ProjectMemory::open(&fixture.runtime).unwrap();
+        let store = project.store();
+
+        store
+            .record(
+                NewMemory::new(MemoryKind::Decision, "Kestrel runs on one instance.")
+                    .with_subject(Some("kestrel topology"))
+                    .with_authority(Some(MemoryAuthority::Decision))
+                    .with_provenance(DecisionProvenance {
+                        rationale: Some("the deploy target has one machine".to_owned()),
+                        project_phase: Some(ProjectPhase::Beta),
+                        operational_assumptions: Some("single instance, no daemon".to_owned()),
+                        ..DecisionProvenance::default()
+                    }),
+            )
+            .unwrap();
+        store
+            .record(
+                NewMemory::new(MemoryKind::Decision, "Kestrel logs to stderr.")
+                    .with_subject(Some("kestrel logging"))
+                    .with_authority(Some(MemoryAuthority::Decision)),
+            )
+            .unwrap();
+        store
+            .record(
+                NewMemory::new(MemoryKind::Finding, "Kestrel starts in under a second.")
+                    .with_subject(Some("kestrel startup"))
+                    .with_authority(Some(MemoryAuthority::Decision)),
+            )
+            .unwrap();
+
+        let report = memory_report(&fixture.runtime, "kestrel", false, 10).unwrap();
+
+        // The well-proven decision shows its reasoning, labelled.
+        assert!(report.contains("phase      beta"), "{report}");
+        assert!(
+            report.contains("why        the deploy target has one machine"),
+            "{report}"
+        );
+        assert!(
+            report.contains("ops        single instance, no daemon"),
+            "{report}"
+        );
+
+        // Exactly one line carries the marker, and it is the bare decision's.
+        let marked: Vec<&str> = report
+            .lines()
+            .filter(|line| line.contains("lower-confidence"))
+            .collect();
+        assert_eq!(marked.len(), 1, "expected one marked line in:\n{report}");
+        assert!(marked[0].contains("kestrel logging"), "{}", marked[0]);
+    }
+
+    /// Line: *"Store the originating session and event references so
+    /// extracted memory retains provenance"* — at the surface a person
+    /// reaches, which is what `glasshouse memory extract --from-events`
+    /// exists for.
+    ///
+    /// The file-fed form of the same command cannot produce this: activity
+    /// read out of a file has no position in the project's log to name.
+    #[test]
+    fn extracting_from_a_sessions_events_records_the_slice_of_the_log_it_read() {
+        let fixture = CliFixture::new();
+        let id = recorded_session(&fixture.runtime);
+
+        // Give the session a history, the way a session gets one: through
+        // the same hook path a harness drives.
+        report_hook(&fixture.runtime, id.as_str(), "UserPromptSubmit");
+        report_hook(&fixture.runtime, id.as_str(), "Stop");
+
+        let dir = tempfile::tempdir().unwrap();
+        let reply = dir.path().join("reply.json");
+        std::fs::write(&reply, ONE_FINDING).unwrap();
+
+        let report = memory_extract(&fixture.runtime, id.as_str(), None, true, &reply).unwrap();
+
+        assert!(report.contains("recorded events for session"), "{report}");
+        assert!(report.contains("provenance: event"), "{report}");
+        assert!(report.contains("stored 1"), "{report}");
+
+        let stored = stored_memories(&fixture.runtime);
+        assert_eq!(stored.len(), 1);
+        let events = stored[0].source_events.expect("an event range");
+        assert_eq!(events.first, 1);
+        assert_eq!(events.last, 2, "both recorded events reached the model");
+    }
+
     /// Phase 21 — extraction runs manually, for debugging and evaluation.
     ///
     /// The model half is supplied from a file, which is what makes this
@@ -2205,7 +2920,8 @@ mod tests {
         )
         .unwrap();
 
-        let report = memory_extract(&fixture.runtime, "s-1", &activity, &reply).unwrap();
+        let report =
+            memory_extract(&fixture.runtime, "s-1", Some(&activity), false, &reply).unwrap();
 
         assert!(report.contains("stored 1"), "{report}");
         // The output must never let an evaluation run be mistaken later for

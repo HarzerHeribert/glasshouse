@@ -301,6 +301,30 @@ impl EventLog {
         )
     }
 
+    /// The most recent `limit` events recorded for one session, oldest first
+    /// within the window.
+    ///
+    /// [`EventLog::for_session`] reads a session's whole history, which is
+    /// the right answer for reconstruction and the wrong one for a caller
+    /// that wants the tail — memory extraction runs after every completed
+    /// turn and would otherwise re-read a week of log to fill a chunk that
+    /// holds sixty entries. The bound is applied in SQL rather than by
+    /// truncating afterwards, so the rows never exist.
+    pub fn recent_for_session(
+        &self,
+        session: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<LoggedEvent>, EventLogError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut rows = self.query(
+            "SELECT {C} FROM lifecycle_events WHERE session_id = ?1 \
+             ORDER BY seq DESC LIMIT ?2",
+            &[&session.as_str(), &limit],
+        )?;
+        rows.reverse();
+        Ok(rows)
+    }
+
     /// The most recent `limit` events, oldest first within the window.
     pub fn recent(&self, limit: usize) -> Result<Vec<LoggedEvent>, EventLogError> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);

@@ -811,13 +811,13 @@ Phase 21 — Memory extraction
 ☑ Require the extractor to classify every emitted memory into one supported memory kind.
 ☐ Require the extractor to omit speculative claims that were not established during the session.
 ☑ Require the extractor to distinguish failed approaches from accepted decisions.
-☐ Require the extractor to preserve concise rationale when a decision’s rationale is important.
+☑ Require the extractor to preserve concise rationale when a decision’s rationale is important.
 ☑ Require the extractor to avoid duplicating an existing active memory when nothing materially changed.
-☐ Store the originating session and event references so extracted memory retains provenance.
+☑ Store the originating session and event references so extracted memory retains provenance.
 ☐ Allow memory extraction to run after task completion.
 ☐ Allow memory extraction to run before or around native prompt compaction.
 ☑ Allow memory extraction to run manually for debugging and evaluation.
-☐ Keep memory-extraction failure non-fatal to the coding session.
+☑ Keep memory-extraction failure non-fatal to the coding session.
 
 Phase 21A — Memory authority classes
 
@@ -841,17 +841,17 @@ Fixed architectural requirements
 
 Phase 21B — Decision provenance and assumptions
 
-☐ Store the rationale behind a durable decision when the rationale materially affects whether the decision remains valid.
-☐ Store the project phase in which a decision was made when known, such as prototype, alpha, beta, production, or migration.
-☐ Store the task or problem the decision was intended to solve when known.
-☐ Store the assumptions that made the decision reasonable when they can be extracted reliably.
-☐ Store relevant scale assumptions such as expected user count, request volume, data size, latency target, or deployment topology when they influenced the decision.
-☐ Store relevant security assumptions when they influenced the decision.
-☐ Store relevant compatibility assumptions when they influenced the decision.
-☐ Store relevant operational assumptions such as single-instance versus distributed deployment when they influenced the decision.
-☐ Store evidence references such as benchmark results, production incidents, tests, commits, or external requirements when available.
-☐ Treat a decision with missing rationale and missing assumptions as lower-confidence than a well-proven decision of the same authority class.
-☐ Preserve the original wording or source reference sufficiently to audit how a remembered decision was derived.
+☑ Store the rationale behind a durable decision when the rationale materially affects whether the decision remains valid.
+☑ Store the project phase in which a decision was made when known, such as prototype, alpha, beta, production, or migration.
+☑ Store the task or problem the decision was intended to solve when known.
+☑ Store the assumptions that made the decision reasonable when they can be extracted reliably.
+☑ Store relevant scale assumptions such as expected user count, request volume, data size, latency target, or deployment topology when they influenced the decision.
+☑ Store relevant security assumptions when they influenced the decision.
+☑ Store relevant compatibility assumptions when they influenced the decision.
+☑ Store relevant operational assumptions such as single-instance versus distributed deployment when they influenced the decision.
+☑ Store evidence references such as benchmark results, production incidents, tests, commits, or external requirements when available.
+☑ Treat a decision with missing rationale and missing assumptions as lower-confidence than a well-proven decision of the same authority class.
+☑ Preserve the original wording or source reference sufficiently to audit how a remembered decision was derived.
 
 Phase 21C — Validity conditions and invalidation
 

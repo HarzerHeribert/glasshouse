@@ -37,6 +37,7 @@
 //! result.
 
 use super::credentials;
+use crate::memory::SourceEvents;
 
 /// How much session activity one extraction may look at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +73,7 @@ impl Default for ChunkLimits {
 pub struct SessionChunk {
     session_id: String,
     commit: Option<String>,
+    events: Option<SourceEvents>,
     entries: Vec<String>,
     dropped: usize,
     truncated: usize,
@@ -144,6 +146,7 @@ impl SessionChunk {
         Self {
             session_id: session_id.into(),
             commit: commit.map(Into::into).filter(|c| !c.trim().is_empty()),
+            events: None,
             entries: kept,
             dropped,
             truncated,
@@ -161,6 +164,27 @@ impl SessionChunk {
     /// [`crate::memory::MemoryRecord::source_commit`].
     pub fn commit(&self) -> Option<&str> {
         self.commit.as_deref()
+    }
+
+    /// Record which slice of the project event log this activity came from.
+    ///
+    /// Separate from [`SessionChunk::build`] rather than an argument to it,
+    /// because it is genuinely optional and absent must stay distinguishable
+    /// from empty: activity read out of a file — which is what
+    /// `glasshouse memory extract --activity` supplies — has **no** event
+    /// range, and that is a different fact from a range covering no events.
+    /// [`crate::memory::extract::lifecycle`] is where a chunk that does have
+    /// one is built.
+    #[must_use]
+    pub fn with_source_events(mut self, events: Option<SourceEvents>) -> Self {
+        self.events = events;
+        self
+    }
+
+    /// The event-log slice this activity came from, when it came from one.
+    /// Becomes [`crate::memory::MemoryRecord::source_events`].
+    pub fn source_events(&self) -> Option<SourceEvents> {
+        self.events
     }
 
     /// The scrubbed entries, oldest first.

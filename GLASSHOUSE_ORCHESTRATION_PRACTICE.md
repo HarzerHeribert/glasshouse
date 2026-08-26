@@ -1131,6 +1131,30 @@ session"*, stays **open**: a CLI invocation is not a coding session, and
 nothing is at risk when extraction fails inside one. Same caller, two different
 answers, because the two sentences describe different callers.
 
+**Sharpened 2026-08-26, by the next lead pushing back on this very paragraph.**
+`lead-mem6` closed the task-completion trigger citing this section as
+precedent, stated the counter-argument, and left the call here — noting that if
+the strict reading won, *this* decision should be re-examined by the same
+standard, because manual extraction calls no model either. It was right to
+press, and the criterion needed to be better than "a CLI is not a coding
+session":
+
+**The test is whether the capability completes and produces its result in the
+shipped binary — not whether a model is called.**
+
+Manual extraction completes: `--reply-from` supplies the model half at the
+user's direction, the pipeline runs, and memories are stored. The
+task-completion trigger cannot complete: it fires on every completed task and
+dead-ends, because nothing can supply the model half at a turn boundary. Both
+were verified by running the binary. So the manual line stays closed, the
+trigger stays open, and the two are not inconsistent.
+
+The useful general form: **ask the capability as a question a user would ask,
+and see whether the honest answer is yes.** *Can a person run extraction for
+debugging?* — yes, here is the command and here are the memories. *Can
+Glasshouse extract memory after a task completes?* — it tries, every time, and
+reports it has no model. The second is not a yes.
+
 ---
 
 ## §34 — the Linux gate is flaky under load, and it was flaky before your batch
@@ -1318,3 +1342,60 @@ whether or not the change happens.
 piece of work: own `database.rs`, `events/mod.rs` and `events/log.rs` together,
 rebuild `lifecycle_events` with `gateway_backend_changed`, and prove `seq`
 survives the rebuild with a test that stores a memory's event range across it.
+
+---
+
+## §40 — never run the local gate beside anything else
+
+`lead-mem6` launched `ci-local.sh` while its own `cargo test -p glasshouse` was
+running natively in the same worktree. That run failed the ubuntu leg **and**
+produced a macOS `pty_smoke` failure that did not reproduce. Both had one
+cause: **the lead was the load.**
+
+The gate competes with itself for the machine and then reports the result as if
+it were about the code. Every pty test in this project is timing-sensitive
+under parallel load — that is §34's standing debt — and the local gate runs the
+whole workspace suite in a container *and* natively.
+
+**Run it alone.** Close idle worker panes first; a finished agent still holds
+memory, and a lead with three shells open is not a quiet machine. If a Linux
+pty test fails, check what else was running before reaching for §34's
+attribution procedure — the cheapest explanation is that you were competing
+with yourself.
+
+**And §34's procedure gained a second half from the same batch.** Attributing
+a Linux FAIL by running `main` once and seeing it pass is *one sample of a
+nondeterministic event*, not evidence the failure is yours. `lead-mem6` ran the
+`main` tree (clean) and then re-ran **its own unchanged tree**, which passed
+too. Same tree, two runs, two answers — which is the actual proof of
+nondeterminism, and stronger than the `main` comparison. Do both, and prefer
+the second: a re-run of your own tree needs no assumption that `main` and your
+branch are otherwise comparable.
+
+---
+
+## §41 — a mutation can be weak in the same way its test is
+
+`lead-mem6`'s only surviving mutation was not a gap in coverage. The test
+`no_event_describes_itself_as_nothing` asserted every rendered event line was
+non-blank; `describe` writes `"[{seq}] {what}"`, and the prefix is
+unconditional — so an arm returning `String::new()` still produced `"[8]"` and
+passed.
+
+**The test asserted a property that could not fail, and the mutation attacked
+the same unreachable property.** A survivor normally means the test is too
+weak; here the mutation was weak in exactly the same direction, so the pair
+agreed and neither was testing anything.
+
+The lead checked whether the mutant broke anything else — it did not, because
+`"[8] "` is non-blank and the chunk builder keeps it — and then rewrote the
+test around what can actually vary: the text *after* the prefix, and whether
+two variants describe themselves identically. That kills the original mutation
+and a new one (one arm's text copied into another) that the original test could
+never have caught.
+
+**The transferable move:** when a mutation survives, do not only ask whether
+the test is strong enough. Ask **what the test and the mutation both assumed**.
+A prefix, a wrapper, a default, or any always-present scaffolding can make a
+whole class of mutations unreachable, and the coverage looks fine from either
+side.

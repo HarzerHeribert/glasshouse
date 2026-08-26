@@ -1577,6 +1577,33 @@ mod tests {
     /// assumption. Recorded when migration 4 added the memory tables and the
     /// worker adding them declined to certify otherwise.
     ///
+    /// **Migration 6's twelve new columns, and the answer this test exists to
+    /// force.** Two of them are integers: `source_event_first` and
+    /// `source_event_last` are positions in `lifecycle_events.seq`, and an
+    /// `INTEGER` column cannot hold a credential — there is no question to
+    /// ask about those two.
+    ///
+    /// The other ten **can**. `rationale`, `problem`, `assumptions`,
+    /// `scale_assumptions`, `security_assumptions`,
+    /// `compatibility_assumptions`, `operational_assumptions`, `evidence`
+    /// and `source_excerpt` are free text a producer chooses, exactly like
+    /// `subject` and `body`, and `source_excerpt` is the sharpest of the ten
+    /// because it is *verbatim session text* rather than a model's
+    /// paraphrase — a decision quoted from a session that discussed
+    /// configuring a provider is precisely where a key would appear.
+    /// (`project_phase` is the eleventh and the one exception: migration 6
+    /// gives it a `CHECK` over five fixed words, so it is not free text.)
+    ///
+    /// So the answer for migration 6 is the same as migration 4's and it is
+    /// written down rather than inherited: **this test does not certify
+    /// them.** The control is on the producer side, and it covers the new
+    /// fields *without being extended*, which is the property worth having:
+    /// `memory::extract::schema::judge` screens each emitted element whole,
+    /// over its serialized text, **before reading any field of it**, so a
+    /// field the contract gained yesterday is screened today. That ordering
+    /// is why the coverage is automatic, and it is a Phase 21 acceptance
+    /// condition rather than a convention.
+    ///
     /// **Migration 5's twenty new columns, judged one at a time.** Nineteen
     /// hold a value drawn from a fixed set or from Glasshouse's own machinery
     /// — a kind, an origin, an exit code, a signal name, a backend resource
@@ -1648,8 +1675,21 @@ mod tests {
                 "memories.superseded_by",
                 "memories.created_at",
                 "memories.updated_at",
+                "memories.source_event_first",
+                "memories.source_event_last",
+                "memories.rationale",
+                "memories.project_phase",
+                "memories.problem",
+                "memories.assumptions",
+                "memories.scale_assumptions",
+                "memories.security_assumptions",
+                "memories.compatibility_assumptions",
+                "memories.operational_assumptions",
+                "memories.evidence",
+                "memories.source_excerpt",
                 "memories_fts.subject",
                 "memories_fts.body",
+                "memories_fts.rationale",
                 "memories_fts_config.k",
                 "memories_fts_config.v",
                 "memories_fts_data.id",
@@ -1806,8 +1846,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 5,
-            "the launch must have applied migrations 3, 4 and 5"
+            version, 6,
+            "the launch must have applied migrations 3, 4, 5 and 6"
         );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
@@ -1993,8 +2033,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 5,
-            "the launch must have applied migrations 2, 3, 4 and 5"
+            version, 6,
+            "the launch must have applied migrations 2, 3, 4, 5 and 6"
         );
 
         let store = SessionStore::new(&reopened).unwrap();

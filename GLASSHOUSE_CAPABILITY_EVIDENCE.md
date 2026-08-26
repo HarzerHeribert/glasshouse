@@ -5572,3 +5572,162 @@ protecting. The alternative the lead offered — keep refusing until a launch
 profile can name its own gateway provider, at the cost of a field on
 `BackendResource::GlasshouseGateway` — is defensible and remains available if a
 later phase needs per-profile provider selection.
+
+---
+
+### Phase 21 — migration 6, provenance, and a failure the coding session survives (lines 814, 816, 820)
+
+Contract: An extracted memory carries the range of the event log it came from
+and the rationale behind it; a person can run extraction over a session's own
+recorded events; and extraction failing never costs the user their turn.
+
+State: COMPLETE
+
+Production evidence:
+- **Migration 6** adds `source_event_first`, `source_event_last` and
+  `rationale` to `memories`, and **rebuilds `memories_fts`** with `rationale`
+  as a third indexed column plus its three triggers — the rebuild the previous
+  batch flagged as the real work. `RATIONALE_MARKER`'s fold into the body is
+  gone: the rationale is now its own column and its own line in a search.
+- `memory/extract/lifecycle.rs` — `describe(&LoggedEvent)` and
+  `chunk_for_session`, which builds a bounded, scrubbed chunk **that knows the
+  range of the log it covers**.
+- **`glasshouse memory extract --session <id> --from-events`** — a caller a
+  person can run. `--activity` and `--from-events` are mutually exclusive and
+  one is required, so extraction is never run over activity nobody chose.
+- **The chunk's event range is narrowed to what survived the budget.**
+  `SessionChunk::build` keeps the newest entries when the budget binds, so a
+  chunk that dropped the first sixteen events must not claim a memory came from
+  them. Tested independently by both subcontractors — unit and end-to-end — and
+  the mutation widening the range back to the whole input slice is killed by
+  both.
+
+**Why the event log is the right source and not a consolation.** A hook payload
+carries the user's prompt and the model's last message; Glasshouse's handler
+drains that stream unread, and `lifecycle_events` has no column a conversation
+could reach. **A chunk built from the event log cannot contain conversation
+text because there is none to contain** — the credential and privacy properties
+hold by construction rather than by a screen.
+
+Regression evidence (box 820, and the failure path is the one that actually
+runs in production today):
+- `a_failing_extraction_model_costs_the_coding_session_nothing` — a refusing
+  model and a panicking model; asserts the lifecycle still moved to `idle` and
+  the event was still recorded.
+- `an_extraction_model_that_never_answers_is_abandoned_at_its_bound` — a model
+  that sleeps a minute; asserts the hook returned at `EXTRACTION_BOUND` (5s)
+  and not after the sleep, **in both directions**.
+- Four failures are absorbed and none reaches the hook: the database not
+  opening, the model refusing, the model **panicking** (`catch_unwind`), and
+  the model **hanging** (the work is on its own thread; the hook waits on a
+  channel and leaves it behind).
+
+**Why 820 is load-bearing rather than defensive.** `glasshouse hook` runs
+*inside* the user's session, and Claude Code treats a hook's non-zero exit as a
+veto on the turn — the user's own words echoed back at them with nothing sent.
+This project observed that directly. `report_hook` may never fail.
+
+**The panic hook, decided rather than deferred.** `memory/extract` recorded a
+caveat it could not fix: `catch_unwind` catches the panic but the default hook
+has already printed to stderr. `install_quiet_panic_hook()` is installed **only
+in the `Command::Hook` arm** — not process-wide from a library module — and
+routes the payload and location to `tracing::error!`. A Rust backtrace in the
+middle of someone's coding session because a support job fell over is the same
+defect as the hook failing. The panic is logged, not swallowed.
+
+Verified against the shipped binary, and reproduced independently by the
+orchestrator: a real `Stop` hook exits `0`, records `turn_ended`, moves the
+session to `idle`, and logs
+`memory extraction after a completed task produced nothing … reason=no
+extraction model is available`.
+
+---
+
+### Phase 21B — decision provenance, 11 of 11 (lines 844–854)
+
+Contract: A durable decision carries why it was made, when in the project's
+life, what problem it solved, the assumptions that made it reasonable, and the
+evidence behind it — and a decision missing all of that is treated as weaker
+than one that carries it.
+
+State: COMPLETE
+
+Production evidence:
+- **Producer:** `PROMPT_CONTRACT` rules 11–13 name every field; `RESPONSE_SCHEMA`
+  asks for them with bounds; `schema::judge` validates each — optional, trimmed,
+  bounded, refused **by name** when over, and `project_phase` refused by name
+  when outside the map's five. `Extractor::store_one` writes them.
+- **Consumer:** `glasshouse memory search` prints every field that has one, and
+  `memory/search.rs` acts on their absence. Both are surfaces a person reaches,
+  and both are in this batch — the §5 test applied to eleven storage lines that
+  could easily have been eleven unread columns.
+- Flat columns rather than a related table, deliberately: each line holds one
+  concise sentence, `NULL` means *not known* and never *none*, and Phase 21C
+  needs them **separable** rather than normalised. A `memory_assumptions` table
+  with a category column would have been one join on every read for no
+  capability the map asks for.
+
+**853 was treated as a behaviour, because its verb is *treat*.**
+`MemoryRecord::is_lower_confidence_decision()` is `kind == Decision &&
+provenance.is_thin()`, where thin is *missing rationale **and** missing
+assumptions* — **and**, not **or**, because that is what the line says.
+`memory::search::demote_thin_decisions` then reorders **only decisions within
+one authority class**. The obvious implementation — sorting thin decisions to
+the bottom — reads the line as *lower-confidence than everything*, which it
+does not say and which would be a real search regression. Both qualifiers in
+the sentence are load-bearing: it compares a decision **to a decision**, **of
+the same authority class**. Driven against the shipped binary with three
+matching memories where the thin one carried the term three times and would
+have won on BM25 alone: the two `preference` decisions swapped and the
+`constraint` between them did not move. One test per clause, each killed by a
+mutation dropping exactly one predicate.
+
+Known limit, recorded rather than glossed:
+- Lines 845–852 say *"Store …"*, and storing plus retrieving is what they ask
+  for. **Nothing yet *acts* on them** — that is Phase 21C, which does not exist.
+  853 is the exception and was treated as one.
+
+---
+
+### Phase 21 — "Allow memory extraction to run after task completion" stays OPEN, and the criterion that decides it
+
+State: SCAFFOLDED — the wiring is complete, proven, and reachable; the
+capability does not complete.
+
+What exists:
+- `report_hook` is a two-line wrapper over `report_hook_with(runtime, session,
+  event, model_factory)`. On a translated `TurnEnded { outcome: Completed }` —
+  and on nothing else — `run_extraction_after_turn` runs, **after** the event is
+  recorded, so the turn's own closing event is in the material extraction reads.
+- `an_event_that_is_not_a_completed_task_asks_no_model` is the discriminating
+  half: `StopFailure`, `UserPromptSubmit` and `PermissionRequest` ask no model.
+  Without it, *"runs after task completion"* would be satisfied by *"runs
+  always"*.
+- Production passes `NoExtractionModel`, whose `describe()` is
+  `none configured (Phase 39 supplies the provider)`; that string is on every
+  outcome and in every log line, and a mutation renaming it to
+  `phase-39/cheap-model` is killed.
+
+**Why it is not closed, and the sharpened criterion.** The lead argued for
+closing it: the map states the trigger (817) and the model (809) as two separate
+lines, and practice §33 closed *"run manually"* on a caller that calls no model.
+It also stated the counter-argument and left the decision here. The counter is
+right, and the reason is a criterion worth stating once:
+
+**The test is not whether a model is called. It is whether the capability
+completes and produces its result in the shipped binary.**
+
+- *Run manually* completes: `--reply-from` supplies the model half at the user's
+  direction, the whole pipeline runs, and **memories are stored** — verified by
+  the orchestrator running the binary.
+- *Run after task completion* cannot complete: the trigger fires on every
+  completed task and dead-ends, always, because nothing can supply the model
+  half on a turn boundary. Independently reproduced by the orchestrator: a real
+  `Stop` hook exits `0` and stores nothing, and `memory search` finds nothing,
+  ever.
+
+Asked plainly — *can Glasshouse run memory extraction after task completion?* —
+today's honest answer is "it tries, every time, and reports it has no model."
+That is not the line. It closes the moment any model exists, at one line in
+`main.rs` passing a different `Box<dyn ExtractionModel>`, and 809 and 817 will
+close together for a reason that is about Phase 39 rather than about this box.

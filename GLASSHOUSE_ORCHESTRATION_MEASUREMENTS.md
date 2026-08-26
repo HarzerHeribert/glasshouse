@@ -935,3 +935,65 @@ it. And the honest limit: **no live `200` was obtained at all**, because
 OpenRouter answers `402` for `:free` models on an account that never purchased
 credits. The account's state, not the model's price, decides whether a free
 request is servable — practice §38.
+
+### Batch 22–23, second half: `lead-mem6` closed 14 of 18, and Phase 21B closed entire
+
+| | result |
+|---|---|
+| boxes | **14 of 18** closed (the lead argued 15; the orchestrator held one — see below) |
+| wall clock | ~1h20m |
+| mutations | 8 run, 7 killed, **1 survivor that was weak in the same way its test was** (§41) |
+| tests | +109 local (1145 → 1254), of which **+24 from two subcontractors** |
+| gate | all ten green on the final run; one intermediate Linux FAIL, attributed |
+| subcontractors | 2 Sonnet at medium |
+| **Phase 21B** | **11 of 11 — the phase is complete** |
+
+**Both halves of batch 22–23 together: 36 of 46 boxes, 335 → 388 mandatory.**
+
+**The round's design question is answered in full.** §32 asked whether putting
+the caller's file in a lead's partition serializes leads against a single
+`main.rs`. It does not: `lead-route` needed no `main.rs` change at all, and
+`lead-mem6` owned it and used it. Two leads, one `main.rs`, one round, and the
+falsifier stated in advance did not fire.
+
+**But the two halves failed in opposite directions, and that is the finding.**
+- `lead-route` (policy package): 22 of 28, and **every miss was a missing
+  consumer** — four free-pool boxes share one absent caller.
+- `lead-mem6` (wiring package): 14 of 18, and **its misses are a missing
+  callee** — the trigger is built and complete and there is no model to call.
+
+A package fails at whichever end of the chain the partition did not reach.
+Naming the caller (§32) and naming the function that *asks* the policy (§36)
+are the same discipline applied to the two ends, and a package needs both
+questions asked before it is written.
+
+**The orchestrator overruled one closable verdict, and the lead set it up to be
+overruled.** `lead-mem6` closed *"allow memory extraction to run after task
+completion"*, cited practice §33 as precedent, stated the counter-argument, and
+noted that if the strict reading won then §33's own earlier decision needed
+re-examining by the same standard. That is the ideal shape for a deferred
+judgement. The answer sharpened §33 into a criterion that survives both cases:
+**does the capability complete and produce its result in the shipped binary?**
+Manual extraction does — memories are stored. The task-completion trigger does
+not — it fires every time and dead-ends. Verified by running the binary, twice,
+once by each of us.
+
+**Cost of the orchestrator's own mistake, measured.** One relay mid-batch
+(§39) was wrong on the merits and ended the lead's turn; it sat idle with three
+shells open until a watch caught it. Recovery cost one nudge and about ten
+minutes. The lead's refusal was the more valuable artefact — it produced the
+`seq`-renumbering hazard that nobody had noticed and a fully specified
+migration 7.
+
+### What the next batch should be, in order
+
+1. **The disposable wiring** — one line in `main.rs` swapping `NoExtractionModel`
+   for a `DisposableRouting`-backed model. Closes `lead-route`'s 530/531/532/540.
+   The seam is built: `report_hook_with` takes `impl Fn() -> Box<dyn ExtractionModel>`.
+2. **Migration 7** — own `database.rs` + `events/mod.rs` + `events/log.rs`
+   together; rebuild `lifecycle_events` with `gateway_backend_changed`; prove
+   `seq` survives with a test storing a memory's event range across the rebuild.
+   Closes nothing by itself and unblocks `lead-route`'s 515 durably.
+3. **The Linux pty flake** (§34/§40) — a bounded wait on the observation, the
+   same treatment `integrations/version.rs`'s ETXTBSY race got. It is a standing
+   debt on the only gate this project has.

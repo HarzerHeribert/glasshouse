@@ -49,10 +49,11 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// Version 1 is the empty-but-initialized schema plus the `project_metadata`
 /// table. Version 2 adds `sessions`. Version 3 adds `sessions.launch_profile`
 /// and `sessions.backend_resource`. Version 4 adds `memories` and its FTS5
-/// index. Version 5 adds `lifecycle_events` and `checkpoints`. Later
-/// migrations are appended to [`MIGRATIONS`], and this constant moves with
-/// them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 5;
+/// index. Version 5 adds `lifecycle_events` and `checkpoints`. Version 6 adds
+/// event provenance and decision provenance to `memories`, and rebuilds the
+/// FTS5 index over the rationale. Later migrations are appended to
+/// [`MIGRATIONS`], and this constant moves with them.
+const SUPPORTED_SCHEMA_VERSION: i64 = 6;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -517,6 +518,165 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
     )
     BEGIN
         SELECT RAISE(ABORT, 'checkpoint belongs to a different project');
+    END;
+    ",
+    // 6: where a memory came from, and why the decision in it was made.
+    //
+    // # Two integers, because extraction reads a slice
+    //
+    // Phase 21's *"store the originating session and event references so
+    // extracted memory retains provenance"*. `source_session_id` has been
+    // here since migration 4; what was missing is *which part* of that
+    // session. Extraction is fed a bounded chunk of the project event log,
+    // so the honest reference is the range of `lifecycle_events.seq` that
+    // chunk covered — a memory is rarely traceable to one event, and naming
+    // a single one would be a precision the producer does not have.
+    //
+    // Nullable, and both-or-neither: a hand-written memory with **no** event
+    // range is a different fact from one with an empty range, and the two
+    // triggers below are what stop a half-filled range being stored at all.
+    // The same argument migration 5 makes for `observed_harness` /
+    // `observed_event`.
+    //
+    // # Phase 21B, one column per line of the map
+    //
+    // `rationale` is the one that already had a home: until this migration
+    // the extractor folded it into `body` behind a marker so that it stayed
+    // in the FTS index. That fold is removed with this migration and the
+    // index is rebuilt over the new column, so nothing that used to be
+    // findable stops being findable — see the rebuild below.
+    //
+    // The eight beside it are the assumptions and references Phase 21B asks
+    // to be preserved so that a remembered decision can be revalidated later
+    // rather than obeyed forever. They are deliberately **flat, concise, and
+    // nullable** rather than a related table: each holds one sentence, NULL
+    // means "not known" and never "none", and a decision that recorded no
+    // security assumption is thereby distinguishable from one that recorded
+    // that security was not a factor.
+    //
+    // `project_phase` is the only one of them drawn from a fixed set, so it
+    // is the only one with a `CHECK`; SQLite accepts a column `CHECK` in
+    // `ADD COLUMN` as long as it admits NULL, which every existing row is.
+    //
+    // # What these columns can hold, asked one at a time
+    //
+    // `rationale`, `problem`, the five assumption columns, `evidence` and
+    // `source_excerpt` are **free text, and free text can hold a
+    // credential** — exactly like `subject` and `body`, and unlike the
+    // nineteen fixed-vocabulary columns migration 5 added.
+    // `source_excerpt` is the sharpest of them, because it is verbatim
+    // session text rather than a model's paraphrase. Nothing in this schema
+    // can stop that, and this migration does not pretend otherwise: the
+    // control is on the producer side, where `memory::extract::chunk`
+    // scrubs everything on the way in and `memory::extract::schema::judge`
+    // screens each emitted element **whole, before any field of it is
+    // read** — which is what makes coverage of a new field automatic rather
+    // than a rule someone has to remember. See
+    // `the_project_database_schema_has_nowhere_to_put_a_credential`, which
+    // records the same judgement for migrations 4 and 5.
+    //
+    // # The FTS5 index is rebuilt, not altered
+    //
+    // `memories_fts` is an external-content index over `subject` and `body`.
+    // There is no `ALTER` that adds a column to an FTS5 table, so making the
+    // rationale searchable means dropping the index and its three triggers,
+    // recreating both over three columns, and asking FTS5 to rebuild itself
+    // from `memories`. The shadow tables go with the `DROP TABLE`.
+    //
+    // **Only `rationale` joins the index.** The other eight provenance
+    // columns are attributes of a decision somebody has already found, not
+    // the words they would search for, and every indexed column costs index
+    // size and shifts BM25's weighting of the ones that matter. The
+    // rationale is different only because it was inside `body` yesterday:
+    // indexing it keeps every search that worked before this migration
+    // working after it.
+    //
+    // **Existing folded bodies are left alone.** A body ending in the old
+    // marker is still a correct memory and is still indexed; splitting it
+    // automatically would mean guessing which occurrence of the marker was
+    // the fold, in text a person may have edited, for rows this project has
+    // never shipped a way to create automatically. The fold is gone from
+    // the producer, not retroactively from the store.
+    "
+    ALTER TABLE memories ADD COLUMN source_event_first INTEGER;
+    ALTER TABLE memories ADD COLUMN source_event_last  INTEGER;
+
+    ALTER TABLE memories ADD COLUMN rationale                 TEXT;
+    ALTER TABLE memories ADD COLUMN project_phase             TEXT
+        CHECK (project_phase IS NULL OR project_phase IN
+               ('prototype', 'alpha', 'beta', 'production', 'migration'));
+    ALTER TABLE memories ADD COLUMN problem                   TEXT;
+    ALTER TABLE memories ADD COLUMN assumptions               TEXT;
+    ALTER TABLE memories ADD COLUMN scale_assumptions         TEXT;
+    ALTER TABLE memories ADD COLUMN security_assumptions      TEXT;
+    ALTER TABLE memories ADD COLUMN compatibility_assumptions TEXT;
+    ALTER TABLE memories ADD COLUMN operational_assumptions   TEXT;
+    ALTER TABLE memories ADD COLUMN evidence                  TEXT;
+    ALTER TABLE memories ADD COLUMN source_excerpt            TEXT;
+
+    -- Everything one session contributed, in the order it was learned.
+    -- Partial, because a memory nobody extracted has no session to group by.
+    CREATE INDEX memories_by_source_session
+        ON memories (source_session_id, source_event_first)
+        WHERE source_session_id IS NOT NULL;
+
+    CREATE TRIGGER memories_reject_broken_event_range_insert
+    BEFORE INSERT ON memories
+    FOR EACH ROW
+    WHEN (NEW.source_event_first IS NULL) <> (NEW.source_event_last IS NULL)
+      OR (NEW.source_event_first IS NOT NULL
+          AND NEW.source_event_first > NEW.source_event_last)
+    BEGIN
+        SELECT RAISE(ABORT, 'a memory names both ends of its source event range or neither');
+    END;
+
+    CREATE TRIGGER memories_reject_broken_event_range_update
+    BEFORE UPDATE OF source_event_first, source_event_last ON memories
+    FOR EACH ROW
+    WHEN (NEW.source_event_first IS NULL) <> (NEW.source_event_last IS NULL)
+      OR (NEW.source_event_first IS NOT NULL
+          AND NEW.source_event_first > NEW.source_event_last)
+    BEGIN
+        SELECT RAISE(ABORT, 'a memory names both ends of its source event range or neither');
+    END;
+
+    DROP TRIGGER memories_fts_after_insert;
+    DROP TRIGGER memories_fts_after_delete;
+    DROP TRIGGER memories_fts_after_update;
+    DROP TABLE memories_fts;
+
+    CREATE VIRTUAL TABLE memories_fts USING fts5(
+        subject,
+        body,
+        rationale,
+        content = 'memories',
+        content_rowid = 'rowid',
+        tokenize = 'unicode61 remove_diacritics 2'
+    );
+
+    INSERT INTO memories_fts (memories_fts) VALUES ('rebuild');
+
+    CREATE TRIGGER memories_fts_after_insert
+    AFTER INSERT ON memories
+    BEGIN
+        INSERT INTO memories_fts (rowid, subject, body, rationale)
+        VALUES (NEW.rowid, NEW.subject, NEW.body, NEW.rationale);
+    END;
+
+    CREATE TRIGGER memories_fts_after_delete
+    AFTER DELETE ON memories
+    BEGIN
+        INSERT INTO memories_fts (memories_fts, rowid, subject, body, rationale)
+        VALUES ('delete', OLD.rowid, OLD.subject, OLD.body, OLD.rationale);
+    END;
+
+    CREATE TRIGGER memories_fts_after_update
+    AFTER UPDATE ON memories
+    BEGIN
+        INSERT INTO memories_fts (memories_fts, rowid, subject, body, rationale)
+        VALUES ('delete', OLD.rowid, OLD.subject, OLD.body, OLD.rationale);
+        INSERT INTO memories_fts (rowid, subject, body, rationale)
+        VALUES (NEW.rowid, NEW.subject, NEW.body, NEW.rationale);
     END;
     ",
 ];
@@ -1001,6 +1161,47 @@ mod tests {
             row.get(0)
         })
         .unwrap()
+    }
+
+    /// A phase the type can produce and the schema will not accept is a
+    /// constraint violation at the moment a memory is stored, on whichever
+    /// thread happens to be extracting. Migration 6's `CHECK` is the
+    /// authority, so this reads the list **out of the migration itself**
+    /// rather than out of a second constant beside it: a constant can drift
+    /// from the SQL, and then the pin proves only that two Rust literals
+    /// still agree.
+    #[test]
+    fn every_project_phase_the_type_supports_is_one_the_schema_accepts() {
+        use crate::memory::ProjectPhase;
+
+        let migration = MIGRATIONS[5];
+        let marker = "project_phase IN";
+        let open = migration
+            .find(marker)
+            .expect("migration 6 checks the phase")
+            + marker.len();
+        let list = &migration[open..];
+        let list = &list[..list.find(')').expect("the CHECK's list is parenthesised")];
+        let accepted: Vec<String> = list
+            .split(',')
+            .map(|value| value.trim().trim_matches(['(', ' ', '\n', '\'']).to_owned())
+            .filter(|value| !value.is_empty())
+            .collect();
+
+        let declared: Vec<String> = ProjectPhase::ALL
+            .iter()
+            .map(|phase| phase.as_str().to_owned())
+            .collect();
+
+        assert_eq!(
+            declared, accepted,
+            "a project phase was added or renamed without migration 6's CHECK"
+        );
+
+        // And the parse has to be able to fail, or it asserts nothing: the
+        // map's own list is five long, so a `CHECK` this failed to read
+        // would show up here as an empty vector rather than as a pass.
+        assert_eq!(accepted.len(), 5, "the CHECK's list was not read correctly");
     }
 
     #[test]
