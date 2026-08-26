@@ -40,6 +40,8 @@ use crate::config::{self, EffectiveConfig, UserConfig};
 use crate::integrations::{Discovery, IntegrationId, IntegrationKind, IntegrationStatus};
 use crate::launch::HarnessLaunch;
 use crate::onboarding;
+use crate::provider::cache::{ModelCache, ModelCatalogue};
+use crate::provider::discovery::{self, ModelFetch, ProbeRequest};
 use crate::pty::TerminalSize;
 use crate::secret;
 use crate::secret::SecretStore as _;
@@ -49,8 +51,9 @@ use crate::session::{
 use crate::tui::{AppEvent, DEFAULT_TICK, Event, EventSource, Screen};
 
 pub use state::{
-    Action, HarnessRow, IntegrationRow, Mode, Overlay, ProfileRow, ProfileSettingsEdit,
-    ProviderRow, ProviderSettingsEdit, SettingsEdit, ShellState, ViewportGrid,
+    Action, HarnessRow, IntegrationRow, Mode, ModelRefresh, Overlay, ProbeKind, ProfileRow,
+    ProfileSettingsEdit, ProviderNotice, ProviderProbeIntent, ProviderProbeResult, ProviderRow,
+    ProviderSettingsEdit, ReachabilityCheck, SettingsEdit, ShellState, ViewportGrid,
 };
 
 /// Open the shell and run it until the user leaves.
@@ -86,6 +89,10 @@ pub fn run(runtime: &Runtime) -> Result<()> {
     // user's terminal untouched rather than flashing an alternate screen.
     let mut screen = Screen::acquire()?;
     let events = EventSource::new(DEFAULT_TICK);
+    // Where a provider probe's answer comes back. The request itself is made
+    // on a thread of its own — see `spawn_provider_probe` — and this is the
+    // seam that keeps it off the thread drawing the terminal.
+    let (probe_results, probe_inbox) = std::sync::mpsc::channel::<ProviderProbeResult>();
 
     screen.draw(|frame| view::render(&state, frame))?;
 
@@ -187,6 +194,23 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     Action::StoreProviderCredential => {
                         store_provider_credential(&mut state);
                     }
+                    Action::RunProviderProbe => {
+                        // `ProbeTimeouts::default()` and nothing else. The
+                        // parameter exists so a test can bound a hanging
+                        // endpoint in under a second instead of waiting out
+                        // `RESPONSE_TIMEOUT`; the values production uses are
+                        // asserted by `provider::discovery`'s own
+                        // `the_default_timeouts_are_the_named_constants_and_none_is_unset`,
+                        // and that this call site passes the default is
+                        // asserted by `the_run_loop_probes_with_the_default_timeouts`.
+                        spawn_provider_probe(
+                            runtime,
+                            &mut state,
+                            &probe_results,
+                            &events.sender(),
+                            discovery::ProbeTimeouts::default(),
+                        );
+                    }
                     Action::DeleteProviderCredential => {
                         delete_provider_credential(&mut state);
                     }
@@ -280,6 +304,20 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     }
                 }
 
+                // A probe's answer normally arrives with its own wake-up —
+                // the worker sends `AppEvent::Redraw` — but it is drained
+                // here too, so a result can never be stranded by a wake-up
+                // that raced a tick.
+                if drain_provider_probes(&probe_inbox, &mut state) {
+                    redraw = true;
+                }
+                // A request is outstanding, so keep repainting. Without this
+                // the in-flight line would be drawn once and then sit there
+                // looking exactly like the hang it exists to rule out.
+                if state.provider_probe_in_flight() {
+                    redraw = true;
+                }
+
                 let grid = state
                     .active_session()
                     .and_then(|record| live.get(&record.id))
@@ -299,7 +337,8 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                 // Something outside the terminal changed. Re-read the records
                 // rather than trusting the sender to describe what moved; the
                 // list is small and the alternative is a second source of truth.
-                if state.refresh(sessions.store().list()?) == Action::Redraw {
+                let probed = drain_provider_probes(&probe_inbox, &mut state);
+                if state.refresh(sessions.store().list()?) == Action::Redraw || probed {
                     screen.draw(|frame| view::render(&state, frame))?;
                 }
             }
@@ -532,6 +571,13 @@ type SettingsRows = (
 /// module keeps free of it by design.
 fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
     let discovery = Discovery::run(runtime.project());
+    // **Phase 9D line 3, and the whole of it.** Opening Settings reads the
+    // model catalogue off disk. It does not fetch, it does not check an
+    // expiry, and it does not fall back to the network on a miss — a provider
+    // with no cache simply shows none until someone presses `m`. The type
+    // that does this cannot make a request at all, which is a stronger
+    // guarantee than remembering not to.
+    let model_cache = ModelCache::new(runtime.paths());
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
     let effective = EffectiveConfig::new(&user, project.as_ref());
@@ -580,11 +626,9 @@ fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
                     .map(|cfg| (cfg, config::Layer::User))
             });
         if let Some((provider_config, layer)) = found {
-            providers.push(ProviderRow {
-                name,
-                config: provider_config.clone(),
-                layer,
-            });
+            let models = model_cache.load(&name);
+            providers
+                .push(ProviderRow::new(name, provider_config.clone(), layer).with_models(models));
         }
     }
 
@@ -693,6 +737,187 @@ fn store_provider_credential(state: &mut ShellState) {
             state.set_status(format!("could not store the credential: {err}"));
         }
     }
+}
+
+/// Make the provider request the Settings overlay just planned, **on a
+/// thread of its own**.
+///
+/// # This is the whole point of the batch
+///
+/// `ureq` is a blocking client. Calling it from here — the thread that reads
+/// keys and draws frames — would stop both for as long as the provider took
+/// to answer, which for a wedged endpoint is until
+/// [`discovery::TOTAL_TIMEOUT`]. A terminal that has stopped repainting and
+/// stopped accepting keys is a hung terminal from the user's side, and the
+/// fact that it would have come back in twenty seconds is invisible while it
+/// is happening. Phase 9E shipped exactly this class of bug once already, and
+/// it was found by running the binary rather than by any test.
+///
+/// So the request goes to a worker thread, which:
+///
+/// 1. resolves the credential — the first reference in the intent that
+///    answers — immediately before the request and nowhere else;
+/// 2. makes exactly one request, bounded by
+///    [`discovery::ProbeTimeouts::default`];
+/// 3. sends the outcome back down `results`;
+/// 4. and nudges the event loop, so the answer is drawn the moment it lands
+///    rather than at the next tick.
+///
+/// The thread is deliberately not joined and not tracked. It is bounded by
+/// its own timeouts, it holds nothing the shell needs back, and a user who
+/// quits while a probe is outstanding should not wait for a provider to
+/// answer before their terminal is returned to them.
+fn spawn_provider_probe(
+    runtime: &Runtime,
+    state: &mut ShellState,
+    results: &std::sync::mpsc::Sender<ProviderProbeResult>,
+    wake: &std::sync::mpsc::Sender<AppEvent>,
+    timeouts: discovery::ProbeTimeouts,
+) {
+    let Some(intent) = state.take_provider_probe_intent() else {
+        return;
+    };
+
+    let cache = ModelCache::new(runtime.paths());
+    let results = results.clone();
+    let wake = wake.clone();
+
+    std::thread::Builder::new()
+        .name(format!("glasshouse-probe-{}", intent.provider))
+        .spawn(move || {
+            // Resolved here and not in `state`: this is the last possible
+            // moment before the value is needed, it happens off the drawing
+            // thread, and the `Secret` it produces lives only as long as this
+            // closure. The store a launch would use, so a key in the Keychain
+            // is a key this probe can send.
+            let store = secret::native::PreferNativeSecretStore::detect();
+            let credential = intent
+                .secret_refs
+                .iter()
+                .find_map(|reference| store.resolve(reference));
+
+            let request = ProbeRequest::new(
+                intent.provider.clone(),
+                intent.protocol,
+                intent.base_url.clone(),
+                intent.target,
+                intent.headers.clone(),
+                credential,
+            );
+            let result = run_provider_probe(&intent, &request, &cache, timeouts);
+
+            // A send failure means the shell has already gone. Nothing to
+            // report to and nothing to clean up — the answer is simply
+            // dropped, which is the correct outcome for a question nobody is
+            // waiting on any more.
+            if results.send(result).is_ok() {
+                let _ = wake.send(AppEvent::Redraw);
+            }
+        })
+        .map_or_else(
+            |err| {
+                // A thread that will not start is reported rather than
+                // silently retried on this one, which is the failure mode
+                // this function exists to prevent.
+                tracing::warn!(error = %err, "could not start a provider probe");
+                state.set_status(format!("could not start the provider request: {err}"));
+            },
+            |_handle| (),
+        );
+}
+
+/// One probe, start to finish, with nothing that touches the terminal.
+///
+/// Split out from the thread body so it can be called directly by a test,
+/// which is what makes the timeout and the cache-write assertions possible
+/// without a `Screen`.
+fn run_provider_probe(
+    intent: &ProviderProbeIntent,
+    request: &ProbeRequest,
+    cache: &ModelCache,
+    timeouts: discovery::ProbeTimeouts,
+) -> ProviderProbeResult {
+    let endpoint = request.url();
+    match intent.kind {
+        ProbeKind::Connectivity => ProviderProbeResult {
+            provider: intent.provider.clone(),
+            notice: ProviderNotice::Reachability(ReachabilityCheck::Answered {
+                protocol: intent.protocol.slug(),
+                base_url: intent.base_url.clone(),
+                endpoint,
+                outcome: discovery::connectivity(request, timeouts),
+            }),
+            catalogue: None,
+        },
+        ProbeKind::ModelRefresh => match discovery::model_catalogue(request, timeouts) {
+            ModelFetch::Catalogue(models) => {
+                let catalogue = ModelCatalogue::new(
+                    intent.provider.clone(),
+                    intent.base_url.clone(),
+                    endpoint.clone(),
+                    crate::provider::cache::now_unix_seconds(),
+                    models,
+                );
+                // Written before it is reported, so a catalogue the user is
+                // told about is one that survives a restart. A write failure
+                // is reported as a failed refresh rather than swallowed: a
+                // list that vanishes on the next start would be worse than
+                // one that never appeared.
+                match cache.store(&catalogue) {
+                    Ok(_) => ProviderProbeResult {
+                        provider: intent.provider.clone(),
+                        notice: ProviderNotice::Models(ModelRefresh::Refreshed {
+                            count: catalogue.len(),
+                            fetched_at: catalogue.fetched_at(),
+                            endpoint,
+                        }),
+                        catalogue: Some(catalogue),
+                    },
+                    Err(err) => ProviderProbeResult {
+                        provider: intent.provider.clone(),
+                        notice: ProviderNotice::Models(ModelRefresh::Failed(format!(
+                            "fetched {} models but could not cache them: {err}",
+                            catalogue.len()
+                        ))),
+                        catalogue: None,
+                    },
+                }
+            }
+            ModelFetch::NotACatalogue { status, reason } => ProviderProbeResult {
+                provider: intent.provider.clone(),
+                notice: ProviderNotice::Models(ModelRefresh::Failed(format!(
+                    "{endpoint} answered {status}, but {reason}"
+                ))),
+                catalogue: None,
+            },
+            ModelFetch::Probe(outcome) => ProviderProbeResult {
+                provider: intent.provider.clone(),
+                notice: ProviderNotice::Models(ModelRefresh::Failed(format!(
+                    "{endpoint}: {}",
+                    view::describe_probe_outcome(&outcome)
+                ))),
+                catalogue: None,
+            },
+        },
+    }
+}
+
+/// Hand every finished probe to the overlay. Returns whether anything
+/// changed and a frame is owed.
+fn drain_provider_probes(
+    inbox: &std::sync::mpsc::Receiver<ProviderProbeResult>,
+    state: &mut ShellState,
+) -> bool {
+    let mut redraw = false;
+    // Every result waiting, not just the first: two providers can have
+    // requests outstanding at once, and a loop that took one per tick would
+    // make the second look slower than it was.
+    while let Ok(result) = inbox.try_recv() {
+        if state.apply_provider_probe_result(result) == Action::Redraw {
+            redraw = true;
+        }
+    }
+    redraw
 }
 
 /// Delete the selected provider's stored credential — line 3.
@@ -1210,6 +1435,603 @@ mod settings_persistence_tests {
     /// `build_settings` must read a disabled provider or profile back
     /// without panicking or dropping the disabled state — the same rows the
     /// Settings overlay renders.
+    // --- Phase 9D: the network never touches the drawing thread ----------
+    use crate::provider::cache::{ModelCatalogue, ModelEntry};
+    use crate::provider::discovery::{ProbeTarget, ProbeTimeouts};
+    use crate::provider::fixture::FixtureProvider;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    /// Short enough that a hanging endpoint is bounded inside a test run,
+    /// and far longer than a loopback round trip.
+    fn quick_timeouts() -> ProbeTimeouts {
+        ProbeTimeouts {
+            connect: std::time::Duration::from_millis(500),
+            response: std::time::Duration::from_millis(400),
+            total: std::time::Duration::from_millis(900),
+        }
+    }
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// A shell with Settings open on one provider pointed at `base_url`,
+    /// with a credential in the environment so the preconditions pass.
+    fn settings_open_on(base_url: &str, var: &str) -> ShellState {
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_base_url(Some(base_url.to_owned()));
+        config.set_credential_env(vec![var.to_owned()]);
+        let rows = vec![ProviderRow::new("router", config, ConfigLayer::User)];
+
+        let mut state = ShellState::new("glasshouse", "/work", crate::VERSION, Vec::new());
+        state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());
+        // Tab to the Providers section: Harnesses, Integrations, Providers.
+        state.handle_key(press(KeyCode::Tab));
+        state.handle_key(press(KeyCode::Tab));
+        state
+    }
+
+    /// **Acceptance test 3, through the production spawn path, and the
+    /// single most important test in this batch.**
+    ///
+    /// The fixture accepts the connection and then never writes a byte and
+    /// never closes — a wedged provider, not a refused one. A refused
+    /// connection is the easy case and proves almost nothing: it comes back
+    /// in microseconds whether or not anyone remembered a timeout.
+    ///
+    /// Two things are asserted, and both matter:
+    ///
+    /// 1. **The interface stayed alive.** While the request is outstanding
+    ///    the main thread — the one that in production reads keys and draws
+    ///    frames — keeps handling keystrokes and rendering, and it does so
+    ///    many times. Under the bug this batch exists to prevent, the very
+    ///    first of those would have blocked until the timeout expired.
+    /// 2. **The request came back bounded**, reported as a timeout rather
+    ///    than as an unreachable host, because "your network is slow" and
+    ///    "your URL is wrong" are different problems.
+    #[test]
+    fn a_provider_that_accepts_and_never_answers_never_blocks_the_drawing_thread() {
+        const VAR: &str = "GLASSHOUSE_SHELL_TEST_ONLY_HANGING_PROBE_VAR";
+        // SAFETY: `VAR` is unique to this test and removed again below.
+        unsafe {
+            std::env::set_var(VAR, "sk-fabricated-test-value-not-a-real-credential");
+        }
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let fixture = FixtureProvider::hanging();
+        let mut state = settings_open_on(&fixture.base_url(), VAR);
+
+        assert_eq!(
+            state.handle_key(press(KeyCode::Char('t'))),
+            Action::RunProviderProbe
+        );
+
+        let (results, inbox) = std::sync::mpsc::channel();
+        let (wake, wake_inbox) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
+        spawn_provider_probe(&runtime, &mut state, &results, &wake, quick_timeouts());
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+
+        // The loop the run loop would be running. Every iteration is work
+        // the drawing thread does *while the request is outstanding*; under
+        // the bug, iteration one would not have returned.
+        let mut frames = 0usize;
+        let mut answer = None;
+        while started.elapsed() < std::time::Duration::from_secs(5) {
+            assert!(
+                state.provider_probe_in_flight() || answer.is_some(),
+                "a request that has not come back must still be reported as in flight"
+            );
+            // A real keystroke, answered while the socket is open.
+            state.handle_key(press(if frames.is_multiple_of(2) {
+                KeyCode::Down
+            } else {
+                KeyCode::Up
+            }));
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))
+                .expect("a test terminal");
+            terminal
+                .draw(|frame| view::render(&state, frame))
+                .expect("a frame is drawn while the request is outstanding");
+            frames += 1;
+
+            if let Ok(result) = inbox.try_recv() {
+                answer = Some(result);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let elapsed = started.elapsed();
+
+        let answer = answer.expect("the probe must come back, bounded by its own timeout");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "the probe must be bounded by its timeout, not by the peer; took {elapsed:?}"
+        );
+        assert!(
+            frames > 5,
+            "the interface must have kept drawing while the request was outstanding; \
+             it managed {frames} frames in {elapsed:?}"
+        );
+        assert_eq!(
+            fixture.connections(),
+            1,
+            "the probe must really have connected — a refused connection would prove \
+             nothing about a stall"
+        );
+
+        match &answer.notice {
+            ProviderNotice::Reachability(ReachabilityCheck::Answered { outcome, .. }) => assert!(
+                matches!(
+                    outcome,
+                    crate::provider::discovery::ProbeOutcome::TimedOut { .. }
+                ),
+                "a stall must be reported as a timeout, not as an unreachable host: {outcome:?}"
+            ),
+            other => panic!("expected a connectivity answer, got {other:?}"),
+        }
+
+        // And the answer reaches the state, clearing the in-flight marker.
+        assert_eq!(state.apply_provider_probe_result(answer), Action::Redraw);
+        assert!(!state.provider_probe_in_flight());
+
+        // The worker nudged the event loop, so the answer is drawn when it
+        // lands rather than at the next tick.
+        assert!(
+            wake_inbox.try_recv().is_ok(),
+            "a finished probe must wake the interface"
+        );
+    }
+
+    /// **Acceptance test 5.** Starting with a cached catalogue issues no
+    /// network request at all.
+    ///
+    /// Asserted on the fixture seeing **zero connections**, not on elapsed
+    /// time. A timing assertion would pass on a fast machine no matter what
+    /// the code did; a connection counter cannot.
+    #[test]
+    fn opening_settings_with_a_cached_catalogue_opens_no_connection_at_all() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let fixture = FixtureProvider::answering(
+            "HTTP/1.1 200 OK",
+            "",
+            r#"{"data":[{"id":"should/never/be/fetched"}]}"#,
+        );
+
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_base_url(Some(fixture.base_url()));
+        save_user_settings(
+            &runtime,
+            &[],
+            &[ProviderSettingsEdit {
+                name: "router".to_owned(),
+                upsert: Some(config),
+            }],
+            &[],
+        )
+        .expect("the provider is configured");
+
+        // A catalogue already on disk, as a previous run's refresh would
+        // have left it.
+        let cache = ModelCache::new(runtime.paths());
+        cache
+            .store(&ModelCatalogue::new(
+                "router",
+                fixture.base_url(),
+                format!("{}/models", fixture.base_url()),
+                1_787_336_476,
+                vec![ModelEntry::new("cached/one"), ModelEntry::new("cached/two")],
+            ))
+            .expect("the cache is written");
+
+        let (harnesses, integrations, providers, profiles) =
+            build_settings(&runtime).expect("settings open");
+
+        assert_eq!(
+            fixture.connections(),
+            0,
+            "opening Settings made a network request; Phase 9D line 3 exists to stop \
+             Glasshouse querying a remote catalogue on every start"
+        );
+
+        let row = providers
+            .iter()
+            .find(|row| row.name == "router")
+            .expect("the row");
+        let models = row.models.as_ref().expect("the cached catalogue is loaded");
+        assert_eq!(models.len(), 2);
+        assert_eq!(models.fetched_at(), 1_787_336_476);
+        assert_eq!(models.models()[0].id(), "cached/one");
+        assert!(
+            !models.models().iter().any(|m| m.id().contains("never")),
+            "the list must be the cached one, not one the fixture served"
+        );
+
+        // Rendering it opens nothing either — a renderer that fetched
+        // lazily would be the same bug wearing a different hat.
+        let mut state = ShellState::new("glasshouse", "/work", crate::VERSION, Vec::new());
+        state.open_settings(harnesses, integrations, providers, profiles);
+        state.handle_key(press(KeyCode::Tab));
+        state.handle_key(press(KeyCode::Tab));
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(200, 40))
+            .expect("a test terminal");
+        terminal
+            .draw(|frame| view::render(&state, frame))
+            .expect("a frame");
+        assert_eq!(
+            fixture.connections(),
+            0,
+            "drawing a cached model list must not fetch one"
+        );
+    }
+
+    /// A provider with no cache is simply a provider with no models. It does
+    /// **not** become a fetch — the counterpart to the test above, so "zero
+    /// connections" cannot be passing because nothing was configured.
+    #[test]
+    fn a_provider_with_no_cached_catalogue_fetches_nothing_on_open_either() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let fixture = FixtureProvider::answering("HTTP/1.1 200 OK", "", r#"{"data":[]}"#);
+
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_base_url(Some(fixture.base_url()));
+        save_user_settings(
+            &runtime,
+            &[],
+            &[ProviderSettingsEdit {
+                name: "router".to_owned(),
+                upsert: Some(config),
+            }],
+            &[],
+        )
+        .expect("configured");
+
+        let (_, _, providers, _) = build_settings(&runtime).expect("settings open");
+        assert_eq!(fixture.connections(), 0);
+        assert!(
+            providers[0].models.is_none(),
+            "no cache means no models, never an implicit fetch"
+        );
+    }
+
+    /// **Acceptance test 4, end to end.** A manual refresh fetches, replaces
+    /// the cache on disk, moves the timestamp, and survives a reopen — which
+    /// is what "cached" has to mean.
+    #[test]
+    fn a_manual_refresh_writes_the_catalogue_to_disk_and_a_reopen_finds_it() {
+        const VAR: &str = "GLASSHOUSE_SHELL_TEST_ONLY_REFRESH_VAR";
+        // SAFETY: `VAR` is unique to this test and removed again below.
+        unsafe {
+            std::env::set_var(VAR, "sk-fabricated-test-value-not-a-real-credential");
+        }
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let fixture = FixtureProvider::answering(
+            "HTTP/1.1 200 OK",
+            "",
+            r#"{"data":[{"id":"vendor/a"},{"id":"vendor/b"},{"id":"vendor/c"}]}"#,
+        );
+
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_base_url(Some(fixture.base_url()));
+        config.set_credential_env(vec![VAR.to_owned()]);
+        save_user_settings(
+            &runtime,
+            &[],
+            &[ProviderSettingsEdit {
+                name: "router".to_owned(),
+                upsert: Some(config),
+            }],
+            &[],
+        )
+        .expect("configured");
+
+        // A stale catalogue, so this proves a replacement rather than a
+        // first write.
+        let cache = ModelCache::new(runtime.paths());
+        cache
+            .store(&ModelCatalogue::new(
+                "router",
+                fixture.base_url(),
+                format!("{}/models", fixture.base_url()),
+                1_000,
+                vec![ModelEntry::new("stale/one")],
+            ))
+            .expect("stale cache written");
+
+        let (harnesses, integrations, providers, profiles) =
+            build_settings(&runtime).expect("settings open");
+        let mut state = ShellState::new("glasshouse", "/work", crate::VERSION, Vec::new());
+        state.open_settings(harnesses, integrations, providers, profiles);
+        state.handle_key(press(KeyCode::Tab));
+        state.handle_key(press(KeyCode::Tab));
+
+        assert_eq!(
+            state.handle_key(press(KeyCode::Char('m'))),
+            Action::RunProviderProbe
+        );
+        let (results, inbox) = std::sync::mpsc::channel();
+        let (wake, _wake_inbox) = std::sync::mpsc::channel();
+        spawn_provider_probe(&runtime, &mut state, &results, &wake, quick_timeouts());
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+
+        let result = inbox
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the refresh must come back");
+        assert_eq!(fixture.requests().len(), 1, "exactly one request, no other");
+        assert_eq!(
+            fixture.requests()[0].target,
+            "/models",
+            "the model list, at the path the provider's own base URL names"
+        );
+
+        let fetched_at = match &result.notice {
+            ProviderNotice::Models(ModelRefresh::Refreshed {
+                count, fetched_at, ..
+            }) => {
+                assert_eq!(*count, 3);
+                *fetched_at
+            }
+            other => panic!("expected a refreshed catalogue, got {other:?}"),
+        };
+        assert!(
+            fetched_at > 1_000,
+            "the timestamp must move forward on a refresh, or a stale list looks fresh"
+        );
+        state.apply_provider_probe_result(result);
+
+        // On disk, and found by a completely fresh read — the thing that
+        // makes the next start silent.
+        let (_, _, reopened, _) = build_settings(&runtime).expect("settings reopen");
+        let models = reopened[0].models.as_ref().expect("a cached catalogue");
+        assert_eq!(models.len(), 3);
+        assert_eq!(models.fetched_at(), fetched_at);
+        assert!(
+            !models.models().iter().any(|m| m.id() == "stale/one"),
+            "a refresh replaces the cached list; it must never append to it"
+        );
+        assert_eq!(
+            fixture.requests().len(),
+            1,
+            "and reopening Settings must not have fetched again"
+        );
+    }
+
+    /// **Acceptance test 2, end to end.** A provider answering `401` is
+    /// reported as reachable-but-rejected.
+    #[test]
+    fn a_provider_answering_401_is_reported_as_reachable_but_rejected() {
+        const VAR: &str = "GLASSHOUSE_SHELL_TEST_ONLY_REJECTED_VAR";
+        // SAFETY: `VAR` is unique to this test and removed again below.
+        unsafe {
+            std::env::set_var(VAR, "sk-fabricated-test-value-not-a-real-credential");
+        }
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let fixture = FixtureProvider::answering(
+            "HTTP/1.1 401 Unauthorized",
+            "",
+            r#"{"error":{"message":"Authentication parameter not received in Header"}}"#,
+        );
+        let mut state = settings_open_on(&fixture.base_url(), VAR);
+        state.handle_key(press(KeyCode::Char('t')));
+
+        let (results, inbox) = std::sync::mpsc::channel();
+        let (wake, _wake_inbox) = std::sync::mpsc::channel();
+        spawn_provider_probe(&runtime, &mut state, &results, &wake, quick_timeouts());
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+
+        let result = inbox
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the probe comes back");
+        match &result.notice {
+            ProviderNotice::Reachability(ReachabilityCheck::Answered { outcome, .. }) => {
+                assert_eq!(
+                    outcome,
+                    &crate::provider::discovery::ProbeOutcome::Rejected { status: 401 }
+                );
+            }
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+        state.apply_provider_probe_result(result);
+
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(200, 40))
+            .expect("a test terminal");
+        terminal
+            .draw(|frame| view::render(&state, frame))
+            .expect("a frame");
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(
+            text.contains("reachable, but it did not accept the credential"),
+            "the user must be told which of the two problems they have: {text}"
+        );
+    }
+
+    /// The run loop probes with the production timeouts and nothing else.
+    ///
+    /// A source scan, in the same idiom as `secret`'s own. The parameter that
+    /// makes the tests above fast is also a parameter someone could quietly
+    /// widen at the one call site that matters, and that call site is not
+    /// otherwise reachable from a test without a real terminal.
+    #[test]
+    fn the_run_loop_probes_with_the_default_timeouts() {
+        let source = include_str!("mod.rs");
+        let production = source.split("#[cfg(test)]").next().expect("a source file");
+        let call = production
+            .find("spawn_provider_probe(\n")
+            .expect("the run loop calls spawn_provider_probe");
+        let window = &production[call..call + 400];
+        assert!(
+            window.contains("discovery::ProbeTimeouts::default()"),
+            "the run loop must pass the default timeouts, not values of its own: {window}"
+        );
+    }
+
+    /// A credential reaches the provider's `authorization` header and no
+    /// other surface the run loop touches — including the cache file it
+    /// writes, which is a new place on disk for one to end up.
+    ///
+    /// `!contains`, never `assert_eq!`, on the raw bytes.
+    #[test]
+    fn a_planted_credential_reaches_the_header_and_not_the_cache_file() {
+        const VAR: &str = "GLASSHOUSE_SHELL_TEST_ONLY_LEAK_VAR";
+        const VALUE: &str = "sk-planted-run-loop-credential-9d";
+        // SAFETY: `VAR` is unique to this test and removed again below.
+        unsafe {
+            std::env::set_var(VAR, VALUE);
+        }
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let fixture =
+            FixtureProvider::answering("HTTP/1.1 200 OK", "", r#"{"data":[{"id":"vendor/a"}]}"#);
+
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_base_url(Some(fixture.base_url()));
+        config.set_credential_env(vec![VAR.to_owned()]);
+        let rows = vec![ProviderRow::new("router", config, ConfigLayer::User)];
+        let mut state = ShellState::new("glasshouse", "/work", crate::VERSION, Vec::new());
+        state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());
+        state.handle_key(press(KeyCode::Tab));
+        state.handle_key(press(KeyCode::Tab));
+        state.handle_key(press(KeyCode::Char('m')));
+
+        let (results, inbox) = std::sync::mpsc::channel();
+        let (wake, _wake_inbox) = std::sync::mpsc::channel();
+        spawn_provider_probe(&runtime, &mut state, &results, &wake, quick_timeouts());
+        let result = inbox
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the refresh comes back");
+        // Removed only once the worker has finished with it: the credential
+        // is resolved on that thread, at the moment of use, so unsetting the
+        // variable any earlier is a race with the code under test rather
+        // than a tidy-up.
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+
+        // It really was sent — otherwise every `!contains` below would pass
+        // for the wrong reason.
+        let sent = fixture.requests();
+        assert_eq!(
+            sent[0].header("authorization"),
+            Some(format!("Bearer {VALUE}").as_str())
+        );
+
+        assert!(!format!("{result:?}").contains(VALUE), "a probe result");
+        state.apply_provider_probe_result(result);
+        assert!(
+            !format!("{:?}", state.settings().unwrap().providers()).contains(VALUE),
+            "a provider row"
+        );
+
+        // The cache file on disk, byte for byte.
+        let path = ModelCache::new(runtime.paths()).path_for("router");
+        let bytes = std::fs::read(&path).expect("the refresh wrote a cache file");
+        assert!(
+            !bytes.is_empty(),
+            "and it is not empty, so this checks something"
+        );
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains(VALUE),
+            "a credential reached the cache file at {}",
+            path.display()
+        );
+
+        // And the whole rendered screen.
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(400, 60))
+            .expect("a test terminal");
+        terminal
+            .draw(|frame| view::render(&state, frame))
+            .expect("a frame");
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(!text.contains(VALUE), "a credential was rendered on screen");
+    }
+
+    /// A probe whose target is the bare base URL appends no path.
+    ///
+    /// The `ollama` template's model list is `Unverified`, so a connectivity
+    /// test of it asks the base URL itself rather than guessing `/models` —
+    /// and the fixture is what proves no path was invented.
+    #[test]
+    fn a_provider_with_no_established_model_list_is_probed_at_its_base_url() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let fixture = FixtureProvider::answering("HTTP/1.1 200 OK", "", "ok");
+
+        let mut config = ProviderConfig::new("ollama");
+        config.set_base_url(Some(format!("{}/v1", fixture.base_url())));
+        let rows = vec![ProviderRow::new("local", config, ConfigLayer::User)];
+        let mut state = ShellState::new("glasshouse", "/work", crate::VERSION, Vec::new());
+        state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());
+        state.handle_key(press(KeyCode::Tab));
+        state.handle_key(press(KeyCode::Tab));
+        state.handle_key(press(KeyCode::Char('t')));
+
+        let (results, inbox) = std::sync::mpsc::channel();
+        let (wake, _wake_inbox) = std::sync::mpsc::channel();
+        spawn_provider_probe(&runtime, &mut state, &results, &wake, quick_timeouts());
+        inbox
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the probe comes back");
+
+        assert_eq!(
+            fixture.requests()[0].target,
+            "/v1",
+            "a provider with no established model list must be asked for its base URL, \
+             never a path nobody read from its documentation"
+        );
+    }
+
+    /// `ProbeTarget` is chosen from the provider's own declaration, and the
+    /// two templates that bracket the choice are asserted by name.
+    #[test]
+    fn the_probe_target_follows_whether_a_model_list_was_established() {
+        const VAR: &str = "GLASSHOUSE_SHELL_TEST_ONLY_TARGET_MATRIX_VAR";
+        // SAFETY: `VAR` is unique to this test and removed again below. It
+        // exists because the preconditions are checked before a target is
+        // chosen, so a template whose credential variable is unset would
+        // never reach the line under test.
+        unsafe {
+            std::env::set_var(VAR, "sk-fabricated-test-value-not-a-real-credential");
+        }
+        for (template, expected) in [
+            ("openrouter", ProbeTarget::ModelList),
+            ("litellm", ProbeTarget::ModelList),
+            ("ollama", ProbeTarget::BaseUrl),
+            ("nvidia", ProbeTarget::BaseUrl),
+        ] {
+            let mut config = ProviderConfig::new(template);
+            config.set_base_url(Some("http://127.0.0.1:1/v1".to_owned()));
+            config.set_credential_env(vec![VAR.to_owned()]);
+            let rows = vec![ProviderRow::new("p", config, ConfigLayer::User)];
+            let mut state = ShellState::new("glasshouse", "/work", crate::VERSION, Vec::new());
+            state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());
+            state.handle_key(press(KeyCode::Tab));
+            state.handle_key(press(KeyCode::Tab));
+            state.handle_key(press(KeyCode::Char('t')));
+            let intent = state
+                .take_provider_probe_intent()
+                .unwrap_or_else(|| panic!("{template} must plan a probe"));
+            assert_eq!(intent.target, expected, "for the {template} template");
+        }
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+    }
+
     #[test]
     fn build_settings_reflects_a_disabled_provider_and_profile() {
         let (_data, _workspace, runtime) = bootstrapped_runtime();

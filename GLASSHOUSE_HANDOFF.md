@@ -4,10 +4,22 @@ Last updated: 2026-08-26 (Europe/Berlin)
 
 ## Current capability / phase
 
-**Phase 9G, 2C, 9B and 9C are COMPLETE.** 9E
-eleven of thirteen; 2D six of nineteen; Phase 9 five of seven; 9F eleven of
-thirteen; 9D eleven of fourteen; 9A nineteen of twenty-six; 9C eleven of twelve;
-**249 checked boxes (19%).** Local suite **779 passing**.
+**Phase 9G, 2C, 9B, 9C and 9D are COMPLETE.** 9E eleven of thirteen; 2D six of
+nineteen; Phase 9 five of seven; 9F eleven of thirteen; 9A nineteen of
+twenty-six; **252 checked boxes (19%).** Local suite **865 passing**.
+
+**Phase 9D closed at fourteen of fourteen.** A provider connectivity test is a
+real bounded request now rather than a precondition check, a model list can be
+refreshed manually, and the catalogue is cached in the data directory with a
+timestamp so starting Glasshouse issues no request at all. Proven against the
+shipped binary in a real terminal: 417 models fetched live from OpenRouter, a
+refused host reported as refused, and **an endpoint that accepts and never
+answers bounded at the shipped ten seconds while the interface kept tracking
+keystrokes.**
+
+**One evidence promotion was withdrawn on review, and it is the finding worth
+carrying.** See the correction entry in the evidence ledger and practice §23:
+a control has to be run against the host it is being used to justify.
 
 The local gateway now serves **all three wire protocols** — Anthropic Messages,
 OpenAI Responses and OpenAI Chat — from one upstream holding one credential,
@@ -44,6 +56,65 @@ session came up and showed Codex's own trust prompt — and the end-to-end PTY
 test asserts the exact argv.
 
 ## Verified completed work
+
+### This session — a connectivity test that makes a request, and a promotion that had to come back off
+
+Phase 9D's last three lines, closing the phase at fourteen of fourteen. The
+2D batch had shipped an honest placeholder — a precondition check whose own
+screen text said "Glasshouse has no HTTP client" — and `ureq` arriving with the
+gateway made that sentence false. It is a real request now.
+
+**The hazard the packet existed to prevent did not happen, and was proved not
+to.** Three network calls were added to a settings screen; a blocking call on
+the drawing thread would have frozen the terminal, which is the class of bug
+Phase 9E shipped once already. `spawn_provider_probe` moves every request to
+its own thread, and the proof is not an argument: against a Python listener
+that accepts a connection and then never writes a byte, **three `Down` presses
+each moved the cursor while that socket was open**, and the probe came back at
+`no answer within 10004ms` — the shipped `RESPONSE_TIMEOUT`, not a test value.
+
+**Three timeouts, not one.** Connect (5 s) and response (10 s) bound the phases
+a stall is likely in; a 20-second global ceiling bounds the one nobody thinks
+of — a server that answers its head promptly and then dribbles the body forever
+satisfies the other two indefinitely.
+
+**The cache is in the data directory and cannot fetch.** `ModelCache::load`
+returns `Option` and **has no error type at all**: absent, truncated, wrong
+version or filed under another provider all mean "no cache hit, carry on". The
+module has no HTTP client, which is a stronger guarantee than remembering not
+to call one. Verified by restart: `fetched_at` and the file's mtime both
+unchanged at `1787731823` after a fresh process start.
+
+**A provider name is untrusted input reaching a file path.** `file_stem`
+slugifies to `[a-z0-9-]` and appends 16 hex characters of a SHA-256 of the
+original, so `my provider` and `my/provider` land in different files and
+neither can contain a separator or be `.` or `..`.
+
+**One of six evidence promotions was withdrawn.** The batch promoted six
+`model_list_endpoint` declarations from live probes; the orchestrator re-ran
+all six in under a minute. Five reproduced exactly. z.ai had answered `401`
+rather than `200` and was promoted on a control — *"a host that served nothing
+there would have answered 404"* — **cited from a probe against a different
+service**. Against z.ai every path under `/api/paas/v4/` answers `401`,
+invented ones included, and a nonexistent API version answers `200`. The `401`
+discriminates nothing, so the claim is back to `Unverified`. The base URL is
+untouched; only "a model list is served at `<base>/models`" is withdrawn, and
+establishing it needs one authenticated request.
+
+The user-visible consequence is a better answer, not a worse one: the z.ai row
+now reads `no model-discovery endpoint established for this provider` where it
+had said `none cached — press m to fetch` — an invitation to press a key that
+would have fetched a `401`.
+
+**Two defects the team lead found by running the binary**, both the shape this
+project's history predicts: a result line that read "reached … unreachable" in
+one sentence, and a row advertising a refresh key for a provider that cannot
+refresh. Both fixed with a test and a mutation each.
+
+**Thirteen mutations by the lead, all killed; three more by the orchestrator.**
+The orchestrator's second one is worth noting — it made the caller *join* the
+probe thread rather than running the probe inline as the lead's did, so the
+responsiveness guarantee is now proved two independent ways.
 
 ### This session — the macOS Keychain, and a hang that would have frozen the TUI
 
@@ -1100,6 +1171,27 @@ have required a magic clamp.
 
 ## Unresolved loose ends
 
+- **`DELIBERATELY_UNTEMPLATED` is empty, and stays.** The 9D worker asked
+  rather than deciding, which was right. The decision: **keep the mechanism.**
+  An absence has to stay assertable, and the next credential someone holds for
+  a service with no readable endpoint belongs there rather than in a guessed
+  template. RouterAI does **not** go back into it — it left the project at the
+  owner's instruction, which is a different decision from "no endpoint has been
+  read". The worker added a control case so the now-vacuous loop still proves
+  something; that is what makes an empty list honest rather than decorative.
+
+- **z.ai's model list needs one authenticated request to settle.** Its
+  unauthenticated `401` establishes nothing (see the ledger correction), so
+  `model_list_endpoint` is `Unverified`. The user holds a key; the condition
+  attached to it is free models only, and a `GET /models` costs no tokens. Do
+  it the next time that key is being used anyway rather than spending a round
+  trip on it alone.
+
+- **A catalogue count is a snapshot, not a fact about a service.** UnoRouter
+  answered `374` entries at 09:00 on 2026-08-26 and `369` an hour later. Every
+  citation names a date for this reason, and nothing downstream may treat a
+  count as stable.
+
 - **The PTY test harness duplicates a character at every wrap boundary, and
   that is not the product.** `pty_smoke.rs` reads the raw pseudo-terminal
   stream and removes escape sequences (`strip_terminal_sequences`); it does not
@@ -1434,147 +1526,147 @@ have required a magic clamp.
   `.agent-runtime/report-<TASK-ID>.md` — with manual visible pane polling and
   no automatic wake, exactly as the protocol prescribes until its safety tests
   exist.
-
 ## Where to go next
 
-**Phase 9A, and the next packet is already written.** Phase 8 line 9 and all of
-Phase 9 remain blocked (below), so Phase 9A is the first actionable work in map
-order, exactly as the previous checkpoint said.
+**Every batch that was blocked on file ownership has landed.** Phase 9D is
+closed, so the three lines that were waiting on an HTTP client are done and no
+worker is in flight. 1,015 mandatory lines remain unchecked, and the map's own
+structure says they partition: whole blocks sit in modules nothing else
+touches.
 
-The design is settled and recorded in `GLASSHOUSE_DESIGN_DECISIONS.md`. The
-shape:
+Three batches are ready, partitioned by the files they touch (practice §9):
 
-- **A profile is data; an overlay is its resolution.** `LaunchProfile` is inert
-  configuration; `resolve(profile, adapter, acknowledged)` produces a
-  `LaunchOverlay` of args and env that applies to exactly one child process.
-  `HarnessLaunch` already *is* that mechanism, so the overlay is handed to it
-  rather than a second launcher being invented.
-- **Resolution refuses rather than invents.** A mechanism the adapter does not
-  declare is an error, never a guessed environment-variable name.
-- **A default that falls back is not a request that is refused.** A profile
-  *explicitly* asking for automatic review from a harness that declares none is
-  refused; a profile that merely took the default resolves to no approval
-  argument at all — never a bypass. The asymmetry is the point: an explicit
-  request is a claim Glasshouse must not silently fail to honour, a default is
-  the absence of one.
-- **A bypass needs a recorded acknowledgement**, per harness, user layer only —
-  a repository must not pre-acknowledge a blanket bypass for whoever clones it.
-- **Only `BackendResource::Native` resolves today.** `DirectProvider` and
-  `GlasshouseGateway` are representable and refused with a diagnostic naming
-  the phase that supplies them, because providers and secrets are 9C/9D/9E.
-- **The Native profile is implied, never stored**, so adding gateway profiles
-  can never remove it and `glasshouse launch` with no profile stays the default
-  path rather than a special case beside it.
+1. **Phase 4's last three lines — `send_text`, `interrupt`, headless
+   presentation.** This is the oldest unchecked mandatory work in map order
+   after the blocked lines, and it is **red risk**: PTY lifecycle, signals and
+   job control are explicitly the Opus specialist's, never Sonnet's. It owns
+   `session/runtime.rs`, `session/mod.rs` and all of `shell/`. Note the
+   recorded trap: `SessionRuntime::is_running()` reports the status cached by
+   the last `poll_exits`, so **any test asserting liveness must poll first** —
+   a mutation killing every session on `close` once stayed green because the
+   survivor had not been polled.
 
-**Do not land the profile model without its production caller.** This project's
-own rule, applied to `SessionRuntime` and Phase 1 line 90 before now: a
-mechanism nothing calls does not get its box. The packet therefore goes all the
-way to `glasshouse launch --profile`, recording the profile on the session, and
-showing it.
+2. **Phase 9A's 359/360/363 and Phase 9F's 465/466, plus the deferred
+   `gateway`-into-`Resolution` fold.** One coherent seam about generated
+   configuration and pre-launch verification. Owns `profile/mod.rs`,
+   `harness/`, and `config/mod.rs` (which the fold needs for two test
+   literals). Both files are free for the first time.
 
-Deferred deliberately, with reasons: **353** and **359** need provider
-templates and generated configuration (9D/9F); **365** needs pairing class and
-response profile (9J/9K); **369** needs the router (34-37). The migration adds
-`launch_profile` and `backend_resource` only — `model` and `wire_protocol`
-would be columns nothing writes until 9F, which is the speculative
-infrastructure Phase 21H tells us not to build.
+3. **Phase 2D's Routing settings section (lines 181-186).** `RoutingConfig`
+   already exists — Phase 2C's routing-model step built it — so this is the
+   settings surface over a model that is already there. It owns
+   `shell/state.rs` and `shell/view.rs`, **so it cannot run beside batch 1**.
+   Run it after batch 1 lands, or give batch 1 only `session/` and accept a
+   thinner slice. Line 187 (Memory section) stays blocked on Phase 20.
 
 Still blocked, unchanged:
 
 - **Phase 8 line 9 (Codex compaction)** — needs Phase 30's compaction counter.
-  Do not fake it with a log line.
-- **Phase 9 (Antigravity), all seven lines** — needs the user to run `agy` once
-  and sign in. Their credential, their action. **Worth asking for: it is a
-  one-minute action that unblocks a whole phase.**
-- Phase 1 line 92 and Phase 3's memory view — Phase 20's memory table.
-- Three Phase 4 lines — unfocused `send_text`, `interrupt`, headless sessions.
-- Eleven Phase 2D lines — Providers, Launch Profiles, Routing, Memory sections.
-  Launch Profiles unblocks with Phase 9A.
-- Phase 2C onboarding — product decisions that need the user.
-- Phase 6's communication-style line — needs one verified in-place mechanism.
-- Pi's approval modes — needs `~/.hermes/node/bin` on `PATH`.
+- **Phase 7 lines 305/307** — permission detection needs an isolated
+  configuration with approvals required; compaction is not exposed by Claude
+  Code 2.1.245 at all.
+- **Phase 9 lines 337/338 (Antigravity lifecycle events)** — the CLI exposes
+  none.
+- **Phase 9E lines 438/439** — Windows Credential Manager and a Linux Secret
+  Service keyring are not provable from this machine.
+- **Phase 6's communication-style line** — needs one verified in-place
+  mechanism.
+- Phase 1 line 107, Phase 3 line 231, Phase 2D line 187 — all Phase 20's memory
+  table.
+
+**And one thing that needs the user's environment rather than a worker:**
+proving Phase 9F end to end against the real OpenRouter gateway. Everything
+needed exists — Anthropic Messages at `https://openrouter.ai/api`, the root,
+**free models only**, which is the condition attached to those keys. It is the
+named evidence gap in 9F's ledger entry.
 
 ## Active worker tasks and results
 
-**One worker, GH-P09A-APPROVALS**, a Sonnet 5 implementer running as
-`claude --model sonnet` in a visible cmux pane ("Glasshouse workers"), in its
-own worktree (`sonnet/approval-argv`), against a packet carrying the verified
-argv table, the expected and forbidden files, and five named acceptance tests.
-Roughly 290 lines across eight files.
+**One worker, GH-P09D-CONNECTIVITY**, an **Opus team lead** with three
+`agy-gh` leaf subcontractors, in its own worktree
+(`claude/9d-connectivity`). Roughly 2 h 50 min; +5343/-176 across 12 files
+after integration.
 
 What it got right, and what the orchestrator still had to do:
 
-- It implemented the specified design and did not redesign it, and it left
-  `pi.rs` untouched **and said so with a reason** — `ApprovalModes::UNVERIFIED`
-  is generic over the new field types, so no edit was needed.
-- **It corrected the packet on one point and was right.** Acceptance test 4 as
-  written asked it to assert `automatic_review != bypass` for four harnesses
-  including Pi, whose whole `ApprovalModes` is `UNVERIFIED` — so both sides are
-  `None` and a literal `assert_ne!` would have failed on `None == None`. It
-  implemented the anti-substitution property and skipped the vacuous
-  comparison, flagging it rather than silently choosing. Verified before
-  accepting. That is the second session running in which a worker was right
-  against its packet.
-- **It flagged, rather than invented, missing evidence**: Cursor's sandbox
-  values were in the packet's table but not in the pre-existing evidence
-  string. The orchestrator had read them from `cursor-agent --help` that day
-  and corrected the citation.
-- The orchestrator ran every gate independently on a frozen tree, ran all five
-  mutations, ran the binary (which found the doubled-backtick rendering), made
-  the design decision, wrote the records, and made the commit. The worker
-  committed nothing and touched no project record.
+- It kept every red-risk part itself, as the packet required: the timeout and
+  responsiveness design, everything touching the credential, the cache's
+  on-disk format, and **all thirteen mutations**.
+- **It verified its leaf workers mechanically** rather than reading their
+  summaries — 339 quoted `path:line` pairs checked against the source, 339
+  exact, 0 mismatched.
+- **A mutation changed its code, which is the point of mutations.** Mutation 1
+  did not fail — it *hung*, because a probe with no read timeout never returns.
+  A test that can only fail by hanging reports nothing, so the test was
+  rewritten to run the probe on a thread and wait with `recv_timeout`.
+- **It corrected its packet on five points and was right on all five**,
+  including that the packet's "the verified constructor exists and is used only
+  in tests" had no literal referent. That is five consecutive batches in which
+  a worker was right against its brief.
+- **The orchestrator withdrew one of its six evidence promotions.** Re-running
+  all six probes took under a minute; five reproduced, z.ai did not. See the
+  correction entry in the ledger and practice §23.
+- The orchestrator re-ran every gate on the integrated tree, ran three
+  independent mutations, drove the shipped binary against a live provider, a
+  refused host and a real never-answering listener, checked the cache file's
+  raw bytes for the planted credential, wrote the records and made the commit.
+  The worker committed nothing and touched no project record.
 
 ## Commands run and outcome
 
-All run by the orchestrator on the frozen tree, not taken from the worker's
-report:
+All run by the orchestrator on the integrated tree, not taken from the
+worker's report:
 
 - `cargo fmt --all -- --check` — pass.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings` —
   zero diagnostics.
-- `cargo test --workspace --all-features` — **478 passing, 0 failing**
-  (417 lib + 4 bin + 53 PTY + 4 settings), against a 474 baseline measured on
-  `main` at the start of the session. The four new tests are the acceptance
-  tests plus the backtick guard.
-- `rustup run 1.85.0 cargo check --locked --workspace --all-targets` — pass.
-- `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` — **23**
-  diagnostics, exactly the recorded baseline. None added.
+- `cargo test --workspace --all-features < /dev/null` — **865 passing, 0
+  failing** (780 lib + 8 bin + 11 provider_discovery + 62 PTY + 4 settings),
+  against a **779** baseline measured on `main` at the start of the session.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` — clean. The
+  baseline is zero and stayed zero.
+- `scripts/msrv-check.sh` — pass, resolving rustc from the 1.88 toolchain.
 - `git diff --check` — pass.
-- Five mutations, five kills, each verdict read from the **named test's own
-  result line**.
-- Real-binary probes, none costing a model turn: `claude --permission-mode
-  auto` (accepted) and `--permission-mode bogus` (rejected, listing `auto`);
-  `codex --approve-for-me` through the cmux shim (accepted) and an invalid
-  variant (rejected, suggesting the real flag); `agy --help` and
-  `cursor-agent --help` re-read for sandbox shapes; `glasshouse doctor` built
-  and run, and its approvals rows read line by line.
+- `python3 scripts/progress.py` — 252 / 1267 mandatory, 19%.
+- Three orchestrator mutations, three kills, each verdict read from the named
+  test's own result line: `ProbeRequest`'s `Debug` printing the credential; the
+  caller *joining* the probe thread so the request blocks the drawing thread;
+  and re-promoting z.ai, which killed at two independent layers.
+- **Six live endpoint re-probes** reproducing the batch's evidence
+  independently — five confirmed, one withdrawn — plus a five-request control
+  run against z.ai that is what settled it.
+- **The shipped binary, in a real terminal**: a live 417-model refresh from
+  OpenRouter cached with a timestamp; a refused host; a real listener that
+  accepts and never answers, bounded at `10004ms` with the cursor still moving
+  through three `Down` presses; the cache file's raw bytes checked for the
+  planted credential (zero occurrences); and a restart that re-fetched nothing,
+  with `fetched_at` and mtime both unchanged.
 
 ## Next exact step
 
 Hand this checkpoint to Opus:
 
-> Start with `git status`, `git log -5`, this handoff,
-> `GLASSHOUSE_DESIGN_DECISIONS.md`, and `.agent-runtime/CONTINUATION.md` —
-> whose Part 1 is generic standing rules, including re-arming the context and
-> usage-window watches, which do not survive a session. Pushing to run CI is
-> standing authorization.
+> Start with `git status`, `git log -5`, this handoff, and
+> `.agent-runtime/CONTINUATION.md` — whose Part 1 is generic standing rules,
+> including re-arming the context and usage-window watches, which do not
+> survive a session. **Verify the statusline file is fresh before trusting
+> either watch.** Pushing to run CI is standing authorization.
 >
-> **Phase 9A is next and its packet is written**: see "Where to go next" for
-> the settled design, and the packet itself in the scratchpad reference in
-> `.agent-runtime/CONTINUATION.md`. Delegate it; do not implement it inline.
+> No worker is in flight. **"Where to go next" names three batches already
+> partitioned by the files they touch** — start two of them concurrently and
+> keep the third until the first lands, because batches 1 and 3 both own
+> `shell/`.
 >
 > The habits that earned this session's results:
 >
-> - **Check a declaration against the use, not the claim.** Three of seven
->   approval declarations were true statements that could not be used for the
->   thing about to consume them. Two minutes of `--help` beat any amount of
->   reading the type.
-> - **Run the binary.** It caught two rendering defects that compiled, passed
->   clippy, and passed a full suite.
-> - **Read the named test's own result line.** A mutation verdict inferred from
->   a shell exit code is how the previous session's harness reported "survived"
->   for everything.
-> - **Gate review on the pane going idle**, then verify every gate yourself on
->   a frozen tree. The worker's own run was honest here, and it still missed
->   nothing only because it was re-run independently.
-> - **Run the suite with `< /dev/null`** — see the hook-stdin loose end.
+> - **Re-run a worker's decisive external observations yourself** (practice
+>   §23). Six `curl`s took under a minute and caught an unfounded `Verified`
+>   declaration that was otherwise about to ship.
+> - **A control has to be run against the host it justifies.** A control
+>   borrowed from another service is a statement about that service.
+> - **Run the binary.** It is still the most productive check in this process,
+>   and this session it confirmed both the timeout value and the
+>   responsiveness guarantee in a way no test could have on its own.
+> - **Read the named test's own result line**, in the target that runs it.
+> - **Never `git checkout` in a worktree holding uncommitted work.** A
+>   `PreToolUse` hook blocks it; if it fires, it is right.

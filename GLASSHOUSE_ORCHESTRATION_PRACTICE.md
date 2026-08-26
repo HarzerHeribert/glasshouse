@@ -656,3 +656,48 @@ from a diff you no longer have.
 that a private field cannot be set from outside its module, which is a language
 guarantee, not a property of this code. Before modifying a worker's tree to test
 something, ask whether the compiler already promises it.
+
+## 23. Re-run a worker's decisive external observations yourself
+
+A worker that probes the outside world is reporting something you cannot
+reconstruct from its diff. Source you can read; a live `401` you cannot. So
+**re-run the observations a box depends on**, and do it before the box goes in.
+
+On 2026-08-26 the 9D batch promoted six provider `model_list_endpoint`
+declarations from `Unverified` to `Verified`, each citing a live probe. Six
+`curl`s, under a minute, re-ran all six. **Five reproduced exactly. One did
+not**, and it was about to ship as a product claim.
+
+The one that failed is instructive because the worker had done everything
+right except one step. It promoted z.ai on a `401` rather than a `200`, and
+justified it with the correct control — *"a host that served nothing there
+would have answered `404`"* — which it had **cited from a probe it ran against
+a different service**. Against z.ai the control collapses: every path under
+`/api/paas/v4/` answers `401`, invented ones included, and a version prefix
+that does not exist answers `200`. The `404` behaviour is real but lives
+outside the API prefix, where the probe cannot use it.
+
+**The rule: a control has to be run against the host it is being used to
+justify.** A control borrowed from another service is a statement about that
+service. This is the fifth declaration in this project derived from an artifact
+that did not support the use it was cited for, after Antigravity's executable
+name, Codex's snake_case hook events, Claude Code's `auto-mode` subcommand and
+Cursor's sandbox usage strings — so it is now a standing review step, not a
+lesson.
+
+Two practical notes:
+
+- **Cost it honestly.** Re-probing six endpoints took less time than reading
+  the diff hunk that changed them. Where an external observation is cheap to
+  repeat, repeating it is not duplication of the worker's effort; it is the
+  only independent evidence available.
+- **Counts in citations are snapshots.** UnoRouter answered `374` entries at
+  09:00 and `369` at 10:00 the same morning. That is not drift to correct, it
+  is why every citation names a date — and why nothing downstream may treat a
+  catalogue count as stable.
+
+**And the finding does not diminish the batch.** The same worker killed
+thirteen mutations, verified 339 leaf quotes mechanically, found two real
+defects by running the binary, and volunteered five things its own packet got
+wrong. The flaw was visible *in its own doc comment* precisely because it
+explained itself. A less careful worker leaves nothing to catch.

@@ -17,10 +17,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 
 use crate::config::Layer;
+use crate::provider::discovery::ProbeOutcome;
 use crate::session::{SessionDisposition, SessionRecord};
 
 use super::state::{
-    Mode, Overlay, SettingsPathInputView, SettingsSection, SettingsState, ShellState, ViewportGrid,
+    Mode, Overlay, ProbeKind, ProviderRow, SettingsPathInputView, SettingsSection, SettingsState,
+    ShellState, ViewportGrid,
 };
 
 /// The shell's fixed vertical chrome: title, root, session bar, viewport,
@@ -293,8 +295,8 @@ fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
         (Mode::Session, _) => "SESSION MODE -- keys go to the session -- ctrl-] for glasshouse",
         (Mode::Control, Some(Overlay::Overview)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::Settings)) => {
-            "tab section   up/down move   space toggle   enter/a/e/c/b/p/u/d/t edit   \
-             s/x secret   w save   W project   r setup   esc close"
+            "tab section   up/down move   space toggle   enter/a/e/c/b/p/u/d edit   \
+             t/m test/models   w save   s/x secret   W project   r setup   esc close"
         }
         (Mode::Control, None) => "tab session   enter session   n new   o overview   q quit",
     };
@@ -306,7 +308,12 @@ fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
     }
 
     // Order is the whole mechanism: the bindings are written first, so when the
-    // row is too narrow it is the note that gets clipped away. The bindings are
+    // row is too narrow it is the note that gets clipped away — and within the
+    // bindings, the ones that come first are the ones that survive. Adding
+    // `t`/`m` for Phase 9D pushed the row past a realistic hundred columns and
+    // clipped `w save` off the end, which is how the ordering below came to put
+    // saving ahead of the secret-store keys: losing "how do I keep my edits" is
+    // worse than losing "how do I store a credential", and something had to go. The bindings are
     // needed permanently and the note only once, so that is the right thing to
     // lose. An earlier version measured the remaining width and truncated the
     // note itself, which turned out to be an elaborate way of duplicating the
@@ -428,6 +435,8 @@ fn render_settings(state: &ShellState, frame: &mut Frame, area: Rect) {
         labeled_text_input_lines(&input.label, input.buffer, input.error)
     } else if let Some((name, outcome)) = settings.provider_test_result() {
         provider_test_result_lines(name, outcome)
+    } else if let Some((name, refresh)) = settings.provider_models_result() {
+        provider_models_result_lines(name, refresh)
     } else {
         Vec::new()
     };
@@ -595,6 +604,9 @@ fn render_integration_rows(settings: &SettingsState, frame: &mut Frame, area: Re
 /// [`std::env::var`], and never the value itself. See the module-level rule
 /// this mirrors in `integrations::write_provider_report`.
 fn render_provider_rows(settings: &SettingsState, frame: &mut Frame, area: Rect) {
+    // Read once per frame rather than once per row, so every row on one
+    // screen describes its age against the same instant.
+    let now = crate::provider::cache::now_unix_seconds();
     let mut lines = Vec::new();
     if settings.providers().is_empty() {
         lines.push(Line::from(Span::styled(
@@ -686,8 +698,95 @@ fn render_provider_rows(settings: &SettingsState, frame: &mut Frame, area: Rect)
             format!("      credential: {credential}"),
             Style::default().fg(Color::DarkGray),
         )));
+        lines.push(provider_models_line(row, now));
     }
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// One provider row's model-list line: what is cached, and **when it was
+/// fetched**.
+///
+/// # The timestamp is not optional
+///
+/// Phase 9D line 3 says "with a timestamp", and this is the only place a user
+/// ever sees one. A cached list rendered without its age is the exact failure
+/// the line exists to prevent: four hundred models from three weeks ago look
+/// identical to four hundred from three seconds ago, and a user picking a
+/// model override from the stale one gets a name the provider has since
+/// retired. So both forms are shown — the absolute instant, which is what you
+/// quote, and the age, which is what you act on.
+///
+/// A request in flight outranks everything else here. It is on the row rather
+/// than in the banner below precisely so that scrolling the list cannot make
+/// a running request invisible — see [`ProviderRow::activity`].
+fn provider_models_line(row: &ProviderRow, now: i64) -> Line<'static> {
+    if let Some(kind) = row.activity {
+        let what = match kind {
+            ProbeKind::Connectivity => "testing connectivity",
+            ProbeKind::ModelRefresh => "refreshing the model list",
+        };
+        return Line::from(Span::styled(
+            format!("      models: {what}..."),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+
+    // **Found running the real binary.** A provider with no established
+    // model-list endpoint used to render "none cached — press m to fetch",
+    // which advertises a key that cannot ever fetch anything for it. The
+    // design decision this batch works to forbids "a silently disabled
+    // control with no explanation"; a control that is loudly *advertised*
+    // and then refuses is worse, because the user presses it first.
+    let offers_discovery = row
+        .config
+        .to_provider(&row.name)
+        .is_ok_and(|provider| provider.model_list_endpoint.is_known_present());
+
+    let Some(models) = &row.models else {
+        return Line::from(Span::styled(
+            if offers_discovery {
+                "      models: none cached — press m to fetch".to_owned()
+            } else {
+                "      models: no model-discovery endpoint established for this provider".to_owned()
+            },
+            Style::default().fg(Color::DarkGray),
+        ));
+    };
+
+    // The base URL the row would use now, against the one the catalogue was
+    // fetched from. A user who repointed a provider at a different service is
+    // looking at another service's models, and saying so is the difference
+    // between a stale cache and a wrong one.
+    let current_base_url = row
+        .config
+        .to_provider(&row.name)
+        .ok()
+        .and_then(|provider| provider.protocols.first().map(|p| p.base_url.clone()))
+        .unwrap_or_default();
+    let moved = !models.was_fetched_from(&current_base_url);
+
+    let text = format!(
+        "      models: {} cached, fetched {} ({}){}",
+        models.len(),
+        format_unix_utc(models.fetched_at()),
+        describe_age(now, models.fetched_at()),
+        if moved {
+            format!(
+                " — from {}, which is no longer this provider's base URL",
+                models.base_url()
+            )
+        } else {
+            String::new()
+        }
+    );
+    Line::from(Span::styled(
+        text,
+        Style::default().fg(if moved {
+            Color::Yellow
+        } else {
+            Color::DarkGray
+        }),
+    ))
 }
 
 /// The Settings "Launch Profiles" section.
@@ -779,34 +878,218 @@ fn labeled_text_input_lines(label: &str, buffer: &str, error: Option<&str>) -> V
     lines
 }
 
-/// Line 5's connectivity check result. Named honestly as a precondition
-/// check, never as proof the network is reachable — see
-/// [`crate::shell::state::ReachabilityCheck`]'s own doc for exactly what is
-/// and is not established.
+/// One [`ProbeOutcome`], as a sentence.
+///
+/// `pub(crate)` because the run loop composes a failed model refresh out of
+/// the same words: a `401` should read identically whether the user pressed
+/// `t` or `m`, and two independent phrasings of the same outcome would
+/// eventually disagree.
+///
+/// **A rejected credential and an unreachable host get different sentences**,
+/// which is the distinction Phase 9D line 1 exists to draw. They are
+/// different problems with different fixes, and a user told only "failed" has
+/// to guess which they have.
+pub(crate) fn describe_probe_outcome(outcome: &ProbeOutcome) -> String {
+    match outcome {
+        ProbeOutcome::Reached { status } => format!("answered {status}"),
+        ProbeOutcome::Rejected { status } => {
+            format!("answered {status} — reachable, but it did not accept the credential")
+        }
+        ProbeOutcome::Unexpected { status } => {
+            format!("answered {status}, which is not a success and not a rejection")
+        }
+        ProbeOutcome::TimedOut { waited_ms } => format!(
+            "no answer within {waited_ms}ms — the connection was accepted but nothing came back"
+        ),
+        ProbeOutcome::Unreachable { reason } => format!("unreachable — {reason}"),
+    }
+}
+
+/// The colour an outcome earns.
+///
+/// A rejection is amber rather than red on purpose: the provider is *there*,
+/// which is most of what the user wanted to find out, and the remaining
+/// problem is one credential away from fixed.
+fn probe_outcome_color(outcome: &ProbeOutcome) -> Color {
+    match outcome {
+        ProbeOutcome::Reached { .. } => Color::Green,
+        ProbeOutcome::Rejected { .. } | ProbeOutcome::Unexpected { .. } => Color::Yellow,
+        ProbeOutcome::TimedOut { .. } | ProbeOutcome::Unreachable { .. } => Color::Red,
+    }
+}
+
+/// Phase 9D line 1's connectivity result.
+///
+/// This used to carry a disclaimer saying Glasshouse had no HTTP client and
+/// that nothing had really been requested. It has one now, the request is
+/// real, and the disclaimer is gone — its absence is asserted by
+/// `the_connectivity_result_names_what_it_reached_and_carries_no_disclaimer`,
+/// because a line that apologises for a check it is no longer failing to make
+/// is worse than no line.
 fn provider_test_result_lines(
     name: &str,
     outcome: &crate::shell::state::ReachabilityCheck,
 ) -> Vec<Line<'static>> {
     use crate::shell::state::ReachabilityCheck;
 
-    let (message, color) = match outcome {
-        ReachabilityCheck::PreconditionsMet { protocol, base_url } => (
-            format!("`{name}`: reachability preconditions met for {protocol} at {base_url}"),
-            Color::Green,
-        ),
-        ReachabilityCheck::Failed(reason) => (
-            format!("`{name}`: reachability precondition failed — {reason}"),
-            Color::Red,
-        ),
-    };
-    vec![
-        Line::from(Span::styled(message, Style::default().fg(color))),
-        Line::from(Span::styled(
-            "Precondition check only — not a real network request; Glasshouse has no HTTP \
-             client yet.",
+    match outcome {
+        ReachabilityCheck::InFlight {
+            protocol,
+            base_url,
+            endpoint,
+        } => vec![
+            Line::from(Span::styled(
+                format!("`{name}`: testing {protocol} at {base_url} — request in flight..."),
+                Style::default().fg(Color::Cyan),
+            )),
+            Line::from(Span::styled(
+                format!("GET {endpoint} — the interface stays usable while this runs."),
+                Style::default().fg(Color::DarkGray),
+            )),
+        ],
+        ReachabilityCheck::Answered {
+            protocol,
+            base_url,
+            endpoint,
+            outcome,
+        } => vec![
+            Line::from(Span::styled(
+                format!(
+                    // The verb follows the outcome, and this is not
+                    // cosmetic. **Found running the real binary**: with
+                    // "reached" hard-coded, a refused connection rendered as
+                    // "`dead-host`: reached openai-chat at ... — GET ...
+                    // unreachable — the connection was refused", which
+                    // contradicts itself inside one sentence. It is the same
+                    // shape of defect as the "(not set) — stored in the OS
+                    // secure store" row an earlier batch found the same way,
+                    // and `ProbeOutcome::answered` already carries exactly
+                    // the distinction the wording needs.
+                    "`{name}`: {} {protocol} at {base_url} — GET {endpoint} {}",
+                    if outcome.answered() {
+                        "reached"
+                    } else {
+                        "could not reach"
+                    },
+                    describe_probe_outcome(outcome)
+                ),
+                Style::default().fg(probe_outcome_color(outcome)),
+            )),
+            Line::from(Span::styled(
+                "Testing does not enable or disable anything — that stays your decision."
+                    .to_owned(),
+                Style::default().fg(Color::DarkGray),
+            )),
+        ],
+        ReachabilityCheck::Failed(reason) => vec![Line::from(Span::styled(
+            format!("`{name}`: nothing was requested — {reason}"),
+            Style::default().fg(Color::Red),
+        ))],
+    }
+}
+
+/// Phase 9D line 2's manual model refresh.
+fn provider_models_result_lines(
+    name: &str,
+    refresh: &crate::shell::state::ModelRefresh,
+) -> Vec<Line<'static>> {
+    use crate::shell::state::ModelRefresh;
+
+    match refresh {
+        ModelRefresh::InFlight { endpoint } => vec![
+            Line::from(Span::styled(
+                format!("`{name}`: refreshing the model list — request in flight..."),
+                Style::default().fg(Color::Cyan),
+            )),
+            Line::from(Span::styled(
+                format!("GET {endpoint} — the interface stays usable while this runs."),
+                Style::default().fg(Color::DarkGray),
+            )),
+        ],
+        ModelRefresh::Refreshed {
+            count,
+            fetched_at,
+            endpoint,
+        } => vec![Line::from(Span::styled(
+            format!(
+                "`{name}`: {count} models from GET {endpoint}, cached at {}",
+                format_unix_utc(*fetched_at)
+            ),
+            Style::default().fg(Color::Green),
+        ))],
+        // Grey and plainly worded, not red: a provider that offers no model
+        // discovery is not a failure, and colouring it like one would send
+        // the user looking for a problem they do not have.
+        ModelRefresh::NotOffered(reason) => vec![Line::from(Span::styled(
+            format!("`{name}`: {reason}"),
             Style::default().fg(Color::DarkGray),
-        )),
-    ]
+        ))],
+        ModelRefresh::Failed(reason) => vec![Line::from(Span::styled(
+            format!("`{name}`: could not refresh the model list — {reason}"),
+            Style::default().fg(Color::Red),
+        ))],
+    }
+}
+
+/// A Unix timestamp as `YYYY-MM-DD HH:MM:SSZ`.
+///
+/// Hand-rolled because this crate has no date library and adding one to print
+/// one line would be a poor trade. The civil-from-days conversion is Howard
+/// Hinnant's, which is exact for every day in the proleptic Gregorian
+/// calendar and is the same algorithm every date library uses underneath.
+///
+/// UTC, never local time. A cache timestamp is compared against another
+/// machine's, quoted into a bug report, and read months later; a local time
+/// with no zone on it is ambiguous in all three situations.
+fn format_unix_utc(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400);
+    let time_of_day = seconds.rem_euclid(86_400);
+    let (hour, minute, second) = (
+        time_of_day / 3_600,
+        (time_of_day % 3_600) / 60,
+        time_of_day % 60,
+    );
+
+    // Howard Hinnant's `civil_from_days`, with the era shifted so the
+    // arithmetic is correct for dates before 1970 as well as after.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let mp = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// How long ago `then` was, from `now`, in words.
+///
+/// The absolute timestamp says *when*; this says *how stale*, which is the
+/// question a user actually has. "2026-08-26 09:31:04Z" requires arithmetic
+/// to act on and "17 days ago" does not, so both are shown and this is the
+/// one that carries the warning.
+fn describe_age(now: i64, then: i64) -> String {
+    let seconds = now.saturating_sub(then);
+    if seconds < 0 {
+        // A cache stamped in the future means a clock moved, on this machine
+        // or the one that wrote it. Saying so is better than rendering a
+        // negative age or silently clamping it to "just now".
+        return "timestamped in the future — check this machine's clock".to_owned();
+    }
+    let (count, unit) = match seconds {
+        0..=59 => return "just now".to_owned(),
+        60..=3_599 => (seconds / 60, "minute"),
+        3_600..=86_399 => (seconds / 3_600, "hour"),
+        86_400..=2_591_999 => (seconds / 86_400, "day"),
+        _ => (seconds / 2_592_000, "month"),
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    format!("{count} {unit}{plural} ago")
 }
 
 fn settings_path_input_lines(input: &SettingsPathInputView<'_>) -> Vec<Line<'static>> {
@@ -1624,11 +1907,7 @@ mod settings_tests {
     fn provider_rows() -> Vec<ProviderRow> {
         let mut config = ProviderConfig::new("openrouter");
         config.set_base_url(Some("https://mirror.example.com/v1".to_owned()));
-        vec![ProviderRow {
-            name: "my-router".to_owned(),
-            config,
-            layer: Layer::User,
-        }]
+        vec![ProviderRow::new("my-router", config, Layer::User)]
     }
 
     fn profile_rows() -> Vec<ProfileRow> {
@@ -1732,11 +2011,7 @@ mod settings_tests {
 
         let mut config = ProviderConfig::new("openrouter");
         config.set_credential_env(vec![VAR.to_owned()]);
-        let rows = vec![ProviderRow {
-            name: "secret-test".to_owned(),
-            config,
-            layer: Layer::User,
-        }];
+        let rows = vec![ProviderRow::new("secret-test", config, Layer::User)];
 
         let mut state = ShellState::new("glasshouse", "/work/glasshouse", "0.1.0", Vec::new());
         state.open_settings(harness_rows(), integration_rows(), rows, profile_rows());
@@ -1790,17 +2065,88 @@ mod settings_tests {
         screens.push(rendered(&state, 400, 60));
         state.handle_key(press(KeyCode::Esc));
 
-        // The reachability precondition test — its result names the
-        // provider and protocol but must never carry the credential's value.
+        // The connectivity test — its result names the provider, the
+        // protocol and the exact URL, but must never carry the credential's
+        // value. The environment variable above is set, so this plans a real
+        // request and renders the in-flight line; no socket is opened here,
+        // because opening one is the run loop's job and this test has no run
+        // loop.
         state.handle_key(press(KeyCode::Char('t')));
-        let test_screen = rendered(&state, 100, 30);
-        screens.push(rendered(&state, 400, 60));
+        let test_screen = rendered(&state, 400, 60);
+        screens.push(rendered(&state, 100, 30));
         assert!(
-            test_screen.contains("preconditions met")
-                || test_screen.contains("precondition failed"),
-            "the test result must say something about the check: {test_screen}"
+            test_screen.contains("request in flight"),
+            "the test result must say a request is running: {test_screen}"
         );
         screens.push(test_screen);
+
+        // A finished probe's rendered outcome, one per shape, since each
+        // formats a different set of fields. The first also clears the row's
+        // in-flight marker, which is what lets `m` below start a second
+        // request rather than being refused as a duplicate.
+        for outcome in [
+            crate::provider::discovery::ProbeOutcome::Rejected { status: 401 },
+            crate::provider::discovery::ProbeOutcome::TimedOut { waited_ms: 10_000 },
+            crate::provider::discovery::ProbeOutcome::Reached { status: 200 },
+        ] {
+            state.apply_provider_probe_result(crate::shell::state::ProviderProbeResult {
+                provider: "secret-test".to_owned(),
+                notice: crate::shell::state::ProviderNotice::Reachability(
+                    crate::shell::state::ReachabilityCheck::Answered {
+                        protocol: "openai-chat",
+                        base_url: "https://openrouter.ai/api/v1".to_owned(),
+                        endpoint: "https://openrouter.ai/api/v1/models".to_owned(),
+                        outcome,
+                    },
+                ),
+                catalogue: None,
+            });
+            screens.push(rendered(&state, 400, 60));
+            screens.push(rendered(&state, 100, 30));
+        }
+
+        // A model refresh, on a provider whose model-list endpoint is
+        // verified, and the same rule applies to its rendering.
+        state.handle_key(press(KeyCode::Char('m')));
+        let models_screen = rendered(&state, 400, 60);
+        assert!(
+            models_screen.contains("refreshing the model list"),
+            "a running refresh must say so: {models_screen}"
+        );
+        screens.push(rendered(&state, 100, 30));
+        screens.push(models_screen);
+
+        // A cached catalogue on the row, timestamp and all — the one place a
+        // model list is rendered, and therefore the one place a credential
+        // could ride along with it.
+        state.apply_provider_probe_result(crate::shell::state::ProviderProbeResult {
+            provider: "secret-test".to_owned(),
+            notice: crate::shell::state::ProviderNotice::Models(
+                crate::shell::state::ModelRefresh::Refreshed {
+                    count: 2,
+                    fetched_at: 1_787_336_476,
+                    endpoint: "https://openrouter.ai/api/v1/models".to_owned(),
+                },
+            ),
+            catalogue: Some(crate::provider::cache::ModelCatalogue::new(
+                "secret-test",
+                "https://openrouter.ai/api/v1",
+                "https://openrouter.ai/api/v1/models",
+                1_787_336_476,
+                vec![
+                    crate::provider::cache::ModelEntry::new("vendor/one"),
+                    crate::provider::cache::ModelEntry::new("vendor/two"),
+                ],
+            )),
+        });
+        let cached_screen = rendered(&state, 400, 60);
+        assert!(
+            cached_screen.contains("2 cached, fetched 2026-08-21 18:21:16Z"),
+            "a cached model list must be rendered with the instant it was fetched: \
+             {cached_screen}"
+        );
+        screens.push(cached_screen);
+        screens.push(rendered(&state, 100, 30));
 
         // Typing a credential into the OS-secure-store field. The masked
         // rendering is asserted positively as well as with `!contains`, so
@@ -1867,6 +2213,421 @@ mod settings_tests {
                 );
             }
         }
+    }
+
+    /// Every line's text, joined — for asserting on what a helper produced
+    /// without going through a `Buffer`, which pads and clips.
+    fn lines_to_string(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// **Acceptance test 1.** The result names what it actually reached —
+    /// the protocol, the base URL, and the exact URL requested — and the
+    /// disclaimer that used to sit under it is gone.
+    ///
+    /// The `!contains` half is the load-bearing one. The old line said
+    /// "Glasshouse has no HTTP client yet", which stopped being true the
+    /// moment `ureq` arrived with the gateway; a line that apologises for a
+    /// check it is no longer failing to make is worse than no line, because
+    /// it teaches the user to disbelieve a result that is now real.
+    #[test]
+    fn the_connectivity_result_names_what_it_reached_and_carries_no_disclaimer() {
+        let lines = provider_test_result_lines(
+            "router",
+            &crate::shell::state::ReachabilityCheck::Answered {
+                protocol: "openai-chat",
+                base_url: "https://openrouter.ai/api/v1".to_owned(),
+                endpoint: "https://openrouter.ai/api/v1/models".to_owned(),
+                outcome: ProbeOutcome::Reached { status: 200 },
+            },
+        );
+        let text = lines_to_string(&lines);
+
+        assert!(text.contains("openai-chat"), "{text}");
+        assert!(text.contains("https://openrouter.ai/api/v1"), "{text}");
+        assert!(
+            text.contains("GET https://openrouter.ai/api/v1/models"),
+            "the exact URL requested must be named, or `reached` is unverifiable: {text}"
+        );
+        assert!(text.contains("answered 200"), "{text}");
+
+        for disclaimer in [
+            "Precondition check only",
+            "not a real network request",
+            "no HTTP client",
+            "preconditions met",
+        ] {
+            assert!(
+                !text.contains(disclaimer),
+                "the disclaimer {disclaimer:?} must be gone — the request is real now: {text}"
+            );
+        }
+    }
+
+    /// **Acceptance test 2, on screen.** A rejected credential and an
+    /// unreachable host must read as different problems, because they are:
+    /// one is fixed with a key, the other with a URL or a network.
+    #[test]
+    fn a_rejection_and_an_unreachable_host_read_as_different_problems() {
+        let rejected = describe_probe_outcome(&ProbeOutcome::Rejected { status: 401 });
+        let unreachable = describe_probe_outcome(&ProbeOutcome::Unreachable {
+            reason: "the connection was refused".to_owned(),
+        });
+        let timed_out = describe_probe_outcome(&ProbeOutcome::TimedOut { waited_ms: 10_000 });
+
+        assert!(
+            rejected.contains("reachable"),
+            "a 401 must say the provider is there: {rejected}"
+        );
+        assert!(
+            rejected.contains("401"),
+            "and must name the status: {rejected}"
+        );
+        assert!(
+            unreachable.contains("unreachable"),
+            "and an unreachable host must say so: {unreachable}"
+        );
+        assert!(
+            !unreachable.contains("did not accept the credential"),
+            "an unreachable host says nothing about the credential: {unreachable}"
+        );
+        assert!(
+            timed_out.contains("nothing came back"),
+            "a timeout is its own third thing: {timed_out}"
+        );
+        assert_ne!(rejected, unreachable);
+        assert_ne!(rejected, timed_out);
+
+        // And they are coloured differently, so the difference survives being
+        // skim-read: a provider that is there is not a red failure.
+        assert_ne!(
+            probe_outcome_color(&ProbeOutcome::Rejected { status: 401 }),
+            probe_outcome_color(&ProbeOutcome::Unreachable {
+                reason: String::new()
+            })
+        );
+    }
+
+    /// **Found running the real binary.** With the verb hard-coded, a
+    /// refused connection rendered as "reached openai-chat at ... —
+    /// unreachable — the connection was refused": a sentence that
+    /// contradicts itself, and the same shape of defect as the "(not set) —
+    /// stored in the OS secure store" row an earlier batch found the same
+    /// way.
+    ///
+    /// Both directions are asserted. Checking only that "could not reach"
+    /// appears would pass on a renderer that said it for a `200` too.
+    #[test]
+    fn a_result_that_never_reached_the_provider_does_not_claim_it_did() {
+        let render = |outcome| {
+            lines_to_string(&provider_test_result_lines(
+                "p",
+                &crate::shell::state::ReachabilityCheck::Answered {
+                    protocol: "openai-chat",
+                    base_url: "http://127.0.0.1:1/v1".to_owned(),
+                    endpoint: "http://127.0.0.1:1/v1".to_owned(),
+                    outcome,
+                },
+            ))
+        };
+
+        for outcome in [
+            ProbeOutcome::Unreachable {
+                reason: "the connection was refused".to_owned(),
+            },
+            ProbeOutcome::TimedOut { waited_ms: 10_003 },
+        ] {
+            let text = render(outcome.clone());
+            assert!(
+                text.contains("could not reach"),
+                "a probe that got no answer must not say it reached anything: {text}"
+            );
+            assert!(
+                !text.contains(": reached "),
+                "and it must not contradict itself inside one sentence: {text}"
+            );
+        }
+
+        for outcome in [
+            ProbeOutcome::Reached { status: 200 },
+            ProbeOutcome::Rejected { status: 401 },
+            ProbeOutcome::Unexpected { status: 404 },
+        ] {
+            let text = render(outcome.clone());
+            assert!(
+                text.contains(": reached "),
+                "an endpoint that answered {outcome:?} really was reached: {text}"
+            );
+            assert!(!text.contains("could not reach"), "{text}");
+        }
+    }
+
+    /// **Found running the real binary.** A provider with no established
+    /// model-list endpoint used to render "press m to fetch" — advertising
+    /// a key that cannot ever fetch anything for it.
+    #[test]
+    fn a_row_never_advertises_a_refresh_key_for_a_provider_that_cannot_refresh() {
+        // `ollama`'s model list is Unverified; `openrouter`'s is Verified.
+        let row = ProviderRow::new(
+            "local",
+            crate::config::ProviderConfig::new("ollama"),
+            Layer::User,
+        );
+        let text = lines_to_string(&[provider_models_line(&row, 1_000)]);
+        assert!(
+            !text.contains("press m"),
+            "a provider that cannot refresh must not be told to press m: {text}"
+        );
+        assert!(
+            text.contains("no model-discovery endpoint established"),
+            "and it must say why instead of leaving a dead control unexplained: {text}"
+        );
+
+        // The counterpart, so this cannot pass by never offering the key.
+        let text = lines_to_string(&[provider_models_line(&provider_row_with(None), 1_000)]);
+        assert!(
+            text.contains("press m"),
+            "a provider that CAN refresh must still say so: {text}"
+        );
+    }
+
+    /// A running request says it is running, and names the URL it is waiting
+    /// on. This is the line that separates "slow" from "frozen".
+    #[test]
+    fn a_request_in_flight_says_so_on_screen() {
+        let text = lines_to_string(&provider_test_result_lines(
+            "router",
+            &crate::shell::state::ReachabilityCheck::InFlight {
+                protocol: "openai-chat",
+                base_url: "https://openrouter.ai/api/v1".to_owned(),
+                endpoint: "https://openrouter.ai/api/v1/models".to_owned(),
+            },
+        ));
+        assert!(text.contains("in flight"), "{text}");
+        assert!(text.contains("stays usable"), "{text}");
+    }
+
+    /// **Acceptance test 6, on screen.** A provider with no model discovery
+    /// gets a sentence, and it is not styled as a failure.
+    #[test]
+    fn a_provider_without_model_discovery_is_explained_rather_than_reported_as_an_error() {
+        let lines = provider_models_result_lines(
+            "local",
+            &crate::shell::state::ModelRefresh::NotOffered(
+                "no model-discovery endpoint has been established for `local`".to_owned(),
+            ),
+        );
+        let text = lines_to_string(&lines);
+        assert!(text.contains("has been established"), "{text}");
+        assert!(
+            !text.contains("could not"),
+            "not phrased as a failure: {text}"
+        );
+        assert_eq!(
+            lines[0].spans[0].style.fg,
+            Some(Color::DarkGray),
+            "an explanation must not be coloured like an error, or the user goes looking \
+             for a problem they do not have"
+        );
+
+        // ... where a genuine failure is.
+        let failed = provider_models_result_lines(
+            "router",
+            &crate::shell::state::ModelRefresh::Failed("the connection was refused".to_owned()),
+        );
+        assert_eq!(failed[0].spans[0].style.fg, Some(Color::Red));
+    }
+
+    // --- the timestamp ----------------------------------------------------
+
+    /// **Phase 9D line 3's "with a timestamp", rendered.**
+    #[test]
+    fn a_unix_timestamp_renders_as_an_unambiguous_utc_instant() {
+        // Checked against `date -u -r <seconds>`.
+        assert_eq!(format_unix_utc(0), "1970-01-01 00:00:00Z");
+        assert_eq!(format_unix_utc(1_787_336_476), "2026-08-21 18:21:16Z");
+        assert_eq!(format_unix_utc(1_000_000_000), "2001-09-09 01:46:40Z");
+        // A leap day, which is where a hand-rolled calendar goes wrong.
+        assert_eq!(format_unix_utc(1_709_164_800), "2024-02-29 00:00:00Z");
+        // The day after, so the leap day is not merely being clamped.
+        assert_eq!(format_unix_utc(1_709_251_200), "2024-03-01 00:00:00Z");
+        // 2100 is not a leap year, which is the century rule most
+        // hand-rolled conversions get wrong.
+        assert_eq!(format_unix_utc(4_107_542_400), "2100-03-01 00:00:00Z");
+        // Before the epoch, because `div_euclid` is what makes that work and
+        // a plain `/` would not.
+        assert_eq!(format_unix_utc(-1), "1969-12-31 23:59:59Z");
+    }
+
+    /// The age is what makes a stale cache *visibly* stale. The instant says
+    /// when; this says how long ago, which is the question a user has.
+    #[test]
+    fn an_age_is_rendered_in_the_largest_unit_that_still_says_something() {
+        assert_eq!(describe_age(1_000, 1_000), "just now");
+        assert_eq!(describe_age(1_059, 1_000), "just now");
+        assert_eq!(describe_age(1_060, 1_000), "1 minute ago");
+        assert_eq!(describe_age(1_120, 1_000), "2 minutes ago");
+        assert_eq!(describe_age(4_600, 1_000), "1 hour ago");
+        assert_eq!(describe_age(87_400, 1_000), "1 day ago");
+        assert_eq!(describe_age(1_729_000, 1_000), "20 days ago");
+        assert_eq!(describe_age(20_000_000, 1_000), "7 months ago");
+    }
+
+    /// A clock that moved is said out loud rather than rendered as a negative
+    /// age or quietly clamped to "just now" — the second would make a cache
+    /// from the future look freshly fetched.
+    #[test]
+    fn a_timestamp_in_the_future_is_reported_rather_than_clamped() {
+        let text = describe_age(1_000, 9_000);
+        assert!(text.contains("future"), "{text}");
+        assert!(text.contains("clock"), "{text}");
+        assert_ne!(text, "just now");
+    }
+
+    // --- the model line on a provider row ---------------------------------
+
+    fn provider_row_with(models: Option<crate::provider::cache::ModelCatalogue>) -> ProviderRow {
+        let mut config = crate::config::ProviderConfig::new("openrouter");
+        config.set_base_url(Some("https://openrouter.ai/api/v1".to_owned()));
+        ProviderRow::new("router", config, Layer::User).with_models(models)
+    }
+
+    fn catalogue_at(
+        base_url: &str,
+        fetched_at: i64,
+        count: usize,
+    ) -> crate::provider::cache::ModelCatalogue {
+        crate::provider::cache::ModelCatalogue::new(
+            "router",
+            base_url,
+            format!("{base_url}/models"),
+            fetched_at,
+            (0..count)
+                .map(|i| crate::provider::cache::ModelEntry::new(format!("vendor/model-{i}")))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_cached_model_list_is_never_shown_without_when_it_was_fetched() {
+        let row = provider_row_with(Some(catalogue_at(
+            "https://openrouter.ai/api/v1",
+            1_787_336_476,
+            417,
+        )));
+        let text = lines_to_string(&[provider_models_line(&row, 1_787_336_476 + 86_400)]);
+        assert!(text.contains("417 cached"), "{text}");
+        assert!(
+            text.contains("2026-08-21 18:21:16Z"),
+            "the instant must be there: {text}"
+        );
+        assert!(
+            text.contains("1 day ago"),
+            "and so must the age, which is the half a user acts on: {text}"
+        );
+    }
+
+    #[test]
+    fn a_provider_with_no_cached_models_says_how_to_get_some() {
+        let text = lines_to_string(&[provider_models_line(&provider_row_with(None), 1_000)]);
+        assert!(text.contains("none cached"), "{text}");
+        assert!(
+            text.contains("press m"),
+            "an empty state must name the key that fills it: {text}"
+        );
+    }
+
+    /// A catalogue fetched from a base URL the provider no longer uses is a
+    /// *wrong* list, not merely a stale one, and the row says which.
+    #[test]
+    fn a_catalogue_from_a_base_url_the_provider_no_longer_uses_is_flagged() {
+        let row = provider_row_with(Some(catalogue_at("https://old.example/v1", 1_000, 9)));
+        let line = provider_models_line(&row, 2_000);
+        let text = lines_to_string(std::slice::from_ref(&line));
+        assert!(text.contains("https://old.example/v1"), "{text}");
+        assert!(
+            text.contains("no longer this provider's base URL"),
+            "{text}"
+        );
+        assert_eq!(line.spans[0].style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn a_request_in_flight_outranks_the_cached_list_on_the_row() {
+        let mut row =
+            provider_row_with(Some(catalogue_at("https://openrouter.ai/api/v1", 1_000, 9)));
+        row.activity = Some(ProbeKind::ModelRefresh);
+        let text = lines_to_string(&[provider_models_line(&row, 2_000)]);
+        assert!(text.contains("refreshing the model list"), "{text}");
+
+        row.activity = Some(ProbeKind::Connectivity);
+        let text = lines_to_string(&[provider_models_line(&row, 2_000)]);
+        assert!(text.contains("testing connectivity"), "{text}");
+    }
+
+    /// **The two-orders-of-magnitude range the packet named**, rendered at a
+    /// realistic width and a narrow one.
+    ///
+    /// Nine models and four hundred and seventeen must both produce exactly
+    /// one line: a renderer that grew with the catalogue would push every row
+    /// below it off a short terminal, and the count is what makes the line
+    /// length independent of the list length.
+    #[test]
+    fn a_catalogue_of_nine_and_of_four_hundred_and_seventeen_both_render_as_one_short_line() {
+        let mut lengths = Vec::new();
+        for count in [9usize, 417] {
+            let row = provider_row_with(Some(catalogue_at(
+                "https://openrouter.ai/api/v1",
+                1_787_336_476,
+                count,
+            )));
+            let line = provider_models_line(&row, 1_787_336_476);
+            let text = lines_to_string(&[line]);
+            assert_eq!(text.lines().count(), 1, "{text}");
+            assert!(
+                !text.contains("vendor/model-0"),
+                "a row summarises a catalogue; it must never list it: {text}"
+            );
+            lengths.push(text.chars().count());
+        }
+        assert!(
+            lengths[1] - lengths[0] <= 2,
+            "the line's length must follow the count's digits and nothing else, got {lengths:?}"
+        );
+    }
+
+    /// The whole Providers section, with a large catalogue cached, at a
+    /// realistic terminal width and an absurdly narrow one. Ratatui clips;
+    /// the assertion is that nothing panics and the rows are still rows.
+    #[test]
+    fn the_providers_section_survives_a_large_catalogue_at_every_width() {
+        let rows = vec![provider_row_with(Some(catalogue_at(
+            "https://openrouter.ai/api/v1",
+            1_787_336_476,
+            417,
+        )))];
+        let mut state = ShellState::new("glasshouse", "/work/glasshouse", "0.1.0", Vec::new());
+        state.open_settings(harness_rows(), integration_rows(), rows, profile_rows());
+        state.handle_key(press(KeyCode::Tab));
+        state.handle_key(press(KeyCode::Tab));
+
+        for (w, h) in [(1, 1), (20, 5), (80, 24), (100, 30), (400, 60)] {
+            let text = rendered(&state, w, h);
+            assert!(
+                !text.contains("vendor/model-200"),
+                "a four-hundred-model catalogue must never be enumerated on screen"
+            );
+        }
+        assert!(rendered(&state, 400, 60).contains("417 cached"));
     }
 
     /// Found running the real binary: refusing an unknown harness produces a

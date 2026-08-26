@@ -95,4 +95,24 @@ impl RuntimePaths {
     pub fn user_config_file(&self) -> PathBuf {
         self.config_dir.join("config.toml")
     }
+
+    /// Where discovered provider metadata is cached between runs.
+    ///
+    /// **Under the data directory, deliberately not the configuration one.**
+    /// A discovered model catalogue is not configuration: the user did not
+    /// type it, it carries a provenance and an age, and Glasshouse rewrites
+    /// it on its own when asked to refresh. Putting it beside
+    /// [`RuntimePaths::user_config_file`] would mean four hundred model
+    /// identifiers and a machine-written timestamp in a file whose whole
+    /// purpose is to record decisions a person made. See
+    /// [`mod@crate::provider::cache`], which is the only thing that reads or
+    /// writes in here.
+    ///
+    /// User scoped rather than project scoped, like everything else on this
+    /// type: a provider's model list is a property of the service, not of the
+    /// repository someone happens to be standing in, and two projects using
+    /// the same provider would otherwise each pay for their own fetch.
+    pub fn provider_cache_dir(&self) -> PathBuf {
+        self.data_dir.join("providers")
+    }
 }

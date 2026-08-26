@@ -20,8 +20,11 @@ use ratatui::style::Style;
 use crate::config::{
     Layer, ProfileApproval, ProfileBackend, ProfileConfig, ProviderConfig, StoredCredentialRef,
 };
+use crate::harness::{Declared, WireProtocol};
 use crate::integrations::{IntegrationId, IntegrationKind, IntegrationStatus};
 use crate::platform::exec;
+use crate::provider::cache::ModelCatalogue;
+use crate::provider::discovery::{ProbeOutcome, ProbeTarget};
 use crate::secret::native::{PreferNativeSecretStore, os_credential_for_variable};
 use crate::secret::{SecretRef, SecretStore};
 use crate::session::SessionRecord;
@@ -100,6 +103,17 @@ pub enum Action {
     /// the deletion — see
     /// [`ShellState::selected_provider_stored_credentials`].
     DeleteProviderCredential,
+    /// Make the network request the Settings overlay just planned — Phase
+    /// 9D lines 1 and 2.
+    ///
+    /// The run loop performs it, on a thread of its own, for the reason this
+    /// whole batch exists: a blocking network call on the thread that draws
+    /// the terminal freezes it, and a frozen terminal and a slow one look
+    /// identical to the person in front of them. See
+    /// [`ShellState::take_provider_probe_intent`], which is the only way the
+    /// request leaves this module, and `shell::spawn_provider_probe`, which
+    /// is the only thing that makes it.
+    RunProviderProbe,
     /// Reopen the first-run wizard for a "reconfigure" invocation (Phase 2C:
     /// "Allow the onboarding wizard to be reopened later from settings").
     /// Discovery and reading `UserConfig` are file I/O this module
@@ -401,6 +415,44 @@ impl ShellState {
         self.settings.as_mut()?.take_credential_entry()
     }
 
+    /// The provider probe the overlay just planned — **taken**, so it can
+    /// only ever be made once.
+    ///
+    /// The mirror of [`ShellState::take_provider_credential_entry`], and for
+    /// the same reason: this module works out what to do and the run loop
+    /// owns everything that touches the world. `None` when nothing is
+    /// planned, so a stray [`Action::RunProviderProbe`] opens no socket.
+    pub fn take_provider_probe_intent(&mut self) -> Option<ProviderProbeIntent> {
+        self.settings.as_mut()?.take_probe_intent()
+    }
+
+    /// Hand a finished probe back to the overlay.
+    ///
+    /// Returns [`Action::Redraw`] when Settings is open — the banner and the
+    /// row both changed — and [`Action::None`] when it is not, so a result
+    /// arriving after the user closed Settings costs no frame.
+    pub fn apply_provider_probe_result(&mut self, result: ProviderProbeResult) -> Action {
+        match self.settings.as_mut() {
+            Some(settings) => {
+                settings.apply_probe_result(result);
+                Action::Redraw
+            }
+            None => Action::None,
+        }
+    }
+
+    /// Whether any provider request is on the wire right now.
+    ///
+    /// The run loop asks each tick, so an interface with a request
+    /// outstanding keeps repainting and keeps saying so. Without this the
+    /// in-flight line would be drawn once and then sit there looking exactly
+    /// like a hang.
+    pub fn provider_probe_in_flight(&self) -> bool {
+        self.settings
+            .as_ref()
+            .is_some_and(SettingsState::any_probe_in_flight)
+    }
+
     /// The credential variable name `provider` declares first, which is the
     /// name a newly stored credential is filed under.
     ///
@@ -564,6 +616,7 @@ impl ShellState {
             SettingsAction::ReopenOnboarding => Action::ReopenOnboarding,
             SettingsAction::StoreCredential => Action::StoreProviderCredential,
             SettingsAction::DeleteCredential => Action::DeleteProviderCredential,
+            SettingsAction::RunProviderProbe => Action::RunProviderProbe,
         }
     }
 
@@ -720,6 +773,42 @@ pub struct ProviderRow {
     /// — so one tag covers every field, unlike [`HarnessRow`], where
     /// `enabled` and `executable` can come from different layers.
     pub layer: Layer,
+    /// This provider's cached model catalogue, read from disk when Settings
+    /// opened, or `None` if it has never been fetched.
+    ///
+    /// **Read from the cache, never fetched here.** Opening Settings must not
+    /// make a network request — that is Phase 9D line 3 — so this is
+    /// whatever `provider::cache::ModelCache::load` had on disk and nothing
+    /// else. It carries its own timestamp, which the renderer shows.
+    pub models: Option<ModelCatalogue>,
+    /// A probe currently on the wire for this provider, if any.
+    ///
+    /// On the row rather than in the bottom-panel banner deliberately. The
+    /// banner is cleared by the next keystroke — that is what stops a stale
+    /// result shadowing a field editor — and an in-flight indicator that
+    /// vanished the moment the user pressed an arrow key would leave a
+    /// running request invisible. A frozen interface and a busy one look
+    /// identical unless the busy one says so.
+    pub activity: Option<ProbeKind>,
+}
+
+impl ProviderRow {
+    /// A row with no cached catalogue and nothing in flight.
+    pub fn new(name: impl Into<String>, config: ProviderConfig, layer: Layer) -> Self {
+        Self {
+            name: name.into(),
+            config,
+            layer,
+            models: None,
+            activity: None,
+        }
+    }
+
+    /// The same row, carrying whatever the cache had for it.
+    pub fn with_models(mut self, models: Option<ModelCatalogue>) -> Self {
+        self.models = models;
+        self
+    }
 }
 
 /// One row of the Settings "Launch Profiles" section, matching
@@ -914,22 +1003,119 @@ pub struct ProfileInputView<'a> {
 
 /// The outcome of Line 5's connectivity check.
 ///
-/// **This is a precondition check, not a network request.** Glasshouse has
-/// no HTTP client dependency yet — another worker is adding one for the
-/// gateway on a separate branch — so this proves only what can be proven
-/// without one: the provider resolves to a real template, it declares at
-/// least one protocol, that protocol's base URL is non-empty, and (when the
-/// provider names any credential variables at all) at least one of them is
-/// currently set. [`ReachabilityCheck::PreconditionsMet`] is never proof the
-/// network is reachable, and the view names it as a precondition check for
-/// exactly that reason.
+/// **This is a real network request now.** It did not used to be: the batch
+/// that first shipped this check had no HTTP client on its branch, so it
+/// proved only what could be proven without one and said so on screen. `ureq`
+/// arrived with the gateway, so the check opens a socket, and the wording
+/// that apologised for not doing so is gone.
+///
+/// The preconditions are still checked first — the provider resolves to a
+/// real template, it declares a protocol, that protocol's base URL is
+/// non-empty, and when the provider names credential variables at all one of
+/// them is set — because a request that cannot possibly work is not worth a
+/// socket. But a passing precondition is no longer the answer; it is the
+/// permission to go and get one.
+///
+/// **This reports; it decides nothing.** A failure here must never disable a
+/// provider and a success must never enable one — Phase 9D line 1 says
+/// "before enabling it for routing", and what happens after the report is the
+/// user's to choose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReachabilityCheck {
-    PreconditionsMet {
+    /// Preconditions met, request on the wire, no answer yet.
+    ///
+    /// A state and not a transient: the interface renders this, which is what
+    /// makes a slow provider distinguishable from a frozen terminal.
+    InFlight {
         protocol: &'static str,
         base_url: String,
+        endpoint: String,
     },
+    /// The request came back. `endpoint` is the exact URL that was
+    /// requested, so "reached" is a claim the user can check.
+    Answered {
+        protocol: &'static str,
+        base_url: String,
+        endpoint: String,
+        outcome: ProbeOutcome,
+    },
+    /// A precondition failed and **no request was made**. Kept from the
+    /// original shape, and still the right answer for a provider with no base
+    /// URL: there is nowhere to send anything.
     Failed(String),
+}
+
+/// Which of the two probes a provider row has in flight, or is being asked
+/// for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeKind {
+    /// Phase 9D line 1: does this provider answer at all?
+    Connectivity,
+    /// Phase 9D line 2: fetch the model list and replace the cache.
+    ModelRefresh,
+}
+
+/// What a manual model refresh produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelRefresh {
+    /// Request on the wire, no answer yet.
+    InFlight { endpoint: String },
+    /// The catalogue was replaced. The count and the timestamp are both here
+    /// because a refresh that moved neither is a refresh that did nothing.
+    Refreshed {
+        count: usize,
+        fetched_at: i64,
+        endpoint: String,
+    },
+    /// **Not an error.** Phase 9D line 2 says "when the provider exposes
+    /// model discovery", so a provider that does not expose it has to produce
+    /// a plain sentence rather than a red failure or a control that is
+    /// silently dead. The `String` is that sentence, and it distinguishes
+    /// "known not to offer one" from "nobody has established whether it
+    /// does", which are different facts about the world.
+    NotOffered(String),
+    /// The request was made and did not produce a catalogue.
+    Failed(String),
+}
+
+/// The one bottom-panel notice a provider action leaves behind.
+///
+/// One slot rather than two, so a connectivity result and a refresh result
+/// can never both be showing and disagree about which was the last thing the
+/// user did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderNotice {
+    Reachability(ReachabilityCheck),
+    Models(ModelRefresh),
+}
+
+/// Everything the run loop needs to make one provider request, and nothing
+/// it does not.
+///
+/// **Names, never a value.** `secret_refs` is a list of
+/// [`SecretRef`]s — see that type's own documentation on why holding one
+/// reveals nothing — and resolving them is the run loop's job, in the one
+/// place that is allowed to touch a credential store. This module works out
+/// *what* to ask and never *what the answer is*, exactly as it does for
+/// [`Action::StartSession`] and [`Action::OpenSettings`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderProbeIntent {
+    pub provider: String,
+    pub kind: ProbeKind,
+    pub protocol: WireProtocol,
+    pub base_url: String,
+    pub target: ProbeTarget,
+    pub headers: Vec<(String, String)>,
+    pub secret_refs: Vec<SecretRef>,
+}
+
+/// One finished probe, on its way back from the worker thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderProbeResult {
+    pub provider: String,
+    pub notice: ProviderNotice,
+    /// A refreshed catalogue to put on the row, when there is one.
+    pub catalogue: Option<ModelCatalogue>,
 }
 
 /// Every [`IntegrationId`] a launch profile may actually name, in
@@ -950,27 +1136,46 @@ fn known_launch_harnesses() -> impl Iterator<Item = IntegrationId> {
         .filter(|id| id.kind() == IntegrationKind::Harness)
 }
 
-/// Check `config`'s reachability *preconditions* for the provider named
-/// `name` — see [`ReachabilityCheck`]'s own doc for exactly what is and is
-/// not established here.
+/// What a probe of `name` would ask for, or why it cannot be asked.
+///
+/// The preconditions come first because a request that cannot possibly work
+/// is not worth opening a socket for — and because the failures here are the
+/// ones a user can fix without leaving the screen they are on.
+///
+/// `target` says which URL the probe will request. A provider whose
+/// model-list endpoint is established gets [`ProbeTarget::ModelList`], which
+/// is the better probe: one request exercises the base URL, TLS, the
+/// credential and a real route. A provider whose model list nobody has
+/// established gets [`ProbeTarget::BaseUrl`] instead — appending `/models`
+/// anyway would be guessing at a path, which is the same failure
+/// [`mod@crate::provider`] refuses for a base URL.
+///
+/// **The first protocol's base URL, exactly as the precondition check has
+/// always used.** A provider serving several protocols at different roots —
+/// `openrouter` is the one that does — has one model list, and it is under
+/// the OpenAI-shaped base URL rather than the Anthropic root. Should a
+/// provider ever appear whose first protocol is not the one its model list
+/// lives under, this is the line that has to grow a per-protocol answer.
 ///
 /// Presence is checked with [`SecretStore::is_present`], never
-/// [`SecretStore::resolve`]: this function has no need to hold a credential's
-/// value even transiently, so it never asks for one.
-fn check_provider_reachability(
+/// [`SecretStore::resolve`]: nothing here needs a credential's value, so
+/// nothing here asks for one. The value is resolved once, later, by the run
+/// loop, immediately before it is put in a header.
+fn plan_provider_probe(
     name: &str,
     config: &ProviderConfig,
+    kind: ProbeKind,
     secrets: &dyn SecretStore,
-) -> ReachabilityCheck {
+) -> Result<ProviderProbeIntent, String> {
     let provider = match config.to_provider(name) {
         Ok(provider) => provider,
-        Err(err) => return ReachabilityCheck::Failed(err.to_string()),
+        Err(err) => return Err(err.to_string()),
     };
     let Some(support) = provider.protocols.first() else {
-        return ReachabilityCheck::Failed(format!("provider `{name}` declares no protocol"));
+        return Err(format!("provider `{name}` declares no protocol"));
     };
     if support.base_url.is_empty() {
-        return ReachabilityCheck::Failed(format!(
+        return Err(format!(
             "provider `{name}` has no base URL configured for {}",
             support.protocol
         ));
@@ -981,15 +1186,83 @@ fn check_provider_reachability(
             .iter()
             .any(|reference| secrets.is_present(reference));
         if !present {
-            return ReachabilityCheck::Failed(format!(
+            return Err(format!(
                 "none of provider `{name}`'s credential variable(s) ({}) is set",
                 provider.credential_env.join(", ")
             ));
         }
     }
-    ReachabilityCheck::PreconditionsMet {
-        protocol: support.protocol.slug(),
+
+    let target = if provider.model_list_endpoint.is_known_present() {
+        ProbeTarget::ModelList
+    } else {
+        ProbeTarget::BaseUrl
+    };
+
+    // Every reference the credential could come from, in the order the
+    // provider declares them, with the OS store's own reference first when
+    // the configuration records one. The run loop resolves the first that
+    // answers; which key of a pool to use is a routing decision neither this
+    // function nor `Provider::secret_refs` makes silently.
+    let mut secret_refs: Vec<SecretRef> = Vec::new();
+    if let Some(stored) = config.credential_store() {
+        secret_refs.push(stored.to_secret_ref());
+    }
+    for reference in provider.secret_refs() {
+        if !secret_refs.contains(&reference) {
+            secret_refs.push(reference);
+        }
+    }
+
+    Ok(ProviderProbeIntent {
+        provider: name.to_owned(),
+        kind,
+        protocol: support.protocol,
         base_url: support.base_url.clone(),
+        target,
+        headers: provider.headers.clone(),
+        secret_refs,
+    })
+}
+
+/// The exact URL `intent` will request.
+///
+/// Composed here, from the same two fields the run loop hands to
+/// [`crate::provider::discovery::ProbeRequest`], so the URL shown in the
+/// in-flight line is the URL that is actually requested rather than a second
+/// guess at it.
+fn probe_endpoint(intent: &ProviderProbeIntent) -> String {
+    match intent.target {
+        ProbeTarget::BaseUrl => intent.base_url.clone(),
+        ProbeTarget::ModelList => format!("{}/models", intent.base_url.trim_end_matches('/')),
+    }
+}
+
+/// Whether `config`'s provider offers model discovery, or the plain sentence
+/// saying why it does not.
+///
+/// Three answers, not two, because [`Declared`] has three states and the
+/// difference matters to the person reading it. "This service is known not to
+/// serve a model list" and "nobody has established whether it does" call for
+/// different next actions: the first is final, the second is an invitation to
+/// go and read the service's documentation. Collapsing them into one
+/// "unavailable" would throw that away — the same reason
+/// [`mod@crate::harness`] keeps `Unverified` distinct from a verified `false`
+/// in the first place.
+fn model_discovery_availability(name: &str, config: &ProviderConfig) -> Result<(), String> {
+    let provider = match config.to_provider(name) {
+        Ok(provider) => provider,
+        Err(err) => return Err(err.to_string()),
+    };
+    match provider.model_list_endpoint {
+        Declared::Verified { value: true, .. } => Ok(()),
+        Declared::Verified { value: false, .. } => Err(format!(
+            "`{name}` is known not to serve a model list, so there is nothing to refresh"
+        )),
+        Declared::Unverified => Err(format!(
+            "no model-discovery endpoint has been established for `{name}`, and Glasshouse \
+             will not guess one; read one from the service's own documentation first"
+        )),
     }
 }
 
@@ -1006,6 +1279,10 @@ enum SettingsAction {
     Close,
     /// `w`: apply every pending edit to the user-level configuration.
     SaveUser,
+    /// `t` or `m`: a provider probe is planned and the run loop should make
+    /// it. Only ever produced once the preconditions passed, so the run loop
+    /// never has to re-check them.
+    RunProviderProbe,
     /// The confirmed half of `W`: apply every pending edit to the
     /// project-level configuration. Only ever produced after the user
     /// answered the confirmation with `y` or `Enter`.
@@ -1069,12 +1346,19 @@ pub struct SettingsState {
     confirm_credential_delete: Option<String>,
     provider_input: Option<ProviderTextInput>,
     profile_input: Option<ProfileTextInput>,
-    /// The last connectivity-precondition check run this session, and which
-    /// provider it was for — see [`ReachabilityCheck`]. Cleared by any other
-    /// key the general dispatcher in [`SettingsState::handle_key`] handles —
-    /// exactly like the status note in the outer shell footer — so it can
-    /// never shadow a wizard or field editor that opens afterward.
-    provider_test_result: Option<(String, ReachabilityCheck)>,
+    /// The last provider notice this session, and which provider it was for
+    /// — a connectivity result or a model refresh, never both. Cleared by any
+    /// other key the general dispatcher in [`SettingsState::handle_key`]
+    /// handles — exactly like the status note in the outer shell footer — so
+    /// it can never shadow a wizard or field editor that opens afterward.
+    ///
+    /// Clearing this does **not** cancel a request; an in-flight probe lives
+    /// on [`ProviderRow::activity`], which no keystroke touches.
+    provider_notice: Option<(String, ProviderNotice)>,
+    /// A probe the run loop has not collected yet — see
+    /// [`ShellState::take_provider_probe_intent`], which is the only way one
+    /// leaves this overlay.
+    pending_probe: Option<ProviderProbeIntent>,
 }
 
 impl SettingsState {
@@ -1102,7 +1386,8 @@ impl SettingsState {
             confirm_credential_delete: None,
             provider_input: None,
             profile_input: None,
-            provider_test_result: None,
+            provider_notice: None,
+            pending_probe: None,
         }
     }
 
@@ -1198,12 +1483,21 @@ impl SettingsState {
         })
     }
 
-    /// The most recent connectivity-precondition check, if one has been run
-    /// this Settings session — see [`ReachabilityCheck`].
+    /// The most recent connectivity check, if that is what the notice is —
+    /// see [`ReachabilityCheck`].
     pub fn provider_test_result(&self) -> Option<(&str, &ReachabilityCheck)> {
-        self.provider_test_result
-            .as_ref()
-            .map(|(name, outcome)| (name.as_str(), outcome))
+        match self.provider_notice.as_ref()? {
+            (name, ProviderNotice::Reachability(check)) => Some((name.as_str(), check)),
+            (_, ProviderNotice::Models(_)) => None,
+        }
+    }
+
+    /// The most recent model refresh, if that is what the notice is.
+    pub fn provider_models_result(&self) -> Option<(&str, &ModelRefresh)> {
+        match self.provider_notice.as_ref()? {
+            (name, ProviderNotice::Models(refresh)) => Some((name.as_str(), refresh)),
+            (_, ProviderNotice::Reachability(_)) => None,
+        }
     }
 
     /// The active Launch-Profiles-section text input, if any — a new
@@ -1350,14 +1644,18 @@ impl SettingsState {
             };
         }
 
-        // A stale reachability-check banner must not permanently shadow
-        // another bottom-panel view — the wizard/field editors this session
-        // opens afterward all render in that same area — so any key that
-        // reaches this general dispatcher clears it first, exactly like the
-        // outer shell's own status note clears on the next keystroke. The
-        // `t` arm below sets it again in the same keypress when that is what
+        // A stale provider banner must not permanently shadow another
+        // bottom-panel view — the wizard/field editors this session opens
+        // afterward all render in that same area — so any key that reaches
+        // this general dispatcher clears it first, exactly like the outer
+        // shell's own status note clears on the next keystroke. The `t` and
+        // `m` arms below set it again in the same keypress when that is what
         // was actually pressed.
-        self.provider_test_result = None;
+        //
+        // This clears a *banner*, never a request. An in-flight probe is on
+        // `ProviderRow::activity` precisely so that pressing an arrow key
+        // cannot make a running request invisible.
+        self.provider_notice = None;
 
         match key.code {
             KeyCode::Esc => SettingsAction::Close,
@@ -1418,8 +1716,18 @@ impl SettingsState {
                 SettingsAction::Redraw
             }
             KeyCode::Char('t') if self.section == SettingsSection::Providers => {
-                self.test_selected_provider();
-                SettingsAction::Redraw
+                if self.begin_provider_test() {
+                    SettingsAction::RunProviderProbe
+                } else {
+                    SettingsAction::Redraw
+                }
+            }
+            KeyCode::Char('m') if self.section == SettingsSection::Providers => {
+                if self.begin_provider_model_refresh() {
+                    SettingsAction::RunProviderProbe
+                } else {
+                    SettingsAction::Redraw
+                }
             }
             KeyCode::Char('s') if self.section == SettingsSection::Providers => {
                 self.start_set_provider_credential();
@@ -1659,20 +1967,129 @@ impl SettingsState {
         self.selected_provider = self
             .selected_provider
             .min(self.providers.len().saturating_sub(1));
-        self.provider_test_result = None;
+        self.provider_notice = None;
     }
 
-    fn test_selected_provider(&mut self) {
+    /// `t`: plan a connectivity probe of the selected provider and hand it
+    /// to the run loop.
+    ///
+    /// Returns `true` when there is something for the run loop to do, so the
+    /// caller can raise [`SettingsAction::RunProviderProbe`] rather than
+    /// guessing. A precondition failure sets the banner here and returns
+    /// `false`: nothing was asked of the network, so nothing needs the run
+    /// loop.
+    fn begin_provider_test(&mut self) -> bool {
+        self.begin_provider_probe(ProbeKind::Connectivity)
+    }
+
+    /// `m`: Phase 9D line 2, and manual by construction — this runs because
+    /// a key was pressed and there is no other caller.
+    fn begin_provider_model_refresh(&mut self) -> bool {
         let Some(row) = self.providers.get(self.selected_provider) else {
-            return;
+            return false;
         };
-        // The store a launch would actually use, not just the environment:
-        // a key the user put in the Keychain is a key this check must count
-        // as present, or `t` would report a provider as unusable that
-        // launches perfectly well.
-        let outcome =
-            check_provider_reachability(&row.name, &row.config, &PreferNativeSecretStore::detect());
-        self.provider_test_result = Some((row.name.clone(), outcome));
+        // Asked before anything else: a provider with no model list must
+        // produce a sentence, not a failed request against a guessed path.
+        if let Err(why) = model_discovery_availability(&row.name, &row.config) {
+            let name = row.name.clone();
+            self.provider_notice =
+                Some((name, ProviderNotice::Models(ModelRefresh::NotOffered(why))));
+            return false;
+        }
+        self.begin_provider_probe(ProbeKind::ModelRefresh)
+    }
+
+    fn begin_provider_probe(&mut self, kind: ProbeKind) -> bool {
+        let Some(row) = self.providers.get(self.selected_provider) else {
+            return false;
+        };
+        let name = row.name.clone();
+
+        // A second press while one is already running would open a second
+        // socket and leave two results racing for one banner. Refused, and
+        // said out loud rather than ignored — a key that silently does
+        // nothing is indistinguishable from a frozen screen.
+        if row.activity.is_some() {
+            self.provider_notice = Some((
+                name.clone(),
+                ProviderNotice::Reachability(ReachabilityCheck::Failed(format!(
+                    "a request for `{name}` is already running; wait for it to come back"
+                ))),
+            ));
+            return false;
+        }
+
+        // The store a launch would actually use, not just the environment: a
+        // key the user put in the Keychain is a key this check must count as
+        // present, or `t` would report a provider as unusable that launches
+        // perfectly well.
+        let intent =
+            match plan_provider_probe(&name, &row.config, kind, &PreferNativeSecretStore::detect())
+            {
+                Ok(intent) => intent,
+                Err(why) => {
+                    self.provider_notice = Some(match kind {
+                        ProbeKind::Connectivity => (
+                            name,
+                            ProviderNotice::Reachability(ReachabilityCheck::Failed(why)),
+                        ),
+                        ProbeKind::ModelRefresh => {
+                            (name, ProviderNotice::Models(ModelRefresh::Failed(why)))
+                        }
+                    });
+                    return false;
+                }
+            };
+
+        let endpoint = probe_endpoint(&intent);
+        self.provider_notice = Some(match kind {
+            ProbeKind::Connectivity => (
+                name.clone(),
+                ProviderNotice::Reachability(ReachabilityCheck::InFlight {
+                    protocol: intent.protocol.slug(),
+                    base_url: intent.base_url.clone(),
+                    endpoint,
+                }),
+            ),
+            ProbeKind::ModelRefresh => (
+                name.clone(),
+                ProviderNotice::Models(ModelRefresh::InFlight { endpoint }),
+            ),
+        });
+        if let Some(row) = self.providers.get_mut(self.selected_provider) {
+            row.activity = Some(kind);
+        }
+        self.pending_probe = Some(intent);
+        true
+    }
+
+    /// A finished probe, back from the run loop.
+    ///
+    /// The row's in-flight marker is cleared whatever the outcome, including
+    /// for a provider the user has since deleted — the lookup simply finds
+    /// nothing and the banner still tells them what happened to the request
+    /// they started.
+    fn apply_probe_result(&mut self, result: ProviderProbeResult) {
+        if let Some(row) = self
+            .providers
+            .iter_mut()
+            .find(|row| row.name == result.provider)
+        {
+            row.activity = None;
+            if let Some(catalogue) = result.catalogue {
+                row.models = Some(catalogue);
+            }
+        }
+        self.provider_notice = Some((result.provider, result.notice));
+    }
+
+    fn take_probe_intent(&mut self) -> Option<ProviderProbeIntent> {
+        self.pending_probe.take()
+    }
+
+    /// Whether any provider row has a request on the wire.
+    fn any_probe_in_flight(&self) -> bool {
+        self.providers.iter().any(|row| row.activity.is_some())
     }
 
     fn handle_provider_input_key(&mut self, key: KeyEvent) -> SettingsAction {
@@ -1778,11 +2195,8 @@ impl SettingsState {
                     return;
                 }
                 let config = ProviderConfig::new(typed);
-                self.providers.push(ProviderRow {
-                    name: name.clone(),
-                    config: config.clone(),
-                    layer: Layer::User,
-                });
+                self.providers
+                    .push(ProviderRow::new(name.clone(), config.clone(), Layer::User));
                 self.providers.sort_by(|a, b| a.name.cmp(&b.name));
                 self.selected_provider = self
                     .providers
@@ -2871,11 +3285,7 @@ mod settings_tests {
     fn sample_provider_rows() -> Vec<ProviderRow> {
         let mut config = ProviderConfig::new("openrouter");
         config.set_base_url(Some("https://mirror.example.com/v1".to_owned()));
-        vec![ProviderRow {
-            name: "my-router".to_owned(),
-            config,
-            layer: Layer::User,
-        }]
+        vec![ProviderRow::new("my-router", config, Layer::User)]
     }
 
     fn sample_profile_rows() -> Vec<ProfileRow> {
@@ -3482,11 +3892,7 @@ mod settings_tests {
 
         let mut config = ProviderConfig::new("openrouter");
         config.set_credential_env(vec![VAR.to_owned()]);
-        let rows = vec![ProviderRow {
-            name: "unset-cred".to_owned(),
-            config,
-            layer: Layer::User,
-        }];
+        let rows = vec![ProviderRow::new("unset-cred", config, Layer::User)];
 
         let mut state = state_with_a_session();
         state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());
@@ -3512,12 +3918,17 @@ mod settings_tests {
         );
     }
 
-    /// The positive counterpart: every precondition holds, and the result
-    /// names the protocol and base URL actually resolved — never a real
-    /// network request, just what `check_provider_reachability` can prove
-    /// without one.
+    /// A provider whose preconditions hold now produces a *request*, not a
+    /// verdict. `t` hands the run loop something to do, the row says a
+    /// request is running, and the intent names the exact URL that will be
+    /// asked for.
+    ///
+    /// The `openrouter` template's model-list endpoint is verified, so the
+    /// planned target is that endpoint rather than the bare base URL — one
+    /// request that exercises the base URL, TLS, the credential and a real
+    /// route.
     #[test]
-    fn a_passing_reachability_precondition_check_names_the_protocol_and_base_url() {
+    fn a_passing_precondition_check_plans_a_real_request_and_says_it_is_in_flight() {
         const VAR: &str = "GLASSHOUSE_SETTINGS_TEST_ONLY_PRESENT_CRED_VAR";
         // SAFETY: `VAR` is unique to this test and is removed again below.
         unsafe {
@@ -3526,20 +3937,22 @@ mod settings_tests {
 
         let mut config = ProviderConfig::new("openrouter");
         config.set_credential_env(vec![VAR.to_owned()]);
-        let rows = vec![ProviderRow {
-            name: "set-cred".to_owned(),
-            config,
-            layer: Layer::User,
-        }];
+        let rows = vec![ProviderRow::new("set-cred", config, Layer::User)];
 
         let mut state = state_with_a_session();
         state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());
         state = to_providers(state);
-        state.handle_key(press(KeyCode::Char('t')));
+        let action = state.handle_key(press(KeyCode::Char('t')));
 
         unsafe {
             std::env::remove_var(VAR);
         }
+
+        assert_eq!(
+            action,
+            Action::RunProviderProbe,
+            "a passing precondition check must hand the run loop a request to make"
+        );
 
         let (_, outcome) = state
             .settings()
@@ -3547,12 +3960,395 @@ mod settings_tests {
             .provider_test_result()
             .expect("a test ran");
         match outcome {
-            ReachabilityCheck::PreconditionsMet { protocol, base_url } => {
-                assert!(!protocol.is_empty());
-                assert!(!base_url.is_empty());
+            ReachabilityCheck::InFlight {
+                protocol,
+                base_url,
+                endpoint,
+            } => {
+                assert_eq!(*protocol, "openai-chat");
+                assert_eq!(*base_url, "https://openrouter.ai/api/v1");
+                assert_eq!(*endpoint, "https://openrouter.ai/api/v1/models");
             }
-            other => panic!("expected preconditions met, got {other:?}"),
+            other => panic!("expected a request in flight, got {other:?}"),
         }
+
+        assert_eq!(
+            state.settings().unwrap().providers()[0].activity,
+            Some(ProbeKind::Connectivity),
+            "the row must say a request is running, or a busy interface looks frozen"
+        );
+
+        let intent = state
+            .take_provider_probe_intent()
+            .expect("the run loop is given exactly one request");
+        assert_eq!(intent.provider, "set-cred");
+        assert_eq!(intent.kind, ProbeKind::Connectivity);
+        assert_eq!(intent.target, ProbeTarget::ModelList);
+        assert_eq!(
+            intent.secret_refs,
+            vec![SecretRef::Environment {
+                var: VAR.to_owned()
+            }]
+        );
+        assert!(
+            state.take_provider_probe_intent().is_none(),
+            "an intent is taken, so one keystroke can only ever open one socket"
+        );
+    }
+
+    /// **Acceptance test 6.** Phase 9D line 2 says "when the provider
+    /// exposes model discovery", so a provider that does not must produce a
+    /// plain sentence — not an error, and not a control that silently does
+    /// nothing.
+    ///
+    /// Both negative states are asserted, because they are different facts
+    /// and call for different next actions. `ollama`'s model list is
+    /// `Unverified`: nobody has established it, and the sentence has to say
+    /// so rather than claiming the service lacks one.
+    #[test]
+    fn a_provider_with_no_established_model_discovery_says_so_and_is_not_an_error() {
+        let rows = vec![ProviderRow::new(
+            "local",
+            ProviderConfig::new("ollama"),
+            Layer::User,
+        )];
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());
+        state = to_providers(state);
+
+        let action = state.handle_key(press(KeyCode::Char('m')));
+        assert_eq!(
+            action,
+            Action::Redraw,
+            "no request may be planned for a provider with no established model list"
+        );
+        assert!(
+            state.take_provider_probe_intent().is_none(),
+            "nothing may be sent to a path nobody established"
+        );
+
+        let (name, refresh) = state
+            .settings()
+            .unwrap()
+            .provider_models_result()
+            .expect("the user must be told something");
+        assert_eq!(name, "local");
+        match refresh {
+            ModelRefresh::NotOffered(reason) => {
+                assert!(
+                    reason.contains("has been established"),
+                    "the sentence must say nobody established one, not that none exists: \
+                     {reason}"
+                );
+                assert!(
+                    reason.contains("local"),
+                    "and it must name the provider: {reason}"
+                );
+            }
+            other => panic!("expected a plain explanation, not an error: {other:?}"),
+        }
+        assert!(
+            state.settings().unwrap().providers()[0].activity.is_none(),
+            "nothing is in flight, so nothing may claim to be"
+        );
+    }
+
+    /// A provider whose model list *is* established plans a refresh. The
+    /// counterpart to the test above, so "not offered" cannot be passing
+    /// because `m` does nothing at all.
+    #[test]
+    fn a_provider_with_an_established_model_list_plans_a_refresh_of_it() {
+        let rows = vec![ProviderRow::new(
+            "router",
+            ProviderConfig::new("litellm"),
+            Layer::User,
+        )];
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());
+        state = to_providers(state);
+
+        assert_eq!(
+            state.handle_key(press(KeyCode::Char('m'))),
+            Action::RunProviderProbe
+        );
+        let intent = state.take_provider_probe_intent().expect("a request");
+        assert_eq!(intent.kind, ProbeKind::ModelRefresh);
+        assert_eq!(intent.target, ProbeTarget::ModelList);
+        assert_eq!(probe_endpoint(&intent), "http://0.0.0.0:4000/models");
+    }
+
+    /// **Phase 9D line 1's own words: "before enabling it for routing".**
+    ///
+    /// Testing reports. It does not decide. A provider that was enabled stays
+    /// enabled through a timeout, and a provider that was disabled stays
+    /// disabled through a success — neither outcome touches the flag, and
+    /// this asserts both directions because only checking one would let a
+    /// "helpful" auto-disable through.
+    #[test]
+    fn a_connectivity_result_never_enables_or_disables_the_provider_it_is_about() {
+        for (starts_enabled, outcome) in [
+            (true, ProbeOutcome::TimedOut { waited_ms: 10_000 }),
+            (true, ProbeOutcome::Rejected { status: 401 }),
+            (
+                true,
+                ProbeOutcome::Unreachable {
+                    reason: "the connection was refused".to_owned(),
+                },
+            ),
+            (false, ProbeOutcome::Reached { status: 200 }),
+        ] {
+            let mut config = ProviderConfig::new("openrouter");
+            config.set_enabled(starts_enabled);
+            let rows = vec![ProviderRow::new("router", config, Layer::User)];
+            let mut state = state_with_a_session();
+            state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());
+
+            state.apply_provider_probe_result(ProviderProbeResult {
+                provider: "router".to_owned(),
+                notice: ProviderNotice::Reachability(ReachabilityCheck::Answered {
+                    protocol: "openai-chat",
+                    base_url: "https://openrouter.ai/api/v1".to_owned(),
+                    endpoint: "https://openrouter.ai/api/v1/models".to_owned(),
+                    outcome: outcome.clone(),
+                }),
+                catalogue: None,
+            });
+
+            assert_eq!(
+                state.settings().unwrap().providers()[0].config.enabled(),
+                starts_enabled,
+                "a {outcome:?} result changed whether the provider was enabled; testing \
+                 reports and the user decides"
+            );
+        }
+    }
+
+    /// **Acceptance test 4, at the state level.** A refresh replaces the
+    /// cached list and moves the timestamp.
+    #[test]
+    fn a_manual_refresh_replaces_the_cached_list_and_moves_the_timestamp() {
+        let rows = vec![
+            ProviderRow::new("router", ProviderConfig::new("openrouter"), Layer::User).with_models(
+                Some(ModelCatalogue::new(
+                    "router",
+                    "https://openrouter.ai/api/v1",
+                    "https://openrouter.ai/api/v1/models",
+                    1_000,
+                    vec![
+                        crate::provider::cache::ModelEntry::new("old/one"),
+                        crate::provider::cache::ModelEntry::new("old/two"),
+                    ],
+                )),
+            ),
+        ];
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());
+
+        let refreshed = ModelCatalogue::new(
+            "router",
+            "https://openrouter.ai/api/v1",
+            "https://openrouter.ai/api/v1/models",
+            2_000,
+            vec![crate::provider::cache::ModelEntry::new("new/one")],
+        );
+        state.apply_provider_probe_result(ProviderProbeResult {
+            provider: "router".to_owned(),
+            notice: ProviderNotice::Models(ModelRefresh::Refreshed {
+                count: 1,
+                fetched_at: 2_000,
+                endpoint: "https://openrouter.ai/api/v1/models".to_owned(),
+            }),
+            catalogue: Some(refreshed),
+        });
+
+        let row = &state.settings().unwrap().providers()[0];
+        let models = row.models.as_ref().expect("a catalogue");
+        assert_eq!(models.fetched_at(), 2_000, "the timestamp must move");
+        assert_eq!(models.len(), 1);
+        assert!(
+            !models.models().iter().any(|m| m.id().starts_with("old/")),
+            "a refresh replaces the list; it must never append to it"
+        );
+    }
+
+    /// A request on the wire must be visible on the row, and must survive
+    /// every keystroke that clears the banner beneath it.
+    ///
+    /// This is the state half of "a frozen screen and a slow screen look
+    /// identical, and only one of them is acceptable". The banner is
+    /// deliberately transient — that is what stops it shadowing a field
+    /// editor — so if the in-flight marker lived there too, scrolling the
+    /// list would make a running request invisible.
+    #[test]
+    fn an_in_flight_request_survives_the_keystrokes_that_clear_its_banner() {
+        const VAR: &str = "GLASSHOUSE_SETTINGS_TEST_ONLY_INFLIGHT_CRED_VAR";
+        // SAFETY: `VAR` is unique to this test and is removed again below.
+        unsafe {
+            std::env::set_var(VAR, "sk-fabricated-test-value-not-a-real-credential");
+        }
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_credential_env(vec![VAR.to_owned()]);
+        let rows = vec![
+            ProviderRow::new("first", config.clone(), Layer::User),
+            ProviderRow::new("second", config, Layer::User),
+        ];
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());
+        state = to_providers(state);
+
+        assert_eq!(
+            state.handle_key(press(KeyCode::Char('t'))),
+            Action::RunProviderProbe
+        );
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+        assert!(state.provider_probe_in_flight());
+
+        // The interface still answers keys — this is the responsiveness
+        // claim, made against the same state a real keystroke would reach.
+        assert_eq!(state.handle_key(press(KeyCode::Down)), Action::Redraw);
+        assert_eq!(state.settings().unwrap().selected_provider(), 1);
+        assert!(
+            state.settings().unwrap().provider_test_result().is_none(),
+            "the banner clears on the next key, exactly as it always did"
+        );
+        assert!(
+            state.provider_probe_in_flight(),
+            "but the request is still running, and the interface must still say so"
+        );
+        assert_eq!(
+            state.settings().unwrap().providers()[0].activity,
+            Some(ProbeKind::Connectivity),
+            "and it says so on the row the request is about, not on the selected one"
+        );
+    }
+
+    /// A second press while one request is running must not open a second
+    /// socket, and must say why rather than doing nothing — a key that
+    /// silently does nothing is indistinguishable from a frozen screen.
+    #[test]
+    fn a_second_test_while_one_is_running_is_refused_out_loud() {
+        const VAR: &str = "GLASSHOUSE_SETTINGS_TEST_ONLY_DOUBLE_PRESS_VAR";
+        // SAFETY: `VAR` is unique to this test and is removed again below.
+        unsafe {
+            std::env::set_var(VAR, "sk-fabricated-test-value-not-a-real-credential");
+        }
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_credential_env(vec![VAR.to_owned()]);
+        let rows = vec![ProviderRow::new("router", config, Layer::User)];
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());
+        state = to_providers(state);
+
+        assert_eq!(
+            state.handle_key(press(KeyCode::Char('t'))),
+            Action::RunProviderProbe
+        );
+        let _first = state.take_provider_probe_intent().expect("one request");
+
+        let action = state.handle_key(press(KeyCode::Char('t')));
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+        assert_eq!(action, Action::Redraw, "the second press plans nothing");
+        assert!(
+            state.take_provider_probe_intent().is_none(),
+            "a second socket must not be opened while the first is outstanding"
+        );
+        match state.settings().unwrap().provider_test_result() {
+            Some((_, ReachabilityCheck::Failed(reason))) => assert!(
+                reason.contains("already running"),
+                "the refusal must say why: {reason}"
+            ),
+            other => panic!("expected an out-loud refusal, got {other:?}"),
+        }
+    }
+
+    /// **Acceptance test 7, at the state boundary.** A probe intent is names
+    /// only. Asserted with `!contains` rather than `assert_eq!`, because a
+    /// failing equality assertion on secret material prints both sides.
+    #[test]
+    fn a_probe_intent_and_its_debug_carry_names_only_and_never_a_credential() {
+        const VAR: &str = "GLASSHOUSE_SETTINGS_TEST_ONLY_LEAK_CHECK_VAR";
+        const VALUE: &str = "sk-planted-state-credential-9d";
+        // SAFETY: `VAR` is unique to this test and is removed again below.
+        unsafe {
+            std::env::set_var(VAR, VALUE);
+        }
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_credential_env(vec![VAR.to_owned()]);
+        let rows = vec![ProviderRow::new("router", config, Layer::User)];
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());
+        state = to_providers(state);
+        state.handle_key(press(KeyCode::Char('t')));
+        let intent = state.take_provider_probe_intent().expect("a request");
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+
+        for rendered in [
+            format!("{intent:?}"),
+            format!("{:?}", state.settings().unwrap().providers()),
+            format!("{:?}", state.settings().unwrap().provider_test_result()),
+        ] {
+            assert!(
+                !rendered.contains(VALUE),
+                "a credential value reached a Debug rendering"
+            );
+        }
+        assert!(
+            format!("{intent:?}").contains(VAR),
+            "the variable NAME is not a secret and is what makes the intent readable"
+        );
+    }
+
+    /// A probe answering after Settings has been closed is dropped quietly
+    /// rather than reopening anything or costing a frame.
+    #[test]
+    fn a_result_arriving_after_settings_closed_changes_nothing() {
+        let mut state = state_with_a_session();
+        assert_eq!(
+            state.apply_provider_probe_result(ProviderProbeResult {
+                provider: "router".to_owned(),
+                notice: ProviderNotice::Models(ModelRefresh::Failed("late".to_owned())),
+                catalogue: None,
+            }),
+            Action::None
+        );
+        assert!(state.settings().is_none());
+    }
+
+    /// Found by asking what happens to a request whose provider the user
+    /// deletes while it is in flight: the row is gone, so there is nothing
+    /// to clear, and the banner still reports what happened to the request
+    /// they started.
+    #[test]
+    fn a_result_for_a_provider_that_has_since_been_deleted_still_reports() {
+        let rows = vec![ProviderRow::new(
+            "router",
+            ProviderConfig::new("openrouter"),
+            Layer::User,
+        )];
+        let mut state = state_with_a_session();
+        state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());
+
+        assert_eq!(
+            state.apply_provider_probe_result(ProviderProbeResult {
+                provider: "already-deleted".to_owned(),
+                notice: ProviderNotice::Models(ModelRefresh::Failed("gone".to_owned())),
+                catalogue: None,
+            }),
+            Action::Redraw
+        );
+        assert!(
+            state
+                .settings()
+                .unwrap()
+                .provider_models_result()
+                .is_some_and(|(name, _)| name == "already-deleted")
+        );
     }
 
     /// Found running the real binary: a reachability-check result must not
@@ -3597,11 +4393,7 @@ mod settings_tests {
         config
             .set_base_url(Some("https://mirror.example.com/v1".to_owned()))
             .set_credential_env(vec!["MY_ROUTER_KEY".to_owned()]);
-        vec![ProviderRow {
-            name: "my-router".to_owned(),
-            config,
-            layer: Layer::User,
-        }]
+        vec![ProviderRow::new("my-router", config, Layer::User)]
     }
 
     fn settings_with_credential_provider() -> ShellState {
@@ -3829,11 +4621,7 @@ mod settings_tests {
         config
             .set_credential_env(vec!["FIRST_KEY".to_owned(), "SECOND_KEY".to_owned()])
             .set_credential_store(Some(StoredCredentialRef::new("glasshouse", "FIRST_KEY")));
-        let rows = vec![ProviderRow {
-            name: "pool".to_owned(),
-            config,
-            layer: Layer::User,
-        }];
+        let rows = vec![ProviderRow::new("pool", config, Layer::User)];
 
         let mut state = ShellState::new("glasshouse", "/work", "0.1.0", Vec::new());
         state.open_settings(Vec::new(), Vec::new(), rows, Vec::new());

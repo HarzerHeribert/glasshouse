@@ -422,9 +422,9 @@ Phase 9D — Built-in provider templates
 ☑ Keep provider templates declarative so adding a known service does not require branching throughout the core router.
 ☑ Keep service-specific default URLs and headers overridable by the user.
 ☑ Allow a provider template to define required environment-variable names without storing the secret in project memory.
-☐ Allow the user to test provider connectivity from settings before enabling it for routing.
-☐ Allow the user to refresh a provider’s model list manually when the provider exposes model discovery.
-☐ Cache discovered model metadata with a timestamp rather than querying remote model catalogs on every Glasshouse start.
+☑ Allow the user to test provider connectivity from settings before enabling it for routing.
+☑ Allow the user to refresh a provider’s model list manually when the provider exposes model discovery.
+☑ Cache discovered model metadata with a timestamp rather than querying remote model catalogs on every Glasshouse start.
 
 Phase 9E — Secret storage
 

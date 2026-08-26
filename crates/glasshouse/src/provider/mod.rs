@@ -55,15 +55,86 @@
 //!   its own comment explaining why: it strips `/v1` from the OpenAI base
 //!   URL because Claude Code appends `/v1/messages` itself.
 //!
-//! **Kilo and Nous are deliberately not templates here.** The user holds a
-//! credential for each, but no endpoint has been established for either — no
-//! real installation and no documentation page was read for them the way it
-//! was for the providers in [`templates`]. A template with an invented base
-//! URL would be the same failure Phase 9A already refuses for an invented
-//! environment-variable name. Both are reachable today through the generic
-//! `openai-compatible` template once someone reads a real endpoint from the
-//! service's own documentation; do not "helpfully" guess one in the
-//! meantime.
+//! # What the model-list probes established, on 2026-08-26
+//!
+//! Every template here shipped with `model_list_endpoint: Unverified` except
+//! OpenRouter's and LiteLLM's, both of which cited a documentation page
+//! rather than a response. Six live `GET <base>/models` requests were then
+//! made against the exact base URLs these templates declare, unauthenticated,
+//! and read for their entry counts:
+//!
+//! | provider | base URL | HTTP | entries |
+//! |---|---|---|---|
+//! | openrouter | `https://openrouter.ai/api/v1` | 200 | 417 |
+//! | unorouter | `https://api.unorouter.com/v1` | 200 | 374 |
+//! | anyrouter | `https://anyrouter.dev/api/v1` | 200 | 102 |
+//! | kilo | `https://kilo.ai/api/openrouter` | 200 | 367 |
+//! | nous | `https://inference-api.nousresearch.com/v1` | 200 | 372 |
+//! | zai | `https://api.z.ai/api/paas/v4` | 401 | — |
+//!
+//! The five that answered `200` are the entries whose `model_list_endpoint`
+//! is now `Verified`. **The promotion goes no further than that.** A
+//! `GET /models` that answers `200` establishes that a model list is served
+//! at that URL and nothing whatever about streaming, tool calls or reasoning,
+//! so every one of those stays `Unverified` — the same discipline the
+//! OpenRouter Responses entry below already documents for its own probe.
+//!
+//! Two of those counts are worth reading as snapshots rather than facts about
+//! the service. UnoRouter answered `374` at 09:00 on 2026-08-26 and `369` an
+//! hour later, re-probed independently. A catalogue that moves within the
+//! hour is why every citation here names a date and why nothing downstream
+//! may treat a count as stable.
+//!
+//! # z.ai stays `Unverified`, and the reason is the control
+//!
+//! **A `401` from z.ai establishes nothing about `/models`,** and the batch
+//! that first promoted it said so itself without knowing: its stated control
+//! was that "a host that served nothing there would have answered `404`".
+//! That is exactly the right test, and it was cited from the OpenRouter
+//! Responses probe rather than run against this host. Run against this host,
+//! on 2026-08-26, it fails:
+//!
+//! - `/api/paas/v4/models` → `401`
+//! - `/api/paas/v4/definitely-not-real-xyz` → `401`
+//! - `/api/paas/v4/nonsense/deep/path` → `401`
+//! - `/api/paas/v9/models`, a version prefix that does not exist → **`200`**,
+//!   carrying the same authentication error in its body
+//!
+//! The service refuses every path under that prefix identically and will not
+//! say whether a route exists until a credential is presented, so the `401`
+//! discriminates nothing. `https://api.z.ai/totally/bogus` does answer `404`,
+//! which is what made the original reasoning look sound — the `404` behaviour
+//! is real, it simply lives outside the API prefix where the probe cannot use
+//! it.
+//!
+//! The base URL is unchanged and still `unverified_support`; only the claim
+//! that a model list is served at `<base>/models` is withdrawn. Establishing
+//! it needs one authenticated request with the user's own key, which is a
+//! free-models-only condition away and belongs to whoever spends it.
+//!
+//! **The transferable rule, which is this project's own and was applied to
+//! the wrong subject here: a control has to be run against the host it is
+//! being used to justify.** A control borrowed from another service is a
+//! statement about that service.
+//!
+//! # Kilo and Nous have endpoints now
+//!
+//! Both were deliberately absent from [`templates`] until 2026-08-26 because
+//! the user held a credential for each and no endpoint had been read for
+//! either. The probes above are those endpoints, so both are templates now.
+//!
+//! **Kilo moved, and the template declares the new host.**
+//! `https://kilocode.ai/api/openrouter/models` answers `308` with
+//! `Location: https://kilo.ai/api/openrouter/models`. A template on the old
+//! host would work only for a client that follows redirects, and
+//! [`mod@crate::provider::discovery`] deliberately follows none — a redirect
+//! means deciding whether to re-attach a credential to a host named at
+//! runtime, which is not a decision to make silently.
+
+pub mod cache;
+pub mod discovery;
+#[cfg(test)]
+pub(crate) mod fixture;
 
 use crate::harness::{Declared, WireProtocol};
 use crate::secret::SecretRef;
@@ -303,7 +374,8 @@ pub fn templates() -> Vec<Provider> {
             model_list_endpoint: Declared::verified(
                 true,
                 "OpenRouter's API reference documents a public, unauthenticated \
-                 GET https://openrouter.ai/api/v1/models, read 2026-08-25",
+                 GET https://openrouter.ai/api/v1/models, read 2026-08-25; that request \
+                 answered 200 with 417 entries when made, 2026-08-26",
             ),
             usage_telemetry: Declared::Unverified,
             credential_env: vec!["OPENROUTER_API_KEY".to_owned()],
@@ -315,7 +387,11 @@ pub fn templates() -> Vec<Provider> {
                 WireProtocol::OpenAiChat,
                 "https://api.unorouter.com/v1",
             )],
-            model_list_endpoint: Declared::Unverified,
+            model_list_endpoint: Declared::verified(
+                true,
+                "GET https://api.unorouter.com/v1/models answered 200 with 374 entries under \
+                 a top-level `data` array, probed 2026-08-26",
+            ),
             usage_telemetry: Declared::Unverified,
             credential_env: vec!["UNOROUTER_API_KEY".to_owned()],
             headers: vec![],
@@ -326,7 +402,11 @@ pub fn templates() -> Vec<Provider> {
                 WireProtocol::OpenAiChat,
                 "https://anyrouter.dev/api/v1",
             )],
-            model_list_endpoint: Declared::Unverified,
+            model_list_endpoint: Declared::verified(
+                true,
+                "GET https://anyrouter.dev/api/v1/models answered 200 with 102 entries under \
+                 a top-level `data` array, probed 2026-08-26",
+            ),
             usage_telemetry: Declared::Unverified,
             credential_env: vec!["ANYROUTER_API_KEY".to_owned()],
             headers: vec![],
@@ -337,9 +417,53 @@ pub fn templates() -> Vec<Provider> {
                 WireProtocol::OpenAiChat,
                 "https://api.z.ai/api/paas/v4",
             )],
+            // Deliberately NOT promoted, unlike the five beside it. z.ai
+            // answers `401` to every path under `/api/paas/v4/`, including
+            // ones that plainly do not exist, so its `401` on `/models`
+            // establishes nothing about `/models`. The full control run is in
+            // the module documentation. Promoting this needs one
+            // authenticated request, not another unauthenticated one.
             model_list_endpoint: Declared::Unverified,
             usage_telemetry: Declared::Unverified,
             credential_env: vec!["ZAI_API_KEY".to_owned()],
+            headers: vec![],
+        },
+        // Kilo and Nous, both added 2026-08-26 from a live `GET /models` —
+        // see the module documentation. Until that date both were named in
+        // `DELIBERATELY_UNTEMPLATED` precisely because no endpoint had been
+        // read for either.
+        Provider {
+            name: "kilo".to_owned(),
+            // `kilo.ai`, not `kilocode.ai`. The old host answers `308` to
+            // this one; a template pointing at it would only work for a
+            // client that follows redirects, and a POST that follows a `308`
+            // is not something to depend on.
+            protocols: vec![unverified_support(
+                WireProtocol::OpenAiChat,
+                "https://kilo.ai/api/openrouter",
+            )],
+            model_list_endpoint: Declared::verified(
+                true,
+                "GET https://kilo.ai/api/openrouter/models answered 200 with 367 entries \
+                 under a top-level `data` array, probed 2026-08-26",
+            ),
+            usage_telemetry: Declared::Unverified,
+            credential_env: vec!["KILO_API_KEY".to_owned()],
+            headers: vec![],
+        },
+        Provider {
+            name: "nous".to_owned(),
+            protocols: vec![unverified_support(
+                WireProtocol::OpenAiChat,
+                "https://inference-api.nousresearch.com/v1",
+            )],
+            model_list_endpoint: Declared::verified(
+                true,
+                "GET https://inference-api.nousresearch.com/v1/models answered 200 with 372 \
+                 entries under a top-level `data` array, probed 2026-08-26",
+            ),
+            usage_telemetry: Declared::Unverified,
+            credential_env: vec!["NOUS_API_KEY".to_owned()],
             headers: vec![],
         },
         Provider {
@@ -460,19 +584,19 @@ pub const GENERIC_TEMPLATE_NAMES: &[&str] = &["openai-compatible", "anthropic-co
 /// because no endpoint has been established for them — see the module
 /// documentation. Named so a test can assert none of them ever appears in
 /// [`templates`], with the reason attached to the assertion itself.
+///
+/// **This list is empty today, and that is a statement rather than a gap.**
+/// It held RouterAI, Kilo and Nous. RouterAI left the project; Kilo and Nous
+/// were given real endpoints on 2026-08-26 by the probes in the module
+/// documentation, which is exactly the transition this list exists to make
+/// visible. The mechanism stays because an absence has to stay assertable:
+/// the next credential someone holds for a service with no readable endpoint
+/// belongs here, not in a guessed template. See
+/// `no_template_exists_for_a_service_whose_endpoint_is_unestablished`, whose
+/// control case is what keeps the check itself honest while the list is
+/// empty.
 #[cfg(test)]
-const DELIBERATELY_UNTEMPLATED: &[(&str, &str)] = &[
-    (
-        "kilo",
-        "the user holds a credential for Kilo, but no endpoint has been read from a real \
-         installation or Kilo's own documentation",
-    ),
-    (
-        "nous",
-        "the user holds a credential for Nous, but no endpoint has been read from a real \
-         installation or Nous's own documentation",
-    ),
-];
+const DELIBERATELY_UNTEMPLATED: &[(&str, &str)] = &[];
 
 #[cfg(test)]
 mod tests {
@@ -768,6 +892,13 @@ mod tests {
         assert_eq!(responses.reasoning, Declared::Unverified);
     }
 
+    /// The list is empty today — see [`DELIBERATELY_UNTEMPLATED`]'s own doc
+    /// for why that is a statement rather than a gap.
+    ///
+    /// An empty list would make the loop below vacuous, so the control after
+    /// it is not decoration: it is the same device as the `404` control in
+    /// the Responses probe, and it is what proves the check can still fail
+    /// while there is nothing in the list for it to catch.
     #[test]
     fn no_template_exists_for_a_service_whose_endpoint_is_unestablished() {
         let names: Vec<String> = templates().into_iter().map(|p| p.name).collect();
@@ -777,6 +908,17 @@ mod tests {
                 "`{name}` must not appear in templates(): {reason}"
             );
         }
+        assert!(
+            !names
+                .iter()
+                .any(|n| n == "a-service-whose-endpoint-nobody-has-read"),
+            "the control case must not match a real template, or this check proves nothing"
+        );
+        assert!(
+            names.iter().any(|n| n == "openrouter"),
+            "and the list of names must be non-empty, or the control above would pass \
+             against nothing at all"
+        );
     }
 
     #[test]
@@ -808,10 +950,17 @@ mod tests {
             verified,
             vec![
                 "openrouter.model_list_endpoint".to_owned(),
+                "unorouter.model_list_endpoint".to_owned(),
+                "anyrouter.model_list_endpoint".to_owned(),
+                "kilo.model_list_endpoint".to_owned(),
+                "nous.model_list_endpoint".to_owned(),
                 "litellm.model_list_endpoint".to_owned(),
             ],
-            "only openrouter's and litellm's model-list endpoints were authorised as Verified; \
-             every other capability must be Unverified: {verified:?}"
+            "only a model-list endpoint someone actually requested and that answered with a \
+             catalogue may be Verified, and every other capability must be Unverified — a \
+             `GET /models` that answered says nothing about streaming, tool calls or \
+             reasoning, and z.ai's 401 says nothing even about the model list, because it \
+             answers 401 to every path under that prefix: {verified:?}"
         );
     }
 

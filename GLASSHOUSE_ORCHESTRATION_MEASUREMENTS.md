@@ -57,6 +57,58 @@ blocks the next batch.
 | 2C routing model | Opus **team lead**, subcontractors | ~55 min | — | +2450/-51, 4 files | 4 (phase COMPLETE) | 17 designed, 17 killed, 0 survived | 4 | PASS, CI green |
 | Rustdoc links | Sonnet | ~25 min | — | +22/-22, 12 files | **0** (made a gate real) | 1 gate mutation, killed | 0 | PASS |
 | 9B child env | **Codex `gpt-5.6-sol` xhigh** | ~17 min | subscription, 4% of weekly | +169/-95, 2 files | 1 (phase COMPLETE) | 3 by worker + 1 by orchestrator, all killed | 4 | PASS |
+| 9D connectivity + model cache | Opus **team lead**, 3 leaf subs (`agy-gh`) | ~2 h 50 min | — | +5343/-176, 12 files | 3 (phase COMPLETE) | 13 by lead + 3 by orchestrator, all killed | 5 | PASS — **but one of six evidence promotions was withdrawn on review** |
+
+### The batch that says review is not a formality
+
+The 9D batch is the strongest single deliverable this process has produced —
+thirteen mutations all killed, three leaf subcontractors all verified
+mechanically, two real defects found by running the binary, and a report that
+volunteered five things its own packet got wrong. It also contained **one
+unfounded evidence promotion that would have shipped as a `Verified`
+declaration in the product.**
+
+Both facts are about the same batch, and the second does not diminish the
+first. The lead promoted six `model_list_endpoint` declarations from live
+probes. The orchestrator re-ran all six independently: five reproduced exactly.
+The sixth, z.ai, had answered `401` rather than `200`, and the lead promoted it
+on a stated control — *"a host that served nothing there would have answered
+404"* — that it had **cited from a probe against a different service**. Run
+against z.ai, the control fails: every path under that prefix answers `401`,
+including invented ones, and a nonexistent API version answers `200`.
+
+Three things worth carrying:
+
+- **Re-running a worker's decisive external observations is cheap and it
+  paid.** Six `curl`s, under a minute. The five that reproduced cost nothing to
+  confirm; the one that did not was about to become a product claim.
+- **The error was in the reasoning, not the diligence.** The lead ran a real
+  probe, read a real body, wrote down what it saw, and explained itself well
+  enough that the flaw was *visible in its own doc comment*. A less careful
+  worker would have left nothing to catch.
+- **It is the fifth declaration in this project derived from an artifact that
+  did not support the use it was cited for** — after Antigravity's executable
+  name, Codex's snake_case hook events, Claude Code's `auto-mode` subcommand,
+  and Cursor's sandbox usage strings. The pattern is now unmistakable enough to
+  be a standing review step rather than a lesson: **before accepting a
+  declaration, check that its evidence was gathered against the thing it is
+  being used to justify.**
+
+**Answering open question 3 — the leaf tier's accuracy, on a second and third
+task.** The lead ran three `agy-gh` leaf workers, each in its own worktree with
+one explicit file. The inventory leaf returned **339 quoted `path:line` pairs,
+and the lead verified every one mechanically: 339 exact, 0 mismatched, 0
+missing-file.** The fixture leaf found and fixed a rustdoc trap the lead's own
+spec had introduced. The test leaf caught that the snapshot it was given was
+unformatted. So the leaf tier now has 171/171 and 339/339 on bounded quoting
+tasks, from two different orchestrating sessions. **Treat that as established
+for inventory work, and keep verifying mechanically — its value is that it is
+checkable, not that it is trusted.**
+
+The lead's own read on delegation is worth preserving: the tests packet was the
+weakest of the three, because a subcontractor can only reach the public API, so
+the load-bearing tests stayed with the lead regardless. **Delegate breadth;
+keep the tests that need private access.**
 
 ### What the first data point already says
 
