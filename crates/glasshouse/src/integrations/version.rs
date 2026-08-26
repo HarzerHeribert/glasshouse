@@ -163,16 +163,18 @@ pub fn parse_version(text: &str) -> Option<Version> {
         if let Some((major, mut pos)) = take_number(&chars, i) {
             let mut minor = 0u64;
             let mut patch = 0u64;
-            if pos < chars.len() && chars[pos] == '.' {
-                if let Some((m, next_pos)) = take_number(&chars, pos + 1) {
-                    minor = m;
+            if pos < chars.len()
+                && chars[pos] == '.'
+                && let Some((m, next_pos)) = take_number(&chars, pos + 1)
+            {
+                minor = m;
+                pos = next_pos;
+                if pos < chars.len()
+                    && chars[pos] == '.'
+                    && let Some((p, next_pos)) = take_number(&chars, pos + 1)
+                {
+                    patch = p;
                     pos = next_pos;
-                    if pos < chars.len() && chars[pos] == '.' {
-                        if let Some((p, next_pos)) = take_number(&chars, pos + 1) {
-                            patch = p;
-                            pos = next_pos;
-                        }
-                    }
                 }
             }
             let raw: String = chars[i..pos].iter().collect();

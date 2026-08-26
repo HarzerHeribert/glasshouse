@@ -1166,6 +1166,14 @@ obvious candidate.
 `rust-version = "1.88.0"`. This workspace pins **1.85**, and CI gates on
 `rustup run 1.85.0 cargo check --locked`. Adding 4.x breaks that gate.
 
+> **Superseded 2026-08-26, and the correction matters more than the entry.**
+> The premise above was false when it was written. `ratatui` and `time`
+> *already* declared `rust-version = "1.88.0"`, so the workspace floor was
+> 1.88 all along and the manifest's `1.85` was a claim no current cargo would
+> honour. Nothing caught it because the gate could not: cargo 1.85.0 does not
+> enforce `rust-version` at all. The decision to pin `keyring = "3.6"` still
+> stands, but **not for this reason** — see the MSRV entry below.
+
 **`keyring 3.6.3` declares `rust-version = "1.75"`**, which is comfortably
 inside the workspace MSRV. So the line to pin is `keyring = "3.6"`.
 
@@ -1187,3 +1195,62 @@ Secret Service keyring needs a session bus, and a Windows Credential Manager
 needs a real user session. Neither is obviously present on a CI runner. macOS
 can be proven on this machine; the other two need either a real host or an
 honest `LOCALLY VERIFIED` with the platform gap recorded.
+
+---
+
+## The workspace MSRV is 1.88, and the gate that said 1.85 could not have known
+
+_Decided 2026-08-26, by the orchestrator, on evidence from the first run of a
+new CI job._
+
+`Cargo.toml` declared `rust-version = "1.85"`. It was wrong, and had been for
+as long as `ratatui 0.30` was a dependency.
+
+**What the evidence says.** Scanning every one of the 282 locked packages for
+its declared `rust-version` puts the true floor at **1.88.0**, and it is not a
+leaf dependency doing it:
+
+| package | declares |
+|---|---|
+| `ratatui` 0.30.2, and its `-core`, `-crossterm`, `-widgets`, `-termina`, `-termwiz` | 1.88.0 |
+| `time` 0.3.55, `time-core` 0.1.9 | 1.88.0 |
+| everything else | ≤ 1.85 |
+
+`ratatui` is the TUI framework. There is no version of this product that drops
+it, so the floor is not negotiable by dependency surgery.
+
+**Why nobody noticed.** The project's MSRV gate was
+`rustup run 1.85.0 cargo check --locked`, and it passed. It passed because
+**cargo 1.85.0 does not enforce `rust-version`** — it compiles whatever
+compiles. Cargo 1.96 refuses the same workspace outright. So the gate was
+checking that the code *compiles* on an old rustc, never that the promise in
+the manifest was true. It was the MSRV equivalent of a test that passes whether
+or not the behaviour is there.
+
+A second, sharper trap sat underneath it, specific to this machine but general
+in shape: `rustup run <version> cargo` execs the toolchain's cargo, and cargo
+then resolves **`rustc` from `PATH`**. With Homebrew's rust ahead of
+`~/.cargo/bin`, the "1.85 check" could compile with rustc 1.96.1 and report
+success. Both halves have to be pinned with `rustup which --toolchain`, which
+is why the gate is now `scripts/msrv-check.sh` and not a command.
+
+**The decision.** Declare `rust-version = "1.88"` — the floor that is already
+true — rather than downgrade `ratatui` and `time` to hold a number nobody was
+verifying. The alternative was to pin two central dependencies to older
+releases purely to preserve a claim, which trades real security exposure for a
+cosmetic one; the repository owner named that risk explicitly when asked.
+
+**Note what this is not.** The *code* compiles fine on rustc 1.85.0 — that was
+tested, in a clean target directory. 1.88 is required because our dependencies
+*declare* it and cargo enforces declarations, not because any 1.86–1.88 language
+feature is in use. The honest statement is "no current cargo will build this
+below 1.88", and that is what a declared MSRV is for.
+
+**Consequences.**
+
+- `keyring 4.x` is no longer blocked by the MSRV. It stays pinned at `3.6` for
+  the smaller reason that the macOS Keychain path is verified against 3.6.3 and
+  moving is a re-verification exercise with its own evidence.
+- The `msrv` CI job reads the version out of `Cargo.toml` rather than repeating
+  it, so the manifest and the gate cannot drift. It found this defect on its
+  first run, on all three platforms, which is the whole argument for having it.

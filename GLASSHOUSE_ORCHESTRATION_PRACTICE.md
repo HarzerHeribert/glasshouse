@@ -511,3 +511,39 @@ the user's face.
 Both were verified in both directions before being committed: the stale-source
 warning fires when a source file is touched and stays silent when it is not,
 and the work-tree guard refuses in `/tmp` and passes in the repository.
+
+## 20. A gate that cannot fail is not a gate — the MSRV case
+
+The MSRV check this project ran before every commit was
+`rustup run 1.85.0 cargo check --locked --workspace --all-targets`. It passed
+every time, all session. It was incapable of failing, for two independent
+reasons, and it took a CI job to find out.
+
+**Reason one: old cargo does not enforce `rust-version`.** Cargo 1.85.0
+compiles whatever compiles and never consults the field. Cargo 1.96 refuses the
+workspace outright. So the command proved "this compiles on an old rustc" while
+appearing to prove "the declared floor is real". Those are different claims and
+only the second one matters.
+
+**Reason two: `rustup run <v> cargo` does not pin rustc.** rustup execs the
+toolchain's cargo, and then *cargo* resolves `rustc` from `PATH`. With a
+Homebrew rust ahead of `~/.cargo/bin`, the "1.85 check" compiled with rustc
+1.96.1 and reported success. Pin both halves:
+
+    CARGO="$(rustup which --toolchain "$V" cargo)"
+    RUSTC="$(rustup which --toolchain "$V" rustc)" "$CARGO" check --locked ...
+
+That is now `scripts/msrv-check.sh`, which also reads the version out of
+`Cargo.toml` so the gate and the manifest cannot drift, and uses its own target
+directory — sharing `target/` with the stable build turns the check into a
+no-op that prints `Finished in 0.39s` and proves nothing (§16 again, in a new
+costume).
+
+**The transferable rule: apply mutation discipline to gates, not just tests.**
+This project already refuses to count a test until a mutation proves it would
+fail. A gate deserves exactly the same treatment, and it is cheap — raise
+`rust-version` to `1.99`, confirm the gate now refuses, put it back. That
+two-minute check would have caught this on the day the gate was written.
+
+Ask it of any gate you inherit: **what change would make this fail?** If the
+answer is "nothing I can think of", it is decoration.

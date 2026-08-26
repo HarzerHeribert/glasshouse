@@ -5,7 +5,7 @@ members = ["crates/glasshouse"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/HarzerHeribert/glasshouse"
 
@@ -18,11 +18,15 @@ ctrlc = { version = "3", features = ["termination"] }
 directories = "6"
 getrandom = "0.4"
 hex = "0.4"
-# The OS credential store, pinned to the 3.6 minor line. 4.x declares
-# `rust-version = "1.88.0"`; this workspace pins 1.85 and CI gates on
-# `rustup run 1.85.0 cargo check --locked`, so the 3→4 jump is an MSRV cliff
-# and `--locked` is the only thing between a routine `cargo update` and a red
-# gate. 3.6.3 declares `rust-version = "1.75"`.
+# The OS credential store, pinned to the 3.6 minor line. This pin was
+# originally justified by the MSRV — 4.x declares `rust-version = "1.88.0"`
+# and the workspace claimed 1.85. **That justification is void**: the `msrv`
+# CI job proved on its first run that `ratatui` and `time` already required
+# 1.88, so the floor was 1.88 all along and the manifest was simply wrong.
+# The pin stays for a different and smaller reason — the macOS Keychain path
+# is verified against 3.6.3, and moving to 4.x is a re-verification exercise
+# with its own evidence, not a free `cargo update`. 3.6.3 declares
+# `rust-version = "1.75"`, comfortably inside.
 #
 # `default-features = false` and no platform feature *here* on purpose: with
 # no backend feature enabled, keyring 3.x resolves `keyring::default` to its

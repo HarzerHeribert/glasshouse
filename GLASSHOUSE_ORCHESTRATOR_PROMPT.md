@@ -148,7 +148,7 @@ Verify proportionally with relevant commands such as:
 - cargo check --workspace --all-targets
 - cargo clippy --workspace --all-targets --all-features -- -D warnings
 - cargo test --workspace --all-features
-- rustup run 1.85.0 cargo check --locked --workspace --all-targets
+- scripts/msrv-check.sh          # NOT `rustup run <v> cargo check` — see the script
 - RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 - focused stress/failure/runtime probes
 - Linux, macOS, and Windows CI where claimed

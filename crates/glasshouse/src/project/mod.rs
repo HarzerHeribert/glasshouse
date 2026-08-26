@@ -303,10 +303,10 @@ fn root_safety(root: &Path, is_git_repository: bool, home: Option<&Path>) -> Opt
         // immediate Git repositories, so neither check above catches it —
         // but scoping Glasshouse there is exactly as bad as scoping it to
         // one user's home directory.
-        if let Some(home_parent) = home.parent() {
-            if platform::same_file(home_parent, root) {
-                return Some(UnsafeRoot::HomeDirectoryParent(root.to_path_buf()));
-            }
+        if let Some(home_parent) = home.parent()
+            && platform::same_file(home_parent, root)
+        {
+            return Some(UnsafeRoot::HomeDirectoryParent(root.to_path_buf()));
         }
     }
 
