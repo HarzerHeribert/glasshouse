@@ -1399,3 +1399,46 @@ the test is strong enough. Ask **what the test and the mutation both assumed**.
 A prefix, a wrapper, a default, or any always-present scaffolding can make a
 whole class of mutations unreachable, and the coverage looks fine from either
 side.
+
+---
+
+## §42 — a find-and-slice edit that misses its end marker silently eats the file
+
+The orchestrator truncated `GLASSHOUSE_HANDOFF.md` from 1715 lines to 54 in a
+single commit, and pushed it. The edit was meant to replace one section.
+
+```python
+start = s.find("## Next action")
+end   = s.find("**Before sizing that packet, read practice §32.**")
+end   = s.find("\n\n", s.find("Size a package by the files a capability's production caller touches.", end))
+s = s[:start] + new_next + s[end:]
+```
+
+**That sentence is wrapped across two lines in the file.** The inner `find`
+returned `-1`; `s.find("\n\n", -1)` then searched from the last character and
+also returned `-1`; and `s[-1:]` is the final newline. Everything between the
+section start and the end of the file was replaced by the new text. No
+exception, no warning, and the commit's own `--stat` was the only witness:
+`1 file changed, 43 insertions(+), 1704 deletions(-)`.
+
+**Three rules, each of which alone would have caught it.**
+
+1. **Assert every offset before slicing.** `assert start != -1` and
+   `assert end > start` cost one line. A `find` that returns `-1` is a *value*,
+   not an error, and `-1` is a legal index everywhere it is then used.
+2. **Never search for prose that the file may have wrapped.** Markdown in this
+   repository is hard-wrapped at ~76 columns, so any search string longer than
+   a few words is likely to contain a newline in the file and never match.
+   Anchor on short, unwrapped things — a heading, a line you have just read
+   back — or address the file by line number after reading it.
+3. **Read `git show --stat` before pushing a documentation commit.** A commit
+   whose deletions vastly exceed its insertions is either a deliberate deletion
+   or a mistake, and you always know which. This one was pushed because the
+   `--stat` was not looked at until afterwards.
+
+**Recovery, for whoever needs it.** The content was one commit old, so
+`git show HEAD~1:<file>` reproduced it exactly; the fix was to rebuild from that
+text with the correct boundary and then `diff` the result against it to prove
+the only change was the intended one. **Do not reach for `git checkout` or
+`git restore`** — the repository's guard blocks them for good reason, and
+`git show` to a scratch file needs no such permission and destroys nothing.
