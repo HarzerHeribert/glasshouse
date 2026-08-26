@@ -858,3 +858,69 @@ otherwise make every retry fail for as long as we were willing to try.
 4. **A rerun is a cheap experiment.** Re-running just the failed job answered
    "intermittent or environmental?" for almost nothing, and that answer
    decided the entire investigation.
+
+## §27 — CI is unavailable until September; the local mirror is the gate
+
+From 2026-08-26 this repository's GitHub Actions quota is spent. It is a
+**private** repo, so every run bills minutes, and there are none left.
+
+**Know what the failure looks like**, because it is not what you expect: a push
+still creates a run, and all seven jobs report `failure` within seconds, with
+**no steps and no logs**. `ce9b5c0` looked like a total build collapse and was
+in fact fine — it had been green on every local gate minutes earlier. Seven
+simultaneous failures with no logs is a billing block, not a defect. Check
+`gh run view <id> --json jobs` for empty `steps` before you debug anything.
+
+**The gate is now `scripts/ci-local.sh`.** Run it before every commit. It
+mirrors `ci.yml` deliberately — `--locked`, `RUSTFLAGS=-D warnings` on build
+and test, clippy *without* `--all-features`, and the README progress check.
+
+Worth noticing: **that is not the gate list in the worker packets**, which use
+`--all-features`, no `--locked`, and no progress check. The packets have been
+running a different and in places weaker set than CI all along. Prefer the
+script.
+
+### It covers five of seven jobs, and the two it misses are the ones that matter
+
+macOS runs natively; ubuntu runs in a container; **Windows is not covered at
+all**. `--windows` cross-compiles and proves the Windows path still builds — it
+runs no test there. This project has already shipped one Windows-only defect
+that only `test (windows-latest)` caught, and Phase 4's interrupt box can be
+closed by nothing else. Do not let a green local run be written into the ledger
+as platform evidence.
+
+### A naive container is not ubuntu-latest, and it will lie to you
+
+The first version bind-mounted the repo and ran as root. Two tests failed that
+real `ubuntu-latest` had passed:
+
+- `version_probe_child_starts_in_the_active_project_root` — `ETXTBSY`,
+  "Text file busy". The test writes an executable and immediately spawns it;
+  across a macOS→Linux bind mount that races. **Copy the tree in, do not mount
+  it.**
+- `the_shared_index_path_opens_one_file_by_name_and_never_lists_a_directory` —
+  failed with *"this test proves nothing unless the directory really cannot be
+  listed"*. `chmod 000` does not stop **root**, and the container ran as root.
+  **Drop to a non-root user.** The test caught its own vacuity, which is the
+  whole argument for writing assertions that check their own premise.
+
+Both are fixed in the script and both were false reds. If your mirror disagrees
+with the last known CI result, suspect the mirror first.
+
+### Two traps inside the container, in order
+
+- `rustup` resolves its own binary from `CARGO_HOME`. Moving `CARGO_HOME` to a
+  writable volume breaks `rustup which`, which `msrv-check.sh` needs to pin
+  cargo *and* rustc. Redirect `CARGO_TARGET_DIR` instead and mount a volume
+  over the registry.
+- Do not write `install >/dev/null 2>&1 && next-command`. The install failed on
+  a permissions problem, the `&&` short-circuited, and the step reported a
+  failure with **no output at all** — which cost more time than the bug. Silence
+  a command only when you are willing to debug it blind.
+
+### Restoring real CI
+
+Two options, neither taken yet, both the user's call: making the repository
+public restores all seven jobs free and unlimited on standard runners, and is
+the only way to get Windows back; a self-hosted runner bills zero minutes even
+while private but still cannot provide Windows without a Windows machine.
