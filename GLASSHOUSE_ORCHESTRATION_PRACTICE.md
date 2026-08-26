@@ -924,3 +924,55 @@ Two options, neither taken yet, both the user's call: making the repository
 public restores all seven jobs free and unlimited on standard runners, and is
 the only way to get Windows back; a self-hosted runner bills zero minutes even
 while private but still cannot provide Windows without a Windows machine.
+
+## §28 — a team lead idles while its subcontractors work, and the watch calls that "finished"
+
+`worker-watch.sh` decides a pane is idle when its screen shows no spinner for
+two consecutive reads. That is correct for a worker doing its own work. It is
+**wrong for a team lead**, which spends much of its batch waiting on
+subcontractors and is therefore legitimately idle for long stretches.
+
+On 2026-08-26 `lead-extract` was reported "idle with NO report" about forty
+minutes into a batch. It had five new files in `memory/extract/`, two test
+files, and had just relayed a subcontractor's findings. Nothing was wrong.
+
+**Inspect the pane before acting on a lead's idle notice.** The tells that it
+is mid-batch, not finished:
+
+- uncommitted work in its worktree (`git status --porcelain -uall`);
+- subcontractor packets or reports in `.agent-runtime/` that it wrote;
+- the status line showing an armed monitor of its own;
+- pane text that reads as a *subcontractor* speaking to it ("your frozen
+  code", "per the packet's instructions").
+
+**Acking ends the watch**, so a false positive costs coverage: `worker-watch.sh`
+exits once the marker is cleared. The recovery is to ack and immediately arm a
+fresh watch, which resets it to waiting-for-idle. For leads, give the fresh one
+a longer nag and a delayed start:
+
+```
+Monitor(command: "cd <repo> && sleep 240; scripts/worker-watch.sh <lead> <surface> <report> 300",
+        persistent: true)
+```
+
+A better fix, unimplemented: gate a lead's idle on the report file existing, or
+teach the script that a pane whose worktree has grown since the last read is
+working even when its screen is quiet.
+
+## §29 — a rate-limit stall can leave a worktree mid-mutation
+
+The mutation protocol edits production code, runs one named test, then restores
+and verifies the restore. If a worker is stopped between the edit and the
+restore — a spent five-hour window will do it — **its worktree holds mutated
+code that looks like ordinary work.**
+
+So before integrating a batch that ran across a usage-limit boundary, read the
+diff for anything the report does not claim. A mutation is usually obvious once
+looked for: a deleted scope check, an inverted condition, a constant changed to
+a wrong value. The worker's own mutation ledger names every one it ran, which
+makes the check cheap — compare the diff against that list.
+
+This has not bitten yet. It is written down now because the conditions for it
+existed on 2026-08-26 (two Opus leads and four subcontractors on one account,
+the window at 87% with 43 minutes to reset) and the cost of finding out the
+hard way is a silently wrong integration.
