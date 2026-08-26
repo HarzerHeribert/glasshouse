@@ -184,9 +184,13 @@ enum ConfigEvidence {
     Configured,
     /// The integration was checked and no evidence was found.
     Unconfigured,
-    /// This integration has no reliable configuration signal Glasshouse
-    /// knows how to check; presence of the executable is all there is.
-    NoSignal,
+    /// This integration does not require separate configuration; its presence
+    /// is sufficient for it to be available for use.
+    Available,
+    /// This integration requires configuration, but Glasshouse has no
+    /// reliable configuration signal to check; whether it is set up for use
+    /// cannot be determined.
+    Unknown,
 }
 
 /// What discovery could determine about one integration.
@@ -195,25 +199,36 @@ enum ConfigEvidence {
 /// 2B: "Mark every detected integration as available, configured,
 /// unconfigured, unsupported-version, or unknown") lists five statuses, and
 /// all five are here (`Available`, `Configured`, `Unconfigured`,
-/// `UnsupportedVersion`, `Unknown`). Those five describe integrations that
-/// were *detected* — the spec's wording presupposes a `PATH` hit exists to
-/// describe. [`IntegrationStatus::NotFound`] is the sixth variant this type
-/// adds for the case the spec's five don't cover at all: searched for and
-/// confirmed absent. That is not a contradiction of the spec, it is the
-/// missing "zero case" underneath it, and it matters: conflating "not
+/// `UnsupportedVersion`, `Unknown`). Every integration that is *detected*
+/// carries exactly one of those five states.
+///
+/// [`IntegrationStatus::NotFound`] is the sixth variant this type adds for
+/// the case the spec's five don't cover at all: searched for and confirmed
+/// absent. That is not a contradiction of the spec, it is the determinate
+/// absence ("not installed") underneath it, and it matters: conflating "not
 /// installed" with "unknown" would tell the Phase 2C onboarding wizard and
 /// Phase 2D settings view nothing about whether to offer "add a path" versus
 /// "we found something but can't tell what state it's in".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegrationStatus {
-    /// Found and usable, but Glasshouse cannot tell whether it still needs
-    /// configuring (no reliable signal exists for this integration).
+    /// Found on the machine and ready for use without requiring a separate
+    /// user configuration or credential step (e.g. terminal multiplexers
+    /// like cmux or local inference tools like llama.cpp).
+    ///
+    /// Present on the machine is not the same as set up for use: tools that
+    /// require credentials or configuration are [`IntegrationStatus::Configured`],
+    /// [`IntegrationStatus::Unconfigured`], or [`IntegrationStatus::Unknown`] —
+    /// never guessed at as `Available`.
     Available,
-    /// Found, and there is evidence it is already set up for use.
+    /// Found, and there is positive evidence it is already set up for use
+    /// (e.g. valid config files, active environment variables, or live
+    /// control socket).
     Configured,
-    /// Found, but no evidence it has been configured.
+    /// Found, but requires configuration and no evidence was found that it
+    /// has been set up.
     Unconfigured,
-    /// Found, but the version is below the declared minimum.
+    /// Found, but the probed version is below the declared minimum supported
+    /// version (as evaluated by [`crate::integrations::version::Version::satisfies_minimum`]).
     UnsupportedVersion,
     /// Searched for on `PATH` and confirmed absent: every candidate name
     /// resolved to [`crate::platform::exec::ResolveError::NotFound`]. This
@@ -221,14 +236,25 @@ pub enum IntegrationStatus {
     /// enum-level documentation for why it is a distinct variant from
     /// [`IntegrationStatus::Unknown`].
     NotFound,
-    /// Present but Glasshouse could not tell what state it is in — e.g.
-    /// found only as an unusable Windows-interop hit under WSL (present,
-    /// but not usable from here; the reason is recorded in
-    /// [`DetectedIntegration::problems`]), a resolved path that exists but
-    /// is not executable by the current user, or any other indeterminate
-    /// resolution outcome that is neither a clean success nor a clean
-    /// absence. Different from [`IntegrationStatus::NotFound`]: something
-    /// was found, Glasshouse just cannot fully characterize it.
+    /// Detection ran and could not determine the integration's state or
+    /// configuration status.
+    ///
+    /// **`Unknown` is not a failure and not a default.** It means detection
+    /// ran and could not tell. A detection that never ran is a different
+    /// thing; in Glasshouse, discovery always runs non-destructively across
+    /// the full catalog ([`IntegrationId::ALL`]), so unprobed integrations
+    /// do not exist.
+    ///
+    /// This state covers:
+    /// 1. Candidate paths found but unusable or indeterminate (e.g. a
+    ///    Windows-interop-only PATH hit under WSL, or a file not executable
+    ///    by the current user; recorded in [`DetectedIntegration::problems`]).
+    /// 2. Integrations present on the machine that require credentials or
+    ///    configuration, but where Glasshouse has no reliable configuration
+    ///    signal to tell whether they are set up for use ([`IntegrationStatus::Configured`])
+    ///    or not ([`IntegrationStatus::Unconfigured`]). Present on the machine is not
+    ///    the same as set up for use, and when discovery cannot tell them
+    ///    apart, the status is `Unknown`, not a guess.
     Unknown,
 }
 
@@ -421,6 +447,29 @@ fn detect_one_with(
     resolver: impl Fn(&str) -> Result<ResolvedExecutable, ResolveError>,
     presence: impl Fn(IntegrationId) -> Vec<String>,
 ) -> DetectedIntegration {
+    detect_one_with_prober(
+        id,
+        home,
+        project,
+        resolver,
+        presence,
+        |exe, arg, proj| version::probe_version(exe, arg, proj, DEFAULT_PROBE_TIMEOUT),
+        IntegrationId::minimum_version,
+    )
+}
+
+/// Core detection implementation with executable resolution, non-executable presence,
+/// version probing, and minimum-supported-version comparison all injected for
+/// deterministic unit testing without depending on external environment or PATH.
+fn detect_one_with_prober(
+    id: IntegrationId,
+    home: Option<&Path>,
+    project: &Project,
+    resolver: impl Fn(&str) -> Result<ResolvedExecutable, ResolveError>,
+    presence: impl Fn(IntegrationId) -> Vec<String>,
+    prober: impl Fn(&ResolvedExecutable, &str, &Project) -> Result<Option<Version>, ProbeError>,
+    min_version: impl Fn(IntegrationId) -> Option<Version>,
+) -> DetectedIntegration {
     let mut evidence = Vec::new();
     let mut problems = Vec::new();
 
@@ -473,7 +522,7 @@ fn detect_one_with(
     };
 
     let version = match id.version_arg() {
-        Some(arg) => match version::probe_version(&exe, arg, project, DEFAULT_PROBE_TIMEOUT) {
+        Some(arg) => match prober(&exe, arg, project) {
             Ok(Some(v)) => Some(v),
             Ok(None) => {
                 evidence.push(format!(
@@ -506,10 +555,17 @@ fn detect_one_with(
             evidence.extend(notes);
             IntegrationStatus::Unconfigured
         }
-        (ConfigEvidence::NoSignal, _) => IntegrationStatus::Available,
+        (ConfigEvidence::Available, _) => IntegrationStatus::Available,
+        (ConfigEvidence::Unknown, notes) => {
+            // Indeterminate configuration is visible on the status field and
+            // in `evidence`, but like Unconfigured it is not an actionable
+            // problem: detection ran and could not tell, which is not an error.
+            evidence.extend(notes);
+            IntegrationStatus::Unknown
+        }
     };
 
-    if let (Some(v), Some(min)) = (&version, id.minimum_version())
+    if let (Some(v), Some(min)) = (&version, min_version(id))
         && !v.satisfies_minimum(&min)
     {
         problems.push(format!(
@@ -701,15 +757,22 @@ fn config_evidence(id: IntegrationId, home: Option<&Path>) -> (ConfigEvidence, V
             }
             (evidence_result(found), notes)
         }
-        // No reliable configuration signal is known for these. Antigravity
-        // and llama.cpp have no established per-user config convention that
-        // could be verified from this environment, and cmux is a session
-        // multiplexer with no credential/config file of its own to check. A
-        // usable executable is reported as `Available`, not guessed at as
-        // configured or unconfigured.
-        IntegrationId::Antigravity | IntegrationId::Cmux | IntegrationId::LlamaCpp => {
-            (ConfigEvidence::NoSignal, Vec::new())
-        }
+        // Antigravity requires credentials/login, but has no established
+        // per-user config convention that can be safely verified non-destructively
+        // from this environment. Present on the machine is not the same as set
+        // up for use: because we cannot tell them apart, it is reported as
+        // `Unknown`, not guessed at as `Available`, `Configured`, or `Unconfigured`.
+        IntegrationId::Antigravity => (
+            ConfigEvidence::Unknown,
+            vec![
+                "no reliable configuration signal is known; cannot determine if set up for use"
+                    .to_string(),
+            ],
+        ),
+        // cmux is a session multiplexer with no credential/config file of its own
+        // to check, and llama.cpp provides local inference binaries. Neither requires
+        // credentials or setup before use: a usable executable is ready and available.
+        IntegrationId::Cmux | IntegrationId::LlamaCpp => (ConfigEvidence::Available, Vec::new()),
     }
 }
 
@@ -1382,17 +1445,117 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_cmux_llama_cpp_have_no_signal() {
+    fn config_evidence_distinguishes_tools_needing_no_config_from_unknown_harness() {
         let dir = tempfile::tempdir().unwrap();
-        for id in [
-            IntegrationId::Antigravity,
-            IntegrationId::Cmux,
-            IntegrationId::LlamaCpp,
-        ] {
+        // cmux and llama.cpp need no user credentials -> Available
+        for id in [IntegrationId::Cmux, IntegrationId::LlamaCpp] {
             let (result, notes) = config_evidence(id, Some(dir.path()));
-            assert_eq!(result, ConfigEvidence::NoSignal);
+            assert_eq!(result, ConfigEvidence::Available);
             assert!(notes.is_empty());
         }
+        // Antigravity needs credentials/setup but has no reliable signal -> Unknown
+        let (result, notes) = config_evidence(IntegrationId::Antigravity, Some(dir.path()));
+        assert_eq!(result, ConfigEvidence::Unknown);
+        assert!(!notes.is_empty());
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("no reliable configuration signal"))
+        );
+    }
+
+    #[test]
+    fn detected_harness_with_indeterminate_config_is_unknown_and_usable() {
+        let (_guard, project) = test_project();
+        let exe = exec::resolve("sh").expect("sh on PATH");
+        let d = detect_one_with_prober(
+            IntegrationId::Antigravity,
+            None,
+            &project,
+            |_| Ok(exe.clone()),
+            |_| Vec::new(),
+            |_, _, _| Ok(None),
+            |_| None,
+        );
+        assert_eq!(d.status(), IntegrationStatus::Unknown);
+        assert!(d.executable().is_some());
+        assert!(
+            d.is_usable(),
+            "detected unknown harness must still be launchable"
+        );
+        assert!(
+            d.problems().is_empty(),
+            "indeterminate config is not an error/problem"
+        );
+        assert!(
+            d.evidence()
+                .iter()
+                .any(|e| e.contains("no reliable configuration signal"))
+        );
+    }
+
+    #[test]
+    fn detected_tool_requiring_no_config_is_available_and_usable() {
+        let (_guard, project) = test_project();
+        let exe = exec::resolve("sh").expect("sh on PATH");
+        let d = detect_one_with_prober(
+            IntegrationId::Cmux,
+            None,
+            &project,
+            |_| Ok(exe.clone()),
+            |_| Vec::new(),
+            |_, _, _| Ok(None),
+            |_| None,
+        );
+        assert_eq!(d.status(), IntegrationStatus::Available);
+        assert!(d.executable().is_some());
+        assert!(d.is_usable());
+        assert!(d.problems().is_empty());
+    }
+
+    #[test]
+    fn detected_harness_with_probed_version_below_minimum_is_unsupported_version_and_not_usable() {
+        let (_guard, project) = test_project();
+        let exe = exec::resolve("sh").expect("sh on PATH");
+        let probed_ver = version::parse_version("1.0.0").unwrap();
+        let min_ver = version::parse_version("2.0.0").unwrap();
+        let d = detect_one_with_prober(
+            IntegrationId::ClaudeCode,
+            None,
+            &project,
+            |_| Ok(exe.clone()),
+            |_| Vec::new(),
+            move |_, _, _| Ok(Some(probed_ver.clone())),
+            move |_| Some(min_ver.clone()),
+        );
+        assert_eq!(d.status(), IntegrationStatus::UnsupportedVersion);
+        assert!(
+            !d.is_usable(),
+            "unsupported version must never be reported as usable"
+        );
+        assert_eq!(d.problems().len(), 1);
+        assert!(d.problems()[0].contains("below the minimum supported version"));
+    }
+
+    #[test]
+    fn detected_harness_with_probed_version_satisfying_minimum_preserves_status_and_is_usable() {
+        let (_guard, project) = test_project();
+        let exe = exec::resolve("sh").expect("sh on PATH");
+        let probed_ver = version::parse_version("2.5.0").unwrap();
+        let min_ver = version::parse_version("2.0.0").unwrap();
+        let d = detect_one_with_prober(
+            IntegrationId::ClaudeCode,
+            None,
+            &project,
+            |_| Ok(exe.clone()),
+            |_| Vec::new(),
+            move |_, _, _| Ok(Some(probed_ver.clone())),
+            move |_| Some(min_ver.clone()),
+        );
+        assert_eq!(d.status(), IntegrationStatus::Unconfigured);
+        assert_ne!(d.status(), IntegrationStatus::UnsupportedVersion);
+        assert!(d.is_usable());
+        assert!(d.problems().is_empty());
     }
 
     // --- resolve_first_usable / resolve_first_usable_with ------------------
