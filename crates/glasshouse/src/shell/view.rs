@@ -411,6 +411,27 @@ fn render_overview(state: &ShellState, frame: &mut Frame, area: Rect) {
         )));
     }
 
+    // The activity section: recent lifecycle events, under the session table
+    // and above the status note. Omitted entirely when there is nothing to
+    // show — an empty "ACTIVITY" heading is worse than none, because it reads
+    // as "nothing has happened" rather than "nothing has been observed yet".
+    if !state.activity().is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "ACTIVITY",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        let now = crate::provider::cache::now_unix_seconds();
+        for recorded in state.activity() {
+            lines.push(Line::from(format!(
+                "  {:<28} {:<12} {}",
+                super::state::describe_event(recorded.event()),
+                super::state::short_session_id(recorded.session()),
+                describe_age(now, recorded.at()),
+            )));
+        }
+    }
+
     // A refusal about a row belongs beside the rows. The footer shows notes
     // too, but the footer writes the key bindings first and lets the note
     // clip — which is the right trade there and the wrong one here, because
@@ -2061,6 +2082,76 @@ mod tests {
         let bottom = last_row(&state, 100, 24).to_lowercase();
         assert!(!bottom.contains("session mode"), "got: `{bottom}`");
         assert!(bottom.contains("quit"), "got: `{bottom}`");
+    }
+
+    /// The negative from practice §17: an empty activity list draws no
+    /// `ACTIVITY` heading at all, not an empty section — because an empty
+    /// section reads as "nothing has happened" rather than "nothing has been
+    /// observed yet".
+    #[test]
+    fn the_overview_draws_no_activity_heading_with_no_events() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert!(state.activity().is_empty());
+
+        for (width, height) in [(100, 24), (400, 24)] {
+            let text = rendered(&state, width, height);
+            assert!(
+                !text.contains("ACTIVITY"),
+                "no events were recorded, so no heading should draw at width {width}:\n{text}"
+            );
+        }
+    }
+
+    /// Practice §17: a row can be truncated off-screen at a narrow width,
+    /// which makes a `contains` assertion pass or fail for reasons that have
+    /// nothing to do with the code — so this asserts at a realistic width
+    /// *and* at 400 columns.
+    #[test]
+    fn the_overview_shows_recorded_activity_at_a_realistic_and_a_wide_width() {
+        use crate::events::{EventBus, LifecycleEvent, MessageOrigin, TurnOutcome};
+        use crate::session::SessionId;
+        use crate::shell::Action;
+
+        let mut state = sample();
+        let bus = EventBus::new();
+        let session = SessionId::new("aaaaaaaaaaaa1");
+        let recorded = vec![
+            bus.publish(&session, LifecycleEvent::SessionStarted),
+            bus.publish(
+                &session,
+                LifecycleEvent::TextDelivered {
+                    origin: MessageOrigin::Machine,
+                    bytes: 41,
+                },
+            ),
+            bus.publish(
+                &session,
+                LifecycleEvent::TurnEnded {
+                    outcome: TurnOutcome::Completed,
+                },
+            ),
+        ];
+        assert_eq!(state.note_events(&recorded), Action::Redraw);
+        state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+
+        for (width, height) in [(100, 24), (400, 24)] {
+            let text = rendered(&state, width, height);
+            assert!(text.contains("ACTIVITY"), "width {width}:\n{text}");
+            assert!(text.contains("session started"), "width {width}:\n{text}");
+            assert!(
+                text.contains("sent 41 bytes (machine)"),
+                "width {width}:\n{text}"
+            );
+            assert!(
+                text.contains("turn ended (completed)"),
+                "width {width}:\n{text}"
+            );
+            assert!(
+                text.contains(&super::super::state::short_session_id(&session)),
+                "the session must be named beside its event, width {width}:\n{text}"
+            );
+        }
     }
 }
 

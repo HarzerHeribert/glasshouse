@@ -435,7 +435,11 @@ pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 /// Saturates rather than panicking on a clock set before 1970: a nonsensical
 /// timestamp on one row is a far smaller problem than refusing to record a
 /// session at all.
-fn system_clock() -> i64 {
+///
+/// `pub(crate)` so that everything stamping a project-scoped record reads the
+/// same clock: [`crate::checkpoint`] shares it rather than growing a second
+/// one that could disagree with this one about what "now" is.
+pub(crate) fn system_clock() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     match SystemTime::now().duration_since(UNIX_EPOCH) {
@@ -1572,6 +1576,17 @@ mod tests {
     /// acceptance condition of Phase 21 rather than something inherited by
     /// assumption. Recorded when migration 4 added the memory tables and the
     /// worker adding them declined to certify otherwise.
+    ///
+    /// **Migration 5's twenty new columns, judged one at a time.** Nineteen
+    /// hold a value drawn from a fixed set or from Glasshouse's own machinery
+    /// — a kind, an origin, an exit code, a signal name, a backend resource
+    /// slug, an integration slug, a harness event name from an adapter's own
+    /// constant list — and none of them is free text a caller chooses.
+    /// `checkpoints.document` is the twentieth and it **is** free text, for
+    /// the same reason `memories.body` is: a person writes a handoff. The same
+    /// limit therefore applies to it and is recorded here rather than glossed
+    /// — it is closed on the producer side, by whoever authors a checkpoint,
+    /// and this test does not and cannot certify it.
     #[test]
     fn the_project_database_schema_has_nowhere_to_put_a_credential() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1601,6 +1616,26 @@ mod tests {
         assert_eq!(
             columns,
             vec![
+                "checkpoints.id",
+                "checkpoints.project_id",
+                "checkpoints.session_id",
+                "checkpoints.created_at",
+                "checkpoints.reason",
+                "checkpoints.document",
+                "lifecycle_events.seq",
+                "lifecycle_events.project_id",
+                "lifecycle_events.session_id",
+                "lifecycle_events.at",
+                "lifecycle_events.kind",
+                "lifecycle_events.turn_outcome",
+                "lifecycle_events.origin",
+                "lifecycle_events.bytes",
+                "lifecycle_events.exit_code",
+                "lifecycle_events.exit_signal",
+                "lifecycle_events.resource",
+                "lifecycle_events.gateway_reason",
+                "lifecycle_events.observed_harness",
+                "lifecycle_events.observed_event",
                 "memories.id",
                 "memories.project_id",
                 "memories.kind",
@@ -1672,6 +1707,8 @@ mod tests {
         assert_eq!(
             tables,
             vec![
+                "checkpoints",
+                "lifecycle_events",
                 "memories",
                 "memories_fts",
                 "memories_fts_config",
@@ -1744,6 +1781,11 @@ mod tests {
         // *hole* — max is still 4, nothing re-applies, and the test failed
         // later and confusingly with "no such column: launch_profile". Roll
         // back a contiguous range, or do not roll back at all.
+        //
+        // Everything a later migration created has to go with the rows that
+        // record it, or the re-run fails on `table … already exists` instead —
+        // which is the same trap wearing the opposite coat, and is exactly how
+        // migration 5 announced itself here.
         fixture
             .conn
             .execute_batch(
@@ -1751,6 +1793,8 @@ mod tests {
                  ALTER TABLE sessions DROP COLUMN backend_resource;
                  DROP TABLE IF EXISTS memories_fts;
                  DROP TABLE IF EXISTS memories;
+                 DROP TABLE IF EXISTS lifecycle_events;
+                 DROP TABLE IF EXISTS checkpoints;
                  DELETE FROM schema_migrations WHERE version >= 3;",
             )
             .unwrap();
@@ -1761,7 +1805,10 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 4, "the launch must have applied migration 4");
+        assert_eq!(
+            version, 5,
+            "the launch must have applied migrations 3, 4 and 5"
+        );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
         let migrated = migrated_store
@@ -1932,6 +1979,8 @@ mod tests {
                  DROP TABLE sessions;
                  DROP TABLE IF EXISTS memories_fts;
                  DROP TABLE IF EXISTS memories;
+                 DROP TABLE IF EXISTS lifecycle_events;
+                 DROP TABLE IF EXISTS checkpoints;
                  DELETE FROM schema_migrations WHERE version >= 2;",
             )
             .unwrap();
@@ -1944,8 +1993,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 4,
-            "the launch must have applied migrations 2, 3 and 4"
+            version, 5,
+            "the launch must have applied migrations 2, 3, 4 and 5"
         );
 
         let store = SessionStore::new(&reopened).unwrap();

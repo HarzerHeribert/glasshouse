@@ -78,6 +78,28 @@ pub struct RecordedEvent {
 }
 
 impl RecordedEvent {
+    /// Rebuild a record that was durably recorded somewhere else.
+    ///
+    /// Crate-private and deliberately narrow. Its only caller is the durable
+    /// log's own reader, bringing an event a *different process* recorded —
+    /// a harness reporting through a hook — into this process's consumers,
+    /// so that the interface sees one stream rather than two.
+    ///
+    /// The invariant this type exists for is untouched: there is still no way
+    /// to build one without a session identifier and a timestamp, and both
+    /// here come from the stored row rather than from a caller's imagination.
+    /// **`seq` is the position in whichever stream produced the record** —
+    /// this bus's for a published one, the project log's for a rebuilt one —
+    /// so it orders a stream and does not identify an event across streams.
+    pub(crate) fn from_log(seq: u64, session: SessionId, at: i64, event: LifecycleEvent) -> Self {
+        Self {
+            seq,
+            session,
+            at,
+            event,
+        }
+    }
+
     /// Position in this bus's stream, from 1. Lets a consumer that fell
     /// behind see that it did, and by how much.
     pub fn seq(&self) -> u64 {

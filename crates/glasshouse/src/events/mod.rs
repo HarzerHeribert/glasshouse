@@ -48,8 +48,10 @@
 //! bounded in-memory history either way.
 
 pub mod bus;
+pub mod log;
 
 pub use bus::{DEFAULT_HISTORY, EventBus, EventSink, RecordedEvent, Subscription};
+pub use log::{EventLog, EventLogSink, LoggedEvent, Observation};
 
 /// One thing that happened to one session, in Glasshouse's own vocabulary.
 ///
@@ -65,6 +67,15 @@ pub enum LifecycleEvent {
     /// [`crate::session::SessionDisposition`] is derived rather than stored.
     /// A consumer that needs it looks the session up.
     SessionStarted,
+    /// A recorded session's process was started again, continuing the
+    /// harness's own conversation.
+    ///
+    /// Distinct from [`LifecycleEvent::SessionStarted`] rather than folded
+    /// into it, because the two are different facts about the project and a
+    /// reader would otherwise have to *infer* a resume from a session having
+    /// started twice. Phase 18 asks for session creation and session resume
+    /// as separate recordings; an inference is not a recording.
+    SessionResumed,
     /// The harness reported that it started working.
     TurnStarted,
     /// The harness reported that a turn ended, and how.
@@ -110,10 +121,32 @@ impl LifecycleEvent {
     /// status in hand and calls [`ProcessExit::session_state`]; routing it
     /// through here as well would let a translated event and the operating
     /// system race to describe the same fact.
+    /// The stored name of this event's variant.
+    ///
+    /// One word per variant, and the same word the project database's
+    /// `lifecycle_events.kind` column is constrained to. It lives here rather
+    /// than in [`mod@crate::events::log`] so that adding a variant to the
+    /// enum is a compile error in the one place that has to classify it,
+    /// instead of a storage error much later.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::SessionStarted => "session_started",
+            Self::SessionResumed => "session_resumed",
+            Self::TurnStarted => "turn_started",
+            Self::TurnEnded { .. } => "turn_ended",
+            Self::WaitingForUser => "waiting_for_user",
+            Self::TextDelivered { .. } => "text_delivered",
+            Self::InterruptDelivered { .. } => "interrupt_delivered",
+            Self::ProcessExited { .. } => "process_exited",
+            Self::OutputEnded => "output_ended",
+            Self::GatewayUnhealthy { .. } => "gateway_unhealthy",
+        }
+    }
+
     pub fn implied_state(&self) -> Option<crate::session::SessionLifecycle> {
         use crate::session::SessionLifecycle as State;
         match self {
-            Self::SessionStarted | Self::TurnStarted => Some(State::Running),
+            Self::SessionStarted | Self::SessionResumed | Self::TurnStarted => Some(State::Running),
             // The turn is over and the session is alive and waiting for
             // whatever comes next. A turn that ended badly is still an alive
             // session: recording it as failed would make a perfectly usable
@@ -192,6 +225,21 @@ impl ProcessExit {
             code: status.code(),
             signal: status.signal().map(str::to_owned),
         }
+    }
+
+    /// Rebuild an exit from what the event log stored.
+    ///
+    /// Crate-private and deliberately narrow: the only production caller is
+    /// [`mod@crate::events::log`], reconstructing a row it wrote itself. It
+    /// exists because reading the raw stream back means rebuilding the typed
+    /// event, and a struct nobody outside the operating-system path can
+    /// construct cannot be read back at all.
+    ///
+    /// Note what it still does not offer — there is no `success()` here
+    /// either, so a caller holding a reconstructed exit is in exactly the
+    /// same position as one holding a fresh one.
+    pub(crate) fn from_parts(code: u32, signal: Option<String>) -> Self {
+        Self { code, signal }
     }
 
     pub fn code(&self) -> u32 {
@@ -524,6 +572,7 @@ mod tests {
 
         let every = [
             LifecycleEvent::SessionStarted,
+            LifecycleEvent::SessionResumed,
             LifecycleEvent::TurnStarted,
             LifecycleEvent::TurnEnded {
                 outcome: TurnOutcome::Completed,
@@ -724,9 +773,10 @@ mod tests {
             .join("\n")
     }
 
-    const EVENT_MODULES: [(&str, &str); 2] = [
+    const EVENT_MODULES: [(&str, &str); 3] = [
         ("events/mod.rs", include_str!("mod.rs")),
         ("events/bus.rs", include_str!("bus.rs")),
+        ("events/log.rs", include_str!("log.rs")),
     ];
 
     /// "Adapters translate native observations into core events; consumers

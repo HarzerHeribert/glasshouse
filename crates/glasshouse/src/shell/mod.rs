@@ -36,7 +36,9 @@ use anyhow::Result;
 use ratatui::layout::Rect;
 
 use crate::Runtime;
+use crate::checkpoint::{Checkpoint, CheckpointReason, CheckpointStore, ProjectCheckpoints};
 use crate::config::{self, EffectiveConfig, UserConfig};
+use crate::events::{EventBus, EventLog, EventLogSink, LifecycleEvent, ProcessExit, RecordedEvent};
 use crate::integrations::{Discovery, IntegrationId, IntegrationKind, IntegrationStatus};
 use crate::launch::HarnessLaunch;
 use crate::onboarding;
@@ -77,7 +79,23 @@ pub fn run(runtime: &Runtime) -> Result<()> {
         crate::VERSION,
         records,
     );
-    let mut live = SessionRuntime::new();
+    // The one normalized lifecycle stream, owned here and shared with the
+    // session runtime, so that everything the runtime publishes reaches this
+    // shell's consumers — and, through the sink below, the project's durable
+    // log.
+    let events = EventBus::new();
+    let event_log = attach_event_log(runtime, &events);
+    // Drained every tick. Publishing never waits on this, by construction:
+    // the queue is bounded and the oldest events are dropped if a viewport
+    // stops draining — see `crate::events::bus`.
+    let event_stream = events.subscribe();
+
+    let checkpoints = ProjectCheckpoints::open(runtime)?;
+
+    let mut live = SessionRuntime::with_event_bus(
+        crate::session::runtime::DEFAULT_SCROLLBACK_BYTES,
+        events.clone(),
+    );
     // What each started session's harness index held for this project before
     // it ran — half the identity guard for a harness whose identifiers live
     // in one shared index, and the reason that read has to happen at start
@@ -95,8 +113,18 @@ pub fn run(runtime: &Runtime) -> Result<()> {
     // on a thread of its own — see `spawn_provider_probe` — and this is the
     // seam that keeps it off the thread drawing the terminal.
     let (probe_results, probe_inbox) = std::sync::mpsc::channel::<ProviderProbeResult>();
+    // And where a harness's own reports come back. Same shape, same reason:
+    // reading them means reading SQLite, and a reader can be made to wait on
+    // whoever holds the write lock. On the drawing thread that is a frozen
+    // interface, which is a defect this project has already shipped once.
+    let (reported, reported_inbox) = std::sync::mpsc::channel::<Vec<RecordedEvent>>();
+    spawn_event_tail(runtime, &reported, &events.sender());
 
     screen.draw(|frame| view::render(&state, frame))?;
+
+    // Every `return` below leaves through this, so the last few events reach
+    // the database rather than dying with the writer thread.
+    let _flush = FlushOnLeaving(event_log);
 
     loop {
         match events.next()? {
@@ -312,11 +340,13 @@ pub fn run(runtime: &Runtime) -> Result<()> {
 
                 let mut redraw = false;
                 for (id, status) in live.poll_exits() {
-                    let lifecycle = if status.success() {
-                        SessionLifecycle::Stopped
-                    } else {
-                        SessionLifecycle::Failed
-                    };
+                    // `ProcessExit` owns this classification and is the only
+                    // place it lives. It used to be computed inline here as
+                    // well, which is two definitions of "did it crash" — and
+                    // two definitions of that eventually disagree about a
+                    // signal, which is the case that comes up least often and
+                    // costs the most when it is wrong.
+                    let lifecycle = ProcessExit::from_status(&status).session_state();
                     // The session is over, so this is the tightest the
                     // discovery window will ever be — see
                     // `session::native_id::capture`'s doc comment.
@@ -339,6 +369,35 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     {
                         redraw = true;
                     }
+                }
+
+                // Everything that happened since the last tick, from both
+                // sides of the one stream: what this process published, and
+                // what a harness reported to a hook process the interface
+                // never sees. Drained on the interface's own thread — never
+                // on the one reading a pseudo-terminal, which is the whole
+                // point of the bus being a queue rather than a callback.
+                let mut recorded = event_stream.drain();
+                recorded.extend(reported_inbox.try_iter().flatten());
+                // The consumer that makes this a delivery rather than a
+                // path: the overview's activity view shows these, and a user
+                // pressing `o` sees what their sessions have been doing. A
+                // drain whose result went nowhere would be a delivery path
+                // with nothing at the end of it, which is the state this
+                // capability sat in until now.
+                if state.note_events(&recorded) == Action::Redraw {
+                    redraw = true;
+                }
+                if !recorded.is_empty()
+                    && checkpoint_task_boundaries(
+                        &checkpoints.store(),
+                        &sessions,
+                        runtime,
+                        &recorded,
+                        &mut state,
+                    )
+                {
+                    redraw = true;
                 }
 
                 // A probe's answer normally arrives with its own wake-up —
@@ -401,6 +460,227 @@ pub fn run(runtime: &Runtime) -> Result<()> {
             Event::Paste(_) | Event::Mouse(_) => {}
         }
     }
+}
+
+/// Send this shell's lifecycle events to the project's durable log as well.
+///
+/// Best effort by construction, and the direction of the trade is the point:
+/// a project whose database cannot be opened loses event history and keeps
+/// its sessions. Refusing to open the interface because a diagnostic log
+/// could not be attached would be Glasshouse's bookkeeping mattering more
+/// than the sessions it keeps books about, which it never does.
+///
+/// The sink queues behind a writer thread rather than writing inline — see
+/// [`crate::events::log`]. Publishing happens on whichever thread produced
+/// the event, and one of those is the thread draining a pseudo-terminal.
+fn attach_event_log(runtime: &Runtime, events: &EventBus) -> Option<std::sync::Arc<EventLogSink>> {
+    match EventLog::open(runtime) {
+        Ok(log) => {
+            let sink = EventLogSink::spawn(log);
+            events.attach_sink(
+                std::sync::Arc::clone(&sink) as std::sync::Arc<dyn crate::events::EventSink>
+            );
+            Some(sink)
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %format!("{err:#}"),
+                "could not open the project event log; this session's events will not be recorded"
+            );
+            None
+        }
+    }
+}
+
+/// Watch the project's event log for what a harness reported to a hook.
+///
+/// # Why the interface cannot simply subscribe to the bus for these
+///
+/// A lifecycle hook runs as its **own short-lived process** — that is how
+/// every supported harness reports, and it is why `glasshouse hook` exists at
+/// all. Its events are minted on that process's bus and it exits. Nothing on
+/// this process's bus ever sees them, so an interface that only subscribed
+/// would show a session's own keystrokes and never once show it finishing a
+/// turn.
+///
+/// The project's event log is the seam between the two, because it is the one
+/// ordering both processes write into. This reads it and delivers what it
+/// finds through the same channel `spawn_provider_probe` uses, for the same
+/// reason: **reading it means reading SQLite, and a reader waits on whoever
+/// holds the write lock.** On the drawing thread that is a frozen interface —
+/// the exact defect class this project shipped once already, in a settings
+/// screen that made a blocking call where the terminal was being painted.
+///
+/// It starts from the log's current head rather than its beginning: opening
+/// the interface should show what happens next, not replay a week.
+fn spawn_event_tail(
+    runtime: &Runtime,
+    reported: &std::sync::mpsc::Sender<Vec<RecordedEvent>>,
+    wake: &std::sync::mpsc::Sender<AppEvent>,
+) {
+    /// How often the log is asked what is new.
+    ///
+    /// Far slower than the interface's own tick: this is a database query,
+    /// and a harness event arriving a quarter of a second later than it
+    /// happened is imperceptible next to the turn it belongs to.
+    const POLL: std::time::Duration = std::time::Duration::from_millis(250);
+    /// Most rows to take in one pass, so a log that grew while Glasshouse was
+    /// closed cannot arrive as one enormous message.
+    const BATCH: usize = 256;
+
+    let log = match EventLog::open(runtime) {
+        Ok(log) => log,
+        Err(err) => {
+            tracing::warn!(
+                error = %format!("{err:#}"),
+                "could not read the project event log; harness reports will not reach the interface"
+            );
+            return;
+        }
+    };
+    let reported = reported.clone();
+    let wake = wake.clone();
+
+    // Not joined and not stopped explicitly. It ends by itself when the
+    // channel's receiver goes, which happens when `run` returns — the same
+    // lifetime `spawn_provider_probe`'s thread has, and for the same reason:
+    // there is nothing to clean up but a `Sender`.
+    let started = std::thread::Builder::new()
+        .name("glasshouse-event-tail".to_owned())
+        .spawn(move || {
+            let mut after = log.head().unwrap_or(0);
+            loop {
+                match log.observed_since(after, BATCH) {
+                    Ok(fresh) if !fresh.is_empty() => {
+                        after = fresh.last().map(|event| event.seq).unwrap_or(after);
+                        let batch: Vec<RecordedEvent> = fresh
+                            .into_iter()
+                            .map(|event| event.into_recorded())
+                            .collect();
+                        // A send failure means the interface has gone. That
+                        // is the end of this thread's job, not an error.
+                        if reported.send(batch).is_err() {
+                            return;
+                        }
+                        let _ = wake.send(AppEvent::Redraw);
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        // One unreadable poll must not end the watch: a busy
+                        // database is the ordinary case this exists to absorb.
+                        tracing::debug!(%err, "could not read the project event log");
+                    }
+                }
+                std::thread::sleep(POLL);
+            }
+        });
+    if let Err(err) = started {
+        tracing::warn!(%err, "could not start the event-log reader");
+    }
+}
+
+/// Waits briefly for the event log's writer to catch up on the way out.
+///
+/// A guard rather than a call, because `shell::run` returns from several
+/// places and the one that would get forgotten is whichever is added next.
+///
+/// Bounded, for the reason [`crate::shutdown`] gives about its own cleanup:
+/// failing to record the last few events is survivable, and failing to give
+/// the user their terminal back is not.
+struct FlushOnLeaving(Option<std::sync::Arc<EventLogSink>>);
+
+impl Drop for FlushOnLeaving {
+    fn drop(&mut self) {
+        const BOUND: std::time::Duration = std::time::Duration::from_millis(500);
+        if let Some(sink) = &self.0
+            && !sink.flush(BOUND)
+        {
+            tracing::warn!(
+                dropped = sink.dropped(),
+                "the event log did not finish writing before the shell closed"
+            );
+        }
+    }
+}
+
+/// Take an automatic checkpoint for every session whose turn just ended.
+///
+/// # What "automatically" can and cannot mean here
+///
+/// A checkpoint's objective, state and next actions are authored — Glasshouse
+/// does not know them and will not guess them from a session's terminal
+/// output, for the same reason nothing else in this codebase reads state out
+/// of scrollback. So an automatic checkpoint **carries forward the handoff the
+/// user last wrote for that session**, restamped with the current time and the
+/// repository's current position.
+///
+/// That is worth doing and is not a substitute for writing one: it keeps the
+/// most recent checkpoint fresh as of the last task boundary, so a session
+/// that dies leaves a handoff describing where the repository actually was
+/// rather than where it was an hour ago. A session whose user has never taken
+/// a checkpoint gets nothing, silently, because the alternative is inventing
+/// one.
+///
+/// Returns whether anything worth repainting happened.
+fn checkpoint_task_boundaries(
+    checkpoints: &CheckpointStore<'_>,
+    sessions: &ProjectSessions,
+    runtime: &Runtime,
+    recorded: &[RecordedEvent],
+    state: &mut ShellState,
+) -> bool {
+    let mut noted = false;
+    for event in recorded {
+        // A turn ending is the task boundary Glasshouse actually detects.
+        // Nothing else in the stream is one: a process exiting says the
+        // harness is gone, not that the work finished, and that distinction
+        // is the whole of `crate::events`'s doc comment.
+        if !matches!(event.event(), LifecycleEvent::TurnEnded { .. }) {
+            continue;
+        }
+        let id = event.session();
+        let previous = match checkpoints.latest_for(id) {
+            Ok(Some(previous)) => previous,
+            // No handoff has ever been written for this session, so there is
+            // nothing to carry forward and nothing honest to invent.
+            Ok(None) => continue,
+            Err(err) => {
+                tracing::warn!(session = %id, %err, "could not read a session's checkpoint");
+                continue;
+            }
+        };
+
+        let harness = match sessions.store().get(id) {
+            Ok(Some(record)) => record.harness,
+            // The checkpoint's own record of which harness wrote it is the
+            // fallback, and it is the right one: it is what was true when the
+            // handoff was authored.
+            _ => previous.checkpoint.harness.clone(),
+        };
+
+        let refreshed = Checkpoint::capture(
+            id,
+            &harness,
+            CheckpointReason::TaskBoundary,
+            checkpoints.now(),
+            runtime.project().root(),
+            previous.checkpoint.handoff.clone(),
+        );
+        match checkpoints.save(refreshed) {
+            Ok(stored) => {
+                state.set_status(format!(
+                    "checkpointed `{}` at a turn boundary ({})",
+                    state::short_session_id(id),
+                    stored.id.short()
+                ));
+                noted = true;
+            }
+            Err(err) => {
+                tracing::warn!(session = %id, %err, "could not take an automatic checkpoint");
+            }
+        }
+    }
+    noted
 }
 
 /// Interrupt one session, whether or not it is the one on screen.

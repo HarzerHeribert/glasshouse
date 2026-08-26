@@ -89,6 +89,21 @@ pub enum Command {
         #[command(subcommand)]
         command: MemoryCommand,
     },
+    /// Take, list, or read a portable session checkpoint.
+    ///
+    /// A checkpoint is what one session hands the next when work has to
+    /// move: the objective, where it got to, what was already ruled out, and
+    /// what to do next. It is deliberately small, it is project-scoped, and
+    /// it is kept apart from this project's durable memory.
+    ///
+    /// Glasshouse fills in the session, the harness, the timestamp and the
+    /// Git position by itself. It does not invent the objective or the state
+    /// — those are yours, and a checkpoint whose objective Glasshouse had
+    /// guessed would be worse than no checkpoint at all.
+    Checkpoint {
+        #[command(subcommand)]
+        command: CheckpointCommand,
+    },
     /// Report a harness lifecycle event. Run by harnesses, not by people.
     ///
     /// Glasshouse installs hooks that invoke this command, so a session's
@@ -145,6 +160,22 @@ pub enum Command {
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
 
+        /// Start the harness with a stored checkpoint's handoff as its
+        /// opening prompt.
+        ///
+        /// Takes the identifier `glasshouse checkpoint list` prints, or
+        /// `latest` for the most recent one in this project. The prompt is
+        /// plain text that names no harness, so a checkpoint written while
+        /// one harness was running can start the work in another.
+        ///
+        /// It is appended as the harness's own trailing argument, which is
+        /// exactly what typing the prompt after `--` would do — so a harness
+        /// that does not take an opening prompt reports that itself, in its
+        /// own words, rather than having Glasshouse guess on its behalf.
+        /// Your own `--` arguments still come after it and still win.
+        #[arg(long, value_name = "ID")]
+        from_checkpoint: Option<String>,
+
         /// Run the session with no terminal of its own.
         ///
         /// The harness still runs in a real pseudo-terminal, inside this
@@ -191,6 +222,22 @@ pub enum Command {
         /// unchanged.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+
+        /// Start the harness with a stored checkpoint's handoff as its
+        /// opening prompt.
+        ///
+        /// Takes the identifier `glasshouse checkpoint list` prints, or
+        /// `latest` for the most recent one in this project. The prompt is
+        /// plain text that names no harness, so a checkpoint written while
+        /// one harness was running can start the work in another.
+        ///
+        /// It is appended as the harness's own trailing argument, which is
+        /// exactly what typing the prompt after `--` would do — so a harness
+        /// that does not take an opening prompt reports that itself, in its
+        /// own words, rather than having Glasshouse guess on its behalf.
+        /// Your own `--` arguments still come after it and still win.
+        #[arg(long, value_name = "ID")]
+        from_checkpoint: Option<String>,
 
         /// Run the session with no terminal of its own.
         ///
@@ -299,6 +346,7 @@ mod tests {
         let Some(Command::Launch {
             harness,
             profile,
+            from_checkpoint,
             headless,
             harness_args,
         }) = cli.command
@@ -307,6 +355,9 @@ mod tests {
         };
         assert_eq!(harness.as_deref(), Some("claude-code"));
         assert_eq!(profile, None);
+        // Opt-in, like `--headless`: a launch that does not name a checkpoint
+        // is the plain launch it has always been.
+        assert_eq!(from_checkpoint, None);
         // A session takes the terminal unless it is explicitly told not to:
         // the flag is opt-in, so a launch that does not name it is the
         // attached one it has always been.
@@ -524,6 +575,64 @@ mod tests {
                 .is_err()
         );
     }
+}
+
+/// What to do with this project's session checkpoints.
+#[derive(Debug, Subcommand)]
+pub enum CheckpointCommand {
+    /// Record a checkpoint for a session.
+    ///
+    /// With no `--session`, the project's most recently active session — the
+    /// one `glasshouse sessions` prints first, which is what "the active
+    /// session" means outside the interactive interface.
+    Save {
+        /// What this work is trying to achieve.
+        #[arg(long, value_name = "TEXT")]
+        objective: String,
+
+        /// Where it has got to.
+        #[arg(long, value_name = "TEXT")]
+        state: String,
+
+        /// Which session, by the identifier `glasshouse sessions` prints.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+
+        /// A decision discovered during this task. Repeatable.
+        #[arg(long = "decision", value_name = "TEXT")]
+        decisions: Vec<String>,
+
+        /// An approach already tried and abandoned. Repeatable.
+        #[arg(long = "failed", value_name = "TEXT")]
+        failed_approaches: Vec<String>,
+
+        /// A file or symbol that matters to this work. Repeatable.
+        #[arg(long = "file", value_name = "TEXT")]
+        files: Vec<String>,
+
+        /// What the tests currently say.
+        #[arg(long, value_name = "TEXT")]
+        tests: Option<String>,
+
+        /// What to do next. Repeatable, in order.
+        #[arg(long = "next", value_name = "TEXT")]
+        next_actions: Vec<String>,
+    },
+    /// List this project's checkpoints, most recent first.
+    List,
+    /// Print a checkpoint.
+    ///
+    /// By default the plain-text handoff a fresh session in any harness can
+    /// be given; `--document` prints the portable JSON instead.
+    Show {
+        /// Which checkpoint, by the identifier `list` prints. Omit for the
+        /// most recent one in this project.
+        checkpoint: Option<String>,
+
+        /// Print the portable document rather than the handoff prompt.
+        #[arg(long)]
+        document: bool,
+    },
 }
 
 /// What to do with this project's durable memory.

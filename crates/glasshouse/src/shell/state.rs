@@ -21,6 +21,7 @@ use crate::config::{
     Layer, Layered, PremiumReservePercent, ProfileApproval, ProfileBackend, ProfileConfig,
     ProviderConfig, RouterCostMicroUsd, RouterLatencyMs, RoutingModelChoice, StoredCredentialRef,
 };
+use crate::events::{LifecycleEvent, MessageOrigin, RecordedEvent, TurnOutcome};
 use crate::harness::{Declared, WireProtocol};
 use crate::integrations::{IntegrationId, IntegrationKind, IntegrationStatus};
 use crate::platform::exec;
@@ -269,6 +270,61 @@ pub(crate) fn short_session_id(id: &SessionId) -> String {
     id.as_str().chars().take(12).collect()
 }
 
+/// How many recent events the activity view keeps and shows.
+///
+/// Bounded, oldest discarded, for the same reason a scrollback is bounded: an
+/// activity list that grew without limit would eventually cost more to hold
+/// and draw than it is worth to a user who only ever looks at the tail of it.
+pub const ACTIVITY_ROWS: usize = 8;
+
+/// One line for the activity view, naming exactly what happened.
+///
+/// Exhaustive with **no `_` arm**: every [`LifecycleEvent`] variant this
+/// module knows about gets its own summary, so a new variant is a compile
+/// error here rather than a silently blank row. The two distinctions the
+/// event model is careful to preserve — a turn ending `Completed` versus
+/// `Failed`, and a [`MessageOrigin`] of `Machine` versus `UserKeystroke` — are
+/// preserved here too, on purpose: collapsing either would throw away the one
+/// fact Glasshouse keeps that the harness cannot.
+pub(crate) fn describe_event(event: &LifecycleEvent) -> String {
+    match event {
+        LifecycleEvent::SessionStarted => "session started".to_owned(),
+        // Not "session started" again. A resume is a different fact and the
+        // event model keeps it separate precisely so a reader never has to
+        // infer one from a session having started twice.
+        LifecycleEvent::SessionResumed => "session resumed".to_owned(),
+        LifecycleEvent::TurnStarted => "turn started".to_owned(),
+        LifecycleEvent::TurnEnded {
+            outcome: TurnOutcome::Completed,
+        } => "turn ended (completed)".to_owned(),
+        LifecycleEvent::TurnEnded {
+            outcome: TurnOutcome::Failed,
+        } => "turn ended (failed)".to_owned(),
+        // Never "idle" — see the module docs on `LifecycleEvent::WaitingForUser`:
+        // silence is never promoted to this, so this must never read like silence.
+        LifecycleEvent::WaitingForUser => "waiting for the user".to_owned(),
+        LifecycleEvent::TextDelivered {
+            origin: MessageOrigin::Machine,
+            bytes,
+        } => format!("sent {bytes} bytes (machine)"),
+        LifecycleEvent::TextDelivered {
+            origin: MessageOrigin::UserKeystroke,
+            bytes,
+        } => format!("sent {bytes} bytes (typed)"),
+        LifecycleEvent::InterruptDelivered {
+            origin: MessageOrigin::Machine,
+        } => "interrupt sent (machine)".to_owned(),
+        LifecycleEvent::InterruptDelivered {
+            origin: MessageOrigin::UserKeystroke,
+        } => "interrupt sent (typed)".to_owned(),
+        LifecycleEvent::ProcessExited { exit } => format!("process {exit}"),
+        LifecycleEvent::OutputEnded => "output ended".to_owned(),
+        LifecycleEvent::GatewayUnhealthy { resource, reason } => {
+            format!("{resource} gateway {reason}")
+        }
+    }
+}
+
 /// Everything the shell displays.
 pub struct ShellState {
     project_name: String,
@@ -300,6 +356,9 @@ pub struct ShellState {
     /// same split as `settings`, and for the same reason. See
     /// [`OverviewState`] for why its cursor is not `selected`.
     overview: Option<OverviewState>,
+    /// Recent lifecycle events, newest first, bounded at [`ACTIVITY_ROWS`].
+    /// See [`ShellState::note_events`].
+    activity: Vec<RecordedEvent>,
 }
 
 impl ShellState {
@@ -321,6 +380,7 @@ impl ShellState {
             viewport_grid: ViewportGrid::default(),
             settings: None,
             overview: None,
+            activity: Vec::new(),
         }
     }
 
@@ -713,6 +773,31 @@ impl ShellState {
         } else {
             Action::Redraw
         }
+    }
+
+    /// Take lifecycle events drained from the bus.
+    ///
+    /// `events` arrives oldest first, matching [`crate::events::Subscription::drain`];
+    /// this keeps `activity` newest first by inserting each one at the front
+    /// in that order, then discards anything past [`ACTIVITY_ROWS`] — the
+    /// oldest events, exactly like a bounded scrollback.
+    ///
+    /// This is a window, not a writer: it never touches a session's
+    /// lifecycle, its order in the table, the cursor, or the status note.
+    pub fn note_events(&mut self, events: &[RecordedEvent]) -> Action {
+        if events.is_empty() {
+            return Action::None;
+        }
+        for event in events {
+            self.activity.insert(0, event.clone());
+        }
+        self.activity.truncate(ACTIVITY_ROWS);
+        Action::Redraw
+    }
+
+    /// The most recent events, newest first, at most [`ACTIVITY_ROWS`].
+    pub fn activity(&self) -> &[RecordedEvent] {
+        &self.activity
     }
 
     /// Answer one key.
@@ -5797,5 +5882,155 @@ mod overview_tests {
             assert_eq!(state.handle_key(key), Action::Redraw);
             assert!(state.status().is_some(), "{key:?} said nothing");
         }
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+    use crate::events::{EventBus, GatewayFailure, ProcessExit};
+
+    fn events_of(events: &[LifecycleEvent]) -> Vec<RecordedEvent> {
+        let bus = EventBus::new();
+        let session = SessionId::new("s-1");
+        events
+            .iter()
+            .map(|event| bus.publish(&session, event.clone()))
+            .collect()
+    }
+
+    /// One representative of every [`LifecycleEvent`] variant this crate
+    /// defines.
+    ///
+    /// Held to that claim by `the_variant_list_covers_every_kind` rather than
+    /// by a comment: a list that merely *said* it was complete would go on
+    /// saying so after somebody added a variant, and the distinctness check
+    /// below would then be proving less than it looks like it proves.
+    fn one_of_each_variant() -> Vec<LifecycleEvent> {
+        vec![
+            LifecycleEvent::SessionStarted,
+            LifecycleEvent::SessionResumed,
+            LifecycleEvent::TurnStarted,
+            LifecycleEvent::TurnEnded {
+                outcome: TurnOutcome::Completed,
+            },
+            LifecycleEvent::WaitingForUser,
+            LifecycleEvent::TextDelivered {
+                origin: MessageOrigin::Machine,
+                bytes: 41,
+            },
+            LifecycleEvent::InterruptDelivered {
+                origin: MessageOrigin::Machine,
+            },
+            LifecycleEvent::ProcessExited {
+                exit: ProcessExit::from_parts(0, None),
+            },
+            LifecycleEvent::OutputEnded,
+            LifecycleEvent::GatewayUnhealthy {
+                resource: "db".to_owned(),
+                reason: GatewayFailure::Unreachable,
+            },
+        ]
+    }
+
+    #[test]
+    fn an_empty_slice_notes_nothing() {
+        let mut state = ShellState::new("p", "/p", "0.1.0", vec![]);
+        assert_eq!(state.note_events(&[]), Action::None);
+        assert!(state.activity().is_empty());
+    }
+
+    #[test]
+    fn note_events_keeps_the_newest_and_is_bounded_at_activity_rows() {
+        let mut state = ShellState::new("p", "/p", "0.1.0", vec![]);
+        let variants: Vec<LifecycleEvent> = (0..ACTIVITY_ROWS + 3)
+            .map(|n| LifecycleEvent::TextDelivered {
+                origin: MessageOrigin::Machine,
+                bytes: n,
+            })
+            .collect();
+        let recorded = events_of(&variants);
+
+        assert_eq!(state.note_events(&recorded), Action::Redraw);
+
+        assert_eq!(state.activity().len(), ACTIVITY_ROWS);
+        // Newest first: the last event published (largest `bytes`) leads.
+        assert_eq!(
+            state.activity()[0].event(),
+            &LifecycleEvent::TextDelivered {
+                origin: MessageOrigin::Machine,
+                bytes: ACTIVITY_ROWS + 2,
+            }
+        );
+        // Bounded: the oldest events (smallest `bytes`) were discarded.
+        for kept in state.activity() {
+            let LifecycleEvent::TextDelivered { bytes, .. } = kept.event() else {
+                panic!("only TextDelivered events were published");
+            };
+            assert!(*bytes >= 3, "an old event survived: {bytes}");
+        }
+    }
+
+    /// The list above really is every variant.
+    ///
+    /// Anchored on `LifecycleEvent::kind`, which is exhaustive at the
+    /// compiler's insistence and is already pinned to the project database's
+    /// own `CHECK` constraint. So adding a variant fails here until the list
+    /// grows, which is what keeps the distinctness test below honest.
+    #[test]
+    fn the_variant_list_covers_every_kind() {
+        let covered: std::collections::BTreeSet<&str> = one_of_each_variant()
+            .iter()
+            .map(LifecycleEvent::kind)
+            .collect();
+        let known: std::collections::BTreeSet<&str> =
+            crate::database::LIFECYCLE_EVENT_KINDS.into_iter().collect();
+        assert_eq!(
+            covered, known,
+            "the activity view's variant list has drifted from the event enum"
+        );
+    }
+
+    /// Catches a `_` arm creeping back into `describe_event`: a collapsed
+    /// variant would make two of these summaries equal.
+    #[test]
+    fn every_variant_renders_a_distinct_non_empty_summary() {
+        let variants = one_of_each_variant();
+        let mut summaries: Vec<String> = variants.iter().map(describe_event).collect();
+        for summary in &summaries {
+            assert!(!summary.is_empty());
+        }
+        let before = summaries.len();
+        summaries.sort();
+        summaries.dedup();
+        assert_eq!(
+            summaries.len(),
+            before,
+            "two variants rendered the same summary"
+        );
+    }
+
+    #[test]
+    fn a_completed_turn_reads_differently_from_a_failed_one() {
+        let completed = describe_event(&LifecycleEvent::TurnEnded {
+            outcome: TurnOutcome::Completed,
+        });
+        let failed = describe_event(&LifecycleEvent::TurnEnded {
+            outcome: TurnOutcome::Failed,
+        });
+        assert_ne!(completed, failed);
+    }
+
+    #[test]
+    fn machine_text_reads_differently_from_a_user_keystroke() {
+        let machine = describe_event(&LifecycleEvent::TextDelivered {
+            origin: MessageOrigin::Machine,
+            bytes: 10,
+        });
+        let typed = describe_event(&LifecycleEvent::TextDelivered {
+            origin: MessageOrigin::UserKeystroke,
+            bytes: 10,
+        });
+        assert_ne!(machine, typed);
     }
 }

@@ -4,7 +4,12 @@ use std::sync::{Arc, Mutex};
 
 use std::io::IsTerminal;
 
+use glasshouse::checkpoint::{
+    Checkpoint, CheckpointReason, CheckpointStore, Handoff, ProjectCheckpoints, Stored,
+};
+use glasshouse::cli::CheckpointCommand;
 use glasshouse::config::{self, EffectiveConfig, UserConfig};
+use glasshouse::events::{EventBus, EventLog, LifecycleEvent, Observation, ProcessExit};
 use glasshouse::integrations::Discovery;
 use glasshouse::launch::HarnessLaunch;
 use glasshouse::onboarding;
@@ -85,12 +90,14 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         Some(Command::Launch {
             harness,
             profile,
+            from_checkpoint,
             headless,
             harness_args,
         })
         | Some(Command::Run {
             harness,
             profile,
+            from_checkpoint,
             headless,
             harness_args,
         }) => {
@@ -98,6 +105,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 &runtime,
                 harness.as_deref(),
                 profile.as_deref(),
+                from_checkpoint.as_deref(),
                 *headless,
                 harness_args,
             );
@@ -120,6 +128,9 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 "{}",
                 memory_report(&runtime, &query.join(" "), *history, *limit)?
             );
+        }
+        Some(Command::Checkpoint { command }) => {
+            return checkpoint_command(&runtime, command);
         }
         Some(Command::Hook { session, event }) => {
             report_hook(&runtime, session, event);
@@ -181,6 +192,7 @@ fn launch_session(
     runtime: &Runtime,
     harness: Option<&str>,
     profile_name: Option<&str>,
+    from_checkpoint: Option<&str>,
     headless: bool,
     harness_args: &[String],
 ) -> anyhow::Result<ExitCode> {
@@ -201,6 +213,17 @@ fn launch_session(
             return Ok(ExitCode::FAILURE);
         }
     };
+    // Resolved here, beside the profile, and for the same reason: a bad
+    // identifier must cost nothing. No session record, no process — see
+    // `glasshouse::profile::resolve`'s doc.
+    let bootstrap = match resolve_bootstrap_prompt(runtime, from_checkpoint) {
+        Ok(prompt) => prompt,
+        Err(err) => {
+            eprintln!("glasshouse: {err:#}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+
     let acknowledged_bypass = effective.bypass_acknowledged(selection.id()).value;
     // A direct-provider profile names a provider; the *lookup* is the
     // caller's job, so `glasshouse::profile` never has to import
@@ -337,6 +360,12 @@ fn launch_session(
     // The overlay is the only thing that may put its own arguments or
     // environment onto the launch — see `LaunchOverlay::apply`'s doc.
     let launch = overlay.apply(launch);
+    // A checkpoint's handoff, if one was named, as the harness's opening
+    // prompt — exactly where a person typing it after `--` would have put it.
+    let launch = match &bootstrap {
+        Some(prompt) => launch.args(std::iter::once(prompt.as_str())),
+        None => launch,
+    };
     // The user's own `--` arguments always come last, so they can win.
     let launch = launch.args(harness_args.iter().map(String::as_str));
 
@@ -345,6 +374,15 @@ fn launch_session(
     // diagnostics problem, whereas turning it into an error would make a
     // database hiccup look like a harness failure.
     note_lifecycle(&store, &record.id, SessionLifecycle::Running);
+
+    // Phase 18's "record session creation events", on the path that actually
+    // creates one from the command line. The shell's own runtime publishes
+    // the same event for a session started there; this is the other entry
+    // point, and a log that only knew about one of them would be a log with a
+    // hole in it exactly where a user was not using the interactive
+    // interface.
+    let events = EventRecorder::open(runtime);
+    events.record(&record.id, LifecycleEvent::SessionStarted);
 
     let session = if headless {
         run_headless(&record.id, launch)
@@ -363,15 +401,17 @@ fn launch_session(
     // ever be — see `session::native_id::capture`'s doc comment.
     session::native_id::capture(&store, &record, runtime.project().root(), &index_before);
 
-    note_lifecycle(
-        &store,
+    // One definition of "did it crash", and it is `ProcessExit`'s. This used
+    // to be an inline `status.success()` split, which is a second place the
+    // same classification lived — and two definitions of that eventually
+    // disagree about a signal, which is the case that matters least often and
+    // costs most when it is wrong.
+    let exit = ProcessExit::from_status(&status);
+    events.record(
         &record.id,
-        if status.success() {
-            SessionLifecycle::Stopped
-        } else {
-            SessionLifecycle::Failed
-        },
+        LifecycleEvent::ProcessExited { exit: exit.clone() },
     );
+    note_lifecycle(&store, &record.id, exit.session_state());
 
     if !status.success() {
         // The harness failing is not Glasshouse failing, so this is a plain
@@ -674,14 +714,6 @@ fn report_hook(runtime: &Runtime, session: &str, event: &str) {
     // `GLASSHOUSE_DESIGN_DECISIONS.md` section this function implements.
     let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
 
-    let Some(next) = session::lifecycle_for(event) else {
-        // An event this build does not recognise. Harnesses gain events
-        // between releases, and guessing a state from an unfamiliar name
-        // would be worse than ignoring it.
-        tracing::debug!(event, "ignoring an unrecognised harness event");
-        return;
-    };
-
     let outcome = (|| -> anyhow::Result<()> {
         let sessions = ProjectSessions::open(runtime)?;
         let store = sessions.store();
@@ -689,6 +721,48 @@ fn report_hook(runtime: &Runtime, session: &str, event: &str) {
         let record = store
             .get(&id)?
             .ok_or_else(|| anyhow::anyhow!("session `{id}` is not in this project"))?;
+
+        // `observe`, not `lifecycle_for`. Two things follow from that and
+        // both are capability lines:
+        //
+        // It preserves the raw observation in the debug log before
+        // translating, so a harness that gained an event between releases
+        // leaves a line naming what arrived — which is the difference between
+        // a five-minute fix and a bisect, and is why the line is written
+        // whether or not the event is recognised.
+        //
+        // And the observation is exactly two words: the integration slug from
+        // this session's own record, and the event name from Glasshouse's own
+        // argv. **The payload is not among them and cannot become one.** The
+        // stream carrying the user's prompt and the model's last message was
+        // drained into `io::sink()` above, unread; nothing downstream of here
+        // has it to leak. See `the_hook_command_never_reads_its_payload`.
+        let Some(translated) = session::lifecycle::observe(&record.harness, event) else {
+            // An event this build does not recognise. Harnesses gain events
+            // between releases, and guessing a state from an unfamiliar name
+            // would be worse than ignoring it.
+            tracing::debug!(event, "ignoring an unrecognised harness event");
+            return Ok(());
+        };
+
+        // Phase 12's "record every translated lifecycle event with session ID
+        // and timestamp", and Phase 18's "record lifecycle-hook events".
+        // Recorded before the state change is decided, and independently of
+        // whether one is applied at all: an event that arrived after the
+        // session finished is still something that happened, and a log that
+        // dropped it would be missing exactly the evidence somebody debugging
+        // a late hook needs.
+        EventRecorder::open(runtime).record_observed(
+            &id,
+            translated.clone(),
+            Observation::new(&record.harness, event),
+        );
+
+        let Some(next) = translated.implied_state() else {
+            // A translated event that says nothing about the session's state
+            // — it is in the log and that is all it was ever going to do.
+            return Ok(());
+        };
 
         if !session::may_apply(record.lifecycle, next) {
             tracing::debug!(
@@ -707,6 +781,317 @@ fn report_hook(runtime: &Runtime, session: &str, event: &str) {
     if let Err(err) = outcome {
         tracing::warn!(error = %err, event, "could not record a harness event");
     }
+}
+
+/// Records lifecycle events durably from a command that is about to exit.
+///
+/// # Why this is not the sink the shell uses
+///
+/// [`glasshouse::events::EventLogSink`] queues behind a writer thread,
+/// because the shell publishes from a thread that is sometimes draining a
+/// pseudo-terminal and must never wait. None of that applies here: a
+/// `glasshouse hook` process lives for a few milliseconds and then exits, and
+/// queueing behind a thread it is about to drop would lose the event it was
+/// run to record. So this writes synchronously.
+///
+/// # Why there is a bus at all
+///
+/// [`glasshouse::events::RecordedEvent`] cannot be built without a session
+/// identifier and a timestamp — that is a property of the type rather than a
+/// habit of its callers, and [`EventBus::publish`] is what stamps both. Using
+/// it as the minting authority is what keeps "record every translated
+/// lifecycle event with session ID and timestamp" true on this path as well
+/// as in the interactive one. No sink is attached to it, so nothing is
+/// written twice.
+///
+/// # Every failure is swallowed into the log, deliberately
+///
+/// This runs inside the user's own session — see [`report_hook`], which may
+/// never fail — and it is also on the launch path, where a bookkeeping
+/// failure must not turn into what looks like a harness failure. A project
+/// whose database cannot be opened loses event history and keeps its session.
+struct EventRecorder {
+    bus: EventBus,
+    log: Option<EventLog>,
+}
+
+impl EventRecorder {
+    fn open(runtime: &Runtime) -> Self {
+        let log = match EventLog::open(runtime) {
+            Ok(log) => Some(log),
+            Err(err) => {
+                tracing::warn!(error = %format!("{err:#}"), "could not open the project event log");
+                None
+            }
+        };
+        Self {
+            bus: EventBus::new(),
+            log,
+        }
+    }
+
+    fn record(&self, id: &SessionId, event: LifecycleEvent) {
+        self.append(id, event, None);
+    }
+
+    /// Record an event together with the harness report it was translated
+    /// from — the harness's own two words, and nothing else.
+    fn record_observed(&self, id: &SessionId, event: LifecycleEvent, observed: Observation) {
+        self.append(id, event, Some(observed));
+    }
+
+    fn append(&self, id: &SessionId, event: LifecycleEvent, observed: Option<Observation>) {
+        let recorded = self.bus.publish(id, event);
+        let Some(log) = &self.log else {
+            return;
+        };
+        if let Err(err) = log.append(&recorded, observed.as_ref()) {
+            tracing::warn!(session = %id, error = %err, "could not record a lifecycle event");
+        }
+    }
+}
+
+/// `glasshouse checkpoint …`.
+///
+/// # What Glasshouse supplies, and what it refuses to
+///
+/// The session, the harness, the timestamp and the Git position are read
+/// straight off the project and the repository. The objective, the state, the
+/// decisions and the next actions are **arguments**, because they are things
+/// only whoever did the work knows. Glasshouse could have filled them from a
+/// session's terminal output and it deliberately does not: a checkpoint whose
+/// objective was guessed from scrollback would be a confident fiction, and
+/// this project already refuses to read state out of terminal output
+/// everywhere else.
+fn checkpoint_command(runtime: &Runtime, command: &CheckpointCommand) -> anyhow::Result<ExitCode> {
+    let checkpoints = ProjectCheckpoints::open(runtime)?;
+    let store = checkpoints.store();
+
+    match command {
+        CheckpointCommand::Save {
+            objective,
+            state,
+            session,
+            decisions,
+            failed_approaches,
+            files,
+            tests,
+            next_actions,
+        } => {
+            let sessions = ProjectSessions::open(runtime)?;
+            let Some(record) = active_session(&sessions, session.as_deref())? else {
+                eprintln!(
+                    "glasshouse: this project has no recorded sessions to check point. \
+                     Start one with `glasshouse launch`."
+                );
+                return Ok(ExitCode::FAILURE);
+            };
+
+            let stored = store.save(Checkpoint::capture(
+                &record.id,
+                &record.harness,
+                CheckpointReason::Manual,
+                store.now(),
+                runtime.project().root(),
+                Handoff {
+                    objective: objective.clone(),
+                    implementation_state: state.clone(),
+                    decisions: decisions.clone(),
+                    failed_approaches: failed_approaches.clone(),
+                    files: files.clone(),
+                    test_state: tests.clone(),
+                    next_actions: next_actions.clone(),
+                },
+            ))?;
+
+            println!("checkpoint {}", stored.id.short());
+            println!("session    {}", short_id(&record.id));
+            match &stored.checkpoint.git {
+                Some(git) => match &git.branch {
+                    Some(branch) => println!("git        {branch} at {}", git.commit),
+                    None => println!("git        detached at {}", git.commit),
+                },
+                // Said out loud rather than left blank: "when available" is a
+                // real condition, and a silent omission reads as a bug.
+                None => println!("git        no repository position available"),
+            }
+            if stored.checkpoint.trimmed {
+                println!(
+                    "note       trimmed to fit {} bytes; the session has more",
+                    glasshouse::checkpoint::MAX_BYTES
+                );
+            }
+            println!(
+                "\nStart a session anywhere from it with:\n  glasshouse launch <harness> \
+                 --from-checkpoint {}",
+                stored.id.short()
+            );
+        }
+        CheckpointCommand::List => {
+            print!("{}", checkpoint_listing(&store)?);
+        }
+        CheckpointCommand::Show {
+            checkpoint,
+            document,
+        } => {
+            let Some(stored) = resolve_checkpoint(&store, checkpoint.as_deref())? else {
+                eprintln!("glasshouse: this project has no checkpoints yet.");
+                return Ok(ExitCode::FAILURE);
+            };
+            if *document {
+                println!("{}", stored.checkpoint.render());
+            } else {
+                print!("{}", stored.checkpoint.bootstrap_prompt());
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The session a checkpoint command means.
+///
+/// Named explicitly, or the project's most recently active one — which is what
+/// "the active session" means outside the interactive interface, and is the
+/// row `glasshouse sessions` already prints first.
+fn active_session(
+    sessions: &ProjectSessions,
+    named: Option<&str>,
+) -> anyhow::Result<Option<glasshouse::session::SessionRecord>> {
+    let store = sessions.store();
+    match named {
+        Some(named) => {
+            let id = store.resolve_id(named)?;
+            Ok(Some(store.get(&id)?.ok_or_else(|| {
+                anyhow::anyhow!("session `{id}` is not in this project")
+            })?))
+        }
+        None => Ok(store.list()?.into_iter().next()),
+    }
+}
+
+/// The checkpoint a command means: the one named, or the most recent.
+fn resolve_checkpoint(
+    store: &CheckpointStore<'_>,
+    named: Option<&str>,
+) -> anyhow::Result<Option<Stored>> {
+    match named {
+        Some("latest") | None => Ok(store.latest()?),
+        Some(named) => {
+            let id = store.resolve_id(named)?;
+            Ok(Some(store.get(&id)?.ok_or_else(|| {
+                anyhow::anyhow!("checkpoint `{id}` is not in this project")
+            })?))
+        }
+    }
+}
+
+/// The handoff prompt a `--from-checkpoint` launch opens with, if one was
+/// asked for.
+///
+/// A named checkpoint that does not exist is an error rather than an empty
+/// prompt: starting a fresh session that silently lost its handoff is the
+/// worst of the available outcomes, because it looks exactly like one that
+/// worked.
+fn resolve_bootstrap_prompt(
+    runtime: &Runtime,
+    named: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let Some(named) = named else {
+        return Ok(None);
+    };
+    let checkpoints = ProjectCheckpoints::open(runtime)?;
+    let store = checkpoints.store();
+    let stored = resolve_checkpoint(&store, Some(named))?.ok_or_else(|| {
+        anyhow::anyhow!("this project has no checkpoints yet, so there is nothing to start from")
+    })?;
+
+    tracing::info!(
+        checkpoint = %stored.id,
+        session = %stored.checkpoint.session,
+        // The harness the checkpoint came *from*. Worth a line, because the
+        // whole point is that it need not be the one about to start.
+        recorded_by = %stored.checkpoint.harness,
+        "starting a session from a checkpoint"
+    );
+    Ok(Some(stored.checkpoint.bootstrap_prompt()))
+}
+
+/// The `glasshouse checkpoint list` listing.
+fn checkpoint_listing(store: &CheckpointStore<'_>) -> anyhow::Result<String> {
+    use std::fmt::Write as _;
+
+    let stored = store.list()?;
+    if stored.is_empty() {
+        return Ok("No checkpoints recorded for this project.\n\
+                   Take one with `glasshouse checkpoint save --objective ... \
+                   --state ...`.\n"
+            .to_owned());
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{}",
+        checkpoint_row(
+            "CHECKPOINT",
+            "SESSION",
+            "HARNESS",
+            "WHY",
+            "TAKEN",
+            "OBJECTIVE"
+        )
+    );
+    for entry in &stored {
+        let _ = writeln!(
+            out,
+            "{}",
+            checkpoint_row(
+                &entry.id.short(),
+                &short_id(&entry.checkpoint.session),
+                &entry.checkpoint.harness,
+                entry.checkpoint.reason.as_str(),
+                &format_age(entry.checkpoint.created_at),
+                &one_line(&entry.checkpoint.handoff.objective),
+            )
+        );
+    }
+    Ok(out)
+}
+
+/// One line of the checkpoint listing, header included.
+///
+/// The header and the rows go through one function so their columns cannot
+/// drift apart, exactly as [`session_row`] does — the usual way a hand-aligned
+/// table stops lining up is somebody widening a column in one of two format
+/// strings.
+fn checkpoint_row(
+    checkpoint: &str,
+    session: &str,
+    harness: &str,
+    reason: &str,
+    taken: &str,
+    objective: &str,
+) -> String {
+    format!(
+        "{checkpoint:<12}  {session:<12}  {harness:<14}  {reason:<13}  {taken:<10}  {objective}"
+    )
+}
+
+/// An objective as one table cell: first line only, and bounded.
+///
+/// A checkpoint's objective is free text a person wrote and may well be a
+/// paragraph. A listing that let one row become forty would be unreadable, so
+/// the table shows the first line and `checkpoint show` prints the rest.
+fn one_line(text: &str) -> String {
+    const WIDTH: usize = 60;
+    let first = text.lines().next().unwrap_or("").trim();
+    if first.chars().count() <= WIDTH {
+        return first.to_owned();
+    }
+    // By characters, never by bytes: cutting a multi-byte character in half
+    // would put invalid text on a terminal.
+    let cut: String = first.chars().take(WIDTH - 1).collect();
+    format!("{cut}…")
 }
 
 /// Reopen a recorded session in its own harness.
@@ -768,6 +1153,14 @@ fn resume_session(
     let launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
 
     note_lifecycle(&store, &resumable.id, SessionLifecycle::Running);
+
+    // Phase 18's "record session resume events". A distinct event rather than
+    // a second `SessionStarted`, because otherwise a reader has to infer a
+    // resume from a session having started twice, and an inference is not a
+    // recording.
+    let events = EventRecorder::open(runtime);
+    events.record(&resumable.id, LifecycleEvent::SessionResumed);
+
     let status = match session::attach(launch) {
         Ok(status) => status,
         Err(err) => {
@@ -775,15 +1168,13 @@ fn resume_session(
             return Err(err);
         }
     };
-    note_lifecycle(
-        &store,
+
+    let exit = ProcessExit::from_status(&status);
+    events.record(
         &resumable.id,
-        if status.success() {
-            SessionLifecycle::Stopped
-        } else {
-            SessionLifecycle::Failed
-        },
+        LifecycleEvent::ProcessExited { exit: exit.clone() },
     );
+    note_lifecycle(&store, &resumable.id, exit.session_state());
 
     if !status.success() {
         // A harness that refuses the identifier — "No conversation found with
@@ -1235,8 +1626,15 @@ mod tests {
         user.profiles_mut().set("gateway", profile);
         user.save(runtime.paths()).unwrap();
 
-        let status =
-            launch_session(&runtime, Some("claude-code"), Some("gateway"), false, &[]).unwrap();
+        let status = launch_session(
+            &runtime,
+            Some("claude-code"),
+            Some("gateway"),
+            None,
+            false,
+            &[],
+        )
+        .unwrap();
         assert_eq!(status, ExitCode::FAILURE);
 
         let sessions = glasshouse::session::ProjectSessions::open(&runtime).unwrap();
@@ -1259,8 +1657,15 @@ mod tests {
         user.profiles_mut().set("yolo", profile);
         user.save(runtime.paths()).unwrap();
 
-        let status =
-            launch_session(&runtime, Some("claude-code"), Some("yolo"), false, &[]).unwrap();
+        let status = launch_session(
+            &runtime,
+            Some("claude-code"),
+            Some("yolo"),
+            None,
+            false,
+            &[],
+        )
+        .unwrap();
         assert_eq!(status, ExitCode::FAILURE);
 
         let sessions = glasshouse::session::ProjectSessions::open(&runtime).unwrap();

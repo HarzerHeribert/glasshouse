@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 310 / 1267 mandatory capabilities (24%)
+`██████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 335 / 1267 mandatory capabilities (26%)
 
 <details>
 <summary>Per-phase breakdown (12 of 103 phases complete)</summary>
@@ -53,14 +53,14 @@ the authoritative specification and tracks what is done.
 | Phase 9K — Harness-aware response profiles | 0/37 |
 | Phase 10 — Unified session model | 0/14 |
 | Phase 11 — Session overview | 0/10 |
-| Phase 12 — Unified lifecycle event bus | 4/8 |
+| Phase 12 — Unified lifecycle event bus | 7/8 |
 | Phase 13 — Direct session messaging | 7/7 ✅ |
 | Phase 14 — Orchestrator role | 0/11 |
 | Phase 15 — Orchestrator wake-up flow | 0/8 |
 | Phase 16 — Worker transparency | 0/7 |
 | Phase 17 — cmux optional integration | 0/10 |
-| Phase 18 — Raw event recording | 0/10 |
-| Phase 19 — Portable session checkpoints | 0/14 |
+| Phase 18 — Raw event recording | 9/10 |
+| Phase 19 — Portable session checkpoints | 13/14 |
 | Phase 20 — Minimal durable project memory | 16/18 |
 | Phase 21 — Memory extraction | 0/13 |
 | Phase 21A — Memory authority classes | 0/12 |

@@ -317,7 +317,9 @@ fn a_version_three_database_gains_the_memory_table_with_its_sessions_intact() {
              DROP TRIGGER memories_reject_foreign_project_update;
              DROP TRIGGER memories_reject_foreign_project_insert;
              DROP TABLE memories;
-             DELETE FROM schema_migrations WHERE version = 4;",
+             DROP TABLE IF EXISTS lifecycle_events;
+             DROP TABLE IF EXISTS checkpoints;
+             DELETE FROM schema_migrations WHERE version >= 4;",
         )
         .unwrap();
 
@@ -346,7 +348,10 @@ fn a_version_three_database_gains_the_memory_table_with_its_sessions_intact() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(version, 4, "the launch must have applied migration 4");
+    assert_eq!(
+        version, 5,
+        "the launch must have applied migrations 4 and 5"
+    );
 
     // The session recorded before the migration is untouched.
     let harness: String = conn

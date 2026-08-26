@@ -49,9 +49,39 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// Version 1 is the empty-but-initialized schema plus the `project_metadata`
 /// table. Version 2 adds `sessions`. Version 3 adds `sessions.launch_profile`
 /// and `sessions.backend_resource`. Version 4 adds `memories` and its FTS5
-/// index. Later migrations are appended to [`MIGRATIONS`], and this constant
-/// moves with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 4;
+/// index. Version 5 adds `lifecycle_events` and `checkpoints`. Later
+/// migrations are appended to [`MIGRATIONS`], and this constant moves with
+/// them.
+const SUPPORTED_SCHEMA_VERSION: i64 = 5;
+
+/// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
+///
+/// Here rather than only in the SQL so that
+/// [`crate::events::LifecycleEvent::kind`] can be pinned against it by a test.
+/// A renamed variant otherwise compiles perfectly and then fails as a
+/// constraint violation on a background writer thread, where nobody is
+/// looking.
+pub(crate) const LIFECYCLE_EVENT_KINDS: [&str; 10] = [
+    "session_started",
+    "session_resumed",
+    "turn_started",
+    "turn_ended",
+    "waiting_for_user",
+    "text_delivered",
+    "interrupt_delivered",
+    "process_exited",
+    "output_ended",
+    "gateway_unhealthy",
+];
+
+/// The largest checkpoint the project database will store, in bytes.
+///
+/// The map's constraint — *keep checkpoints deliberately small enough to
+/// bootstrap a fresh session cheaply* — expressed where it cannot be talked
+/// out of. [`crate::checkpoint`] trims to fit before it ever gets here; this
+/// is what makes the bound a property of the stored data rather than of one
+/// builder remembering to apply it.
+pub(crate) const MAX_CHECKPOINT_BYTES: usize = 8 * 1024;
 
 /// Migration `index + 1` upgrades a database from schema version `index` to
 /// version `index + 1`. Migrations run in order inside one transaction, so a
@@ -331,6 +361,162 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
         VALUES ('delete', OLD.rowid, OLD.subject, OLD.body);
         INSERT INTO memories_fts (rowid, subject, body)
         VALUES (NEW.rowid, NEW.subject, NEW.body);
+    END;
+    ",
+    // 5: the append-only project event log (Phase 18) and portable session
+    // checkpoints (Phase 19).
+    //
+    // # Why `lifecycle_events` refuses UPDATE and DELETE
+    //
+    // Phase 18's fixed architectural requirement is that derived
+    // interpretation must not overwrite or masquerade as the original event.
+    // Two triggers enforce that against anything that opens this file, which
+    // is a different kind of promise from a rule every future query has to
+    // remember — the same argument migration 2 makes for project isolation.
+    //
+    // The cost is real and is stated rather than hidden: **nothing can prune
+    // this table.** Retention is then a migration and a decision, not a
+    // `DELETE` somebody adds one afternoon.
+    //
+    // # Why the raw observation gets its own two columns
+    //
+    // The same requirement asks that raw observations stay available as
+    // diagnostic source evidence while normalized records remain
+    // distinguishable from them. `kind` and its payload columns are
+    // Glasshouse's normalized reading; `observed_harness` and
+    // `observed_event` are the harness's own two words. Neither can be
+    // mistaken for the other, and an event Glasshouse observed itself — a
+    // process exiting — simply has NULL there.
+    //
+    // **There is deliberately no column a conversation could reach.** A hook
+    // payload carries the user's prompt and the model's last message; the
+    // handler drains that stream unread, and the only fields that travel this
+    // far are an integration slug and an event name. `RawObservation`'s
+    // `detail` — the one field an adapter could fill from a payload — has no
+    // column, so no future writer can persist one without a migration.
+    //
+    // # No `REFERENCES sessions(id)`, on purpose
+    //
+    // `PRAGMA foreign_keys` is off by default in SQLite, so the clause would
+    // be decoration unless every connection remembered to turn it on — the
+    // reason migration 4 uses triggers for supersession. And a foreign key
+    // here would be the wrong shape regardless: an event that arrives for a
+    // session this database has never heard of is a fact worth keeping, and
+    // refusing it would make the log lie by omission at exactly the moment
+    // something is wrong.
+    //
+    // # `checkpoints` is a separate table from `memories`, which is the point
+    //
+    // Phase 19 requires checkpoints to be stored separately from durable
+    // project memory. They are different things with different lifetimes: a
+    // checkpoint is bounded handoff context for one session, and a memory is
+    // durable project knowledge. The `CHECK` on the document's byte length is
+    // Phase 19's size constraint made structural — `length(CAST(x AS BLOB))`
+    // rather than `length(x)`, which counts characters and would let a
+    // checkpoint full of non-ASCII past a byte bound.
+    //
+    // **`document` is the checkpoint; the columns beside it are an index.**
+    // Only the three a query actually needs are lifted out, and every one of
+    // them is written from the document in one place, so there is nothing for
+    // the row and the document to drift about — see
+    // `a_stored_row_never_disagrees_with_its_own_document`. The harness and
+    // the Git position stay inside the document alone for exactly that
+    // reason: nothing queries on them, so a second copy would be a liability
+    // with no use.
+    "
+    CREATE TABLE lifecycle_events (
+        seq              INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id       TEXT    NOT NULL,
+        session_id       TEXT    NOT NULL,
+        at               INTEGER NOT NULL,
+        kind             TEXT    NOT NULL
+            CHECK (kind IN ('session_started', 'session_resumed',
+                            'turn_started', 'turn_ended',
+                            'waiting_for_user', 'text_delivered',
+                            'interrupt_delivered', 'process_exited',
+                            'output_ended', 'gateway_unhealthy')),
+
+        -- Variant payloads, each NULL for the kinds that do not carry them.
+        turn_outcome     TEXT
+            CHECK (turn_outcome IS NULL OR
+                   turn_outcome IN ('completed', 'failed')),
+        origin           TEXT
+            CHECK (origin IS NULL OR
+                   origin IN ('user_keystroke', 'machine')),
+        bytes            INTEGER,
+        exit_code        INTEGER,
+        exit_signal      TEXT,
+        resource         TEXT,
+        gateway_reason   TEXT
+            CHECK (gateway_reason IS NULL OR
+                   gateway_reason IN ('unreachable', 'timed_out', 'rejected')),
+
+        -- The harness report this was translated from, when it was translated
+        -- from one. Both or neither.
+        observed_harness TEXT,
+        observed_event   TEXT,
+        CHECK ((observed_harness IS NULL) = (observed_event IS NULL))
+    );
+
+    CREATE INDEX lifecycle_events_by_session
+        ON lifecycle_events (session_id, seq);
+
+    CREATE TRIGGER lifecycle_events_reject_foreign_project_insert
+    BEFORE INSERT ON lifecycle_events
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'event belongs to a different project');
+    END;
+
+    CREATE TRIGGER lifecycle_events_are_append_only_update
+    BEFORE UPDATE ON lifecycle_events
+    FOR EACH ROW
+    BEGIN
+        SELECT RAISE(ABORT, 'the project event log is append-only');
+    END;
+
+    CREATE TRIGGER lifecycle_events_are_append_only_delete
+    BEFORE DELETE ON lifecycle_events
+    FOR EACH ROW
+    BEGIN
+        SELECT RAISE(ABORT, 'the project event log is append-only');
+    END;
+
+    CREATE TABLE checkpoints (
+        id           TEXT PRIMARY KEY,
+        project_id   TEXT NOT NULL,
+        session_id   TEXT NOT NULL,
+        created_at   INTEGER NOT NULL,
+        reason       TEXT NOT NULL
+            CHECK (reason IN ('manual', 'task_boundary')),
+        document     TEXT NOT NULL
+            CHECK (length(CAST(document AS BLOB)) <= 8192)
+    ) WITHOUT ROWID;
+
+    CREATE INDEX checkpoints_by_session
+        ON checkpoints (session_id, created_at DESC);
+
+    CREATE TRIGGER checkpoints_reject_foreign_project_insert
+    BEFORE INSERT ON checkpoints
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'checkpoint belongs to a different project');
+    END;
+
+    CREATE TRIGGER checkpoints_reject_foreign_project_update
+    BEFORE UPDATE OF project_id ON checkpoints
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'checkpoint belongs to a different project');
     END;
     ",
 ];

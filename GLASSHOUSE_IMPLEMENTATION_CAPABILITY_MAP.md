@@ -671,12 +671,12 @@ Fixed architectural requirements
 - Adapters translate native observations into core events; consumers must not create competing harness-specific lifecycle architectures.
 
 ☑ Define a harness-independent Glasshouse lifecycle-event enum.
-☐ Record every translated lifecycle event with session ID and timestamp.
-☐ Deliver lifecycle events to the TUI without blocking the harness process.
+☑ Record every translated lifecycle event with session ID and timestamp.
+☑ Deliver lifecycle events to the TUI without blocking the harness process.
 ☐ Deliver lifecycle events to the orchestration layer without coupling orchestration to a specific harness.
 ☑ Distinguish process exit from successful turn completion.
 ☑ Distinguish waiting-for-user from idle when the harness provides enough information.
-☐ Preserve raw adapter event payloads in debug logs when useful for troubleshooting.
+☑ Preserve raw adapter event payloads in debug logs when useful for troubleshooting.
 ☑ Do not infer successful task completion solely because a child process became quiet.
 
 Phase 13 — Direct session messaging
@@ -744,16 +744,16 @@ Fixed architectural requirements
 - Raw observations remain available as diagnostic source evidence while normalized and derived records remain distinguishable from them.
 - Derived interpretation must not overwrite or masquerade as the original event.
 
-☐ Create an append-only project event log for important Glasshouse and harness events.
-☐ Record session creation events.
-☐ Record session resume events.
-☐ Record session stop and failure events.
-☐ Record lifecycle-hook events that may later be useful for memory extraction.
-☐ Record machine-initiated orchestration messages.
-☐ Record detected task-completion boundaries.
+☑ Create an append-only project event log for important Glasshouse and harness events.
+☑ Record session creation events.
+☑ Record session resume events.
+☑ Record session stop and failure events.
+☑ Record lifecycle-hook events that may later be useful for memory extraction.
+☑ Record machine-initiated orchestration messages.
+☑ Record detected task-completion boundaries.
 ☐ Record Git commit identifiers associated with memory events when they can be resolved cheaply.
-☐ Keep raw event storage project-scoped.
-☐ Treat the raw event stream as reconstructable source material rather than directly injecting it into agent prompts.
+☑ Keep raw event storage project-scoped.
+☑ Treat the raw event stream as reconstructable source material rather than directly injecting it into agent prompts.
 
 Phase 19 — Portable session checkpoints
 
@@ -762,20 +762,20 @@ Fixed architectural requirements
 - Glasshouse checkpoints contain portable Glasshouse metadata and bounded handoff context.
 - They do not attempt to clone or replace proprietary native harness session formats.
 
-☐ Define a provider-independent checkpoint format for transferring active work between sessions.
-☐ Include the current objective in every checkpoint.
-☐ Include the current implementation state in every checkpoint.
-☐ Include important decisions discovered during the current task in every checkpoint when present.
-☐ Include known failed approaches in every checkpoint when present.
-☐ Include important files and symbols in every checkpoint when present.
-☐ Include test state in every checkpoint when present.
-☐ Include explicit next actions in every checkpoint when present.
-☐ Include the current Git branch and commit when available.
-☐ Keep checkpoints deliberately small enough to bootstrap a fresh session cheaply.
-☐ Store checkpoints separately from durable project memory.
-☐ Allow the user to request a checkpoint manually for the active session.
+☑ Define a provider-independent checkpoint format for transferring active work between sessions.
+☑ Include the current objective in every checkpoint.
+☑ Include the current implementation state in every checkpoint.
+☑ Include important decisions discovered during the current task in every checkpoint when present.
+☑ Include known failed approaches in every checkpoint when present.
+☑ Include important files and symbols in every checkpoint when present.
+☑ Include test state in every checkpoint when present.
+☑ Include explicit next actions in every checkpoint when present.
+☑ Include the current Git branch and commit when available.
+☑ Keep checkpoints deliberately small enough to bootstrap a fresh session cheaply.
+☑ Store checkpoints separately from durable project memory.
+☑ Allow the user to request a checkpoint manually for the active session.
 ☐ Allow Glasshouse to request a checkpoint automatically at selected task boundaries.
-☐ Allow a checkpoint created by one harness to bootstrap a fresh session in another harness.
+☑ Allow a checkpoint created by one harness to bootstrap a fresh session in another harness.
 
 Phase 20 — Minimal durable project memory
 
