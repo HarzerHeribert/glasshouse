@@ -1355,3 +1355,139 @@ configuration is authored needs no guess at all.
 Recorded here rather than acted on: it is a direction that touches `profile`,
 `launch` and `shim` together, and it deserves its own batch with its own
 evidence rather than being folded into a review.
+
+## Speculative tool calling is a harness technique, and a harness hook is a gate, not a proxy
+
+_Raised by the repository owner, 2026-08-26: look at `github.com/alexzhang13/spec-ptc`
+and "see if this concept could benefit glasshouse … not MVP scope but might be
+worth A/B testing down the road. Should be at least documented." Evaluated against
+the repository (cloned and read) and the author's write-up. Recorded and deferred;
+the finding that survives is not the one the technique is about._
+
+### What the technique is
+
+Speculative programmatic tool calling (sPTC) applies to harnesses that use
+**programmatic tool calling** — tools embedded as functions inside a single code
+block the model generates per turn. While the model is still streaming that
+block, a shadow interpreter parses each statement as it closes and launches the
+tool calls it can prove safe to launch early. When the real `exec` reaches the
+call, it claims a result that is already finished instead of blocking on it.
+
+```text
+baseline   generate ──────────▶ exec: call₁ ─▶ call₂ ─▶ … ─▶ answer
+sPTC       generate ──────────▶ exec: claim · claim · … ─▶ answer
+                ╲ call₁ ▶▶ done ╱      (calls run inside generation time)
+```
+
+The payoff is overlap: expensive calls are paid for out of time the harness was
+spending on token generation anyway.
+
+### Why it does not apply to Glasshouse's own architecture
+
+Glasshouse has no REPL, generates no tokens, and executes no tool calls. It
+starts and manages harnesses that do. There is no seam inside Glasshouse where a
+speculator could live, and this is not a gap to be closed — it is the product
+boundary the map states as its core principle. Every remaining question is
+whether Glasshouse should *enable* the technique for the harnesses it launches.
+That question is where the useful finding is, and it is not about speculation.
+
+### The finding worth keeping, which outlives the technique
+
+The project integrates three harnesses, and its Claude Code adapter — a
+`PreToolUse` hook — has to short-circuit a speculated tool call like this:
+
+```python
+print(json.dumps({"decision": "block", "reason": f"spec-ptc claimed result: {hit}"}))
+```
+
+It blocks the tool and puts the answer inside the human-readable *reason* string.
+That is not an implementation shortcut. **The surface has no other move.**
+Verified against the current hook reference (2026-08-26): a `PreToolUse` hook
+returns `permissionDecision` (`allow` / `deny` / `ask`) and
+`permissionDecisionReason`; the fields every hook may return are `systemMessage`,
+`additionalContext` and `terminalSequence`. None of them carries a tool result.
+`PostToolUse` observes a call that already ran; it does not rewrite what the
+model is shown as that call's output.
+
+Stated as a boundary this project should hold:
+
+> **A native harness hook is a gate, not a proxy. It can stop a tool call, and it
+> can put text in front of the model. It cannot answer on the harness's behalf.**
+
+This lands squarely on work already recorded here. The hook protocol's job is
+*evidence and delivery* — record a completion, wake a parent, normalize an event
+— and all of that is within a gate's power. Anything that wants to **substitute**
+a harness's behaviour has exactly two places to stand: the **transport**, where
+the gateway already sits, or the **executable**, where the generated shim already
+sits. That is the same two-artifact answer the auth-separation entry above
+reaches from a completely different direction, and it is worth noticing that an
+unrelated project ran into the same wall and had to fake its way around it.
+
+### Whether the technique itself earns an A/B later
+
+The author's own measurement is **1–1.2x**, on his own favourable benchmark
+(OOLONG / OOLONG-Pairs, Qwen3-30B-A3B on an 8×H100 vLLM node), with the explicit
+caveat that the real figure depends heavily on tool latency, tokens generated,
+and serving-engine load. The repository carries a whole test file cataloguing the
+cases where speculation loses rather than wins — an honesty worth crediting, and
+worth reading before believing any speedup.
+
+Three conditions must hold for a win. For the harnesses Glasshouse launches, none
+reliably does:
+
+1. **The harness must be in a code-REPL / PTC mode.** Claude Code, Codex and Ox
+   emit discrete tool calls by default. There is no generated code block to
+   speculate inside, so the precondition simply is not met.
+2. **Speculated calls must be expensive relative to the turn.** The payoff case
+   is *sub-LLM* calls taking seconds. A coding harness's speculatable tools —
+   `Read`, `Grep`, `Glob` — are milliseconds, and its expensive ones — `Bash`,
+   `Edit`, `Write` — are exactly the ones purity forbids speculating. The safe
+   set and the worthwhile set barely intersect.
+3. **There must be spare serving capacity.** The technique's stated worst case is
+   a serving engine already saturated with concurrent requests — which is
+   Glasshouse's *normal* operating state, several harnesses at once.
+
+Expected value on this project's real workloads is therefore close to 1.0x, paid
+for with a new correctness surface. Deferred, not rejected.
+
+### What would make it worth revisiting
+
+Two named triggers, so this is a decision that can be reopened by evidence rather
+than by enthusiasm:
+
+- **A supported harness ships a code-execution loop as its default**, making
+  condition 1 true without Glasshouse changing anything.
+- **Glasshouse routes sub-agent calls itself**, per the map's routing tier. At
+  that point the expensive, pure, independent call is something Glasshouse
+  *owns*, and it would hold all three pieces the technique needs at once — the
+  token stream (gateway), the tool dispatch (its own router), and the state. That
+  is the only configuration in which the whole loop is in one place, and it is
+  the honest reason this is filed rather than dismissed.
+
+### If a sidecar is ever built, two things to copy from it and two not to
+
+Worth copying:
+
+- **The wire shape.** Four operations — `turn_begin`, `feed`, `resolve`,
+  `turn_end` — as JSON lines over a unix socket, with a client small enough
+  (~40 lines, standard library only) that each language adapter *vendors* it
+  instead of depending on it. The hook protocol already needs cross-language
+  adapters; this is a validated minimum for one.
+- **Fail-open on the agent path.** Daemon unreachable means the harness runs the
+  tool normally, and the adapter is a bare `except Exception: hit = None`. That
+  is the protocol's own stated goal already: a hook failure must not crash a
+  worker.
+
+Worth *not* copying:
+
+- **The socket path.** `/tmp/spec-ptc.sock`, hardcoded, one per machine, with no
+  per-session namespace and no ownership check. Glasshouse runs many sessions per
+  project and many projects per machine; a single shared world-writable path
+  violates the isolation principle outright, and would let any local process
+  answer a tool call. A Glasshouse sidecar socket is per session, in a
+  user-restricted directory — the rule the hook protocol already sets for reports
+  and routes.
+- **Fail-open on everything.** That project is fail-open on both paths because it
+  has no evidence path to protect. Glasshouse's is fail-closed: a missing or
+  malformed report means "not verified," never success. The two rules must not be
+  collapsed into one just because the agent-path half was borrowed.
