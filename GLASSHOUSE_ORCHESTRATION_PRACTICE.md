@@ -1442,3 +1442,45 @@ text with the correct boundary and then `diff` the result against it to prove
 the only change was the intended one. **Do not reach for `git checkout` or
 `git restore`** — the repository's guard blocks them for good reason, and
 `git show` to a scratch file needs no such permission and destroys nothing.
+
+---
+
+## §43 — check sibling packets against each other mechanically, and answer a worker that asks
+
+Two orchestrator failures in one round, both cheap to prevent.
+
+**1. The same file was given to two live workers.** `shell/state.rs` appeared
+in the `YOURS` list of both `wire-disposable` and `migration-7`. "Never let two
+workers edit the same file at once" is one of the three non-negotiables handed
+to every team lead, and the orchestrator broke it while writing the packets that
+hand it out. It did not bite — `migration-7` added ten lines and
+`wire-disposable` never opened the file — but that was luck, not design.
+
+**The fix is mechanical, so do it mechanically.** After writing a round's
+packets, extract every `YOURS` list and intersect them pairwise. If two lists
+share a path, one of them is wrong. Do not rely on reading three packets and
+noticing; the whole reason `FORBIDDEN FILES` is a list is that humans and models
+both fail at set arithmetic done by eye.
+
+**2. A worker asked a question and waited.** `migration-7` finished, hit a
+genuine decision — whether to apply three patches to files outside its
+partition — presented the options, and idled. The watch fired correctly. The
+orchestrator was mid-way through an unrelated investigation, read the
+notification, and did not act on it; the **user** noticed the worker was waiting
+and said so.
+
+That is precisely the failure the nagging watch was built to prevent, arriving
+in a form the watch cannot fix: the reminder was delivered and not acted on.
+A worker blocked on a question is worse than a worker that has finished — it is
+burning nothing and producing nothing, and only the orchestrator can unblock it.
+
+**Rule: a watch event that says a worker is idle gets looked at before the next
+piece of work, not after.** Reading the pane costs one command. And when a
+worker offers a numbered choice, answer it in the pane — `cmux send` then
+`cmux send-key Enter` — because a report file cannot answer a menu.
+
+**What the worker did right, and it is the standard:** it needed those three
+files to prove its migration end to end, so it patched them locally, ran the
+full suite green, **reverted them to their exact committed byte content**
+(verified with an empty `git diff`), and reported the patches for the
+orchestrator to land. Verification without ownership, and no residue.
