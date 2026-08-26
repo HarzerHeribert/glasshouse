@@ -33,18 +33,20 @@
 #   scripts/ci-local.sh --macos      # native jobs only, fastest
 #   scripts/ci-local.sh --linux      # container jobs only
 #   scripts/ci-local.sh --windows    # add the compile-only cross check
+#   scripts/ci-local.sh --flake      # measure the pty flake rate (FLAKE_RUNS=10)
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO" || exit 1
 
-DO_MAC=0; DO_LINUX=0; DO_WIN=0
+DO_MAC=0; DO_LINUX=0; DO_WIN=0; DO_FLAKE=0
 if [ $# -eq 0 ]; then DO_MAC=1; DO_LINUX=1; fi
 for a in "$@"; do
   case "$a" in
     --macos)   DO_MAC=1 ;;
     --linux)   DO_LINUX=1 ;;
     --windows) DO_WIN=1 ;;
+    --flake)   DO_FLAKE=1 ;;
     --all)     DO_MAC=1; DO_LINUX=1; DO_WIN=1 ;;
     *) echo "unknown option: $a" >&2; exit 2 ;;
   esac
@@ -73,6 +75,10 @@ if [ "$DO_MAC" -eq 1 ]; then
   step "lint / clippy" env RUSTFLAGS= cargo clippy --locked --workspace --all-targets -- -D warnings
   step "lint / rustdoc" env RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
   step "lint / README progress" python3 scripts/progress.py --check
+  # Free-because-local checks. These never ran on GitHub Actions; they exist
+  # because a local gate can afford questions a metered one could not.
+  step "lint / doc boundary" scripts/check-doc-boundary.sh
+  step "lint / evidence coverage" python3 scripts/check-evidence-coverage.py
   step "test (macos) / build" env RUSTFLAGS='-D warnings' cargo build --locked --workspace --all-targets
   step "test (macos) / test"  env RUSTFLAGS='-D warnings' sh -c 'cargo test --locked --workspace -- --nocapture < /dev/null'
   # Call the project's own script rather than `cargo +$MSRV`: its header
@@ -150,6 +156,30 @@ if [ "$DO_LINUX" -eq 1 ]; then
     step "msrv (ubuntu) $MSRV" run_linux \
       "rustup toolchain install $MSRV --profile minimal && scripts/msrv-check.sh"
   fi
+fi
+
+# --- flake rate: the standing debt needs a number, not a pass ----------------
+#
+# `pty_smoke::a_direct_provider_profile_reaches_a_real_child_and_only_that_child`
+# still fails about once in 37 full-suite runs with the child killed by SIGABRT.
+# One green pass says nothing about it. A local gate can afford to ask how often,
+# which a metered one never could — so this runs the pty-sensitive suites N times
+# and reports failures/attempts rather than a verdict.
+if [ "$DO_FLAKE" -eq 1 ]; then
+  RUNS="${FLAKE_RUNS:-10}"
+  printf '\n\033[1m=== flake rate over %s runs ===\033[0m\n' "$RUNS"
+  fails=0
+  for i in $(seq 1 "$RUNS"); do
+    if RUSTFLAGS='-D warnings' cargo test --locked -p glasshouse \
+         --test pty_smoke --test events_lifecycle -- --nocapture < /dev/null >/dev/null 2>&1; then
+      printf '  run %2s/%s ok\n' "$i" "$RUNS"
+    else
+      fails=$((fails + 1))
+      printf '  run %2s/%s \033[31mFAILED\033[0m\n' "$i" "$RUNS"
+    fi
+  done
+  RESULTS+=("RATE  pty flake: $fails failure(s) in $RUNS run(s)")
+  # A rate is a measurement, not a verdict: it never fails the gate on its own.
 fi
 
 # --- Windows: compile-only, and labelled as such -----------------------------

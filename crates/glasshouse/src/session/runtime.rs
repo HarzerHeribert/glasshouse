@@ -885,9 +885,10 @@ impl SessionRuntime {
     /// reader thread, which is a *different* thread that may not have run
     /// yet. Asking `poll_exits` and then reading the scrollback in the same
     /// breath therefore reports a crashed worker as having said nothing —
-    /// which is what the Linux gate had been failing on at random for weeks
-    /// (`GLASSHOUSE_ORCHESTRATION_PRACTICE.md` §34), and which reproduced at
-    /// 8 runs in 17 beside the full workspace suite.
+    /// which is what the Linux gate had been failing on at random for weeks,
+    /// and which reproduced at 8 runs in 17 beside the full workspace suite —
+    /// see `docs/product/design-decisions.md`, "A pseudo-terminal child's exit
+    /// is observable before its output is".
     ///
     /// `session::attach` — the other shape a harness runs in — has always
     /// done this, and says so in `OUTPUT_DRAIN_GRACE`. This path is the one

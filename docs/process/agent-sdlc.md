@@ -1,12 +1,16 @@
 # Glasshouse agent SDLC
 
+> This describes how Glasshouse is built, not what Glasshouse does. Nothing
+> here is a product requirement. Capability requirements live only in
+> `docs/product/capability-map.md`.
+
 This document defines how agent harnesses implement the authoritative
-[`GLASSHOUSE_IMPLEMENTATION_CAPABILITY_MAP.md`](GLASSHOUSE_IMPLEMENTATION_CAPABILITY_MAP.md)
+[`docs/product/capability-map.md`](../product/capability-map.md)
 without confusing code presence with verified product behavior. It is
 phase-independent: the current checkpoint belongs in
-[`GLASSHOUSE_HANDOFF.md`](GLASSHOUSE_HANDOFF.md), while evidence for individual
+[`docs/process/handoff.md`](handoff.md), while evidence for individual
 requirements belongs in
-[`GLASSHOUSE_CAPABILITY_EVIDENCE.md`](GLASSHOUSE_CAPABILITY_EVIDENCE.md).
+[`docs/product/evidence/`](../product/evidence/README.md).
 
 ## Sources of truth
 
@@ -114,7 +118,7 @@ The Opus orchestrator settles ordinary architecture. A separate Opus
 specialist handles disputed or red-risk design. Once the design is stable,
 Sonnet performs most implementation. Ox handles only mechanically decidable
 leaf work. Detailed boundaries live in
-[`GLASSHOUSE_WORKER_CAPABILITIES.md`](GLASSHOUSE_WORKER_CAPABILITIES.md).
+[`docs/process/worker-capabilities.md`](worker-capabilities.md).
 
 ### 5. Implement in isolation
 
@@ -190,7 +194,7 @@ Opus specialist -------------> Opus orchestrator
 ```
 
 The completion transport and safety rules are defined in
-[`GLASSHOUSE_HARNESS_HOOK_PROTOCOL.md`](GLASSHOUSE_HARNESS_HOOK_PROTOCOL.md).
+[`docs/process/harness-hook-protocol.md`](harness-hook-protocol.md).
 
 ## Product invariants
 

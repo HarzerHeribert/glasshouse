@@ -98,7 +98,7 @@ pub fn event_for(event: &str) -> Option<LifecycleEvent> {
 /// Only the harness's name for the event travels. A hook payload also carries
 /// the user's prompt and the model's last message; Glasshouse's handler
 /// drains that stream without reading it, so there is nothing here to leak.
-/// See `GLASSHOUSE_DESIGN_DECISIONS.md`.
+/// See `docs/product/design-decisions.md`.
 pub fn observe(harness: &str, event: &str) -> Option<LifecycleEvent> {
     RawObservation::new(harness, event).preserve();
     event_for(event)
@@ -221,7 +221,8 @@ mod tests {
     ///
     /// Reads by `str::lines`, which strips a carriage return for us, so the
     /// scan is blind to line endings by construction rather than by anyone
-    /// remembering — see `GLASSHOUSE_ORCHESTRATION_PRACTICE.md` §14.
+    /// remembering — see `docs/product/design-decisions.md`, "A source-scanning
+    /// guard reads by lines".
     fn production_code(source: &str) -> String {
         let lines: Vec<&str> = source.lines().collect();
         let end = lines

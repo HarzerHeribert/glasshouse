@@ -195,7 +195,7 @@ enum ConfigEvidence {
 
 /// What discovery could determine about one integration.
 ///
-/// The capability map (`GLASSHOUSE_IMPLEMENTATION_CAPABILITY_MAP.md`, Phase
+/// The capability map (`docs/product/capability-map.md`, Phase
 /// 2B: "Mark every detected integration as available, configured,
 /// unconfigured, unsupported-version, or unknown") lists five statuses, and
 /// all five are here (`Available`, `Configured`, `Unconfigured`,

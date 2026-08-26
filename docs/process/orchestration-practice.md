@@ -1,6 +1,10 @@
 # Glasshouse orchestration practice
 
-How to *run* the process the SDLC describes. `GLASSHOUSE_AGENT_SDLC.md` says
+> This describes how Glasshouse is built, not what Glasshouse does. Nothing
+> here is a product requirement. Capability requirements live only in
+> `docs/product/capability-map.md`.
+
+How to *run* the process the SDLC describes. `docs/process/agent-sdlc.md` says
 what the steps are; this says how to execute them without losing time to the
 same mistakes twice.
 
@@ -146,7 +150,7 @@ backticks the report adds. Only running `glasshouse doctor` showed it.
 
 ## 6. Model tiers, including the fast one
 
-`GLASSHOUSE_WORKER_CAPABILITIES.md` defines the tiers. Two practical notes:
+`docs/process/worker-capabilities.md` defines the tiers. Two practical notes:
 
 **Red-risk work goes to an Opus specialist, not to Sonnet.** Secret
 boundaries, PTY lifecycle, migrations, resume identity. The secret-storage
@@ -228,7 +232,7 @@ So schedule like this:
 Three editing workers is the point where reviews start to collide, because
 reviews are serial and worker wall-clock is not. Beyond that, use a team lead.
 
-Measured numbers live in `GLASSHOUSE_ORCHESTRATION_MEASUREMENTS.md`. Add yours.
+Measured numbers live in `docs/process/orchestration-measurements.md`. Add yours.
 
 ## 10. Team leads — push the review cycle down a level
 
@@ -284,13 +288,12 @@ Running it, with the traps in order:
 
 ## 12. Keep the experiment running
 
-`GLASSHOUSE_ORCHESTRATION_MEASUREMENTS.md` is a standing, inherited experiment,
+`docs/process/orchestration-measurements.md` is a standing, inherited experiment,
 not a one-off note. Add every batch to its ledger with its verdict, answer one
 of its open questions when you can, and record what changed your mind. The
 project is a control plane for routing work to models; the data this process
 generates about *which tier produced what verified result* is the same question
 the product exists to answer.
-
 
 ## 13. Two traps this project hit while running several workers at once
 
@@ -314,7 +317,6 @@ the lead is not touching — or from a git ref, never the live working tree.
 batches share. Naming the other live workers' files in `FORBIDDEN FILES` reduces
 this but does not eliminate it, because a batch that landed *between* the branch
 point and the merge is not a live worker any more.
-
 
 ## 14. A source-scanning test is a line-ending trap
 
@@ -349,7 +351,6 @@ wrong. *Check a declaration against the use* applies to the practice file too.
 The rule still stands for the next scan someone writes: `lines`, and a CRLF
 copy in the test.
 
-
 ## 15. Reproduce a Windows line-ending failure locally, in four commands
 
 Two CI round-trips went into one CRLF bug on 2026-08-26 — the second because
@@ -376,7 +377,6 @@ flake generator, and it will find the environment you did not test on. Build
 both sides from a normalised base. A subcontractor taught this project the same
 lesson one batch earlier with a test that scanned a randomly generated token and
 failed 45 times in 100.
-
 
 ## 16. A mutation runner must force a rebuild, and workers must not share `target/`
 
@@ -408,7 +408,6 @@ So, for any mutation runner:
 A mutation verdict from a stale binary is worse than no mutation testing at all,
 because it is indistinguishable from a real one in the report.
 
-
 ## 17. An absence assertion is only as strong as the viewport it renders into
 
 A settings test planted a real credential in the environment, drove nine
@@ -431,7 +430,6 @@ The same shape applies beyond a TUI — any assertion over truncated, paginated
 or elided output. This is the third distinct way this project has produced a
 test that passed for the wrong reason, after the vacuous poll loop and the
 mutation run against a cached binary.
-
 
 ## 18. Compile the *other* platform's path locally, by flipping the cfg
 
@@ -1404,7 +1402,7 @@ side.
 
 ## §42 — a find-and-slice edit that misses its end marker silently eats the file
 
-The orchestrator truncated `GLASSHOUSE_HANDOFF.md` from 1715 lines to 54 in a
+The orchestrator truncated `docs/process/handoff.md` from 1715 lines to 54 in a
 single commit, and pushed it. The edit was meant to replace one section.
 
 ```python
@@ -1673,3 +1671,75 @@ packets, or accept that every tool reading them needs to reconstruct.
 call sites and says plainly when there are none, because that is §5 and it is
 the finding that costs whole rounds. Treat a method-call match as a lead rather
 than proof — it cannot resolve the receiver's type, and it says so.
+
+---
+
+## §50 — the two worlds, and the lint that keeps them apart
+
+This repository holds two kinds of document, and an agent must be able to tell
+which it is holding **from the path alone**:
+
+    docs/product/   what Glasshouse IS    capability map, design decisions, evidence
+    docs/process/   how we BUILD it       this file, measurements, worker tiers,
+                                          the orchestrator prompt, the handoff,
+                                          the worker-to-worker hook protocol
+
+The confusion is not hypothetical and it is not cheap. `harness-hook-protocol.md`
+reads like a product specification and is a contract between our own worker
+sessions; the orchestrator mis-filed it once while writing a design page. And
+`scripts/check-doc-boundary.sh`, on its first run, found **four citations of this
+very file inside shipped Rust source**.
+
+**Only one direction is forbidden.** Product source may cite `docs/product/**`
+and must never cite `docs/process/**`. A process document cites the product
+freely — that is what it is for. The asymmetry is the point: shipped code that
+justifies itself by referring to notes about how we ran our agents is unreadable
+to anyone who does not have our transcripts, and unactionable even to those who
+do.
+
+**The fix for a violation is never to delete the thought.** Restate it in
+`docs/product/design-decisions.md` as a decision about the product, and cite
+that. Both of the real ones converted cleanly and are better for it: source
+guards read by `str::lines` so they cannot be blinded by line endings, and a
+pseudo-terminal child's exit is observable before its output is. Those are facts
+about Glasshouse. Where we learned them is not.
+
+The lint is in the gate. It was kept out until the four existing violations were
+converted, because a gate that starts red teaches everyone to override it.
+
+---
+
+## §51 — a local gate can afford questions a metered one could not
+
+GitHub Actions was billed by the minute, so `ci.yml` asks only what it must.
+`ci-local.sh` costs a laptop's evening. Three checks now exist because of that,
+and none of them could have justified a paid runner.
+
+**Doc boundary** — §50. Cheap, and it caught four real violations immediately.
+
+**Evidence coverage** — `scripts/check-evidence-coverage.py`. `CLAUDE.md` says
+*do not check a box until its evidence-ledger entry is COMPLETE*, and until now
+**nothing enforced that at all**. Its first run:
+
+    evidence coverage: 28/34 phases with ticked boxes have an evidence file
+      6 phase(s), 52 ticked box(es), with no evidence file
+      Phase 0, 13, 18, 19, 22, 23
+
+Fifty-two ticked boxes with nothing behind them in the ledger. Most predate the
+discipline. **It ships warn-only**, with `--strict` to fail, for the reason §20
+gives from the other side: a gate that starts red is a gate people learn to
+override. Reconcile the backlog, then turn strict on.
+
+**A flake rate** — `ci-local.sh --flake`, `FLAKE_RUNS=10`. The residual SIGABRT
+in `pty_smoke` fails about once in thirty-seven full-suite runs, and a single
+green pass says exactly nothing about it. This runs the pty-sensitive suites N
+times and reports failures over attempts. **It is a measurement and never fails
+the gate** — a rate is not a verdict, and treating it as one would either hide
+the number or block on noise.
+
+**And the gap that stays a gap.** Windows containers share the host's Windows
+kernel, so a `linux/aarch64` Docker daemon cannot run `mcr.microsoft.com/windows`
+images at all — verified, not assumed: the host reports `linux / aarch64` and the
+manifest reports `windows / amd64`. No amount of local rigour buys Windows
+evidence. The only local route is a Windows 11 ARM virtual machine running the
+suite natively, and it is the one thing that could close Phase 4's interrupt box.

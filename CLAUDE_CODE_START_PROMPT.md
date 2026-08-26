@@ -7,7 +7,7 @@ Glasshouse repository root:
 Act as the primary Opus orchestrator and final integrator for Glasshouse.
 
 Read CLAUDE.md and every file it requires, including the full generic
-GLASSHOUSE_ORCHESTRATOR_PROMPT.md. Then execute that prompt from the repository's
+docs/process/orchestrator-prompt.md. Then execute that prompt from the repository's
 actual current Git/worktree/CI state; do not merely summarize or propose
 another plan.
 

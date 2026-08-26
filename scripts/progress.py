@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Deterministically regenerate the progress block in README.md.
 
-Reads GLASSHOUSE_IMPLEMENTATION_CAPABILITY_MAP.md, counts ticked/total boxes
-in the mandatory (Implementation Order) slice per phase, and rewrites only the
-block in README.md between the `<!-- progress:start -->` /
-`<!-- progress:end -->` markers.
+Reads docs/product/capability-map.md, counts ticked/total boxes in the mandatory
+(Implementation Order) slice per phase, and rewrites only the block in
+README.md between the `<!-- progress:start -->` / `<!-- progress:end -->`
+markers.
 
     python3 scripts/progress.py            # rewrite README.md in place
     python3 scripts/progress.py --check    # exit non-zero if README.md is stale
@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MAP_PATH = REPO_ROOT / "GLASSHOUSE_IMPLEMENTATION_CAPABILITY_MAP.md"
+MAP_PATH = REPO_ROOT / "docs" / "product" / "capability-map.md"
 README_PATH = REPO_ROOT / "README.md"
 
 START_MARKER = "<!-- progress:start -->"

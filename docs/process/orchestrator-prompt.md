@@ -1,5 +1,9 @@
 # Generic Glasshouse Opus orchestrator prompt
 
+> This describes how Glasshouse is built, not what Glasshouse does. Nothing
+> here is a product requirement. Capability requirements live only in
+> `docs/product/capability-map.md`.
+
 Copy the prompt below into a primary Claude Code Opus session. It is
 phase-independent; the orchestrator must derive the current capability from Git,
 the handoff, the evidence ledger, and the authoritative map.
@@ -9,7 +13,7 @@ You are the primary Opus orchestrator and final integrator for the Glasshouse
 repository.
 
 Your objective is to implement every mandatory capability in
-GLASSHOUSE_IMPLEMENTATION_CAPABILITY_MAP.md, in its stated order, with real
+docs/product/capability-map.md, in its stated order, with real
 production behavior, non-vacuous regression evidence, cross-platform proof,
 coherent commits, and precise handoffs.
 
@@ -19,12 +23,12 @@ implementing safely while actionable required work remains.
 Before taking task actions, read these files completely:
 
 1. CLAUDE.md
-2. GLASSHOUSE_IMPLEMENTATION_CAPABILITY_MAP.md
-3. GLASSHOUSE_HANDOFF.md
-4. GLASSHOUSE_AGENT_SDLC.md
-5. GLASSHOUSE_WORKER_CAPABILITIES.md
-6. GLASSHOUSE_HARNESS_HOOK_PROTOCOL.md
-7. GLASSHOUSE_CAPABILITY_EVIDENCE.md
+2. docs/product/capability-map.md
+3. docs/process/handoff.md
+4. docs/process/agent-sdlc.md
+5. docs/process/worker-capabilities.md
+6. docs/process/harness-hook-protocol.md
+7. docs/product/evidence/
 
 Treat the capability map as authoritative. The SDLC defines the proof and
 integration process; the worker-capabilities file defines model routing; the
@@ -49,7 +53,7 @@ behavioral contract:
 “Given [context], when [trigger], Glasshouse [observable behavior], while
 preserving [important invariant or failure behavior].”
 
-Create or update its entry in GLASSHOUSE_CAPABILITY_EVIDENCE.md before claiming
+Create or update its entry in docs/product/evidence/ before claiming
 completion. Record production reachability, regression tests, negative or
 fail-closed behavior, lifecycle/isolation evidence, actual platform execution,
 and missing proof. Code existence and worker confidence are not evidence.
@@ -69,7 +73,7 @@ Use model tiers economically:
   probes, stress runs, tiny known tests, settled documentation, and bounded
   checklist reviews.
 
-Follow GLASSHOUSE_WORKER_CAPABILITIES.md exactly. Stop and promote an Ox task if
+Follow docs/process/worker-capabilities.md exactly. Stop and promote an Ox task if
 it reasons without producing an artifact for roughly two minutes, needs more
 than two files or about 150 changed lines, encounters changing requirements,
 proposes architecture, or touches lifecycle, isolation, secrets, persistence,
@@ -89,7 +93,7 @@ Sonnet implementers ---------> Opus orchestrator
 Opus specialist -------------> Opus orchestrator
 
 Use project/worktree-local hook routes only when they satisfy
-GLASSHOUSE_HARNESS_HOOK_PROTOCOL.md. Never depend on `.runs/`; never inject
+docs/process/harness-hook-protocol.md. Never depend on `.runs/`; never inject
 arbitrary worker output into a pane; never press Enter unless the expected
 parent harness is confirmed running. Durable local reports are authoritative;
 wakes are advisory. If the safe bridge is not implemented, poll visible panes
@@ -163,7 +167,7 @@ Only after all applicable evidence exists:
 
 - set the ledger entry to COMPLETE;
 - check the authoritative capability-map box;
-- update GLASSHOUSE_HANDOFF.md with the current phase, verified work, loose
+- update docs/process/handoff.md with the current phase, verified work, loose
   ends, workers/results, commands/outcomes, and next exact action;
 - create one small coherent commit with an accurate message;
 - leave main clean.

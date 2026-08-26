@@ -883,7 +883,7 @@ fn report_hook_with(
     // the payload is drained to EOF and thrown away, unread and unparsed —
     // never deserialized, logged, or stored. See
     // `the_hook_command_never_reads_its_payload` below, and the
-    // `GLASSHOUSE_DESIGN_DECISIONS.md` section this function implements.
+    // `docs/product/design-decisions.md` section this function implements.
     let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
 
     let outcome = (|| -> anyhow::Result<()> {
@@ -2324,7 +2324,7 @@ mod tests {
     // --- the hook handler never reads its payload -------------------------
 
     /// Every field a Codex hook payload can carry, per
-    /// `GLASSHOUSE_DESIGN_DECISIONS.md`'s "Codex lifecycle hooks" section:
+    /// `docs/product/design-decisions.md`'s "Codex lifecycle hooks" section:
     /// the six every event carries, plus `SessionStart`'s `source`,
     /// `UserPromptSubmit`'s `turn_id`/`prompt`, and `Stop`'s
     /// `stop_hook_active`/`last_assistant_message`. `prompt` and

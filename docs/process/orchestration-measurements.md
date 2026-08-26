@@ -1,5 +1,9 @@
 # Glasshouse orchestration measurements
 
+> This describes how Glasshouse is built, not what Glasshouse does. Nothing
+> here is a product requirement. Capability requirements live only in
+> `docs/product/capability-map.md`.
+
 Glasshouse's own product principle says telemetry must measure **outcomes and
 evidence, not token/spend vanity metrics**. This file applies that principle to
 the process that builds Glasshouse, because the same question the product asks
@@ -329,7 +333,6 @@ Add your data; do not re-derive from scratch.
 
    Do this to any gate you inherit, and to every gate you write.
 
-
 ## Zero-box work is not zero-value work — record it anyway
 
 Two batches today closed **no capability boxes** and were among the most
@@ -350,7 +353,6 @@ conclude they were waste.
 chart and as a slope change everywhere else.** When you spend a session on
 something that closes no boxes, write down what recurring cost it removed, so
 the next orchestrator can tell the difference between that and drift.
-
 
 ## The Codex tier — first data, and what it costs to run
 

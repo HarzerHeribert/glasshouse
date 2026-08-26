@@ -1,5 +1,8 @@
 Glasshouse — Implementation Capability Map
 
+> This describes the product. Do not cite it as instruction for how to run a
+> worker or a batch — that belongs in `docs/process/`.
+
 Idea
 
 Glasshouse is a lean, project-scoped control plane for existing coding-agent harnesses such as Claude Code, Codex, Antigravity, and later other compatible tools.

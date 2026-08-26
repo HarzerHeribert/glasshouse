@@ -1134,7 +1134,7 @@ impl ShellState {
 }
 
 // -----------------------------------------------------------------------
-// Settings — see `GLASSHOUSE_DESIGN_DECISIONS.md`'s "Settings" section for
+// Settings — see `docs/product/design-decisions.md`'s "Settings" section for
 // the invariants this data model exists to hold to.
 // -----------------------------------------------------------------------
 

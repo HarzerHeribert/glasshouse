@@ -1,5 +1,9 @@
 # Glasshouse worker capabilities
 
+> This describes how Glasshouse is built, not what Glasshouse does. Nothing
+> here is a product requirement. Capability requirements live only in
+> `docs/product/capability-map.md`.
+
 This document defines what each model tier should and should not do. The goal
 is to save expensive-model tokens without delegating judgment to a model that
 cannot reliably carry it.

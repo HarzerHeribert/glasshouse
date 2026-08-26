@@ -345,7 +345,7 @@ impl std::fmt::Display for GatewayFailure {
 /// reading it, and neither adapter supplies a `detail` at all. The mechanism
 /// preserves whatever an adapter hands it — the policy about what an adapter
 /// hands it belongs to the adapter, and is recorded in
-/// `GLASSHOUSE_DESIGN_DECISIONS.md`.
+/// `docs/product/design-decisions.md`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawObservation<'a> {
     /// The harness that reported it, as an integration slug.
@@ -755,8 +755,8 @@ mod tests {
     // both are exercised against a CRLF copy of their own input below. A
     // multi-line literal search would find nothing on a checkout where Git
     // converted line endings, and would do it silently — see
-    // `GLASSHOUSE_ORCHESTRATION_PRACTICE.md` §14, which this project paid a
-    // red Windows job for.
+    // `docs/product/design-decisions.md`, "A source-scanning guard reads by
+    // lines".
     // ---------------------------------------------------------------
 
     /// Production source of a module: everything before its
@@ -773,7 +773,8 @@ mod tests {
     ///
     /// Reads by `str::lines`, which strips a carriage return for us, so the
     /// scan is blind to line endings by construction rather than by anyone
-    /// remembering — see `GLASSHOUSE_ORCHESTRATION_PRACTICE.md` §14.
+    /// remembering — see `docs/product/design-decisions.md`, "A source-scanning
+    /// guard reads by lines".
     fn production_code(source: &str) -> String {
         let lines: Vec<&str> = source.lines().collect();
         let end = lines

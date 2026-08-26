@@ -29,7 +29,7 @@ BOX_OPEN = "☐"
 BOX_DONE = "☑"
 BOX_CHARS = (BOX_OPEN, BOX_DONE)
 
-DEFAULT_MAP = "GLASSHOUSE_IMPLEMENTATION_CAPABILITY_MAP.md"
+DEFAULT_MAP = "docs/product/capability-map.md"
 
 
 class Finding:

@@ -65,7 +65,7 @@ workers_running() {
 }
 
 open_boxes() {
-  grep -c '^☐' "$REPO/GLASSHOUSE_IMPLEMENTATION_CAPABILITY_MAP.md" 2>/dev/null || echo 0
+  grep -c '^☐' "$REPO/docs/product/capability-map.md" 2>/dev/null || echo 0
 }
 
 quiet=0

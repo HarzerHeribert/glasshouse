@@ -4,8 +4,8 @@
     scripts/discover.py --seam 'ExtractionModel::complete'
     scripts/discover.py --phase 9I
 
-Never edits anything. Both modes read `crates/**` and the two root
-capability documents relative to the current working directory.
+Never edits anything. Both modes read `crates/**` and the capability
+documents under `docs/` relative to the current working directory.
 """
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ BOX_OPEN = "☐"
 BOX_DONE = "☑"
 BOX_CHARS = (BOX_OPEN, BOX_DONE)
 
-DEFAULT_MAP = "GLASSHOUSE_IMPLEMENTATION_CAPABILITY_MAP.md"
-DEFAULT_EVIDENCE = "GLASSHOUSE_CAPABILITY_EVIDENCE.md"
+DEFAULT_MAP = "docs/product/capability-map.md"
+DEFAULT_EVIDENCE = "docs/product/evidence"
 DEFAULT_SRC_ROOT = "crates"
 
 
@@ -201,7 +201,37 @@ def phase_evidence_paths(evidence_lines: list[str], phase_id: str) -> list[str]:
     return out
 
 
-def report_phase(phase_id: str, map_path: str, evidence_path: str) -> None:
+def evidence_file_id(phase_id: str) -> str:
+    """`docs/product/evidence/phase-<id>.md`'s <id>: lowercased, non-alnum runs
+    hyphenated, matching how the ledger split named those files."""
+    slug = re.sub(r"[^a-z0-9]+", "-", phase_id.lower())
+    return slug.strip("-")
+
+
+def phase_evidence_lines(evidence_dir: str, phase_id: str) -> tuple[list[str], str]:
+    """The evidence-ledger lines to scan for `phase_id`, and where they came
+    from.
+
+    The split ledger gives each phase its own `phase-<id>.md` — read that
+    file directly when it exists, which is the point of the split: no need
+    to scan the other 30-odd files. A phase_id that names more than one
+    split file (e.g. a bare `21` alongside `phase-21-extraction-contract.md`)
+    falls back to scanning every split file, the same exhaustive way the
+    single ledger used to be scanned.
+    """
+    direct = Path(evidence_dir) / f"phase-{evidence_file_id(phase_id)}.md"
+    if direct.exists():
+        return direct.read_text().splitlines(), str(direct)
+
+    lines: list[str] = []
+    for f in sorted(Path(evidence_dir).glob("*.md")):
+        if f.name == "README.md":
+            continue
+        lines.extend(f.read_text().splitlines())
+    return lines, f"{evidence_dir}/*.md (scanned)"
+
+
+def report_phase(phase_id: str, map_path: str, evidence_dir: str) -> None:
     map_lines = Path(map_path).read_text().splitlines()
     span = phase_span(map_lines, phase_id)
     if span is None:
@@ -219,14 +249,14 @@ def report_phase(phase_id: str, map_path: str, evidence_path: str) -> None:
     else:
         print("  no open boxes in this phase.")
 
-    evidence_lines = Path(evidence_path).read_text().splitlines()
+    evidence_lines, source = phase_evidence_lines(evidence_dir, phase_id)
     paths = phase_evidence_paths(evidence_lines, phase_id)
     if paths:
-        print(f"  {len(paths)} file(s) named in this phase's evidence-ledger entries:")
+        print(f"  {len(paths)} file(s) named in this phase's evidence-ledger entries ({source}):")
         for p in paths:
             print(f"    {p}")
     else:
-        print(f"  no file paths found in {evidence_path} for this phase.")
+        print(f"  no file paths found in {source} for this phase.")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -236,7 +266,8 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--phase", help="phase id to print open boxes and evidence files for, e.g. 9I")
     parser.add_argument("--src-root", default=DEFAULT_SRC_ROOT)
     parser.add_argument("--map", default=DEFAULT_MAP)
-    parser.add_argument("--evidence", default=DEFAULT_EVIDENCE)
+    parser.add_argument("--evidence", default=DEFAULT_EVIDENCE,
+                         help="directory of split evidence-ledger files, e.g. docs/product/evidence")
     args = parser.parse_args(argv)
 
     if args.seam:
@@ -249,8 +280,8 @@ def main(argv: list[str] | None = None) -> int:
     if not Path(args.map).exists():
         print(f"discover.py: map {args.map} does not exist", file=sys.stderr)
         return 2
-    if not Path(args.evidence).exists():
-        print(f"discover.py: evidence {args.evidence} does not exist", file=sys.stderr)
+    if not Path(args.evidence).is_dir():
+        print(f"discover.py: evidence directory {args.evidence} does not exist", file=sys.stderr)
         return 2
     report_phase(args.phase, args.map, args.evidence)
     return 0

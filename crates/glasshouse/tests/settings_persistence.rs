@@ -4,7 +4,7 @@
 //! these prove the two functions that actually touch disk —
 //! `shell::save_user_settings` and `shell::save_project_settings` — against a
 //! real project directory and a real user config directory, per the six
-//! invariants in `GLASSHOUSE_DESIGN_DECISIONS.md`'s "Settings" section.
+//! invariants in `docs/product/design-decisions.md`'s "Settings" section.
 
 use clap::Parser;
 

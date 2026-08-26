@@ -13,7 +13,7 @@
 # difference between the worker's edits and yours, and the undo takes both.
 #
 # The rule was already written down, in the orchestrator's memory and in
-# GLASSHOUSE_ORCHESTRATION_PRACTICE.md §22, and it was broken anyway. That is
+# docs/process/orchestration-practice.md §22, and it was broken anyway. That is
 # the whole argument for this file: a rule nobody enforces is decoration, which
 # is the same finding that two dead CI gates produced the same morning. This
 # turns the rule into something that cannot be forgotten under time pressure.

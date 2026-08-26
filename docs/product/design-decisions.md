@@ -1,5 +1,8 @@
 # Glasshouse design decisions
 
+> This describes the product. Do not cite it as instruction for how to run a
+> worker or a batch — that belongs in `docs/process/`.
+
 Decisions that shaped the implementation and would be expensive to rediscover.
 Each records the conflict, the choice, and the reasoning — not just the outcome,
 because the reasoning is what a future change has to argue against.
@@ -1482,3 +1485,60 @@ adopt-or-replace on discovery, quarantine on identity change, readiness bounds,
 bounded respawn, one ordered path for state changes — comes from reading a
 publicly posted reconstruction of another vendor's agent coordinator. That
 repository carries no license; nothing was copied from it and nothing should be.
+
+---
+
+## A source-scanning guard reads by lines, so it cannot be blinded by line endings
+
+Several invariants in this codebase are enforced by scanning Glasshouse's own
+source: that `LifecycleEvent::TurnEnded` is minted in exactly one production
+function, that a hook handler never reads its payload. A guard like that is only
+as good as its ability to see the file.
+
+**A multi-line literal search finds nothing on a checkout where Git converted
+line endings, and finds nothing silently.** The guard passes, reports success,
+and has scanned nothing — the worst failure available to a check, because it is
+indistinguishable from the invariant holding.
+
+So every source guard scans with `str::lines`, which strips a carriage return on
+the way past. The scan is blind to line endings **by construction rather than by
+anyone remembering**, and each guard is exercised against a CRLF copy of its own
+input so the property is tested rather than asserted.
+
+This cost a red Windows job to learn, at a time when the Windows runner was the
+only thing that could have shown it.
+
+**The related trap, in the same family.** `production_code` cuts a module at
+`#[cfg(test)] mod tests`, not at the first `#[cfg(test)]` attribute.
+`session/runtime.rs` carries a `#[cfg(test)] const` two hundred lines in, so
+cutting at the first attribute scanned a fifth of the file and silently exempted
+the rest — including the exit path, which is exactly where a forbidden inference
+would be written. A planted violation survived the scan. Anchor on the attribute
+that actually introduces the test module.
+
+---
+
+## A pseudo-terminal child's exit is observable before its output is
+
+`waitpid` reports that a child has gone. Its last output still has to cross the
+pseudo-terminal and be copied into the session's scrollback by a **different
+thread**, which under load may not have run yet.
+
+**So any observer that asks "has it exited?" and then "what did it say?" in the
+same breath can see an empty buffer from a child that definitely spoke.** The
+window is small — measured at 1.1ms to 2.2ms beside a full test suite on Linux —
+and it is wide enough to be hit at random, which is how it presented: a gate
+failing on two different tests for weeks, at 8 runs in 17.
+
+`crash_report` therefore **waits to be woken** by the reader thread rather than
+sleeping and looking again. The wait is bounded at 250ms, deliberately the same
+bound `session::attach` allows its own output pump, because on Windows no
+end-of-file ever arrives while the pseudo-terminal is open and nothing else would
+end the wait.
+
+**What this is not.** Glasshouse never lost a crashed harness's output: 600
+trials on Linux, with the child reaped before the first read, lost zero bytes —
+the reader is handed everything that was written and *then* told the far end has
+gone. The defect was in reporting the output as absent when asked inside the
+window, which is a smaller thing than it looked and worth stating so nobody
+"fixes" the drain path again.

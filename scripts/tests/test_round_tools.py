@@ -350,6 +350,7 @@ class RealAcceptanceTests(unittest.TestCase):
     def test_real_colliding_packets_fail_and_name_state_rs(self):
         result = subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts" / "validate_round.py"),
+             "--map", str(SIBLING_GLASSHOUSE / "GLASSHOUSE_IMPLEMENTATION_CAPABILITY_MAP.md"),
              ".agent-runtime/packet-wire-disposable.md",
              ".agent-runtime/packet-migration-7.md"],
             capture_output=True, text=True, cwd=str(SIBLING_GLASSHOUSE),
@@ -360,7 +361,7 @@ class RealAcceptanceTests(unittest.TestCase):
     def test_real_round_tools_packet_passes(self):
         result = subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts" / "validate_round.py"),
-             "--map", str(REPO_ROOT / "GLASSHOUSE_IMPLEMENTATION_CAPABILITY_MAP.md"),
+             "--map", str(SIBLING_GLASSHOUSE / "GLASSHOUSE_IMPLEMENTATION_CAPABILITY_MAP.md"),
              ".agent-runtime/packet-round-tools.md"],
             capture_output=True, text=True, cwd=str(SIBLING_GLASSHOUSE),
         )

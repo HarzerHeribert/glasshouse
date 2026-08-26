@@ -1,5 +1,9 @@
 # Glasshouse harness hook protocol
 
+> This describes how Glasshouse is built, not what Glasshouse does. Nothing
+> here is a product requirement. Capability requirements live only in
+> `docs/product/capability-map.md`.
+
 This document specifies a safe completion/reporting bridge between visible
 Claude Code and OpenCode/Ox sessions. It is a design contract for project-local
 adapters; it does not require either harness to impersonate or replace the

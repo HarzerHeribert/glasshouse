@@ -13,7 +13,7 @@ orchestrator session delegate work to other first-class sessions.
 
 ## Status
 
-Under active implementation. `GLASSHOUSE_IMPLEMENTATION_CAPABILITY_MAP.md` is
+Under active implementation. `docs/product/capability-map.md` is
 the authoritative specification and tracks what is done.
 
 <!-- progress:start -->
@@ -139,15 +139,15 @@ the authoritative specification and tracks what is done.
 Agent-assisted implementation follows a spec-to-evidence SDLC rather than
 accepting generated code as proof of completion:
 
-- [`GLASSHOUSE_AGENT_SDLC.md`](GLASSHOUSE_AGENT_SDLC.md) — implementation and
+- [`docs/process/agent-sdlc.md`](docs/process/agent-sdlc.md) — implementation and
   verification lifecycle;
-- [`GLASSHOUSE_WORKER_CAPABILITIES.md`](GLASSHOUSE_WORKER_CAPABILITIES.md) —
+- [`docs/process/worker-capabilities.md`](docs/process/worker-capabilities.md) —
   Opus, Sonnet, and Ox responsibilities and limits;
-- [`GLASSHOUSE_HARNESS_HOOK_PROTOCOL.md`](GLASSHOUSE_HARNESS_HOOK_PROTOCOL.md)
+- [`docs/process/harness-hook-protocol.md`](docs/process/harness-hook-protocol.md)
   — safe Claude Code/OpenCode completion reporting;
-- [`GLASSHOUSE_CAPABILITY_EVIDENCE.md`](GLASSHOUSE_CAPABILITY_EVIDENCE.md) —
+- [`docs/product/evidence/README.md`](docs/product/evidence/README.md) —
   behavioral contracts mapped to production and regression evidence;
-- [`GLASSHOUSE_ORCHESTRATOR_PROMPT.md`](GLASSHOUSE_ORCHESTRATOR_PROMPT.md) —
+- [`docs/process/orchestrator-prompt.md`](docs/process/orchestrator-prompt.md) —
   reusable phase-independent Opus prompt;
 - [`CLAUDE_CODE_START_PROMPT.md`](CLAUDE_CODE_START_PROMPT.md) — short prompt
   for starting a new primary Claude Code session.

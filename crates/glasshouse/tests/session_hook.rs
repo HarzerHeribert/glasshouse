@@ -322,7 +322,7 @@ fn a_hook_for_an_unknown_session_costs_the_user_nothing() {
 /// troubleshooting", and the standing decision that bounds it.**
 ///
 /// The two are in tension and the resolution is in
-/// `GLASSHOUSE_DESIGN_DECISIONS.md`: what an adapter hands Glasshouse is an
+/// `docs/product/design-decisions.md`: what an adapter hands Glasshouse is an
 /// integration slug and an event name, so that is what is preserved. The
 /// conversation the payload also carries is drained unread and reaches
 /// nothing. Both halves are asserted here, over the real log file the real

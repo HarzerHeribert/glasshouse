@@ -1,5 +1,9 @@
 # Glasshouse implementation handoff
 
+> This describes how Glasshouse is built, not what Glasshouse does. Nothing
+> here is a product requirement. Capability requirements live only in
+> `docs/product/capability-map.md`.
+
 Last updated: 2026-08-26 (Europe/Berlin)
 
 ## Current capability / phase
@@ -111,7 +115,7 @@ history rewrite is the user's call; the orchestrator will not force-push
 unattended.
 
 Three workers now run concurrently, partitioned by the files they touch —
-see `GLASSHOUSE_ORCHESTRATION_MEASUREMENTS.md`, which is a standing inherited
+see `docs/process/orchestration-measurements.md`, which is a standing inherited
 experiment and not a one-off note.
 
 The user signed the Antigravity CLI in, which unblocked Phase 9.
@@ -592,7 +596,6 @@ the purpose it was cited for, after Antigravity's executable name and Codex's
 snake_case hook events. The rule it earns: *before a declaration is used, check
 that its evidence supports the use, not merely the claim.*
 
-
 ### This session — the permission cycle, watched from both ends
 
 Phase 8 line 8 closed. `glasshouse launch codex -- --sandbox read-only
@@ -647,7 +650,6 @@ log its payload. The payload scan was additionally hardened to assert the slice
 it scans is the real function, because a scan over the wrong span passes for the
 wrong reason.
 
-
 ### This session — every adapter declares its approval modes
 
 Phase 6's new line, closed. `ApprovalModes` carries `automatic_review`,
@@ -676,7 +678,6 @@ nobody established one. Pi makes the difference concrete: installed, not on
 `PATH` here, `--help` unreadable. It now reads "automatic review unverified",
 matching the convention the neighbouring `capabilities:` line already used.
 
-
 ### This session — resuming a Codex session, which cost no production code
 
 Phase 8 line 3 closed without a line of new production code, and that is the
@@ -703,7 +704,6 @@ identifier replays the conversation, an unknown one answers `ERROR: No saved
 session found with ID <id>`. Two traps recorded with it: a pseudo-terminal with
 no window size makes Codex draw nothing and look hung, and its update prompt
 defaults to an option that runs `curl … | sh`.
-
 
 ### This session — the Codex session identifier, and the rule `cwd` alone cannot express
 
@@ -769,7 +769,6 @@ one-directional by design.
 appeared while the worker was still running its own mutation checks, and two
 successive `git status` snapshots each showed a different call site missing.
 Gate review on the pane going idle, not on the report appearing.
-
 
 ### Previous session — Codex, and a question it asks that Claude Code does not
 
@@ -1294,7 +1293,7 @@ have required a magic clamp.
   and Nous — all seven with endpoints verified live on 2026-08-26). The user
   offered them for Glasshouse's own testing **provided only free models are
   used**. Full inventory — names, endpoints and env-var *names*, never a value
-  — is in `GLASSHOUSE_DESIGN_DECISIONS.md`. Four map lines were added for what
+  — is in `docs/product/design-decisions.md`. Four map lines were added for what
   this exposed: naming the three missing services, key *pools* rather than
   duplicate provider instances, per-credential quota tracking, and the
   free-models-only rule for automated runs. Nothing is implemented yet; it
@@ -1531,7 +1530,7 @@ have required a magic clamp.
   mode machinery by `the_shell_enters_and_leaves_session_mode_in_a_real_terminal`.
 - `session::runtime` (`SessionRuntime`) exists and is proven against real
   processes on all three platforms, but **has no production caller yet**, so
-  seven Phase 4 boxes stay unchecked. `GLASSHOUSE_DESIGN_DECISIONS.md`
+  seven Phase 4 boxes stay unchecked. `docs/product/design-decisions.md`
   records the decision that unblocks it: the shell's single-key bindings cannot
   coexist with forwarding every keystroke to a harness, so control mode and
   session mode split, with `Ctrl-]` as a single-chord escape.
