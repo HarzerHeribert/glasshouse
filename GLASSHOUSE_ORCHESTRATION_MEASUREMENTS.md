@@ -48,6 +48,7 @@ blocks the next batch.
 | 9 Antigravity id | Opus **team lead**, 1 subcontractor | ~25 min | ~$13 (last read $10.83 at 16 min) | +1258/-75, 7 files | 2 | killed, 2 re-run by orchestrator | 7 | PASS |
 | 9G Anthropic ingress | Opus **team lead**, subcontractors | ~65 min | ~$22 | +4426/-193, 11 files | 10 | 24 run, 23 caught + 1 survivor that found a real gap | 6 | PASS, CI green first push |
 | 2D settings sections | Sonnet | ~55 min | ~$12 | +2675/-77, 5 files | 4 | 1 orchestrator mutation found a **weak test** | 1 | PASS |
+| 9E native secret store | Opus specialist | ~35 min | ~$14 | +2445/-46, 11 files | 3 | 1 orchestrator mutation, killed by 2 tests | 3 | PASS |
 | Records audit | Gemini 3.7 Flash via `agy` | **blocked** | — | — | 0 (read-only) | — | — | BLOCKED on its permission model — see below |
 | Records audit (redone) | orchestrator, one script | ~1 min | negligible | 1 script | 0 (read-only) | — | — | PASS — zero real drift found |
 
@@ -204,6 +205,32 @@ because work was being taken in strict map order inside one family.
 touch*, then order those batches by the map. A packet's `FORBIDDEN FILES`
 section is the scheduling primitive: it is what makes two workers safe to run
 at once, and it should name the other live workers' files explicitly.
+
+### Ten batches in: what actually caught the defects
+
+Tally across the whole session, because it settles an argument this file opened:
+
+| how a real defect was found | count |
+|---|---|
+| **running the shipped binary** | **6** |
+| a mutation the orchestrator ran during review | 3 |
+| a subcontractor working outside its brief | 2 |
+| Windows CI | 2 (both test defects, not product) |
+| a worker reading its own packet critically | 4 packet errors |
+
+**Running the binary is the single most productive check in this process**, by a
+clear margin, and nothing else is close. It found the Keychain hang that would
+have frozen the TUI, the Nagle stall on every streamed event, a stale banner
+that made a wizard silently un-drivable, a refusal message rendered off-screen,
+`cmux` accepted as a launch harness, and two doubled-backtick renderings in an
+earlier session. Every one of those compiled, passed clippy, and passed a full
+suite.
+
+**Mutation review is second, and its value is asymmetric.** Two of the three
+mutations that mattered *survived*: one exposed a real gap in the product, the
+other exposed a test passing for the wrong reason. A mutation that dies confirms
+what you already believed; a mutation that lives teaches you something. Budget
+review time for the survivors.
 
 ## Questions the next orchestrator should answer
 
