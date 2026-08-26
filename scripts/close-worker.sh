@@ -28,7 +28,7 @@
 # MacBook sleep and stops the fleet.
 #
 # USAGE
-#   scripts/close-worker.sh <workspace-ref> <name>
+#   scripts/close-worker.sh <workspace-ref> <name> [worktree-path]
 #   scripts/close-worker.sh --scan            # just look for orphans
 set -uo pipefail
 
@@ -107,5 +107,36 @@ CMUX_QUIET=1 cmux close-workspace --workspace "$WS" >/dev/null 2>&1 \
   && echo "closed $WS" \
   || { echo "failed to close $WS" >&2; exit 1; }
 
-# 3. And check what it left behind.
+# 3. Reclaim the disk this worker was holding.
+#
+# Not a tidiness step. Eleven worktrees in one day cost ~55GB of Rust build
+# output plus ~42GB of per-worktree Linux build volumes, and took a 926GB disk
+# to 99% full. Both are pure build product: gitignored, regenerable, and holding
+# nothing a diff needs.
+#
+# **The per-worktree volume is deliberate and stays deliberate.** One shared
+# volume was tried and produced a build of `main` that compiled a test file from
+# another branch — a shared *source* tree is a wrong-green waiting to happen, and
+# sharing a `target/` between two trees is the same hazard one layer down. The
+# answer is not to share it; it is to delete it when the worker is done.
+WT="${3:-$REPO/../glasshouse-$NAME}"
+if [ -d "$WT/.git" ] || [ -f "$WT/.git" ]; then
+  if [ -d "$WT/target" ]; then
+    sz="$(du -sh "$WT/target" 2>/dev/null | cut -f1)"
+    rm -rf "$WT/target" && echo "reclaimed $sz of build output from $NAME's worktree"
+  fi
+  VOL="glasshouse-ci-home-$(cd "$WT" 2>/dev/null && printf '%s' "$PWD" | shasum | cut -c1-12)"
+  if docker volume rm "$VOL" >/dev/null 2>&1; then
+    echo "removed this worktree's Linux build volume ($VOL)"
+  fi
+else
+  echo "note: no worktree found at $WT; skipped build-output cleanup"
+fi
+
+# The worktree itself is NOT removed. It holds the diff, and until the
+# orchestrator has integrated and pushed, that diff is the only copy.
+echo "worktree kept at $WT — remove it yourself once the work is pushed:"
+echo "    git worktree remove $WT"
+
+# 4. And check what it left behind.
 scan_orphans

@@ -1782,3 +1782,41 @@ layout work — worth doing on its own merits — bought none of the saving by
 itself. **Before restructuring something to make it cheaper, find the sentence
 that makes it expensive.** If that sentence survives the restructure, so does
 the cost.
+
+---
+
+## §53 — worktrees are cheap to make and expensive to keep
+
+Eleven worktrees in one day took a 926GB disk from comfortable to **99% full,
+13GB free**, and nobody noticed until the machine complained. The user asked
+whether the runaway workers had written logs. They had not: `.agent-runtime` is
+1.7MB and the logs are nothing. The space was build product.
+
+    worker worktrees' target/     44 GB across 28 worktrees
+    per-worktree ci volumes      ~42 GB, one Linux build cache each
+    (plus 49GB of dead Docker Desktop data, unrelated and the user's to clear)
+
+**Both are the orchestrator's doing and neither is visible.** A worktree is one
+command and looks free; its `target/` is invisible until you go looking, and
+`ci-local.sh` creates a Linux build volume per worktree that nothing ever
+removed.
+
+**The per-worktree volume stays.** One shared volume was tried and produced a
+build of `main` that compiled a test file from another branch — a shared
+*source* tree is a wrong-green waiting to happen, and sharing a `target/`
+between two trees is the same hazard one layer down. The answer is not to share
+the cache; it is to **delete it when the worker is done**.
+
+So `scripts/close-worker.sh` now reclaims a worker's `target/` and its ci volume
+as part of closing the pane, and `scripts/reap-worktrees.sh` reports or reclaims
+across all of them at once. Both refuse to touch three things: any tracked file,
+any uncommitted change, and **the worktree itself** — which holds the diff, and
+until the work is integrated and pushed that diff is the only copy.
+
+**Reclaiming build output is not a destructive act and should not be treated as
+one.** It is gitignored, it is regenerable, and the only cost is a rebuild.
+Deleting the *worktree* is a different question and stays the user's.
+
+**The measurement to keep:** 44GB reclaimed, zero source touched, and the disk
+went from 99% to 77%. Run `scripts/reap-worktrees.sh` at the end of any round
+that made more than two worktrees.
