@@ -75,6 +75,12 @@ const BACKEND_SELECTION: &[BackendSelection] = &[BackendSelection::CommandLineAr
     "--model and --project select what a session runs against",
 )];
 
+/// A signed-in Antigravity CLI 1.1.21 `agy --help` was read in full on
+/// 2026-08-26. It documents no native output-style or other
+/// communication-style mechanism, so Glasshouse deliberately records no
+/// inferred support.
+const COMMUNICATION_STYLE: Declared<super::CommunicationStyle> = Declared::Unverified;
+
 impl HarnessAdapter for Antigravity {
     fn id(&self) -> IntegrationId {
         IntegrationId::Antigravity
@@ -208,7 +214,7 @@ impl HarnessAdapter for Antigravity {
                      enabled\"",
                 ),
             },
-            communication_style: Declared::Unverified,
+            communication_style: COMMUNICATION_STYLE,
         }
     }
 }

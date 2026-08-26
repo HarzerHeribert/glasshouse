@@ -35,6 +35,12 @@ const BACKEND_SELECTION: &[BackendSelection] = &[
     ),
 ];
 
+/// Hermes Agent 0.15.1's `hermes --help` was read on 2026-08-26. Its
+/// `--tui` and `--cli` selectors choose terminal presentation, not how the
+/// agent communicates, and no native output-style mechanism is documented.
+/// Glasshouse therefore records an unknown rather than a guess.
+const COMMUNICATION_STYLE: Declared<super::CommunicationStyle> = Declared::Unverified;
+
 impl HarnessAdapter for Hermes {
     fn id(&self) -> IntegrationId {
         IntegrationId::Hermes
@@ -132,7 +138,7 @@ impl HarnessAdapter for Hermes {
                 ),
                 sandbox: Declared::Unverified,
             },
-            communication_style: Declared::Unverified,
+            communication_style: COMMUNICATION_STYLE,
         }
     }
 }

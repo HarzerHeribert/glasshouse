@@ -1444,6 +1444,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_adapter_declares_its_native_communication_style_and_session_cost() {
+        // The declaration lives in `HarnessDescription`, like
+        // `HookInstallation`: an adapter cannot quietly omit the question.
+        // Keep the full table exact. In particular, a launch-time mechanism
+        // must not be represented as an in-place change merely because it is
+        // convenient for a future caller; doing so would lose a warm native
+        // session without warning.
+        let table: Vec<(IntegrationId, Option<CommunicationStyle>)> = all()
+            .map(|adapter| {
+                (
+                    adapter.id(),
+                    adapter.describe().communication_style.value().copied(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            table,
+            vec![
+                (
+                    IntegrationId::ClaudeCode,
+                    Some(CommunicationStyle {
+                        mechanism: "output style, supplied in the settings document passed with \
+                                    `--settings` when the session starts",
+                        change: StyleChange::NewSession,
+                    }),
+                ),
+                (IntegrationId::Codex, None),
+                (IntegrationId::Antigravity, None),
+                (IntegrationId::OpenCode, None),
+                (IntegrationId::Cursor, None),
+                (IntegrationId::Pi, None),
+                (IntegrationId::Hermes, None),
+            ],
+            "read any changed declaration from the named native artifact before changing this \
+             table; unsupported or unobserved style mechanisms must remain unknown"
+        );
+    }
+
     // --- approvals: honesty about review vs. bypass ----------------------
 
     #[test]

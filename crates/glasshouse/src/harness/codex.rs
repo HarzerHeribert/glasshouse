@@ -98,6 +98,12 @@ const BACKEND_SELECTION: &[BackendSelection] = &[
     BackendSelection::ChildEnvironment("CODEX_HOME relocates the whole configuration root"),
 ];
 
+/// Codex 0.149.1's complete `codex --help` was read on 2026-08-26. It
+/// documented no output-style, persona, or tone mechanism. The capability map
+/// names "Codex personalities" only as an example, so this is unknown rather
+/// than an invented declaration of support.
+const COMMUNICATION_STYLE: Declared<super::CommunicationStyle> = Declared::Unverified;
+
 /// The `{ "N" = "V", ... }` inline TOML table for `headers`, or `None` when
 /// there are none to send — composed by hand rather than through a
 /// TOML-writing dependency, exactly as `-c model_providers.<id>.http_headers`
@@ -428,12 +434,7 @@ impl HarnessAdapter for Codex {
                      selects the sandbox policy for model-generated shell commands",
                 ),
             },
-            // Codex 0.149.0's `--help` documents no output-style, persona, or
-            // tone mechanism. The capability map anticipates "Codex
-            // personalities"; this installation does not expose one, so
-            // Glasshouse records that it has not seen one rather than
-            // implying the map's example is present.
-            communication_style: Declared::Unverified,
+            communication_style: COMMUNICATION_STYLE,
         }
     }
 }

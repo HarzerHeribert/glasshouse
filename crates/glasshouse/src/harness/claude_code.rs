@@ -115,6 +115,22 @@ const BACKEND_SELECTION: &[BackendSelection] = &[
     BackendSelection::GeneratedConfiguration("--settings <file-or-json>"),
 ];
 
+/// Claude Code's native output-style mechanism, read from the settings document
+/// observed for Claude Code 2.1.245 on 2026-08-25 and from that session's
+/// status-line payload. A Claude Code 2.1.246 `claude --help` run on
+/// 2026-08-26 confirmed that the document still reaches the harness through
+/// the launch-only `--settings` option; changing it therefore cannot alter an
+/// already-running native session.
+const COMMUNICATION_STYLE: Declared<CommunicationStyle> = Declared::verified(
+    CommunicationStyle {
+        mechanism: "output style, supplied in the settings document passed with \
+                    `--settings` when the session starts",
+        change: StyleChange::NewSession,
+    },
+    "a Claude Code 2.1.245 session's status-line payload reports its output style; Claude Code \
+     2.1.246 `claude --help` documents `--settings <file-or-json>` as a launch option",
+);
+
 impl HarnessAdapter for ClaudeCode {
     fn id(&self) -> IntegrationId {
         IntegrationId::ClaudeCode
@@ -330,15 +346,7 @@ impl HarnessAdapter for ClaudeCode {
                 ),
                 sandbox: Declared::Unverified,
             },
-            communication_style: Declared::verified(
-                CommunicationStyle {
-                    mechanism: "output style, supplied in the settings document passed with \
-                                `--settings` when the session starts",
-                    change: StyleChange::NewSession,
-                },
-                "Claude Code reports an output style as part of its status-line payload, and \
-                 `--settings` is read when the process starts",
-            ),
+            communication_style: COMMUNICATION_STYLE,
         }
     }
 }

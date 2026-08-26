@@ -23,6 +23,14 @@ const BACKEND_SELECTION: &[BackendSelection] = &[
     ),
 ];
 
+/// Cursor CLI 2026.08.11-e8db854's `cursor-agent --help` was read on
+/// 2026-08-26. Its
+/// `--mode ask` and `--mode plan` are read-only execution modes, not a
+/// communication-style mechanism: using either would weaken a coding session.
+/// No native output-style mechanism was documented, so support remains
+/// unknown.
+const COMMUNICATION_STYLE: Declared<super::CommunicationStyle> = Declared::Unverified;
+
 impl HarnessAdapter for Cursor {
     fn id(&self) -> IntegrationId {
         IntegrationId::Cursor
@@ -130,7 +138,7 @@ impl HarnessAdapter for Cursor {
                      sandbox mode (overrides config)\", choices \"enabled\", \"disabled\"",
                 ),
             },
-            communication_style: Declared::Unverified,
+            communication_style: COMMUNICATION_STYLE,
         }
     }
 }

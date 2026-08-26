@@ -3055,7 +3055,12 @@ user, when Glasshouse needs to apply a response profile, the adapter names
 that mechanism and says whether changing it costs the running session, while
 never presenting an unverified guess as a mechanism.
 
-State: PARTIALLY VERIFIED — **box deliberately unchecked.**
+State: PARTIALLY VERIFIED — **box deliberately unchecked.** The closing bar
+recorded here on 2026-08-25 — one verified in-place mechanism, or a second
+harness with a verified native mechanism of any kind — was retested on
+2026-08-26 against newer installed binaries and is still unmet. A worker
+batch strengthened the entry without closing it; that is recorded rather than
+rounded up.
 
 Production evidence:
 - `harness/mod.rs: CommunicationStyle`, `StyleChange`, and
@@ -3063,21 +3068,54 @@ Production evidence:
   adapter fills it in.
 - `harness/claude_code.rs` — declares output styles, supplied through the
   settings document `--settings` reads at startup, as `StyleChange::NewSession`.
+- Each adapter's value is now a named `COMMUNICATION_STYLE` constant whose doc
+  comment cites the artifact it was read from, so the declaration and its
+  provenance cannot drift apart silently.
+
+Regression evidence:
+- `every_adapter_declares_its_native_communication_style_and_session_cost` —
+  pins the complete seven-adapter table, so neither a new adapter nor a changed
+  declaration can pass without being written down here.
+- Mutation proof, re-run by the orchestrator on integrated `main` rather than
+  taken from the worker's report:
+
+      test harness::tests::every_adapter_declares_..._session_cost ... ok
+      (mutate claude_code.rs NewSession -> InPlace)
+      test harness::tests::every_adapter_declares_..._session_cost ... FAILED
+      error: test failed, to rerun pass `-p glasshouse --lib`
+      (restore)
+      test harness::tests::every_adapter_declares_..._session_cost ... ok
+
+  Before this test, flipping Claude Code's launch-only mechanism to `InPlace`
+  passed every gate in the repository. That is the specific hole it closes.
+
+Platform/external evidence:
+- Native artifacts read on macOS on 2026-08-26: `claude` 2.1.246, `codex`
+  0.149.1, `agy` 1.1.21, `opencode` 1.18.22, `cursor-agent`
+  2026.08.11-e8db854, `hermes` 0.15.1. `pi` is absent from `PATH`.
+- Claude Code, Codex and Antigravity are all newer than the versions the
+  adapter module headers cite; the newer help output still documents no
+  in-place communication-style mechanism for any of them.
 
 Missing evidence:
 - Six of seven adapters declare `Unverified`, because their installed binaries
   document no communication-style mechanism at all. Codex is the pointed case:
   the capability map names "Codex personalities" as an example, and Codex
-  0.149.0's `--help` exposes none.
-- `StyleChange::InPlace` has no instance. Claude Code's declaration is
-  `NewSession` because the mechanism *Glasshouse can drive* — a settings
-  document read once at startup — is fixed for the life of the process. A
-  native in-session command may well exist; relying on one that has not been
-  observed would be exactly the guess this phase's design forbids, and the
-  conservative direction is also the safe one, since Phase 9K requires warning
-  before a profile change that costs a warm session.
+  0.149.1's `--help` still exposes none.
+- `StyleChange::InPlace` still has no instance, so the arm the enum exists to
+  express is unexercised by any real harness.
 - Closing this needs one verified in-place mechanism, or a second harness with
-  a verified native mechanism of any kind.
+  a verified native mechanism of any kind. Re-reading `--help` has now failed
+  to produce either twice; a third attempt should read a different artifact —
+  an in-session command list or a settings schema — rather than repeat it.
+
+Known limit, recorded rather than fixed:
+- `Declared::Unverified` collapses two different claims: "this version's
+  `--help` was read and documents no mechanism" (Codex, Antigravity, OpenCode,
+  Cursor, Hermes) and "no artifact could be read at all" (Pi, absent from
+  `PATH`). Only the evidence prose distinguishes them. Nothing consumes the
+  distinction today; the first thing that will is a re-probe policy, and it
+  will need a structural difference rather than a doc comment.
 
 ### Phase 2B — Detect Antigravity when a supported Antigravity CLI executable is present
 

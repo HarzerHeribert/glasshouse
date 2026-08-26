@@ -21,6 +21,12 @@ const BACKEND_SELECTION: &[BackendSelection] = &[
     ),
 ];
 
+/// Pi is unavailable on `PATH` in this environment, so no current `--help`
+/// artifact can establish a native communication-style mechanism. Its package
+/// name alone is not evidence, and its prompt flags must not be repurposed as
+/// one by inference.
+const COMMUNICATION_STYLE: Declared<super::CommunicationStyle> = Declared::Unverified;
+
 impl HarnessAdapter for Pi {
     fn id(&self) -> IntegrationId {
         IntegrationId::Pi
@@ -100,11 +106,7 @@ impl HarnessAdapter for Pi {
             // another harness's flags would be exactly the invented
             // declaration this module exists to prevent.
             approvals: ApprovalModes::UNVERIFIED,
-            // `--system-prompt` and `--append-system-prompt` change the whole
-            // system prompt, which is not a communication-style mechanism:
-            // the capability map is explicit that a response profile must not
-            // replace a harness's native system prompt to control tone.
-            communication_style: Declared::Unverified,
+            communication_style: COMMUNICATION_STYLE,
         }
     }
 }

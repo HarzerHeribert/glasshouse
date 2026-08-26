@@ -32,6 +32,11 @@ const BACKEND_SELECTION: &[BackendSelection] = &[BackendSelection::CommandLineAr
     "--model takes a provider/model pair, so the provider is chosen with the model",
 )];
 
+/// OpenCode 1.18.22's `opencode --help` was read on 2026-08-26. It documents
+/// no native output-style or other communication-style mechanism, so this
+/// stays unknown instead of projecting a generic response profile onto it.
+const COMMUNICATION_STYLE: Declared<super::CommunicationStyle> = Declared::Unverified;
+
 impl HarnessAdapter for OpenCode {
     fn id(&self) -> IntegrationId {
         IntegrationId::OpenCode
@@ -128,7 +133,7 @@ impl HarnessAdapter for OpenCode {
                 ),
                 sandbox: Declared::Unverified,
             },
-            communication_style: Declared::Unverified,
+            communication_style: COMMUNICATION_STYLE,
         }
     }
 }
