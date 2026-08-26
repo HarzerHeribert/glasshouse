@@ -3885,13 +3885,48 @@ mod tests {
         };
         let outcome = connectivity(&request, quick);
         assert!(!outcome.answered(), "nothing was listening: {outcome:?}");
-        let described = describe_probe_outcome(&outcome);
-        assert!(described.contains("never answered"), "{described}");
 
-        // The three descriptions are all distinct — reached, rejected and
-        // unreachable never collapse into the same sentence.
+        // **Which** not-answered outcome a closed port produces is the
+        // platform's choice, not Glasshouse's, and asserting one of them cost
+        // this repository a red Windows run. A Unix stack answers a connection
+        // to a closed loopback port with an immediate refusal, so the probe
+        // reports `Unreachable`; Windows drops the SYN instead, so the probe
+        // waits out its own bound and reports `TimedOut`. Both are honest and
+        // both are correct — the product's distinction between them is worth
+        // keeping, so the test asserts the property it actually cares about
+        // rather than the platform's spelling of it.
+        assert!(
+            matches!(
+                outcome,
+                ProbeOutcome::TimedOut { .. } | ProbeOutcome::Unreachable { .. }
+            ),
+            "a closed port must be timed-out or unreachable, never a response: {outcome:?}"
+        );
+        let described = describe_probe_outcome(&outcome);
+
+        // Reached, rejected and not-answered never collapse into the same
+        // sentence, whichever not-answered outcome this platform produced.
         let reached_desc = describe_probe_outcome(&ProbeOutcome::Reached { status: 200 });
+        let rejected_desc = describe_probe_outcome(&ProbeOutcome::Rejected { status: 401 });
         assert_ne!(reached_desc, described);
+        assert_ne!(rejected_desc, described);
+
+        // And both spellings are checked on **every** platform, not just the
+        // one whose stack happens to produce them: the assertion above can
+        // only ever see one of the two, which is precisely how the Windows
+        // spelling reached CI unexamined. Practice §18 applied to a runtime
+        // difference rather than a `cfg`.
+        for not_answered in [
+            ProbeOutcome::TimedOut { waited_ms: 509 },
+            ProbeOutcome::Unreachable {
+                reason: "connection refused".to_owned(),
+            },
+        ] {
+            let desc = describe_probe_outcome(&not_answered);
+            assert!(!not_answered.answered(), "{not_answered:?}");
+            assert_ne!(reached_desc, desc);
+            assert_ne!(rejected_desc, desc);
+        }
     }
 
     /// Acceptance test 6 (line 465's half): nothing about a capability

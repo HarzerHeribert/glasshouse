@@ -722,3 +722,35 @@ The CI job exists because the README is what a reader sees first, and a
 progress claim that disagrees with the map is exactly the kind of quiet
 inaccuracy this project's ledger discipline is meant to prevent. Cheap failure,
 correctly placed.
+
+## §25 — "nothing is listening" has two honest answers, and they are platform-specific
+
+`test (windows-latest)` went red on `5cf2fc4` for
+`a_capability_probe_composes_with_a_real_connectivity_check`, with
+`did not answer within 509ms` where the test demanded `never answered`.
+
+Neither the product nor the platform was wrong. A probe against a closed
+loopback port gets:
+
+- **Unix** — an immediate refusal, so the probe reports
+  `ProbeOutcome::Unreachable` → "never answered: …";
+- **Windows** — a dropped SYN, so the probe waits out its own bound and
+  reports `ProbeOutcome::TimedOut` → "did not answer within Nms".
+
+The distinction between those two outcomes is worth keeping; the test simply
+asserted one platform's spelling of a property that both satisfy. Fixed by
+asserting what the test actually cares about — not-answered, and distinct from
+both reached and rejected.
+
+**The general trap, which is not about sockets.** An assertion that passes
+locally can encode a *runtime* platform difference just as easily as a `cfg`
+one, and it is harder to see: there is no `#[cfg]` to flip and no compile error
+to catch it. Practice §18 says compile the other platform's path; this is its
+runtime sibling — **when an outcome type has several variants that all satisfy
+the property under test, assert the property and enumerate the variants, rather
+than asserting whichever variant this machine happens to produce.** The repair
+here loops over both outcomes on every platform, so the Windows spelling is now
+exercised on macOS too.
+
+Third time a Windows job has caught something every local gate hid. The pattern
+has not changed: local green says nothing about the platform that broke.
