@@ -965,7 +965,6 @@ project's gitignored `.env` and were never read.
 | OpenCode Zen | `https://opencode.ai/zen/v1` (and `/zen/go/v1`) | — | yes |
 | Kilo | `https://kilo.ai/api/openrouter` | `KILO_API_KEY` | no |
 | Nous | `https://inference-api.nousresearch.com/v1` | `NOUS_API_KEY` | no |
-| ~~RouterAI~~ | **removed from the project 2026-08-26** | — | — |
 
 **A key held is not an endpoint verified**, and this table has moved on twice
 since it was written.
@@ -978,14 +977,6 @@ answers `308` redirecting to `kilo.ai`, so the old host is only usable by a
 client that follows redirects, which a POST should not be asked to do. Full
 probe record in `.agent-runtime/notes-provider-probes.md`. Both are now
 templatable with evidence; neither has a template yet.
-
-**RouterAI is out of scope entirely**, at the repository owner's instruction on
-2026-08-26: it is a Russian service they have no access to. Removed from the
-Phase 9D map line, from this inventory, and from the `DELIBERATELY_UNTEMPLATED`
-record in `provider/mod.rs`. This reverses part of the specification change
-listed below, which is why that item now says so rather than being deleted — a
-spec that quietly forgets what it once said is worse than one that records the
-reversal.
 
 Glasshouse must still not invent base URLs. That rule is unchanged; it is
 simply no longer binding on Kilo and Nous, because nobody had to invent
@@ -1007,10 +998,8 @@ disposable one-shot jobs over OpenAI-compatible gateways.
 Four things were genuinely missing, and were added as an explicit
 specification change:
 
-1. **RouterAI, Z.ai and OpenCode Zen** were not named among the services the
-   generic templates should cover. Now they are — **except RouterAI, which was
-   removed from the project on 2026-08-26** at the owner's instruction, being a
-   service they have no access to. Z.ai and OpenCode Zen stand.
+1. **Z.ai and OpenCode Zen** were not named among the services the generic
+   templates should cover. Now they are.
 2. **A key pool is not the same as a second provider instance.** Phase 9E's
    existing line allows several credentials only by configuring the provider
    twice. The user asked for multiple keys *per router*, which is a pool.

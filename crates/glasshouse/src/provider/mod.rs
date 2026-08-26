@@ -586,10 +586,9 @@ pub const GENERIC_TEMPLATE_NAMES: &[&str] = &["openai-compatible", "anthropic-co
 /// [`templates`], with the reason attached to the assertion itself.
 ///
 /// **This list is empty today, and that is a statement rather than a gap.**
-/// It held RouterAI, Kilo and Nous. RouterAI left the project; Kilo and Nous
-/// were given real endpoints on 2026-08-26 by the probes in the module
-/// documentation, which is exactly the transition this list exists to make
-/// visible. The mechanism stays because an absence has to stay assertable:
+/// It held Kilo and Nous, both of which were given real endpoints on
+/// 2026-08-26 by the probes in the module documentation — exactly the
+/// transition this list exists to make visible. The mechanism stays because an absence has to stay assertable:
 /// the next credential someone holds for a service with no readable endpoint
 /// belongs here, not in a guessed template. See
 /// `no_template_exists_for_a_service_whose_endpoint_is_unestablished`, whose

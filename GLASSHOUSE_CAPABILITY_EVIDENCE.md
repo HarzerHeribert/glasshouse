@@ -1609,12 +1609,10 @@ setup rather than recalled**: openrouter, unorouter, anyrouter, zai,
 opencode-zen, ollama, llama-cpp, and the two generic ones whose URL is
 user-supplied.
 
-**Kilo, Nous and RouterAI are deliberately absent.** The user holds a key for
-each and no endpoint has been established for any of them.
+**Kilo and Nous are deliberately absent.** The user holds a key for each and
+no endpoint has been established for either of them.
 
-> **Updated 2026-08-26, and the reasons now differ per service.** **RouterAI is
-> removed from the project** at the owner's instruction — a service they have no
-> access to — so it is no longer absent-pending-evidence, it is out of scope.
+> **Updated 2026-08-26.**
 > **Kilo and Nous now have endpoints read from the live services**
 > (`https://kilo.ai/api/openrouter` and
 > `https://inference-api.nousresearch.com/v1`, both 200 with real catalogues;

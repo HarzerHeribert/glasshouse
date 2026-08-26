@@ -1175,10 +1175,9 @@ have required a magic clamp.
   rather than deciding, which was right. The decision: **keep the mechanism.**
   An absence has to stay assertable, and the next credential someone holds for
   a service with no readable endpoint belongs there rather than in a guessed
-  template. RouterAI does **not** go back into it — it left the project at the
-  owner's instruction, which is a different decision from "no endpoint has been
-  read". The worker added a control case so the now-vacuous loop still proves
-  something; that is what makes an empty list honest rather than decorative.
+  template. The worker added a control case so the now-vacuous loop still
+  proves something; that is what makes an empty list honest rather than
+  decorative.
 
 - **z.ai's model list needs one authenticated request to settle.** Its
   unauthenticated `401` establishes nothing (see the ledger correction), so
@@ -1215,8 +1214,7 @@ have required a magic clamp.
 - **The user's own gateway keys are available for Glasshouse, on one
   condition.** `~/projects/openrouter-clis` holds working credentials for
   seven gateways (OpenRouter, UnoRouter, AnyRouter, Z.ai, OpenCode Zen, Kilo
-  and Nous — all seven with endpoints verified live on 2026-08-26; RouterAI was
-  removed from the project at the owner's instruction). The user
+  and Nous — all seven with endpoints verified live on 2026-08-26). The user
   offered them for Glasshouse's own testing **provided only free models are
   used**. Full inventory — names, endpoints and env-var *names*, never a value
   — is in `GLASSHOUSE_DESIGN_DECISIONS.md`. Four map lines were added for what
