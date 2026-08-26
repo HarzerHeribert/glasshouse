@@ -418,7 +418,7 @@ Phase 9D — Built-in provider templates
 ☑ Add a built-in llama.cpp provider template.
 ☑ Add a generic OpenAI-compatible provider template.
 ☑ Add a generic Anthropic-compatible provider template.
-☑ Allow providers such as UnoRouter, AnyRouter, Kilo, Nous, RouterAI, Z.ai, OpenCode Zen, Cerebras, Groq, or future services to be configured through generic templates when their API shape is compatible.
+☑ Allow providers such as UnoRouter, AnyRouter, Kilo, Nous, Z.ai, OpenCode Zen, Cerebras, Groq, or future services to be configured through generic templates when their API shape is compatible.
 ☑ Keep provider templates declarative so adding a known service does not require branching throughout the core router.
 ☑ Keep service-specific default URLs and headers overridable by the user.
 ☑ Allow a provider template to define required environment-variable names without storing the secret in project memory.

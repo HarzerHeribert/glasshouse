@@ -963,16 +963,33 @@ project's gitignored `.env` and were never read.
 | AnyRouter | `https://anyrouter.dev/api/v1` | `ANYROUTER_API_KEY` | yes |
 | Z.ai | `https://api.z.ai/api/paas/v4` | `ZAI_API_KEY` | yes |
 | OpenCode Zen | `https://opencode.ai/zen/v1` (and `/zen/go/v1`) | — | yes |
-| Kilo | not established | `KILO_API_KEY` | no |
-| Nous | not established | `NOUS_API_KEY` | no |
-| RouterAI | not established | `ROUTERAI_API_KEY` | no |
+| Kilo | `https://kilo.ai/api/openrouter` | `KILO_API_KEY` | no |
+| Nous | `https://inference-api.nousresearch.com/v1` | `NOUS_API_KEY` | no |
+| ~~RouterAI~~ | **removed from the project 2026-08-26** | — | — |
 
-**A key held is not an endpoint verified.** Three of the eight have a
-credential on this machine and no endpoint in the reference implementation.
-Glasshouse must not invent base URLs for them — that is the same failure as
-inventing an environment-variable name, which Phase 9A already refuses to do.
-They stay configurable through the generic OpenAI-compatible template until
-someone reads a real endpoint from the service's own documentation.
+**A key held is not an endpoint verified**, and this table has moved on twice
+since it was written.
+
+**Kilo and Nous now have endpoints, read from the services themselves**
+(2026-08-26). `GET https://kilo.ai/api/openrouter/models` answers 200 with 367
+model ids; `GET https://inference-api.nousresearch.com/v1/models` answers 200
+with 372. Note that Kilo **moved**: `https://kilocode.ai/api/openrouter/models`
+answers `308` redirecting to `kilo.ai`, so the old host is only usable by a
+client that follows redirects, which a POST should not be asked to do. Full
+probe record in `.agent-runtime/notes-provider-probes.md`. Both are now
+templatable with evidence; neither has a template yet.
+
+**RouterAI is out of scope entirely**, at the repository owner's instruction on
+2026-08-26: it is a Russian service they have no access to. Removed from the
+Phase 9D map line, from this inventory, and from the `DELIBERATELY_UNTEMPLATED`
+record in `provider/mod.rs`. This reverses part of the specification change
+listed below, which is why that item now says so rather than being deleted — a
+spec that quietly forgets what it once said is worse than one that records the
+reversal.
+
+Glasshouse must still not invent base URLs. That rule is unchanged; it is
+simply no longer binding on Kilo and Nous, because nobody had to invent
+anything — the endpoints were read from the live services.
 
 Free capacity is real here: the reference gateway routes models such as
 `ox-alpha:free` and treats Zen's free endpoint as a first-class route — while
@@ -991,7 +1008,9 @@ Four things were genuinely missing, and were added as an explicit
 specification change:
 
 1. **RouterAI, Z.ai and OpenCode Zen** were not named among the services the
-   generic templates should cover. Now they are.
+   generic templates should cover. Now they are — **except RouterAI, which was
+   removed from the project on 2026-08-26** at the owner's instruction, being a
+   service they have no access to. Z.ai and OpenCode Zen stand.
 2. **A key pool is not the same as a second provider instance.** Phase 9E's
    existing line allows several credentials only by configuring the provider
    twice. The user asked for multiple keys *per router*, which is a pool.

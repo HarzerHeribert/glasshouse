@@ -1118,8 +1118,9 @@ have required a magic clamp.
 
 - **The user's own gateway keys are available for Glasshouse, on one
   condition.** `~/projects/openrouter-clis` holds working credentials for
-  eight gateways (OpenRouter, UnoRouter, AnyRouter, Z.ai, OpenCode Zen, and
-  keys-without-verified-endpoints for Kilo, Nous and RouterAI). The user
+  seven gateways (OpenRouter, UnoRouter, AnyRouter, Z.ai, OpenCode Zen, Kilo
+  and Nous — all seven with endpoints verified live on 2026-08-26; RouterAI was
+  removed from the project at the owner's instruction). The user
   offered them for Glasshouse's own testing **provided only free models are
   used**. Full inventory — names, endpoints and env-var *names*, never a value
   — is in `GLASSHOUSE_DESIGN_DECISIONS.md`. Four map lines were added for what
