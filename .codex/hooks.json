@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/hooks/guard-destructive-git.sh\"",
+            "timeout": 5,
+            "statusMessage": "glasshouse destructive-git guard"
+          }
+        ]
+      }
+    ]
+  }
+}

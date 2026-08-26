@@ -657,27 +657,70 @@ that a private field cannot be set from outside its module, which is a language
 guarantee, not a property of this code. Before modifying a worker's tree to test
 something, ask whether the compiler already promises it.
 
-### The guard covers one harness, and the other one is not covered
+### The guard covers both harnesses, and here is what it took to prove it
 
-The `PreToolUse` guard registered in `.claude/settings.json` protects Claude
-Code workers only. Codex reads its hooks from `<project>/.codex/hooks.json`
-instead, and a copy of the Claude Code document dropped there does **not**
-work: it interpolates `$CLAUDE_PROJECT_DIR`, which is Claude Code's variable
-and not one Codex sets, so the command resolves to a path that does not exist.
-A safety gate whose command cannot resolve is decoration — the same finding as
-the dead MSRV and rustdoc gates, arrived at a third time.
+The `PreToolUse` guard is registered twice: `.claude/settings.json` for Claude
+Code, `.codex/hooks.json` for Codex. Codex reads that path and nowhere else.
 
-That path is also the one **Glasshouse itself writes** when a Codex launch
-installs project-local hooks, so a tracked `.codex/hooks.json` in this repo
-would be overwritten by the product under test. `.codex/` is therefore ignored,
-and the file is not committed.
+**The first Codex copy was decoration.** It was the Claude Code document with
+the path left alone, so it interpolated `$CLAUDE_PROJECT_DIR` — Claude Code's
+variable, which Codex does not set — and resolved to a path that does not
+exist. Being untracked did not make it harmless: Codex reads the file off disk,
+so it was installed and inert at the same time, which is the worst of both. A
+gate you have not watched refuse something is not a gate.
 
-**So: a Codex worker in a worktree is not protected, and the rule above is the
-only thing standing between it and a deleted deliverable.** Closing this needs
-a document with a path Codex can actually resolve, trusted through Codex's own
-hook-review prompt, and *observed refusing a real `git checkout -- <path>`*
-before it is believed. Until then, do not assume a Codex worker is guarded.
+**Three things had to be established before the guard could be believed, and
+only one was already recorded.** They were settled on 2026-08-26 against Codex
+0.149.1 with `gpt-5.6-luna`, using a throwaway probe hook that dumped its
+payload and exited 2:
 
+1. **The document schema.** `{"hooks": {"<PascalCaseEvent>": [{"hooks": [{"type":
+   "command", "command": "<shell string>", "timeout": N}]}]}}`. There is **no
+   `matcher` field** — that is Claude Code's. The trust keys in
+   `$CODEX_HOME/config.toml` are `snake_case`, which is a different spelling for
+   a different purpose and must not be copied into the document.
+2. **The command string is shell-evaluated.** So
+   `"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/hooks/..."`
+   works, and one document is correct in the main checkout *and* in every
+   worktree with no absolute path anywhere in it. This idiom was read off a
+   working third-party document already trusted on the machine, not invented.
+3. **A non-zero exit actually blocks, and stderr reaches the model.** This was
+   the real unknown: Glasshouse only ever used Codex hooks to *observe*, so
+   nothing here had established that Codex honours a refusal. It does. The probe
+   exited 2, the pane printed `PreToolUse hook (blocked)` with the stderr as
+   `feedback`, and the marker file the command would have written was absent.
+4. **The payload is the same shape as Claude Code's** — `tool_name: "Bash"` and
+   `tool_input.command`, alongside `session_id`, `turn_id`, `cwd`,
+   `hook_event_name`, `model`, `permission_mode`, `tool_use_id`. So the guard
+   script needed **no changes at all**. The path was the only defect.
+
+**Then the guard itself was watched working, both directions, in a live Codex
+session** — which is the standard §22 sets and the reason the first version was
+not committed:
+
+- `git checkout -- README.md` → `PreToolUse hook (blocked)`, the guard's own
+  refusal shown as feedback. README was clean first, so a failure of the guard
+  would have destroyed nothing; design the acceptance test so the bad outcome is
+  harmless.
+- `git stash list && git status --short && echo GUARD-ALLOWED-OK` → ran, printed
+  `GUARD-ALLOWED-OK`. That command is there deliberately: `git stash list` had
+  been a false positive in the guard hours earlier, so the allow direction
+  re-proves the fix in the *other* harness.
+
+**Two cautions.**
+
+`.codex/hooks.json` is also the path **Glasshouse itself writes** when a Codex
+launch installs project-local hooks. It is committed anyway, because a worker's
+worktree needs the file and being tracked means an overwrite by the product
+under test shows up as a diff instead of silently removing the guard.
+
+Codex normally asks before running a project's hooks — "Hooks need review". On
+this machine cmux's `cmux-codex-wrapper` passes
+`--dangerously-bypass-hook-trust`, so **hooks in any repo opened through cmux
+run unreviewed**. That is convenient here and is worth knowing generally. Note
+also that trusting via the prompt is a blanket action over whatever else is
+pending: an earlier probe answered "Trust all" and trusted five unrelated
+plugin hooks. Prefer "Review hooks", or a bypass whose scope you know.
 
 ## 23. Re-run a worker's decisive external observations yourself
 
