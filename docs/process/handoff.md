@@ -4,7 +4,7 @@
 > here is a product requirement. Capability requirements live only in
 > `docs/product/capability-map.md`.
 
-Last updated: 2026-08-26 (Europe/Berlin)
+Last updated: 2026-08-27 (Europe/Berlin)
 
 ## Current capability / phase
 
@@ -23,25 +23,52 @@ policy has its caller (Phase 9I is 13 of 14), migration 7 landed with `seq`
 proven durable, and the Linux gate's random failures are fixed — 8 failures in
 17 full-suite runs before, 0 in 20 after.
 
-**1. The TUI spins at 100% CPU when its terminal dies.** Found by the user with
-five runaway processes on their laptop, three of them 19 hours old, at ~500%
-CPU total. `.agent-runtime/defect-tui-spins-when-terminal-dies.md` has the
-sampled stack: `shell::run` → `EventSource::next` → `crossterm::event::poll` →
-`read()`, 1622 of 1622 samples. When the terminal is gone the fd is permanently
-readable and returns zero bytes, so crossterm retries for the whole tick and
-the shell asks again forever. **EOF and "no input yet" are indistinguishable in
-that loop.** Signals are not the gap — all four died on `SIGTERM`. On Unix a
-`libc::poll` with a zero timeout reports `POLLHUP`, which is cheap and does not
-steal input the way a speculative `read()` would; `Event::Shutdown` already
-exists as the right thing to return. Needs a Windows counterpart. Owns
-`tui/**` and `shell/mod.rs`.
+**The TUI spin is fixed.** A terminal that goes away now ends the interface
+instead of pinning a core forever. The wait moved out of crossterm into
+`tui::event::wait_for_terminal`, which uses `libc::poll` on the descriptor
+crossterm itself reads from and answers `HangUp` on `POLLHUP` before it ever
+looks at `POLLIN` — a hung-up pty reports both at once (`0x11`, measured), and
+reading the `POLLIN` half of that is precisely the spin.
 
-**This one has a workflow cost, not just a CPU cost.** Practice §38 says the
-only way to drive the binary is a cmux pane, so every binary probe a worker
-performs creates a candidate, and closing that pane afterwards leaves it
-spinning. Four accumulated in one day.
+**The packet's account of the cause was wrong, and the correction is the
+transferable part** — practice §58. Crossterm's `try_read` does not burn a tick
+and return; `Ok(0)` falls through an inner loop that checks no timeout, so the
+call never returns at all. The pre-check the packet proposed would therefore
+have fixed nothing. It also rewrites the incident: those orphans were **not**
+un-signalled. A `SIGHUP` had already arrived and been recorded, and the loop
+never returned to the line that reads the flag.
 
-**2. The residual `SIGABRT`, 1 in 37 runs.**
+Windows is **deliberately unhandled and says so in the doc comment**: a console
+going away raises `CTRL_CLOSE_EVENT` on a handle, not endless zero-byte reads
+on a descriptor. `Wait::Unavailable` keeps the old behaviour there byte for
+byte. Compiling that path locally with the cfg flipped (§18) caught a real
+`-D warnings` break that would have failed the Windows job on a green tree.
+
+**This also removes an orchestration hazard, not only a product defect.**
+Practice §38 says the only way to drive the binary is a cmux pane, so every
+binary probe a worker performed created a candidate, and closing that pane
+afterwards left it spinning — four accumulated in a single day. Closing the
+pane now ends the process.
+
+**Two related defects were found in passing and are not fixed.** Both are
+outside that partition and belong to a follow-up package:
+
+- `session/attach.rs:255` — `pump_input` breaks on `Ok(0)` and its thread ends;
+  `supervise` then waits forever on a harness nobody can see or type at. It
+  does not spin, so it was not part of the 501%, but it is the same missing
+  question, and the new `request_shutdown()` does not reach it because `attach`
+  runs while the TUI does not. Suggested shape: `Ok(0)` calls
+  `shutdown::request_shutdown()`, which `supervise` already watches at line 185.
+- Ratatui's `Terminal::drop` `eprintln!`s when it cannot show the cursor, and
+  that is itself a panic on a hung-up pty — so some paths exit 101 rather
+  than 0. The process does go away; a clean exit is still worth having.
+
+**A Windows host now exists.** `GLASSHOUSE_WINDOWS_HOST` +
+`scripts/ci-local.sh --windows-vm` has a real target for the first time, so the
+interrupt box below can finally be tested rather than compiled. Expect several
+jobs to fail at once on the first run; reconcile them in one sweep.
+
+**1. The residual `SIGABRT`, 1 in 37 runs.**
 `pty_smoke::a_direct_provider_profile_reaches_a_real_child_and_only_that_child`
 fails with the child killed by signal 6. It is **not** the drain race that was
 just fixed. Four hypotheses are already ruled out with data — the `EIO` theory
@@ -49,7 +76,7 @@ just fixed. Four hypotheses are already ruled out with data — the `EIO` theory
 (2400 spawns), and mislabelling — and `report-PTY-FLAKE.md` §6 ranks where to
 look next, starting with `std::env::set_var` in a threaded test binary.
 
-**3. Phase 9I line 528** is the last free-pool line: `Allowance` separates
+**2. Phase 9I line 528** is the last free-pool line: `Allowance` separates
 request pools from token-priced allowances and only the request-pool half has a
 production feed. It needs a source for "this credential is priced per token".
 Deliberately not solved by parsing rate-limit headers on the forwarding path —

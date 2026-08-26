@@ -1956,3 +1956,66 @@ watching for that artefact before you call it finished.
 
 Answers already on disk when the watch starts are not news; it marks them seen
 and reports only what lands afterwards.
+
+## §58 — a wrong cause that predicts the right symptom still produces a wrong fix
+
+The `terminal-loss` packet handed its worker a cause, written up from a 1622-sample
+profile and stated with confidence:
+
+> crossterm retries `try_read` for the whole `remaining` window and returns
+> `false` having burned the entire tick. `next()` returns `Event::Tick`, the
+> caller asks again, forever.
+
+Every observable this predicts is correct. The process pins a core, every sample
+lands in `read`, and the loop never ends. **It is still wrong.** Crossterm's
+`TTY_TOKEN` arm treats `Ok(0)` as neither a `break`, a `continue`, nor a
+`return`, and the inner loop checks no timeout — so `try_read` never returns at
+all. One call, not a million.
+
+The two accounts are indistinguishable from the outside and they prescribe
+different remedies. The packet's suggested shape — a zero-timeout `libc::poll`
+*before* `event::poll` — is correct under the packet's cause and useless under
+the real one: the tick is 16ms, essentially all of it is spent inside
+`event::poll`, so the hangup lands *during* that call almost every time and a
+pre-check that only runs between calls never gets another turn. The wait itself
+had to move out of the library. A worker that took the packet's word for the
+cause would have shipped a fix, measured no improvement, and had nowhere to look.
+
+Three further consequences followed only from the correct account, and one of
+them rewrote the incident: the shutdown check at the top of `next()` is
+unreachable for the life of the process, so the orphans were not un-signalled —
+a `SIGHUP` had already arrived and been recorded, and the loop could not observe
+a flag it never returned to read.
+
+**So the rule.** A cause is not confirmed by matching the symptom; it is
+confirmed by predicting something the symptom does not already tell you. When a
+packet states a cause, state it as a claim the worker is expected to try to
+break — and say which line of the fix depends on it. Cf. §44: there the
+orchestrator's hypothesis was killed by 600 trials, here by four lines of
+somebody else's source.
+
+## §59 — reproduce the state the defect was found in, not the event that triggers it
+
+The acceptance test closes a pty master and requires the process to be gone
+without burning processor time. Its first version did that ~30ms after the first
+frame was drawn, and **on Linux it passed with and without the fix.**
+
+A Glasshouse still finishing startup turns a hangup into an error that
+propagates out of the interface and ends the process by a completely different
+route, in 0.01s of CPU. The test was measuring that route. It was not a weak
+test — it was a test of another scenario that happened to share an assertion.
+
+The field processes had been idle for nineteen hours. **Idle is the state under
+test**; closing the terminal is only the event. A 1500ms settle before the
+hangup separates them, and the same unfixed tree then burns 5.01s of CPU in
+5.02s of wall clock.
+
+This was caught by mutation-proofing **on both platforms**. On macOS the
+unfixed tree failed either way, so a single-platform proof would have shipped a
+vacuous Linux test and no one would have known until the next orphan. §41 asks
+for mutations strong enough to matter; this adds: run them everywhere the test
+will run, because a mutation that fails to fail on one platform is telling you
+the test means something different there.
+
+The settle is a named constant whose doc comment carries both measurements, so
+the next person to find it slow knows what deleting it costs.

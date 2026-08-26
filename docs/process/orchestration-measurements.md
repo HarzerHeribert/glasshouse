@@ -1061,3 +1061,94 @@ alone. Budget a flake hunt as a container-hours job, not a code-reading job.
 - Two rounds running, the highest-value findings have come from work that closed
   no box. Should a round deliberately budget one worker for debt rather than
   boxes?
+
+## Batch 25 — one Opus worker on a defect the whole test suite had missed
+
+**One worker, one defect, no boxes closed.** `terminal-loss`, Opus at high
+effort, on the 100% CPU spin the user found at 501% across five processes. The
+round before it asked whether a round should deliberately budget a worker for
+debt rather than boxes; this is that worker, and it is the second consecutive
+round where the highest-value output closed nothing.
+
+| | |
+|---|---|
+| tier | Opus, high effort, isolated worktree |
+| partition | `tui/event.rs`, `tui/mod.rs`, new `tests/terminal_loss.rs` |
+| delivered | +195 lines of production code, a 461-line acceptance test |
+| boxes closed | **0** |
+| gate | 12/12 local, first attempt on the final tree, no Linux pty flake |
+| mutations | 3, all rebuilt, all `FAILED` with the CPU message; 1 re-run on Linux |
+| orchestrator re-verification | M1 and M2 reproduced independently (§23) |
+
+### The packet's cause was wrong in a way that would have produced a wrong fix
+
+Recorded as practice §58. The packet's account matched every observable and
+still prescribed a remedy that could not work — the pre-check it suggested runs
+between calls to `event::poll`, and the hangup lands *inside* one. The worker
+read crossterm's source, found `Ok(0)` falls through an inner loop with no
+timeout, and moved the wait out of the library instead. **This is the second
+consecutive batch in which the orchestrator's stated hypothesis was overturned
+by the worker it was handed to**, and both times the correction was the batch's
+main product.
+
+It also rewrote the incident report: the orphans were not un-signalled. A
+`SIGHUP` had arrived and been recorded; the loop never returned to the line that
+reads the flag.
+
+### An acceptance test that passed on the unfixed tree
+
+Recorded as §59. Without a settle before the hangup, the test passed on Linux
+with and without the fix — it was exercising a startup-error path, not the
+defect. Found because mutations were run on **both** platforms; a macOS-only
+mutation pass would have shipped a vacuous Linux test.
+
+### §18 earned its keep, in the one place this machine cannot test
+
+Compiling the non-Unix path locally with the cfg flipped caught a real break:
+with no `#[cfg(unix)]` constructor, two `Wait` variants are dead code, and
+`dead_code` under `-D warnings` is an **error**. The Windows job would have
+failed on a tree whose twelve local jobs were green. That is the whole return on
+§18 in a single batch.
+
+Windows is otherwise **deliberately unhandled and says so in the function's doc
+comment**: a console going away raises `CTRL_CLOSE_EVENT` on a handle rather
+than endless zero-byte reads on a descriptor, and no one here can run a native
+Windows terminal to check. `Wait::Unavailable` keeps the old behaviour there
+byte for byte. A stated gap was preferred to a guessed branch, and the packet
+asked for exactly that.
+
+### What this says about worker tier
+
+Opus was the right call and would have been wrong to economise on. The job
+required reading a dependency's source to contradict its own packet, a measured
+`POLLHUP` probe rather than an assumed one, an `EINTR` branch found only by a
+second failing round, and the judgement to leave Windows alone. A Sonnet given
+"add a `libc::poll` pre-check as described" would have produced a clean,
+mutation-proofed, useless patch — and the mutations would have passed, because
+they would have been mutations of the wrong line.
+
+### Two defects found in passing, neither patched, both outside the partition
+
+1. **An attached session never learns its terminal died.**
+   `session/attach.rs:255` — `pump_input` breaks on `Ok(0)` and its thread ends;
+   `supervise` then waits forever on a harness nobody can see or type at. It
+   does not spin, so it was not in the 501%, but it is the same missing
+   question. `request_shutdown()` on hangup does not reach it — `attach` runs
+   while the TUI does not. Suggested shape: `Ok(0)` calls
+   `shutdown::request_shutdown()`, which `supervise` already watches at line 185.
+2. **Ratatui panics on the way out of a dead terminal.** `Terminal::drop`
+   `eprintln!`s when it cannot show the cursor, and that is itself a panic on a
+   hung-up pty, so some paths exit 101 rather than 0. Harmless — the loop has
+   already returned — but a clean exit is worth having.
+
+Both belong to a follow-up package. Neither was folded in: the partition was the
+partition (§32).
+
+### Open questions for the next round
+
+- The residual `SIGABRT` at 1 in 37 is still open, still ranked, still unowned.
+- Two rounds asked whether to budget a worker for debt. Two rounds answered yes
+  by accident. Should the round template reserve one slot for it outright?
+- The Windows host exists now. The first `--windows-vm` run is expected to fail
+  in several places at once; is that one reconciliation package, or one worker
+  per failing job?
