@@ -51,6 +51,8 @@ blocks the next batch.
 | 9E native secret store | Opus specialist | ~35 min | ~$14 | +2445/-46, 11 files | 3 | 1 orchestrator mutation, killed by 2 tests | 3 | PASS |
 | Records audit | Gemini 3.7 Flash via `agy` | **blocked** | — | — | 0 (read-only) | — | — | BLOCKED on its permission model — see below |
 | Records audit (redone) | orchestrator, one script | ~1 min | negligible | 1 script | 0 (read-only) | — | — | PASS — zero real drift found |
+| Dev shims | orchestrator solo | ~35 min | — | +2 shims, 3 docs | **0** | n/a (both guards proven both directions) | 1 (mine: conflated dev shim with product shim) | PASS, CI green |
+| MSRV correction | orchestrator solo | ~50 min | — | +1 script, 3 code sites, 4 docs | **0** | 1 gate mutation, killed | 0 | PASS, 6/6 CI jobs green |
 
 ### What the first data point already says
 
@@ -217,6 +219,7 @@ Tally across the whole session, because it settles an argument this file opened:
 | a subcontractor working outside its brief | 2 |
 | Windows CI | 2 (both test defects, not product) |
 | a worker reading its own packet critically | 4 packet errors |
+| **a CI job on its first run** | **1 — a false MSRV, wrong since ratatui 0.30** |
 
 **Running the binary is the single most productive check in this process**, by a
 clear margin, and nothing else is close. It found the Keychain hang that would
@@ -248,3 +251,46 @@ Add your data; do not re-derive from scratch.
    conflicts and reverts, not intuitions about them.
 5. **Where does an orchestrator's context actually go?** If reading diffs
    dominates, a verifier tier between worker and orchestrator pays for itself.
+6. **~~How many of this project's gates are decoration?~~ ANSWERED
+   2026-08-26: two of six.** Every gate was mutated deliberately and the result
+   recorded. Total cost, about ten minutes.
+
+   | gate | mutation | verdict |
+   |---|---|---|
+   | `cargo fmt --all -- --check` | added badly-formatted fn | **bites** — exit 1, exit 0 restored |
+   | `cargo clippy … -D warnings` | none needed — failed for real on `collapsible_if` when the MSRV rose | **bites** |
+   | `cargo test --workspace` | proven continuously by this project's own mutation discipline | **bites** |
+   | `python3 scripts/progress.py --check` | changed a count in the README block | **bites** — exit 1, diff printed, exit 0 restored |
+   | `RUSTDOCFLAGS='-D warnings' cargo doc` | none needed | **DECORATION** — 22 warnings, never once green |
+   | `rustup run 1.85.0 cargo check --locked` | raised `rust-version` to 1.99 | **DECORATION** — could not fail, for two independent reasons |
+
+   The two that were decoration were both *inherited and trusted*, and neither
+   had ever been questioned. The four that bite were never in doubt. **The
+   correlation worth noticing: a gate nobody has ever seen fail is the one to
+   suspect.** `fmt`, `clippy` and `test` fail routinely, so they were obviously
+   alive; the MSRV and rustdoc gates were "always green", which read as health
+   and was actually silence.
+
+   Do this to any gate you inherit, and to every gate you write.
+
+
+## Zero-box work is not zero-value work — record it anyway
+
+Two batches today closed **no capability boxes** and were among the most
+valuable of the project. This ledger measures boxes per hour, so it structurally
+undervalues them, and a future orchestrator reading only the table would
+conclude they were waste.
+
+- **Dev shims** removed a per-invocation tax that every session had been paying:
+  `cargo run --manifest-path …` instead of `glasshouse`, and a round trip to the
+  user every time a leaf worker needed launching. The cost was being paid
+  forever and counted nowhere.
+- **The MSRV correction** found that the gate the whole project trusted was
+  incapable of failing. Every "MSRV clean" claim in the evidence ledger before
+  `aef4285` was unfounded — not wrong about the code, but unfounded as
+  evidence, which for this project is the same thing.
+
+**The pattern: infrastructure work shows up as a flat line on a boxes-per-hour
+chart and as a slope change everywhere else.** When you spend a session on
+something that closes no boxes, write down what recurring cost it removed, so
+the next orchestrator can tell the difference between that and drift.
