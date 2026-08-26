@@ -503,6 +503,124 @@ button leading nowhere. The Provider step configures providers, and the Summary
 says so plainly. It also flagged that the module's own "out of scope" doc was
 stale — providers had been built by 9C/9D/9F since it was written.
 
+---
+
+### Phase 9G — the last two ingresses, and Phase 9G at nineteen of nineteen
+
+Lines, quoted exactly:
+
+- "Expose an OpenAI Responses-compatible ingress for gateway-backed Codex
+  profiles when implemented."
+- "Expose an OpenAI Chat-compatible ingress for compatible disposable jobs and
+  harnesses when implemented."
+
+Contract: Given a gateway-backed profile whose harness speaks OpenAI Responses
+or OpenAI Chat, when that harness sends a request to the local gateway,
+Glasshouse forwards it to the base URL the configured provider declared **for
+that protocol** and streams the response back unmodified — while preserving:
+the provider credential never reaches the child, a target belonging to no
+served protocol is refused rather than blindly appended, and the Anthropic
+Messages ingress behaves exactly as before.
+
+State: **COMPLETE.** Phase 9G is **nineteen of nineteen**.
+
+#### One upstream, several routes — and the reason is the secret boundary
+
+The gateway holds **one `Upstream`: one provider, one `Secret`, and one route
+per protocol** — not a set of `Upstream`s keyed by protocol. The deciding
+argument is not aesthetic. `crate::secret::Secret` is deliberately not `Clone`
+and cannot be minted outside its own module, so a set of upstreams would need
+either a widened `Secret` API or the same credential resolved once per
+protocol. That would turn "the credential lives here and nowhere else" — the
+sentence that module exists to make true — into "it lives in three places that
+happen to agree". One owner with several destinations keeps it literally true,
+and `every_route_forwards_with_the_one_credential_the_upstream_holds` asserts
+it.
+
+A route carries its protocol as a **slug**, not a `WireProtocol`, because
+`gateway/` is structurally forbidden from naming `crate::harness` and a test
+enforces that. So `crate::profile` owns the table of which paths belong to which
+protocol, and `gateway` owns the matching — the same division that already put
+`GATEWAY_INGRESS_PROTOCOLS` in `profile`.
+
+**Matching drops the query, strips a leading `/v1` segment, then matches a
+declared prefix at a path-segment boundary.** The target is still appended to
+the base URL byte for byte; the stripping affects classification only.
+
+#### The packet was wrong about the path, and it was load bearing
+
+The packet said `/v1/responses` → OpenAI Responses. Against a real listener,
+**Codex 0.149.1 pointed at a base URL with no path sends `POST /responses`** —
+and a base URL with no path is the only kind `Gateway::base_url()` hands out.
+Whether the `/v1` segment appears is a property of the harness's configured base
+URL, not of the protocol. Taking the packet literally would have shipped an
+ingress no gateway-backed Codex could reach.
+
+Codex's `wire_api` was re-verified against the installed binary rather than
+assumed: `wire_api = "chat"` is refused with "no longer supported", `"responses"`
+starts a session. So this ingress really is the only gateway path that can ever
+back a Codex profile.
+
+#### End-to-end, against a real provider
+
+One gateway, one provider, two harnesses, two protocols, from one run's log:
+
+    outcome="forwarded" status=200 provider=openrouter protocol=Some("openai-responses")
+    outcome="forwarded" status=402 provider=openrouter protocol=Some("anthropic-messages")
+
+`glasshouse launch codex` reached OpenRouter's Responses endpoint and the model
+answered, 550 KB streamed back through the gateway. `glasshouse launch
+claude-code` over the **same** gateway routed to Anthropic Messages, and the
+provider's own `402 Insufficient credits` reached the harness verbatim — a
+billing answer, not a routing one, which is the pass-through the phase requires.
+Against a recording listener the forwarded request carried exactly one
+`authorization` header, the provider's, with the child's gateway token gone.
+`grep -c` for the key across three real gateway logs: `0`, `0`, `0`.
+
+#### The honest ceiling on the Chat ingress
+
+**No adapter in this crate declares `OpenAiChat`.** Claude Code is
+Anthropic-only, Codex is Responses-only, and every other adapter's protocol
+support is `Declared::Unverified`. The Chat ingress is therefore proven at the
+socket level — through the real gateway, real TCP, real forwarding — and **not**
+through a real harness client, because none exists to run. That is the ceiling
+for "compatible disposable jobs and harnesses" until Phase 39's disposable jobs
+are built, and it is stated here rather than implied.
+
+#### Evidence quality
+
+Eight mutations, every one killed, each read from the named test's own result
+line. They cover route selection, the `/v1` strip, segment-boundary matching,
+refusing against the *running* gateway rather than the static constant, `Debug`
+on `Upstream`, per-protocol route construction, streaming, and the
+unplaceable-target fallback.
+
+The orchestrator ran a ninth, independent of the worker's set, on the property
+that matters most: **forward the child's own gateway token upstream as well as
+the provider's.** Killed by four tests, two of them the worker's new
+conformance tests.
+
+A subcontractor found a real defect in the lead's own path and correctly
+declined to fix it: `refuse()` wrote a JSON body regardless of method, and the
+new `404` is the first response in this gateway's life that a `HEAD` can
+reach — Claude Code 2.1.245 sends `HEAD /api/hello`. A body there is not
+harmless; a client reads the declared length, finds bytes it was told would not
+be there, and takes them for the next response.
+
+#### Two things recorded, not fixed
+
+- **Codex's `GET /models` is refused**, and Codex logs that at `ERROR` twice per
+  session. The session completes normally — the live run above contains exactly
+  those two refusals and still returned its answer. It was not routed because
+  `/models` is a catalogue endpoint **all three protocols define**, and placing
+  it means choosing a protocol for a request that names none. Two already-checked
+  map lines forbid inventing that tie-break before a concrete pair requires it.
+  Tracked as follow-up work with its own evidence, not folded into this review.
+- **`config/mod.rs` applies one `base_url` override to every protocol a
+  provider serves.** With `openrouter` now serving three protocols across two
+  URLs, a single override silently collapses them. Found by a subcontractor,
+  outside the batch's file ownership, reported rather than touched.
+
 ### Phase 9G — the local gateway process (seven of nineteen)
 
 Contract: Given a Glasshouse instance whose active launch profiles include one

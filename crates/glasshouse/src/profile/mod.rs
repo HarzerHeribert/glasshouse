@@ -45,7 +45,7 @@
 use std::ffi::OsString;
 use std::fmt;
 
-use crate::gateway::{Gateway, Upstream};
+use crate::gateway::{Gateway, Route, Upstream};
 use crate::harness::{
     ApprovalKind, ApprovalMode, CredentialPlacement, CredentialVarProblem, DirectProviderRequest,
     HarnessAdapter, WireProtocol,
@@ -55,17 +55,56 @@ use crate::launch::HarnessLaunch;
 use crate::provider::Provider;
 use crate::secret::{SecretRef, SecretStore};
 
-/// The protocols the local gateway's ingress actually serves.
+/// The protocols the local gateway's ingress knows how to serve.
 ///
-/// One entry, and the list is here rather than in [`mod@crate::gateway`]
+/// All three, and the list is here rather than in [`mod@crate::gateway`]
 /// because that module is structurally forbidden from naming
 /// [`crate::harness`] — see its own header — and a protocol enum lives
-/// there. Phase 9G's map names an OpenAI Responses ingress and an OpenAI
-/// Chat ingress as separate lines; when either is built, it is added here
-/// and a Codex profile starts resolving. Until then a harness that cannot
-/// speak Anthropic Messages is refused rather than pointed at an ingress
-/// that would not understand it.
-pub const GATEWAY_INGRESS_PROTOCOLS: &[WireProtocol] = &[WireProtocol::AnthropicMessages];
+/// there.
+///
+/// **This is a capability, not a promise.** It says what the ingress can
+/// carry; what a *running* gateway actually carries is narrower, because a
+/// route exists only for a protocol the one configured provider declared a
+/// base URL for. [`Gateway::served_protocols`] is that narrower answer, and
+/// it — never this constant — is what `apply_gateway` refuses against. A
+/// profile checked against this list alone would launch a harness at an
+/// ingress that would answer its first request with a `404`.
+///
+/// The order matters in one place only: [`gateway_upstream`] builds routes
+/// in it, so it is the order a diagnostic lists protocols in.
+pub const GATEWAY_INGRESS_PROTOCOLS: &[WireProtocol] = &[
+    WireProtocol::AnthropicMessages,
+    WireProtocol::OpenAiResponses,
+    WireProtocol::OpenAiChat,
+];
+
+/// The request-target path prefixes that belong to each ingress protocol.
+///
+/// This is the whole of "the request target decides the protocol", and it
+/// lives here for the same reason [`GATEWAY_INGRESS_PROTOCOLS`] does: the
+/// gateway cannot name a [`WireProtocol`], so the module that can composes
+/// the table and hands it over as [`Route`]s. The gateway owns the
+/// *matching* — including the fact that a leading `/v1` is not part of the
+/// answer, see `crate::gateway::upstream`'s `VERSION_SEGMENT`.
+///
+/// Each entry is a prefix matched at a path-segment boundary, so one entry
+/// covers a protocol's whole surface: `/messages` places
+/// `/v1/messages?beta=true` and `/v1/messages/count_tokens` alike.
+///
+/// **Every prefix here was read off a real request line**, from a harness
+/// run against a listener that recorded it — Claude Code 2.1.245 sends
+/// `POST /v1/messages?beta=true`, Codex 0.149.1 sends `POST /responses` —
+/// or, for OpenAI Chat, off the endpoint the provider templates in
+/// [`mod@crate::provider`] already document. Nothing here is a guess at a
+/// path nobody has seen, which is the same rule that module applies to base
+/// URLs.
+const fn ingress_targets(protocol: WireProtocol) -> &'static [&'static str] {
+    match protocol {
+        WireProtocol::AnthropicMessages => &["/messages"],
+        WireProtocol::OpenAiResponses => &["/responses"],
+        WireProtocol::OpenAiChat => &["/chat/completions"],
+    }
+}
 
 /// The name the gateway presents itself to an adapter under.
 ///
@@ -287,14 +326,18 @@ pub enum Refusal {
     },
 
     #[error(
-        "launch profile `{profile}` is backed by the local Glasshouse gateway, whose ingress \
-         speaks {protocol}, but {} cannot be pointed at that protocol",
+        "launch profile `{profile}` is backed by the local Glasshouse gateway, but {} cannot \
+         be pointed at any protocol that gateway's ingress serves ({})",
         .harness.display_name(),
+        .protocols.join(", "),
     )]
     GatewayProtocolUnserved {
         profile: String,
         harness: IntegrationId,
-        protocol: WireProtocol,
+        /// The protocol **slugs** this gateway is actually serving — what
+        /// its one configured provider declared a base URL for, not the
+        /// whole of [`GATEWAY_INGRESS_PROTOCOLS`].
+        protocols: Vec<String>,
     },
 
     #[error(
@@ -729,26 +772,37 @@ fn apply_gateway(
         .copied()
         .unwrap_or(&[]);
 
+    // What this *running* gateway carries, which is
+    // `GATEWAY_INGRESS_PROTOCOLS` narrowed to the protocols the configured
+    // provider declared a base URL for. Refusing against the constant
+    // instead would launch a harness at an ingress with no route for it, and
+    // the mismatch would surface as a `404` on the first request rather than
+    // as a refusal naming what is missing.
+    //
+    // Compared by slug because the gateway may not name a `WireProtocol` —
+    // see `Gateway::served_protocols`. The slug is `WireProtocol::slug`'s own
+    // output on both sides of the comparison, so there is one spelling, not
+    // two.
+    let served = gateway.served_protocols();
+    let ingress_serves =
+        |protocol: &WireProtocol| served.iter().any(|slug| *slug == protocol.slug());
+
     // An explicit ask is a constraint, never a hint — the same rule
     // `choose_protocol` applies to a direct provider. A profile expecting a
     // protocol the ingress does not serve is refused rather than quietly
-    // given the one that exists.
+    // given one that exists.
     let protocol = match profile.expected_protocol {
-        Some(expected) => GATEWAY_INGRESS_PROTOCOLS
-            .contains(&expected)
-            .then_some(expected),
-        None => harness_protocols
-            .iter()
-            .copied()
-            .find(|protocol| GATEWAY_INGRESS_PROTOCOLS.contains(protocol)),
+        Some(expected) => ingress_serves(&expected).then_some(expected),
+        None => harness_protocols.iter().copied().find(ingress_serves),
     };
     let Some(protocol) = protocol.filter(|protocol| harness_protocols.contains(protocol)) else {
         return Err(Refusal::GatewayProtocolUnserved {
             profile: profile.name.clone(),
             harness: profile.harness,
             // What the ingress serves, for a message that names the mismatch
-            // from the side the user cannot change.
-            protocol: GATEWAY_INGRESS_PROTOCOLS[0],
+            // from the side the user cannot change. Slugs, because that is
+            // what the gateway could tell us.
+            protocols: served.iter().map(|slug| (*slug).to_owned()).collect(),
         });
     };
 
@@ -808,47 +862,81 @@ fn apply_gateway(
 /// because which backend a gateway-backed session runs against is Phase 9H's
 /// *sticky routing* decision and belongs to the session, not to the profile.
 /// This phase therefore does the only thing that invents nothing: it takes
-/// the single configured provider that serves the ingress protocol, and
-/// refuses when there is no such provider or more than one. A gateway that
-/// picked the alphabetically first of three routers would be making exactly
-/// the routing decision the map defers.
+/// the single configured provider that serves **any** protocol the ingress
+/// offers, and refuses when there is no such provider or more than one. A
+/// gateway that picked the alphabetically first of three routers would be
+/// making exactly the routing decision the map defers.
+///
+/// # One provider, every protocol it serves
+///
+/// The candidate rule is per *provider*, not per protocol: a provider is a
+/// candidate if it serves at least one ingress protocol with a base URL, and
+/// the upstream then gets a [`Route`] for **each** protocol it serves. That
+/// is deliberate in both directions.
+///
+/// Requiring a provider to serve all three would refuse every real
+/// configuration — no built-in template serves more than two — and would
+/// make a Claude Code launch fail over a Responses upstream it was never
+/// going to use. Allowing several providers, one per protocol, would be
+/// Phase 9H's sticky routing built early: the gateway would be choosing
+/// backends, which is exactly what this function exists to refuse.
+///
+/// So a gateway serves what its one provider serves, and
+/// [`Gateway::served_protocols`] reports that narrower set to
+/// `apply_gateway`, which refuses a harness the ingress cannot carry —
+/// before a child process exists rather than at its first request.
 ///
 /// The credential is resolved here, once, at start, and moved into the
-/// [`Upstream`]. That is the second place in Glasshouse where a
-/// [`crate::secret::Secret`] exists — the first being [`resolve`]'s
-/// direct-provider path — and unlike that one it does not end at a child
-/// process: it stays in this process for the gateway's lifetime, which is
-/// the entire point of holding it here instead.
+/// [`Upstream`] — **once**, however many protocols it serves. That is the
+/// second place in Glasshouse where a [`crate::secret::Secret`] exists — the
+/// first being [`resolve`]'s direct-provider path — and unlike that one it
+/// does not end at a child process: it stays in this process for the
+/// gateway's lifetime, which is the entire point of holding it here instead.
 pub fn gateway_upstream(
     providers: &[Provider],
     secrets: &dyn SecretStore,
 ) -> Result<Upstream, GatewayUpstreamRefusal> {
-    let protocol = GATEWAY_INGRESS_PROTOCOLS[0];
+    let serves_the_ingress = |provider: &Provider| {
+        GATEWAY_INGRESS_PROTOCOLS
+            .iter()
+            .any(|protocol| declared_base_url(provider, *protocol).is_some())
+    };
     let candidates: Vec<&Provider> = providers
         .iter()
-        .filter(|provider| {
-            provider
-                .serves(protocol)
-                .is_some_and(|support| !support.base_url.is_empty())
-        })
+        .filter(|provider| serves_the_ingress(provider))
         .collect();
 
     let provider = match candidates.as_slice() {
         [] => {
-            return Err(GatewayUpstreamRefusal::NoProviderServesTheIngress { protocol });
+            return Err(GatewayUpstreamRefusal::NoProviderServesTheIngress {
+                protocols: GATEWAY_INGRESS_PROTOCOLS.to_vec(),
+            });
         }
         [only] => *only,
         several => {
             return Err(GatewayUpstreamRefusal::SeveralProvidersServeTheIngress {
-                protocol,
+                protocols: GATEWAY_INGRESS_PROTOCOLS.to_vec(),
                 candidates: several.iter().map(|p| p.name.clone()).collect(),
             });
         }
     };
 
-    let support = provider
-        .serves(protocol)
-        .expect("the provider was selected because it serves this protocol");
+    // One route per protocol this provider actually serves, in the ingress's
+    // own order. A protocol it does not serve gets no route, which is what
+    // makes a request for it a refusal rather than a request sent to some
+    // other protocol's base URL.
+    let routes: Vec<Route> = GATEWAY_INGRESS_PROTOCOLS
+        .iter()
+        .filter_map(|protocol| {
+            declared_base_url(provider, *protocol).map(|base_url| {
+                Route::new(
+                    protocol.slug().to_owned(),
+                    ingress_targets(*protocol),
+                    base_url,
+                )
+            })
+        })
+        .collect();
 
     // A provider declaring several credential variables is a pool, and
     // choosing between them on cost or quota is a routing decision this
@@ -863,11 +951,22 @@ pub fn gateway_upstream(
             variables: provider.credential_env.clone(),
         })?;
 
-    Ok(Upstream::new(
-        provider.name.clone(),
-        &support.base_url,
-        credential,
-    )?)
+    Ok(Upstream::new(provider.name.clone(), routes, credential)?)
+}
+
+/// The base URL `provider` declares for `protocol`, or `None` when it
+/// declares none — or declares an empty one.
+///
+/// An empty base URL is not a base URL: the generic templates in
+/// [`mod@crate::provider`] ship one so the user can supply their own, and
+/// launching against `""` must never happen. The same rule
+/// `apply_direct_provider` already applies, in one place both can be read
+/// from.
+fn declared_base_url(provider: &Provider, protocol: WireProtocol) -> Option<&str> {
+    provider
+        .serves(protocol)
+        .map(|support| support.base_url.as_str())
+        .filter(|base_url| !base_url.is_empty())
 }
 
 /// Why the local gateway could not be given an upstream to forward to.
@@ -879,20 +978,28 @@ pub fn gateway_upstream(
 #[derive(Debug, thiserror::Error)]
 pub enum GatewayUpstreamRefusal {
     #[error(
-        "the local Glasshouse gateway forwards {protocol} requests, but no configured provider \
-         serves {protocol} with a base URL; configure one before launching a gateway-backed \
-         profile"
+        "the local Glasshouse gateway can forward requests for {}, but no configured provider \
+         serves any of them with a base URL; configure one before launching a gateway-backed \
+         profile",
+        protocol_list(.protocols),
     )]
-    NoProviderServesTheIngress { protocol: WireProtocol },
+    NoProviderServesTheIngress {
+        /// Every protocol the ingress offers — what the user could configure
+        /// a provider for, not one of them picked out.
+        protocols: Vec<WireProtocol>,
+    },
 
     #[error(
-        "the local Glasshouse gateway would have to choose between {} to serve {protocol}, and \
-         choosing a backend per session is sticky routing rather than something a launch \
-         profile decides; configure exactly one provider for {protocol}",
+        "the local Glasshouse gateway would have to choose between {} to serve its ingress \
+         ({}), and choosing a backend per session is sticky routing rather than something a \
+         launch profile decides; configure exactly one provider that serves them",
         .candidates.join(", "),
+        protocol_list(.protocols),
     )]
     SeveralProvidersServeTheIngress {
-        protocol: WireProtocol,
+        /// Every protocol the ingress offers, so the message says what the
+        /// collision is about.
+        protocols: Vec<WireProtocol>,
         /// Provider *names*, so the message can say which entries collided.
         candidates: Vec<String>,
     },
@@ -912,6 +1019,18 @@ pub enum GatewayUpstreamRefusal {
 
     #[error(transparent)]
     Unusable(#[from] crate::gateway::UpstreamError),
+}
+
+/// `a`, `b` and `c` — a list of protocols for a message a user reads.
+///
+/// Names only, and every one of them is a [`WireProtocol::slug`], so nothing
+/// user-written reaches a diagnostic through here.
+fn protocol_list(protocols: &[WireProtocol]) -> String {
+    protocols
+        .iter()
+        .map(|protocol| protocol.slug())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Point one child process at `provider_name`, or refuse.
@@ -1457,10 +1576,15 @@ mod tests {
         assert!(message.contains("gateway"), "{message}");
     }
 
-    /// A running gateway, for the tests below. Its upstream never has to
-    /// answer: resolution reads the gateway's address and token and opens no
-    /// connection at all.
-    fn running_gateway() -> crate::gateway::Gateway {
+    /// A running gateway serving `protocols`, for the tests below. Its
+    /// upstream never has to answer: resolution reads the gateway's address
+    /// and token and opens no connection at all.
+    ///
+    /// Which protocols it serves is the parameter because that is now the
+    /// thing under test: a gateway serves what its one configured provider
+    /// declared a base URL for, and `apply_gateway` refuses against exactly
+    /// that.
+    fn gateway_serving(protocols: &[WireProtocol]) -> crate::gateway::Gateway {
         let profiles = [{
             let mut profile = profile_for(IntegrationId::ClaudeCode);
             profile.backend = BackendResource::GlasshouseGateway;
@@ -1469,12 +1593,172 @@ mod tests {
         crate::gateway::start_if_required(&profiles, || {
             Ok(Upstream::new(
                 "fixture".to_owned(),
-                "https://provider.example/api",
+                protocols
+                    .iter()
+                    .map(|protocol| {
+                        Route::new(
+                            protocol.slug().to_owned(),
+                            ingress_targets(*protocol),
+                            "https://provider.example/api",
+                        )
+                    })
+                    .collect(),
                 crate::secret::Secret::mint_for_test(PLANTED_CREDENTIAL),
             )?)
         })
         .expect("loopback is bindable")
         .expect("a gateway-backed profile asks for a gateway")
+    }
+
+    /// A running gateway serving the protocol Claude Code speaks — the shape
+    /// every test written before the ingress served more than one assumes.
+    fn running_gateway() -> crate::gateway::Gateway {
+        gateway_serving(&[WireProtocol::AnthropicMessages])
+    }
+
+    /// Phase 9G's OpenAI Responses ingress, at the resolution layer: a
+    /// gateway whose provider serves Responses **resolves a Codex profile**,
+    /// which is the line's whole point.
+    ///
+    /// Codex 0.149.1 removed `wire_api = "chat"` — confirmed against the
+    /// installed binary, which answers
+    /// ``Error loading config.toml: `wire_api = "chat"` is no longer
+    /// supported.`` — so Responses is the only protocol that can ever back a
+    /// Codex profile, and this ingress is therefore the only gateway path to
+    /// one. The same binary pointed at a path-less base URL was observed
+    /// sending `POST /responses`, which is why
+    /// [`ingress_targets`] declares the bare form.
+    ///
+    /// Lose this and the Responses ingress can exist in the gateway while
+    /// remaining unreachable from the only harness that speaks it.
+    #[test]
+    fn a_gateway_serving_responses_resolves_a_codex_profile() {
+        let adapter = adapter_for(IntegrationId::Codex).expect("a harness");
+        let gateway = gateway_serving(&[WireProtocol::OpenAiResponses]);
+        let mut profile = profile_for(IntegrationId::Codex);
+        profile.backend = BackendResource::GlasshouseGateway;
+
+        let overlay = resolve_with_gateway(
+            &profile,
+            &native_cx(adapter, false, &FakeSecrets::empty()),
+            Some(&gateway),
+        )
+        .expect("a Codex profile resolves against a gateway that serves Responses");
+
+        let rendered = format!("{:?}", overlay.args());
+        assert!(
+            rendered.contains(&format!("http://{}", gateway.address())),
+            "the child was not pointed at this gateway: {rendered}"
+        );
+        assert!(
+            rendered.contains("responses"),
+            "the child was not configured for the Responses wire API: {rendered}"
+        );
+
+        // The gateway's own token reaches the child, and the provider
+        // credential the gateway holds does not — the same rule the Claude
+        // Code path already carries, asserted again on the path that did not
+        // exist when it was written.
+        let env: Vec<(String, String)> = overlay
+            .env()
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        assert!(
+            env.iter()
+                .any(|(_, value)| value == gateway.token().expose()),
+            "the gateway's token did not reach the child: {env:?}"
+        );
+        for (key, value) in &env {
+            assert!(
+                !value.contains(PLANTED_CREDENTIAL),
+                "the provider credential reached the child in {key}"
+            );
+        }
+    }
+
+    /// A gateway serving every protocol its ingress knows how to carry
+    /// resolves both harnesses that declare one — and hands each the
+    /// protocol it actually speaks, never the first one the list happens to
+    /// name.
+    ///
+    /// Lose this and `apply_gateway` can go back to picking
+    /// `GATEWAY_INGRESS_PROTOCOLS[0]`, which now silently means "Anthropic
+    /// Messages for everyone".
+    #[test]
+    fn each_harness_is_given_the_protocol_it_speaks_not_the_first_one_served() {
+        let gateway = gateway_serving(GATEWAY_INGRESS_PROTOCOLS);
+        assert_eq!(
+            gateway.served_protocols(),
+            vec!["anthropic-messages", "openai-responses", "openai-chat"],
+            "this test proves nothing unless the gateway really serves all three"
+        );
+
+        for (harness, expected) in [
+            (IntegrationId::ClaudeCode, "anthropic-messages"),
+            (IntegrationId::Codex, "openai-responses"),
+        ] {
+            let adapter = adapter_for(harness).expect("a harness");
+            let mut profile = profile_for(harness);
+            profile.backend = BackendResource::GlasshouseGateway;
+
+            let overlay = resolve_with_gateway(
+                &profile,
+                &native_cx(adapter, false, &FakeSecrets::empty()),
+                Some(&gateway),
+            )
+            .unwrap_or_else(|err| panic!("{harness:?} did not resolve: {err}"));
+
+            let note = overlay
+                .mechanisms()
+                .iter()
+                .find(|note| note.category == "glasshouse gateway")
+                .unwrap_or_else(|| panic!("{harness:?} recorded no gateway mechanism"));
+            assert!(
+                note.detail.contains(expected),
+                "{harness:?} was given the wrong protocol: {}",
+                note.detail
+            );
+        }
+    }
+
+    /// The target table and the protocol list are two halves of one fact,
+    /// and nothing else checks that they agree.
+    ///
+    /// [`ingress_targets`] is a `match` on [`WireProtocol`], so the compiler
+    /// already refuses to let a protocol go unlisted. What it cannot check
+    /// is that each entry is **non-empty** and **distinct** — a protocol
+    /// whose targets were an empty slice would be declared served and would
+    /// place no request at all, and two protocols sharing a prefix would
+    /// make routing depend on declaration order.
+    #[test]
+    fn the_ingress_target_table_covers_every_protocol_the_gateway_serves() {
+        let mut seen: Vec<&str> = Vec::new();
+        for protocol in GATEWAY_INGRESS_PROTOCOLS {
+            let targets = ingress_targets(*protocol);
+            assert!(
+                !targets.is_empty(),
+                "{protocol} declares no request target, so nothing could ever be routed to it"
+            );
+            for target in targets {
+                assert!(
+                    target.starts_with('/'),
+                    "{protocol}'s target {target:?} is not a path"
+                );
+                assert!(
+                    !seen.contains(target),
+                    "{target:?} is declared by two protocols, so routing would depend on the \
+                     order they happen to be listed in"
+                );
+                seen.push(target);
+            }
+        }
+        assert_eq!(GATEWAY_INGRESS_PROTOCOLS.len(), 3);
     }
 
     /// Phase 9G's line 1 for Claude Code, end to end at the resolution
@@ -1546,10 +1830,20 @@ mod tests {
         );
     }
 
-    /// The ingress speaks one protocol, and a harness that cannot be pointed
-    /// at it is refused rather than pointed at it anyway. Codex declares
-    /// `openai-responses`; there is no Responses ingress in this phase, and
-    /// the map lists it as a separate line.
+    /// A harness the *running* gateway cannot carry is refused rather than
+    /// pointed at it anyway.
+    ///
+    /// This test used to hold because there was no OpenAI Responses ingress
+    /// at all. There is one now, and it still holds — for the reason that
+    /// actually matters. The ingress can serve Responses; **this** gateway
+    /// does not, because the one provider behind it declares no Responses
+    /// base URL. Codex declares `openai-responses` and nothing else, so the
+    /// refusal comes before a child process exists, rather than as a `404`
+    /// on the harness's first request.
+    ///
+    /// Lose this and `apply_gateway` starts refusing against
+    /// [`GATEWAY_INGRESS_PROTOCOLS`] — what the ingress *could* serve — and
+    /// a Codex session comes up pointed at a gateway with no route for it.
     #[test]
     fn a_harness_that_cannot_speak_the_ingress_protocol_is_refused() {
         let adapter = adapter_for(IntegrationId::Codex).expect("a harness");
@@ -1616,10 +1910,27 @@ mod tests {
             "the upstream's own rendering carried the credential it holds"
         );
 
-        // Nothing serving the ingress at all.
-        let chat_only = provider_serving("chat", WireProtocol::OpenAiChat, "https://a.example/v1");
+        // A provider serving only OpenAI Chat is a candidate now: the
+        // ingress serves that protocol too, and this is the line that
+        // changed when it started to. Before, it was the example of
+        // "serves nothing the ingress offers".
+        let mut chat_only =
+            provider_serving("chat", WireProtocol::OpenAiChat, "https://a.example/v1");
+        chat_only.credential_env = vec![CREDENTIAL_VAR.to_owned()];
+        let chat_upstream = gateway_upstream(std::slice::from_ref(&chat_only), &secrets)
+            .expect("a provider serving one ingress protocol backs the gateway");
+        assert_eq!(chat_upstream.served_protocols(), vec!["openai-chat"]);
+
+        // Nothing serving the ingress at all: a provider that serves none of
+        // the three, and no provider whatsoever.
+        let none = provider_serving(
+            "unrelated",
+            WireProtocol::OpenAiChat,
+            // Serving the protocol without declaring where is not serving it.
+            "",
+        );
         assert!(matches!(
-            gateway_upstream(std::slice::from_ref(&chat_only), &secrets),
+            gateway_upstream(std::slice::from_ref(&none), &secrets),
             Err(GatewayUpstreamRefusal::NoProviderServesTheIngress { .. })
         ));
         assert!(matches!(

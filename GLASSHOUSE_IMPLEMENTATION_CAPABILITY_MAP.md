@@ -484,8 +484,8 @@ Fixed architectural requirements
 ☑ Never expose provider API keys to a child harness when the local gateway can hold the credential itself.
 ☑ Keep provider credentials inside the Glasshouse process or secure secret-store boundary.
 ☑ Expose an Anthropic Messages-compatible ingress for gateway-backed Claude Code profiles when implemented.
-☐ Expose an OpenAI Responses-compatible ingress for gateway-backed Codex profiles when implemented.
-☐ Expose an OpenAI Chat-compatible ingress for compatible disposable jobs and harnesses when implemented.
+☑ Expose an OpenAI Responses-compatible ingress for gateway-backed Codex profiles when implemented.
+☑ Expose an OpenAI Chat-compatible ingress for compatible disposable jobs and harnesses when implemented.
 ☑ Require every interactive gateway ingress to be consumed through a compatible installed harness launch profile.
 ☑ Preserve streaming end-to-end through the gateway.
 ☑ Preserve tool-call payloads without lossy rewriting when the backend speaks the same protocol.

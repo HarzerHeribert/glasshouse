@@ -55,15 +55,15 @@
 //!   its own comment explaining why: it strips `/v1` from the OpenAI base
 //!   URL because Claude Code appends `/v1/messages` itself.
 //!
-//! **Kilo, Nous and RouterAI are deliberately not templates here.** The user
-//! holds a credential for each, but no endpoint has been established for any
-//! of the three — no real installation and no documentation page was read for
-//! them the way it was for the providers in [`templates`]. A template with an
-//! invented base URL would be the same failure Phase 9A already refuses for
-//! an invented environment-variable name. All three are reachable today
-//! through the generic `openai-compatible` template once someone reads a real
-//! endpoint from the service's own documentation; do not "helpfully" guess
-//! one in the meantime.
+//! **Kilo and Nous are deliberately not templates here.** The user holds a
+//! credential for each, but no endpoint has been established for either — no
+//! real installation and no documentation page was read for them the way it
+//! was for the providers in [`templates`]. A template with an invented base
+//! URL would be the same failure Phase 9A already refuses for an invented
+//! environment-variable name. Both are reachable today through the generic
+//! `openai-compatible` template once someone reads a real endpoint from the
+//! service's own documentation; do not "helpfully" guess one in the
+//! meantime.
 
 use crate::harness::{Declared, WireProtocol};
 use crate::secret::SecretRef;
@@ -174,6 +174,32 @@ pub fn templates() -> Vec<Provider> {
             name: "openrouter".to_owned(),
             protocols: vec![
                 unverified_support(WireProtocol::OpenAiChat, "https://openrouter.ai/api/v1"),
+                // OpenRouter serves OpenAI Responses too, and this entry is
+                // what makes it usable: `crate::config` lets a user override
+                // a provider's base URL and credential variable but never
+                // its protocols, so a protocol no template declares is a
+                // protocol nothing can be configured for — and Codex 0.149.1
+                // speaks Responses and nothing else.
+                //
+                // Established by empty-body `POST`s against the live service
+                // on 2026-08-26, with a control: `/v1/responses`,
+                // `/v1/chat/completions` and `/v1/messages` each answered
+                // `400` (the route exists, the body was rejected) while
+                // `/v1/definitely-not-a-real-endpoint` answered `404`.
+                // Without that control a `400` would prove nothing. The
+                // `/v1` is on the base URL because an OpenAI-shaped client
+                // appends `/responses` itself — Codex 0.149.1 pointed at a
+                // path-less base URL was observed sending exactly
+                // `POST /responses`.
+                //
+                // Still `unverified_support`: the probe established that the
+                // route exists, and nothing about streaming, tool calls or
+                // reasoning, so those stay Unverified rather than being
+                // upgraded by association.
+                unverified_support(
+                    WireProtocol::OpenAiResponses,
+                    "https://openrouter.ai/api/v1",
+                ),
                 // See the module documentation's "OpenRouter serves Anthropic
                 // Messages too" entry for both sources. The root, with no
                 // `/v1` — Claude Code appends `/v1/messages` itself.
@@ -353,11 +379,6 @@ const DELIBERATELY_UNTEMPLATED: &[(&str, &str)] = &[
         "the user holds a credential for Nous, but no endpoint has been read from a real \
          installation or Nous's own documentation",
     ),
-    (
-        "routerai",
-        "the user holds a credential for RouterAI, but no endpoint has been read from a real \
-         installation or RouterAI's own documentation",
-    ),
 ];
 
 #[cfg(test)]
@@ -414,14 +435,43 @@ mod tests {
         assert_ne!(chat.base_url, anthropic.base_url);
     }
 
+    /// Line 408. Serving OpenAI Chat says nothing about serving OpenAI
+    /// Responses; they are two protocols that happen to share a vendor.
+    ///
+    /// This test used to make the point with the `openrouter` template,
+    /// which declared Chat and not Responses. It cannot any more:
+    /// OpenRouter's Responses route was **separately established** — an
+    /// empty-body `POST` to `https://openrouter.ai/api/v1/responses`
+    /// answered `400` where an unknown path answered `404` — so that
+    /// template now declares both, and it declares them because each was
+    /// probed rather than because one implied the other. Using it here would
+    /// have quietly turned this rule into a description of one provider's
+    /// catalogue.
+    ///
+    /// So the rule is asserted against a provider built to serve Chat and
+    /// nothing else, and against a real template that is still exactly that
+    /// — which is what makes this a rule rather than a snapshot.
     #[test]
     fn openai_chat_support_never_implies_openai_responses() {
-        // Line 408. OpenRouter's real, established shape: openai-chat only.
-        let openrouter = template("openrouter").expect("openrouter is a built-in template");
-        assert!(openrouter.serves(WireProtocol::OpenAiChat).is_some());
+        let chat_only = Provider {
+            name: "chat-only".to_owned(),
+            protocols: vec![support(WireProtocol::OpenAiChat, "https://a.example/v1")],
+            model_list_endpoint: Declared::Unverified,
+            usage_telemetry: Declared::Unverified,
+            credential_env: vec![],
+            headers: vec![],
+        };
+        assert!(chat_only.serves(WireProtocol::OpenAiChat).is_some());
         assert!(
-            openrouter.serves(WireProtocol::OpenAiResponses).is_none(),
+            chat_only.serves(WireProtocol::OpenAiResponses).is_none(),
             "a provider serving only openai-chat must not answer for openai-responses"
+        );
+
+        let unorouter = template("unorouter").expect("unorouter is a built-in template");
+        assert!(unorouter.serves(WireProtocol::OpenAiChat).is_some());
+        assert!(
+            unorouter.serves(WireProtocol::OpenAiResponses).is_none(),
+            "a template whose Responses route nobody has probed must not declare one"
         );
     }
 
@@ -509,6 +559,52 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// OpenRouter is the one configured provider that can back every
+    /// ingress the Phase 9G gateway serves, and this pins each protocol to
+    /// the base URL a request for it is actually appended to.
+    ///
+    /// The three URLs are not interchangeable and the difference is not
+    /// cosmetic: an OpenAI-shaped client appends `/responses` or
+    /// `/chat/completions` to its base URL, so those two carry the `/v1`,
+    /// while Claude Code appends `/v1/messages` itself, so Anthropic
+    /// Messages must be the root or the `/v1` is doubled. A gateway holding
+    /// one base URL for all three would have to get two of them wrong.
+    ///
+    /// Lose this and the Responses entry can silently acquire the Anthropic
+    /// root, and every Codex request through the gateway goes to
+    /// `https://openrouter.ai/api/responses` — a path the service answers
+    /// `404` for, which the harness would report as a model error.
+    #[test]
+    fn openrouter_declares_every_gateway_ingress_protocol_at_its_own_base_url() {
+        let openrouter = template("openrouter").expect("openrouter is a built-in template");
+        for (protocol, base_url) in [
+            (
+                WireProtocol::OpenAiResponses,
+                "https://openrouter.ai/api/v1",
+            ),
+            (WireProtocol::OpenAiChat, "https://openrouter.ai/api/v1"),
+            (WireProtocol::AnthropicMessages, "https://openrouter.ai/api"),
+        ] {
+            let support = openrouter
+                .serves(protocol)
+                .unwrap_or_else(|| panic!("openrouter must serve {protocol}"));
+            assert_eq!(
+                support.base_url, base_url,
+                "{protocol} is declared at the wrong base URL"
+            );
+        }
+
+        // ... and the entry is honest about what the probe established: a
+        // route exists. Nothing was learned about streaming, tool calls or
+        // reasoning, so nothing may claim to have been.
+        let responses = openrouter
+            .serves(WireProtocol::OpenAiResponses)
+            .expect("checked above");
+        assert_eq!(responses.streaming, Declared::Unverified);
+        assert_eq!(responses.tool_calls, Declared::Unverified);
+        assert_eq!(responses.reasoning, Declared::Unverified);
     }
 
     #[test]

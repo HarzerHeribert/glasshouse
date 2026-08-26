@@ -54,7 +54,7 @@ use ureq::{Agent, SendBody};
 
 use super::GatewayToken;
 use super::http::{self, HeadError};
-use super::upstream::Upstream;
+use super::upstream::{Route, Upstream};
 
 /// The `authorization` scheme the gateway accepts from a child harness.
 ///
@@ -101,7 +101,13 @@ pub(super) struct Exchange {
     pub(super) status: u16,
     /// The configured provider this gateway forwards to. A name.
     pub(super) provider: String,
-    /// The upstream host. A host: never a path, never a query.
+    /// The slug of the protocol the request target was placed in, or `None`
+    /// when it was refused before it could be placed. A name.
+    pub(super) protocol: Option<String>,
+    /// The upstream host **of the route that carried it**. A host: never a
+    /// path, never a query. Empty when no route was chosen, because there is
+    /// then no host this request was ever going to reach — and naming one
+    /// anyway would be the log asserting something that did not happen.
     pub(super) host: String,
 }
 
@@ -118,6 +124,11 @@ pub(super) enum Outcome {
     /// A request the gateway will not carry: malformed, oversized, or framed
     /// with `transfer-encoding` — see [`super::http::read_head`].
     Declined,
+    /// The request target belongs to none of the protocols this gateway's
+    /// upstream serves. **Nothing was opened upstream**: a target the
+    /// gateway cannot place is one it must not append to whichever base URL
+    /// was declared first.
+    Unrouted,
     /// The provider could not be reached at all, so there is no status to
     /// forward. `detail` is one of [`transport_detail`]'s fixed phrases —
     /// `&'static str`, so it is a string written in this file and can never
@@ -150,6 +161,7 @@ impl Exchange {
             } => ("forwarded", Some(*upstream_status), Some(*bytes), None),
             Outcome::Unauthenticated => ("unauthenticated", None, None, None),
             Outcome::Declined => ("declined", None, None, None),
+            Outcome::Unrouted => ("unrouted", None, None, None),
             Outcome::Unreachable { detail } => ("unreachable", None, None, Some(*detail)),
             Outcome::ClientGone => ("client-gone", None, None, None),
             Outcome::Idle => ("idle", None, None, None),
@@ -161,6 +173,7 @@ impl Exchange {
             bytes = ?bytes,
             detail = ?detail,
             provider = %self.provider,
+            protocol = ?self.protocol,
             host = %self.host,
             "glasshouse gateway exchange"
         );
@@ -189,7 +202,7 @@ pub(super) fn serve(
     // on Linux it does not. A non-blocking stream would turn every read here
     // into `WouldBlock` on two of the three platforms Glasshouse supports.
     if stream.set_nonblocking(false).is_err() {
-        return exchange(Outcome::ClientGone, 0, upstream);
+        return exchange(Outcome::ClientGone, 0, upstream, None);
     }
     let _ = stream.set_read_timeout(Some(HEAD_TIMEOUT));
     // Nagle's algorithm coalesces small writes and waits for an
@@ -203,23 +216,23 @@ pub(super) fn serve(
     let _ = stream.set_nodelay(true);
 
     let Ok(mut out) = stream.try_clone() else {
-        return exchange(Outcome::ClientGone, 0, upstream);
+        return exchange(Outcome::ClientGone, 0, upstream, None);
     };
     let mut reader = BufReader::new(stream);
 
     let head = match http::read_head(&mut reader) {
         Ok(head) => head,
-        Err(HeadError::Empty) => return exchange(Outcome::Idle, 0, upstream),
-        Err(HeadError::Io) => return exchange(Outcome::ClientGone, 0, upstream),
+        Err(HeadError::Empty) => return exchange(Outcome::Idle, 0, upstream, None),
+        Err(HeadError::Io) => return exchange(Outcome::ClientGone, 0, upstream, None),
         Err(error) => {
             let (status, kind, message) = decline(&error);
-            refuse(&mut out, status, kind, message);
+            refuse(&mut out, status, kind, message, None);
             // The client may still be writing the body of a request whose
             // head was already refused — a chunked one, for instance. Closing
             // now would reset the connection and the client would see a
             // network error instead of the status explaining what was wrong.
             settle(&mut reader, &mut out, None);
-            return exchange(Outcome::Declined, status.as_u16(), upstream);
+            return exchange(Outcome::Declined, status.as_u16(), upstream, None);
         }
     };
 
@@ -233,9 +246,10 @@ pub(super) fn serve(
             "this request did not carry the Glasshouse gateway's own token; a gateway ingress \
              is reachable only from a harness Glasshouse started under a gateway-backed launch \
              profile",
+            Some(&head.method),
         );
         settle(&mut reader, &mut out, head.content_length);
-        return exchange(Outcome::Unauthenticated, 401, upstream);
+        return exchange(Outcome::Unauthenticated, 401, upstream, None);
     }
 
     forward(head, reader, &mut out, upstream, agent)
@@ -245,8 +259,9 @@ pub(super) fn serve(
 ///
 /// Rewritten, and named here so that the list can be counted:
 ///
-/// 1. **the request target** is appended to the provider's declared base URL
-///    — [`Upstream::uri_for`];
+/// 1. **the request target** is appended to the base URL the provider
+///    declared *for the protocol that target belongs to* —
+///    [`Upstream::route_for`], then [`Route::uri_for`];
 /// 2. **`authorization`** is replaced by the provider's credential, attached
 ///    by the gateway — [`Upstream::authorization`];
 /// 3. **`host`** is dropped so that the outbound layer derives the upstream's
@@ -260,21 +275,89 @@ pub(super) fn serve(
 /// arrived on, and this is a different connection. `content-length` is among
 /// them and is re-stated below from the value the client declared, so the
 /// body is framed outbound exactly as it was framed inbound.
+///
+/// # Which protocol, and how that is decided
+///
+/// **By the request target, and by nothing else.** The gateway may serve
+/// Anthropic Messages, OpenAI Responses and OpenAI Chat at once, each with
+/// the base URL the one configured provider declared for it, and the target
+/// the harness wrote is what says which of them this request is. The
+/// alternative — looking at the body to see which protocol it reads like —
+/// is forbidden here twice over: it would make this module a parser of the
+/// payload it exists to be unable to distinguish from any other bytes, and a
+/// request whose shape was ambiguous would be *guessed* rather than placed.
+///
+/// A target belonging to no served protocol is answered with a `404` and
+/// **nothing is opened upstream**. That is a narrowing of what this gateway
+/// used to do — a single-protocol gateway appended every target to its one
+/// base URL — and it is the point rather than a side effect: with several
+/// base URLs available, "append it to the first one" sends a request
+/// somewhere nobody asked for it to go.
+///
+/// # What the narrowing costs, measured rather than assumed
+///
+/// Real harnesses do send targets outside their own protocol, and both were
+/// observed against a listener that recorded the request line:
+///
+/// - Claude Code 2.1.245 sends `HEAD /api/hello` before its first
+///   `/v1/messages`, and carries on unaffected after a non-2xx answer to it.
+/// - Codex 0.149.1 sends `GET /models?client_version=0.149.1` when it does
+///   not already hold metadata for the configured model. Under this rule
+///   those are refused, and Codex logs
+///   `failed to refresh available models: unexpected status 404 Not
+///   Found: <this refusal's message>` — twice per session, at `ERROR`
+///   level and visible to the user — then completes the session normally.
+///   A full live run through this gateway to OpenRouter returned its
+///   answer with exactly those two refusals recorded.
+///
+/// So the cost is real, it is user-visible, and it is a degradation rather
+/// than a breakage. It is **not** silently accepted, and the reason it is
+/// not simply routed is worth stating: `/models` is a catalogue endpoint
+/// that all three protocols define, and the two spellings a harness may use
+/// need *different* base URLs. Codex asks for `/models`, which only resolves
+/// against a base URL carrying `/v1`; Anthropic Messages is declared at a
+/// root without one, so the same request routed to that protocol would reach
+/// a path the provider answers `404` for anyway. Placing it therefore means
+/// choosing between OpenAI Responses and OpenAI Chat for a request that
+/// names neither — a tie-break invented without a concrete provider pair
+/// requiring it, which is the move the capability map's pass-through lines
+/// forbid.
+///
+/// The change, if a later phase decides the tie-break: add `/models` to
+/// `crate::profile::ingress_targets`' OpenAI Responses entry.
 fn forward(
     head: http::RequestHead,
-    reader: BufReader<TcpStream>,
+    mut reader: BufReader<TcpStream>,
     out: &mut TcpStream,
     upstream: &Upstream,
     agent: &Agent,
 ) -> Exchange {
-    let Some(uri) = upstream.uri_for(&head.target) else {
+    let Some(route) = upstream.route_for(&head.target) else {
+        refuse(
+            out,
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+            "this request target does not belong to any protocol the Glasshouse gateway is \
+             serving; a gateway ingress carries only the protocols the configured provider \
+             declares a base URL for, and forwards nothing it cannot place",
+            Some(&head.method),
+        );
+        // Drained before the socket closes for the same reason the `401`
+        // path drains: a client still writing a body would get a connection
+        // reset instead of the status that explains what was wrong.
+        settle(&mut reader, out, head.content_length);
+        return exchange(Outcome::Unrouted, 404, upstream, None);
+    };
+
+    let Some(uri) = route.uri_for(&head.target) else {
         refuse(
             out,
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             "the request target could not be appended to the configured provider's base URL",
+            Some(&head.method),
         );
-        return exchange(Outcome::Declined, 400, upstream);
+        return exchange(Outcome::Declined, 400, upstream, Some(route));
     };
 
     let mut request = Request::builder().method(head.method.clone()).uri(uri);
@@ -304,8 +387,9 @@ fn forward(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             "the request could not be rebuilt for the configured provider",
+            Some(&head.method),
         );
-        return exchange(Outcome::Declined, 400, upstream);
+        return exchange(Outcome::Declined, 400, upstream, Some(route));
     };
 
     let response = match agent.run(request) {
@@ -317,8 +401,9 @@ fn forward(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
                 "the Glasshouse gateway could not reach the configured provider",
+                Some(&head.method),
             );
-            return exchange(Outcome::Unreachable { detail }, 502, upstream);
+            return exchange(Outcome::Unreachable { detail }, 502, upstream, Some(route));
         }
     };
 
@@ -359,14 +444,14 @@ fn forward(
     headers.push(("connection".to_owned(), b"close".to_vec()));
 
     if http::write_head(out, status, &headers).is_err() {
-        return exchange(Outcome::ClientGone, status.as_u16(), upstream);
+        return exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route));
     }
 
     let mut moved = 0;
     if carries_body {
         match http::pump(body.as_reader(), out, chunked) {
             Ok(bytes) => moved = bytes,
-            Err(_) => return exchange(Outcome::ClientGone, status.as_u16(), upstream),
+            Err(_) => return exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route)),
         }
     } else {
         let _ = out.flush();
@@ -380,6 +465,7 @@ fn forward(
         },
         status.as_u16(),
         upstream,
+        Some(route),
     )
 }
 
@@ -500,10 +586,27 @@ fn decline(error: &HeadError) -> (StatusCode, &'static str, &'static str) {
 /// head is still a head someone wrote, and echoing it back is how prompt
 /// text ends up in a terminal scrollback. Nothing in this body is derived
 /// from anything the client sent.
-fn refuse(out: &mut TcpStream, status: StatusCode, kind: &str, message: &str) {
+fn refuse(
+    out: &mut TcpStream,
+    status: StatusCode,
+    kind: &str,
+    message: &str,
+    method: Option<&ureq::http::Method>,
+) {
     let body = format!(
         "{{\"type\":\"error\",\"error\":{{\"type\":\"{kind}\",\"message\":\"{message}\"}}}}"
     );
+    // A response to `HEAD` carries the headers a `GET` would have and none
+    // of the body, and a client that reads the body anyway reads it as the
+    // start of the next response. `forward` already applies this rule to a
+    // provider's answer; a refusal written here needs it just as much, and
+    // needs it more now — Claude Code 2.1.245's `HEAD /api/hello` belongs to
+    // no protocol, so the refusal above is the first response in this
+    // gateway's life that a `HEAD` can actually reach.
+    //
+    // `None` is a request whose head would not parse, so there is no method
+    // to honour and the body is the only thing that can explain why.
+    let carries_body = method != Some(&ureq::http::Method::HEAD);
     let headers = vec![
         ("content-type".to_owned(), b"application/json".to_vec()),
         (
@@ -513,7 +616,9 @@ fn refuse(out: &mut TcpStream, status: StatusCode, kind: &str, message: &str) {
         ("connection".to_owned(), b"close".to_vec()),
     ];
     if http::write_head(out, status, &headers).is_ok() {
-        let _ = out.write_all(body.as_bytes());
+        if carries_body {
+            let _ = out.write_all(body.as_bytes());
+        }
         let _ = out.flush();
     }
 }
@@ -547,12 +652,18 @@ fn status_carries_a_body(status: StatusCode) -> bool {
 }
 
 /// One [`Exchange`], with the upstream's non-secret identity filled in.
-fn exchange(outcome: Outcome, status: u16, upstream: &Upstream) -> Exchange {
+///
+/// `route` is `None` for everything refused before a target could be placed.
+/// It is not defaulted to the first route: a log that named a protocol and a
+/// host for a request that never reached either would be inventing the one
+/// fact it exists to record.
+fn exchange(outcome: Outcome, status: u16, upstream: &Upstream, route: Option<&Route>) -> Exchange {
     Exchange {
         outcome,
         status,
         provider: upstream.provider().to_owned(),
-        host: upstream.host(),
+        protocol: route.map(|route| route.protocol().to_owned()),
+        host: route.map(Route::host).unwrap_or_default(),
     }
 }
 
@@ -701,11 +812,13 @@ mod tests {
             },
             Outcome::ClientGone,
             Outcome::Idle,
+            Outcome::Unrouted,
         ] {
             let exchange = Exchange {
                 outcome,
                 status: 429,
                 provider: "openrouter".to_owned(),
+                protocol: Some("anthropic-messages".to_owned()),
                 host: "openrouter.ai".to_owned(),
             };
             let line = recorded(&exchange);

@@ -89,7 +89,7 @@ use anyhow::{Context, Result};
 use crate::profile::{BackendResource, LaunchProfile};
 use crate::secret::REDACTED;
 
-pub use upstream::{Upstream, UpstreamError};
+pub use upstream::{Route, Upstream, UpstreamError};
 
 /// The only interface a Glasshouse gateway ever binds.
 ///
@@ -238,6 +238,11 @@ impl fmt::Debug for GatewayToken {
 pub struct Gateway {
     address: SocketAddr,
     token: Arc<GatewayToken>,
+    /// Shared with the accept loop rather than moved into it, so that a
+    /// launch profile can ask what this gateway actually serves. Its
+    /// [`Debug`](fmt::Debug) renders the credential's redaction marker, not
+    /// the credential — see [`Upstream`].
+    upstream: Arc<Upstream>,
     /// Set by [`Drop`]; read by the accept loop every [`ACCEPT_POLL`].
     stop: Arc<AtomicBool>,
     /// `None` only after [`Drop`] has taken it.
@@ -265,13 +270,14 @@ impl Gateway {
 
         let token = Arc::new(GatewayToken::generate()?);
         let stop = Arc::new(AtomicBool::new(false));
+        let upstream = Arc::new(upstream);
 
         let accept = std::thread::Builder::new()
             .name("glasshouse-gateway-accept".to_owned())
             .spawn({
                 let token = Arc::clone(&token);
                 let stop = Arc::clone(&stop);
-                let upstream = Arc::new(upstream);
+                let upstream = Arc::clone(&upstream);
                 move || accept_loop(listener, stop, token, upstream)
             })
             .context("could not start the local Glasshouse gateway's accept thread")?;
@@ -279,6 +285,7 @@ impl Gateway {
         Ok(Self {
             address,
             token,
+            upstream,
             stop,
             accept: Some(accept),
         })
@@ -303,6 +310,23 @@ impl Gateway {
     /// This instance's authentication token.
     pub fn token(&self) -> &GatewayToken {
         &self.token
+    }
+
+    /// The slug of every wire protocol this gateway's ingress can actually
+    /// carry.
+    ///
+    /// Not the same list as [`crate::profile::GATEWAY_INGRESS_PROTOCOLS`],
+    /// and that difference is the point: that constant says what the ingress
+    /// *knows how to serve*, while this says what the one configured
+    /// provider declared a base URL for. A launch profile has to refuse
+    /// against the second, or a harness would be started against an ingress
+    /// that would answer its first request with a `404`.
+    ///
+    /// Slugs rather than a protocol enum because no file in this directory
+    /// may name [`mod@crate::harness`] — see this module's header. The
+    /// caller that reads them is `crate::profile`, which can.
+    pub fn served_protocols(&self) -> Vec<&str> {
+        self.upstream.served_protocols()
     }
 }
 
@@ -470,13 +494,23 @@ mod tests {
 
     /// A gateway pointed at `fixture`, holding [`PROVIDER_CREDENTIAL`].
     fn gateway_to(fixture: &FixtureUpstream) -> Gateway {
-        let upstream = Upstream::new(
+        Gateway::start(anthropic_upstream_to(&fixture.base_url())).expect("loopback is bindable")
+    }
+
+    /// An upstream serving Anthropic Messages at `base_url` and nothing
+    /// else — the shape every test in this module written before the
+    /// ingress served more than one protocol assumes.
+    fn anthropic_upstream_to(base_url: &str) -> Upstream {
+        Upstream::new(
             "fixture".to_owned(),
-            &fixture.base_url(),
+            vec![Route::new(
+                "anthropic-messages".to_owned(),
+                &["/messages"],
+                base_url,
+            )],
             Secret::mint_for_test(PROVIDER_CREDENTIAL),
         )
-        .expect("the fixture's base URL is absolute");
-        Gateway::start(upstream).expect("loopback is bindable")
+        .expect("the fixture's base URL is absolute")
     }
 
     /// The bytes a Claude Code child sends: a bearer token, a JSON body, and
@@ -694,14 +728,9 @@ mod tests {
     fn a_profile_backed_by_the_gateway_binds_a_listener() {
         let fixture = FixtureUpstream::answering("HTTP/1.1 200 OK", "", "{}");
         let profiles = [profile_backed_by(BackendResource::GlasshouseGateway)];
-        let started = start_if_required(&profiles, || {
-            Ok(Upstream::new(
-                "fixture".to_owned(),
-                &fixture.base_url(),
-                Secret::mint_for_test(PROVIDER_CREDENTIAL),
-            )?)
-        })
-        .expect("loopback is bindable");
+        let started =
+            start_if_required(&profiles, || Ok(anthropic_upstream_to(&fixture.base_url())))
+                .expect("loopback is bindable");
         assert!(
             started.is_some(),
             "a gateway-backed profile did not produce a gateway"

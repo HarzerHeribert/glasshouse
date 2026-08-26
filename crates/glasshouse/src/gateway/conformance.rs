@@ -31,7 +31,27 @@
 //! 3. **No rendering carries either secret.** Every `Debug` this module can
 //!    reach, every response byte the client was sent, and the transport
 //!    error's own detail, scanned for a planted provider credential and for a
-//!    gateway token.
+//!    gateway token. Asserted twice: once over the paths a single-protocol
+//!    gateway had, and once over the three-protocol ones, because a routed
+//!    exchange and a refused-before-routing one render different fields.
+//! 4. **A request reaches the base URL its own protocol declared, and no
+//!    other.** The gateway serves up to three wire protocols from one
+//!    provider, each with its own base URL, and chooses between them on the
+//!    request target alone. The load-bearing half of every assertion here is
+//!    the negative one — the *other* base URLs were never connected to —
+//!    because the implementation this replaced appended every target to a
+//!    single base URL and would pass the positive half for all three.
+//! 5. **Streaming survives on every ingress.** The Anthropic path's twin of
+//!    this lives in [`mod@super`]; a gateway that started buffering only the
+//!    two new ones would leave that test green. The fixture blocks until the
+//!    client says it has the first chunk, so a buffering implementation
+//!    cannot produce the second one at all.
+//! 6. **A target belonging to no served protocol is refused, and nothing is
+//!    opened upstream.** Claude Code sends one such target before its first
+//!    request. The assertion is on the fixtures' *connection counts*: a
+//!    gateway that opened a connection, thought better of it and answered
+//!    `404` would pass an assertion on the status and would still have sent
+//!    a request somewhere nobody asked for it to go.
 //!
 //! # Two planted values, and why the token is planted twice
 //!
@@ -53,15 +73,39 @@
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::sync::{Mutex, mpsc};
 use std::time::Duration;
 
 use ureq::Agent;
 
-use super::fixture::FixtureUpstream;
+use super::fixture::{FixtureUpstream, RecordedRequest};
 use super::ingress::{Exchange, Outcome, serve};
-use super::upstream::{Upstream, agent};
+use super::upstream::{Route, Upstream, agent};
 use super::{Gateway, GatewayToken};
 use crate::secret::{REDACTED, Secret, redact};
+
+/// The three protocols the ingress can serve, spelled as `crate::profile`
+/// composes them: a [`crate::harness::WireProtocol`] slug, and the request
+/// targets that belong to it.
+///
+/// Written out here rather than imported because this suite must be able to
+/// build an upstream that serves an arbitrary subset of them, and because
+/// the module under test cannot name `crate::harness` at all.
+/// `crate::profile`'s `the_ingress_target_table_covers_every_protocol_the_gateway_serves`
+/// is what holds these two spellings together.
+const ANTHROPIC_MESSAGES: &str = "anthropic-messages";
+const OPENAI_RESPONSES: &str = "openai-responses";
+const OPENAI_CHAT: &str = "openai-chat";
+
+/// The request targets that belong to a protocol slug.
+fn targets_for(protocol: &str) -> &'static [&'static str] {
+    match protocol {
+        ANTHROPIC_MESSAGES => &["/messages"],
+        OPENAI_RESPONSES => &["/responses"],
+        OPENAI_CHAT => &["/chat/completions"],
+        other => panic!("no ingress targets are declared for {other:?}"),
+    }
+}
 
 /// The provider credential every upstream here holds.
 ///
@@ -155,11 +199,28 @@ const TOOL_CALL_BODY: &str = concat!(
 
 // --- fixtures, upstreams and clients ----------------------------------------
 
-/// An [`Upstream`] holding [`PROVIDER_CREDENTIAL`] and pointed at `base_url`.
+/// An [`Upstream`] holding [`PROVIDER_CREDENTIAL`], serving Anthropic
+/// Messages at `base_url` and nothing else.
+///
+/// One route, because that is the shape every test written before there was
+/// more than one ingress protocol assumes, and those tests are the record
+/// that the Anthropic path did not change. The multi-protocol shape is
+/// [`upstream_serving`].
 fn upstream_at(base_url: &str) -> Upstream {
+    upstream_serving(&[(ANTHROPIC_MESSAGES, base_url)])
+}
+
+/// An [`Upstream`] holding [`PROVIDER_CREDENTIAL`] and serving one route per
+/// `(protocol slug, base URL)` pair.
+fn upstream_serving(routes: &[(&str, &str)]) -> Upstream {
     Upstream::new(
         "fixture".to_owned(),
-        base_url,
+        routes
+            .iter()
+            .map(|(protocol, base_url)| {
+                Route::new((*protocol).to_owned(), targets_for(protocol), base_url)
+            })
+            .collect(),
         Secret::mint_for_test(PROVIDER_CREDENTIAL),
     )
     .expect("a loopback http URL is absolute and this credential is header-safe")
@@ -215,8 +276,12 @@ fn messages_request(token: &str, body: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// Send `raw` to `address` and read everything that comes back, to the close.
-fn send_and_read(address: SocketAddr, raw: &[u8]) -> Vec<u8> {
+/// Send `raw` to `address` and hand back the connection, still open.
+///
+/// The open socket is what a streaming assertion needs: reading it to the
+/// close would answer "did every byte arrive" and never "did the first one
+/// arrive before the last was written", and only the second is streaming.
+fn send(address: SocketAddr, raw: &[u8]) -> TcpStream {
     let mut client = TcpStream::connect(address).expect("the gateway accepts connections");
     client
         .set_read_timeout(Some(CLIENT_TIMEOUT))
@@ -225,6 +290,12 @@ fn send_and_read(address: SocketAddr, raw: &[u8]) -> Vec<u8> {
         .write_all(raw)
         .expect("the gateway reads the request");
     client.flush().expect("the gateway reads the request");
+    client
+}
+
+/// Send `raw` to `address` and read everything that comes back, to the close.
+fn send_and_read(address: SocketAddr, raw: &[u8]) -> Vec<u8> {
+    let mut client = send(address, raw);
     let mut received = Vec::new();
     client
         .read_to_end(&mut received)
@@ -858,6 +929,781 @@ fn carries_no_planted_secret(what: &str, rendering: &str, minted: &GatewayToken)
             "{what} carried {leak}. A prefix or a suffix is not a cosmetic leak — it is the \
              search space an attacker no longer has to cover — and the value is deliberately not \
              printed here, because printing it would publish it to whatever collected this output."
+        );
+    }
+}
+
+// --- 4. one ingress per protocol, chosen by the request target --------------
+
+/// Every protocol this suite builds a gateway over, in the order the routes
+/// are declared.
+///
+/// Order matters to what these tests prove rather than to what they do: a
+/// gateway that ignored the request target and appended everything to the
+/// **first** declared base URL is the implementation this whole section
+/// exists to fail, and it would pass every positive assertion below if the
+/// protocol under test were always declared first.
+const PROTOCOLS: [&str; 3] = [ANTHROPIC_MESSAGES, OPENAI_RESPONSES, OPENAI_CHAT];
+
+/// What a base URL that must never be reached answers with.
+///
+/// A marker rather than an ordinary body, so a request that went to the
+/// wrong ingress fails twice and legibly: once on the connection count, and
+/// once on a client that reads this instead of what it asked for.
+const WRONG_INGRESS_BODY: &str = "{\"reached\":\"WRONG-INGRESS-BASE-URL\"}";
+
+/// An OpenAI Responses request body, in the shape Codex sends one.
+///
+/// Non-ASCII on purpose: its byte length and its character length disagree,
+/// so the `content-length` assertions on the new ingresses are the same
+/// statement about framing that [`TOOL_CALL_BODY`] makes about the Anthropic
+/// one.
+const RESPONSES_BODY: &str = concat!(
+    r#"{"model":"gpt-5-codex","stream":true,"input":[{"role":"user","#,
+    r#""content":[{"type":"input_text","text":"Grüße — 日本語 🔧"}]}]}"#
+);
+
+/// An OpenAI Chat Completions request body, non-ASCII for the same reason.
+const CHAT_BODY: &str = concat!(
+    r#"{"model":"gpt-4.1","stream":true,"messages":[{"role":"user","#,
+    r#""content":"Grüße — 日本語 🔧"}]}"#
+);
+
+/// How long a streaming fixture waits for the client to say it has the first
+/// chunk before giving up and writing the marker that fails the test.
+///
+/// Shorter than [`CLIENT_TIMEOUT`] on purpose, and by a wide margin: a
+/// buffering gateway must be observed *failing this assertion* rather than
+/// timing the client out first, because a client timeout is a flake and a
+/// marker in the body is a diagnosis.
+const STREAM_WAIT: Duration = Duration::from_secs(20);
+
+/// One canned upstream per protocol the gateway serves.
+///
+/// Three, rather than the one every test above uses, because the
+/// load-bearing half of a routing assertion is negative: a request reached
+/// *this* base URL **and no other**. One fixture can only ever show the
+/// first half, and the single-base-URL gateway this replaced satisfies the
+/// first half for every target there is.
+struct Fixtures {
+    /// One `(protocol slug, fixture)` pair per served protocol, in
+    /// [`PROTOCOLS`] order.
+    served: Vec<(&'static str, FixtureUpstream)>,
+}
+
+impl Fixtures {
+    /// Three fixtures, each answering every request with the same `200`.
+    fn answering_ok() -> Self {
+        Self {
+            served: PROTOCOLS
+                .iter()
+                .map(|protocol| {
+                    (
+                        *protocol,
+                        FixtureUpstream::answering(
+                            "HTTP/1.1 200 OK",
+                            "content-type: application/json\r\n",
+                            "{\"ok\":true}",
+                        ),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Three fixtures, with `protocol`'s driven by `responder` and the other
+    /// two answering [`WRONG_INGRESS_BODY`].
+    ///
+    /// The other two exist even though the test is about one of them: a
+    /// streaming assertion that held only because the request went somewhere
+    /// else entirely would otherwise be indistinguishable from one that held
+    /// for the reason it claims.
+    fn driven_by(
+        protocol: &'static str,
+        responder: impl Fn(&RecordedRequest, &mut TcpStream) + Send + Sync + 'static,
+    ) -> Self {
+        let mut responder = Some(responder);
+        Self {
+            served: PROTOCOLS
+                .iter()
+                .map(|served| {
+                    let fixture = if *served == protocol {
+                        FixtureUpstream::start(
+                            responder
+                                .take()
+                                .expect("exactly one fixture stands in for the driven protocol"),
+                        )
+                    } else {
+                        FixtureUpstream::answering(
+                            "HTTP/1.1 200 OK",
+                            "content-type: application/json\r\n",
+                            WRONG_INGRESS_BODY,
+                        )
+                    };
+                    (*served, fixture)
+                })
+                .collect(),
+        }
+    }
+
+    /// An [`Upstream`] serving every protocol, each routed to its own
+    /// fixture and all of them holding the one [`PROVIDER_CREDENTIAL`].
+    fn upstream(&self) -> Upstream {
+        let base_urls: Vec<(&str, String)> = self
+            .served
+            .iter()
+            .map(|(protocol, fixture)| (*protocol, fixture.base_url()))
+            .collect();
+        let routes: Vec<(&str, &str)> = base_urls
+            .iter()
+            .map(|(protocol, base_url)| (*protocol, base_url.as_str()))
+            .collect();
+        upstream_serving(&routes)
+    }
+
+    /// A real running [`Gateway`], with its own minted token, in front of all
+    /// three.
+    fn gateway(&self) -> Gateway {
+        Gateway::start(self.upstream()).expect("loopback is bindable")
+    }
+
+    /// The fixture standing in for `protocol`'s base URL.
+    fn at(&self, protocol: &str) -> &FixtureUpstream {
+        self.served
+            .iter()
+            .find(|(served, _)| *served == protocol)
+            .map(|(_, fixture)| fixture)
+            .unwrap_or_else(|| panic!("no fixture stands in for {protocol}"))
+    }
+
+    /// The one request that reached `protocol`'s base URL — failing unless
+    /// no other base URL was ever **connected to**.
+    fn only_request_to(&self, protocol: &str) -> RecordedRequest {
+        for (served, fixture) in &self.served {
+            if *served == protocol {
+                continue;
+            }
+            assert_eq!(
+                fixture.connections(),
+                0,
+                "a request that belongs to {protocol} opened a connection to the {served} base \
+                 URL. A gateway serving several protocols from one provider has a different base \
+                 URL for each, and a request sent to the wrong one is a request sent somewhere \
+                 nobody asked for it to go"
+            );
+        }
+        let mut arrived = self.at(protocol).requests();
+        assert_eq!(
+            arrived.len(),
+            1,
+            "the {protocol} base URL received a number of requests other than the one that was \
+             sent to it"
+        );
+        arrived.remove(0)
+    }
+
+    /// Fail unless **nothing at all** was opened at any base URL.
+    ///
+    /// The assertion is on connections rather than on requests: a gateway
+    /// that opened a socket to a provider and then thought better of it has
+    /// still told that provider a Glasshouse instance is here, and would
+    /// leave no request behind to say so.
+    fn nothing_was_opened(&self, what: &str) {
+        for (served, fixture) in &self.served {
+            assert_eq!(
+                fixture.connections(),
+                0,
+                "{what} opened a connection to the {served} base URL. A target the gateway cannot \
+                 place must be refused before anything upstream exists — otherwise the provider \
+                 sees traffic for a request the gateway had already decided it would not carry"
+            );
+        }
+    }
+}
+
+/// The bytes a harness sends: a method, a request target, a bearer token and
+/// an optional JSON body framed by its **byte** length.
+///
+/// Separate from [`messages_request`] rather than a generalisation of it.
+/// That one carries `anthropic-version`, which belongs to one protocol and
+/// would be a lie on the other two, and it is the exact spelling every test
+/// written before there was more than one ingress asserts against.
+fn request_for(method: &str, target: &str, token: &str, body: Option<&str>) -> Vec<u8> {
+    let head = format!(
+        "{method} {target} HTTP/1.1\r\n\
+         Host: 127.0.0.1\r\n\
+         Authorization: Bearer {token}\r\n"
+    );
+    match body {
+        Some(body) => format!(
+            "{head}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+        None => format!("{head}\r\n"),
+    }
+    .into_bytes()
+}
+
+/// Fail unless the provider received the credential the upstream holds, and
+/// nothing of the token the child presented.
+///
+/// Both halves are one property: the child is given the gateway's own token
+/// *instead of* the credential, so a provider that received the token would
+/// have been handed the value that proves a request came from a harness this
+/// instance started.
+///
+/// Compared with `assert!` on an equality rather than with `assert_eq!`, and
+/// the failure message prints neither side. A failing `assert_eq!` renders
+/// both, and one of them is the credential — which would publish it to
+/// whatever collected the test output.
+fn carries_the_provider_credential_and_not_the_childs_token(
+    request: &RecordedRequest,
+    presented: &str,
+) {
+    let attached = request.header("authorization");
+    assert!(
+        attached.is_some(),
+        "the provider received no authorization header at all, so the gateway forwarded a request \
+         the provider has no way to authenticate"
+    );
+    let expected = format!("Bearer {PROVIDER_CREDENTIAL}");
+    assert!(
+        attached == Some(expected.as_str()),
+        "the provider did not receive the credential the upstream holds; the two values are \
+         deliberately not printed here"
+    );
+    for (name, value) in &request.headers {
+        assert!(
+            !value.contains(presented),
+            "the token the child presented survived to the provider in the {name} header. The \
+             gateway exists so that the child holds a value worthless off this machine and the \
+             provider holds one that is not; forwarding the child's own reverses that"
+        );
+    }
+}
+
+/// Lose this and a Codex child pointed at a Glasshouse gateway has its
+/// `/responses` request appended to whichever base URL happened to be
+/// declared first — most likely the provider's Anthropic Messages endpoint,
+/// which answers a Responses payload with a `4xx` naming neither the reason
+/// nor the gateway. Worse, it is a request sent to an endpoint nobody asked
+/// for it to go to, carrying the user's prompt.
+///
+/// Both spellings, because whether a harness sends `/v1` depends on its own
+/// idea of where its base URL ends and not on the protocol: Codex 0.149.1
+/// pointed at a path-less base URL — the only kind [`Gateway::base_url`]
+/// hands out — really does send `POST /responses`.
+#[test]
+fn a_responses_request_reaches_the_responses_base_url_and_opens_no_other() {
+    for target in ["/responses", "/v1/responses"] {
+        let fixtures = Fixtures::answering_ok();
+        let gateway = fixtures.gateway();
+        let presented = gateway.token().expose().to_owned();
+
+        let response = as_text(&send_and_read(
+            gateway.address(),
+            &request_for("POST", target, &presented, Some(RESPONSES_BODY)),
+        ));
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "the exchange for {target} did not complete, so nothing below is a statement about \
+             where it went: {response}"
+        );
+
+        let forwarded = fixtures.only_request_to(OPENAI_RESPONSES);
+        assert_eq!(
+            forwarded.method, "POST",
+            "the method was rewritten on the way to the Responses base URL"
+        );
+        assert_eq!(
+            forwarded.target, target,
+            "the request target did not reach the Responses base URL as the harness wrote it"
+        );
+        assert!(
+            forwarded.body == RESPONSES_BODY.as_bytes(),
+            "the Responses body did not arrive byte-for-byte; the provider received {:?}",
+            as_text(&forwarded.body)
+        );
+        carries_the_provider_credential_and_not_the_childs_token(&forwarded, &presented);
+    }
+}
+
+/// The same property for the third ingress, and it is not the same test:
+/// `/chat/completions` is two path segments where the other two are one, so
+/// a router that matched on "the first segment" would place the other two
+/// and refuse this one, and a gateway that served only the protocols it was
+/// tested on would leave a Chat-only provider unreachable.
+#[test]
+fn a_chat_completions_request_reaches_the_chat_base_url_and_opens_no_other() {
+    for target in ["/chat/completions", "/v1/chat/completions"] {
+        let fixtures = Fixtures::answering_ok();
+        let gateway = fixtures.gateway();
+        let presented = gateway.token().expose().to_owned();
+
+        let response = as_text(&send_and_read(
+            gateway.address(),
+            &request_for("POST", target, &presented, Some(CHAT_BODY)),
+        ));
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "the exchange for {target} did not complete, so nothing below is a statement about \
+             where it went: {response}"
+        );
+
+        let forwarded = fixtures.only_request_to(OPENAI_CHAT);
+        assert_eq!(
+            forwarded.method, "POST",
+            "the method was rewritten on the way to the Chat base URL"
+        );
+        assert_eq!(
+            forwarded.target, target,
+            "the request target did not reach the Chat base URL as the harness wrote it"
+        );
+        assert!(
+            forwarded.body == CHAT_BODY.as_bytes(),
+            "the Chat body did not arrive byte-for-byte; the provider received {:?}",
+            as_text(&forwarded.body)
+        );
+        carries_the_provider_credential_and_not_the_childs_token(&forwarded, &presented);
+    }
+}
+
+// --- 5. streaming, on the two ingresses that are new ------------------------
+
+/// One streaming exchange, asserted the way [`mod@super`]'s
+/// `a_streamed_response_reaches_the_client_before_the_upstream_has_finished`
+/// asserts the Anthropic one — and built so that a buffering implementation
+/// cannot pass rather than so that a streaming one happens to.
+///
+/// The fixture writes its first event, then **blocks until the client says
+/// it has received that event**, and only then writes the second. So the
+/// second event exists at all only if the first reached the client while the
+/// response was still open. A gateway that read the upstream body to the end
+/// before writing anything deadlocks instead: the client never acknowledges,
+/// the fixture's wait expires, and the marker it writes in place of the
+/// second event is what fails.
+///
+/// Nothing here sleeps. The synchronisation is a channel, in both
+/// directions: the fixture blocks on `recv_timeout` and the client blocks on
+/// `read`.
+fn a_stream_arrives_incrementally(protocol: &'static str, target: &str, body: &str) {
+    let (saw_first, first_seen) = mpsc::channel::<()>();
+    let first_seen = Mutex::new(first_seen);
+
+    let fixtures = Fixtures::driven_by(protocol, move |_request, out| {
+        let _ = out.write_all(
+            b"HTTP/1.1 200 OK\r\n\
+              content-type: text/event-stream\r\n\
+              transfer-encoding: chunked\r\n\r\n",
+        );
+        let first = "event: one\ndata: {\"n\":1}\n\n";
+        let _ = out.write_all(format!("{:x}\r\n{first}\r\n", first.len()).as_bytes());
+        let _ = out.flush();
+
+        let streamed = first_seen
+            .lock()
+            .expect("no test panics while holding this")
+            .recv_timeout(STREAM_WAIT)
+            .is_ok();
+        let second = if streamed {
+            "event: two\ndata: {\"n\":2}\n\n"
+        } else {
+            "event: BUFFERED-NOT-STREAMED\n\n"
+        };
+        let _ = out.write_all(format!("{:x}\r\n{second}\r\n0\r\n\r\n", second.len()).as_bytes());
+        let _ = out.flush();
+    });
+
+    let gateway = fixtures.gateway();
+    let mut client = send(
+        gateway.address(),
+        &request_for("POST", target, gateway.token().expose(), Some(body)),
+    );
+
+    let mut seen = Vec::new();
+    let mut buffer = [0u8; 1024];
+    loop {
+        let read = client.read(&mut buffer).unwrap_or_else(|err| {
+            panic!(
+                "the gateway did not deliver the first event of a {protocol} stream before the \
+                 upstream had finished ({err}); {} bytes had arrived: {:?}",
+                seen.len(),
+                as_text(&seen)
+            )
+        });
+        assert!(
+            read > 0,
+            "the gateway closed a {protocol} response before its first event arrived; {} bytes \
+             had arrived: {:?}",
+            seen.len(),
+            as_text(&seen)
+        );
+        seen.extend_from_slice(&buffer[..read]);
+        if as_text(&seen).contains("event: one") {
+            break;
+        }
+    }
+    saw_first.send(()).expect("the fixture is still writing");
+
+    let mut rest = Vec::new();
+    client.read_to_end(&mut rest).expect("the stream completes");
+    seen.extend_from_slice(&rest);
+    let text = as_text(&seen);
+
+    assert!(
+        text.contains("event: one"),
+        "the first event of a {protocol} stream never reached the client: {text}"
+    );
+    // Asserted before the presence of the second event, because this is the
+    // diagnosis and that is only the symptom: a run that prints "the second
+    // event never arrived" leaves a reader to work out why, and a run that
+    // prints this one has already said.
+    assert!(
+        !text.contains("BUFFERED-NOT-STREAMED"),
+        "the upstream's wait for the first event to reach the client timed out, so the gateway is \
+         buffering a {protocol} response rather than streaming it: {text}"
+    );
+    assert!(
+        text.contains("event: two"),
+        "the second event of a {protocol} stream never reached the client: {text}"
+    );
+    assert!(
+        !text.contains("WRONG-INGRESS-BASE-URL"),
+        "a {protocol} request was answered by another protocol's base URL, so everything above is \
+         a statement about the wrong ingress: {text}"
+    );
+
+    // ... and it really did travel the ingress this test names. Without
+    // this the assertions above would go on holding for a gateway that
+    // routed every target to one base URL, which is the defect the whole
+    // section exists for.
+    let forwarded = fixtures.only_request_to(protocol);
+    assert_eq!(
+        forwarded.target, target,
+        "the streamed request did not reach {protocol}'s base URL as the harness wrote it"
+    );
+}
+
+/// Line 4 of the capability map is "streaming is preserved end-to-end", and
+/// [`mod@super`]'s twin of this asserts it only for Anthropic Messages. Lose
+/// this and a gateway that buffers a Codex stream leaves that test green:
+/// the child shows nothing for the whole generation and then everything at
+/// once, which reads as a hang and is reported as one.
+#[test]
+fn a_streamed_responses_reply_reaches_the_client_before_the_upstream_has_finished() {
+    a_stream_arrives_incrementally(OPENAI_RESPONSES, "/responses", RESPONSES_BODY);
+}
+
+/// The same, for the third ingress. Separate from the Responses test rather
+/// than folded into it so that a regression names the protocol it broke.
+#[test]
+fn a_streamed_chat_reply_reaches_the_client_before_the_upstream_has_finished() {
+    a_stream_arrives_incrementally(OPENAI_CHAT, "/v1/chat/completions", CHAT_BODY);
+}
+
+// --- 6. a target that belongs to nothing is refused, and forwarded nowhere --
+
+/// The narrowing that came with serving more than one protocol, asserted on
+/// the thing that actually matters. A single-protocol gateway appended every
+/// request target to its one base URL; with three, "append it to the first
+/// one" would send a `/v1/models` — or a `HEAD /api/hello`, which Claude
+/// Code 2.1.245 really does send before its first `/v1/messages` — to
+/// whichever provider endpoint happened to be declared first.
+///
+/// So the load-bearing assertion is **every fixture's connection count**,
+/// not the status. A gateway that opened a connection upstream, read the
+/// answer and then decided to write its own `404` would pass an assertion on
+/// the status and would still have sent a request nobody asked for.
+///
+/// The refusal is also asserted on requests that carry a body: the gateway
+/// has to drain what is still in flight before closing, or the client sees a
+/// connection reset — a network error — in place of the status that would
+/// have told it what was wrong.
+#[test]
+fn a_target_belonging_to_no_served_protocol_is_refused_and_nothing_is_opened_upstream() {
+    let fixtures = Fixtures::answering_ok();
+    let upstream = fixtures.upstream();
+    let token = GatewayToken(PLANTED_TOKEN.to_owned());
+    let agent = agent();
+
+    for (method, target, body) in [
+        // Observed against a recording listener: Claude Code 2.1.245 sends
+        // this before its first `/v1/messages`, and carries on after a
+        // non-2xx answer to it.
+        ("HEAD", "/api/hello", None),
+        ("GET", "/v1/models", None),
+        // The same target with a body, because a refusal that resets the
+        // connection is not a refusal the client can read.
+        ("POST", "/v1/models", Some("{\"probe\":true}")),
+        // Prefix matches that are not on a path-segment boundary — one per
+        // served protocol, because each declares its own prefix and each
+        // could be matched with `starts_with` alone.
+        ("POST", "/v1/messagesomethingelse", Some(TOOL_CALL_BODY)),
+        ("POST", "/responsesomethingelse", Some(RESPONSES_BODY)),
+        ("POST", "/chat/completionsomethingelse", Some(CHAT_BODY)),
+    ] {
+        let (exchange, response) = serve_one(
+            &token,
+            &upstream,
+            &agent,
+            &request_for(method, target, PLANTED_TOKEN, body),
+        );
+        let received = as_text(&response);
+        let what = format!("{method} {target}");
+
+        assert!(
+            received.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "{what} was not refused with the status a harness can read: {received}"
+        );
+        assert!(
+            received.contains("content-type: application/json"),
+            "{what} was refused with something other than JSON, so a harness expecting a \
+             provider's protocol cannot parse it: {received}"
+        );
+
+        let body_bytes = body_of(&response);
+        if method == "HEAD" {
+            // A response to `HEAD` carries a `GET`'s headers and none of its
+            // body. Writing one is not a harmless extra: a client reads the
+            // declared length, finds bytes it was told would not be there,
+            // and takes them for the start of the next response. This is the
+            // first response in this gateway's life a `HEAD` can reach —
+            // Claude Code's `HEAD /api/hello` belongs to no protocol, so it
+            // is refused here rather than forwarded, and `forward`'s own
+            // rule never gets to apply to it.
+            assert!(
+                received.contains("content-length: "),
+                "the refusal of {what} dropped the length a HEAD response still declares: \
+                 {received}"
+            );
+            assert!(
+                body_bytes.is_empty(),
+                "the refusal of {what} carried a body; a client that reads it reads the start \
+                 of a response that does not exist: {}",
+                as_text(body_bytes)
+            );
+            fixtures.nothing_was_opened(&what);
+            continue;
+        }
+
+        let parsed: serde_json::Value = serde_json::from_slice(body_bytes).unwrap_or_else(|err| {
+            panic!(
+                "the refusal of {what} did not carry readable JSON ({err}), so a harness sees \
+                     a truncated or malformed answer rather than an error: {}",
+                as_text(body_bytes)
+            )
+        });
+        assert_eq!(
+            parsed["type"], "error",
+            "the refusal of {what} is not in the error shape a harness's protocol uses: {parsed}"
+        );
+        assert_eq!(
+            parsed["error"]["type"], "not_found_error",
+            "the refusal of {what} did not name the kind of error it is: {parsed}"
+        );
+        assert!(
+            parsed["error"]["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "the refusal of {what} carried no message, so a user reading it learns only that \
+             something was not found: {parsed}"
+        );
+
+        assert_eq!(
+            exchange.status, 404,
+            "the exchange for {what} recorded a status other than the one the harness was told"
+        );
+        assert!(
+            matches!(exchange.outcome, Outcome::Unrouted),
+            "{what} was refused but was not recorded as unrouted, so the one line that says a \
+             request was never placed says something else: {exchange:?}"
+        );
+        assert!(
+            exchange.protocol.is_none(),
+            "the exchange for {what} named a protocol for a request that belongs to none: \
+             {exchange:?}"
+        );
+        assert!(
+            exchange.host.is_empty(),
+            "the exchange for {what} named an upstream host the request was never going to reach; \
+             a log that invents the one fact it exists to record is worse than no log: \
+             {exchange:?}"
+        );
+
+        fixtures.nothing_was_opened(&what);
+    }
+
+    // ... and none of those zeroes is because nothing here could have
+    // reached a fixture in the first place. Same upstream, same fixtures,
+    // one target that *is* served: if this does not arrive, every count
+    // above was a statement about a broken test rather than about a refusal.
+    let (served, response) = serve_one(
+        &token,
+        &upstream,
+        &agent,
+        &messages_request(PLANTED_TOKEN, "{\"model\":\"probe\"}"),
+    );
+    assert!(
+        as_text(&response).starts_with("HTTP/1.1 200 OK"),
+        "the control exchange did not complete, so the zero connection counts above prove nothing"
+    );
+    assert!(
+        matches!(served.outcome, Outcome::Forwarded { .. }),
+        "the control exchange was not forwarded, so the zero connection counts above prove \
+         nothing: {served:?}"
+    );
+    assert_eq!(
+        served.protocol.as_deref(),
+        Some(ANTHROPIC_MESSAGES),
+        "the control exchange did not record the protocol that carried it: {served:?}"
+    );
+    assert_eq!(
+        fixtures.at(ANTHROPIC_MESSAGES).connections(),
+        1,
+        "the served target opened no connection to its own base URL, so the refusals above were \
+         asserted against fixtures that could not have been reached anyway"
+    );
+    assert_eq!(
+        fixtures.at(OPENAI_RESPONSES).connections(),
+        0,
+        "a served Anthropic target also opened a connection to the Responses base URL"
+    );
+    assert_eq!(
+        fixtures.at(OPENAI_CHAT).connections(),
+        0,
+        "a served Anthropic target also opened a connection to the Chat base URL"
+    );
+}
+
+// --- 7. and none of the new paths renders either secret ---------------------
+
+/// [`no_rendering_the_gateway_can_produce_carries_either_planted_secret`] is
+/// the same assertion over the paths a single-protocol gateway had, and it
+/// cannot cover these: a routed exchange now renders a protocol slug and the
+/// host of *the route that carried it*, an unrouted one renders neither, and
+/// an [`Upstream`] now holds three base URLs beside the one credential. Each
+/// of those is a field that did not exist when that test was written, and a
+/// field is how a secret reaches a log without anybody deciding it should.
+///
+/// Lose this and the first `tracing` call taking a three-protocol upstream,
+/// or the first `Debug` of a Codex exchange, publishes the provider
+/// credential — the exact thing the child harness is given a token instead
+/// of.
+#[test]
+fn no_rendering_the_new_ingresses_produce_carries_either_planted_secret() {
+    let fixtures = Fixtures::answering_ok();
+    let gateway = fixtures.gateway();
+    let minted = gateway.token();
+    let upstream = fixtures.upstream();
+    let token = GatewayToken(PLANTED_TOKEN.to_owned());
+    let agent = agent();
+
+    // A real exchange on a new ingress through a real gateway, so the minted
+    // token scanned for below is one that actually authenticated a Responses
+    // request rather than one that was merely generated.
+    let through_the_gateway = send_and_read(
+        gateway.address(),
+        &request_for("POST", "/responses", minted.expose(), Some(RESPONSES_BODY)),
+    );
+    assert!(
+        as_text(&through_the_gateway).starts_with("HTTP/1.1 200 OK"),
+        "the gateway did not serve the exchange whose response is scanned below"
+    );
+
+    // Three paths out of the ingress that only exist now that it routes:
+    // two that were placed on different routes, and one that was refused
+    // before a route could be chosen.
+    let (responses, responses_response) = serve_one(
+        &token,
+        &upstream,
+        &agent,
+        &request_for("POST", "/v1/responses", PLANTED_TOKEN, Some(RESPONSES_BODY)),
+    );
+    let (chat, chat_response) = serve_one(
+        &token,
+        &upstream,
+        &agent,
+        &request_for("POST", "/chat/completions", PLANTED_TOKEN, Some(CHAT_BODY)),
+    );
+    let (unrouted, unrouted_response) = serve_one(
+        &token,
+        &upstream,
+        &agent,
+        &request_for(
+            "POST",
+            "/v1/models",
+            PLANTED_TOKEN,
+            Some("{\"probe\":true}"),
+        ),
+    );
+
+    assert!(
+        matches!(responses.outcome, Outcome::Forwarded { .. }),
+        "the Responses exchange took another path, so its rendering is not the one this test \
+         means to scan: {responses:?}"
+    );
+    assert!(
+        matches!(chat.outcome, Outcome::Forwarded { .. }),
+        "the Chat exchange took another path, so its rendering is not the one this test means to \
+         scan: {chat:?}"
+    );
+    assert!(
+        matches!(unrouted.outcome, Outcome::Unrouted),
+        "the refused exchange took another path, so its rendering is not the one this test means \
+         to scan: {unrouted:?}"
+    );
+
+    for (what, rendering) in [
+        (
+            "the Debug of an upstream serving three protocols",
+            format!("{upstream:?}"),
+        ),
+        (
+            "the Debug of an exchange carried by the Responses route",
+            format!("{responses:?}"),
+        ),
+        (
+            "the Debug of an exchange carried by the Chat route",
+            format!("{chat:?}"),
+        ),
+        (
+            "the Debug of an exchange that belonged to no route",
+            format!("{unrouted:?}"),
+        ),
+        (
+            "the response a real gateway sent a Responses request",
+            as_text(&through_the_gateway),
+        ),
+        (
+            "the response to a Responses request",
+            as_text(&responses_response),
+        ),
+        ("the response to a Chat request", as_text(&chat_response)),
+        (
+            "the response to a request that belonged to no route",
+            as_text(&unrouted_response),
+        ),
+    ] {
+        carries_no_planted_secret(what, &rendering, minted);
+    }
+
+    // ... and the credential is shown as redacted rather than dropped, while
+    // everything a diagnostic is actually for survives. A `Debug` that
+    // simply omitted the field would pass every `!contains` above and would
+    // leave a reader unable to tell an upstream holding a credential from
+    // one holding none.
+    let rendered = format!("{upstream:?}");
+    assert!(
+        rendered.contains(REDACTED),
+        "the upstream's Debug omits its credential rather than showing the redaction marker: \
+         {rendered}"
+    );
+    for name in PROTOCOLS {
+        assert!(
+            rendered.contains(name),
+            "the upstream's Debug no longer names {name}, so a reader cannot tell which protocols \
+             a gateway is serving and the scan above is over a rendering that carries less than \
+             the real one"
         );
     }
 }
