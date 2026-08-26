@@ -579,3 +579,44 @@ two-minute check would have caught this on the day the gate was written.
 
 Ask it of any gate you inherit: **what change would make this fail?** If the
 answer is "nothing I can think of", it is decoration.
+
+## 21. A Unix pty is a byte pipe; ConPTY is a screen buffer
+
+The gap §18 does not reach. That rule says to compile the other platform's path
+locally before pushing, and it works because compilation is a property of source
+you can flip a `cfg` on. **Runtime pty semantics are not, and they differ.**
+
+On Unix, a pty is a byte pipe. Whatever the child writes, the master reads —
+byte for byte. Line wrapping is a property of the *terminal displaying* the
+bytes, not of the bytes. A ten-thousand-character line arrives as one line.
+
+**ConPTY is not a byte pipe.** It renders into a console screen buffer of fixed
+width and emits the reflowed result, so a line wider than the buffer comes back
+**split across lines**. Any test that writes something long through a pty and
+parses the result line by line therefore passes on macOS and Linux and fails on
+Windows — and no local run will tell you, because the local pty is the one that
+behaves.
+
+This cost a CI round trip on 2026-08-26. A test planted the runner's own `PATH`
+(≈3000 characters on GitHub's Windows image), dumped the child's environment
+through a pty, and parsed it per line. It read back the first ~74 characters.
+The truncation point is the tell: if a value comes back cut at roughly a
+terminal width, suspect the pty, not the code under test.
+
+**Two habits that avoid it:**
+
+- **Never send CI's own environment through a pty and assert on it.** Plant a
+  short value the test chooses. It removes the width problem *and* makes the
+  assertion independent of whatever environment the runner happens to have,
+  which is worth having on its own.
+- **Ask for a terminal size when a test's output width matters**
+  (`HarnessLaunch::size`). The default is whatever the fixture picked, and a
+  test that silently depends on it is a test that will break on a machine you
+  cannot see.
+
+**And the honest caveat, because it is the point of this section:** an attempt
+to reproduce this locally *falsified the diagnosis* — the pre-fix test passes on
+macOS under a deliberately 3599-character `PATH`. The mechanism is real and the
+fix follows from it, but the proof is a green Windows job, not a local run. When
+that is the situation, say so in the commit rather than implying a verification
+you do not have.
