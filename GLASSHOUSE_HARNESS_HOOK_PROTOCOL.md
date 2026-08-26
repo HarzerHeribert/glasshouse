@@ -30,17 +30,14 @@ hook returns `permissionDecision` (`allow` / `deny` / `ask`) and
 `permissionDecisionReason`; every hook may additionally return `systemMessage`,
 `additionalContext` and `terminalSequence`. None of these is the tool's result.
 `PostToolUse` observes a call that already ran and does not rewrite what the
-model is shown. A third-party project that needed to substitute a result had to
-deny the call and hide the answer inside the reason string — because the surface
-offers nothing else.
+model is shown.
 
 This is a fit, not a limitation, for what this protocol does. Reporting a
 completion, waking a parent, and normalizing an event are all within a gate's
 power. But it fixes where *other* features must live: anything that substitutes
 a harness's behaviour belongs at the **transport** (the gateway) or at the
-**executable** (a generated shim), never here. See
-`GLASSHOUSE_DESIGN_DECISIONS.md`, "Speculative tool calling is a harness
-technique, and a harness hook is a gate, not a proxy."
+**executable** (a generated shim), never here. That is the same pair of artifacts
+the subscription/key auth separation arrives at from the other direction.
 
 ## Topology
 
