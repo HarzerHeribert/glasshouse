@@ -876,3 +876,62 @@ other rather than two independent piles.
   package with obvious mechanisms, holding lead tier and effort constant?
 - Does the standing Linux pty flake (§34) get diagnosed by whoever owns
   `pty_smoke.rs`, now that the attribution procedure is written down?
+
+### Batch 22–23, first half: `lead-route` closed 22 of 28, and the falsifier did not fire
+
+| | result |
+|---|---|
+| boxes | **22 of 28 closable** (9H 13/14, 9I 9/14) |
+| wall clock | 57 minutes |
+| mutations | 25 run, **25 killed**, 3 only after a survivor forced a fix |
+| tests | +90 in the lib target, +18 `routing_policy.rs`, +6 `settings_persistence.rs` |
+| size | +2200 / −178 tracked, +4421 in 7 new files |
+| gate | all ten `ci-local.sh` jobs green, Linux included, no pty flake |
+| subcontractors | 2 Sonnet at medium, both in visible panes with watches |
+| **`main.rs` patch needed** | **none** |
+
+**The §32 refinement held.** The falsifier stated in advance was: *if
+`lead-route` comes back with a `main.rs` patch it could not avoid, the
+refinement is wrong and the rule serializes leads.* It did not.
+`main.rs::launch_session` is byte-for-byte unchanged, and `gateway_upstream`'s
+signature was deliberately left alone to keep it that way, because the
+assignment could be made inside `apply_gateway` — a function in the lead's own
+module that `launch_session` already calls. **Two leads satisfied §32 against a
+single `main.rs` in the same round.** Ask which *function* must change, not
+which file calls it.
+
+**But the packet was wrong about 9I, and the lead caught it.** The packet
+asserted 9I's consumer was the `ExtractionModel` seam `lead-mem6` was building.
+That seam is a caller for *extraction*, not for *model selection* — nothing
+asks a router which resource a disposable job should use — so four of 9I's
+boxes (530/531/532/540) were unclosable from that partition before the batch
+began. The tell cost one command: `grep` for a call site of
+`ExtractionModel::complete` outside a test finds one, in `main.rs`, behind
+`--reply-from`. Recorded as practice **§36**: name the function that will *ask*
+the policy, and check it is being built *for that purpose*.
+
+So the partition question now has two parts, and the second is the harder one:
+1. Is the caller's file in the partition? (§32 — answered, and satisfiable)
+2. Does a caller that *exercises this policy* exist at all? (§36 — the packet
+   got this wrong, and it cost four boxes)
+
+**Answer to "does a package of pure policy lines produce a lower closable
+rate?" — yes, and the mechanism is now visible.** 22 of 28 is a high rate, and
+every one of the six misses is a missing consumer rather than a missing
+mechanism. Policy packages fail at the consumer end, mechanism packages fail at
+the caller end, and they need different questions asked before the packet is
+written.
+
+**The finding worth more than the boxes.** M18 deleted the production launch
+path's only call to `routing().bind` and the entire suite passed, because all
+ten conformance tests bound the assignment in their own helper. A caller every
+test bypasses is not a caller — practice §35. Two of the three fixed survivors
+were this same shape. **Mutating the callee is not enough; mutate the call.**
+
+**Live-run findings, from a real terminal against a real router.** A `402` was
+being classified as a healthy exchange when it is really this account's key
+being unable to pay — another key would serve. No fixture would have produced
+it. And the honest limit: **no live `200` was obtained at all**, because
+OpenRouter answers `402` for `:free` models on an account that never purchased
+credits. The account's state, not the model's price, decides whether a free
+request is servable — practice §38.
