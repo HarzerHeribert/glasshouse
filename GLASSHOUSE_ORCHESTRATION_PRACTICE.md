@@ -1575,3 +1575,62 @@ than saying so. It prints the `kill -TERM` line and leaves the decision alone.
 
 This is the interim hook. When Phase 10A ships adoption, identity verification
 and quarantine, the product does this properly and the script retires.
+
+---
+
+## §47 — the orchestrator needs a dead-man's switch, because every other watch is event-driven
+
+The user asked what stops the orchestrator going idle, having watched one sit
+idle *not* waiting on agents — just waiting for input. The honest answer was
+**nothing**.
+
+Every watch in this project fires on an event: a worker changes state, a
+threshold is crossed, a background command exits. That covers idle-while-work-
+runs. It does not cover **idle with nothing running**, because with no event
+there is nothing to fire. The loop ends quietly, the machine stays awake, and
+the fleet is stopped until a person notices.
+
+`scripts/orchestrator-heartbeat.sh` watches the orchestrator's own surface the
+way `worker-watch.sh` watches a worker's, and nudges only when three things hold
+together: the pane has been genuinely idle for several checks, no worker is
+running or owed a review, and the map still has open boxes. One nudge, then a
+long back-off — the goal is restarting a stopped loop, not hectoring a working
+one. `touch .agent-runtime/stopped` silences it, because stopping is a decision
+and not a fault.
+
+**It found its own defect within minutes of being armed, which is the part worth
+recording.** Its first version asked only whether a worker was *waiting to be
+acknowledged* — a marker file that appears when a worker goes idle. A worker
+still **working** leaves no marker, so the heartbeat fired while a batch was
+mid-flight. Two different questions:
+
+- *waiting for review* → a marker in `.agent-runtime/idle/`
+- *still running* → a live `worker-watch.sh` process
+
+Both must be false before the orchestrator is genuinely idle. Match the `bash`
+process rather than the shell wrapper, or every watch counts twice.
+
+---
+
+## §48 — park a question instead of stopping for it
+
+An orchestrator idling because it needs a decision is the fleet stopped, and
+most decisions do not deserve that: they block one package, not the project, and
+the answer is as good in twenty minutes as now.
+
+`scripts/ask-user.sh <slug> "<question>" "<option>" "<option>"` opens a **Haiku**
+pane whose only job is to put the question in front of the user, wait as long as
+it takes, and write the answer to `.agent-runtime/answers/<slug>.txt`. The
+orchestrator dispatches something else and collects the answer when it lands.
+`--list` shows what is outstanding; `--check <slug>` reads one.
+
+**The test for whether to stop is whether the PROJECT is blocked, not the
+package.** If another package can be dispatched, dispatch it and park the
+question.
+
+Two details that are not incidental. The asking session is told to ask and
+nothing else — not to explore the repository, not to offer an opinion unless
+invited — because a cheap model given a repository will start having views about
+it. And the options are passed through a file rather than interpolated into the
+prompt string: a question containing a quote would otherwise rewrite the command
+that asks it.
