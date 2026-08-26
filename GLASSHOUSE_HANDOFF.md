@@ -6,7 +6,7 @@ Last updated: 2026-08-26 (Europe/Berlin)
 
 **Phase 9G, 2C, 9B, 9C and 9D are COMPLETE.** 9E eleven of thirteen; 2D six of
 nineteen; Phase 9 five of seven; 9F eleven of thirteen; 9A nineteen of
-twenty-six; **388 checked boxes (30%).** Local suite **1254 passing**.
+twenty-six; **392 checked boxes (30%).** Local suite **1300+ passing**.
 
 **Phase 9H, 9I and 21B all landed in one round.** Sticky gateway routing and
 free-pool routing were both untouched before it; Phase 21B is complete at 11 of
@@ -14,45 +14,56 @@ free-pool routing were both untouched before it; Phase 21B is complete at 11 of
 
 ## Next action
 
-Three pieces, in this order. All three are small and fully specified — the
-expensive part of each was done by the batch that found it.
+The three pieces the previous round specified are **done**: the disposable
+policy has its caller (Phase 9I is 13 of 14), migration 7 landed with `seq`
+proven durable, and the Linux gate's random failures are fixed — 8 failures in
+17 full-suite runs before, 0 in 20 after.
 
-1. **The disposable wiring — one line, four boxes.** `main.rs::report_hook_with`
-   takes `impl Fn() -> Box<dyn ExtractionModel>` and production passes
-   `NoExtractionModel`. Swapping in a `DisposableRouting`-backed model closes
-   Phase 9I's 530, 531, 532 and 540, all four of which are stranded on that one
-   absent caller. `ExtractionModel` is `Send + Sync` and synchronous by design.
-2. **Migration 7.** Own `database.rs`, `events/mod.rs` and `events/log.rs`
-   **together** — they cannot be split, because
-   `every_lifecycle_event_kind_is_one_the_schema_accepts` asserts the enum and
-   `LIFECYCLE_EVENT_KINDS` are equal in both directions. Rebuild
-   `lifecycle_events` to admit `gateway_backend_changed` (SQLite cannot ALTER a
-   CHECK, so it is rename/recreate/copy/drop plus the index and three triggers),
-   add the `LifecycleEvent::GatewayBackendChanged` variant, and **prove `seq`
-   survives the rebuild** with a test that stores a memory's event range across
-   it — `memories.source_event_first/_last` now reference that column, so a
-   renumbering silently re-points every extracted memory's provenance. This
-   makes Phase 9H's line 515 durable across a restart.
-3. **The Linux pty flake.** A standing debt on the only gate this project has —
-   practice §34 and §40. The fix is a bounded wait on the observation, the same
-   treatment `integrations/version.rs`'s ETXTBSY race got. Two different pty
-   tests have now failed nondeterministically, and the same tree has passed and
-   failed the same leg on consecutive runs.
+**1. The TUI spins at 100% CPU when its terminal dies.** Found by the user with
+five runaway processes on their laptop, three of them 19 hours old, at ~500%
+CPU total. `.agent-runtime/defect-tui-spins-when-terminal-dies.md` has the
+sampled stack: `shell::run` → `EventSource::next` → `crossterm::event::poll` →
+`read()`, 1622 of 1622 samples. When the terminal is gone the fd is permanently
+readable and returns zero bytes, so crossterm retries for the whole tick and
+the shell asks again forever. **EOF and "no input yet" are indistinguishable in
+that loop.** Signals are not the gap — all four died on `SIGTERM`. On Unix a
+`libc::poll` with a zero timeout reports `POLLHUP`, which is cheap and does not
+steal input the way a speculative `read()` would; `Event::Shutdown` already
+exists as the right thing to return. Needs a Windows counterpart. Owns
+`tui/**` and `shell/mod.rs`.
 
-**What is blocked and by what.** Phase 21's `809` (a configurable cheap or
-local model) and `817` (extraction after task completion) both wait on Phase
-39, and will close together: the trigger is built, proven and reachable, and
-dead-ends every time because nothing can supply a model at a turn boundary.
-`818` (extraction around compaction) is blocked two phases deep — Phase 7 line
-307 and Phase 8 line 324 — because Glasshouse cannot observe a compaction from
-either harness today.
+**This one has a workflow cost, not just a CPU cost.** Practice §38 says the
+only way to drive the binary is a cmux pane, so every binary probe a worker
+performs creates a candidate, and closing that pane afterwards leaves it
+spinning. Four accumulated in one day.
 
-**Before sizing any packet, read practice §32 and §36 together.** §32: put the
-caller's file in the partition. §36: name the function that will *ask* the
-policy, and check it is being built *for that purpose*. Batch 22–23 failed at
-both ends — a policy package whose every miss was an absent consumer, and a
-wiring package whose misses are an absent callee. A package fails at whichever
-end of the chain the partition did not reach.
+**2. The residual `SIGABRT`, 1 in 37 runs.**
+`pty_smoke::a_direct_provider_profile_reaches_a_real_child_and_only_that_child`
+fails with the child killed by signal 6. It is **not** the drain race that was
+just fixed. Four hypotheses are already ruled out with data — the `EIO` theory
+(600 trials), a non-blocking master fd, `malloc` between `fork` and `exec`
+(2400 spawns), and mislabelling — and `report-PTY-FLAKE.md` §6 ranks where to
+look next, starting with `std::env::set_var` in a threaded test binary.
+
+**3. Phase 9I line 528** is the last free-pool line: `Allowance` separates
+request pools from token-priced allowances and only the request-pool half has a
+production feed. It needs a source for "this credential is priced per token".
+Deliberately not solved by parsing rate-limit headers on the forwarding path —
+the gateway forwards headers without reading them, and a parser there would
+make it a reader of the payload it exists to pass through. Possibly a Phase 32
+job rather than a 9I one.
+
+**Still blocked on Phase 39:** Phase 21's `809` (configurable cheap or local
+model) and `817` (extraction after task completion) close together. The trigger
+is built, proven, reachable and consults the routing policy on every completed
+task — and dead-ends every time, because nothing can supply a model at a turn
+boundary. `818` is blocked two phases deep on Phase 7 line 307 and Phase 8
+line 324.
+
+**Before sizing any packet, read §32 and §36 together**, and then §43: extract
+every `YOURS` list from the round's packets and intersect them pairwise. Two
+workers were given `shell/state.rs` last round; it did not bite, and that was
+luck rather than design.
 
 **Phase 4 gained its unfocused-control lines.** `m` and `c` in the session
 overview act on a session the viewport is not showing, and `N` /
