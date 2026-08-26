@@ -1864,15 +1864,72 @@ mod settings_persistence_tests {
     /// otherwise reachable from a test without a real terminal.
     #[test]
     fn the_run_loop_probes_with_the_default_timeouts() {
-        let source = include_str!("mod.rs");
-        let production = source.split("#[cfg(test)]").next().expect("a source file");
-        let call = production
-            .find("spawn_provider_probe(\n")
-            .expect("the run loop calls spawn_provider_probe");
-        let window = &production[call..call + 400];
         assert!(
-            window.contains("discovery::ProbeTimeouts::default()"),
-            "the run loop must pass the default timeouts, not values of its own: {window}"
+            run_loop_passes_the_default_timeouts(include_str!("mod.rs")),
+            "the run loop must pass the default timeouts, not values of its own"
+        );
+    }
+
+    /// Whether the run loop's own call to `spawn_provider_probe` passes
+    /// [`discovery::ProbeTimeouts::default`].
+    ///
+    /// # Scanned by lines, deliberately
+    ///
+    /// The first version of this searched for the literal
+    /// `"spawn_provider_probe(\n"`. That is a **multi-line literal**, and on a
+    /// checkout where Git converts line endings the source
+    /// [`include_str!`] hands back contains `\r\n`, so the search finds
+    /// nothing and the scan fails by *panicking* rather than by asserting.
+    /// Windows CI went red on exactly that, for a test that has nothing to do
+    /// with platforms — the second time this repository has paid for the same
+    /// mistake, which is why the practice file has a section about it.
+    ///
+    /// [`str::lines`] strips the carriage return, so this is CRLF-agnostic by
+    /// construction rather than by remembering. See
+    /// `the_scan_finds_the_call_whatever_the_line_endings_are`, which proves
+    /// it against a CRLF copy of this very file — an LF checkout never
+    /// exercises the broken path, so without that control the fix would be
+    /// untested precisely where it was needed.
+    fn run_loop_passes_the_default_timeouts(source: &str) -> bool {
+        let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let lines: Vec<&str> = production.lines().collect();
+        let call = lines.iter().position(|line| {
+            let trimmed = line.trim();
+            // The call site, not the `fn spawn_provider_probe(` definition
+            // line and not a single-line test call.
+            trimmed == "spawn_provider_probe("
+        });
+        let Some(call) = call else { return false };
+        lines
+            .iter()
+            .skip(call)
+            .take(12)
+            .any(|line| line.contains("discovery::ProbeTimeouts::default()"))
+    }
+
+    /// The control that keeps the scan above honest.
+    ///
+    /// Both sides are built from a **normalised** base rather than from
+    /// whatever `include_str!` happened to produce, because an assertion whose
+    /// input varies with the checkout is a flake generator that will find the
+    /// environment you did not test on.
+    #[test]
+    fn the_scan_finds_the_call_whatever_the_line_endings_are() {
+        let normalised = include_str!("mod.rs").replace("\r\n", "\n");
+        let crlf = normalised.replace('\n', "\r\n");
+        assert!(
+            run_loop_passes_the_default_timeouts(&normalised),
+            "the scan must find the call in an LF checkout"
+        );
+        assert!(
+            run_loop_passes_the_default_timeouts(&crlf),
+            "the scan must find the call in a CRLF checkout — this is the assertion \
+             Windows CI failed on"
+        );
+        // And it must be capable of saying no, or the two above prove nothing.
+        assert!(
+            !run_loop_passes_the_default_timeouts("fn main() {}\n"),
+            "a source with no such call must not report that the call is correct"
         );
     }
 

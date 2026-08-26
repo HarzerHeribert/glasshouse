@@ -679,8 +679,33 @@ mod tests {
         );
     }
 
+    /// Nothing listening is reported as a non-answer, and *how* it is reported
+    /// follows what the operating system actually did.
+    ///
+    /// # Why this is not simply `assert Unreachable`
+    ///
+    /// It was, and Windows CI failed it with
+    /// `nothing listening is unreachable, got TimedOut { waited_ms: 502 }`.
+    /// That is not a defect in the code under test — it is a difference in
+    /// what the platforms *do*. A Unix host answers a connection to a closed
+    /// port with an immediate RST, which surfaces as
+    /// [`std::io::ErrorKind::ConnectionRefused`] and classifies as
+    /// [`ProbeOutcome::Unreachable`]. On the Windows runner the attempt
+    /// instead ran out the connect timeout (502 ms against a 500 ms budget),
+    /// so there was no refusal to classify and `TimedOut` is the honest
+    /// answer.
+    ///
+    /// So the assertion is split. **The part that is true everywhere** — a
+    /// host that nothing is listening on never counts as having answered — is
+    /// asserted unconditionally, and it is the property the product actually
+    /// promises. The classification of a *refusal* is asserted only where a
+    /// refusal is what the platform produces.
+    ///
+    /// This is the same shape as the pty rule in the practice file: local
+    /// behaviour that a `cfg` flip cannot reproduce, because it is a runtime
+    /// property of the platform rather than a compile-time one.
     #[test]
-    fn a_refused_connection_is_unreachable_rather_than_a_timeout() {
+    fn nothing_listening_never_counts_as_an_answer() {
         // Bind and drop, so the port is one nothing is listening on.
         let port = {
             let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -692,9 +717,47 @@ mod tests {
         };
         let request = request_at(&format!("http://127.0.0.1:{port}"), ProbeTarget::BaseUrl);
         let outcome = connectivity(&request, quick());
+
+        // True on every platform, and the property that matters: a probe that
+        // never reached anything must not report that it did.
+        assert!(
+            !outcome.answered(),
+            "nothing was listening, so nothing can have answered, got {outcome:?}"
+        );
+        assert!(
+            matches!(
+                outcome,
+                ProbeOutcome::Unreachable { .. } | ProbeOutcome::TimedOut { .. }
+            ),
+            "a port nothing is listening on is either refused or never answers, got {outcome:?}"
+        );
+
+        // Where the platform refuses, the refusal must be classified as a
+        // refusal and not as a stall — the two have different fixes and the
+        // user is told which they have.
+        #[cfg(unix)]
         assert!(
             matches!(outcome, ProbeOutcome::Unreachable { .. }),
-            "nothing listening is unreachable, got {outcome:?}"
+            "on Unix a closed port answers with RST, so this must classify as unreachable \
+             rather than as a timeout, got {outcome:?}"
+        );
+    }
+
+    /// The classification itself, with no operating system involved.
+    ///
+    /// This is what the platform-dependent test above can no longer prove
+    /// everywhere, so it is proved here instead: a refusal is `Unreachable`,
+    /// and it says so in words this module chose.
+    #[test]
+    fn a_refused_connection_classifies_as_unreachable_rather_than_a_timeout() {
+        let refused = ureq::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
+        assert!(!is_timeout(&refused), "a refusal is not a timeout");
+        assert_eq!(unreachable_reason(&refused), "the connection was refused");
+
+        let outcome = transport_outcome(&refused, Instant::now());
+        assert!(
+            matches!(outcome, ProbeOutcome::Unreachable { .. }),
+            "got {outcome:?}"
         );
         assert!(!outcome.answered());
     }
