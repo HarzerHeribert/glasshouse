@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# glasshouse — development shim for the Glasshouse binary being built here.
+#
+# Glasshouse is not installed on this machine; it is a target/ artifact of this
+# repository. Every `glasshouse …` in the docs, the evidence ledger and the
+# worker packets means "the binary this repo builds", and typing
+# `cargo run --manifest-path … --` every time is friction the whole team pays.
+# This resolves that one thing and nothing else.
+#
+#   glasshouse setup            run the built binary, any subcommand
+#   GLASSHOUSE_DEV_BUILD=1 …    cargo build first (off by default: it takes the
+#                               target/ lock, which stalls parallel workers)
+#   GLASSHOUSE_DEV_PROFILE=release
+#                               use target/release instead of target/debug
+#
+# **This is dev tooling, not the product.** `glasshouse shim` is Phase 9B's own
+# mechanism for generating shims for *users*, it writes a different file, and
+# nothing here pre-authorizes anything: a generated user shim still resolves a
+# launch profile and is still refused if that profile wants an unacknowledged
+# bypass. When Glasshouse is installed for real, delete this link.
+set -euo pipefail
+
+# Resolve symlinks — this is invoked through ~/.local/bin/glasshouse, and the
+# repository lives next to the real file. BSD readlink has no -f.
+SELF="${BASH_SOURCE[0]:-$0}"
+while [ -L "$SELF" ]; do
+  LINK="$(readlink "$SELF")"
+  case "$LINK" in
+    /*) SELF="$LINK" ;;
+    *)  SELF="$(dirname "$SELF")/$LINK" ;;
+  esac
+done
+REPO="$(cd "$(dirname "$SELF")/../.." && pwd)"
+
+PROFILE="${GLASSHOUSE_DEV_PROFILE:-debug}"
+BIN="$REPO/target/$PROFILE/glasshouse"
+
+if [ "${GLASSHOUSE_DEV_BUILD:-0}" = "1" ]; then
+  BUILD_ARGS=(build --manifest-path "$REPO/Cargo.toml" --bin glasshouse)
+  [ "$PROFILE" = "release" ] && BUILD_ARGS+=(--release)
+  cargo "${BUILD_ARGS[@]}" >&2
+fi
+
+if [ ! -x "$BIN" ]; then
+  echo "glasshouse (dev shim): $BIN is not built." >&2
+  echo "  cargo build --manifest-path $REPO/Cargo.toml --bin glasshouse" >&2
+  exit 127
+fi
+
+# A stale binary is the failure mode that wastes an afternoon: the shim runs,
+# it prints something plausible, and it is last week's behaviour. Say so rather
+# than rebuild — rebuilding here would fight a worker holding the target/ lock.
+NEWER="$(find "$REPO/crates" -name '*.rs' -newer "$BIN" -print -quit 2>/dev/null || true)"
+if [ -n "$NEWER" ]; then
+  echo "glasshouse (dev shim): warning — sources are newer than $PROFILE binary" >&2
+  echo "  first newer file: ${NEWER#"$REPO"/}" >&2
+  echo "  rebuild with GLASSHOUSE_DEV_BUILD=1, or ignore if that is expected" >&2
+fi
+
+exec "$BIN" "$@"

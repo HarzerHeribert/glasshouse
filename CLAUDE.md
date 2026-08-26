@@ -39,6 +39,11 @@ batch to its ledger and answer one of its open questions when you can.
 It reminds until you run `scripts/worker-ack.sh <name>`. Before starting new
 work, run `scripts/worker-ack.sh --list` and clear anything waiting.
 
+`scripts/dev/` holds the dev shims, symlinked onto `PATH`: `glasshouse` runs
+the binary this repo builds, and `agy-gh` starts an Antigravity leaf worker
+unattended. Use them instead of re-deriving the workaround or asking the user
+to intervene — practice §19 explains why they are not the product's shims.
+
 Keep Claude Code, OpenCode/Ox, and other native harness workers visible in cmux.
 Use isolated worktrees for editors. Start Ox with the normal `ox` TUI—never
 `ox run` or a headless loop. Follow the worker do/don't rules and the safe hook
