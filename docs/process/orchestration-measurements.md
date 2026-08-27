@@ -1664,6 +1664,16 @@ because the neighbouring fact was solid. §39 already names this ("I verified th
 fact and not the recommendation") and it has now happened twice more in one
 round, once in a packet and once in a message to a peer.
 
+**Two instances, one round, mode recorded — that is not a rate and must not be
+read as one.** The outgoing orchestrator pushed back on a first version of this
+paragraph that called the pattern "not incidental" on the strength of n=2, and
+was right to: this project's own §34 and §60 say a count of one or two measures
+nothing about a tail, and there is no reason process defects obey a different
+arithmetic than flaky tests do. The instrument to settle it now exists — defects
+typed by mode, per round — so **Batch 30–32 answer this, and until they do the
+honest entry is the count.** Recorded here rather than resolved, which is the
+whole point of a ledger.
+
 **The cheap prevention is different for each class:**
 
 - **asserted-never-checked** → name the *symbol*, not just the file. A packet
@@ -1689,3 +1699,39 @@ caught before dispatch; defect 1 cost a stop because it was caught after. Same
 class of error, two orders of magnitude apart in cost, and the only difference
 is whether anyone looked before the work started. That is the argument for the
 pre-dispatch check, not the post-hoc one.
+
+### What the round gate should grow next: symbol existence, not just path existence
+
+`validate_round.py` proves the `YOURS` lists are disjoint, that every path in
+them exists or is marked `(new)`, and that every quoted box line matches the map
+verbatim. It caught two real collisions the day it was written and it passed
+this round's four packets cleanly.
+
+**It could not have caught defect 1, and defect 1 was the expensive one.** The
+packet said the migration convention lived in `session/store.rs`. That path
+exists, so the gate was satisfied; the *claim about what is inside it* was false
+and nothing checked it.
+
+The fix follows from the prevention this round arrived at. If a packet must
+**name the symbol** rather than only the file, then the symbol is a string a
+script can look for:
+
+    packet says:  the migration convention is in `database.rs` (`MIGRATIONS`)
+    gate checks:  grep -q 'MIGRATIONS' crates/glasshouse/src/database.rs
+
+That is a one-line check per claim and it converts the whole
+asserted-never-checked class from "caught by a worker stopping" into "caught
+before dispatch" — which is exactly the zero-cost-versus-one-stop gap the defect
+table already measures between defects 3 and 1.
+
+**Deliberately not built mid-round.** `scripts/tests/test_round_tools.py` is in
+the gate and covers `validate_round.py`, so this is a change plus its tests, not
+a one-liner — and practice §1 says the orchestrator's hands stay off code while
+workers run. It is a well-specified packet for a Sonnet, and it belongs to
+whoever runs Batch 30: own `scripts/validate_round.py` and
+`scripts/tests/test_round_tools.py` together, add a `SYMBOLS` or annotated-path
+syntax, and prove it by running the gate against **this round's own
+`packet-phase-10a.md`**, which must fail on `store.rs`.
+
+A gate that has never been run against a packet known to be broken is §20's
+question waiting to be asked. This round supplies the broken packet.
