@@ -342,15 +342,32 @@ class DiscoverPhaseTests(unittest.TestCase):
         self.assertEqual(paths, ["crates/glasshouse/src/routing/free.rs"])
 
 
+def _packets_present(*names: str) -> bool:
+    """The packet fixtures live in `.agent-runtime/`, which is gitignored.
+
+    These three cases were stale from the day the documents moved — the map
+    they named became `docs/product/capability-map.md` and nothing re-ran them,
+    because nothing ran these tests at all until they were wired into
+    `ci-local.sh`. Guarding on the fixtures rather than only on the checkout
+    keeps them honest on a machine where the runtime directory is empty:
+    skipped says "not checked here", where a hard failure would say
+    "validate_round.py is broken" about a tool that is fine.
+    """
+    return all((SIBLING_GLASSHOUSE / ".agent-runtime" / n).is_file() for n in names)
+
+
 @unittest.skipUnless(SIBLING_GLASSHOUSE.is_dir(), "sibling glasshouse checkout not present on this machine")
 class RealAcceptanceTests(unittest.TestCase):
     """The three acceptance cases named in packet-round-tools.md, run for
     real against the sibling glasshouse checkout when it is available."""
 
+    @unittest.skipUnless(
+        _packets_present("packet-wire-disposable.md", "packet-migration-7.md"),
+        "packet fixtures are not on this machine (.agent-runtime is gitignored)")
     def test_real_colliding_packets_fail_and_name_state_rs(self):
         result = subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts" / "validate_round.py"),
-             "--map", str(SIBLING_GLASSHOUSE / "GLASSHOUSE_IMPLEMENTATION_CAPABILITY_MAP.md"),
+             "--map", str(SIBLING_GLASSHOUSE / "docs" / "product" / "capability-map.md"),
              ".agent-runtime/packet-wire-disposable.md",
              ".agent-runtime/packet-migration-7.md"],
             capture_output=True, text=True, cwd=str(SIBLING_GLASSHOUSE),
@@ -358,10 +375,13 @@ class RealAcceptanceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("crates/glasshouse/src/shell/state.rs", result.stderr)
 
+    @unittest.skipUnless(
+        _packets_present("packet-round-tools.md"),
+        "packet fixture is not on this machine (.agent-runtime is gitignored)")
     def test_real_round_tools_packet_passes(self):
         result = subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts" / "validate_round.py"),
-             "--map", str(SIBLING_GLASSHOUSE / "GLASSHOUSE_IMPLEMENTATION_CAPABILITY_MAP.md"),
+             "--map", str(SIBLING_GLASSHOUSE / "docs" / "product" / "capability-map.md"),
              ".agent-runtime/packet-round-tools.md"],
             capture_output=True, text=True, cwd=str(SIBLING_GLASSHOUSE),
         )

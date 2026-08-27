@@ -48,10 +48,29 @@ mkdir -p "$IDLE_DIR"
 # Read the SURFACE, never the workspace: a workspace ref can resolve to a
 # sibling pane, and an empty ref silently resolves to the caller's own pane —
 # which once nearly sent a stray keystroke to the orchestrator itself.
+# The signals, enumerated rather than implied. Two false idles were paid for on
+# 2026-08-27: a retry countdown (no spinner, no counter), and a spinner glyph
+# from a set this pattern did not list. Adding one string at a time is how the
+# second one happened, so the third signal here is deliberately generic — a
+# parenthesised elapsed timer, which every working state draws whatever glyph
+# it picks. `(shift+tab to cycle)` and the unparenthesised `1h34m` in the status
+# bar do not match it.
+BUSY_RE='esc to interrupt|esc to cancel|[0-9]+s · ↓|\([0-9]+[hms]|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✶✻✽✳✢∗]|will retry in|Retrying|Waiting for API response|API Error.*retry|thinking with|Tool use'
+
+# The last line that says something, for the idle announcement. A notification
+# that carries the pane's own last words would have caught both false idles
+# without anyone opening the pane.
+last_words() {
+  cmux read-screen --surface "$SURFACE" 2>/dev/null \
+    | grep -vE '^\s*$|^─+$|^\s*❯\s*$' \
+    | tail -1 \
+    | cut -c1-100
+}
+
 is_busy() {
   local screen
   screen="$(cmux read-screen --surface "$SURFACE" 2>/dev/null)" || return 1
-  printf '%s' "$screen" | grep -qE 'esc to interrupt|esc to cancel|[0-9]+s · ↓|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|will retry in|Retrying|Waiting for API response|API Error.*retry'
+  printf '%s' "$screen" | grep -qE "$BUSY_RE"
 }
 
 quiet=0
@@ -72,7 +91,7 @@ while true; do
       if [ -f "$REPORT" ]; then
         echo "STILL UNACKNOWLEDGED: '$NAME' idle with a report waiting at $REPORT — review it, then: scripts/worker-ack.sh $NAME"
       else
-        echo "STILL UNACKNOWLEDGED: '$NAME' idle and wrote NO report — inspect $SURFACE, then: scripts/worker-ack.sh $NAME"
+        echo "STILL UNACKNOWLEDGED: '$NAME' idle and wrote NO report — its last line was: $(last_words) — inspect $SURFACE, then: scripts/worker-ack.sh $NAME"
       fi
     fi
     continue
@@ -92,7 +111,7 @@ while true; do
     if [ -f "$REPORT" ]; then
       echo "WORKER IDLE: '$NAME' finished, report present at $REPORT — review, then: scripts/worker-ack.sh $NAME"
     else
-      echo "WORKER IDLE: '$NAME' went idle with NO report — inspect $SURFACE, then: scripts/worker-ack.sh $NAME"
+      echo "WORKER IDLE: '$NAME' went idle with NO report — its last line was: $(last_words) — inspect $SURFACE, then: scripts/worker-ack.sh $NAME"
     fi
   fi
 done

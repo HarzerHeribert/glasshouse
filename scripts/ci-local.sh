@@ -81,6 +81,11 @@ if [ "$DO_MAC" -eq 1 ]; then
   # because a local gate can afford questions a metered one could not.
   step "lint / doc boundary" scripts/check-doc-boundary.sh
   step "lint / evidence coverage" python3 scripts/check-evidence-coverage.py --strict
+  # The orchestration scripts have tests and, until 2026-08-27, nothing ran
+  # them. validate_round.py gates every round and worker-watch.sh decides
+  # when a worker is finished; both are cheap to break and expensive to
+  # have wrong.
+  step "lint / script tests" sh -c 'for t in scripts/tests/test_*.py; do python3 "$t" || exit 1; done'
   step "test (macos) / build" env RUSTFLAGS='-D warnings' cargo build --locked --workspace --all-targets
   step "test (macos) / test"  env RUSTFLAGS='-D warnings' sh -c 'cargo test --locked --workspace -- --nocapture < /dev/null'
   # Call the project's own script rather than `cargo +$MSRV`: its header

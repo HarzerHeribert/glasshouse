@@ -2118,3 +2118,41 @@ particular string added.
 Cost when it misfires: an orchestrator interrupting itself mid-round to inspect
 a pane, and — worse if unnoticed — an `ack` that ends the watch on a worker
 that has not finished, leaving nothing armed for when it actually does.
+
+### §57, third addendum — and the fix for a miss must not be one more string
+
+The retry countdown was fixed by adding `will retry in` to the busy pattern.
+Ninety minutes later the same watch announced a false idle for a worker whose
+pane read
+
+    ✶ Photosynthesizing… (1h 34m 48s · almost done thinking with high effort)
+
+because the spinner set listed the braille glyphs and not the stars. **The fix
+for the first miss was one more string, and that is why there was a second.**
+
+What the pattern needed was one *generic* signal instead of a longer list of
+specific ones: a **parenthesised elapsed timer**, which every working state
+draws whatever glyph it happens to pick. `(shift+tab to cycle)` does not match
+it and neither does the status bar's own unparenthesised `1h34m`.
+
+Two things followed, and both are the general lesson rather than this bug:
+
+1. **The notification now quotes the pane's own last line.** Both false idles
+   would have been obvious from the notification alone — "its last line was:
+   ✶ Photosynthesizing…" needs no investigation. When a watch reports a
+   conclusion, make it carry the evidence it concluded from.
+2. **The classifier has a test**, `scripts/tests/test_worker_watch.py`, with
+   every real capture that has ever fooled it plus one deliberately using a
+   glyph nobody has listed, so the generic signal stays load-bearing. When a
+   future pane state fools it, the capture goes in there first.
+
+And the reason both misses were possible at all: **`scripts/tests/` was never
+wired into the gate.** Thirty-five tests for `validate_round.py` and
+`discover.py` had been sitting unrun since they were written, and two of them
+had been failing since the documents moved — they still named
+`GLASSHOUSE_IMPLEMENTATION_CAPABILITY_MAP.md`. Nothing noticed, because nothing
+asked. `ci-local.sh` runs `scripts/tests/test_*.py` now.
+
+**A test nobody runs is a comment with a shebang.** If the gate is where truth
+is established for the product, the tools that decide what the product's
+workers do belong in it too.
