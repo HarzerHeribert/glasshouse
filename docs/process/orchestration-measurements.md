@@ -1547,3 +1547,97 @@ It found one of its own backgrounded `cargo test` runs still going while it
 started the gate, killed it, and **declined to quote any timing from that
 window**. Nothing failed during the overlap. Reporting a contaminated
 measurement as contaminated is the behaviour the rule is for.
+
+## Batch 29 — four concurrent workers, and the first round dispatched by a successor
+
+Four workers in parallel, started together on 2026-08-27 from `a24fee1`, by an
+incoming orchestrator that inherited the round already written. **This is the
+first round in this project's history that was prepared by one orchestrator and
+dispatched by another**, which is practice §55 working as intended — the
+predecessor stopped at its context ceiling rather than start a round it could
+not integrate.
+
+| worker | tier | kind | partition |
+|---|---|---|---|
+| `typing-throttle` | Opus specialist | defect | `tui/**`, `tests/terminal_loss.rs` |
+| `windows-truth` | Sonnet | defect | `scripts/`, `session/api.rs`, `tests/pty_smoke.rs` |
+| `phase-10a` | Opus lead | forward, 13 boxes | `session/{runtime,lifecycle,native_id,store,mod}.rs` |
+| `phase-9a-facts` | Sonnet | forward, 2 boxes | `profile/**`, `launch.rs`, `shell/mod.rs`, `main.rs` |
+
+Four is one above §9's stated ceiling of three, where "reviews start to
+collide". It is being tried deliberately: two of the four are defect packages
+that tick no box and therefore need no ledger or map edit at integration, which
+is where a review's serial cost actually lands. **The question this round asks
+is whether the ceiling is really about worker count or about how many
+integrations need records written** — record the answer at integration.
+
+### What a successor pays, measured
+
+Dispatch cost the incoming orchestrator **~6% of context** from cold start to
+four workers running and watched, including verifying the inherited state rather
+than believing it. The predecessor's `ROUND-BRIEF.md` is what made that possible:
+the packets, the worktrees and the validator run were all already done.
+
+Against that, the orchestrator's own reading list is ~175k tokens. **The brief
+is worth more than the reading list for the first hour**, because nothing in the
+ten documents tells you which four packets are ready.
+
+### Two packet defects in the first twenty minutes, and only one was the predecessor's
+
+**1. The dispatch template pointed at a path that cannot resolve.** The brief's
+worker instruction was *"Read `.agent-runtime/packet-<name>.md`"* — but
+`/.agent-runtime/` is gitignored and exists **only in the main checkout**. None
+of the four worktrees has it. A relative path there finds nothing, and the
+report would have been written where no watch was looking, which is §57's
+write-with-no-read arriving from a third direction. Caught before dispatch by
+checking the directory existed in a worktree rather than assuming; every worker
+got the absolute path plus one sentence redirecting every `.agent-runtime/` path
+in its packet.
+
+**2. `packet-phase-10a.md` named the wrong file for the schema migration.** It
+said the convention lived in `src/session/store.rs` and that "migration 7 is the
+most recent". Migrations live **only** in `crates/glasshouse/src/database.rs`,
+`store.rs` contains none at all, and `SUPPORTED_SCHEMA_VERSION` is **8**.
+
+The worker found this, and what it did with it is the point: it did not edit the
+file it needed, because the file was in neither its `YOURS` nor its `FORBIDDEN`
+list and its instruction was not to touch what the packet did not grant. It
+stopped and asked, with the three options and its recommendation.
+
+**That is the sixth consecutive round in which a worker was right against its
+packet**, and the first in which the correction was about *which file a
+convention lives in* rather than about a claim's substance. The orchestrator
+verified it independently before granting — `grep -rln 'MIGRATIONS'` returns one
+file, and all four packets were checked for a `database.rs` claim before it was
+handed over.
+
+**The transferable rule: a packet that names a file as the home of a convention
+should name the symbol too.** `MIGRATIONS` would have been greppable and the
+staleness self-evident; "the migration numbering convention is in it" is a claim
+a worker can only take on trust or stop over.
+
+### The `FORBIDDEN`/`YOURS` gap is a third category, and it cost a stop
+
+`database.rs` was in neither list. The worker read that correctly as "not
+granted" and stopped — the safe reading, and the one the packet's own stop
+condition asks for. But it cost a round trip that a complete partition would not
+have.
+
+`validate_round.py` checks that the `YOURS` lists are **disjoint**. It cannot
+check that they are **sufficient**, because nothing tells it what a package will
+need to touch. That is §32 and §36 restated as a tooling gap: the round gate
+proves no two workers collide and proves nothing about whether any of them can
+finish. Worth building — for each packet, grep the box lines for the symbols
+they imply and report any that resolve to a file in no list at all.
+
+### Open questions for this round
+
+1. **Does four concurrent workers actually collide at review**, or was §9's
+   ceiling of three really a statement about how many *box-closing* packages one
+   orchestrator can record? Two of these four tick no boxes.
+2. **Does a stale packet cost more than a thin one?** Two of the three defects
+   found so far were stale facts stated confidently, not facts omitted. A packet
+   that says "find the migration convention yourself" is cheaper to write and
+   might be cheaper to run.
+3. **What did the two defect packages cost against what they returned?** Neither
+   moves the progress number at all, and both were ranked above a phase.

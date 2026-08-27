@@ -1851,3 +1851,59 @@ implied. A live session is refused rather than closed underneath itself — a
 `closed` row that a running harness keeps updating is worse than an error
 telling the user to stop it first.
 
+
+## A provider's model list is a catalogue, not an entitlement list
+
+Glasshouse asks a provider `GET /models` to learn what it offers, and every
+surface that shows a model to a user is built on that answer. **The list says
+what exists. It does not say what this credential may invoke**, and on some
+hosts the two differ completely.
+
+Measured on 2026-08-27 against fourteen providers with real credentials, and
+re-run independently before being written here:
+
+| host | catalogue | this account could invoke | how the refusal arrives |
+|---|---|---|---|
+| NVIDIA | 84 models | **none of them** | `404` — `Function '<uuid>': Not found for account '<id>'` |
+| Nous | 372 models | none — balance too low | `404` — `requires available credits` |
+| Cerebras | 2 models | none — unpaid | `402 payment_required` |
+| DeepSeek | 3 models | none — unpaid | `402 payment_required` |
+
+**The same condition arrives as three different status codes, and one status
+code carries three different conditions.** Nous alone answers `404` both for a
+model that genuinely does not exist — *"does not exist in our configuration or
+OpenRouter catalog"* — and for one it lists and this account cannot afford —
+*"requires available credits. Your account balance is too low"*. Both were
+observed from this repository within a minute of each other.
+
+### What this requires of Glasshouse
+
+**Any component that decides whether a model is usable must classify on status
+*and* body, never on status alone.** A router that reads status codes only will:
+
+- treat NVIDIA's and Nous's *entitlement and billing* conditions as
+  *"model does not exist"*, and may retire a model permanently that would work
+  after a top-up;
+- treat Cerebras's and DeepSeek's identical condition as retryable, because
+  `402` is the honest code;
+- and be unable to tell, on Nous, a real absence from a temporary one at all.
+
+This binds the routing prior (Phase 35B) and the free-pool router (Phase 21B)
+before either is written, and it is the reason a catalogue entry may not be
+promoted to "available" by its presence in the list. **Reachability and
+entitlement are different claims** — the same distinction an unauthenticated
+probe already forces, one layer further in.
+
+A model identifier is not evidence either: on one gateway an id containing
+`free` was refused as a paid tier while a sibling served for nothing on the
+same credential. Whether a model costs this account anything is a property of
+the account, not of the name.
+
+### And an error body is untrusted output that may name the account
+
+NVIDIA's refusal quotes an account identifier back; two other hosts quote a
+masked tail of the submitted credential. **A provider's error body must be
+treated as sensitive by default**: classified against, and never copied whole
+into a log, a diagnostic, a session record, or anything a user might share.
+That is the same rule already applied to the request side, applied to the
+response.
