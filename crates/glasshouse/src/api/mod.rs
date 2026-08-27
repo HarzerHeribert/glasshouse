@@ -49,6 +49,12 @@
 //! **Authentication.** See `unix::authorize` for the mechanism and its
 //! limits — a filesystem-permission and peer-credential check, not a secret.
 
+/// Gated to match its only consumer, `unix`. Every item in `protocol` is
+/// reached from `unix::serve` and from nothing else, so on a platform without
+/// Unix domain sockets the whole module is dead code — and `-D warnings` makes
+/// that a hard error, not a warning. Practice: anything used only by a
+/// platform-gated module needs the same gate as that module.
+#[cfg(unix)]
 mod protocol;
 
 #[cfg(unix)]
