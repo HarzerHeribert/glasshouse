@@ -145,6 +145,48 @@ pub enum Command {
         #[arg(long, value_name = "VALUE")]
         format: Option<String>,
     },
+    /// Report what Glasshouse knows about each model resource's quota, and
+    /// where it learned it.
+    ///
+    /// Lists every resource Glasshouse can describe — each harness's own
+    /// subscription, every configured provider and local server, and the
+    /// gateway — with the shape of its quota, what can exhaust it, and for
+    /// every capacity number whether it is authoritative, observed,
+    /// estimated, manual, or unknown.
+    ///
+    /// **A value Glasshouse never read prints as `unknown`, and never as
+    /// zero or as full.** Most of them are unknown today, and that is the
+    /// answer rather than a gap: a subscription's remaining allowance is
+    /// published by nobody, and an inferred figure presented as a measurement
+    /// is worse than no figure at all. An estimate is always marked as one.
+    ///
+    /// Makes no network request unless `--probe` names a provider. It does
+    /// ask each installed harness for its own status, which is a local
+    /// command costing no quota, and it reads the plan out of the answer and
+    /// nothing else.
+    ///
+    /// Where a provider publishes nothing, record what you know in a
+    /// `[providers.<name>.quota]` table — a `plan`, a `budget`, or a
+    /// `stale_after_seconds`. Those are read as `manual`, and a provider's
+    /// own word always outranks them.
+    Resources {
+        /// Show every pool, window and rate ceiling, including the ones
+        /// nothing is known about — the debug view.
+        #[arg(long)]
+        verbose: bool,
+
+        /// Make one request to this configured provider and read the
+        /// rate-limit headers it answers with. Repeatable.
+        ///
+        /// The request goes to the same model-list URL `glasshouse doctor`
+        /// already probes, so it costs one catalogue read and no inference.
+        #[arg(long, value_name = "PROVIDER")]
+        probe: Vec<String>,
+
+        /// Do not run any harness's status command.
+        #[arg(long)]
+        no_harness: bool,
+    },
     /// List the sessions Glasshouse has recorded for this project, or act on
     /// one of them.
     ///

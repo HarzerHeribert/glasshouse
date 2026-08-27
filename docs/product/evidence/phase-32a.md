@@ -275,3 +275,60 @@ home regardless, since a `CapacityState` is a derived view over a
 `provider::registry::ResourceKind` exactly as the registry is a derived view
 over `provider::templates`. Moving it to `crate::quota` later is a rename plus
 one line in `lib.rs`; nothing depends on the path.
+
+---
+
+## Appended by Phase 32B, 2026-08-27 — which of the sixteen actually closed
+
+Phase 32A left sixteen lines *OPEN — Phase 32B* on the principle that **a
+structural guarantee is not a closed box**: they close when a reading is
+actually taken and a caller shows it. Phase 32B built the readers
+(`crates/glasshouse/src/provider/telemetry.rs`) and the caller
+(`glasshouse resources`). Applying 32A's own criterion, **two** of the sixteen
+now have a real reading from a live host and **fourteen** do not. Nothing in
+32A's entries above is amended; this records what happened to them.
+
+**Closed by Phase 32B:**
+
+- **1207 — request count independent from token consumption.** AnyRouter's
+  `ratelimit-limit: 300`, read on 2026-08-27 from `GET /api/v1/models` — the
+  endpoint Glasshouse already calls — fills the request pool's ceiling while
+  every token pool of the same `CapacityState` stays `Unmeasured`. 32A proved
+  they *could not* alias; this is one of them being filled and the others not.
+  Visible in the shipped binary as
+  `requests remaining unmeasured (unknown), limit 300 requests [authoritative]`.
+- **1214 — requests-per-minute limits when known.** The same response's
+  `ratelimit-policy: 300;w=60`. The window is what makes it a per-minute
+  ceiling rather than an unqualified `300`, and a ceiling whose window is
+  longer lands in `LongWindowRequests` instead.
+
+**Still open, and the reason has changed for two of them.** 1216 and 1217 now
+have a *working, tested reader* and still no number: no host Glasshouse can
+reach has sent a long-window request pool, and — 1217's antecedent — **the
+shipped binary still computes no normalized percentage at all**, because no
+pool has had both halves read. That is the same finding 32A recorded, unchanged
+by having built the parser. 1199, 1200, 1205, 1206, 1208, 1210, 1211, 1212,
+1213, 1215 and 1218 are unchanged for the original reason: nothing publishes
+the number.
+
+**One correction to 32A's own framing, offered rather than asserted.** 32A
+wrote that line 1211's reset time is *"a number Phase 32B can legitimately
+read"* because "harnesses do print when a subscription window turns". Checked
+against the installed binaries on 2026-08-27, **none of them exposes it
+machine-readably**: `codex doctor --json` is stable and schema-stamped and
+carries no reset field, and `claude auth status --json` carries a plan and no
+window at all. The reset time is legitimately readable from a *provider's*
+`RateLimit-Reset` header — `RateLimitHeaders::resets_at_unix` reads one, and
+`a_reset_field_reaches_the_rolling_window_and_not_the_calendar_one` proves
+where it lands — but no host Glasshouse ships a template for has sent one on
+the route it calls. Leaving 1211's pools `Unmeasured` rather than
+`ProviderOpaque` was still the right call; the justification for it is the
+header, not the harness.
+
+**And 1202's blocker is unchanged, which is now a fact about the rounds rather
+than about the code.** 32A recorded it as blocked on
+`crates/glasshouse/src/profile/mod.rs`'s `BackendResource::Native => {}` arm,
+outside its partition. That file was outside Phase 32B's partition too, so the
+same box has been blocked by the same three lines in the same file for two
+consecutive packages. See `.agent-runtime/report-PHASE-32B.md` for the exact
+patch.

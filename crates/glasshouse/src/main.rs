@@ -127,6 +127,16 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             };
             print!("{}", config::response::report(&effective, &request));
         }
+        Some(Command::Resources {
+            verbose,
+            probe,
+            no_harness,
+        }) => {
+            print!(
+                "{}",
+                resources_report(&runtime, *verbose, probe, *no_harness)?
+            );
+        }
         Some(Command::Sessions { command }) => match command {
             // The bare command still lists, which is what every existing
             // caller and every printed identifier assumes.
@@ -1950,6 +1960,81 @@ fn note_lifecycle(
     if let Err(err) = store.set_lifecycle(id, lifecycle) {
         tracing::warn!(session = %id, %lifecycle, error = %err, "could not record a session state change");
     }
+}
+
+/// Render `glasshouse resources` — Phase 32B's production caller, and the
+/// reason its boxes are closeable at all.
+///
+/// # What this function is for, beyond printing
+///
+/// Phase 32 recorded that `provider::registry::registry()` had no production
+/// caller, and Phase 32A recorded that the launch path reads exactly one
+/// projection out of `CapacityState` — its quota *shape* — with every pool,
+/// window and rate ceiling below that proven only by tests. Both ledgers
+/// named the same missing piece: something in the shipped binary that reads
+/// the model. This is that, and every telemetry reader Phase 32B builds is
+/// reached from here and from nowhere else in the binary.
+///
+/// # The order of reads, and why the cheap one is not optional
+///
+/// Harness status first, because it is a local process invocation of about a
+/// quarter of a second that spends no quota and needs no credential — so the
+/// bare command still takes a real reading, and a user who runs
+/// `glasshouse resources` with no flags is not shown a screen of `unknown`
+/// that Glasshouse could have filled in for free. Network probes are opt-in,
+/// matching `glasshouse pairing` and `glasshouse response`, which is the
+/// shape this command was modelled on.
+///
+/// # It cannot fail on telemetry
+///
+/// The `Result` here is for reading the user's own configuration files, which
+/// is the same failure every other command in this file can have. No
+/// telemetry read below can produce an `Err`: capability map line 1238 is
+/// enforced in `provider::telemetry` and `provider::resources` by there being
+/// no fallible signature to propagate.
+fn resources_report(
+    runtime: &Runtime,
+    verbose: bool,
+    probe: &[String],
+    no_harness: bool,
+) -> anyhow::Result<String> {
+    let user = UserConfig::load(runtime.paths())?;
+    let project = config::load_project_config(runtime.project())?;
+    let effective = EffectiveConfig::new(&user, project.as_ref());
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+
+    let mut telemetry = glasshouse::provider::resources::GatheredTelemetry::new();
+    if !no_harness {
+        telemetry = telemetry.gather_harness_status(now_unix);
+    }
+
+    let mut probes = String::new();
+    if !probe.is_empty() {
+        use std::fmt::Write as _;
+        let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
+        let _ = writeln!(probes, "PROBES\n");
+        for name in probe {
+            let reading = glasshouse::provider::resources::probe_provider(
+                &effective, &secrets, name, now_unix,
+            );
+            glasshouse::provider::resources::render_probe(&mut probes, name, &reading);
+            if let glasshouse::provider::resources::ProbeReading::Answered {
+                headers,
+                observed_at_unix,
+                ..
+            } = reading
+            {
+                telemetry = telemetry.with_provider_headers(name, headers, observed_at_unix);
+            }
+        }
+        probes.push('\n');
+    }
+
+    let options = glasshouse::provider::resources::ReportOptions { verbose, now_unix };
+    Ok(format!(
+        "{probes}{}",
+        glasshouse::provider::resources::report(&effective, &telemetry, options)
+    ))
 }
 
 /// Render a memory search the way `session_report` renders sessions: the

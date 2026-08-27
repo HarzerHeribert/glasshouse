@@ -57,6 +57,14 @@ pub enum Overlay {
     /// doing", this one answers "what is this project doing". See
     /// [`ProjectOverviewState`] for the data behind it.
     ProjectOverview,
+    /// Phase 47 line 1758: the presented session's own recent lifecycle
+    /// events, reached deliberately rather than shown by default — see
+    /// [`ShellState::open_session_events`]. Carries no data of its own: the
+    /// events themselves already live in `ShellState::activity`, populated
+    /// in production by [`ShellState::note_events`] whether or not this
+    /// overlay is ever opened, exactly as [`Overlay::Overview`] carries none
+    /// of the session list it shows.
+    SessionEvents,
 }
 
 /// Who currently owns the keyboard.
@@ -613,6 +621,23 @@ impl ShellState {
         self.project_overview.as_ref()
     }
 
+    /// Open the presented session's recent-lifecycle-events overlay — map
+    /// line 1758.
+    ///
+    /// Unlike [`Self::open_project_overview`], nothing here needs the run
+    /// loop's file I/O: the events this overlay shows are the same
+    /// `activity` buffer [`Self::note_events`] already keeps up to date in
+    /// production, whether or not this overlay is ever opened, so there is
+    /// no data to hand in — only the marker, exactly like
+    /// [`Self::open_overview`] before Phase 11 gave it a cursor to track.
+    pub fn open_session_events(&mut self) -> Action {
+        if self.overlay == Some(Overlay::SessionEvents) {
+            return Action::None;
+        }
+        self.overlay = Some(Overlay::SessionEvents);
+        Action::Redraw
+    }
+
     /// The session the overview's cursor is on — the one an interrupt or a
     /// sent line acts on. `None` when the overview is closed or the project
     /// has no sessions.
@@ -971,6 +996,12 @@ impl ShellState {
             return self.handle_project_overview_key(key, had_status);
         }
 
+        // Read-only, like the two above: nothing to act on, so only its own
+        // close key is claimed.
+        if self.overlay == Some(Overlay::SessionEvents) {
+            return self.handle_session_events_key(key, had_status);
+        }
+
         self.handle_control_key(key, had_status)
     }
 
@@ -986,6 +1017,7 @@ impl ShellState {
             KeyCode::Char('o') => self.open_overview(),
             KeyCode::Char('s') => Action::OpenSettings,
             KeyCode::Char('p') => Action::OpenProjectOverview,
+            KeyCode::Char('e') => self.open_session_events(),
             KeyCode::Enter | KeyCode::Char('i') => self.enter_session_mode(),
             KeyCode::Char('n') => Action::StartSession,
             // Shift-N is the same session `n` starts, minus the viewport —
@@ -1073,6 +1105,16 @@ impl ShellState {
     fn handle_project_overview_key(&mut self, key: KeyEvent, had_status: bool) -> Action {
         match key.code {
             KeyCode::Esc | KeyCode::Char('p') => self.close_overlay(),
+            _ => self.handle_control_key(key, had_status),
+        }
+    }
+
+    /// Answer one key while the session-events overlay is open — the same
+    /// shape as [`Self::handle_project_overview_key`], for the same reason:
+    /// nothing here is acted on, only shown.
+    fn handle_session_events_key(&mut self, key: KeyEvent, had_status: bool) -> Action {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('e') => self.close_overlay(),
             _ => self.handle_control_key(key, had_status),
         }
     }

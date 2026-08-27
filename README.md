@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`████████████████░░░░░░░░░░░░░░░░░░░░░░░░` 514 / 1280 mandatory capabilities (40%)
+`████████████████░░░░░░░░░░░░░░░░░░░░░░░░` 539 / 1280 mandatory capabilities (42%)
 
 <details>
 <summary>Per-phase breakdown (17 of 104 phases complete)</summary>
@@ -86,8 +86,8 @@ the authoritative specification and tracks what is done.
 | Phase 30 — Session context metadata | 0/8 |
 | Phase 31 — Compaction-aware behavior | 0/7 |
 | Phase 32 — Resource registry | 11/12 |
-| Phase 32A — Unified quota and capacity model | 3/21 |
-| Phase 32B — Quota telemetry sources | 0/14 |
+| Phase 32A — Unified quota and capacity model | 5/21 |
+| Phase 32B — Quota telemetry sources | 11/14 |
 | Phase 32C — Subscription capacity estimation | 0/12 |
 | Phase 32D — Normalized remaining-capacity score | 0/12 |
 | Phase 32E — Burn rate and exhaustion forecasting | 0/10 |
@@ -119,10 +119,10 @@ the authoritative specification and tracks what is done.
 | Phase 43 — MCP surface for orchestrators | 0/10 |
 | Phase 44 — User control and override | 0/9 |
 | Phase 45 — Failure handling | 7/9 |
-| Phase 46 — Security and contamination tests | 0/8 |
-| Phase 47 — Observability without spectacle | 0/15 |
+| Phase 46 — Security and contamination tests | 5/8 |
+| Phase 47 — Observability without spectacle | 5/15 |
 | Phase 48 — CLI ergonomics | 0/8 |
-| Phase 49 — Configuration | 10/16 |
+| Phase 49 — Configuration | 12/16 |
 | Phase 50 — Tracked project knowledge as an optional feature | 0/7 |
 | Phase 51 — Evaluation hooks | 0/37 |
 | Phase 52 — Criteria before adding semantic/vector retrieval | 0/6 |

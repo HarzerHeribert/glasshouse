@@ -687,7 +687,7 @@ fn a_caller_outside_the_crate_can_record_a_reading_and_normalize_it_without_losi
 
     let (pool, score) = capacity.normalized().expect("the credit pool was read");
     assert_eq!(pool, "credits");
-    assert_eq!(score.percent(), 15);
+    assert_eq!(score.percent().exact(), Some(15));
     assert_eq!(score.native_unit(), "USD");
     assert_eq!(score.remaining().value().value(), 1_200_000);
     assert_eq!(score.remaining().value().scale(), UnitScale::Millionths);
@@ -697,4 +697,464 @@ fn a_caller_outside_the_crate_can_record_a_reading_and_normalize_it_without_losi
         capacity.credits().remaining().value().unwrap().value(),
         1_200_000
     );
+}
+
+// ===== Phase 32B: quota telemetry, from outside the crate ==================
+
+use std::process::Command;
+
+use glasshouse::provider::quota::{
+    CapacityState, Confidence, Freshness, KnownPlan, Percentage, TelemetryClass, UNKNOWN_TELEMETRY,
+};
+use glasshouse::provider::telemetry::{
+    HarnessTelemetry, RateLimitHeaders, apply_harness_report, apply_provider_headers,
+    apply_user_configuration, read_harness_plan,
+};
+
+const TELEMETRY_OBSERVED: i64 = 1_787_800_000;
+
+/// A project directory and a private configuration directory the shipped
+/// binary can be pointed at.
+///
+/// Both are temporary and neither is the developer's own, so these tests read
+/// no real credential and observe no real account.
+struct BinaryFixture {
+    project: tempfile::TempDir,
+    config: tempfile::TempDir,
+}
+
+impl BinaryFixture {
+    fn new() -> Self {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".git")).unwrap();
+        let config = tempfile::tempdir().unwrap();
+        Self { project, config }
+    }
+
+    fn with_config(self, toml: &str) -> Self {
+        std::fs::write(self.config.path().join("config.toml"), toml).unwrap();
+        self
+    }
+
+    /// Run the shipped binary and return its stdout.
+    ///
+    /// `--no-harness` on every invocation here: a test must not depend on
+    /// which harnesses happen to be installed on the machine running it, nor
+    /// invoke somebody's real `claude auth status`. The harness seam has its
+    /// own tests, driven with a report rather than a subprocess.
+    fn run(&self, args: &[&str]) -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+            .current_dir(self.project.path())
+            .args([
+                "--data-dir",
+                self.config.path().to_str().unwrap(),
+                "--config-dir",
+                self.config.path().to_str().unwrap(),
+            ])
+            .args(args)
+            .output()
+            .expect("the glasshouse binary runs");
+        assert!(
+            output.status.success(),
+            "`glasshouse {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("stdout is UTF-8")
+    }
+}
+
+/// **The §35 test for this whole phase.**
+///
+/// Everything Phase 32B builds is reachable from exactly one place in the
+/// shipped binary: `main.rs`'s `Command::Resources` arm. Every other test in
+/// this package enters at `provider::resources::report` or below, which is
+/// precisely the shape practice §35 warns about — *a caller you can delete
+/// without a test noticing is, to the test suite, not a caller*.
+///
+/// So this one goes through the binary. Deleting the dispatch arm, or the
+/// `resources_report` call inside it, makes it fail; nothing below the entry
+/// point can keep it passing.
+#[test]
+fn the_shipped_binary_reports_every_resource_it_can_describe() {
+    let fixture = BinaryFixture::new();
+    let stdout = fixture.run(&["resources", "--no-harness"]);
+
+    assert!(stdout.starts_with("RESOURCES"), "{stdout}");
+    for kind in registry() {
+        assert!(
+            stdout.contains(&kind.label()),
+            "the binary did not report `{}`:\n{stdout}",
+            kind.label()
+        );
+    }
+}
+
+/// Capability map line 1240 and map line 1761, through the binary: every
+/// resource names whether what is known about it is measured, inferred or
+/// unknown — and with nothing read, every one of them says `unknown` rather
+/// than showing a figure.
+#[test]
+fn the_shipped_binary_names_the_telemetry_source_of_every_resource() {
+    let fixture = BinaryFixture::new();
+    let stdout = fixture.run(&["resources", "--no-harness", "--verbose"]);
+
+    assert_eq!(
+        stdout
+            .matches(&format!("telemetry       {UNKNOWN_TELEMETRY}"))
+            .count(),
+        registry().len(),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains('%'),
+        "the binary printed a percentage with nothing measured:\n{stdout}"
+    );
+    assert!(stdout.contains("cached input tokens"), "{stdout}");
+}
+
+/// Capability map line 1233 and Phase 49's configuration half, through the
+/// binary: a user who writes a plan and a budget into their own
+/// configuration sees both, marked `manual`, with the layer that supplied
+/// them named.
+#[test]
+fn the_shipped_binary_reads_a_users_own_quota_overrides() {
+    let fixture = BinaryFixture::new().with_config(
+        r#"
+[providers.anyrouter]
+template = "anyrouter"
+
+[providers.anyrouter.quota]
+plan = "free-tier"
+stale_after_seconds = 120
+
+[providers.anyrouter.quota.budget]
+amount_micro_usd = 10000000
+period = "calendar-month"
+"#,
+    );
+    let stdout = fixture.run(&["resources", "--no-harness"]);
+
+    assert!(stdout.contains("free-tier [manual]"), "{stdout}");
+    assert!(
+        stdout.contains("anyrouter: plan `free-tier` (user)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("10.000000 USD per calendar month"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("anyrouter: telemetry stale after 120s (user)"),
+        "{stdout}"
+    );
+    // Line 1237, visible: this provider's own age, not the default.
+    assert!(stdout.contains("provider limit 120s"), "{stdout}");
+}
+
+/// The note that tells a user the override exists, when they have set none.
+/// A screen full of `unknown` with no way out of it is the failure this
+/// guards against.
+#[test]
+fn the_shipped_binary_says_how_to_record_a_plan_when_nothing_is_configured() {
+    let fixture = BinaryFixture::new();
+    let stdout = fixture.run(&["resources", "--no-harness"]);
+    assert!(stdout.contains("CONFIGURED QUOTA OVERRIDES"), "{stdout}");
+    assert!(stdout.contains("[providers.<name>.quota]"), "{stdout}");
+    assert!(stdout.contains("never as measurements"), "{stdout}");
+}
+
+/// Capability map line 1229, from outside the crate: the header set a real
+/// provider sent becomes a reading with the header's own name on it.
+#[test]
+fn a_real_providers_rate_limit_headers_become_a_reading_outside_the_crate() {
+    let headers = RateLimitHeaders::read(vec![
+        ("ratelimit-limit", "300"),
+        ("ratelimit-policy", "300;w=60"),
+        ("x-ratelimit-limit", "300"),
+        ("x-ratelimit-tier", "ip"),
+        ("x-ratelimit-window", "60"),
+    ]);
+    let state = apply_provider_headers(
+        ResourceKind::from_direct_provider("anyrouter").capacity(),
+        &headers,
+        TELEMETRY_OBSERVED,
+    );
+
+    let limit = state
+        .requests()
+        .limit()
+        .value()
+        .expect("a ceiling was read");
+    assert_eq!(limit.value(), 300);
+    assert_eq!(limit.unit(), "requests");
+    assert_eq!(
+        state.requests().limit().telemetry_class(),
+        Some(TelemetryClass::Authoritative)
+    );
+    assert!(
+        state
+            .requests()
+            .limit()
+            .describe_source()
+            .contains("ratelimit-limit")
+    );
+    // What the provider did not send stays unknown.
+    assert_eq!(state.requests().remaining().telemetry_class(), None);
+    assert_eq!(
+        state.requests().remaining().telemetry_class_str(),
+        UNKNOWN_TELEMETRY
+    );
+    // Line 1236.
+    assert_eq!(state.last_observed_at_unix(), Some(TELEMETRY_OBSERVED));
+}
+
+/// Capability map line 1234, from outside the crate, on the type a caller
+/// actually holds: an estimate has no accessor that yields a bare figure.
+#[test]
+fn a_caller_outside_the_crate_cannot_read_an_estimate_as_an_exact_figure() {
+    let pool = Pool::unmeasured()
+        .with_limit(Capacity::Measured(Reading::new(
+            NativeAmount::millionths(10_000_000, "USD"),
+            TELEMETRY_OBSERVED,
+            ReadingSource::UserConfiguration,
+        )))
+        .with_remaining(Capacity::Measured(Reading::new(
+            NativeAmount::millionths(2_500_000, "USD"),
+            TELEMETRY_OBSERVED,
+            ReadingSource::LocalObservation("this session's own spend".to_owned()),
+        )));
+    let score = pool.normalized().expect("both halves were read");
+
+    assert_eq!(score.percent().exact(), None);
+    let percentage = score.percent();
+    let (percent, confidence, source) = percentage.estimated().expect("an estimate");
+    assert_eq!(percent, 25);
+    assert_eq!(confidence, Confidence::Medium);
+    assert!(!source.is_empty());
+    assert!(matches!(score.percent(), Percentage::Estimated { .. }));
+    assert!(score.percent().render().contains("estimated"));
+
+    // And the exact case, so the test is not passing for want of a path to
+    // the other answer.
+    let authoritative = Pool::unmeasured()
+        .with_limit(Capacity::Measured(Reading::new(
+            NativeAmount::whole(1_000, "requests"),
+            TELEMETRY_OBSERVED,
+            ReadingSource::ResponseHeader("ratelimit-limit".to_owned()),
+        )))
+        .with_remaining(Capacity::Measured(Reading::new(
+            NativeAmount::whole(250, "requests"),
+            TELEMETRY_OBSERVED,
+            ReadingSource::ResponseHeader("ratelimit-remaining".to_owned()),
+        )))
+        .normalized()
+        .expect("both halves were read");
+    assert_eq!(authoritative.percent().exact(), Some(25));
+    assert_eq!(authoritative.percent().render(), "25%");
+}
+
+/// Capability map line 1228, from outside the crate, over all four classes.
+#[test]
+fn authoritative_telemetry_is_preferred_over_every_weaker_class() {
+    let authoritative = Capacity::Measured(Reading::new(
+        NativeAmount::whole(10, "requests"),
+        TELEMETRY_OBSERVED,
+        ReadingSource::ResponseHeader("ratelimit-remaining".to_owned()),
+    ));
+    let weaker = [
+        ReadingSource::LocalObservation("this session".to_owned()),
+        ReadingSource::UserConfiguration,
+        ReadingSource::InferredEstimate("the previous window".to_owned()),
+    ];
+    for source in weaker {
+        // Fresher and still weaker: the authoritative reading survives.
+        let candidate = Capacity::Measured(Reading::new(
+            NativeAmount::whole(999, "requests"),
+            TELEMETRY_OBSERVED + 10_000,
+            source.clone(),
+        ));
+        assert_eq!(
+            authoritative
+                .clone()
+                .prefer(candidate.clone())
+                .value()
+                .unwrap()
+                .value(),
+            10,
+            "{source:?} displaced an authoritative reading"
+        );
+        assert_eq!(
+            candidate
+                .prefer(authoritative.clone())
+                .value()
+                .unwrap()
+                .value(),
+            10,
+            "{source:?} displaced an authoritative reading, applied the other way"
+        );
+    }
+}
+
+/// Capability map line 1232, from outside the crate: the two seams are
+/// independent, and a harness's own report never touches a provider's fields.
+#[test]
+fn harness_telemetry_and_provider_telemetry_stay_independent_outside_the_crate() {
+    let plan = read_harness_plan(
+        r#"{"subscriptionType":"max","email":"someone@example.com"}"#,
+        TELEMETRY_OBSERVED,
+        "claude auth status --json",
+    );
+    let subscription = apply_harness_report(CapacityState::opaque_subscription(), &plan);
+    assert_eq!(
+        subscription.plan().value().map(KnownPlan::name),
+        Some("max")
+    );
+    // Nothing about the account holder survived the read.
+    assert!(!format!("{subscription:?}").contains("someone@example.com"));
+    // And no pool learned anything from a plan.
+    assert_eq!(
+        subscription.requests(),
+        CapacityState::opaque_subscription().requests()
+    );
+
+    let provider = apply_provider_headers(
+        CapacityState::metered_balance(),
+        &RateLimitHeaders::read(vec![("ratelimit-limit", "300")]),
+        TELEMETRY_OBSERVED,
+    );
+    // And no plan learned anything from a header.
+    assert_eq!(provider.plan().telemetry_class(), None);
+}
+
+/// Capability map line 1237, from outside the crate: the same reading, two
+/// ages, two answers.
+#[test]
+fn staleness_is_decided_by_the_age_a_caller_supplies_and_not_by_a_constant() {
+    let reading = Reading::new(
+        NativeAmount::whole(300, "requests"),
+        TELEMETRY_OBSERVED,
+        ReadingSource::ResponseHeader("ratelimit-limit".to_owned()),
+    );
+    let now = TELEMETRY_OBSERVED + 300;
+    assert!(!reading.freshness(now, 900).is_stale());
+    assert!(reading.freshness(now, 120).is_stale());
+    assert_eq!(reading.freshness(now, 900).age_seconds(), 300);
+    assert_eq!(
+        Freshness::of(TELEMETRY_OBSERVED, now, 900).age_seconds(),
+        300
+    );
+}
+
+/// Capability map line 1238, from outside the crate: nothing in the telemetry
+/// path is fallible, so a caller cannot write an error branch that fails a
+/// session on a bad header or an unreadable status report.
+#[test]
+fn no_telemetry_reader_can_hand_a_caller_an_error_to_fail_a_session_on() {
+    // Garbage in every position, and a complete capacity state out.
+    let state = apply_user_configuration(
+        apply_harness_report(
+            apply_provider_headers(
+                CapacityState::metered_balance(),
+                &RateLimitHeaders::read(vec![
+                    ("ratelimit-limit", "not a number"),
+                    ("ratelimit-policy", "nonsense"),
+                    ("ratelimit-remaining", "-1"),
+                ]),
+                TELEMETRY_OBSERVED,
+            ),
+            &read_harness_plan(
+                "<html>not json</html>",
+                TELEMETRY_OBSERVED,
+                "some --interface",
+            ),
+        ),
+        Some("   "),
+        None,
+        TELEMETRY_OBSERVED,
+    );
+
+    assert_eq!(state.last_observed_at_unix(), None);
+    assert_eq!(state.telemetry_class_str(), UNKNOWN_TELEMETRY);
+    assert!(state.normalized().is_none());
+    // Still a complete, usable model — the exact one a resource with no
+    // telemetry has.
+    assert_eq!(state, CapacityState::metered_balance());
+}
+
+/// Every unknown quantity in the shipped binary answers `unknown` rather than
+/// a number, over every entry of the registry and every pool of each — the
+/// standing guard against this phase's characteristic failure, extended from
+/// Phase 32A's version to cover the telemetry class as well as the value.
+#[test]
+fn nothing_the_registry_can_describe_claims_a_telemetry_class_it_did_not_earn() {
+    for kind in registry() {
+        let capacity = kind.capacity();
+        assert_eq!(
+            capacity.telemetry_class(),
+            None,
+            "`{}` claims a telemetry class with nothing read",
+            kind.label()
+        );
+        for (label, pool) in capacity.pools() {
+            for half in [pool.limit(), pool.remaining()] {
+                assert_eq!(
+                    half.telemetry_class(),
+                    None,
+                    "`{}`'s {label} claims a telemetry class with nothing read",
+                    kind.label()
+                );
+                assert_eq!(half.telemetry_class_str(), UNKNOWN_TELEMETRY);
+            }
+        }
+        assert!(capacity.plan().reading().is_none());
+        assert_eq!(capacity.last_observed_at_unix(), None);
+    }
+}
+
+/// Capability map line 1231: the plan reader takes one field and leaves the
+/// rest of the body where it found it. Driven from outside the crate, over
+/// the shape the real interface was measured emitting.
+#[test]
+fn a_harness_status_body_yields_a_plan_and_nothing_else_about_the_account() {
+    let body = r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty",
+        "email":"someone@example.com","orgId":"5916b68d-0000-0000-0000-000000000000",
+        "orgName":"someone@example.com's Organization","subscriptionType":"max"}"#;
+    let report = read_harness_plan(body, TELEMETRY_OBSERVED, "claude auth status --json");
+    let rendered = format!("{report:?}");
+
+    assert!(rendered.contains("max"));
+    for forbidden in [
+        "someone@example.com",
+        "5916b68d",
+        "Organization",
+        "claude.ai",
+    ] {
+        assert!(
+            !rendered.contains(forbidden),
+            "`{forbidden}` survived the read"
+        );
+    }
+    // And a body with no plan yields nothing rather than a partial account.
+    assert!(
+        !read_harness_plan(
+            r#"{"email":"someone@example.com"}"#,
+            TELEMETRY_OBSERVED,
+            "x"
+        )
+        .known_plan()
+        .is_measured()
+    );
+}
+
+/// A `HarnessTelemetry` that read nothing must not blank a plan that is
+/// already known — capability map line 1238 on the harness seam.
+#[test]
+fn a_harness_that_reported_nothing_does_not_erase_a_plan_already_known() {
+    let known = apply_harness_report(
+        CapacityState::opaque_subscription(),
+        &HarnessTelemetry::plan("max", TELEMETRY_OBSERVED, "claude auth status --json"),
+    );
+    let after = apply_harness_report(known, &HarnessTelemetry::nothing());
+    assert_eq!(after.plan().value().map(KnownPlan::name), Some("max"));
 }

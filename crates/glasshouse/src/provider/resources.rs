@@ -1,0 +1,1281 @@
+//! Phase 32B: `glasshouse resources` — what Glasshouse believes about every
+//! model resource it can describe, and **where each belief came from**.
+//!
+//! # Why this command exists at all
+//!
+//! Phase 32 built [`mod@crate::provider::registry`] and recorded, in its own
+//! evidence ledger, that `registry()` had no production caller: *"Nothing in
+//! the shipped binary currently prints 'here is everything Glasshouse can
+//! describe' to a user."* Phase 32A built [`mod@crate::provider::quota`] and
+//! recorded the same limit one layer down — the launch path reads exactly one
+//! projection out of the capacity model, its quota *shape*, and every pool,
+//! window and rate ceiling below that was proven only by tests.
+//!
+//! Both were right to say so, and both were pointing at the same missing
+//! thing: a surface that reads the model. This is it, and it is modelled on
+//! `glasshouse pairing` and `glasshouse response` — read-only, one screen,
+//! reports what Glasshouse believes rather than deciding anything, and makes
+//! no network request unless asked.
+//!
+//! # The one rule this whole surface exists to obey
+//!
+//! Capability map line 1240 asks that the telemetry source be surfaced, and
+//! line 1234 that an inferred percentage never be labelled exact. Neither is
+//! enforced by this module's care. Every number printed here arrives as a
+//! [`Capacity`], whose [`Capacity::telemetry_class_str`] answers
+//! [`crate::provider::quota::UNKNOWN_TELEMETRY`] when nothing was read, and
+//! every percentage arrives as a [`crate::provider::quota::Percentage`],
+//! whose only rendering path marks an estimate as one. This module cannot
+//! print an unlabelled figure because it has no access to one.
+//!
+//! # What it reads, and what it costs
+//!
+//! Without `--probe` it makes **no network request**: it reads the user's
+//! configuration and — because it is a local process invocation costing about
+//! a quarter of a second and no quota — each installed harness's own status
+//! interface. With `--probe <provider>` it makes exactly one request, to a
+//! provider the user has configured, and folds in whatever rate-limit headers
+//! come back.
+
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+
+use crate::config::{EffectiveConfig, Layer, QuotaStaleAfterSeconds};
+use crate::integrations::{IntegrationId, IntegrationKind};
+use crate::provider::quota::{
+    Capacity, CapacityState, Freshness, NativeAmount, Pool, TelemetryClass, UNKNOWN_TELEMETRY,
+};
+use crate::provider::registry::{ResourceKind, registry};
+use crate::provider::telemetry::{
+    HarnessTelemetry, RateLimitHeaders, apply_harness_report, apply_provider_headers,
+    apply_user_configuration, read_harness_plan,
+};
+
+/// The status interface of a harness that has one, as a command line
+/// Glasshouse constructs itself.
+///
+/// # This list is what the installed binaries actually offer, checked
+///
+/// Practice §5's rule — *check a declaration against the use, not the claim*
+/// — and the reason this project has been wrong about a harness's declared
+/// surface five times. Checked on 2026-08-27 against the binaries installed
+/// on this machine:
+///
+/// - **Claude Code** — `claude auth status --json`. `--json` is listed in
+///   `claude auth status --help` as the **default** output, which is as
+///   stable a declaration as a CLI gives. It emits a small object whose
+///   `subscriptionType` names the plan.
+/// - **Codex** — `codex doctor --json` exists and is stamped
+///   `"schemaVersion": 1`, so it is genuinely stable and machine-readable.
+///   It carries **no** usage, quota, limit, credit, remaining, reset, plan,
+///   window or balance field: twenty-three checks about installation, auth
+///   configuration, network reachability and disk. It is not a usage
+///   interface and is deliberately absent from this list rather than
+///   listed-and-parsed-for-nothing.
+/// - **Antigravity** — the `agy` binary's `--help` lists no status or usage
+///   subcommand at all.
+/// - **Cursor CLI** — likewise.
+///
+/// So one harness of four exposes machine-readable status, and what it
+/// exposes is a **plan and not a usage figure**. That is capability map line
+/// 1231's *"or status information"* clause and not its *"usage"* clause, and
+/// the evidence ledger says so rather than letting the list imply more.
+///
+/// # Why the arguments live here and not on the harness adapter
+///
+/// They should live on the adapter. [`IntegrationId::executable_candidates`]
+/// argues exactly this about the executable *name* — *"keeping a second copy
+/// here would be a second place for it to be wrong, and the two would
+/// drift"* — and a status command is the same kind of fact. The name is not
+/// duplicated: [`harness_status_command`] resolves it through
+/// [`IntegrationId::executable_candidates`], so only the **arguments** are
+/// here. `crates/glasshouse/src/harness/**` is outside this package's
+/// partition; see the report for the two-line trait method this wants to be.
+const HARNESS_STATUS_ARGS: &[(IntegrationId, &[&str])] =
+    &[(IntegrationId::ClaudeCode, &["auth", "status", "--json"])];
+
+/// The arguments that ask `harness` for its own status, if it has a stable
+/// machine-readable one.
+///
+/// Split out from [`harness_status_command`] so that the *declaration* — which
+/// harnesses have a checked interface — can be asserted without resolving an
+/// executable, which depends on what happens to be installed.
+pub fn harness_status_args(harness: IntegrationId) -> Option<&'static [&'static str]> {
+    HARNESS_STATUS_ARGS
+        .iter()
+        .find(|(id, _)| *id == harness)
+        .map(|(_, args)| *args)
+}
+
+/// The command line that would read `harness`'s own status, if it has one and
+/// it is installed — as the operating system can actually spawn it.
+///
+/// # Why this goes through `spawn_command` rather than the resolved path
+///
+/// The executable **name** comes from [`IntegrationId::executable_candidates`],
+/// which is the adapter's own answer, so this module never spells a harness
+/// binary's name. But a resolved path is not always the program to run:
+/// [`crate::platform::exec::LaunchKind::WindowsScript`] is the case where it
+/// is a `.cmd`/`.bat` that must go through the command interpreter, and
+/// **the usual Windows install of a Node-packaged CLI is exactly that shim**.
+/// Calling `Command::new(resolved.path())` on one fails to spawn, which this
+/// module would report as "no plan" — a correct degradation, and a silently
+/// absent feature on the one platform where the shim is normal.
+///
+/// [`crate::platform::exec::ResolvedExecutable::spawn_command`] is the
+/// translation, and it validates every argument against `cmd.exe`
+/// metacharacters before allowing one through. Its `Err` is treated as "no
+/// status interface" rather than propagated, for this module's usual reason:
+/// nothing in the telemetry path may hand a caller an error.
+pub fn harness_status_command(
+    harness: IntegrationId,
+) -> Option<(std::path::PathBuf, Vec<std::ffi::OsString>)> {
+    let args = harness_status_args(harness)?;
+    let resolved = harness
+        .executable_candidates()
+        .iter()
+        .find_map(|name| crate::platform::exec::resolve(name).ok())?;
+    resolved.spawn_command(args.iter().copied()).ok()
+}
+
+/// A short, stable description of the interface a plan was read from, for a
+/// [`crate::provider::quota::ReadingSource::HarnessReport`].
+///
+/// The **executable name and its arguments**, never the resolved path: a path
+/// under a user's home directory names the user, and this string is printed
+/// in a report they may share. `claude auth status --json` says everything a
+/// reader needs in order to re-run it.
+fn harness_interface_name(harness: IntegrationId, args: &[&str]) -> String {
+    let program = harness
+        .executable_candidates()
+        .first()
+        .copied()
+        .unwrap_or(harness.slug());
+    format!("{program} {}", args.join(" "))
+}
+
+/// Read one harness's own status — capability map lines 1231 and 1232.
+///
+/// # It cannot fail, and it cannot hang
+///
+/// A harness that is not installed, that exits non-zero, that prints
+/// something other than JSON, or that prints JSON without a plan in it all
+/// produce [`HarnessTelemetry::nothing`] — capability map line 1238. There is
+/// no error to propagate, so no coding session can be stopped by a status
+/// command having a bad day.
+///
+/// The child's output is captured rather than inherited, and only its
+/// `stdout` is parsed. `stderr` is discarded unread: a harness's error output
+/// is the same class of thing as a provider's error body, which
+/// `design-decisions.md` requires be treated as sensitive by default.
+pub fn read_harness_status(harness: IntegrationId, now_unix: i64) -> HarnessTelemetry {
+    let Some(declared_args) = harness_status_args(harness) else {
+        return HarnessTelemetry::nothing();
+    };
+    let Some((program, args)) = harness_status_command(harness) else {
+        return HarnessTelemetry::nothing();
+    };
+    // The *declared* arguments, not the spawn-translated ones: on Windows the
+    // latter begin `/D /C <script path>`, and a resolved path names the user.
+    let interface = harness_interface_name(harness, declared_args);
+    let Ok(output) = std::process::Command::new(&program)
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return HarnessTelemetry::nothing();
+    };
+    if !output.status.success() {
+        return HarnessTelemetry::nothing();
+    }
+    let Ok(body) = String::from_utf8(output.stdout) else {
+        return HarnessTelemetry::nothing();
+    };
+    read_harness_plan(&body, now_unix, &interface)
+}
+
+/// Every reading a report has to work with, gathered before any of it is
+/// rendered.
+///
+/// A value rather than a set of calls made mid-render, so that [`report`] is
+/// a pure function of what was read. That is what lets a test drive the exact
+/// production rendering path with readings it chose — including readings no
+/// host would produce twice, like a header set captured from a real provider
+/// on a specific day — without a network or a subprocess anywhere near it.
+#[derive(Debug, Clone, Default)]
+pub struct GatheredTelemetry {
+    harness: BTreeMap<&'static str, HarnessTelemetry>,
+    providers: BTreeMap<String, (RateLimitHeaders, i64)>,
+}
+
+impl GatheredTelemetry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record what a harness said about itself — capability map line 1232's
+    /// seam.
+    pub fn with_harness(mut self, harness: IntegrationId, report: HarnessTelemetry) -> Self {
+        self.harness.insert(harness.slug(), report);
+        self
+    }
+
+    /// Record what a provider's response headers said — capability map
+    /// line 1229's seam, independent of the one above.
+    pub fn with_provider_headers(
+        mut self,
+        provider: impl Into<String>,
+        headers: RateLimitHeaders,
+        observed_at_unix: i64,
+    ) -> Self {
+        self.providers
+            .insert(provider.into(), (headers, observed_at_unix));
+        self
+    }
+
+    /// Read every installed harness's own status.
+    ///
+    /// Local process invocations only — no network, no credential, no quota
+    /// spent. Runs for every [`IntegrationKind::Harness`] integration, so a
+    /// harness that gains a status interface later is picked up by adding one
+    /// line to this module's private `HARNESS_STATUS_ARGS` and nothing here.
+    pub fn gather_harness_status(mut self, now_unix: i64) -> Self {
+        for harness in IntegrationId::ALL
+            .iter()
+            .filter(|id| id.kind() == IntegrationKind::Harness)
+        {
+            let report = read_harness_status(*harness, now_unix);
+            if report.known_plan().is_measured() {
+                self.harness.insert(harness.slug(), report);
+            }
+        }
+        self
+    }
+
+    fn for_harness(&self, harness: IntegrationId) -> Option<&HarnessTelemetry> {
+        self.harness.get(harness.slug())
+    }
+
+    fn for_provider(&self, provider: &str) -> Option<&(RateLimitHeaders, i64)> {
+        self.providers.get(provider)
+    }
+}
+
+/// The capacity Glasshouse believes `kind` has, after every reading that
+/// applies to it has been folded in — the function every box in this phase
+/// ultimately closes through.
+///
+/// # The order is capability map line 1228, and it is not cosmetic
+///
+/// Configuration first, then the harness's own report, then the provider's
+/// own headers — weakest source applied first, strongest last — because
+/// [`Capacity::prefer`] resolves each collision in favour of the more
+/// authoritative claim regardless of order, and applying them in this order
+/// means the *stale* case behaves the same way: a fresh manual entry never
+/// displaces a provider's own word, only fills a gap it left.
+///
+/// # Line 1238, structurally
+///
+/// Every step is total. A missing reading, an unparseable one, a harness that
+/// is not installed and a provider that answered no headers all leave the
+/// state exactly as the previous step left it, and the worst case is the
+/// state [`CapacityState::for_resource`] built with nothing read at all —
+/// which is a complete, printable answer. There is no path through this
+/// function that yields an error for a caller to fail a session on.
+pub fn observed_capacity(
+    kind: &ResourceKind,
+    effective: &EffectiveConfig<'_>,
+    telemetry: &GatheredTelemetry,
+    now_unix: i64,
+) -> CapacityState {
+    let mut state = kind.capacity();
+
+    if let ResourceKind::DirectProvider { provider, .. } = kind {
+        let configured = effective.quota_override(provider);
+        state = apply_user_configuration(
+            state,
+            configured.value.plan(),
+            configured.value.budget().map(|b| b.amount_micro_usd()),
+            now_unix,
+        );
+    }
+
+    if let ResourceKind::NativeSubscription { harness } = kind
+        && let Some(report) = telemetry.for_harness(*harness)
+    {
+        state = apply_harness_report(state, report);
+    }
+
+    if let ResourceKind::DirectProvider { provider, .. } = kind
+        && let Some((headers, observed_at_unix)) = telemetry.for_provider(provider)
+    {
+        state = apply_provider_headers(state, headers, *observed_at_unix);
+    }
+
+    state
+}
+
+/// How long `kind`'s telemetry stays current — capability map line 1237.
+///
+/// Per provider, resolved through [`EffectiveConfig::quota_stale_after`]. A
+/// native subscription and the gateway are not keys in the provider table, so
+/// they take the default; that is not a gap, it is that "provider-specific"
+/// means specific to a *provider*, and neither of those is one.
+fn stale_after(kind: &ResourceKind, effective: &EffectiveConfig<'_>) -> QuotaStaleAfterSeconds {
+    match kind {
+        ResourceKind::DirectProvider { provider, .. } => {
+            effective.quota_stale_after(provider).value
+        }
+        _ => QuotaStaleAfterSeconds::DEFAULT,
+    }
+}
+
+/// What to include in a report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReportOptions {
+    /// Show every pool, window and rate ceiling rather than only the ones
+    /// something is known about — capability map line 1761's debug view.
+    pub verbose: bool,
+    /// Unix seconds, supplied by the caller. This module has no clock, for
+    /// [`mod@crate::provider::quota`]'s own reason.
+    pub now_unix: i64,
+}
+
+/// Render what Glasshouse believes about every resource it can describe.
+///
+/// A pure function of `effective` and `telemetry`. Its output is the whole of
+/// what `glasshouse resources` prints.
+pub fn report(
+    effective: &EffectiveConfig<'_>,
+    telemetry: &GatheredTelemetry,
+    options: ReportOptions,
+) -> String {
+    let mut out = String::new();
+    out.push_str("RESOURCES\n\n");
+    out.push_str(
+        "Every model resource Glasshouse can describe, with what is known about its quota and\n\
+         where that knowledge came from. A value marked `unknown` was never read; Glasshouse\n\
+         does not fill one in.\n\n",
+    );
+
+    for kind in registry() {
+        let state = observed_capacity(&kind, effective, telemetry, options.now_unix);
+        let age_limit = stale_after(&kind, effective);
+        render_resource(&mut out, &kind, &state, age_limit, options);
+        out.push('\n');
+    }
+
+    render_configuration_note(&mut out, effective);
+    out
+}
+
+fn render_resource(
+    out: &mut String,
+    kind: &ResourceKind,
+    state: &CapacityState,
+    age_limit: QuotaStaleAfterSeconds,
+    options: ReportOptions,
+) {
+    let _ = writeln!(out, "{}", kind.label());
+    let _ = writeln!(out, "  quota shape     {}", state.model().as_str());
+    let _ = writeln!(out, "  locality        {}", state.locality().as_str());
+    let _ = writeln!(out, "  limited by      {}", describe_limits(state));
+
+    // Capability map lines 1227 and 1240: the class of claim this resource's
+    // knowledge rests on, in one word, including `unknown`.
+    let _ = writeln!(out, "  telemetry       {}", state.telemetry_class_str());
+
+    // Capability map line 1236.
+    match state.last_observed_at_unix() {
+        Some(at) => {
+            let freshness = Freshness::of(at, options.now_unix, age_limit.seconds());
+            let _ = writeln!(
+                out,
+                "  last observed   unix {at} ({}; provider limit {}s)",
+                freshness.describe(),
+                age_limit.get()
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "  last observed   never — no quota observation has ever succeeded here"
+            );
+        }
+    }
+
+    // Capability map lines 1231 and 1233.
+    let _ = writeln!(out, "  plan            {}", describe_plan(state));
+
+    // Capability map line 1234, through the one rendering path a percentage
+    // has. An estimate cannot print here as though it were exact.
+    match state.normalized() {
+        Some((pool, score)) => {
+            let _ = writeln!(
+                out,
+                "  capacity        {} of {} ({}, {})",
+                score.percent().render(),
+                pool,
+                score.native_unit(),
+                score.remaining().source().describe()
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "  capacity        {UNKNOWN_TELEMETRY} — no pool was read on both halves in one unit"
+            );
+        }
+    }
+
+    let mut shown = 0usize;
+    for (label, pool) in state.pools() {
+        if !options.verbose && !pool_has_a_reading(pool) {
+            continue;
+        }
+        render_pool(out, label, pool, age_limit, options);
+        shown += 1;
+    }
+    if shown == 0 {
+        let _ = writeln!(
+            out,
+            "  pools           nothing read; re-run with --verbose to see every pool and its state"
+        );
+    }
+
+    render_rate_ceilings(out, state, options);
+}
+
+fn render_pool(
+    out: &mut String,
+    label: &str,
+    pool: &Pool,
+    age_limit: QuotaStaleAfterSeconds,
+    options: ReportOptions,
+) {
+    let _ = writeln!(
+        out,
+        "  {label:<15} remaining {}, limit {}",
+        describe_amount(pool.remaining(), age_limit, options),
+        describe_amount(pool.limit(), age_limit, options)
+    );
+}
+
+fn render_rate_ceilings(out: &mut String, state: &CapacityState, options: ReportOptions) {
+    let rates = state.rate_ceilings();
+    let per_minute = rates.requests_per_minute();
+    if per_minute.is_measured() || options.verbose {
+        let _ = writeln!(
+            out,
+            "  requests/minute {} [{}] {}",
+            per_minute
+                .value()
+                .map_or_else(|| UNKNOWN_TELEMETRY.to_owned(), render_amount),
+            per_minute.telemetry_class_str(),
+            per_minute.describe_source()
+        );
+    }
+    let long = rates.long_window_requests();
+    if long.is_measured() || options.verbose {
+        let described = long.value().map_or_else(
+            || UNKNOWN_TELEMETRY.to_owned(),
+            |window| {
+                format!(
+                    "{} per {}s",
+                    render_amount(window.limit()),
+                    window.window_seconds()
+                )
+            },
+        );
+        let _ = writeln!(
+            out,
+            "  long window     {described} [{}] {}",
+            long.telemetry_class_str(),
+            long.describe_source()
+        );
+    }
+}
+
+/// One quantity, with the two things capability map lines 1227, 1235, 1236
+/// and 1237 require beside it: what kind of claim it is, where it came from,
+/// and how old it is.
+fn describe_amount(
+    capacity: &Capacity<NativeAmount>,
+    age_limit: QuotaStaleAfterSeconds,
+    options: ReportOptions,
+) -> String {
+    let Some(reading) = capacity.reading() else {
+        return format!("{} ({})", capacity.as_str(), capacity.telemetry_class_str());
+    };
+    let freshness = reading.freshness(options.now_unix, age_limit.seconds());
+    let stale = if freshness.is_stale() {
+        format!(", {}", freshness.describe())
+    } else {
+        String::new()
+    };
+    format!(
+        "{} [{}] from {}{stale}",
+        render_amount(reading.value()),
+        reading.class().as_str(),
+        reading.source().describe()
+    )
+}
+
+/// A provider-native amount, in the provider's own unit — capability map
+/// line 1217. Never converted, never rounded into a different unit.
+fn render_amount(amount: &NativeAmount) -> String {
+    match amount.scale() {
+        crate::provider::quota::UnitScale::Whole => {
+            format!("{} {}", amount.value(), amount.unit())
+        }
+        crate::provider::quota::UnitScale::Millionths => format!(
+            "{}.{:06} {}",
+            amount.value() / 1_000_000,
+            (amount.value() % 1_000_000).abs(),
+            amount.unit()
+        ),
+    }
+}
+
+fn describe_plan(state: &CapacityState) -> String {
+    match state.plan().reading() {
+        Some(reading) => format!(
+            "{} [{}] from {}",
+            reading.value().name(),
+            reading.class().as_str(),
+            reading.source().describe()
+        ),
+        None => format!(
+            "{} ({})",
+            state.plan().as_str(),
+            state.plan().telemetry_class_str()
+        ),
+    }
+}
+
+fn describe_limits(state: &CapacityState) -> String {
+    use crate::provider::quota::LimitingUnits;
+    match state.limiting_units() {
+        LimitingUnits::None => "nothing — this resource cannot be exhausted".to_owned(),
+        LimitingUnits::Delegated => "whatever limits its assigned upstream".to_owned(),
+        LimitingUnits::These(units) => units
+            .iter()
+            .map(|unit| unit.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+fn pool_has_a_reading(pool: &Pool) -> bool {
+    pool.limit().is_measured() || pool.remaining().is_measured()
+}
+
+/// The half of this surface that is about what the *user* can do — capability
+/// map lines 1233 and 1203.
+///
+/// A user whose provider publishes nothing needs to be told that entering a
+/// plan or a budget is an option, at the moment they are looking at a screen
+/// full of `unknown`. Naming the layer each configured value came from
+/// matches what `glasshouse response` and `glasshouse pairing` already do.
+fn render_configuration_note(out: &mut String, effective: &EffectiveConfig<'_>) {
+    out.push_str("CONFIGURED QUOTA OVERRIDES\n");
+    let mut any = false;
+    for name in effective.provider_names() {
+        let configured = effective.quota_override(&name);
+        if configured.value.is_empty() {
+            continue;
+        }
+        any = true;
+        let layer = describe_layer(configured.layer);
+        if let Some(plan) = configured.value.plan() {
+            let _ = writeln!(out, "  {name}: plan `{plan}` ({layer})");
+        }
+        if let Some(budget) = configured.value.budget() {
+            let _ = writeln!(
+                out,
+                "  {name}: budget {}.{:06} USD per {} ({layer}) — Glasshouse does not count \
+                 spend against this",
+                budget.amount_micro_usd() / 1_000_000,
+                budget.amount_micro_usd() % 1_000_000,
+                budget.period().as_str()
+            );
+        }
+        if let Some(age) = configured.value.stale_after() {
+            let _ = writeln!(
+                out,
+                "  {name}: telemetry stale after {}s ({layer})",
+                age.get()
+            );
+        }
+    }
+    if !any {
+        out.push_str(
+            "  none. Where a provider publishes no usable telemetry, record what you know with\n\
+             \x20 a `[providers.<name>.quota]` table: `plan = \"max\"` for a known plan, and\n\
+             \x20 `budget = { amount_micro_usd = 10000000, period = \"calendar-month\" }` for a\n\
+             \x20 spending ceiling. Both are read as `manual`, never as measurements.\n",
+        );
+    }
+}
+
+fn describe_layer(layer: Layer) -> &'static str {
+    match layer {
+        Layer::Project => "project",
+        Layer::User => "user",
+        Layer::Default => "default",
+    }
+}
+
+/// The strongest kind of claim in a whole report, for a one-line summary.
+///
+/// Public because the acceptance tests assert on it directly rather than on
+/// the rendered text: a class is a fact and a layout is a preference, and a
+/// test that pinned the layout would fail on every wording change.
+pub fn strongest_class(
+    effective: &EffectiveConfig<'_>,
+    telemetry: &GatheredTelemetry,
+    now_unix: i64,
+) -> Option<TelemetryClass> {
+    registry()
+        .iter()
+        .filter_map(|kind| {
+            observed_capacity(kind, effective, telemetry, now_unix).telemetry_class()
+        })
+        .min_by_key(|class| class.rank())
+}
+
+/// A stale reading is still a reading — capability map line 1238.
+///
+/// Answers whether every reading on `state` has aged past `age_limit`, which
+/// is what a caller needs in order to say "this is what Glasshouse last saw,
+/// and it is old" rather than discarding it. Nothing in Glasshouse deletes a
+/// stale reading: falling back means preferring a fresher weaker source where
+/// one exists, never blanking the strong one.
+pub fn is_entirely_stale(
+    state: &CapacityState,
+    now_unix: i64,
+    age_limit: QuotaStaleAfterSeconds,
+) -> bool {
+    match state.last_observed_at_unix() {
+        Some(at) => Freshness::of(at, now_unix, age_limit.seconds()).is_stale(),
+        None => false,
+    }
+}
+
+/// Build the one request `--probe` makes for `provider` — capability map
+/// line 1229's production path.
+///
+/// # It reuses the endpoint Glasshouse already calls
+///
+/// `ProbeTarget::ModelList` when the provider's model-list endpoint is
+/// established and the base URL otherwise, which is exactly what
+/// `crate::profile::capability_probe` chooses for the same provider. That is
+/// deliberate and it is the whole reason this seam is affordable: the map's
+/// line 1230 asks for telemetry that can be had *without excessive request
+/// cost*, and a catalogue read Glasshouse already knows how to make costs one
+/// request and no inference. It was measured returning usable rate-limit
+/// headers on a real host — see [`mod@crate::provider::telemetry`].
+///
+/// `None` when the provider declares no protocol with a base URL, which is
+/// the honest answer for the two generic templates before a user fills one
+/// in. Not an error: there is nothing wrong, there is simply nowhere to send
+/// a request.
+pub fn telemetry_probe(
+    provider: &crate::provider::Provider,
+    secrets: &dyn crate::secret::SecretStore,
+) -> Option<crate::provider::discovery::ProbeRequest> {
+    let support = provider
+        .protocols
+        .iter()
+        .find(|support| !support.base_url.trim().is_empty())?;
+    let target = if provider.model_list_endpoint.is_known_present() {
+        crate::provider::discovery::ProbeTarget::ModelList
+    } else {
+        crate::provider::discovery::ProbeTarget::BaseUrl
+    };
+    // The same search `profile::apply_direct_provider` performs: the first
+    // declared credential variable that currently resolves. A probe with no
+    // credential still answers a real question — AnyRouter's rate-limit
+    // headers arrived on an unauthenticated request — so `None` is not
+    // refused.
+    let credential = provider
+        .secret_refs()
+        .iter()
+        .find_map(|reference| secrets.resolve(reference));
+    Some(crate::provider::discovery::ProbeRequest::new(
+        provider.name.clone(),
+        support.protocol,
+        support.base_url.clone(),
+        target,
+        provider.headers.clone(),
+        credential,
+    ))
+}
+
+/// What one `--probe` produced, for a caller to report.
+///
+/// A named type rather than a tuple because the *absence* of headers is the
+/// interesting answer — it was the answer for seven of eight hosts measured —
+/// and a bare empty [`RateLimitHeaders`] beside a probe outcome does not say
+/// whether the request even happened.
+#[derive(Debug, Clone)]
+pub enum ProbeReading {
+    /// The provider is not configured, or declares nowhere to send a request.
+    NotProbeable { reason: String },
+    /// A request was made. `headers` is empty when it carried no rate-limit
+    /// header this reader understands, which is a finding about the provider
+    /// and not a failure.
+    Answered {
+        outcome: crate::provider::discovery::ProbeOutcome,
+        headers: RateLimitHeaders,
+        observed_at_unix: i64,
+    },
+}
+
+/// Probe one configured provider and read its rate-limit headers —
+/// capability map line 1229.
+///
+/// # It cannot fail the caller
+///
+/// Every failure is a [`ProbeReading`] variant, never an `Err`: an unknown
+/// provider, an unreachable host, a timeout and a refusal all produce
+/// something printable. Capability map line 1238 is a property of this
+/// signature.
+pub fn probe_provider(
+    effective: &EffectiveConfig<'_>,
+    secrets: &dyn crate::secret::SecretStore,
+    name: &str,
+    now_unix: i64,
+) -> ProbeReading {
+    let Ok(provider) = effective.configured_provider(name) else {
+        return ProbeReading::NotProbeable {
+            reason: format!(
+                "`{name}` is not a configured provider; `glasshouse doctor` lists the ones that are"
+            ),
+        };
+    };
+    let Some(request) = telemetry_probe(&provider.value, secrets) else {
+        return ProbeReading::NotProbeable {
+            reason: format!("`{name}` declares no base URL to send a request to"),
+        };
+    };
+    let response = crate::provider::discovery::connectivity_with_headers(
+        &request,
+        crate::provider::discovery::ProbeTimeouts::default(),
+    );
+    ProbeReading::Answered {
+        outcome: response.outcome().clone(),
+        headers: response.rate_limits(),
+        observed_at_unix: now_unix,
+    }
+}
+
+/// Render what a `--probe` found, above the report itself.
+///
+/// Names the URL that was asked and what came back, because "no rate-limit
+/// headers" is only a useful answer if the reader can see which request it is
+/// an answer about.
+pub fn render_probe(out: &mut String, name: &str, reading: &ProbeReading) {
+    match reading {
+        ProbeReading::NotProbeable { reason } => {
+            let _ = writeln!(out, "  {name}: not probed — {reason}");
+        }
+        ProbeReading::Answered {
+            outcome, headers, ..
+        } => {
+            let _ = writeln!(
+                out,
+                "  {name}: {}",
+                crate::profile::describe_probe_outcome(outcome)
+            );
+            if headers.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "    no rate-limit header this reader understands. That is a fact about the \
+                     provider, not a failure: seven of the eight hosts Glasshouse ships templates \
+                     for sent none on this route."
+                );
+            } else {
+                let _ = writeln!(
+                    out,
+                    "    read {} from: {}",
+                    headers.read_from().len(),
+                    headers.read_from().join(", ")
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        BudgetPeriod, MonetaryBudget, ProjectConfig, ProviderConfig, QuotaOverride, UserConfig,
+    };
+    use crate::provider::quota::{Capacity, NativeAmount, Reading, ReadingSource};
+    use crate::provider::telemetry::RateLimitHeaders;
+
+    const OBSERVED: i64 = 1_787_800_000;
+    const NOW: i64 = OBSERVED + 30;
+
+    /// The header set `https://anyrouter.dev/api/v1/models` really answered
+    /// with on 2026-08-27 — see `provider::telemetry`'s own fixture note.
+    fn anyrouter_headers() -> RateLimitHeaders {
+        RateLimitHeaders::read(vec![
+            ("ratelimit-limit", "300"),
+            ("ratelimit-policy", "300;w=60"),
+            ("x-ratelimit-limit", "300"),
+            ("x-ratelimit-tier", "ip"),
+            ("x-ratelimit-window", "60"),
+        ])
+    }
+
+    fn user_with_anyrouter(quota: QuotaOverride) -> UserConfig {
+        let mut user = UserConfig::default();
+        let mut provider = ProviderConfig::new("anyrouter");
+        provider.set_quota(Some(quota));
+        user.providers_mut().set("anyrouter", provider);
+        user
+    }
+
+    fn options() -> ReportOptions {
+        ReportOptions {
+            verbose: false,
+            now_unix: NOW,
+        }
+    }
+
+    fn anyrouter_row(rendered: &str) -> String {
+        rendered
+            .split("\n\n")
+            .find(|block| block.starts_with("anyrouter"))
+            .unwrap_or_else(|| panic!("no anyrouter block in:\n{rendered}"))
+            .to_owned()
+    }
+
+    // --- line 1229, through the function `main.rs` calls -------------------
+
+    #[test]
+    fn a_providers_own_rate_limit_header_reaches_the_report_as_authoritative() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let telemetry = GatheredTelemetry::new().with_provider_headers(
+            "anyrouter",
+            anyrouter_headers(),
+            OBSERVED,
+        );
+
+        let rendered = report(&effective, &telemetry, options());
+        let row = anyrouter_row(&rendered);
+
+        assert!(row.contains("300 requests"), "{row}");
+        assert!(row.contains("authoritative"), "{row}");
+        assert!(row.contains("`ratelimit-limit` response header"), "{row}");
+        // Line 1236: the observation is dated.
+        assert!(row.contains(&format!("unix {OBSERVED}")), "{row}");
+    }
+
+    /// The half of line 1229 that is about restraint. AnyRouter advertises
+    /// `RateLimit-Remaining` and does not send it; a report that showed a
+    /// remaining count anyway would be inventing one.
+    #[test]
+    fn a_count_the_provider_did_not_send_stays_unknown_in_the_report() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let telemetry = GatheredTelemetry::new().with_provider_headers(
+            "anyrouter",
+            anyrouter_headers(),
+            OBSERVED,
+        );
+        let row = anyrouter_row(&report(&effective, &telemetry, options()));
+
+        assert!(row.contains("remaining unmeasured (unknown)"), "{row}");
+        // And with no both-halves reading there is no percentage at all.
+        assert!(row.contains("capacity        unknown"), "{row}");
+    }
+
+    // --- lines 1233 and 1203: what the user entered ------------------------
+
+    #[test]
+    fn a_configured_plan_and_budget_reach_the_report_marked_manual() {
+        let mut quota = QuotaOverride::default();
+        quota.set_plan(Some("free-tier".to_owned()));
+        quota.set_budget(Some(
+            MonetaryBudget::new(10_000_000, BudgetPeriod::CalendarMonth).unwrap(),
+        ));
+        let user = user_with_anyrouter(quota);
+        let effective = EffectiveConfig::new(&user, None);
+        let rendered = report(&effective, &GatheredTelemetry::new(), options());
+
+        let row = anyrouter_row(&rendered);
+        assert!(row.contains("free-tier [manual]"), "{row}");
+        assert!(row.contains("the user's own configuration"), "{row}");
+
+        // And the note that tells a user this is a thing they can do.
+        assert!(
+            rendered.contains("anyrouter: plan `free-tier` (user)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("10.000000 USD per calendar month"),
+            "{rendered}"
+        );
+        // Stated rather than implied: the ceiling is known, the spend is not.
+        assert!(
+            rendered.contains("does not count \n                 spend against this")
+                || rendered.contains("does not count"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_project_layer_quota_table_replaces_the_users_and_says_which_layer_won() {
+        let mut user_quota = QuotaOverride::default();
+        user_quota.set_plan(Some("user-plan".to_owned()));
+        let user = user_with_anyrouter(user_quota);
+
+        let mut project = ProjectConfig::default();
+        let mut project_provider = ProviderConfig::new("anyrouter");
+        let mut project_quota = QuotaOverride::default();
+        project_quota.set_plan(Some("project-plan".to_owned()));
+        project_provider.set_quota(Some(project_quota));
+        project.providers_mut().set("anyrouter", project_provider);
+
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        let rendered = report(&effective, &GatheredTelemetry::new(), options());
+        assert!(
+            rendered.contains("anyrouter: plan `project-plan` (project)"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("user-plan"), "{rendered}");
+    }
+
+    // --- line 1237: provider-specific staleness ---------------------------
+
+    /// Two providers, two configured ages, one reading each of the same age:
+    /// one is stale and one is not. A single global age could not produce
+    /// this, which is what makes it a test of "provider-specific" rather
+    /// than of staleness in general.
+    #[test]
+    fn two_providers_with_different_configured_ages_disagree_about_the_same_reading() {
+        let mut user = UserConfig::default();
+        for (name, seconds) in [("anyrouter", 10_u32), ("openrouter", 3_600)] {
+            let mut provider = ProviderConfig::new(name);
+            let mut quota = QuotaOverride::default();
+            quota.set_stale_after(Some(seconds.try_into().unwrap()));
+            provider.set_quota(Some(quota));
+            user.providers_mut().set(name, provider);
+        }
+        let effective = EffectiveConfig::new(&user, None);
+        let telemetry = GatheredTelemetry::new()
+            .with_provider_headers("anyrouter", anyrouter_headers(), OBSERVED)
+            .with_provider_headers("openrouter", anyrouter_headers(), OBSERVED);
+
+        let rendered = report(&effective, &telemetry, options());
+        let anyrouter = anyrouter_row(&rendered);
+        let openrouter = rendered
+            .split("\n\n")
+            .find(|block| block.starts_with("openrouter"))
+            .expect("an openrouter block")
+            .to_owned();
+
+        // 30 seconds old, against a ten-second limit and an hour's.
+        assert!(anyrouter.contains("stale:"), "{anyrouter}");
+        assert!(!openrouter.contains("stale:"), "{openrouter}");
+    }
+
+    #[test]
+    fn a_stale_reading_is_still_reported_rather_than_discarded() {
+        let mut user = UserConfig::default();
+        let mut provider = ProviderConfig::new("anyrouter");
+        let mut quota = QuotaOverride::default();
+        quota.set_stale_after(Some(10_u32.try_into().unwrap()));
+        provider.set_quota(Some(quota));
+        user.providers_mut().set("anyrouter", provider);
+
+        let effective = EffectiveConfig::new(&user, None);
+        let telemetry = GatheredTelemetry::new().with_provider_headers(
+            "anyrouter",
+            anyrouter_headers(),
+            OBSERVED,
+        );
+        let state = observed_capacity(
+            &ResourceKind::from_direct_provider("anyrouter"),
+            &effective,
+            &telemetry,
+            NOW,
+        );
+
+        assert!(is_entirely_stale(
+            &state,
+            NOW,
+            effective.quota_stale_after("anyrouter").value
+        ));
+        // Line 1238: stale is not gone. The number is still there.
+        assert_eq!(
+            state.requests().limit().value().map(NativeAmount::value),
+            Some(300)
+        );
+        let row = anyrouter_row(&report(&effective, &telemetry, options()));
+        assert!(row.contains("300 requests"), "{row}");
+    }
+
+    // --- line 1228, at the report level -----------------------------------
+
+    #[test]
+    fn a_providers_own_header_outranks_the_plan_a_user_typed_for_the_same_provider() {
+        let mut quota = QuotaOverride::default();
+        quota.set_plan(Some("free-tier".to_owned()));
+        let user = user_with_anyrouter(quota);
+        let effective = EffectiveConfig::new(&user, None);
+
+        let manual_only = strongest_class(&effective, &GatheredTelemetry::new(), NOW);
+        assert_eq!(manual_only, Some(TelemetryClass::Manual));
+
+        let with_header = strongest_class(
+            &effective,
+            &GatheredTelemetry::new().with_provider_headers(
+                "anyrouter",
+                anyrouter_headers(),
+                OBSERVED,
+            ),
+            NOW,
+        );
+        assert_eq!(with_header, Some(TelemetryClass::Authoritative));
+    }
+
+    // --- lines 1231 and 1232, at the report level --------------------------
+
+    #[test]
+    fn a_harness_report_reaches_the_subscription_row_and_no_provider_row() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let telemetry = GatheredTelemetry::new().with_harness(
+            IntegrationId::ClaudeCode,
+            crate::provider::telemetry::HarnessTelemetry::plan(
+                "max",
+                OBSERVED,
+                "claude auth status --json",
+            ),
+        );
+        let rendered = report(&effective, &telemetry, options());
+
+        let claude = rendered
+            .split("\n\n")
+            .find(|block| block.starts_with("Claude Code subscription"))
+            .expect("a Claude Code block")
+            .to_owned();
+        assert!(claude.contains("max [authoritative]"), "{claude}");
+        assert!(claude.contains("claude auth status --json"), "{claude}");
+
+        // Independence, line 1232: no other harness and no provider learned
+        // anything from it.
+        let codex = rendered
+            .split("\n\n")
+            .find(|block| block.starts_with("Codex subscription"))
+            .expect("a Codex block");
+        assert!(
+            codex.contains("plan            unmeasured (unknown)"),
+            "{codex}"
+        );
+    }
+
+    // --- line 1240 / map line 1761: the debug view -------------------------
+
+    /// Every resource names the class of claim its knowledge rests on,
+    /// including the ones where the answer is `unknown`. Driven over the
+    /// whole registry rather than a sample, so a resource kind added later
+    /// fails here instead of silently rendering without a source.
+    #[test]
+    fn every_resource_in_the_report_names_its_telemetry_class() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let rendered = report(&effective, &GatheredTelemetry::new(), options());
+
+        for kind in registry() {
+            let block = rendered
+                .split("\n\n")
+                .find(|block| block.starts_with(&kind.label()))
+                .unwrap_or_else(|| panic!("no block for `{}`:\n{rendered}", kind.label()));
+            assert!(
+                block.contains("telemetry       "),
+                "`{}` names no telemetry class",
+                kind.label()
+            );
+        }
+        // With nothing read at all, every one of them says so.
+        assert_eq!(
+            rendered.matches("telemetry       unknown").count(),
+            registry().len()
+        );
+    }
+
+    #[test]
+    fn the_verbose_view_shows_every_pool_including_the_ones_nothing_is_known_about() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let quiet = report(&effective, &GatheredTelemetry::new(), options());
+        let verbose = report(
+            &effective,
+            &GatheredTelemetry::new(),
+            ReportOptions {
+                verbose: true,
+                now_unix: NOW,
+            },
+        );
+
+        assert!(quiet.len() < verbose.len());
+        assert!(!quiet.contains("cached input tokens"), "{quiet}");
+        assert!(verbose.contains("cached input tokens"), "{verbose}");
+        assert!(verbose.contains("calendar window"), "{verbose}");
+    }
+
+    /// The characteristic failure of this whole phase, guarded at the surface
+    /// a person reads: with nothing measured, no number appears anywhere.
+    #[test]
+    fn a_report_with_no_telemetry_shows_no_capacity_figure_at_all() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let rendered = report(
+            &effective,
+            &GatheredTelemetry::new(),
+            ReportOptions {
+                verbose: true,
+                now_unix: NOW,
+            },
+        );
+        assert!(
+            !rendered.contains('%'),
+            "a percentage was printed: {rendered}"
+        );
+        assert!(
+            !rendered.contains("last observed   unix"),
+            "an observation was dated: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches("last observed   never").count(),
+            registry().len()
+        );
+    }
+
+    // --- line 1238, at the report level ------------------------------------
+
+    /// Every reader is total, so the report is producible from any
+    /// combination of nothing. This drives the exact function `main.rs`
+    /// calls, with the readings a completely failed telemetry pass leaves
+    /// behind.
+    #[test]
+    fn a_report_is_still_produced_when_every_telemetry_read_yielded_nothing() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let nothing = GatheredTelemetry::new()
+            .with_harness(
+                IntegrationId::ClaudeCode,
+                crate::provider::telemetry::HarnessTelemetry::nothing(),
+            )
+            .with_provider_headers("anyrouter", RateLimitHeaders::read(Vec::new()), OBSERVED);
+
+        let rendered = report(&effective, &nothing, options());
+        assert!(rendered.starts_with("RESOURCES"));
+        for kind in registry() {
+            assert!(rendered.contains(&kind.label()), "{}", kind.label());
+        }
+    }
+
+    // --- the provider-native unit survives rendering -----------------------
+
+    /// Capability map line 1217, at the surface: a millionths-scaled amount
+    /// prints as the provider's own money in the provider's own unit, never
+    /// as a bare integer of microdollars and never converted.
+    #[test]
+    fn a_rendered_amount_keeps_the_providers_own_unit_and_scale() {
+        assert_eq!(
+            render_amount(&NativeAmount::whole(300, "requests")),
+            "300 requests"
+        );
+        assert_eq!(
+            render_amount(&NativeAmount::millionths(2_500_000, "USD")),
+            "2.500000 USD"
+        );
+        assert_eq!(
+            render_amount(&NativeAmount::millionths(1_200_000, "credits")),
+            "1.200000 credits"
+        );
+    }
+
+    /// The estimate path, at the surface. A percentage this report can print
+    /// at all must go through `Percentage::render`, so an estimate is marked
+    /// wherever it appears.
+    #[test]
+    fn an_estimated_percentage_is_marked_as_one_in_the_report() {
+        let mut quota = QuotaOverride::default();
+        quota.set_budget(Some(
+            MonetaryBudget::new(10_000_000, BudgetPeriod::RollingThirtyDays).unwrap(),
+        ));
+        let user = user_with_anyrouter(quota);
+        let effective = EffectiveConfig::new(&user, None);
+
+        let state = observed_capacity(
+            &ResourceKind::from_direct_provider("anyrouter"),
+            &effective,
+            &GatheredTelemetry::new(),
+            NOW,
+        );
+        // Glasshouse counts no spend, so supply the observed half the way a
+        // future local counter would, and check how it renders.
+        let pool = state
+            .user_budget()
+            .clone()
+            .with_remaining(Capacity::Measured(Reading::new(
+                NativeAmount::millionths(2_500_000, "USD"),
+                OBSERVED,
+                ReadingSource::LocalObservation("this session's own spend".to_owned()),
+            )));
+        let state = state.with_user_budget(pool);
+        let (label, score) = state.normalized().expect("the budget pool has both halves");
+        assert_eq!(label, "user budget");
+
+        let rendered = score.percent().render();
+        assert!(rendered.starts_with("~25%"), "{rendered}");
+        assert!(rendered.contains("estimated"), "{rendered}");
+        assert_eq!(score.percent().exact(), None);
+    }
+
+    // --- the harness status command ----------------------------------------
+
+    /// Practice §5: check a declaration against the *use*. Only harnesses
+    /// with an interface checked on a real binary are listed, and the
+    /// executable name comes from the adapter rather than from a second copy
+    /// here.
+    #[test]
+    fn only_harnesses_with_a_checked_status_interface_are_listed() {
+        for (id, args) in HARNESS_STATUS_ARGS {
+            assert_eq!(id.kind(), IntegrationKind::Harness);
+            assert!(!args.is_empty());
+            // The name is the adapter's, never this module's.
+            assert!(!id.executable_candidates().is_empty(), "{id:?}");
+            assert_eq!(harness_status_args(*id), Some(*args));
+        }
+        // A harness with no checked interface is asked for nothing.
+        assert_eq!(harness_status_args(IntegrationId::Cursor), None);
+        // Codex is deliberately absent: `codex doctor --json` is stable and
+        // machine-readable and carries no usage field at all.
+        assert!(
+            !HARNESS_STATUS_ARGS
+                .iter()
+                .any(|(id, _)| *id == IntegrationId::Codex)
+        );
+    }
+
+    /// The interface string is printed in a report a user may share, so it
+    /// must be the command and never the resolved path — a path under a home
+    /// directory names the user.
+    #[test]
+    fn a_harness_interface_name_is_a_command_and_never_a_resolved_path() {
+        let name = harness_interface_name(IntegrationId::ClaudeCode, &["auth", "status", "--json"]);
+        assert_eq!(name, "claude auth status --json");
+        assert!(!name.contains('/'));
+    }
+}

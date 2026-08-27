@@ -1204,14 +1204,14 @@ Phase 32A — Unified quota and capacity model
 ☑ Allow CapacityState to represent effectively unlimited local inference separately from remote quota.
 ☐ Track input-token budget independently from output-token budget when the provider exposes separate limits.
 ☐ Track cached-input usage independently when the provider exposes cache telemetry.
-☐ Track request count independently from token consumption when both can constrain a resource.
+☑ Track request count independently from token consumption when both can constrain a resource.
 ☐ Track provider credits independently from raw tokens when credits are the actual limiting unit.
 ☐ Track remaining monetary budget independently from provider quota when the user has configured a spending ceiling.
 ☐ Track the current quota window start when known.
 ☐ Track the current quota reset time when known.
 ☐ Track rolling-window capacity separately from fixed calendar-window capacity.
 ☐ Track concurrent-request limits when they materially affect routability.
-☐ Track requests-per-minute limits when known.
+☑ Track requests-per-minute limits when known.
 ☐ Track tokens-per-minute limits when known.
 ☐ Track requests-per-day or equivalent long-window request pools when known.
 ☐ Preserve the provider-native quota units alongside any normalized percentage.
@@ -1224,20 +1224,20 @@ Fixed architectural requirements
 - Provider-reported measurements, locally observed measurements, and inferred estimates remain explicitly distinguishable.
 - Estimated capacity must never be presented as exact provider truth.
 
-☐ Define quota telemetry sources as authoritative, observed, estimated, manual, or unknown.
-☐ Prefer authoritative provider or harness usage telemetry when it is available.
+☑ Define quota telemetry sources as authoritative, observed, estimated, manual, or unknown.
+☑ Prefer authoritative provider or harness usage telemetry when it is available.
 ☐ Read rate-limit and usage headers from API and gateway responses when the provider exposes them.
 ☐ Read provider usage endpoints when they are documented and can be queried without excessive request cost.
-☐ Read native harness usage or status information when a stable machine-readable interface exists.
-☐ Allow harness adapters to expose subscription-usage telemetry independently from API-provider telemetry.
-☐ Allow a user to enter a known plan or manual budget when the provider exposes no usable telemetry.
-☐ Never label an inferred subscription percentage as exact.
-☐ Attach a confidence value and source description to every estimated capacity value.
-☐ Record the timestamp of the last successful quota observation.
-☐ Mark quota telemetry stale after a provider-specific configurable age.
-☐ Fall back from authoritative telemetry to observed estimates without failing the active coding session.
+☑ Read native harness usage or status information when a stable machine-readable interface exists.
+☑ Allow harness adapters to expose subscription-usage telemetry independently from API-provider telemetry.
+☑ Allow a user to enter a known plan or manual budget when the provider exposes no usable telemetry.
+☑ Never label an inferred subscription percentage as exact.
+☑ Attach a confidence value and source description to every estimated capacity value.
+☑ Record the timestamp of the last successful quota observation.
+☑ Mark quota telemetry stale after a provider-specific configurable age.
+☑ Fall back from authoritative telemetry to observed estimates without failing the active coding session.
 ☐ Treat completely unknown quota as a routing uncertainty rather than as zero or one hundred percent remaining.
-☐ Surface the telemetry source in debug and resource views.
+☑ Surface the telemetry source in debug and resource views.
 
 Phase 32C — Subscription capacity estimation
 
@@ -1738,13 +1738,13 @@ Fixed architectural requirements
 
 Phase 46 — Security and contamination tests
 
-☐ Add automated tests proving one project database cannot be queried through another project’s Glasshouse instance.
-☐ Add automated tests proving a session from project A cannot be resumed from project B.
-☐ Add automated tests proving canonicalized paths cannot escape the project root through ...
-☐ Add automated tests proving symlink targets outside the project root are rejected by Glasshouse-controlled file operations.
+☑ Add automated tests proving one project database cannot be queried through another project’s Glasshouse instance.
+☑ Add automated tests proving a session from project A cannot be resumed from project B.
+☑ Add automated tests proving canonicalized paths cannot escape the project root through ...
+☑ Add automated tests proving symlink targets outside the project root are rejected by Glasshouse-controlled file operations.
 ☐ Add automated tests proving cmux session metadata cannot bypass project-scope validation.
 ☐ Add automated tests proving MCP operations remain bound to the active project.
-☐ Add automated tests proving memory extraction cannot write into another project’s database.
+☑ Add automated tests proving memory extraction cannot write into another project’s database.
 ☐ Add automated tests proving a project-state deletion removes only that project’s Glasshouse state.
 
 Phase 47 — Observability without spectacle
@@ -1755,20 +1755,20 @@ Fixed architectural requirements
 - Raw token counts, cost, TTFT, TTFC, throughput, errors, outages, and correlations remain measurable, while inferred quality conclusions remain labeled as derived evidence.
 
 ☐ Add a debug view showing why the router chose a session or resource.
-☐ Add a debug view showing recent lifecycle events for a session.
+☑ Add a debug view showing recent lifecycle events for a session.
 ☐ Add a debug view showing which memories were retrieved for a routed task.
 ☐ Add a debug view showing estimated cache temperature and the evidence used for that estimate.
-☐ Add a debug view showing quota information and whether it is measured, inferred, or unknown.
+☑ Add a debug view showing quota information and whether it is measured, inferred, or unknown.
 ☐ Add an optional compact route-evidence table showing sample count, TTFC, effective TTFC, TTFT, decode throughput, successful rounds per minute, and observation window when available.
 ☐ Show failure counts by class instead of presenting one unexplained error percentage.
 ☐ Show whether latency evidence came from warm, cold, or unknown context.
 ☐ Show route health, immediate availability, cadence, quota reset, and failure-domain evidence as separate concepts.
 ☐ Show the strongest measured factors behind the most recent routing decision in concise text.
 ☐ Show correlations with their sample size and confidence instead of implying precise independence from sparse data.
-☐ Keep lifetime token and spend totals out of the default project overview and never present them as achievement counters.
+☑ Keep lifetime token and spend totals out of the default project overview and never present them as achievement counters.
 ☐ Add a debug view showing memory-extraction inputs and outputs when explicitly enabled.
-☐ Keep diagnostic views optional and do not turn them into the normal user experience.
-☐ Prefer inspectable text and tables over animated knowledge-graph visualizations.
+☑ Keep diagnostic views optional and do not turn them into the normal user experience.
+☑ Prefer inspectable text and tables over animated knowledge-graph visualizations.
 
 Phase 48 — CLI ergonomics
 
@@ -1789,8 +1789,8 @@ Phase 49 — Configuration
 ☑ Keep secrets out of tracked project configuration.
 ☑ Make sensible defaults sufficient for Claude Code and Codex when their native executables are already usable from the shell.
 ☐ Allow automatic routing and memory extraction to be disabled independently.
-☐ Allow the user to configure provider-specific quota overrides when automatic telemetry is unavailable.
-☐ Allow the user to configure a monthly or rolling monetary budget for metered providers.
+☑ Allow the user to configure provider-specific quota overrides when automatic telemetry is unavailable.
+☑ Allow the user to configure a monthly or rolling monetary budget for metered providers.
 ☑ Allow the user to configure protected reserve percentages for premium subscriptions.
 ☐ Allow the user to configure the routing-model fallback chain.
 ☐ Allow the user to configure workload-tier ceilings for individual models.

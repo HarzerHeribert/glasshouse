@@ -144,23 +144,197 @@ impl NativeAmount {
     }
 }
 
+/// What *kind of claim* a reading is — capability map line 1227.
+///
+/// # Two axes, not one
+///
+/// [`ReadingSource`] names **where** a number came from; this names **what
+/// kind of claim it is**. They are not the same question and collapsing them
+/// loses one: two numbers can arrive by the same mechanism and be different
+/// claims (a provider's own `RateLimit-Limit` header and a ceiling Glasshouse
+/// inferred from watching that header change), and two numbers can be the
+/// same kind of claim through different mechanisms (a provider endpoint and a
+/// harness's own status output are both the account holder speaking about
+/// itself).
+///
+/// # Why `unknown` is not a variant here
+///
+/// Line 1227 lists five words and only four of them are classes. A reading
+/// that does not exist cannot carry a source or a class, and inventing an
+/// `Unknown` variant would mean constructing a [`Reading`] for a measurement
+/// nobody took. Unknown is already [`Capacity`]'s four non-[`Capacity::Measured`]
+/// states, whose [`Capacity::reading`] answers `None` so a caller cannot read
+/// a number that was never taken. [`Capacity::telemetry_class`] is therefore
+/// `Option<TelemetryClass>` and [`Capacity::telemetry_class_str`] renders the
+/// fifth word for the `None` case — see [`UNKNOWN_TELEMETRY`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TelemetryClass {
+    /// The party that owns the quota said so about itself: a provider's own
+    /// response header or usage endpoint, or a harness reporting on its own
+    /// first-party account. Capability map line 1228's "authoritative".
+    Authoritative,
+    /// Glasshouse measured it locally — it counted something it did itself.
+    /// True about Glasshouse's own activity and not about the account, which
+    /// may be shared with other clients.
+    Observed,
+    /// Derived from something that is not a statement of this quantity.
+    /// Never exact — see [`Percentage`].
+    Estimated,
+    /// The user told Glasshouse. Exactly as reliable as the user, which is
+    /// to say it is a statement of intent about a ceiling and a recollection
+    /// about a plan.
+    Manual,
+}
+
+/// The word rendered where no reading exists — line 1227's fifth term.
+///
+/// A constant rather than a literal repeated at each surface, because the
+/// whole point of the [`Capacity`] states is that "unknown" is one answer a
+/// reader can recognise wherever it appears.
+pub const UNKNOWN_TELEMETRY: &str = "unknown";
+
+impl TelemetryClass {
+    /// A short, stable word for a diagnostic — the four terms of line 1227.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TelemetryClass::Authoritative => "authoritative",
+            TelemetryClass::Observed => "observed",
+            TelemetryClass::Estimated => "estimated",
+            TelemetryClass::Manual => "manual",
+        }
+    }
+
+    /// Whether this claim came from the party that owns the quota.
+    ///
+    /// The predicate capability map line 1228 is about: *prefer authoritative
+    /// provider or harness usage telemetry when it is available*. Deliberately
+    /// a method rather than an equality check at each call site, so that
+    /// "authoritative" has exactly one definition.
+    pub fn is_authoritative(self) -> bool {
+        matches!(self, TelemetryClass::Authoritative)
+    }
+
+    /// Whether a value of this class may ever be presented as exact.
+    ///
+    /// Only [`TelemetryClass::Authoritative`] may. [`TelemetryClass::Manual`]
+    /// may not, and that is not a slight on the user: a plan the user typed
+    /// is a recollection about a contract, not a measurement of what is left
+    /// in it. [`TelemetryClass::Observed`] may not either — Glasshouse can
+    /// only ever have counted its own share of a pool something else may also
+    /// be spending.
+    pub fn may_be_exact(self) -> bool {
+        self.is_authoritative()
+    }
+
+    /// Preference order for line 1228, lowest first.
+    ///
+    /// Authoritative outranks everything. Between the other three, a number
+    /// Glasshouse actually counted outranks one the user remembered, which
+    /// outranks one Glasshouse inferred — an inference is the only one of the
+    /// three with no observation of any kind behind it.
+    pub fn rank(self) -> u8 {
+        match self {
+            TelemetryClass::Authoritative => 0,
+            TelemetryClass::Observed => 1,
+            TelemetryClass::Manual => 2,
+            TelemetryClass::Estimated => 3,
+        }
+    }
+}
+
 /// Where a reading came from.
 ///
 /// Carried so that a number can be argued with later: "the provider said so
 /// in a response header" and "the user typed it into `config.toml`" are
 /// different kinds of claim, and a router weighing a stale one against a
 /// fresh one needs to know which it has.
+///
+/// Every variant maps to exactly one [`TelemetryClass`] through
+/// [`ReadingSource::class`], which is total: there is no way to build a
+/// reading whose kind of claim is undecided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadingSource {
     /// A response header the provider sent, named verbatim.
     ResponseHeader(String),
     /// A dedicated endpoint the provider serves, named by URL or path.
     ProviderEndpoint(String),
-    /// A harness reported it about its own first-party account.
+    /// A harness reported it about its own first-party account, named by the
+    /// command or interface that was read.
     HarnessReport(String),
     /// The user configured it. The only source for a user-defined monetary
     /// ceiling — capability map line 1203.
     UserConfiguration,
+    /// Glasshouse measured it itself, named by what it counted.
+    ///
+    /// The origin line 1227's "observed" needs and [`ReadingSource`] lacked:
+    /// a number nobody told Glasshouse, which it arrived at by counting its
+    /// own activity. Distinct from [`ReadingSource::InferredEstimate`],
+    /// which counted nothing.
+    LocalObservation(String),
+    /// Glasshouse derived it from something that was not a statement of this
+    /// quantity, named by the derivation.
+    ///
+    /// The weakest origin, and the one line 1234 exists to keep from being
+    /// rendered as fact.
+    InferredEstimate(String),
+}
+
+impl ReadingSource {
+    /// What kind of claim a reading from this origin is — capability map
+    /// line 1227.
+    ///
+    /// **Total, and deliberately so.** Every origin has a class, so a caller
+    /// can never hold a reading whose kind of claim is undecided, and adding
+    /// an origin later is a compile error here rather than a silent default.
+    ///
+    /// The three authoritative origins are the ones where the party that owns
+    /// the quota is the party speaking: its own response header, its own
+    /// usage endpoint, its own harness reporting on its own account. A
+    /// harness report is authoritative for exactly that reason and not
+    /// because a harness is trustworthy in general — it is reporting on
+    /// itself.
+    pub fn class(&self) -> TelemetryClass {
+        match self {
+            ReadingSource::ResponseHeader(_)
+            | ReadingSource::ProviderEndpoint(_)
+            | ReadingSource::HarnessReport(_) => TelemetryClass::Authoritative,
+            ReadingSource::LocalObservation(_) => TelemetryClass::Observed,
+            ReadingSource::InferredEstimate(_) => TelemetryClass::Estimated,
+            ReadingSource::UserConfiguration => TelemetryClass::Manual,
+        }
+    }
+
+    /// A short description of this origin, for a diagnostic — capability map
+    /// line 1235's "source description".
+    ///
+    /// # This is Glasshouse's own sentence, not the provider's
+    ///
+    /// Every variant carries a `String` a caller supplied, and the caller
+    /// that supplied it read it off a network response. `design-decisions.md`
+    /// records that a provider's error body may quote an account identifier
+    /// or a masked tail of the submitted credential, so it "must be treated
+    /// as sensitive by default: classified against, and never copied whole
+    /// into a log, a diagnostic, a session record, or anything a user might
+    /// share." A source description is exactly such a diagnostic.
+    ///
+    /// The rule this module enforces is therefore on the *producers*: the
+    /// only strings that reach here are header **names**, endpoint URLs from
+    /// Glasshouse's own configuration, and the command line Glasshouse itself
+    /// ran — never a header value, never a response body, never an error
+    /// message. See [`crate::provider::telemetry`], where that is asserted at
+    /// the boundary rather than hoped for here.
+    pub fn describe(&self) -> String {
+        match self {
+            ReadingSource::ResponseHeader(name) => format!("the `{name}` response header"),
+            ReadingSource::ProviderEndpoint(url) => format!("the provider usage endpoint {url}"),
+            ReadingSource::HarnessReport(interface) => {
+                format!("the harness interface `{interface}`")
+            }
+            ReadingSource::UserConfiguration => "the user's own configuration".to_owned(),
+            ReadingSource::LocalObservation(what) => format!("Glasshouse's own count of {what}"),
+            ReadingSource::InferredEstimate(how) => format!("an estimate derived from {how}"),
+        }
+    }
 }
 
 /// One value that was actually read, with when and where from.
@@ -197,6 +371,92 @@ impl<T> Reading<T> {
 
     pub fn source(&self) -> &ReadingSource {
         &self.source
+    }
+
+    /// What kind of claim this reading is — capability map line 1227,
+    /// projected out of its origin so the two cannot disagree.
+    pub fn class(&self) -> TelemetryClass {
+        self.source.class()
+    }
+
+    /// Whether this reading has aged past `stale_after_seconds` as of
+    /// `now_unix` — capability map line 1237.
+    ///
+    /// The age limit is a parameter rather than a constant because the map
+    /// asks for a **provider-specific configurable** age, and there is no one
+    /// right number: a credit balance moves when somebody pays and a
+    /// requests-per-minute ceiling is a contract that changes when a plan
+    /// does. See [`crate::config::QuotaStaleAfterSeconds`], which is where a
+    /// user says so per provider, and [`crate::provider::resources`], which
+    /// is what passes it in.
+    ///
+    /// A reading stamped in the future is [`Freshness::Fresh`] with a
+    /// negative age rather than an error: clock skew between this machine and
+    /// a provider is ordinary, and refusing a number because a remote clock
+    /// runs fast would be a worse failure than reporting it.
+    pub fn freshness(&self, now_unix: i64, stale_after_seconds: i64) -> Freshness {
+        Freshness::of(self.observed_at_unix, now_unix, stale_after_seconds)
+    }
+}
+
+/// Whether a reading is still current — capability map line 1237.
+///
+/// Both variants carry the age, because "stale" without a number is a verdict
+/// a user cannot check and "fresh" without one hides a reading that is one
+/// second from turning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// Younger than the configured age.
+    Fresh { age_seconds: i64 },
+    /// Older than the configured age. Still a real reading — line 1238 is
+    /// explicit that Glasshouse falls back rather than fails — but no longer
+    /// one to route on without saying so.
+    Stale {
+        age_seconds: i64,
+        stale_after_seconds: i64,
+    },
+}
+
+impl Freshness {
+    /// How old an observation taken at `observed_at_unix` is as of
+    /// `now_unix`, against a limit of `stale_after_seconds`.
+    ///
+    /// [`Reading::freshness`] is this, applied to a reading's own timestamp.
+    /// The bare form exists because [`CapacityState::last_observed_at_unix`]
+    /// answers a timestamp rather than a reading — it is the latest of many —
+    /// and a caller with a timestamp should not have to invent a reading with
+    /// a made-up source in order to ask how old it is.
+    pub fn of(observed_at_unix: i64, now_unix: i64, stale_after_seconds: i64) -> Self {
+        let age_seconds = now_unix.saturating_sub(observed_at_unix);
+        if age_seconds > stale_after_seconds {
+            Freshness::Stale {
+                age_seconds,
+                stale_after_seconds,
+            }
+        } else {
+            Freshness::Fresh { age_seconds }
+        }
+    }
+
+    pub fn is_stale(self) -> bool {
+        matches!(self, Freshness::Stale { .. })
+    }
+
+    pub fn age_seconds(self) -> i64 {
+        match self {
+            Freshness::Fresh { age_seconds } | Freshness::Stale { age_seconds, .. } => age_seconds,
+        }
+    }
+
+    /// A short, stable phrase for a diagnostic.
+    pub fn describe(self) -> String {
+        match self {
+            Freshness::Fresh { age_seconds } => format!("{age_seconds}s old"),
+            Freshness::Stale {
+                age_seconds,
+                stale_after_seconds,
+            } => format!("stale: {age_seconds}s old, limit {stale_after_seconds}s"),
+        }
     }
 }
 
@@ -260,6 +520,69 @@ impl<T> Capacity<T> {
             Capacity::Unmeasured => "unmeasured",
             Capacity::DelegatedUpstream => "delegated to its assigned upstream",
             Capacity::Measured(_) => "measured",
+        }
+    }
+
+    /// What kind of claim this quantity is — capability map line 1227.
+    ///
+    /// `None` for all four unknown states, and that `None` is the fifth term
+    /// of the line. A quantity nobody read has no class, because there is no
+    /// claim: see [`TelemetryClass`]'s own documentation for why an `Unknown`
+    /// variant would have meant constructing a [`Reading`] for a measurement
+    /// nobody took.
+    pub fn telemetry_class(&self) -> Option<TelemetryClass> {
+        self.reading().map(Reading::class)
+    }
+
+    /// The line-1227 term for this quantity, including
+    /// [`UNKNOWN_TELEMETRY`] when there is no reading.
+    ///
+    /// This is what capability map line 1240 asks a view to surface, in one
+    /// call, so that no surface has to remember to spell the unknown case
+    /// itself.
+    pub fn telemetry_class_str(&self) -> &'static str {
+        self.telemetry_class()
+            .map_or(UNKNOWN_TELEMETRY, TelemetryClass::as_str)
+    }
+
+    /// Where this quantity came from, in a sentence — capability map
+    /// line 1235's "source description", and [`UNKNOWN_TELEMETRY`] when
+    /// nothing was read.
+    pub fn describe_source(&self) -> String {
+        self.reading()
+            .map_or_else(|| UNKNOWN_TELEMETRY.to_owned(), |r| r.source().describe())
+    }
+
+    /// Whichever of two candidate readings for the same quantity should be
+    /// believed — capability map line 1228.
+    ///
+    /// **Authoritative telemetry wins when it is available**, which is the
+    /// line's whole content, and [`TelemetryClass::rank`] is the one place
+    /// that order is defined. Between two readings of the same class the
+    /// fresher one wins, because two statements by the same party about the
+    /// same quantity differ only by when they were made.
+    ///
+    /// A [`Capacity::Measured`] always beats any of the four unknown states,
+    /// and between two unknowns `self` is kept — the caller's starting state
+    /// carries the distinction between "opaque" and "unmeasured" that
+    /// [`CapacityState::for_resource`] established, and a merge that
+    /// overwrote it would be exactly the accident
+    /// [`Capacity::is_readable`] exists to prevent.
+    pub fn prefer(self, other: Capacity<T>) -> Capacity<T> {
+        match (self.reading().map(Reading::class), other.reading()) {
+            (_, None) => self,
+            (None, Some(_)) => other,
+            (Some(mine), Some(theirs)) => {
+                let theirs_class = theirs.class();
+                let take_other = theirs_class.rank() < mine.rank()
+                    || (theirs_class == mine
+                        && theirs.observed_at_unix()
+                            > self
+                                .reading()
+                                .map(Reading::observed_at_unix)
+                                .unwrap_or(i64::MIN));
+                if take_other { other } else { self }
+            }
         }
     }
 }
@@ -373,10 +696,206 @@ pub struct NormalizedCapacity {
     limit: Reading<NativeAmount>,
 }
 
+/// How much a value of class other than [`TelemetryClass::Authoritative`] is
+/// worth relying on — capability map line 1235's "confidence value".
+///
+/// Three bands rather than a number out of a hundred, because a second
+/// invented percentage attached to the first is exactly the kind of precision
+/// line 1234 is about. There is nothing to calibrate a 0–100 confidence
+/// against, and a band is a claim Glasshouse can actually defend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Confidence {
+    /// Nothing but the age of the reading stands between this and fact.
+    High,
+    /// A real measurement of something adjacent — Glasshouse's own count of
+    /// its own activity, or a ceiling the user stated for a plan they hold.
+    Medium,
+    /// Derived, with no measurement of this quantity behind it at all.
+    Low,
+}
+
+impl Confidence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Confidence::High => "high confidence",
+            Confidence::Medium => "medium confidence",
+            Confidence::Low => "low confidence",
+        }
+    }
+
+    /// The lesser of two confidences.
+    ///
+    /// A figure computed from two readings is worth what its weakest input is
+    /// worth, never what its strongest is. Named rather than written as
+    /// `a.max(b)` at the call site, because the derived ordering puts
+    /// [`Confidence::High`] first and "take the maximum to get the weakest"
+    /// is precisely the kind of line that gets inverted in a later edit.
+    pub fn weaker(self, other: Confidence) -> Confidence {
+        self.max(other)
+    }
+}
+
+impl TelemetryClass {
+    /// How much a value of this class is worth relying on — capability map
+    /// line 1235.
+    ///
+    /// [`TelemetryClass::Manual`] is `Medium` and not `Low`: a plan the user
+    /// typed is a statement about a contract they actually hold, which is
+    /// more than an inference has behind it and less than a measurement.
+    pub fn confidence(self) -> Confidence {
+        match self {
+            TelemetryClass::Authoritative => Confidence::High,
+            TelemetryClass::Observed | TelemetryClass::Manual => Confidence::Medium,
+            TelemetryClass::Estimated => Confidence::Low,
+        }
+    }
+}
+
+/// A capacity percentage that **cannot be presented as exact unless it is** —
+/// capability map line 1234.
+///
+/// # Why this is a type and not a convention
+///
+/// [`NormalizedCapacity::percent`] used to answer a bare `u8`. A bare `u8`
+/// makes "check the source before you render this" a rule every caller has to
+/// remember, and line 1234 — *never label an inferred subscription percentage
+/// as exact* — is not a rule this project leaves to memory. There is no
+/// accessor here that yields a number without also yielding what kind of
+/// number it is: [`Percentage::exact`] answers `None` for an estimate, and
+/// [`Percentage::estimated`] is the only other way to reach the digits, and it
+/// hands back the confidence and the source description with them.
+///
+/// # The subscription case is guarded twice
+///
+/// A first-party subscription's pools are [`Capacity::ProviderOpaque`], so
+/// [`Pool::normalized`] answers `None` for one and there is no percentage to
+/// mislabel in the first place. This type is the second guard, for the case
+/// where a percentage does exist and was computed from something weaker than
+/// the provider's own word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Percentage {
+    /// Every reading behind this number came from the party that owns the
+    /// quota. It is what the provider says, divided by what the provider
+    /// says.
+    Exact(u8),
+    /// At least one reading behind this number was observed, remembered or
+    /// inferred rather than stated by the provider.
+    ///
+    /// Carries line 1235's two obligations — a confidence value and a source
+    /// description — as fields, so an estimate cannot be constructed without
+    /// them.
+    Estimated {
+        percent: u8,
+        confidence: Confidence,
+        source: String,
+    },
+}
+
+impl Percentage {
+    /// The number, **only** when it is exact. `None` for an estimate.
+    pub fn exact(&self) -> Option<u8> {
+        match self {
+            Percentage::Exact(percent) => Some(*percent),
+            Percentage::Estimated { .. } => None,
+        }
+    }
+
+    /// The number and its two qualifications, **only** when it is an
+    /// estimate. `None` for an exact reading.
+    pub fn estimated(&self) -> Option<(u8, Confidence, &str)> {
+        match self {
+            Percentage::Exact(_) => None,
+            Percentage::Estimated {
+                percent,
+                confidence,
+                source,
+            } => Some((*percent, *confidence, source.as_str())),
+        }
+    }
+
+    /// What kind of claim this percentage is.
+    pub fn class(&self) -> TelemetryClass {
+        match self {
+            Percentage::Exact(_) => TelemetryClass::Authoritative,
+            Percentage::Estimated { .. } => TelemetryClass::Estimated,
+        }
+    }
+
+    /// The one way to turn a percentage into text.
+    ///
+    /// An estimate renders with a `~`, the word `estimated`, its confidence
+    /// band and the source it came from; an exact reading renders as the bare
+    /// figure. Every surface goes through this rather than formatting the
+    /// digits itself, which is what makes line 1234 a property of the code
+    /// and not of each view's care.
+    pub fn render(&self) -> String {
+        match self {
+            Percentage::Exact(percent) => format!("{percent}%"),
+            Percentage::Estimated {
+                percent,
+                confidence,
+                source,
+            } => format!(
+                "~{percent}% (estimated, {}, from {source})",
+                confidence.as_str()
+            ),
+        }
+    }
+
+    /// The digits alone, for ordering only — private, so no surface can
+    /// render a number without its qualification.
+    fn number(&self) -> u8 {
+        match self {
+            Percentage::Exact(percent) => *percent,
+            Percentage::Estimated { percent, .. } => *percent,
+        }
+    }
+}
+
+/// Ordered by how much capacity is left, so that
+/// [`CapacityState::normalized`] can find the binding pool without any caller
+/// unwrapping the digits. An exact reading sorts below an estimate at the
+/// same figure: where the two tie, the one Glasshouse can defend is the one
+/// to report.
+impl Ord for Percentage {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.number()
+            .cmp(&other.number())
+            .then_with(|| self.class().rank().cmp(&other.class().rank()))
+    }
+}
+
+impl PartialOrd for Percentage {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl NormalizedCapacity {
-    /// Zero to one hundred.
-    pub fn percent(&self) -> u8 {
-        self.percent
+    /// Zero to one hundred, **labelled** — capability map line 1234.
+    ///
+    /// Exact only when both readings this score was computed from came from
+    /// the party that owns the quota. Otherwise an estimate carrying the
+    /// weaker of the two readings' confidence and a description naming both
+    /// origins, so the qualification travels with the figure rather than
+    /// being reconstructible from it.
+    pub fn percent(&self) -> Percentage {
+        let remaining_class = self.remaining.class();
+        let limit_class = self.limit.class();
+        if remaining_class.may_be_exact() && limit_class.may_be_exact() {
+            return Percentage::Exact(self.percent);
+        }
+        Percentage::Estimated {
+            percent: self.percent,
+            confidence: remaining_class
+                .confidence()
+                .weaker(limit_class.confidence()),
+            source: format!(
+                "{} over {}",
+                self.remaining.source().describe(),
+                self.limit.source().describe()
+            ),
+        }
     }
 
     /// What the provider said is left, in the provider's own unit.
@@ -743,6 +1262,46 @@ impl LimitingUnits {
     }
 }
 
+/// A provider- or harness-defined plan name — capability map line 1233.
+///
+/// # Why a plan is a reading and not a setting
+///
+/// Line 1233 asks that a user be able to *enter a known plan* when the
+/// provider exposes no usable telemetry, and line 1231 asks that native
+/// harness status be read when a stable machine-readable interface exists.
+/// Those are the same fact arriving by two different origins — the user
+/// remembering their subscription tier, and the harness stating it — so a
+/// plan is a [`Capacity`] like every other quantity here, and which of the
+/// two supplied it is a [`ReadingSource`] rather than two separate fields.
+/// [`Capacity::prefer`] then does line 1228's work for free: a harness that
+/// reports its own plan overrides one the user typed, because the harness is
+/// authoritative about its own account and the user is remembering.
+///
+/// # What a plan is not
+///
+/// It is **not** a capacity. Knowing an account is on `max` says nothing
+/// about how much of this window is left, and this type carries no number for
+/// exactly that reason. It is what a later phase would need in order to look
+/// a published allowance up, and it is what a resource view can honestly
+/// state today.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownPlan {
+    name: String,
+}
+
+impl KnownPlan {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+
+    /// The plan's name as the provider or harness spells it — `"max"`,
+    /// `"pro"`, `"team"`. Not a Glasshouse enumeration: every vendor names
+    /// its own tiers and a closed set here would be wrong within a quarter.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 /// How much usable capacity a resource has left — capability map line 1198.
 ///
 /// Provider-independent: nothing here names a provider, a harness or a
@@ -768,6 +1327,7 @@ pub struct CapacityState {
     model: QuotaModel,
     locality: Locality,
     limits: LimitingUnits,
+    plan: Capacity<KnownPlan>,
     tokens: TokenBudget,
     requests: Pool,
     credits: Pool,
@@ -799,6 +1359,11 @@ impl CapacityState {
             model: QuotaModel::RollingWindowSubscription,
             locality: Locality::Remote,
             limits: LimitingUnits::These(BTreeSet::from([LimitingUnit::OpaqueProviderAllowance])),
+            // Unmeasured, not opaque: a subscription is exactly the resource
+            // whose *plan* both a harness and a user can state even though
+            // the allowance behind it is published nowhere. Capability map
+            // lines 1231 and 1233.
+            plan: Capacity::Unmeasured,
             tokens: TokenBudget::uniform(Pool::opaque()),
             requests: Pool::opaque(),
             credits: Pool::inapplicable(),
@@ -820,6 +1385,9 @@ impl CapacityState {
             model: QuotaModel::MeteredBalance,
             locality: Locality::Remote,
             limits: LimitingUnits::These(BTreeSet::from([LimitingUnit::Credits])),
+            // A metered account may well be on a named tier, and a user may
+            // record one; nothing has read it.
+            plan: Capacity::Unmeasured,
             tokens: TokenBudget::uniform(Pool::unmeasured()),
             requests: Pool::unmeasured(),
             credits: Pool::unmeasured(),
@@ -842,6 +1410,8 @@ impl CapacityState {
             model: QuotaModel::Unmetered,
             locality: Locality::Local,
             limits: LimitingUnits::None,
+            // A local server sells no plans.
+            plan: Capacity::Inapplicable,
             tokens: TokenBudget::uniform(Pool::inapplicable()),
             requests: Pool::inapplicable(),
             credits: Pool::inapplicable(),
@@ -864,6 +1434,8 @@ impl CapacityState {
             model: QuotaModel::DelegatedToUpstream,
             locality: Locality::Local,
             limits: LimitingUnits::Delegated,
+            // Whatever plan the bound upstream is on, not the gateway's own.
+            plan: Capacity::DelegatedUpstream,
             tokens: TokenBudget::uniform(Pool::delegated()),
             requests: Pool::delegated(),
             credits: Pool::delegated(),
@@ -904,6 +1476,13 @@ impl CapacityState {
     /// credits.
     pub fn limited_by(mut self, limits: LimitingUnits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Record what plan this resource is on — capability map lines 1231
+    /// (a harness said so) and 1233 (the user said so).
+    pub fn with_plan(mut self, plan: Capacity<KnownPlan>) -> Self {
+        self.plan = plan;
         self
     }
 
@@ -954,6 +1533,12 @@ impl CapacityState {
     /// What can exhaust this resource.
     pub fn limiting_units(&self) -> &LimitingUnits {
         &self.limits
+    }
+
+    /// What plan this resource is on, if anything has said — capability map
+    /// lines 1231 and 1233.
+    pub fn plan(&self) -> &Capacity<KnownPlan> {
+        &self.plan
     }
 
     /// Token budget — capability map lines 1205 and 1206.
@@ -1012,6 +1597,114 @@ impl CapacityState {
             ("rolling window", self.windows.rolling().pool()),
             ("calendar window", self.windows.calendar().pool()),
         ]
+    }
+
+    /// When this resource's most recent successful quota observation was
+    /// taken — capability map line 1236.
+    ///
+    /// The **latest** unix second across every reading this state carries,
+    /// and `None` when nothing has been read at all, which is the honest
+    /// answer for every resource the shipped binary constructs without a
+    /// telemetry pass. "Successful" is not a separate flag: a
+    /// [`Capacity::Measured`] is the only state that exists *because* an
+    /// observation succeeded, and a failed one leaves the quantity in
+    /// whichever unknown state it started in — which is also line 1238, since
+    /// a failure therefore cannot overwrite a good earlier reading with a
+    /// worse one.
+    ///
+    /// Every pool, both window timestamps, every rate ceiling and the plan
+    /// are all considered, because any one of them may be the thing that was
+    /// last refreshed.
+    pub fn last_observed_at_unix(&self) -> Option<i64> {
+        let mut latest: Option<i64> = None;
+        let mut consider = |at: Option<i64>| {
+            if let Some(at) = at {
+                latest = Some(latest.map_or(at, |best: i64| best.max(at)));
+            }
+        };
+
+        for (_, pool) in self.pools() {
+            consider(pool.limit().reading().map(Reading::observed_at_unix));
+            consider(pool.remaining().reading().map(Reading::observed_at_unix));
+        }
+        for window in [self.windows.rolling(), self.windows.calendar()] {
+            consider(
+                window
+                    .started_at_unix()
+                    .reading()
+                    .map(Reading::observed_at_unix),
+            );
+            consider(
+                window
+                    .resets_at_unix()
+                    .reading()
+                    .map(Reading::observed_at_unix),
+            );
+        }
+        consider(
+            self.rates
+                .requests_per_minute()
+                .reading()
+                .map(Reading::observed_at_unix),
+        );
+        consider(
+            self.rates
+                .tokens_per_minute()
+                .reading()
+                .map(Reading::observed_at_unix),
+        );
+        consider(
+            self.rates
+                .long_window_requests()
+                .reading()
+                .map(Reading::observed_at_unix),
+        );
+        consider(
+            self.rates
+                .max_concurrent_requests()
+                .reading()
+                .map(Reading::observed_at_unix),
+        );
+        consider(self.plan.reading().map(Reading::observed_at_unix));
+        latest
+    }
+
+    /// The strongest kind of claim anything in this state rests on —
+    /// capability map lines 1227 and 1240.
+    ///
+    /// `None` when nothing has been read, which renders as
+    /// [`UNKNOWN_TELEMETRY`]. This is the one-line answer a resource view
+    /// leads with; the per-pool classes are still each their own, and
+    /// [`CapacityState::pools`] is how a view reaches them.
+    pub fn telemetry_class(&self) -> Option<TelemetryClass> {
+        let mut best: Option<TelemetryClass> = None;
+        let mut consider = |class: Option<TelemetryClass>| {
+            if let Some(class) = class {
+                best = Some(best.map_or(
+                    class,
+                    |b: TelemetryClass| {
+                        if class.rank() < b.rank() { class } else { b }
+                    },
+                ));
+            }
+        };
+        for (_, pool) in self.pools() {
+            consider(pool.limit().telemetry_class());
+            consider(pool.remaining().telemetry_class());
+        }
+        consider(self.plan.telemetry_class());
+        consider(self.rates.requests_per_minute().telemetry_class());
+        consider(self.rates.tokens_per_minute().telemetry_class());
+        consider(self.rates.long_window_requests().telemetry_class());
+        consider(self.rates.max_concurrent_requests().telemetry_class());
+        best
+    }
+
+    /// The line-1227 term for this resource as a whole, including
+    /// [`UNKNOWN_TELEMETRY`].
+    pub fn telemetry_class_str(&self) -> &'static str {
+        self.telemetry_class()
+            .map_or(UNKNOWN_TELEMETRY, TelemetryClass::as_str)
     }
 
     /// The tightest normalized score across every pool that has one, with the
@@ -1469,7 +2162,10 @@ mod tests {
                 ReadingSource::ProviderEndpoint("/api/v1/credits".to_owned()),
             ));
         let score = pool.normalized().expect("both halves were read");
-        assert_eq!(score.percent(), 25);
+        // Both readings came from the provider's own usage endpoint, so
+        // the score is exact — and `exact()` is the only accessor that
+        // yields the digits, which is capability map line 1234.
+        assert_eq!(score.percent().exact(), Some(25));
         // The percentage did not replace anything: the provider's own unit,
         // scale, numbers, observation time and source are all still here.
         assert_eq!(score.native_unit(), "USD");
@@ -1521,7 +2217,7 @@ mod tests {
         // Two percent of credits, ninety percent of tokens: the resource has
         // two percent of usable capacity, and the answer says which pool.
         assert_eq!(label, "credits");
-        assert_eq!(score.percent(), 2);
+        assert_eq!(score.percent().exact(), Some(2));
         assert_eq!(score.native_unit(), "USD");
     }
 
@@ -1553,6 +2249,360 @@ mod tests {
                 "rolling window",
                 "calendar window",
             ]
+        );
+    }
+    // ==== Phase 32B ======================================================
+
+    // --- line 1227: five terms, four of them classes ---------------------
+
+    #[test]
+    fn every_reading_origin_has_exactly_one_class_and_the_mapping_is_total() {
+        let cases = [
+            (
+                ReadingSource::ResponseHeader("ratelimit-limit".to_owned()),
+                TelemetryClass::Authoritative,
+            ),
+            (
+                ReadingSource::ProviderEndpoint("/api/v1/key".to_owned()),
+                TelemetryClass::Authoritative,
+            ),
+            (
+                ReadingSource::HarnessReport("claude auth status --json".to_owned()),
+                TelemetryClass::Authoritative,
+            ),
+            (
+                ReadingSource::LocalObservation("this session's requests".to_owned()),
+                TelemetryClass::Observed,
+            ),
+            (
+                ReadingSource::InferredEstimate("the last window's rate".to_owned()),
+                TelemetryClass::Estimated,
+            ),
+            (ReadingSource::UserConfiguration, TelemetryClass::Manual),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(source.class(), expected, "{source:?}");
+        }
+    }
+
+    /// The fifth term. A quantity nobody read has no class, and every one of
+    /// the four unknown states renders the same word — so a view cannot
+    /// accidentally distinguish "opaque" from "unmeasured" as though one of
+    /// them were a number.
+    #[test]
+    fn a_quantity_nothing_read_has_no_class_and_renders_as_unknown() {
+        let unknowns: [Capacity<NativeAmount>; 4] = [
+            Capacity::Inapplicable,
+            Capacity::ProviderOpaque,
+            Capacity::Unmeasured,
+            Capacity::DelegatedUpstream,
+        ];
+        for state in unknowns {
+            assert_eq!(state.telemetry_class(), None);
+            assert_eq!(state.telemetry_class_str(), UNKNOWN_TELEMETRY);
+            assert_eq!(state.describe_source(), UNKNOWN_TELEMETRY);
+        }
+        let measured = measured(10, "requests", header("ratelimit-limit"));
+        assert_eq!(
+            measured.telemetry_class(),
+            Some(TelemetryClass::Authoritative)
+        );
+        assert_ne!(measured.telemetry_class_str(), UNKNOWN_TELEMETRY);
+    }
+
+    /// The two classes named in line 1227 that `ReadingSource` had no origin
+    /// for before this phase. A test rather than a note, because their whole
+    /// purpose is to be distinguishable from the authoritative three.
+    #[test]
+    fn an_observed_and_an_inferred_reading_are_not_authoritative() {
+        let observed = ReadingSource::LocalObservation("requests this session made".to_owned());
+        let inferred = ReadingSource::InferredEstimate("the previous window".to_owned());
+        assert!(!observed.class().is_authoritative());
+        assert!(!inferred.class().is_authoritative());
+        assert!(!observed.class().may_be_exact());
+        assert!(!inferred.class().may_be_exact());
+        assert_ne!(observed.class(), inferred.class());
+    }
+
+    // --- line 1228: authoritative wins ------------------------------------
+
+    #[test]
+    fn an_authoritative_reading_outranks_every_other_class_in_both_directions() {
+        let authoritative = measured(10, "requests", header("ratelimit-limit"));
+        let manual = Capacity::Measured(Reading::new(
+            NativeAmount::whole(999, "requests"),
+            OBSERVED + 1_000,
+            ReadingSource::UserConfiguration,
+        ));
+        // The fresher, weaker reading still loses.
+        assert_eq!(
+            authoritative
+                .clone()
+                .prefer(manual.clone())
+                .value()
+                .unwrap()
+                .value(),
+            10
+        );
+        assert_eq!(manual.prefer(authoritative).value().unwrap().value(), 10);
+    }
+
+    #[test]
+    fn between_two_readings_of_one_class_the_fresher_one_wins() {
+        let older = measured(10, "requests", header("ratelimit-limit"));
+        let newer = Capacity::Measured(Reading::new(
+            NativeAmount::whole(4, "requests"),
+            OBSERVED + 60,
+            ReadingSource::ResponseHeader("ratelimit-limit".to_owned()),
+        ));
+        assert_eq!(
+            older.clone().prefer(newer.clone()).value().unwrap().value(),
+            4
+        );
+        assert_eq!(newer.prefer(older).value().unwrap().value(), 4);
+    }
+
+    /// A measurement always beats an unknown, and — the part that matters —
+    /// an unknown never overwrites a measurement, so a failed telemetry pass
+    /// cannot blank a good earlier reading. Capability map line 1238.
+    #[test]
+    fn an_unknown_never_displaces_a_measurement_and_never_loses_its_own_kind() {
+        let measured_value = measured(10, "requests", header("ratelimit-limit"));
+        assert!(
+            measured_value
+                .clone()
+                .prefer(Capacity::Unmeasured)
+                .is_measured()
+        );
+        assert!(
+            Capacity::<NativeAmount>::Unmeasured
+                .prefer(measured_value)
+                .is_measured()
+        );
+        // Two unknowns: the starting state's own distinction survives, which
+        // is what keeps `opaque` from silently becoming `unmeasured`.
+        let opaque: Capacity<NativeAmount> = Capacity::ProviderOpaque;
+        assert!(!opaque.prefer(Capacity::Unmeasured).is_readable());
+    }
+
+    // --- line 1234: exactness is structural -------------------------------
+
+    #[test]
+    fn a_percentage_from_two_provider_readings_is_exact_and_renders_bare() {
+        let pool = Pool::unmeasured()
+            .with_limit(measured(1_000, "requests", header("ratelimit-limit")))
+            .with_remaining(measured(250, "requests", header("ratelimit-remaining")));
+        let score = pool.normalized().expect("both halves were read");
+        assert_eq!(score.percent().exact(), Some(25));
+        assert_eq!(score.percent().estimated(), None);
+        assert_eq!(score.percent().render(), "25%");
+        assert_eq!(score.percent().class(), TelemetryClass::Authoritative);
+    }
+
+    /// The line itself. One weak reading is enough to make the whole figure
+    /// an estimate, and there is no accessor that yields its digits without
+    /// the confidence and the source travelling with them.
+    #[test]
+    fn one_non_authoritative_reading_makes_the_whole_percentage_an_estimate() {
+        let pool = Pool::unmeasured()
+            .with_limit(Capacity::Measured(Reading::new(
+                NativeAmount::whole(1_000, "requests"),
+                OBSERVED,
+                ReadingSource::UserConfiguration,
+            )))
+            .with_remaining(measured(250, "requests", header("ratelimit-remaining")));
+        let score = pool.normalized().expect("both halves were read");
+
+        assert_eq!(score.percent().exact(), None);
+        let percentage = score.percent();
+        let (percent, confidence, source) = percentage.estimated().expect("an estimate");
+        assert_eq!(percent, 25);
+        // Line 1235: a confidence value and a source description, both
+        // required by the variant rather than added by a caller.
+        assert_eq!(confidence, Confidence::Medium);
+        assert!(source.contains("configuration"), "{source}");
+        assert!(source.contains("ratelimit-remaining"), "{source}");
+
+        let rendered = score.percent().render();
+        assert!(rendered.starts_with('~'), "{rendered}");
+        assert!(rendered.contains("estimated"), "{rendered}");
+        assert!(rendered.contains("medium confidence"), "{rendered}");
+    }
+
+    /// An exact and an estimated figure at the same number must not render
+    /// the same way. This is the property a view could break and the one the
+    /// mutation ledger attacks.
+    #[test]
+    fn an_estimate_and_an_exact_reading_at_the_same_figure_never_render_alike() {
+        let exact = Percentage::Exact(25);
+        let estimated = Percentage::Estimated {
+            percent: 25,
+            confidence: Confidence::Low,
+            source: "an estimate derived from the previous window".to_owned(),
+        };
+        assert_ne!(exact.render(), estimated.render());
+        assert_ne!(exact.class(), estimated.class());
+        assert_eq!(estimated.exact(), None);
+    }
+
+    #[test]
+    fn the_weakest_reading_decides_an_estimates_confidence() {
+        let inferred = ReadingSource::InferredEstimate("the previous window".to_owned());
+        let pool = Pool::unmeasured()
+            .with_limit(Capacity::Measured(Reading::new(
+                NativeAmount::whole(1_000, "requests"),
+                OBSERVED,
+                inferred,
+            )))
+            .with_remaining(measured(250, "requests", header("ratelimit-remaining")));
+        let score = pool.normalized().expect("both halves were read");
+        let percentage = score.percent();
+        let (_, confidence, _) = percentage.estimated().expect("an estimate");
+        // High (the header) and Low (the inference) give Low, not High.
+        assert_eq!(confidence, Confidence::Low);
+        assert_eq!(Confidence::High.weaker(Confidence::Low), Confidence::Low);
+        assert_eq!(
+            Confidence::Medium.weaker(Confidence::High),
+            Confidence::Medium
+        );
+    }
+
+    /// Capability map line 1234 names *subscription* percentages
+    /// specifically, and for a subscription the guard fires one layer
+    /// earlier: there is no percentage at all to mislabel.
+    #[test]
+    fn a_subscription_produces_no_percentage_for_line_1234_to_have_to_label() {
+        let subscription = CapacityState::opaque_subscription();
+        assert!(subscription.normalized().is_none());
+        for (label, pool) in subscription.pools() {
+            assert!(pool.normalized().is_none(), "{label} produced a percentage");
+        }
+    }
+
+    // --- line 1236: when the last observation succeeded --------------------
+
+    #[test]
+    fn the_last_observation_is_the_latest_reading_anywhere_in_the_state() {
+        let state = CapacityState::metered_balance();
+        assert_eq!(state.last_observed_at_unix(), None);
+
+        let state = state
+            .with_credits(Pool::unmeasured().with_limit(measured_usd(
+                10_000_000,
+                ReadingSource::ProviderEndpoint("/api/v1/credits".to_owned()),
+            )))
+            .with_plan(Capacity::Measured(Reading::new(
+                KnownPlan::new("pro"),
+                OBSERVED + 500,
+                ReadingSource::UserConfiguration,
+            )));
+        // The latest of the two, not the first and not the strongest.
+        assert_eq!(state.last_observed_at_unix(), Some(OBSERVED + 500));
+    }
+
+    #[test]
+    fn a_rate_ceiling_alone_is_still_a_successful_observation() {
+        let state = CapacityState::metered_balance().with_rate_ceilings(
+            RateCeilings::uniform(Capacity::Unmeasured, Capacity::Unmeasured)
+                .with_requests_per_minute(measured(300, "requests", header("ratelimit-policy"))),
+        );
+        assert_eq!(state.last_observed_at_unix(), Some(OBSERVED));
+    }
+
+    // --- line 1237: staleness against a configurable age -------------------
+
+    #[test]
+    fn a_reading_is_stale_only_once_it_is_older_than_the_age_it_is_given() {
+        let reading = Reading::new(1_i64, OBSERVED, header("ratelimit-limit"));
+        assert_eq!(
+            reading.freshness(OBSERVED + 100, 120),
+            Freshness::Fresh { age_seconds: 100 }
+        );
+        // Exactly at the limit is not yet stale.
+        assert_eq!(
+            reading.freshness(OBSERVED + 120, 120),
+            Freshness::Fresh { age_seconds: 120 }
+        );
+        assert_eq!(
+            reading.freshness(OBSERVED + 121, 120),
+            Freshness::Stale {
+                age_seconds: 121,
+                stale_after_seconds: 120
+            }
+        );
+    }
+
+    /// The same reading, two ages: which is the whole content of
+    /// "provider-specific configurable age". A staleness rule that answered
+    /// the same for every provider would not be one.
+    #[test]
+    fn the_same_reading_is_fresh_under_one_configured_age_and_stale_under_another() {
+        let reading = Reading::new(1_i64, OBSERVED, header("ratelimit-limit"));
+        let now = OBSERVED + 300;
+        assert!(!reading.freshness(now, 900).is_stale());
+        assert!(reading.freshness(now, 120).is_stale());
+    }
+
+    #[test]
+    fn a_reading_stamped_in_the_future_is_fresh_rather_than_an_error() {
+        let reading = Reading::new(1_i64, OBSERVED + 60, header("ratelimit-limit"));
+        assert!(!reading.freshness(OBSERVED, 30).is_stale());
+    }
+
+    // --- lines 1231 and 1233: the plan ------------------------------------
+
+    #[test]
+    fn a_plan_is_a_reading_with_an_origin_rather_than_a_bare_string() {
+        let harness =
+            CapacityState::opaque_subscription().with_plan(Capacity::Measured(Reading::new(
+                KnownPlan::new("max"),
+                OBSERVED,
+                ReadingSource::HarnessReport("claude auth status --json".to_owned()),
+            )));
+        assert_eq!(harness.plan().value().unwrap().name(), "max");
+        assert_eq!(
+            harness.plan().telemetry_class(),
+            Some(TelemetryClass::Authoritative)
+        );
+
+        // A local server has no plan, and that is `Inapplicable` rather than
+        // unmeasured — nothing should ever go looking for one.
+        assert!(!CapacityState::unmetered_local().plan().is_readable());
+        // The gateway's plan belongs to its upstream.
+        assert!(matches!(
+            CapacityState::delegated_to_upstream().plan(),
+            Capacity::DelegatedUpstream
+        ));
+        // A subscription's is unmeasured — a number 32B may legitimately read.
+        assert!(CapacityState::opaque_subscription().plan().is_readable());
+    }
+
+    // --- line 1240: one word per resource ----------------------------------
+
+    #[test]
+    fn a_resources_telemetry_class_is_the_strongest_claim_anything_in_it_rests_on() {
+        assert_eq!(CapacityState::metered_balance().telemetry_class(), None);
+        assert_eq!(
+            CapacityState::metered_balance().telemetry_class_str(),
+            UNKNOWN_TELEMETRY
+        );
+
+        let manual_only =
+            CapacityState::metered_balance().with_plan(Capacity::Measured(Reading::new(
+                KnownPlan::new("pro"),
+                OBSERVED,
+                ReadingSource::UserConfiguration,
+            )));
+        assert_eq!(manual_only.telemetry_class(), Some(TelemetryClass::Manual));
+
+        let plus_header = manual_only.with_requests(Pool::unmeasured().with_limit(measured(
+            300,
+            "requests",
+            header("ratelimit-limit"),
+        )));
+        assert_eq!(
+            plus_header.telemetry_class(),
+            Some(TelemetryClass::Authoritative)
         );
     }
 }

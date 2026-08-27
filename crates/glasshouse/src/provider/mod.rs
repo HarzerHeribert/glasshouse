@@ -137,6 +137,8 @@ pub mod discovery;
 pub(crate) mod fixture;
 pub mod quota;
 pub mod registry;
+pub mod resources;
+pub mod telemetry;
 
 use crate::harness::{Declared, WireProtocol};
 use crate::secret::SecretRef;
@@ -379,7 +381,27 @@ pub fn templates() -> Vec<Provider> {
                  GET https://openrouter.ai/api/v1/models, read 2026-08-25; that request \
                  answered 200 with 417 entries when made, 2026-08-26",
             ),
-            usage_telemetry: Declared::Unverified,
+            // Phase 32B. **The route exists and gates on authentication**;
+            // what it *answers with* has not been read here, because reading
+            // it needs the user's own key and no worker holds one. So this
+            // declares that there is a usage endpoint worth querying, which
+            // is the decision `glasshouse resources` needs, and it does not
+            // declare a response schema — see `provider::telemetry`, which
+            // ships no parser for one.
+            //
+            // The control was run against this host, not borrowed from
+            // another: `/api/v1/glasshouse-nonexistent-control` answers
+            // `404` with OpenRouter's own HTML error page, while
+            // `/api/v1/key` and `/api/v1/credits` each answer `401` with the
+            // documented `{"error":{"message":…,"code":401}}` envelope. A
+            // host that served nothing at those paths would have answered
+            // the `404`. That is the exact step z.ai's promotion skipped —
+            // see this module's own note on it — and it is why the evidence
+            // string names the control and not only the probe.
+            usage_telemetry: Declared::verified(
+                true,
+                "GET https://openrouter.ai/api/v1/key and /api/v1/credits each answered 401                  with a JSON error envelope, unauthenticated, while the sibling path                  /api/v1/glasshouse-nonexistent-control answered 404 on the same host in the                  same minute, 2026-08-27; the routes exist and require a credential. No                  authenticated response body has been read, so no schema is declared",
+            ),
             credential_env: vec!["OPENROUTER_API_KEY".to_owned()],
             headers: vec![],
         },
@@ -951,17 +973,24 @@ mod tests {
             verified,
             vec![
                 "openrouter.model_list_endpoint".to_owned(),
+                // Phase 32B, and the only non-`model_list_endpoint` entry
+                // here: the route exists and gates on authentication, proved
+                // with a `404` control on the same host. What it answers with
+                // is still unread, and no schema is declared anywhere.
+                "openrouter.usage_telemetry".to_owned(),
                 "unorouter.model_list_endpoint".to_owned(),
                 "anyrouter.model_list_endpoint".to_owned(),
                 "kilo.model_list_endpoint".to_owned(),
                 "nous.model_list_endpoint".to_owned(),
                 "litellm.model_list_endpoint".to_owned(),
             ],
-            "only a model-list endpoint someone actually requested and that answered with a \
-             catalogue may be Verified, and every other capability must be Unverified — a \
-             `GET /models` that answered says nothing about streaming, tool calls or \
-             reasoning, and z.ai's 401 says nothing even about the model list, because it \
-             answers 401 to every path under that prefix: {verified:?}"
+            "only a capability someone actually probed may be Verified, and every other one \
+             must be Unverified — a `GET /models` that answered says nothing about \
+             streaming, tool calls or reasoning, and z.ai's 401 says nothing even about the \
+             model list, because it answers 401 to every path under that prefix. The one \
+             usage_telemetry entry is OpenRouter's, whose /api/v1/key and /api/v1/credits \
+             answered 401 while an invented sibling path answered 404 on the same host: \
+             {verified:?}"
         );
     }
 

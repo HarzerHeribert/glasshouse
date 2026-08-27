@@ -71,6 +71,7 @@ pub fn render(state: &ShellState, frame: &mut Frame) {
         Some(Overlay::Overview) => render_overview(state, frame, area),
         Some(Overlay::Settings) => render_settings(state, frame, area),
         Some(Overlay::ProjectOverview) => render_project_overview(state, frame, area),
+        Some(Overlay::SessionEvents) => render_session_events(state, frame, area),
         None => {}
     }
 }
@@ -324,8 +325,10 @@ fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
              w save   W project   r setup   esc close"
         }
         (Mode::Control, Some(Overlay::ProjectOverview)) => "esc back to session   q quit",
+        (Mode::Control, Some(Overlay::SessionEvents)) => "esc back to session   q quit",
         (Mode::Control, None) => {
-            "tab session   enter session   n new   N headless   o overview   p project   q quit"
+            "tab session   enter session   n new   N headless   o overview   p project   \
+             e events   q quit"
         }
     };
     let mut spans = vec![Span::styled(hint, Style::default().fg(Color::DarkGray))];
@@ -649,6 +652,73 @@ fn render_project_overview(state: &ShellState, frame: &mut Frame, area: Rect) {
             note.to_owned(),
             Style::default().fg(Color::Yellow),
         )));
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// Map line 1758: the *presented* session's own recent lifecycle events —
+/// deliberately its own overlay, reached by its own key, rather than folded
+/// into [`render_overview`]'s cross-session ACTIVITY feed. That feed already
+/// shows recent events across every session and is drawn every time the
+/// routine session-management popup opens; a diagnostic surface answering
+/// "what has this one session been doing" stays a diagnostic surface, per
+/// line 1770, only if opening it is a separate, deliberate act.
+///
+/// Filters [`ShellState::activity`] rather than reading
+/// [`crate::events::log::EventLog`]: the buffer already holds exactly the
+/// events this build records, in memory, with no file I/O this pure render
+/// function is not allowed to perform (see the module doc). A session with
+/// more history than [`super::state::ACTIVITY_ROWS`] keeps only its most
+/// recent rows, the same bound `render_overview`'s feed already accepts.
+fn render_session_events(state: &ShellState, frame: &mut Frame, area: Rect) {
+    let popup = centered(area, 80, 60);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" session events ")
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines = Vec::new();
+
+    let Some(session) = state.active_session() else {
+        lines.push(Line::from(Span::styled(
+            "no session is presented",
+            Style::default().fg(Color::DarkGray),
+        )));
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        return;
+    };
+
+    lines.push(Line::from(Span::styled(
+        format!("{}  {}", short_id(session), session_detail(session)),
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    let now = crate::provider::cache::now_unix_seconds();
+    let events: Vec<_> = state
+        .activity()
+        .iter()
+        .filter(|recorded| recorded.session() == &session.id)
+        .collect();
+
+    if events.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "no recent lifecycle events recorded for this session",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for recorded in events {
+            lines.push(Line::from(format!(
+                "  {:<28} {}",
+                super::state::describe_event(recorded.event()),
+                describe_age(now, recorded.at()),
+            )));
+        }
     }
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -2274,7 +2344,10 @@ mod tests {
         let mut state = ShellState::new("p", "/p", "0.1.0", vec![lone_session()]);
         state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
-        let bottom = last_row(&state, 120, 24);
+        // 120 columns fit the note alongside the bindings before Phase 47
+        // added `e events`; 132 is the same margin this test always had,
+        // measured against the longer row rather than assumed.
+        let bottom = last_row(&state, 132, 24);
         assert!(
             bottom.contains("only one session"),
             "the note must reach the status bar: `{bottom}`"
@@ -2301,7 +2374,9 @@ mod tests {
     }
 
     /// "Keep the visual design text-first and avoid decorative graph
-    /// visualizations that do not expose actionable state."
+    /// visualizations that do not expose actionable state." — map line 1771,
+    /// which this test proved for the shell and the session overview before
+    /// Phase 47's two overlays existed to add.
     ///
     /// Enforced mechanically rather than by inspection: Ratatui's decorative
     /// widgets — `Gauge`, `Sparkline`, `BarChart` — all draw with the Unicode
@@ -2316,6 +2391,16 @@ mod tests {
         screens.push(rendered(&state, 100, 30));
         state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        screens.push(rendered(&state, 100, 30));
+
+        // The two diagnostic overlays map line 1771 names by name — a
+        // "knowledge-graph visualization" is exactly what a `Gauge` or
+        // `Sparkline` would be reaching for here.
+        state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        state.open_project_overview(Vec::new(), Vec::new(), 0, None);
+        screens.push(rendered(&state, 100, 30));
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
         screens.push(rendered(&state, 100, 30));
 
         for screen in screens {
@@ -2733,6 +2818,113 @@ mod tests {
         );
     }
 
+    /// Map line 1768: the project overview must never show a lifetime token
+    /// or spend total, and never present one as an achievement counter.
+    ///
+    /// Practice §17: a settings test once passed for the wrong reason
+    /// because a narrow render clipped the very value it asserted was
+    /// absent, so this is proven at a realistic width *and* a wide one, and
+    /// mutation-proofed by hand: a temporary line pushed into
+    /// `render_project_overview` reading `lines.push(Line::from("lifetime
+    /// tokens: 999999"))` made this fail at both widths before it was
+    /// reverted (see the evidence ledger for the run).
+    #[test]
+    fn the_project_overview_never_shows_a_lifetime_token_or_spend_total() {
+        let mut orchestrator = record("orchestrator", "claude-code", SessionLifecycle::Running);
+        orchestrator.role = SessionRole::Orchestrator;
+        let mut worker = record("run-worker01", "codex", SessionLifecycle::Running);
+        worker.role = SessionRole::Worker;
+
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![orchestrator, worker]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        state.open_project_overview(
+            vec!["decision: ship the six closeable lines".to_owned()],
+            vec!["todo: close the rest next round".to_owned()],
+            2,
+            None,
+        );
+
+        for (width, height) in [(120, 40), (400, 40)] {
+            let text = rendered(&state, width, height).to_lowercase();
+            for forbidden in ["token", "spend", "achievement", "lifetime"] {
+                assert!(
+                    !text.contains(forbidden),
+                    "the project overview must never show `{forbidden}`, width {width}:\n{text}"
+                );
+            }
+        }
+    }
+
+    /// Map line 1768's "never" as a property of the source, not only of one
+    /// fixture's render: a future PR could add a lifetime counter under
+    /// session-state most existing fixtures never populate. Scoped to
+    /// `render_project_overview` specifically — `session_detail`'s
+    /// per-session model/backend line and Settings' own per-decision
+    /// "Maximum marginal cost" knob are both legitimate and must not trip
+    /// this.
+    ///
+    /// # Scanned by lines, deliberately
+    ///
+    /// Same idiom as `shell::mod::run_loop_passes_the_default_timeouts`: a
+    /// multi-line literal search breaks on a CRLF checkout because Git
+    /// converts line endings and the literal no longer matches, and that has
+    /// already taken Windows CI red once on this project. [`str::lines`]
+    /// strips the carriage return, so this is CRLF-agnostic by construction.
+    fn project_overview_never_names_a_lifetime_total(source: &str) -> bool {
+        let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let lines: Vec<&str> = production.lines().collect();
+        let Some(start) = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with("fn render_project_overview("))
+        else {
+            return false;
+        };
+        let body: Vec<&str> = lines[start + 1..]
+            .iter()
+            .take_while(|line| !line.trim_start().starts_with("fn "))
+            .copied()
+            .collect();
+
+        const FORBIDDEN: [&str; 4] = ["token", "spend", "achievement", "lifetime"];
+        !body.iter().any(|line| {
+            let lower = line.to_lowercase();
+            FORBIDDEN.iter().any(|term| lower.contains(term))
+        })
+    }
+
+    /// The control that keeps the scan above honest — both that it says yes
+    /// on the real file and that it is capable of saying no, in both an LF
+    /// and a CRLF checkout.
+    #[test]
+    fn the_lifetime_total_scan_is_crlf_agnostic_and_can_say_no() {
+        let normalised = include_str!("view.rs").replace("\r\n", "\n");
+        let crlf = normalised.replace('\n', "\r\n");
+        assert!(
+            project_overview_never_names_a_lifetime_total(&normalised),
+            "the real file must pass its own guard"
+        );
+        assert!(
+            project_overview_never_names_a_lifetime_total(&crlf),
+            "the scan must still pass in a CRLF checkout"
+        );
+
+        let tainted = "fn render_project_overview(x: i32) {\n    let lifetime_tokens = 1;\n}\n";
+        assert!(
+            !project_overview_never_names_a_lifetime_total(tainted),
+            "a source naming a lifetime total inside the function must be rejected"
+        );
+
+        // And a term appearing *outside* the function — Settings' own "cost"
+        // knob, say — must not trip it, or the guard is too broad to survive
+        // the rest of this file.
+        let outside = "fn render_project_overview(x: i32) {\n    let y = 1;\n}\n\
+                        fn render_settings() {\n    let cost = 1;\n}\n";
+        assert!(
+            project_overview_never_names_a_lifetime_total(outside),
+            "a term outside render_project_overview must not trip the guard"
+        );
+    }
+
     /// Map line 1664: the overview must be derived state, never generated
     /// commentary — proven the same way `nothing_draws_with_block_elements`
     /// proves the rest of the shell stays text-first: every character in the
@@ -2756,6 +2948,140 @@ mod tests {
             control_text.contains("p project"),
             "control-mode footer must advertise the key:\n{control_text}"
         );
+    }
+
+    /// Map line 1758. Practice §17: asserted at a realistic width and at 400
+    /// columns, exactly like `the_overview_shows_recorded_activity_...`,
+    /// because a row clipped off-screen at 100 columns would make the
+    /// `contains` assertions below pass or fail for reasons that have
+    /// nothing to do with the code.
+    ///
+    /// Also proves the filter: `sample()`'s two sessions each get an event,
+    /// and only the *presented* one's (`aaaaaaaaaaaa1`, `sample()`'s default
+    /// `selected_index`) text must appear — the other session's event text
+    /// must not, which is what distinguishes this overlay from
+    /// `render_overview`'s cross-session ACTIVITY feed.
+    #[test]
+    fn session_events_shows_only_the_presented_sessions_events_at_a_realistic_and_a_wide_width() {
+        use crate::events::{EventBus, LifecycleEvent, MessageOrigin, TurnOutcome};
+        use crate::session::SessionId;
+        use crate::shell::Action;
+
+        let mut state = sample();
+        let bus = EventBus::new();
+        let presented = SessionId::new("aaaaaaaaaaaa1");
+        let other = SessionId::new("bbbbbbbbbbbb2");
+        let recorded = vec![
+            bus.publish(&presented, LifecycleEvent::SessionStarted),
+            bus.publish(
+                &other,
+                LifecycleEvent::TextDelivered {
+                    origin: MessageOrigin::Machine,
+                    bytes: 99,
+                },
+            ),
+            bus.publish(
+                &presented,
+                LifecycleEvent::TurnEnded {
+                    outcome: TurnOutcome::Completed,
+                },
+            ),
+        ];
+        assert_eq!(state.note_events(&recorded), Action::Redraw);
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)),
+            Action::Redraw
+        );
+
+        for (width, height) in [(100, 24), (400, 24)] {
+            let text = rendered(&state, width, height);
+            assert!(text.contains("session events"), "width {width}:\n{text}");
+            assert!(text.contains("session started"), "width {width}:\n{text}");
+            assert!(
+                text.contains("turn ended (completed)"),
+                "width {width}:\n{text}"
+            );
+            assert!(
+                !text.contains("sent 99 bytes (machine)"),
+                "the other session's event must not appear, width {width}:\n{text}"
+            );
+        }
+    }
+
+    /// The honest empty state, matching `render_overview`'s own convention
+    /// for a section with nothing to show.
+    #[test]
+    fn session_events_says_so_when_the_presented_session_has_none() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        let text = rendered(&state, 120, 24);
+        assert!(
+            text.contains("no recent lifecycle events recorded for this session"),
+            "{text}"
+        );
+    }
+
+    /// Map line 1770 for this overlay specifically: reached only by its own
+    /// key, never present on the screen a user sees without asking for it.
+    /// Asserted at both widths for the same reason as the test above — an
+    /// absence assertion is only as strong as the viewport it renders into
+    /// (practice §17).
+    #[test]
+    fn session_events_is_absent_from_the_default_screen_at_a_realistic_and_a_wide_width() {
+        let state = sample();
+        for (width, height) in [(100, 24), (400, 24)] {
+            let text = rendered(&state, width, height);
+            assert!(
+                !text.contains("session events"),
+                "the default screen must not show the session-events overlay, \
+                 width {width}:\n{text}"
+            );
+        }
+    }
+
+    /// The overlay's own footer, and the control-mode footer advertising the
+    /// key that opens it — the same pair `the_project_overview_footer_...`
+    /// proves for `p`/`Overlay::ProjectOverview`.
+    #[test]
+    fn the_session_events_footer_names_its_own_key() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let text = rendered(&state, 120, 24);
+        assert!(
+            text.contains("esc back to session"),
+            "session events footer:\n{text}"
+        );
+
+        let control_text = rendered(&sample(), 120, 24);
+        assert!(
+            control_text.contains("e events"),
+            "control-mode footer must advertise the key:\n{control_text}"
+        );
+    }
+
+    /// `e` toggles like every other overlay key: pressing it again while open
+    /// closes it, exactly as `o`/`Overlay::Overview` and `p`/
+    /// `Overlay::ProjectOverview` already do. A regression here would leave
+    /// the key un-openable a second time in the same session.
+    #[test]
+    fn e_opens_and_esc_closes_the_session_events_overlay() {
+        use crate::shell::Action;
+
+        let mut state = sample();
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)),
+            Action::Redraw
+        );
+        assert_eq!(
+            state.overlay(),
+            Some(crate::shell::state::Overlay::SessionEvents)
+        );
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Action::Redraw
+        );
+        assert_eq!(state.overlay(), None);
     }
 }
 

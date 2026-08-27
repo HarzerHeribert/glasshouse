@@ -696,6 +696,240 @@ pub struct ProviderConfig {
     /// Free text, because it describes somebody else's software.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     prompt_transform: Option<String>,
+    /// What the user told Glasshouse about this provider's quota when the
+    /// provider's own telemetry does not say — capability map lines 1233,
+    /// 1203 and 1237.
+    ///
+    /// As safe to write into a tracked project file as
+    /// [`ProviderConfig::credential_env`]'s variable names: a plan name, an
+    /// integer number of microdollars, and an integer number of seconds.
+    /// Nothing here is resolved through [`crate::secret`] and nothing here
+    /// names a credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    quota: Option<QuotaOverride>,
+}
+
+/// How long one provider's quota telemetry stays current — capability map
+/// line 1237's "provider-specific configurable age".
+///
+/// Seconds, as a human-editable integer, matching
+/// [`RouterCostMicroUsd`]'s own reasoning about exactness in policy. There is
+/// no one right value and that is the point of the line: a credit balance
+/// changes when somebody pays a bill and a requests-per-minute ceiling is a
+/// contract that changes when a plan does, so the same age would be wrong for
+/// both on the same provider, let alone across providers.
+///
+/// The default is fifteen minutes. It is a *default*, not a claim about any
+/// provider — long enough that a resource view opened twice in a row does not
+/// call a reading from a minute ago stale, short enough that a balance read
+/// before lunch is not still presented as current after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct QuotaStaleAfterSeconds(u32);
+
+impl QuotaStaleAfterSeconds {
+    /// Thirty days. A ceiling rather than a policy: an age limit longer than
+    /// this describes a reading nobody should be routing on under any
+    /// definition, and accepting `u32::MAX` silently would let a typo disable
+    /// staleness entirely without saying so.
+    pub const MAX: u32 = 30 * 24 * 60 * 60;
+    pub const DEFAULT: Self = Self(15 * 60);
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+
+    /// As the `i64` [`crate::provider::quota::Reading::freshness`] takes.
+    pub fn seconds(self) -> i64 {
+        i64::from(self.0)
+    }
+}
+
+impl TryFrom<u32> for QuotaStaleAfterSeconds {
+    type Error = QuotaValueError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        if value <= Self::MAX {
+            Ok(Self(value))
+        } else {
+            Err(QuotaValueError::StaleAfter {
+                seconds: value,
+                max_seconds: Self::MAX,
+            })
+        }
+    }
+}
+
+impl From<QuotaStaleAfterSeconds> for u32 {
+    fn from(value: QuotaStaleAfterSeconds) -> Self {
+        value.0
+    }
+}
+
+/// The period a monetary budget covers — capability map line 1203's
+/// "monthly **or rolling**".
+///
+/// Two answers because they are genuinely different promises: a calendar
+/// month's budget is spent and forgiven on the first, and a rolling window's
+/// is never fully forgiven at all. Nothing in Glasshouse counts spend against
+/// either yet — see [`MonetaryBudget`] — but a ceiling recorded without its
+/// period is a number that cannot be checked, and this project does not store
+/// those.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BudgetPeriod {
+    /// Resets at the start of each calendar month.
+    CalendarMonth,
+    /// A trailing thirty days that never fully resets.
+    RollingThirtyDays,
+}
+
+impl BudgetPeriod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BudgetPeriod::CalendarMonth => "calendar month",
+            BudgetPeriod::RollingThirtyDays => "rolling thirty days",
+        }
+    }
+}
+
+/// A spending ceiling the user set for one metered provider — capability map
+/// line 1203.
+///
+/// # Not [`RouterCostMicroUsd`], and the difference is the whole line
+///
+/// [`RouterCostMicroUsd`] caps the price of **one routing decision**. This
+/// caps **cumulative spend over a period**. A user who set the first to a
+/// tenth of a cent has said nothing at all about how many such calls they are
+/// willing to pay for in a month, which is why Phase 32A recorded that the
+/// existing field does not satisfy this line.
+///
+/// # What it does not do, stated rather than implied
+///
+/// Nothing in Glasshouse counts money spent. This is the ceiling half of
+/// capability map line 1209 and the ceiling half only: it reaches
+/// [`crate::provider::quota::CapacityState::user_budget`] as the pool's
+/// *limit*, with the remaining half left unmeasured, so a resource view can
+/// honestly say "you set a ten dollar monthly ceiling and Glasshouse does not
+/// know what you have spent against it" instead of implying a balance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonetaryBudget {
+    #[serde(rename = "amount_micro_usd")]
+    amount_micro_usd: u64,
+    period: BudgetPeriod,
+}
+
+impl MonetaryBudget {
+    /// Ten thousand dollars. A unit-mistake guard in the same spirit as
+    /// [`RouterCostMicroUsd::MAX`]: somebody who writes `1000` meaning ten
+    /// dollars has made an error this cannot catch, but somebody who writes
+    /// a dollar figure where microdollars belong is off by a million and this
+    /// does.
+    pub const MAX_MICRO_USD: u64 = 10_000 * 1_000_000;
+
+    pub fn new(amount_micro_usd: u64, period: BudgetPeriod) -> Result<Self, QuotaValueError> {
+        if amount_micro_usd > Self::MAX_MICRO_USD {
+            return Err(QuotaValueError::Budget {
+                micro_usd: amount_micro_usd,
+                max_micro_usd: Self::MAX_MICRO_USD,
+            });
+        }
+        Ok(Self {
+            amount_micro_usd,
+            period,
+        })
+    }
+
+    pub fn amount_micro_usd(self) -> u64 {
+        self.amount_micro_usd
+    }
+
+    pub fn period(self) -> BudgetPeriod {
+        self.period
+    }
+}
+
+/// What the user told Glasshouse about one provider's quota when its own
+/// telemetry does not say — capability map lines 1233, 1203 and 1237.
+///
+/// Every field is optional and absent means "the user said nothing", never
+/// "the user said none": a provider with no `[providers.x.quota]` table at
+/// all and one with an empty table are the same, and neither asserts that the
+/// provider has no plan.
+///
+/// This is configuration, so everything here is [`Layer`]-resolved the same
+/// way every other provider field is, and everything here becomes a
+/// [`crate::provider::quota::ReadingSource::UserConfiguration`] reading —
+/// which [`crate::provider::quota::Capacity::prefer`] then ranks *below* a
+/// provider's or a harness's own word, per capability map line 1228. A user's
+/// manual entry fills a gap; it does not override a measurement.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuotaOverride {
+    /// The plan this account is on, as the provider names it — `"max"`,
+    /// `"pro"`, `"team"`. Capability map line 1233's "known plan".
+    ///
+    /// Free text, for [`crate::provider::quota::KnownPlan`]'s own reason: every
+    /// vendor names its own tiers and a closed enumeration here would be
+    /// wrong within a quarter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plan: Option<String>,
+    /// A cumulative spending ceiling for this provider — capability map
+    /// line 1203.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    budget: Option<MonetaryBudget>,
+    /// How long this provider's telemetry stays current — capability map
+    /// line 1237. `None` means [`QuotaStaleAfterSeconds::DEFAULT`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stale_after_seconds: Option<QuotaStaleAfterSeconds>,
+}
+
+impl QuotaOverride {
+    pub fn plan(&self) -> Option<&str> {
+        self.plan.as_deref()
+    }
+
+    pub fn set_plan(&mut self, plan: Option<String>) -> &mut Self {
+        self.plan = plan;
+        self
+    }
+
+    pub fn budget(&self) -> Option<MonetaryBudget> {
+        self.budget
+    }
+
+    pub fn set_budget(&mut self, budget: Option<MonetaryBudget>) -> &mut Self {
+        self.budget = budget;
+        self
+    }
+
+    /// This layer's configured age, or `None` for "never decided".
+    pub fn stale_after(&self) -> Option<QuotaStaleAfterSeconds> {
+        self.stale_after_seconds
+    }
+
+    pub fn set_stale_after(&mut self, value: Option<QuotaStaleAfterSeconds>) -> &mut Self {
+        self.stale_after_seconds = value;
+        self
+    }
+
+    /// Whether the user recorded anything at all here.
+    pub fn is_empty(&self) -> bool {
+        self.plan.is_none() && self.budget.is_none() && self.stale_after_seconds.is_none()
+    }
+}
+
+/// A quota configuration value outside the range its field accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum QuotaValueError {
+    #[error(
+        "a quota staleness age of {seconds}s is longer than the maximum {max_seconds}s; a          reading older than that should not be routed on under any policy"
+    )]
+    StaleAfter { seconds: u32, max_seconds: u32 },
+
+    #[error(
+        "a monetary budget of {micro_usd} microdollars is above the maximum {max_micro_usd};          this field is in millionths of a US dollar, so a plain dollar figure here is off by a          million"
+    )]
+    Budget { micro_usd: u64, max_micro_usd: u64 },
 }
 
 /// Why a stored [`ProviderConfig`] could not be turned into a
@@ -804,6 +1038,7 @@ impl ProviderConfig {
             enabled: true,
             free_models: Vec::new(),
             prompt_transform: None,
+            quota: None,
         }
     }
 
@@ -813,6 +1048,17 @@ impl ProviderConfig {
 
     pub fn set_template(&mut self, template: impl Into<String>) -> &mut Self {
         self.template = template.into();
+        self
+    }
+
+    /// This layer's quota overrides, or `None` when this layer recorded
+    /// none — capability map lines 1233, 1203 and 1237.
+    pub fn quota(&self) -> Option<&QuotaOverride> {
+        self.quota.as_ref()
+    }
+
+    pub fn set_quota(&mut self, quota: Option<QuotaOverride>) -> &mut Self {
+        self.quota = quota;
         self
     }
 
@@ -2412,6 +2658,62 @@ impl<'a> EffectiveConfig<'a> {
 
         let provider = config.to_provider(name)?;
         Ok(Layered::new(provider, layer))
+    }
+
+    /// What the user configured about `name`'s quota, reporting which layer
+    /// supplied it — capability map lines 1233, 1203 and 1237.
+    ///
+    /// # Whole-table precedence, deliberately
+    ///
+    /// The project layer's `[providers.<name>.quota]` table replaces the
+    /// user layer's rather than merging field by field, matching
+    /// [`ProviderConfig::credential_env`]'s and
+    /// [`ProviderConfig::headers`]'s own replace-not-merge rule and the
+    /// [`EffectiveConfig::configured_provider`] lookup this sits beside — a
+    /// project that states a quota table has stated the whole of what it
+    /// believes about that provider's quota. A per-field merge would let a
+    /// project's `plan` silently inherit a user's `budget`, which is a
+    /// spending ceiling arriving somewhere nobody wrote it.
+    ///
+    /// [`Layer::Default`] with an empty override when neither layer says
+    /// anything, which is not the same as the provider being unknown: this
+    /// answers a question about configuration and an unconfigured provider
+    /// has, correctly, no overrides.
+    pub fn quota_override(&self, name: &str) -> Layered<QuotaOverride> {
+        if let Some(quota) = self
+            .project
+            .and_then(|p| p.providers().get(name))
+            .and_then(ProviderConfig::quota)
+        {
+            return Layered::new(quota.clone(), Layer::Project);
+        }
+        if let Some(quota) = self
+            .user
+            .providers()
+            .get(name)
+            .and_then(ProviderConfig::quota)
+        {
+            return Layered::new(quota.clone(), Layer::User);
+        }
+        Layered::new(QuotaOverride::default(), Layer::Default)
+    }
+
+    /// How long `name`'s quota telemetry stays current — capability map
+    /// line 1237.
+    ///
+    /// Resolved through [`EffectiveConfig::quota_override`], so a project
+    /// layer's age wins over a user layer's, and
+    /// [`QuotaStaleAfterSeconds::DEFAULT`] when neither said. **The value is
+    /// per provider**, which is the whole of the line's "provider-specific":
+    /// asking this for two providers may legitimately give two answers, and a
+    /// caller that read it once and reused it would have flattened exactly
+    /// the distinction the line asks for.
+    pub fn quota_stale_after(&self, name: &str) -> Layered<QuotaStaleAfterSeconds> {
+        let configured = self.quota_override(name);
+        match configured.value.stale_after() {
+            Some(value) => Layered::new(value, configured.layer),
+            None => Layered::new(QuotaStaleAfterSeconds::DEFAULT, Layer::Default),
+        }
     }
 }
 

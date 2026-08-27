@@ -275,6 +275,62 @@ pub enum ModelFetch {
     Probe(ProbeOutcome),
 }
 
+/// What one probe found, **with the rate-limit headers it came back with** —
+/// capability map line 1229.
+///
+/// # Why the headers are here and not on [`ProbeOutcome`]
+///
+/// A [`ProbeOutcome`] answers "did this endpoint answer, and how". Adding a
+/// header list to its variants would put quota telemetry inside the type
+/// [`mod@crate::shell::state`] renders as a one-line connectivity result, and
+/// every existing caller would have to learn to ignore it. This type wraps
+/// that answer instead, so [`connectivity`] keeps its exact signature and
+/// nothing that only wants the outcome changes at all.
+///
+/// # Only the headers Glasshouse asked for
+///
+/// `headers` is what [`crate::provider::telemetry::retain_rate_limit_headers`]
+/// kept, which is an allowlist and not a filter — see
+/// [`crate::provider::telemetry::RATE_LIMIT_HEADERS`] for why that matters,
+/// and note in particular that OpenRouter's `GET /api/v1/models` answers with
+/// a `set-cookie` header. A probe result is a diagnostic a user may be invited
+/// to share, and a diagnostic that captured "the response headers" would carry
+/// a session cookie into it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeResponse {
+    outcome: ProbeOutcome,
+    headers: Vec<(String, String)>,
+}
+
+impl ProbeResponse {
+    pub fn new(outcome: ProbeOutcome, headers: Vec<(String, String)>) -> Self {
+        Self { outcome, headers }
+    }
+
+    pub fn outcome(&self) -> &ProbeOutcome {
+        &self.outcome
+    }
+
+    /// The rate-limit headers this response carried, lowercased, in the
+    /// order [`crate::provider::telemetry::RATE_LIMIT_HEADERS`] lists them.
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
+    /// What those headers said — capability map line 1229.
+    ///
+    /// Empty when the response carried none, which was the answer for seven
+    /// of the eight hosts Glasshouse ships templates for when this was
+    /// measured; see [`mod@crate::provider::telemetry`].
+    pub fn rate_limits(&self) -> crate::provider::telemetry::RateLimitHeaders {
+        crate::provider::telemetry::RateLimitHeaders::read(
+            self.headers
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+        )
+    }
+}
+
 /// Make one request and report what happened, without reading a body.
 ///
 /// This is Phase 9D line 1. It reports; it decides nothing. A failure here
@@ -282,11 +338,48 @@ pub enum ModelFetch {
 /// the caller in [`mod@crate::shell::state`], where that separation is the
 /// thing under test.
 pub fn connectivity(request: &ProbeRequest, timeouts: ProbeTimeouts) -> ProbeOutcome {
+    connectivity_with_headers(request, timeouts).outcome
+}
+
+/// [`connectivity`], keeping the rate-limit headers the response carried —
+/// capability map line 1229, and the only place in Glasshouse that reads a
+/// quota number off a response.
+///
+/// # Why here and not on the gateway's forwarding path
+///
+/// The gateway is deliberately excluded. Phase 9I line 528 settled that *the
+/// gateway forwards headers without reading them, and a parser there would
+/// make it a reader of the payload it exists to pass through*. This module is
+/// the opposite kind of thing: it already makes a request **because a
+/// keystroke asked it to**, it already holds the response, and until now it
+/// discarded the headers. Reading them costs no extra request — which is the
+/// other half of why this is the right seam, since capability map line 1230's
+/// "without excessive request cost" applies to the whole telemetry story and
+/// a probe that already ran is free.
+pub fn connectivity_with_headers(request: &ProbeRequest, timeouts: ProbeTimeouts) -> ProbeResponse {
     let started = Instant::now();
     match send(request, timeouts) {
-        Ok(response) => classify(response.status().as_u16()),
-        Err(err) => transport_outcome(&err, started),
+        Ok(response) => {
+            let outcome = classify(response.status().as_u16());
+            ProbeResponse::new(outcome, rate_limit_headers_of(&response))
+        }
+        Err(err) => ProbeResponse::new(transport_outcome(&err, started), Vec::new()),
     }
+}
+
+/// Pull the allowlisted rate-limit headers off a response.
+///
+/// A header whose value is not valid UTF-8 is skipped rather than escaped:
+/// every field this module reads is an integer or a short parameter list, and
+/// a non-UTF-8 value in one of them is not a number this parser could have
+/// understood anyway.
+fn rate_limit_headers_of(response: &ureq::http::Response<ureq::Body>) -> Vec<(String, String)> {
+    let named: Vec<(&str, &str)> = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?)))
+        .collect();
+    crate::provider::telemetry::retain_rate_limit_headers(named)
 }
 
 /// Make one request to the provider's model list and read it.
@@ -578,6 +671,131 @@ mod tests {
     fn a_base_url_probe_appends_no_path_at_all() {
         let request = request_at("https://a.example/v1", ProbeTarget::BaseUrl);
         assert_eq!(request.url(), "https://a.example/v1");
+    }
+
+    // --- Phase 32B line 1229: the headers a response carried --------------
+
+    /// The header block `https://anyrouter.dev/api/v1/models` really answered
+    /// with on 2026-08-27, in wire format.
+    ///
+    /// Served by the fixture so that the capture is proven **through
+    /// `connectivity_with_headers`** rather than by handing
+    /// `RateLimitHeaders::read` a list a test built. Practice §35: the
+    /// telemetry tests all enter below this function, and a capture nothing
+    /// enters through is a capture the suite would not miss.
+    const ANYROUTER_HEADER_BLOCK: &str = "ratelimit-limit: 300\r\n\
+         ratelimit-policy: 300;w=60\r\n\
+         x-ratelimit-limit: 300\r\n\
+         x-ratelimit-tier: ip\r\n\
+         x-ratelimit-window: 60\r\n\
+         access-control-expose-headers: X-RateLimit-Limit,RateLimit-Remaining\r\n\
+         set-cookie: __cf_bm=oGkHQJmsGX6wCH7Quh5JYzAK6KXu1icwUg5MExQ2LqQ\r\n";
+
+    #[test]
+    fn a_response_carrying_rate_limit_headers_hands_them_back_to_the_caller() {
+        let fixture =
+            FixtureProvider::answering("HTTP/1.1 200 OK", ANYROUTER_HEADER_BLOCK, "{\"data\":[]}");
+        let request = request_at(&fixture.base_url(), ProbeTarget::ModelList);
+        let response = connectivity_with_headers(&request, quick());
+
+        assert_eq!(response.outcome(), &ProbeOutcome::Reached { status: 200 });
+        let limits = response.rate_limits();
+        assert_eq!(limits.limit(), Some(300));
+        assert_eq!(limits.window_seconds(), Some(60));
+        // The host advertises `RateLimit-Remaining` and did not send it.
+        assert_eq!(limits.remaining(), None);
+    }
+
+    /// The allowlist, at the boundary it exists to guard. This response
+    /// carries a `set-cookie` — OpenRouter's own `GET /api/v1/models` does,
+    /// measured — and a capture that kept "the response headers" would put a
+    /// session cookie into a diagnostic a user is invited to share.
+    #[test]
+    fn nothing_but_an_allowlisted_header_survives_the_capture() {
+        let fixture =
+            FixtureProvider::answering("HTTP/1.1 200 OK", ANYROUTER_HEADER_BLOCK, "{\"data\":[]}");
+        let request = request_at(&fixture.base_url(), ProbeTarget::ModelList);
+        let response = connectivity_with_headers(&request, quick());
+
+        let names: Vec<&str> = response
+            .headers()
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "ratelimit-limit",
+                "ratelimit-policy",
+                "x-ratelimit-limit",
+                "x-ratelimit-window"
+            ],
+            "the capture kept a header nobody asked for"
+        );
+        let rendered = format!("{response:?}");
+        for forbidden in ["set-cookie", "__cf_bm", "oGkHQJmsGX", "x-ratelimit-tier"] {
+            assert!(
+                !rendered.contains(forbidden),
+                "`{forbidden}` survived the capture"
+            );
+        }
+    }
+
+    #[test]
+    fn a_response_with_no_rate_limit_header_hands_back_an_empty_capture() {
+        let fixture = FixtureProvider::answering(
+            "HTTP/1.1 200 OK",
+            "content-type: application/json\r\ncf-cache-status: HIT\r\n",
+            "{\"data\":[]}",
+        );
+        let request = request_at(&fixture.base_url(), ProbeTarget::ModelList);
+        let response = connectivity_with_headers(&request, quick());
+        assert!(response.headers().is_empty());
+        assert!(response.rate_limits().is_empty());
+    }
+
+    /// `connectivity` must keep answering exactly what it always did, so no
+    /// existing caller changed behaviour when the capture was added.
+    #[test]
+    fn capturing_headers_did_not_change_what_a_plain_connectivity_probe_answers() {
+        let fixture =
+            FixtureProvider::answering("HTTP/1.1 200 OK", ANYROUTER_HEADER_BLOCK, "{\"data\":[]}");
+        let request = request_at(&fixture.base_url(), ProbeTarget::ModelList);
+        assert_eq!(
+            connectivity(&request, quick()),
+            ProbeOutcome::Reached { status: 200 }
+        );
+    }
+
+    /// A refusal carries headers too, and `Retry-After` is the one a provider
+    /// sends with one. Capability map line 1229 says *rate-limit and usage
+    /// headers*, not *headers on a success*.
+    #[test]
+    fn a_refusal_that_carries_a_retry_after_still_yields_a_reading() {
+        let fixture = FixtureProvider::answering(
+            "HTTP/1.1 429 Too Many Requests",
+            "retry-after: 30\r\nratelimit-remaining: 0\r\n",
+            "",
+        );
+        let request = request_at(&fixture.base_url(), ProbeTarget::ModelList);
+        let response = connectivity_with_headers(&request, quick());
+        assert_eq!(
+            response.outcome(),
+            &ProbeOutcome::Unexpected { status: 429 }
+        );
+        assert_eq!(response.rate_limits().retry_after_seconds(), Some(30));
+        assert_eq!(response.rate_limits().remaining(), Some(0));
+    }
+
+    /// A request that never got an answer has no headers to carry, and asking
+    /// for them must not be a way to turn a transport failure into a panic.
+    #[test]
+    fn an_unreachable_endpoint_yields_an_outcome_and_an_empty_capture() {
+        let request = request_at("http://127.0.0.1:1/v1", ProbeTarget::ModelList);
+        let response = connectivity_with_headers(&request, quick());
+        assert!(!response.outcome().answered());
+        assert!(response.headers().is_empty());
+        assert!(response.rate_limits().is_empty());
     }
 
     // --- line 1: connectivity --------------------------------------------
