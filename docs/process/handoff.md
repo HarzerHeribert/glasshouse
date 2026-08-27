@@ -6,7 +6,15 @@
 
 Last updated: 2026-08-27 (Europe/Berlin)
 
-## ⚠ HEAD IS COMMITTED BUT NOT GATED, AND NOT PUSHED
+## ⚠ (resolved — kept for the reasoning)
+
+HEAD was committed ungated because the gate refused to start beside a running
+worker. `mio-spin` has since landed, the machine went quiet, and the gate ran on
+the combined tree. The rule that produced the pause is the one worth keeping:
+**a gate that runs beside a build is not a gate**, and waiting was cheaper than
+attributing a false red.
+
+## Superseded — HEAD IS COMMITTED BUT NOT GATED, AND NOT PUSHED
 
 The `launch-overlay` integration is committed locally and **has not passed
 `scripts/ci-local.sh`**. The gate refused to start, correctly: `mio-spin` was
@@ -32,6 +40,13 @@ than four times.
 | `mio-spin` | `tui/**`, `tests/terminal_loss.rs` | the edge-triggered readiness spin that eats keystrokes; a **rate**, not a pass (§60) |
 | ~~`provider-probe`~~ | **integrated** | 15 reachable, 3 unsettleable without a key, 0 wrong; practice §63 |
 | ~~`launch-overlay`~~ | **integrated** | 4 of 7 closed; **353 and 368 open with the gap located**, 372 blocked on 35B |
+
+**TYPING IS THROTTLED TO ~59 KEYS A SECOND, AND IT IS A REGRESSION THIS
+PROJECT SHIPPED.** Measured by `mio-spin`: since batch 26's quiet-tick short
+cut, the shell takes **one keystroke per 16ms tick** — a 200-character paste
+takes 3.4 seconds. Same loop, different defect, deliberately not fixed in that
+diff so the race fix could be measured on its own. **This is the most
+user-visible thing on the board** and it should go out before any new phase.
 
 **Two Phase 9A boxes are open with their gaps already located** — this is the
 cheapest work left on the board and needs no investigation:

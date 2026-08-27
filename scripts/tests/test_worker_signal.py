@@ -119,8 +119,13 @@ def main() -> int:
 
     # The orchestrator works in the main checkout. A self-signal would make it
     # announce its own completion and acknowledge work nobody did.
+    # The MAIN checkout, not REPO. Run from a worktree, `REPO` is that worktree
+    # — so firing the hook at it forged a done marker named after the live
+    # worker whose tree the gate happened to be running in, and a watch armed
+    # for that worker then announced it finished. The gate was manufacturing
+    # the exact false positive the hook was added to remove.
     before = set(p.name for p in DONE.iterdir()) if DONE.is_dir() else set()
-    fire(str(REPO))
+    fire(str(_main_checkout()))
     after = set(p.name for p in DONE.iterdir()) if DONE.is_dir() else set()
     if after != before:
         failures.append(f"the main checkout signalled itself: {after - before}")
