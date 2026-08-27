@@ -2391,3 +2391,47 @@ condition it exists for** — after the MSRV gate that could not fail (§20), th
 Codex hook that was installed and inert (§22), and the shared relaunch lock
 (§30). Ask of any safety net: *what has it been seen to do, under which trigger,
 and what does it do when it is not needed?*
+
+
+## §65 — a change no test can observe may be doing something nothing is watching
+
+On 2026-08-28 the integrator wired the Phase 33A evidence ledger into `main.rs`,
+mutated the wiring away, and found **the entire suite still green**. The
+conclusion drawn was "this needs a structural guard proving the wiring exists",
+and a source-scanning test was added.
+
+That was the wrong lesson, and the right one cost four Windows runs.
+
+The same tree **hung six memory-extraction tests on Windows for 37 minutes with
+no output**, while its local gate was 13/13. `EvidenceLedger` holds
+`Mutex<Connection>` — an open SQLite handle for its whole lifetime — and the
+wiring opened it *unconditionally*, before anything decided whether a gateway
+was needed. SQLite uses advisory POSIX locks on Unix and mandatory `LockFileEx`
+on Windows, so a handle opened for a launch that never used it blocks a later
+writer on one platform and is invisible on the other.
+
+**The invisibility to tests and the Windows hang had the same cause**: the code
+ran on a path nothing was looking at. The guard proved the wiring was *present*;
+it could not prove the wiring was *safe*, and presence was never the thing in
+doubt.
+
+**So when a mutation of your own change survives everything:**
+
+1. do not stop at "add a test that proves it is there";
+2. ask **what the code does on the path nobody is asserting about** — it is
+   running there, on every platform, whether or not a test looks;
+3. treat resource acquisition on such a path as the first suspect. An open file
+   handle, a lock, a socket, a spawned process: each is free on the developer's
+   machine and billed somewhere else.
+
+**Opening a database you may not use is not free, and the platform that charges
+for it is not the one this project develops on.**
+
+The fix was to acquire the resource exactly where its consumer starts —
+`gateway_is_required(profiles)`, the same decision the gateway makes a moment
+later — which removed both the wasted work and the lock.
+
+Sixth Windows-only defect here to survive a green local gate, and the **first to
+present as a hang**. That is worse than a failure: a failure prints a result
+line, and a hang prints nothing at all. `--windows-vm` on every landing round is
+what caught it (§56), and a 37-minute silence is what it looks like when it does.
