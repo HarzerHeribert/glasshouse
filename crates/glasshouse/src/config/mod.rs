@@ -1677,6 +1677,21 @@ pub struct UserConfig {
     /// nothing to their harness.
     #[serde(default, skip_serializing_if = "response::ResponseConfig::is_unset")]
     response: response::ResponseConfig,
+    /// Whether Glasshouse's automatic post-turn memory-extraction trigger
+    /// (Phase 21) may run in this project. `None` means "never decided" and
+    /// resolves to enabled — the same reasoning [`RoutingConfig::model`]
+    /// documents for why this stays an `Option` rather than a plain `bool`:
+    /// a project that wants to record an explicit "off" over a user-level
+    /// "on" needs a third state to override, not just two.
+    ///
+    /// Independent of [`RoutingConfig::model`] and
+    /// [`response::ResponseConfig`]'s own `enabled` field by construction —
+    /// each lives in its own table/field and is read by
+    /// [`EffectiveConfig::memory_extraction_enabled`] alone, so setting one
+    /// never touches another. See
+    /// `tests::the_three_automatic_behaviours_disable_independently`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_extraction: Option<bool>,
 }
 
 impl Default for UserConfig {
@@ -1690,6 +1705,7 @@ impl Default for UserConfig {
             routing: RoutingConfig::default(),
             pairing: pairing::PairingConfig::default(),
             response: response::ResponseConfig::default(),
+            memory_extraction: None,
         }
     }
 }
@@ -1755,6 +1771,17 @@ impl UserConfig {
         &mut self.response
     }
 
+    /// This layer's recorded decision on the automatic memory-extraction
+    /// trigger, or `None` for "never decided". See the field's own doc.
+    pub fn memory_extraction(&self) -> Option<bool> {
+        self.memory_extraction
+    }
+
+    pub fn set_memory_extraction(&mut self, enabled: Option<bool>) -> &mut Self {
+        self.memory_extraction = enabled;
+        self
+    }
+
     /// Load the user-level configuration file named by `paths`.
     ///
     /// A missing file is not an error: it returns [`UserConfig::default`]
@@ -1818,6 +1845,12 @@ pub struct ProjectConfig {
     /// project — line 597. See `crate::config::response`'s own header.
     #[serde(default, skip_serializing_if = "response::ResponseConfig::is_unset")]
     response: response::ResponseConfig,
+    /// A project may override the user's decision on the automatic
+    /// memory-extraction trigger — see [`UserConfig::memory_extraction`] for
+    /// the field this mirrors and [`EffectiveConfig::memory_extraction_enabled`]
+    /// for how the two layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_extraction: Option<bool>,
 }
 
 impl Default for ProjectConfig {
@@ -1830,6 +1863,7 @@ impl Default for ProjectConfig {
             routing: RoutingConfig::default(),
             pairing: pairing::PairingConfig::default(),
             response: response::ResponseConfig::default(),
+            memory_extraction: None,
         }
     }
 }
@@ -1885,6 +1919,17 @@ impl ProjectConfig {
 
     pub fn response_mut(&mut self) -> &mut response::ResponseConfig {
         &mut self.response
+    }
+
+    /// This layer's recorded decision on the automatic memory-extraction
+    /// trigger, or `None` for "never decided". See [`UserConfig::memory_extraction`].
+    pub fn memory_extraction(&self) -> Option<bool> {
+        self.memory_extraction
+    }
+
+    pub fn set_memory_extraction(&mut self, enabled: Option<bool>) -> &mut Self {
+        self.memory_extraction = enabled;
+        self
     }
 }
 
@@ -2166,6 +2211,25 @@ impl<'a> EffectiveConfig<'a> {
             names.extend(project.providers().names().map(str::to_owned));
         }
         names.into_iter().collect()
+    }
+
+    /// Whether Glasshouse's automatic post-turn memory-extraction trigger
+    /// (Phase 21) may run, reporting which layer decided it. Project first,
+    /// then user, then [`Layer::Default`], matching every other lookup on
+    /// this type except [`EffectiveConfig::bypass_acknowledged`].
+    ///
+    /// Deliberately independent of [`EffectiveConfig::routing_model`] and
+    /// response-profile injection: each reads its own field, so disabling one
+    /// automatic behaviour never disables another. See
+    /// `tests::the_three_automatic_behaviours_disable_independently`.
+    pub fn memory_extraction_enabled(&self) -> Layered<bool> {
+        if let Some(value) = self.project.and_then(ProjectConfig::memory_extraction) {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.memory_extraction() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(true, Layer::Default)
     }
 
     /// Resolve which routing model classifies requests, reporting which
@@ -2563,6 +2627,7 @@ mod tests {
         let mut profile = ProfileConfig::new(IntegrationId::ClaudeCode);
         profile.set_approval(ProfileApproval::AutomaticReview);
         config.profiles_mut().set("fast", profile);
+        config.set_memory_extraction(Some(false));
         config
     }
 
@@ -2613,6 +2678,7 @@ mod tests {
         let profile = loaded.profiles().get("fast").unwrap();
         assert_eq!(profile.harness_slug(), "claude-code");
         assert_eq!(profile.approval(), ProfileApproval::AutomaticReview);
+        assert_eq!(loaded.memory_extraction(), Some(false));
     }
 
     #[test]
@@ -2813,6 +2879,53 @@ mod tests {
             config
                 .integrations()
                 .is_enabled_or_default(IntegrationId::ClaudeCode, false)
+        );
+    }
+
+    /// Box 1800: cmux may be disabled even when it is detected. This module
+    /// has no concept of "detected" at all — that lives in `integrations::`,
+    /// which is exactly why an explicit decision here is immune to it: the
+    /// same generic tri-state `enabled` this file gives every integration
+    /// (see [`tri_state_enabled_distinguishes_never_asked_from_a_decision`])
+    /// applies to [`IntegrationId::Cmux`] with no special case, and
+    /// `onboarding::state::build_rows` reads this exact field to seed the
+    /// wizard's cmux row regardless of what live detection found.
+    #[test]
+    fn cmux_can_be_explicitly_disabled_and_the_decision_is_ordinary_configuration() {
+        let mut config = UserConfig::default();
+        assert_eq!(
+            config.integrations().is_enabled(IntegrationId::Cmux),
+            None,
+            "never asked, whether or not cmux is present on this machine"
+        );
+
+        config
+            .integrations_mut()
+            .entry(IntegrationId::Cmux)
+            .set_enabled(false);
+
+        // Nothing in configuration ever consults "is cmux detected" — the
+        // decision persists exactly like any other integration's, and a
+        // caller must never fall back to treating detection as an override.
+        assert_eq!(
+            config.integrations().is_enabled(IntegrationId::Cmux),
+            Some(false)
+        );
+        assert!(
+            !config
+                .integrations()
+                .is_enabled_or_default(IntegrationId::Cmux, true),
+            "an explicit disable must win over any default, including one a detector would suggest"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
+        config.save(&paths).unwrap();
+        let loaded = UserConfig::load(&paths).unwrap();
+        assert_eq!(
+            loaded.integrations().is_enabled(IntegrationId::Cmux),
+            Some(false),
+            "the disable survives a save and load, so a later run still honours it"
         );
     }
 
@@ -4036,6 +4149,7 @@ mod tests {
             user_keys,
             vec![
                 "integrations",
+                "memory_extraction",
                 "onboarding",
                 "profiles",
                 "providers",
@@ -4203,6 +4317,106 @@ mod tests {
             }),
             None
         );
+    }
+
+    /// [`an_os_credential_reference_round_trips_through_configuration_without_its_value`]'s
+    /// sibling for the *project*-level file: box 1789 is specifically about
+    /// what a project may write into its own tracked `.glasshouse/config.toml`
+    /// — a file real repositories check in — so the guarantee needs its own
+    /// proof at [`write_project_config_with_consent`] rather than resting on
+    /// the user-file test alone.
+    ///
+    /// "Wide", here, is comprehensiveness rather than a TUI viewport (§17's
+    /// truncation risk does not apply to a TOML file: nothing elides it) — a
+    /// project config populated across every component table this module
+    /// exposes (providers with headers and a credential store, profiles,
+    /// pairing corrections, a response profile, routing), so a leak in any
+    /// one of them would show up here rather than only in a narrow fixture.
+    #[test]
+    fn project_config_file_never_contains_a_planted_secret_value_across_every_table() {
+        const VAR: &str = "GLASSHOUSE_PROJECT_CONFIG_TEST_ONLY_SECRET_VAR";
+        const VALUE: &str = "sk-project-config-test-only-0123456789abcdef";
+
+        let workspace = tempfile::tempdir().unwrap();
+        let project = test_project(workspace.path());
+
+        let mut provider = ProviderConfig::new("openrouter");
+        provider
+            .set_base_url(Some("https://example.invalid".to_owned()))
+            .set_credential_env(vec![VAR.to_owned()])
+            .set_credential_store(Some(StoredCredentialRef::new("glasshouse", VAR)))
+            .set_headers(vec![("X-Test".to_owned(), "1".to_owned())])
+            .set_free_models(vec!["nvidia/nemotron-nano-9b-v2:free".to_owned()]);
+
+        let mut profile = ProfileConfig::new(IntegrationId::ClaudeCode);
+        profile.set_backend(ProfileBackend::DirectProvider {
+            provider: "wide".to_owned(),
+        });
+
+        let mut config = ProjectConfig::default();
+        config.providers_mut().set("wide", provider);
+        config.profiles_mut().set("wide", profile);
+        config
+            .integrations_mut()
+            .entry(IntegrationId::Codex)
+            .set_executable(Some(PathBuf::from("/opt/codex/bin/codex")));
+        config
+            .pairing_mut()
+            .model_entry("gpt-5.6-luna")
+            .set_developer(Some("openai".to_owned()));
+        config
+            .response_mut()
+            .default_entry_mut()
+            .set_preset(Some("audit".to_owned()));
+        config
+            .routing_mut()
+            .set_model(Some(RoutingModelChoice::Pinned {
+                provider: "wide".to_owned(),
+                model: "gpt-5.6-luna".to_owned(),
+            }));
+
+        // SAFETY: `VAR` is unique to this test and removed again below.
+        // Planted so that a serializer which resolved the reference would
+        // have something to leak.
+        unsafe {
+            std::env::set_var(VAR, VALUE);
+        }
+        let written = write_project_config_with_consent(&project, &config);
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+        written.unwrap();
+
+        let path = project.root().join(PROJECT_CONFIG_RELATIVE_PATH);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains(VALUE),
+            "a credential value reached the project configuration file:\n{text}"
+        );
+        assert!(text.contains(VAR), "the NAME must be there:\n{text}");
+
+        // The same broad word-scan the user-file structural test runs,
+        // applied to a project file that actually populates every table —
+        // unlike that test's fixture, this one legitimately writes
+        // `credential_env`/`credential_store` as *keys*, so the scan is
+        // narrowed to lines that are not those two keys' own declarations.
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("credential_env")
+                || trimmed.starts_with("credential_store")
+                || trimmed.starts_with("service =")
+                || trimmed.starts_with("account =")
+            {
+                continue;
+            }
+            for forbidden in ["token", "secret", "password"] {
+                assert!(
+                    !line.to_lowercase().contains(forbidden),
+                    "project configuration file unexpectedly contains `{forbidden}` outside a \
+                     credential reference's own keys: {line}"
+                );
+            }
+        }
     }
 
     /// Phase 2C's whole job is to *record* the choice, so the thing worth
@@ -4416,6 +4630,42 @@ mod tests {
             RoutingModelResolution::Heuristics(RoutingFallback::NotConfigured)
         );
         assert_eq!(resolution.layer, Layer::Default);
+    }
+
+    #[test]
+    fn memory_extraction_enabled_layers_project_over_user_over_default() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.memory_extraction_enabled(),
+            Layered::new(true, Layer::Default),
+            "nothing recorded anywhere must resolve to enabled"
+        );
+
+        let mut user = UserConfig::default();
+        user.set_memory_extraction(Some(false));
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.memory_extraction_enabled(),
+            Layered::new(false, Layer::User)
+        );
+
+        let mut project = ProjectConfig::default();
+        project.set_memory_extraction(Some(true));
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        assert_eq!(
+            effective.memory_extraction_enabled(),
+            Layered::new(true, Layer::Project),
+            "a project's explicit re-enable must win over the user's disable"
+        );
+
+        let silent_project = ProjectConfig::default();
+        let effective = EffectiveConfig::new(&user, Some(&silent_project));
+        assert_eq!(
+            effective.memory_extraction_enabled(),
+            Layered::new(false, Layer::User),
+            "a project that recorded nothing must fall through to the user layer"
+        );
     }
 
     /// A pin is two names — a key into `ProviderTable` and a model name —

@@ -1015,6 +1015,26 @@ fn report_hook(runtime: &Runtime, session: &str, event: &str) {
     });
 }
 
+/// Phase 21/49: whether the automatic post-turn memory-extraction trigger may
+/// run for this project — see
+/// [`glasshouse::config::EffectiveConfig::memory_extraction_enabled`].
+///
+/// A configuration Glasshouse cannot read defaults to enabled, matching every
+/// other read failure on this path: [`disposable_extraction_model`] falls
+/// back the same way, for the same reason — a broken config file must not
+/// silently and permanently turn off a working capability, and this trigger
+/// already tolerates every other failure non-fatally (see
+/// [`run_extraction_after_turn`]'s own doc comment).
+fn memory_extraction_enabled(runtime: &Runtime) -> bool {
+    let Ok(user) = UserConfig::load(runtime.paths()) else {
+        return true;
+    };
+    let project = config::load_project_config(runtime.project()).unwrap_or(None);
+    EffectiveConfig::new(&user, project.as_ref())
+        .memory_extraction_enabled()
+        .value
+}
+
 /// Phase 9I lines 530, 531 and 540's production caller: route this
 /// extraction through `glasshouse::routing::disposable::DisposableRouting`
 /// over the free models the user has actually configured, and report the
@@ -1215,7 +1235,8 @@ fn report_hook_with(
             LifecycleEvent::TurnEnded {
                 outcome: TurnOutcome::Completed
             }
-        ) {
+        ) && memory_extraction_enabled(runtime)
+        {
             run_extraction_after_turn(runtime, &id, model());
         }
 

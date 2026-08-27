@@ -169,6 +169,20 @@ impl ResponseProfileEntry {
 /// the same rule [`super::pairing::PairingConfig::is_unset`] follows.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResponseConfig {
+    /// Whether automatic response-profile injection may apply the
+    /// configured `default`/`roles` layers at all — independent of automatic
+    /// routing ([`super::RoutingConfig::model`]) and automatic memory
+    /// extraction ([`super::UserConfig::memory_extraction`]). `None` means
+    /// "never decided" and resolves to enabled, the same reasoning
+    /// [`super::RoutingConfig::model`] documents.
+    ///
+    /// This gates only the file-configured `Role`, `Project` and
+    /// `UserDefault` layers of [`EffectiveConfig::response_stack`] — an
+    /// explicit `--response-preset`/`--response-role` on one invocation is a
+    /// request made *now*, not automatic injection, and still applies. See
+    /// `tests::disabling_injection_suppresses_configured_layers_but_not_an_explicit_request`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
     #[serde(
         default,
         flatten,
@@ -185,7 +199,20 @@ pub struct ResponseConfig {
 
 impl ResponseConfig {
     pub fn is_unset(&self) -> bool {
-        self.default.is_unset() && self.roles.values().all(ResponseProfileEntry::is_unset)
+        self.enabled.is_none()
+            && self.default.is_unset()
+            && self.roles.values().all(ResponseProfileEntry::is_unset)
+    }
+
+    /// This layer's recorded decision on automatic response-profile
+    /// injection, or `None` for "never decided". See the field's own doc.
+    pub fn enabled(&self) -> Option<bool> {
+        self.enabled
+    }
+
+    pub fn set_enabled(&mut self, enabled: Option<bool>) -> &mut Self {
+        self.enabled = enabled;
+        self
     }
 
     pub fn default_entry(&self) -> &ResponseProfileEntry {
@@ -288,6 +315,21 @@ impl ResponseResolution {
 }
 
 impl EffectiveConfig<'_> {
+    /// Whether automatic response-profile injection may apply the
+    /// configured layers, reporting which layer decided it. Project first,
+    /// then user, then [`super::Layer::Default`] (enabled), matching every
+    /// ordinary lookup on this type. See [`ResponseConfig::enabled`] for
+    /// exactly what this does and does not suppress.
+    pub fn response_injection_enabled(&self) -> super::Layered<bool> {
+        if let Some(value) = self.project.and_then(|p| p.response().enabled()) {
+            return super::Layered::new(value, super::Layer::Project);
+        }
+        if let Some(value) = self.user.response().enabled() {
+            return super::Layered::new(value, super::Layer::User);
+        }
+        super::Layered::new(true, super::Layer::Default)
+    }
+
     /// Line 596's six layers, filled in from configuration and `request`.
     ///
     /// The **only** place the stack is built, so `glasshouse response` and
@@ -344,18 +386,23 @@ impl EffectiveConfig<'_> {
         //    be there and its bottom half could never win. Asking for
         //    `--response-role worker` is a request for that role's defaults;
         //    not asking is not a request for anything.
-        let role_entry = self
-            .project
-            .and_then(|project| project.response().role(role))
-            .filter(|entry| !entry.is_unset())
-            .map(|entry| (entry, "this project's configuration"))
-            .or_else(|| {
-                self.user
-                    .response()
-                    .role(role)
+        let injection_enabled = self.response_injection_enabled().value;
+
+        let role_entry = injection_enabled
+            .then(|| {
+                self.project
+                    .and_then(|project| project.response().role(role))
                     .filter(|entry| !entry.is_unset())
-                    .map(|entry| (entry, "the user configuration"))
-            });
+                    .map(|entry| (entry, "this project's configuration"))
+                    .or_else(|| {
+                        self.user
+                            .response()
+                            .role(role)
+                            .filter(|entry| !entry.is_unset())
+                            .map(|entry| (entry, "the user configuration"))
+                    })
+            })
+            .flatten();
         let role_layer = match (role_entry, request.role) {
             (Some((entry, where_from)), _) => {
                 entry.to_layer(&format!("{where_from}'s `{role}` role"), &mut problems)
@@ -370,10 +417,14 @@ impl EffectiveConfig<'_> {
         // 4. Project — this project's own `[response]` table, and no other
         //    project's. See the module documentation.
         let project_layer = match self.project {
-            Some(project) if !project.response().default_entry().is_unset() => project
-                .response()
-                .default_entry()
-                .to_layer("this project's configuration", &mut problems),
+            Some(project)
+                if injection_enabled && !project.response().default_entry().is_unset() =>
+            {
+                project
+                    .response()
+                    .default_entry()
+                    .to_layer("this project's configuration", &mut problems)
+            }
             _ => ProfileLayer::empty(),
         };
         stack.set(PrecedenceLayer::Project, project_layer);
@@ -381,10 +432,14 @@ impl EffectiveConfig<'_> {
         // 5. User default.
         stack.set(
             PrecedenceLayer::UserDefault,
-            self.user
-                .response()
-                .default_entry()
-                .to_layer("the user configuration", &mut problems),
+            if injection_enabled {
+                self.user
+                    .response()
+                    .default_entry()
+                    .to_layer("the user configuration", &mut problems)
+            } else {
+                ProfileLayer::empty()
+            },
         );
 
         // 6. Harness default — see this method's doc comment. Nothing to set.
@@ -605,4 +660,175 @@ pub fn one_line(resolution: &ResponseResolution) -> String {
 /// Every preset, for a CLI that wants to list them.
 pub fn known_presets() -> &'static [Preset] {
     presets()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Layer, Layered, ProjectConfig, UserConfig};
+    use crate::profile::response::PrecedenceLayer;
+
+    #[test]
+    fn enabled_key_round_trips_and_absence_parses_to_never_decided() {
+        let mut user = UserConfig::default();
+        assert_eq!(user.response().enabled(), None);
+        user.response_mut().set_enabled(Some(false));
+
+        let text = toml::to_string_pretty(&user).unwrap();
+        assert!(
+            text.contains("enabled = false"),
+            "an explicit disable must actually be written:\n{text}"
+        );
+        let loaded: UserConfig = toml::from_str(&text).unwrap();
+        assert_eq!(loaded.response().enabled(), Some(false));
+
+        // A file written before this field existed has no `enabled` key at
+        // all, and must load as "never decided" — never as "configured off".
+        let old_file = "version = 1\n";
+        let from_old_file: UserConfig = toml::from_str(old_file).unwrap();
+        assert_eq!(from_old_file.response().enabled(), None);
+    }
+
+    #[test]
+    fn injection_enabled_layers_project_over_user_over_default() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.response_injection_enabled(),
+            Layered::new(true, Layer::Default),
+            "nothing recorded anywhere must resolve to enabled"
+        );
+
+        let mut user = UserConfig::default();
+        user.response_mut().set_enabled(Some(false));
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.response_injection_enabled(),
+            Layered::new(false, Layer::User)
+        );
+
+        let mut project = ProjectConfig::default();
+        project.response_mut().set_enabled(Some(true));
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        assert_eq!(
+            effective.response_injection_enabled(),
+            Layered::new(true, Layer::Project),
+            "a project's explicit re-enable must win over the user's disable"
+        );
+    }
+
+    /// The disable trio's response half: disabling injection must not move
+    /// [`super::super::RoutingConfig::model`] or
+    /// [`super::super::UserConfig::memory_extraction`], and setting either of
+    /// those must not move this. Each reads its own field.
+    #[test]
+    fn the_three_automatic_behaviours_disable_independently() {
+        use crate::config::RoutingModelChoice;
+
+        for (routing_off, memory_off, response_off) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+            (true, true, true),
+        ] {
+            let mut user = UserConfig::default();
+            if routing_off {
+                user.routing_mut()
+                    .set_model(Some(RoutingModelChoice::Deterministic));
+            }
+            user.set_memory_extraction(Some(!memory_off));
+            user.response_mut().set_enabled(Some(!response_off));
+
+            let effective = EffectiveConfig::new(&user, None);
+
+            assert_eq!(
+                matches!(
+                    effective.routing_model_resolution().value,
+                    crate::config::RoutingModelResolution::Heuristics(
+                        crate::config::RoutingFallback::DeterministicChosen
+                    )
+                ),
+                routing_off,
+                "routing state must depend only on the routing field, case {routing_off} {memory_off} {response_off}"
+            );
+            assert_eq!(
+                effective.memory_extraction_enabled().value,
+                !memory_off,
+                "memory-extraction state must depend only on its own field, case {routing_off} {memory_off} {response_off}"
+            );
+            assert_eq!(
+                effective.response_injection_enabled().value,
+                !response_off,
+                "response-injection state must depend only on its own field, case {routing_off} {memory_off} {response_off}"
+            );
+        }
+    }
+
+    /// Disabling injection suppresses the file-configured `Role`, `Project`
+    /// and `UserDefault` layers, but an explicit request made on this one
+    /// invocation — a task override, a session preset, or naming a role on
+    /// the command line — is not automatic injection and still applies.
+    #[test]
+    fn disabling_injection_suppresses_configured_layers_but_not_an_explicit_request() {
+        let mut user = UserConfig::default();
+        user.response_mut()
+            .default_entry_mut()
+            .set_preset(Some("audit".to_owned()));
+        user.response_mut().set_enabled(Some(false));
+        let effective = EffectiveConfig::new(&user, None);
+
+        // With nothing requested, a disabled injection applies nothing: every
+        // axis reads from `HarnessDefault`.
+        let resolution = effective.response_profile(&ResponseRequest::default());
+        assert!(
+            resolution.resolved().is_harness_default(),
+            "a disabled injection with no explicit request must apply nothing"
+        );
+
+        // An explicit task-level preset still applies even while injection is
+        // disabled — this is a request made now, not automatic injection.
+        let request = ResponseRequest {
+            session_preset: Some("concise-technical".to_owned()),
+            ..ResponseRequest::default()
+        };
+        let resolution = effective.response_profile(&request);
+        assert!(
+            !resolution.resolved().is_harness_default(),
+            "an explicit session preset must still apply while injection is disabled"
+        );
+        assert!(
+            resolution
+                .resolved()
+                .axes()
+                .iter()
+                .all(|axis| axis.source == PrecedenceLayer::Session),
+            "every axis must come from the explicit session preset, not a suppressed layer"
+        );
+
+        // The same suppression applies to a project's own `[response]`
+        // table, not only the user's — the disable is resolved once and
+        // gates every file-configured layer, not just `UserDefault`.
+        let mut project = ProjectConfig::default();
+        project
+            .response_mut()
+            .default_entry_mut()
+            .set_preset(Some("brief".to_owned()));
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        let resolution = effective.response_profile(&ResponseRequest::default());
+        assert!(
+            resolution.resolved().is_harness_default(),
+            "a disabled injection must also suppress a configured project layer"
+        );
+
+        // Re-enabling injection restores the configured user default.
+        let mut enabled_user = user.clone();
+        enabled_user.response_mut().set_enabled(Some(true));
+        let effective = EffectiveConfig::new(&enabled_user, None);
+        let resolution = effective.response_profile(&ResponseRequest::default());
+        assert!(
+            !resolution.resolved().is_harness_default(),
+            "re-enabling injection must restore the configured user default"
+        );
+    }
 }
