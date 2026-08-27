@@ -2334,3 +2334,50 @@ you have stopped questioning.
 The generalisation is worth having beyond this script: **a running process is a
 copy, not a reference.** Editing the source of something already executing —
 a shell loop, a daemon, a cron body — changes the next start and nothing else.
+
+## §64 — a fire-once safety net must ask whether the thing it replaces is still alive
+
+`self-continue.sh ratelimit` exists so an orchestrator whose five-hour window is
+spent hands off instead of dying. The watch fires at 90%, the script sleeps
+until the window resets, and then it opens a fresh orchestrator pane.
+
+**Reset is the moment the risk has passed.** So when the predecessor is *not*
+dead — when it was still working at 90%, as one was on 2026-08-27 with three
+reviewed batches applied to `main` and uncommitted — the relaunch fires at
+precisely the worst time: a second orchestrator, on a dirty tree, integrating
+the same round. It would either duplicate the work or clobber it.
+
+§30 already fixed this net once, by scoping its lock per session and per
+trigger. That fixed *firing twice*. This is the neighbouring bug: **firing at
+all, into a world where it is not needed.** A `context` handoff does not have
+the problem — a context ceiling does not lift by itself, so the predecessor
+really is finished. A `ratelimit` handoff is the only one whose triggering
+condition expires on a timer.
+
+**Three things, in order of how much they are worth:**
+
+1. **A watchdog that acts should establish that its subject is gone**, not infer
+   it from the condition that made it worry. Cheapest tell here: the
+   orchestrator's own pane. `cmux read-screen --surface <ref> | tail` shows a
+   live session in one command.
+2. **Prefer advising to acting when the subject may be alive.** The replacement
+   watch armed that day prints the condition and the exact command to run, and
+   does nothing else. A human or a live orchestrator can act on that; a dead one
+   costs a `--continue`, which is far cheaper than an unwanted second integrator.
+3. **Arm a threshold watch only after the threshold's window has reset**, or it
+   fires instantly on the spent window it was meant to protect the *next* one
+   from. The first replacement did exactly that and had to be re-armed behind a
+   wait-for-reset loop.
+
+**And the operational note.** Four `self-continue` processes were live on that
+machine and one belonged to a **different session** — a peer orchestrator's.
+Killing by pattern would have taken out somebody else's safety net silently.
+Establish parentage first (`ps -o ppid=`), or stop the Monitor through the
+harness and let it take its own child down. Both were done, and the peer's watch
+was verified untouched afterwards, which is the half people skip.
+
+This is the fourth mechanism in this project found to be **untested in the
+condition it exists for** — after the MSRV gate that could not fail (§20), the
+Codex hook that was installed and inert (§22), and the shared relaunch lock
+(§30). Ask of any safety net: *what has it been seen to do, under which trigger,
+and what does it do when it is not needed?*
