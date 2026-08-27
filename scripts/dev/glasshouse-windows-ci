@@ -1,0 +1,147 @@
+#!/bin/zsh
+# glasshouse-windows-ci — run this project's tests on the Windows ARM64 VM.
+#
+# WHY THIS LIVES HERE
+# -------------------
+# It was written by a Codex session into `~/.local/bin` as a personal file. It
+# is not one: `scripts/ci-local.sh --windows-vm` depends on it, and a gate whose
+# runner lives only in one person's home directory is a gate nobody else can
+# run. `scripts/dev/` is where this project keeps tooling that is on PATH but is
+# not the product — `glasshouse` and `agy-gh` are both symlinked out of here,
+# and so is this now.
+#
+# WHICH TREE IT TESTS, AND WHY THAT WAS A DEFECT
+# ----------------------------------------------
+# It used to hardcode `/Users/eneas/projects/glasshouse`. Run from any of the
+# forty worktrees this project uses, it packaged **main** and reported the
+# result as though it were about the tree you were standing in — the same
+# wrong-green the Linux leg of `ci-local.sh` copies-instead-of-bind-mounts to
+# avoid. A worker measuring a Windows fix would have been measuring somebody
+# else's tree.
+#
+# It now resolves, in order:
+#   1. $GLASSHOUSE_CI_REPO, if set — for a caller that knows better;
+#   2. the git checkout the CALLER is standing in, if it is a Glasshouse one —
+#      not the checkout this script lives in, because PATH reaches it through a
+#      symlink into the main worktree and that is precisely the wrong answer;
+#   3. the checkout this script lives in, as a last resort.
+#
+# Everything machine-specific is an environment variable with the working value
+# as its default, so this file carries no absolute path into one person's home.
+#
+# USAGE
+#   glasshouse-windows-ci [all|stable|build|test|msrv]
+#   GLASSHOUSE_CI_REPO=… glasshouse-windows-ci test
+#
+# Start the "Glasshouse Windows CI" VM in VMware Fusion first. Exit status is a
+# normal CI one: 0 passes, non-zero fails.
+set -euo pipefail
+
+ci_script_repo="${0:A:h:h:h}"
+
+resolve_ci_repo() {
+  if [[ -n "${GLASSHOUSE_CI_REPO:-}" ]]; then
+    print -r -- "$GLASSHOUSE_CI_REPO"
+    return
+  fi
+  local top
+  if top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" \
+     && [[ -f "$top/crates/glasshouse/Cargo.toml" ]]; then
+    print -r -- "$top"
+    return
+  fi
+  print -r -- "$ci_script_repo"
+}
+
+readonly ci_repo="$(resolve_ci_repo)"
+readonly ci_key="${GLASSHOUSE_WINDOWS_CI_KEY:-$HOME/.ssh/glasshouse-windows-ci}"
+readonly ci_lease_file="${GLASSHOUSE_WINDOWS_CI_LEASES:-/var/db/vmware/vmnet-dhcpd-vmnet8.leases}"
+readonly ci_guest_name="${GLASSHOUSE_WINDOWS_CI_GUEST:-glasshouse-ci}"
+
+ci_mode="${1:-all}"
+if (( $# > 1 )); then
+  print -u2 "usage: glasshouse-windows-ci [all|stable|build|test|msrv]"
+  exit 2
+fi
+
+case "$ci_mode" in
+  all|stable|build|test|msrv) ;;
+  *)
+    print -u2 "usage: glasshouse-windows-ci [all|stable|build|test|msrv]"
+    exit 2
+    ;;
+esac
+
+if [[ ! -f "$ci_repo/Cargo.toml" ]]; then
+  print -u2 "Glasshouse repository not found at $ci_repo"
+  exit 2
+fi
+if [[ ! -s "$ci_key" ]]; then
+  print -u2 "Windows CI SSH key not found at $ci_key"
+  exit 2
+fi
+if [[ ! -r "$ci_lease_file" ]]; then
+  print -u2 "VMware DHCP lease file is not readable: $ci_lease_file"
+  exit 2
+fi
+
+ci_ip="$({
+  awk -v guest="$ci_guest_name" '
+    /^lease [0-9.]+ \{/ { address = $2 }
+    $0 ~ "client-hostname \\\"" guest "\\\";" { print address }
+  ' "$ci_lease_file"
+} | tail -n 1)"
+
+if [[ -z "$ci_ip" ]]; then
+  print -u2 "No VMware DHCP lease found for $ci_guest_name"
+  exit 2
+fi
+
+ci_endpoint="glasshouse@$ci_ip"
+ci_ssh_options=(
+  -i "$ci_key"
+  -o BatchMode=yes
+  -o ConnectTimeout=10
+)
+
+if ! ssh "${ci_ssh_options[@]}" "$ci_endpoint" "exit 0"; then
+  print -u2 "Windows CI VM is not reachable at $ci_ip. Start it in VMware Fusion and retry."
+  exit 2
+fi
+
+ci_temp_dir="$(mktemp -d /tmp/glasshouse-windows-ci.XXXXXX)"
+if [[ "$ci_temp_dir" != /tmp/glasshouse-windows-ci.* ]]; then
+  print -u2 "Unexpected temporary directory: $ci_temp_dir"
+  exit 2
+fi
+ci_archive="$ci_temp_dir/glasshouse-source.tar.gz"
+
+cleanup_ci_archive() {
+  if [[ -f "$ci_archive" ]]; then
+    unlink "$ci_archive"
+  fi
+  if [[ -d "$ci_temp_dir" ]]; then
+    rmdir "$ci_temp_dir"
+  fi
+}
+trap cleanup_ci_archive EXIT INT TERM
+
+print "Packaging $ci_repo ..."
+(
+  cd "$ci_repo"
+  git ls-files --cached --others --exclude-standard -z |
+    while IFS= read -r -d '' ci_path; do
+      if [[ -e "$ci_path" || -L "$ci_path" ]]; then
+        printf '%s\0' "$ci_path"
+      fi
+    done |
+    COPYFILE_DISABLE=1 tar --no-mac-metadata --null -czf "$ci_archive" -T -
+)
+
+print "Synchronizing source to Windows ARM64 ($ci_ip)..."
+scp "${ci_ssh_options[@]}" "$ci_archive" "${ci_endpoint}:glasshouse-source.tar.gz"
+ssh "${ci_ssh_options[@]}" "$ci_endpoint" \
+  'powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\ci\install-source.ps1'
+
+print "Running Windows ARM64 CI mode: $ci_mode"
+ssh "${ci_ssh_options[@]}" "$ci_endpoint" "C:\\ci\\run-glasshouse-ci.cmd $ci_mode"
