@@ -2156,3 +2156,37 @@ asked. `ci-local.sh` runs `scripts/tests/test_*.py` now.
 **A test nobody runs is a comment with a shebang.** If the gate is where truth
 is established for the product, the tools that decide what the product's
 workers do belong in it too.
+
+## §61 — a file that just changed is not the same file the next packet describes
+
+Three constraints get confused because they all end in "do not touch that file",
+and only two of them were written down.
+
+1. **Tier.** `worker-capabilities.md`'s risk routing already says PTY lifecycle,
+   shutdown, signals and job control are Red — Opus specialist. That is about
+   *who*, and it is permanent.
+2. **Partition.** `FORBIDDEN FILES` says another live worker owns it this round.
+   That is about *when*, it is per-round, and `validate_round.py` checks it.
+3. **Freshness.** *This file changed in the last integration, so a second change
+   today needs the orchestrator to see both together.* That is about *what has
+   just happened to it*, and nothing recorded it until now.
+
+The third one is real and has come up three times: `shell/state.rs` handed to
+two live workers, `tui/event.rs` passed on with a fix already in it, and
+`shutdown.rs` — where a hangup fix had redefined the signal handler's
+second-signal test hours earlier, and the next worker's investigation led
+straight back to it. It stopped and reported the shape it would have written,
+which was the right outcome and was the packet's doing, not the worker's luck.
+
+**So the rule.** When a packet forbids a file that no live worker owns, say
+**which change** made it fresh and **why that matters to this worker**, in one
+sentence. "Do not edit `shutdown.rs`" is a rule a worker can only obey.
+"`shutdown.rs`'s signal handler was rewritten this morning because
+`wait_for_terminal` began setting the flag it read — if you land back there,
+stop and say so" is a rule a worker can *reason with*, and the difference showed
+up in the report: it explained why nothing inside `next()` can close the
+window, and proposed the watchdog rather than silently working around the ban.
+
+A freshness freeze is a **stop-and-report**, never a stop-and-abandon. Say so in
+the packet, or a worker will treat the forbidden file as a dead end and quietly
+solve a smaller problem.

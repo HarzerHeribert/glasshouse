@@ -30,6 +30,37 @@
 //! (practice §34). A new proof should not inherit an old reputation: when
 //! this file fails it should be believed.
 //!
+//! # A rate, not a pass
+//!
+//! The first version of this file ran the scenario **once**. It passed on
+//! every run, on both platforms, and three mutations killed it — and the
+//! process was still spinning about one hangup in thirty. A separate harness
+//! running the same scenario sixty times caught it twice, at `Rs+ 100.0` with
+//! cumulative processor time equal to the process's whole lifetime.
+//!
+//! Nothing about the test was wrong; it simply cannot tell "fixed" from
+//! "fixed 97% of the time", because a one-shot pass is consistent with a
+//! residual rate of anything up to roughly one in three. So it now runs
+//! [`TRIALS`] of them, and the rate measured by hand — too many trials to
+//! afford in a gate — is recorded here rather than left to be inferred from
+//! `ok`:
+//!
+//! | tree | survivors |
+//! |---|---|
+//! | before, by an earlier harness | 2 in 60 |
+//! | before, measured again | 7 in 200 |
+//! | before, through this test's own scenario | 2 in 120 |
+//! | after | 0 in 400 |
+//!
+//! `0 in 400` bounds a residual rate below roughly 0.75% with 95% confidence.
+//! It does **not** establish zero, and this file does not claim one.
+//!
+//! The mechanism behind those numbers is in `tui::event::wait_for_terminal`'s
+//! doc comment: an idle interface spent about 4% of every tick inside a call
+//! to crossterm it did not need to make, and a hangup landing inside that call
+//! wedged crossterm exactly as before. It now makes no such call once the
+//! terminal has been quiet — 0 samples of 6185, against 268 of 6210.
+//!
 //! # A related exit-code defect proved elsewhere, on purpose
 //!
 //! `Screen::drop` (`tui::mod`) can still panic on the way out here — Ratatui's
@@ -94,6 +125,30 @@ const MAX_CPU_AFTER_HANGUP: f64 = 0.5;
 /// interface is the state under test.
 const SETTLE: Duration = Duration::from_millis(1500);
 
+/// How many times the scenario is run.
+///
+/// **The point of the number, not padding.** The defect this file exists for
+/// survived a single-trial version of it for a whole batch, because it fires
+/// on a fraction of hangups rather than on all of them (see the rate table
+/// above). N trials find a residual rate `p` with probability `1 - (1-p)^N`,
+/// so this many catch a 1-in-3 every time, a 1-in-10 about four times in five,
+/// and a 1-in-30 about two times in five. **Measured against the real thing**,
+/// by deleting the fix and running this test sixteen times: it failed twice.
+/// That is not enough on its own — which is why the by-hand `0 in 400` is
+/// recorded above — but the gate runs the suite four times (two platforms, two
+/// Rust versions), so 60 hangups per gate run makes a reverted fix far likelier
+/// to be caught than missed.
+///
+/// The cost is roughly [`SETTLE`] plus a process start per trial, and `SETTLE`
+/// cannot be shortened without testing a different scenario entirely — see its
+/// own comment.
+const TRIALS: usize = 15;
+
+/// The size the terminal is changed to in the resize test, chosen only to be
+/// different in both directions from the 40x120 it starts at.
+const RESIZED_ROWS: u16 = 50;
+const RESIZED_COLS: u16 = 100;
+
 const EXIT_POLL: Duration = Duration::from_millis(25);
 const READ_POLL: Duration = Duration::from_millis(10);
 /// How often the child's processor time is sampled while it is still alive.
@@ -103,6 +158,17 @@ const CPU_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 
 #[test]
 fn a_terminal_that_goes_away_ends_the_interface_instead_of_spinning() {
+    for trial in 1..=TRIALS {
+        one_terminal_loss(trial);
+    }
+}
+
+/// One trial: start the interface, let it settle, take its terminal away, and
+/// require it gone without having burned processor time getting there.
+///
+/// `trial` appears in every failure message. A race that fails on the eleventh
+/// run and not the first is worth being able to say so about.
+fn one_terminal_loss(trial: usize) {
     let fixture = Fixture::new();
     let mut child = fixture.start_shell();
 
@@ -126,8 +192,8 @@ fn a_terminal_that_goes_away_ends_the_interface_instead_of_spinning() {
     // away — the test would pass while measuring nothing.
     assert!(
         child.try_wait().is_none(),
-        "glasshouse had already exited before its terminal was taken away, so this run \
-         proves nothing about losing a terminal\n--- output ---\n{}\n--- end ---",
+        "trial {trial}: glasshouse had already exited before its terminal was taken \
+         away, so this run proves nothing about losing a terminal\n--- output ---\n{}\n--- end ---",
         child.output()
     );
 
@@ -153,8 +219,8 @@ fn a_terminal_that_goes_away_ends_the_interface_instead_of_spinning() {
                 .map(|(after, before)| after - before);
             assert!(
                 cpu.is_none_or(|burned| burned <= MAX_CPU_AFTER_HANGUP),
-                "the interface exited ({status:?}) after {took:?}, but burned {:?}s of \
-                 processor time doing it — a wind-down should cost almost none",
+                "trial {trial}: the interface exited ({status:?}) after {took:?}, but burned \
+                 {:?}s of processor time doing it — a wind-down should cost almost none",
                 cpu.unwrap_or_default(),
             );
             return;
@@ -180,8 +246,8 @@ fn a_terminal_that_goes_away_ends_the_interface_instead_of_spinning() {
             };
             child.kill();
             panic!(
-                "the interface was still running {HANGUP_DEADLINE:?} after its terminal \
-                 went away, having burned {burned}. A terminal that is gone is an \
+                "trial {trial}: the interface was still running {HANGUP_DEADLINE:?} after its \
+                 terminal went away, having burned {burned}. A terminal that is gone is an \
                  instruction to stop.\n--- what it had drawn ---\n{}\n--- end ---",
                 child.output()
             );
@@ -189,6 +255,65 @@ fn a_terminal_that_goes_away_ends_the_interface_instead_of_spinning() {
 
         std::thread::sleep(EXIT_POLL);
     }
+}
+
+/// The other half of the residual-spin fix, and the only thing that keeps it
+/// from swallowing something.
+///
+/// That fix stops asking crossterm anything once the terminal has been silent
+/// for about a second, because asking is what exposes the process to a hangup.
+/// **But a window resize is not something the terminal says.** It arrives as
+/// `SIGWINCH`, on a pipe of crossterm's own that only crossterm's poll
+/// watches — so a loop that has stopped polling crossterm has also stopped
+/// hearing about resizes, and an interface that has been idle for a second is
+/// exactly the one a user is about to drag the corner of.
+///
+/// This is deterministic where the test above is a rate: the interface is left
+/// alone well past the silence threshold, then its terminal is made a
+/// different size, and it must redraw itself at that size. Without the watch
+/// that notices, it redraws nothing at all — verified by mutation, not by
+/// reasoning.
+#[test]
+fn a_resize_still_arrives_on_a_terminal_that_has_been_silent() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start_shell();
+    child.wait_for_first_frame();
+
+    // Past `tui::event`'s silence threshold, which is what puts the interface
+    // in the state where it is no longer consulting crossterm at all. Resizing
+    // straight after the first frame would exercise the ordinary path and
+    // prove nothing — the same trap `SETTLE` records for the test above.
+    let settled = Instant::now() + SETTLE;
+    while Instant::now() < settled {
+        child.drain();
+        std::thread::sleep(READ_POLL);
+    }
+    let drawn_before = child.output().len();
+
+    child.resize(RESIZED_ROWS, RESIZED_COLS);
+
+    // The interface draws its bottom row last, so a cursor move to the new
+    // bottom row is proof it laid itself out at the new size rather than
+    // merely repainting. Matched against the raw bytes on purpose: this is
+    // about the geometry it drew at, which is carried by the escape sequences
+    // and not by the text they place.
+    let moved_to_new_bottom_row = format!("\x1b[{RESIZED_ROWS};");
+    let deadline = Instant::now() + HANGUP_DEADLINE;
+    while Instant::now() < deadline {
+        child.drain();
+        if child.output()[drawn_before..].contains(&moved_to_new_bottom_row) {
+            return;
+        }
+        std::thread::sleep(READ_POLL);
+    }
+    let after = child.output()[drawn_before..].to_owned();
+    child.kill();
+    panic!(
+        "the terminal was made {RESIZED_COLS}x{RESIZED_ROWS} and {HANGUP_DEADLINE:?} later the \
+         interface had still never drawn a row {RESIZED_ROWS}. A resize that reaches nothing is \
+         an interface drawing itself at a size its terminal no longer is.\n--- drawn since the \
+         resize ---\n{after}\n--- end ---"
+    );
 }
 
 /// A project, a state directory and a user configuration, all thrown away
@@ -335,6 +460,21 @@ impl Shell {
         );
     }
 
+    /// Change the size of the terminal, exactly as a window manager dragging
+    /// its corner does: the kernel records the new size and sends `SIGWINCH`.
+    fn resize(&mut self, rows: u16, cols: u16) {
+        self.master
+            .as_ref()
+            .expect("the terminal is still there")
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("resize the pty");
+    }
+
     /// Take the terminal away, exactly as closing the pane that started it
     /// does: every master descriptor closed, and no signal sent.
     ///
@@ -351,8 +491,32 @@ impl Shell {
         self.child.try_wait().expect("try_wait")
     }
 
+    /// End the child now, and do not come back until it is reaped.
+    ///
+    /// **`SIGKILL`, and not `portable_pty::Child::kill`, which sends
+    /// `SIGHUP`.** Every caller of this is on a failure path, and a failure
+    /// path that hangs is worse than no failure path at all — a gate waiting
+    /// forever reports nothing, where a failed assertion reports a defect.
+    /// Two ways `SIGHUP` hangs here, both observed:
+    ///
+    /// * a Glasshouse wedged in crossterm's unbounded read — the very defect
+    ///   this file is about — never returns to the loop that would observe the
+    ///   shutdown the signal requested, so it keeps spinning and `wait` never
+    ///   returns;
+    /// * a Glasshouse that *is* winding down blocks writing its last frame to
+    ///   a pty whose master nobody is draining any more, because this thread
+    ///   is the drainer and it is sitting in `wait`. Seen for eleven minutes,
+    ///   in state `E`, before it was killed by hand.
+    ///
+    /// `SIGKILL` is answerable by neither.
     fn kill(&mut self) {
-        let _ = self.child.kill();
+        if let Some(pid) = self.child.process_id() {
+            // SAFETY: `kill` takes no pointers. A pid that has already been
+            // reaped fails with `ESRCH`, which is not an error here.
+            unsafe {
+                libc::kill(pid.cast_signed(), libc::SIGKILL);
+            }
+        }
         let _ = self.child.wait();
     }
 

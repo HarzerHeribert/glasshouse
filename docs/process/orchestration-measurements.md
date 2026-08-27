@@ -1389,3 +1389,72 @@ the call to the orchestrator, with the argument written per line. Left unticked
 here. **Should a worker be allowed to close a neighbouring group's box when its
 own box is otherwise unprovable?** The conservative answer taken today costs
 three boxes that are arguably done.
+
+### Batch 27, addendum: `spin-residual` — the round that produced a rate instead of a pass
+
+The packet asked for a rate and got one, with a confidence bound and an explicit
+refusal to claim zero.
+
+| tree | trials | survivors |
+|---|---|---|
+| shipped | 200 | 7 (3.5%) |
+| **fixed** | **400** | **0** |
+| shipped, orchestrator's own matched run | 100 | **6** |
+| fixed, orchestrator's own matched run | 100 | **0** |
+
+`0 in 400` bounds a residual below about **0.75%** at 95% confidence — a ≥4.7×
+reduction, **not** elimination, and the report says so in those words. That
+sentence is the whole return on §60. The previous round wrote "the spin is gone"
+on a one-shot pass and was wrong.
+
+### The record was corrected twice, both times by measurement
+
+**The compiled backend is crossterm's `mio` source, not `tty`.** §58's account
+of the defect was read off `tty.rs`, which in crossterm 0.29 *does* `break` on a
+zero-byte read and would never hang. Right mechanism, wrong file — and it
+matters, because the `use-dev-tty` feature selects the other one.
+
+**The window is the duration of the call, not a gap between calls.** Profiling
+an *idle* process put 268 of 6210 and 233 of 6162 main-thread samples — about
+**4% of every tick** — inside `crossterm::event::poll`. A hangup arriving at a
+uniformly random instant lands there about one time in twenty-five; observed 7
+in 200. After the fix: 0 of 6185.
+
+That is the arithmetic the previous batch's "microseconds" claim failed, and the
+packet's instruction to distrust it is what produced the profile. **Handing a
+worker the orchestrator's own arithmetic against the orchestrator's own prior
+claim is a cheap, repeatable move** — it cost two sentences and bought a
+located cause.
+
+### Two mutations that did not kill, and both were reported rather than hidden
+
+- **M1 (the fix reverted) survived**, and the worker measured *why*: a mutation
+  restoring a ~3% failure rate cannot reliably fail a 15-trial test. Run sixteen
+  times, it failed twice. It said so, and named what carries the proof
+  instead — the 400-trial rate, and the fact that a gate run executes the suite
+  four times (two platforms, two Rust versions), 60 hangups per gate.
+- **M5 survives on purpose**: the seeding branch's `false` has no observable
+  consequence, only a cost. §41's question — what do the test and the mutation
+  both assume — answered honestly as "there is no behaviour here to test".
+
+A mutation table with two survivors and the reasoning for each is worth more
+than one with none and no reasoning.
+
+### A test-harness defect that would have hung the gate
+
+`Shell::kill` called `portable_pty::Child::kill`, which on Unix sends **`SIGHUP`,
+not `SIGKILL`**. Both of `terminal_loss.rs`'s failure paths go through it and
+both can hang there forever — a Glasshouse wedged in crossterm never reaches the
+shutdown the signal asks for, and one that *is* winding down blocks writing its
+last frame to a pty nobody is draining, because the draining thread is the one
+in `wait`. Observed for eleven minutes in state `E`. **A gate that hangs reports
+nothing where a failed assertion reports a defect.**
+
+### The freshness freeze worked, and is now §61
+
+The packet forbade `shutdown.rs` and said *which* change had made it fresh and
+why it mattered. The investigation led straight back there; the worker stopped,
+explained why nothing inside `next()` can close the window — once crossterm is
+wedged the main thread cannot observe the flag, a signal, or even a closed
+descriptor — and proposed the watchdog. A bare prohibition would have produced a
+quiet workaround instead.

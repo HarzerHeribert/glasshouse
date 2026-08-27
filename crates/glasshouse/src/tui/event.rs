@@ -45,6 +45,15 @@ pub enum AppEvent {
     Redraw,
 }
 
+/// How many silent ticks before [`EventSource::next`] stops consulting
+/// crossterm on an idle tick.
+///
+/// About a second at the default 16ms tick. Long enough that no interactive
+/// burst of typing reaches it — see [`EventSource::quiet_ticks`] for why that
+/// matters — and far short of the nineteen hours the orphaned processes this
+/// exists for had been idle.
+const QUIET_TICKS: u32 = 64;
+
 /// Pulls events from the terminal and from other threads.
 ///
 /// The terminal is polled with a timeout rather than read on a dedicated
@@ -59,6 +68,40 @@ pub struct EventSource {
     tick: Duration,
     sender: Sender<AppEvent>,
     receiver: Receiver<AppEvent>,
+    /// The terminal size this source last reported, or `None` before it has
+    /// looked once.
+    ///
+    /// A window resize is the one thing crossterm learns that the descriptor
+    /// itself never shows: it arrives as `SIGWINCH`, on a pipe of crossterm's
+    /// own that only crossterm's poll watches. So a loop that stops polling
+    /// crossterm on an idle tick stops delivering resizes — measured, not
+    /// reasoned: `pty_smoke::resizing_the_shell_reaches_the_harness_terminal`
+    /// failed on macOS *and* Linux the first time the idle skip was added, and
+    /// passed again the moment it was taken out.
+    ///
+    /// Watching the size here rather than restoring that poll keeps the wait
+    /// where the rest of this module put it. One `TIOCGWINSZ` per idle tick is
+    /// the same order of cost as the `poll` beside it, and unlike a signal it
+    /// cannot be delivered to the wrong thread or coalesced away.
+    last_size: std::cell::Cell<Option<(u16, u16)>>,
+    /// How many ticks in a row the terminal has said nothing at all.
+    ///
+    /// The short cut in [`EventSource::next`] is taken only once this passes
+    /// [`QUIET_TICKS`], and **that threshold is the whole reason the short cut
+    /// is safe.** Crossterm multiplexes the terminal and `SIGWINCH` through
+    /// one edge-triggered `mio` registration, and its reader returns the first
+    /// of the two it looks at — dropping, unread and unrecoverable, whatever
+    /// readiness arrived in the same batch. Polling it less often makes two
+    /// sources coincide more often, which is measurable: skipping it on every
+    /// idle tick turned `pty_smoke::resizing_the_shell_reaches_the_harness_
+    /// terminal` from 0 failures in 12 into 1 to 2, every one of them a shell
+    /// whose keystrokes had been swallowed.
+    ///
+    /// Waiting for a second of complete silence first buys the protection
+    /// where it is needed and gives up nothing where it is not: a terminal
+    /// that has not made a sound for a second has no input to collide with,
+    /// and the field processes had been silent for nineteen hours.
+    quiet_ticks: std::cell::Cell<u32>,
 }
 
 impl EventSource {
@@ -69,6 +112,34 @@ impl EventSource {
             tick,
             sender,
             receiver,
+            last_size: std::cell::Cell::new(None),
+            quiet_ticks: std::cell::Cell::new(0),
+        }
+    }
+
+    /// Whether the terminal is a different size than the last resize this
+    /// source delivered.
+    ///
+    /// **The cache is deliberately not updated here.** It moves only when a
+    /// resize is actually delivered, further down, so a `SIGWINCH` that has
+    /// not yet reached crossterm's pipe is looked for again on the next tick
+    /// rather than lost — the answer stays `true` until the resize comes out.
+    /// If crossterm never reported one, this would go on letting it through
+    /// every tick, which is exactly the behaviour that existed before the idle
+    /// short cut: worse than the short cut, and not broken.
+    ///
+    /// The first look seeds the cache and reports nothing. Nothing has been
+    /// resized at that point; there is only a size that had never been read.
+    fn terminal_was_resized(&self) -> bool {
+        let Some(size) = terminal_size() else {
+            return false;
+        };
+        match self.last_size.get() {
+            Some(before) => before != size,
+            None => {
+                self.last_size.set(Some(size));
+                false
+            }
         }
     }
 
@@ -129,7 +200,37 @@ impl EventSource {
                 // `SIGHUP` announcing it arrive together, and taking the
                 // signal as an answer walked straight back into the spin.
                 Wait::Interrupted => continue,
-                Wait::Ready | Wait::Idle | Wait::Unavailable => {}
+                // **This arm is the residual-spin fix**, and what it fixes
+                // is a rate rather than a bug. Every call into crossterm is a
+                // chance for the terminal to have died since the wait above,
+                // and an idle interface used to make one of those calls per
+                // tick to be told nothing. Measured over two eight-second
+                // profiles of an idle process: 268 of 6210 and 233 of 6162
+                // main-thread samples — about 4% of every tick — were inside
+                // that pointless call, and 0 of 6185 are after this arm. That
+                // share is the window, and it is not the microseconds
+                // `wait_for_terminal`'s comment used to claim.
+                //
+                // A terminal that has been silent for a while, with no window
+                // resize to report, has nothing crossterm could say. Not
+                // asking is the whole fix: see `quiet_ticks` for why it waits
+                // out that silence first, and `last_size` for the one thing
+                // that still has to get through.
+                //
+                // Crossterm cannot be left holding an event of its own by the
+                // time this bites, either. It hands back one event per call
+                // out of a whole parsed buffer, but it is asked on every one
+                // of the `QUIET_TICKS` ticks before the short cut opens — so
+                // anything it had is long since drained.
+                Wait::Idle => {
+                    let quiet = self.quiet_ticks.get();
+                    if quiet >= QUIET_TICKS && !self.terminal_was_resized() {
+                        continue;
+                    }
+                    self.quiet_ticks.set(quiet.saturating_add(1));
+                }
+                // Anything the terminal actually said starts the silence over.
+                Wait::Ready | Wait::Unavailable => self.quiet_ticks.set(0),
             }
             // Already waited above, so crossterm is asked only for what it
             // has *now* — except where the wait could not be taken over, in
@@ -148,7 +249,16 @@ impl EventSource {
                 // changes) must not be reported as input, but must also not
                 // consume the whole tick — keep waiting out the remainder.
                 None => continue,
-                Some(ev) => return Ok(ev),
+                Some(ev) => {
+                    self.quiet_ticks.set(0);
+                    // Crossterm still reports resizes whenever it is consulted
+                    // at all. Agreeing with it here is what stops the watch
+                    // above from reporting the same resize a second time.
+                    if let Event::Resize(cols, rows) = ev {
+                        self.last_size.set(Some((cols, rows)));
+                    }
+                    return Ok(ev);
+                }
             }
         }
     }
@@ -198,6 +308,16 @@ enum Wait {
 /// it never noticed, because noticing happens between calls to `next` and
 /// there was never going to be another one.
 ///
+/// **Which of crossterm's two Unix sources, because they do not agree.** The
+/// one this build compiles is `event::source::unix::mio` — confirmed by
+/// symbolising a caught process rather than assumed — and its `TTY_TOKEN` arm
+/// treats a zero-byte read as neither a `break`, a `continue`, nor a `return`,
+/// so the inner loop cannot end and no timeout is consulted inside it. The
+/// other source, behind crossterm's `use-dev-tty` feature, does `break` on a
+/// zero-byte read and would not hang this way. Turning that feature on would
+/// therefore change what this function is defending against, which is worth
+/// knowing before anyone does.
+///
 /// So the wait is taken over here, and crossterm is only ever handed a
 /// terminal that has bytes waiting. `poll(2)` reports `POLLHUP` the moment
 /// the far end closes, and it is the right instrument rather than a
@@ -207,11 +327,32 @@ enum Wait {
 /// alone (`0x1`) and a hung-up one reports `POLLIN | POLLHUP` (`0x11`), so a
 /// keystroke can never be mistaken for a hangup.
 ///
-/// One race remains and is not closable from here: a terminal that dies in the
-/// window between this call returning [`Wait::Ready`] and crossterm's `read`
-/// leaves crossterm in the same unbounded loop. That window is microseconds
-/// wide against the 16ms one it replaces, and closing it would mean parsing
-/// terminal input here instead of in the library.
+/// # The window that is left, which is narrower than it was and was never
+/// microseconds
+///
+/// A terminal that dies between this call answering and crossterm's own poll
+/// reaching the descriptor leaves crossterm in the same unbounded loop. That
+/// window used to be described here as "microseconds wide against the 16ms one
+/// it replaces". **It was not, and the arithmetic said so**: a microsecond
+/// window against a 16ms tick predicts about one hangup in ten thousand, and
+/// the measured survival rate was two in sixty.
+///
+/// The window is not a gap *between* calls, it is the duration of the call
+/// itself. An idle [`EventSource::next`] used to ask crossterm once per tick
+/// for an answer it could not have, and two eight-second profiles of an idle
+/// process put 268 of 6210 and 233 of 6162 main-thread samples — about 4% of
+/// every tick — inside that ask. A hangup arriving at a uniformly random
+/// instant lands there roughly one time in twenty-five, which is the order of
+/// magnitude that was actually seen: 7 survivors in 200 hangups. The same
+/// profile of the same process with the fix is 0 of 6185.
+///
+/// So [`EventSource::next`] no longer makes that call once the terminal has
+/// been silent for a while — see `QUIET_TICKS`, which is also the reason the
+/// short cut waits rather than applying to every idle tick. What exposure is
+/// left needs input or a resize at the instant the terminal dies, and neither
+/// is the state a closed window leaves behind. Closing it completely would
+/// mean parsing terminal input here instead of in the library, or ending the
+/// process from outside a loop that can no longer end itself.
 ///
 /// # Windows
 ///
@@ -299,6 +440,37 @@ fn terminal_fd() -> Option<std::os::fd::RawFd> {
         })
         .as_ref()
         .map(AsRawFd::as_raw_fd)
+}
+
+/// The terminal's size in columns and rows, read straight from the descriptor.
+///
+/// Deliberately not `crossterm::terminal::size`, which falls back to the
+/// `COLUMNS`/`LINES` environment variables when the `ioctl` fails and would
+/// therefore answer confidently about a terminal that is no longer there.
+/// `None` here means "do not know", which is what the caller wants.
+#[cfg(unix)]
+fn terminal_size() -> Option<(u16, u16)> {
+    let fd = terminal_fd()?;
+    let mut size = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: `TIOCGWINSZ` writes one `winsize` through the pointer given, and
+    // `size` is an initialised one owned by this frame.
+    if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &raw mut size) } != 0 {
+        return None;
+    }
+    Some((size.ws_col, size.ws_row))
+}
+
+/// See the Unix implementation. Nothing here reaches this: the wait cannot be
+/// taken over on this platform, so the loop never takes the idle short cut
+/// that would ask.
+#[cfg(not(unix))]
+fn terminal_size() -> Option<(u16, u16)> {
+    None
 }
 
 /// See the Unix implementation: this platform has no hangup answer yet, so

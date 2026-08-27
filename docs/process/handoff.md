@@ -178,32 +178,41 @@ harness untouched in every respect. The packet's partition omitted
 patch. Whoever gives the shell's quick-open a launch profile should give it a
 response profile in the same change.
 
-**2. The residual spin, roughly two in sixty.** The highest-value open defect,
-and the one with a reproducing harness already written
-(`.agent-runtime/diagnostics/hangup-exit-rate.py`, which needs a *controlling*
-terminal — a child with none receives no `SIGHUP` at all and the harness
-measures nothing). `terminal-loss`'s report names the likely window: a terminal
-that dies between `Wait::Ready` and crossterm's `read` puts crossterm back in
-the unbounded loop. It called that window microseconds wide against the 16ms it
-replaces; two in sixty is three orders of magnitude more than that arithmetic
-predicts, so either the window is wider than described or there is a second
-path. **Opus specialist**, and it should produce a rate, not a pass (§60).
+**2. A second 100% CPU spin, pre-existing, and it loses keystrokes.** Found by
+`spin-residual` while attributing a resize regression; it is on `main` today and
+it needs **no hangup at all**.
 
-**Phase 0 is closed, eight of eight.** Its two failing boxes are both resolved.
-Box 8's panic clause was fixed and re-ticked with the exit code measured before
-and after. Box 2 was **unsatisfiable by any tree that also satisfied Phase 0's
-own boxes 4, 6 and 7** — a specification defect, not a code defect — and the
-user's decision was to widen the list to what the binary actually needs and
-keep it a standing lean-dependency constraint, on the map's own principle that
-stale rules get revisited rather than built around. The word *initial* went with
-it: the line is now a claim about the tree today.
+Crossterm's `mio` registration is edge-triggered (`EV_CLEAR`, confirmed in mio
+1.2.2's kqueue selector) and its `try_read` returns the *first* readiness it
+looks at, abandoning unread whatever arrived in the same batch. When a
+`SIGWINCH` and terminal input land in one batch and the signal is looked at
+first, **the terminal's readiness is discarded and those bytes stay invisible to
+crossterm until new input creates a new edge.** Caught instrumented:
 
-`getrandom` was added on top of the user's list, deliberately: it was the one
-dependency their categories did not reach, and folding it into "hashing" would
-have blurred a distinction `gateway/mod.rs` makes in its own words — an
-identifier needs to be unique, an authentication token needs to be
-unpredictable. **"async execution" stays in the list and stays unused**; the
-user was offered dropping it separately and did not.
+    stalls=1001 fd=0 FIONREAD=32 revents=0x1
+
+Thirty-two bytes — the stranded command — unread on the descriptor, `POLLIN`
+set, no `POLLHUP`, crossterm reporting nothing. `wait_for_terminal` correctly
+answers `Wait::Ready`, `event::poll` correctly answers "nothing", and `next()`
+spins: **380,987 of 381,501 waits** at 100% of a core with the user's keystrokes
+never delivered.
+
+Reproduction: `pty_smoke::resizing_the_shell_reaches_the_harness_terminal` under
+a tree that polls crossterm less than once per tick, plus the `FIONREAD` probe.
+A fix was written and **taken back out** — 2 failures in 8 against 1 in 12
+without it, samples too small to separate. The honest fix is upstream, or is
+Glasshouse not sharing one crossterm poll between input and `SIGWINCH`.
+**Opus specialist, its own packet.**
+
+**Also open, and it is the only way to make the hangup residual structurally
+zero:** nothing inside `next()` can close the window, because once crossterm is
+wedged the main thread cannot observe the shutdown flag, a signal, or even a
+closed descriptor — a closed fd makes that same `read` return `EBADF` and fall
+through the same arm. Ending the process from outside a wedged loop needs a
+watchdog thread blocked in `poll(fd, events: 0, -1)` — `POLLHUP`, `POLLERR` and
+`POLLNVAL` are reported whatever is subscribed — that requests shutdown on wake
+and takes `shutdown::force_exit` if the loop has not ended within a tick or two.
+`force_exit` is private and `shutdown.rs` is Red tier (§61).
 
 **3. Phase 9J line 572 is probably in the wrong phase.** "Keep evidence for the
 same nominal model distinct across different harnesses, gateways,
