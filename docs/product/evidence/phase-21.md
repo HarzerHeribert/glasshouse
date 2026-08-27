@@ -177,3 +177,43 @@ That is not the line. It closes the moment any model exists, at one line in
 close together for a reason that is about Phase 39 rather than about this box.
 
 ---
+
+### Phase 21 line 837 — speculative claims are omitted, and this was already shipped
+
+Contract: Given a session in which a model proposed something that was never
+established, when memory extraction runs, Glasshouse drops that element rather
+than storing it as project knowledge.
+
+State: **COMPLETE** — already shipped before this package; verified and ticked
+rather than built.
+
+Production evidence:
+- `memory/extract/schema.rs`: `Support::Speculative` is a **required** field
+  that `judge()` checks before any other field. A speculative element returns
+  `Verdict::Speculative` and is dropped, counted, and never stored.
+
+Regression evidence:
+- `tests/memory_extract_schema.rs::a_speculative_memory_is_dropped_rather_than_rejected_or_stored`
+  — note the distinction the test name carries: *dropped*, not *rejected*. A
+  rejection would be an error the caller has to handle; a drop is the honest
+  outcome for a model volunteering something it was not asked for.
+
+**Third time in three batches that a box closed on already-shipped code** —
+Phase 48 closed six that way, Phase 35 fourteen. The pattern is consistent
+enough to plan around: before sizing a package, ask what is already built and
+merely unticked.
+
+### Phase 21A line 862 — still open, and looked at hard before being left
+
+State: NOT STARTED, blocked on the same unverifiable judgement as Phase 20's
+828/829.
+
+`PROMPT_CONTRACT` rule 7 states *"distinguish a hard requirement from a
+convenient implementation choice"* almost verbatim, and the `authority` enum
+already gives the distinction a place to land (`constraint` versus
+`decision`/`preference`). But nothing validates that a model's `constraint` call
+was an externally-imposed requirement rather than a convenient choice it
+labelled wrong — rule 7 is not one of the three fields `judge()` enforces.
+
+The worker searched for a way to close it and reported the gap instead of
+inventing a check. Recorded so the next package starts from here.

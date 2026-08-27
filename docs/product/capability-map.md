@@ -834,7 +834,7 @@ Phase 21 — Memory extraction
 ☐ Allow a configurable cheap or local model to perform memory extraction.
 ☑ Feed the extractor bounded session/event chunks rather than entire unbounded session histories.
 ☑ Require the extractor to classify every emitted memory into one supported memory kind.
-☐ Require the extractor to omit speculative claims that were not established during the session.
+☑ Require the extractor to omit speculative claims that were not established during the session.
 ☑ Require the extractor to distinguish failed approaches from accepted decisions.
 ☑ Require the extractor to preserve concise rationale when a decision’s rationale is important.
 ☑ Require the extractor to avoid duplicating an existing active memory when nothing materially changed.
@@ -880,29 +880,29 @@ Phase 21B — Decision provenance and assumptions
 
 Phase 21C — Validity conditions and invalidation
 
-☐ Allow a durable memory to define explicit validity conditions when known.
-☐ Allow a durable memory to define explicit invalidation conditions when known.
-☐ Mark a memory for review when its assumptions no longer match current project state.
-☐ Mark a memory for review when the project phase has changed materially since the memory was created.
-☐ Mark a memory for review when a production incident contradicts the assumptions behind the memory.
-☐ Mark a memory for review when a newer benchmark or scale measurement invalidates the original performance assumption.
-☐ Mark a memory for review when a newer security requirement conflicts with the original design.
-☐ Mark a memory for review when current source architecture no longer resembles the architecture on which the decision depended.
-☐ Never silently preserve a decision as binding after a known invalidation condition has occurred.
-☐ Never silently delete invalidated decisions because historical rationale may still explain the current architecture.
-☐ Represent invalidated memories as historical evidence rather than current instructions.
+☑ Allow a durable memory to define explicit validity conditions when known.
+☑ Allow a durable memory to define explicit invalidation conditions when known.
+☑ Mark a memory for review when its assumptions no longer match current project state.
+☑ Mark a memory for review when the project phase has changed materially since the memory was created.
+☑ Mark a memory for review when a production incident contradicts the assumptions behind the memory.
+☑ Mark a memory for review when a newer benchmark or scale measurement invalidates the original performance assumption.
+☑ Mark a memory for review when a newer security requirement conflicts with the original design.
+☑ Mark a memory for review when current source architecture no longer resembles the architecture on which the decision depended.
+☑ Never silently preserve a decision as binding after a known invalidation condition has occurred.
+☑ Never silently delete invalidated decisions because historical rationale may still explain the current architecture.
+☑ Represent invalidated memories as historical evidence rather than current instructions.
 
 Phase 21D — Memory age and relevance decay
 
-☐ Track the age of every durable memory.
-☐ Do not make age alone invalidate a genuine invariant.
-☐ Reduce automatic retrieval weight for old ordinary decisions when they have not been reaffirmed against current project state.
-☐ Reduce automatic retrieval weight more aggressively for old ideas, hypotheses, and preferences.
-☐ Allow recently reaffirmed memories to regain retrieval weight without changing their original creation timestamp.
-☐ Track a separate last_validated_at timestamp for memories that have been rechecked.
-☐ Prefer a newer validated decision over an older unvalidated decision when both address the same concern.
-☐ Avoid resurfacing low-authority stale memories merely because their wording has high lexical similarity to the current task.
-☐ Keep historical memories available through explicit history search even when they are excluded from automatic context injection.
+☑ Track the age of every durable memory.
+☑ Do not make age alone invalidate a genuine invariant.
+☑ Reduce automatic retrieval weight for old ordinary decisions when they have not been reaffirmed against current project state.
+☑ Reduce automatic retrieval weight more aggressively for old ideas, hypotheses, and preferences.
+☑ Allow recently reaffirmed memories to regain retrieval weight without changing their original creation timestamp.
+☑ Track a separate last_validated_at timestamp for memories that have been rechecked.
+☑ Prefer a newer validated decision over an older unvalidated decision when both address the same concern.
+☑ Avoid resurfacing low-authority stale memories merely because their wording has high lexical similarity to the current task.
+☑ Keep historical memories available through explicit history search even when they are excluded from automatic context injection.
 
 Phase 21E — Decision ladder and conflict handling
 
@@ -1060,7 +1060,7 @@ Phase 22 — Memory lifecycle and supersession
 ☑ Allow rejected decisions and failed approaches to remain searchable as historical knowledge.
 ☑ Allow resolved todos to remain queryable without presenting them as open work.
 ☑ Record the superseding memory identifier when a direct supersession relationship is known.
-☐ Avoid returning mutually contradictory current memories without flagging the conflict.
+☑ Avoid returning mutually contradictory current memories without flagging the conflict.
 ☑ Add a conflict state for memories whose current truth cannot be resolved automatically.
 ☑ Require human or stronger-agent review before automatically resolving ambiguous high-impact memory conflicts.
 

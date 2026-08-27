@@ -33,6 +33,7 @@
 //! this is asserted directly in the integration tests rather than trusted by
 //! reading the manual once.
 
+use super::policy::retrieval_weight;
 use super::store::{
     MemoryAuthority, MemoryKind, MemoryRecord, MemoryStatus, MemoryStore, MemoryStoreError,
     row_to_record,
@@ -81,7 +82,33 @@ const QUALIFIED_COLUMNS: &str = "memories.id, memories.project_id, memories.kind
                                  memories.scale_assumptions, memories.security_assumptions, \
                                  memories.compatibility_assumptions, \
                                  memories.operational_assumptions, memories.evidence, \
-                                 memories.source_excerpt";
+                                 memories.source_excerpt, memories.validity_conditions, \
+                                 memories.invalidation_conditions, memories.review_reason, \
+                                 memories.review_marked_at, memories.last_validated_at";
+
+/// How many extra candidates a search fetches beyond `limit`, before decay
+/// reordering runs.
+///
+/// Phase 21D's decay is applied in Rust, after the SQL query, because it
+/// depends on the wall clock and on per-authority policy — see
+/// [`retrieval_weight`]. If the SQL `LIMIT` were the caller's own `limit`,
+/// decay could never promote a fresh, high-authority memory that ranked
+/// outside the raw BM25 top-`limit` back into the returned set: the row would
+/// already be gone. Over-fetching a wider candidate pool and truncating after
+/// reordering is what keeps decay able to change *which* memories come back,
+/// not only their order among a fixed set.
+const DECAY_OVERFETCH_FACTOR: usize = 5;
+
+/// The most candidates a search ever pulls from SQLite before truncating to
+/// `limit`, regardless of how small `limit` is. Bounds the cost of a search
+/// over a project with a very large memory table.
+const DECAY_OVERFETCH_CAP: usize = 500;
+
+/// The SQL `LIMIT` for a search asking for `limit` final results.
+fn overfetch_limit(limit: usize) -> usize {
+    let scaled = limit.saturating_mul(DECAY_OVERFETCH_FACTOR);
+    scaled.clamp(limit, DECAY_OVERFETCH_CAP.max(limit))
+}
 
 /// Turn free-form text into a safe FTS5 `MATCH` expression, or `None` if
 /// nothing in it could be searched for.
@@ -128,6 +155,31 @@ impl<'a> MemoryStore<'a> {
     /// ([`MemoryRecord::source_session_id`], [`MemoryRecord::source_commit`])
     /// as `Option`, so a memory recorded without one reports it absent
     /// instead of inventing an empty string.
+    ///
+    /// # Phase 21D: decay is applied here, after the match
+    ///
+    /// The raw BM25 relevance of every candidate is multiplied by
+    /// `retrieval_weight` before the final ordering, so an old, low-
+    /// authority memory that happens to match the query text well still
+    /// ranks below a fresh, high-authority memory that matches it poorly —
+    /// line 904's *"avoid resurfacing low-authority stale memories merely
+    /// because of high lexical similarity."* This has to run in Rust rather
+    /// than in the `ORDER BY`: the weight depends on the wall clock and on a
+    /// per-authority policy (`super::policy::retrieval_weight`), neither of
+    /// which SQLite's `bm25()` has access to. See `overfetch_limit` for why
+    /// the SQL `LIMIT` is not simply `limit`.
+    ///
+    /// # Phase 22 line 1063: conflicts are detected here too
+    ///
+    /// Before decay runs, every pair of still-[`MemoryStatus::Active`]
+    /// candidates in *this* result set is checked for contradiction — see
+    /// `contradicts` — and a contradicting pair is moved to
+    /// [`MemoryStatus::Conflicted`] via [`MemoryStore::mark_conflicted`]
+    /// before being returned, so a caller never receives two mutually
+    /// contradictory memories presented as equally settled. Detection is
+    /// scoped to the memories this query actually matched, not the whole
+    /// project: Phase 22 asks that a conflict be flagged, not that every
+    /// memory be compared against every other one on every search.
     pub fn search(
         &self,
         text: &str,
@@ -137,9 +189,12 @@ impl<'a> MemoryStore<'a> {
         let Some(match_expr) = sanitize_query(text) else {
             return Ok(Vec::new());
         };
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
 
         let sql = format!(
-            "SELECT {QUALIFIED_COLUMNS} \
+            "SELECT {QUALIFIED_COLUMNS}, bm25(memories_fts) AS relevance \
              FROM memories_fts \
              JOIN memories ON memories.rowid = memories_fts.rowid \
              WHERE memories_fts MATCH ?1 \
@@ -158,6 +213,7 @@ impl<'a> MemoryStore<'a> {
                 })?;
 
         let historical = matches!(scope, SearchScope::Historical);
+        let fetch_limit = overfetch_limit(limit);
         let rows = statement
             .query_map(
                 rusqlite::params![
@@ -165,9 +221,12 @@ impl<'a> MemoryStore<'a> {
                     self.project_id(),
                     historical,
                     MemoryStatus::Active.as_str(),
-                    i64::try_from(limit).unwrap_or(i64::MAX),
+                    i64::try_from(fetch_limit).unwrap_or(i64::MAX),
                 ],
-                row_to_record,
+                |row| {
+                    let relevance: f64 = row.get("relevance")?;
+                    Ok(row_to_record(row)?.map(|record| (record, relevance)))
+                },
             )
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
             .map_err(|source| MemoryStoreError::Sql {
@@ -175,10 +234,97 @@ impl<'a> MemoryStore<'a> {
                 source,
             })?;
 
-        let mut records: Vec<MemoryRecord> = rows.into_iter().collect::<Result<_, _>>()?;
+        let mut scored: Vec<(MemoryRecord, f64)> = rows.into_iter().collect::<Result<_, _>>()?;
+
+        self.flag_contradictions(&mut scored)?;
+
+        let now = self.now();
+        scored.sort_by(|(a, a_relevance), (b, b_relevance)| {
+            let a_weight = retrieval_weight(a.authority, now, a.created_at, a.last_validated_at);
+            let b_weight = retrieval_weight(b.authority, now, b.created_at, b.last_validated_at);
+            let a_score = *a_relevance * a_weight;
+            let b_score = *b_relevance * b_weight;
+            a_score
+                .partial_cmp(&b_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut records: Vec<MemoryRecord> = scored.into_iter().map(|(record, _)| record).collect();
         demote_thin_decisions(&mut records);
+        records.truncate(limit);
         Ok(records)
     }
+
+    /// Phase 22 line 1063: detect mutually contradictory current memories
+    /// among `scored` and flag them, rather than returning either silently.
+    ///
+    /// Conservative by construction — see [`contradicts`] — and scoped to
+    /// pairs within this one result set. Marking a pair
+    /// [`MemoryStatus::Conflicted`] is exactly [`MemoryStore::mark_conflicted`],
+    /// so both halves of Phase 22's requirement — flagging, and detecting —
+    /// go through the one mechanism the store already exposes for it.
+    fn flag_contradictions(
+        &self,
+        scored: &mut [(MemoryRecord, f64)],
+    ) -> Result<(), MemoryStoreError> {
+        for i in 0..scored.len() {
+            for j in (i + 1)..scored.len() {
+                let already_flagged = scored[i].0.status != MemoryStatus::Active
+                    || scored[j].0.status != MemoryStatus::Active;
+                if already_flagged || !contradicts(&scored[i].0, &scored[j].0) {
+                    continue;
+                }
+
+                let one = scored[i].0.id.clone();
+                let other = scored[j].0.id.clone();
+                let (updated_one, updated_other) = self.mark_conflicted(&one, &other)?;
+                scored[i].0 = updated_one;
+                scored[j].0 = updated_other;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Phase 22 line 1063's conservative contradiction test: the same subject,
+/// with one memory recording the subject as adopted and the other recording
+/// it as abandoned.
+///
+/// The map's own vocabulary for this is "same subject, opposite
+/// disposition," but `disposition` is a field [`super::extract::schema`]
+/// reads from a model's reply and this table never persists it — see that
+/// module's documentation. [`MemoryKind::Decision`] and
+/// [`MemoryKind::Constraint`] are the stored proxy for "adopted," and
+/// [`MemoryKind::FailedAttempt`] is the stored proxy for "abandoned": the
+/// same distinction `memory::extract::authority`'s disposition ceilings
+/// exist to enforce, expressed in the vocabulary this table actually keeps.
+/// A memory with no subject can never be compared this way — silence is not
+/// a contradiction.
+fn contradicts(a: &MemoryRecord, b: &MemoryRecord) -> bool {
+    let (Some(subject_a), Some(subject_b)) = (a.subject.as_deref(), b.subject.as_deref()) else {
+        return false;
+    };
+    if normalize_subject(subject_a) != normalize_subject(subject_b) {
+        return false;
+    }
+
+    matches!(
+        (a.kind, b.kind),
+        (
+            MemoryKind::Decision | MemoryKind::Constraint,
+            MemoryKind::FailedAttempt
+        ) | (
+            MemoryKind::FailedAttempt,
+            MemoryKind::Decision | MemoryKind::Constraint
+        )
+    )
+}
+
+/// A subject compared for contradiction, case- and whitespace-insensitively.
+/// Conservative in the same direction [`sanitize_query`] is: two subjects
+/// that differ in wording are never treated as the same one.
+fn normalize_subject(subject: &str) -> String {
+    subject.trim().to_lowercase()
 }
 
 /// Phase 21B: *"treat a decision with missing rationale and missing

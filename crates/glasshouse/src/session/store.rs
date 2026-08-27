@@ -2768,6 +2768,20 @@ mod tests {
                 "memories.operational_assumptions",
                 "memories.evidence",
                 "memories.source_excerpt",
+                // Migration 10. `review_reason` is one of six fixed words (a
+                // `CHECK` enum); `review_marked_at` and `last_validated_at` are
+                // Unix timestamps — none of the three can hold a credential.
+                // `validity_conditions` and `invalidation_conditions` are free
+                // text a producer writes, exactly like `rationale` and the rest
+                // of migration 6's provenance columns beside them, and this test
+                // does not and cannot certify them for the same reason it does
+                // not certify those: the control is on the producer side, where
+                // `memory::extract::chunk` scrubs and `schema::judge` screens.
+                "memories.validity_conditions",
+                "memories.invalidation_conditions",
+                "memories.review_reason",
+                "memories.review_marked_at",
+                "memories.last_validated_at",
                 "memories_fts.subject",
                 "memories_fts.body",
                 "memories_fts.rationale",
@@ -2965,8 +2979,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 9,
-            "the launch must have applied migrations 3, 4, 5, 6, 7, 8 and 9"
+            version, 10,
+            "the launch must have applied migrations 3, 4, 5, 6, 7, 8, 9 and 10"
         );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
@@ -3152,8 +3166,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 9,
-            "the launch must have applied migrations 2, 3, 4, 5, 6, 7, 8 and 9"
+            version, 10,
+            "the launch must have applied migrations 2, 3, 4, 5, 6, 7, 8, 9 and 10"
         );
 
         let store = SessionStore::new(&reopened).unwrap();
@@ -4068,7 +4082,16 @@ mod tests {
             fixture
                 .conn
                 .execute_batch(
-                    "ALTER TABLE sessions DROP COLUMN model;
+                    // Migration 10's columns go first, for the same reason
+                    // migration 8's sessions columns are dropped below: this
+                    // rollback lands on version 7, and `memories` must not
+                    // still carry columns a later migration added.
+                    "ALTER TABLE memories DROP COLUMN validity_conditions;
+                     ALTER TABLE memories DROP COLUMN invalidation_conditions;
+                     ALTER TABLE memories DROP COLUMN review_reason;
+                     ALTER TABLE memories DROP COLUMN review_marked_at;
+                     ALTER TABLE memories DROP COLUMN last_validated_at;
+                     ALTER TABLE sessions DROP COLUMN model;
                      ALTER TABLE sessions DROP COLUMN pairing_class;
                      ALTER TABLE sessions DROP COLUMN protocol;
                      ALTER TABLE sessions DROP COLUMN response_profile;
@@ -4091,8 +4114,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 9,
-                "the launch must have applied migrations 8 and 9"
+                version, 10,
+                "the launch must have applied migrations 8, 9 and 10"
             );
 
             let after = SessionStore::new(&reopened)

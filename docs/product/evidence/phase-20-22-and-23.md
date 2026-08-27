@@ -102,3 +102,68 @@ Known limit, recorded rather than fixed:
   prove free text is clean. That control belongs to the producer, and is now
   written down as an explicit acceptance condition of Phase 21's extractor
   rather than inherited by assumption.
+
+### Phase 22 line 1063 — contradictory current memories are flagged, and `mark_conflicted` gets its first caller
+
+Contract: Given two current memories that contradict each other, when a
+retrieval returns both, Glasshouse marks them `conflicted` and stops presenting
+either as a current instruction — while preserving both as history rather than
+choosing a winner.
+
+State: **COMPLETE**.
+
+Production evidence:
+- `memory/search.rs: MemoryStore::search` → `flag_contradictions` → the store's
+  pre-existing `mark_conflicted`. **`mark_conflicted` had zero production
+  callers before this** — re-grepped; only tests reached it. So this line closes
+  two things: the detector, and the first real caller of a method that had been
+  shipped and unreachable.
+- Detection is over the memories the call **just matched**, not the whole
+  project. Phase 22 asks that a conflict be flagged, not that every retrieval do
+  an O(n²) scan of every memory in the database.
+
+**The map's vocabulary had to be reinterpreted, and this is the decision to
+re-examine if the box is ever disputed.** The map says "same subject, opposite
+disposition". `disposition` is a field `memory::extract::schema` reads from a
+model's reply during extraction — and **the `memories` table has no
+`disposition` column**; nothing persists it. So `contradicts()` uses the closest
+stored proxy: same normalised subject (trimmed, lowercased), with one memory's
+`kind` being `Decision`/`Constraint` (the stored equivalent of *adopted*) and
+the other's `FailedAttempt` (the stored equivalent of *abandoned*). That is the
+same distinction `memory::extract::authority`'s disposition ceilings already
+encode on the way in, expressed in the vocabulary the table actually keeps.
+
+Regression evidence:
+- `tests/memory_validity.rs::needs_review_and_conflicted_memories_stay_out_of_current_search_but_are_findable_as_history`
+  — a `Decision` and a `FailedAttempt` sharing a subject (differing only in
+  case) are both moved to `Conflicted` by one `search()` call, then excluded
+  from `Current` and found under `Historical`.
+- `tests/memory_validity.rs::unrelated_or_agreeing_memories_are_never_flagged_as_conflicted`
+  — **the conservative half, and the one that matters.** Two agreeing
+  `Decision`s sharing a subject, and a `Decision`/`FailedAttempt` pair with
+  *different* subjects, are never flagged.
+- `tests/memory_store.rs::contradictory_current_memories_are_flagged_and_leave_normal_retrieval`
+  — pre-existing, exercises the manual `mark_conflicted` path, untouched. The
+  manual and automatic paths coexist.
+
+Failure/isolation evidence:
+- Mutation: deleting `self.flag_contradictions(&mut scored)?;` from `search()`
+  killed the first test above (`left: Active, right: Conflicted`).
+
+### Phase 20 lines 828 and 829 — still open, and deliberately not faked
+
+State: NOT STARTED, blocked on a judgement the storage layer cannot make.
+
+*"Do not store obvious source-code facts when rereading the source is cheaper"*
+and *"prefer storing information whose rediscovery would require significant
+exploration"* are stated in `memory::extract::schema`'s `PROMPT_CONTRACT` and
+are **asked for, never validated**. That module's own "what is enforced" table
+lists exactly three checkable fields — `support`, `disposition`, `confidence` —
+and these two are not among them.
+
+**The worker was asked to close them and declined, correctly.** Deciding whether
+a claim is "an obvious source-code fact" is a judgement about the project that
+only the producer can make; a keyword heuristic would refuse real memories and
+admit fake ones. That is the same limit `memory::policy` already declined to
+fake at the storage layer. Recorded here so the next package does not re-derive
+it.

@@ -61,9 +61,12 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// and `purpose`. Version 9 adds the supervision columns Phase 10A needs — the
 /// identity of the process a session was started in (`process_id`,
 /// `process_started_at`, `process_host`) and what supervision has since
-/// concluded about it (`supervision`, `supervision_reason`). Later migrations
-/// are appended to [`MIGRATIONS`], and this constant moves with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 9;
+/// concluded about it (`supervision`, `supervision_reason`). Version 10 adds
+/// Phase 21C's validity and invalidation conditions and the review/decay
+/// bookkeeping Phase 21D needs (`review_reason`, `review_marked_at`,
+/// `last_validated_at`). Later migrations are appended to [`MIGRATIONS`], and
+/// this constant moves with them.
+const SUPPORTED_SCHEMA_VERSION: i64 = 10;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -971,6 +974,63 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
     ALTER TABLE sessions ADD COLUMN supervision_reason TEXT
         CHECK (supervision_reason IS NULL OR supervision_reason <> '');
     ",
+    // 10: Phase 21C's validity and invalidation conditions, and the
+    // review/decay bookkeeping Phase 21D needs.
+    //
+    // # `ADD COLUMN` only, for migration 8's reasons
+    //
+    // No table is rebuilt, no existing `CHECK` is altered, no existing row is
+    // touched. In particular `memories_fts` is left alone: none of these five
+    // columns joins it. They are attributes of a memory somebody has already
+    // found — a validity condition, why it was flagged, when, and whether it
+    // has since been rechecked — not words a search would match on, and every
+    // indexed column shifts BM25's weighting of the ones that matter. Making
+    // one searchable later is the same rebuild migration 6 paid for
+    // `rationale`; nothing here asks for it.
+    //
+    // # `validity_conditions` and `invalidation_conditions`
+    //
+    // Phase 21C's *"allow a durable memory to define explicit validity [or
+    // invalidation] conditions when known"*. Free text, like the Phase 21B
+    // provenance columns beside them, and for the same reason: a condition is
+    // a sentence someone wrote down, not a value from a fixed vocabulary, and
+    // `NULL` means "no condition was recorded" rather than "none apply."
+    //
+    // # `review_reason`, one value per map line
+    //
+    // The six values are lines 885-890 of the capability map, in order, and
+    // this `CHECK` is their only definition — [`crate::memory::ReviewReason`]
+    // reads it back the way `every_project_phase_the_type_supports_is_one_
+    // the_schema_accepts` reads migration 6's, so the two cannot silently
+    // drift apart.
+    //
+    // # `review_marked_at` and `last_validated_at`: `NULL` is "unknown," never zero
+    //
+    // The same argument every other nullable timestamp in this schema makes,
+    // sharpened by Phase 21D line 898: a memory written before this migration
+    // has no `last_validated_at`, and the decay policy must treat that as
+    // *unknown* — never reaffirmed, not yet due for one, no basis to prefer it
+    // over a memory that has one — rather than as *never validated as of
+    // epoch zero*, which would make every pre-migration memory look infinitely
+    // stale the instant this migration runs. `review_marked_at` carries the
+    // same distinction for the same reason: a memory nobody has flagged has no
+    // answer to "when," not an answer of zero.
+    "
+    ALTER TABLE memories ADD COLUMN validity_conditions     TEXT;
+    ALTER TABLE memories ADD COLUMN invalidation_conditions TEXT;
+
+    ALTER TABLE memories ADD COLUMN review_reason TEXT
+        CHECK (review_reason IS NULL OR review_reason IN
+               ('project_state', 'project_phase_change', 'production_incident',
+                'benchmark_or_scale', 'security_requirement',
+                'architecture_drift'));
+
+    ALTER TABLE memories ADD COLUMN review_marked_at INTEGER
+        CHECK (review_marked_at IS NULL OR review_marked_at >= 0);
+
+    ALTER TABLE memories ADD COLUMN last_validated_at INTEGER
+        CHECK (last_validated_at IS NULL OR last_validated_at >= 0);
+    ",
 ];
 
 pub(crate) const PROJECT_ID_KEY: &str = "project_id";
@@ -1494,6 +1554,139 @@ mod tests {
         // map's own list is five long, so a `CHECK` this failed to read
         // would show up here as an empty vector rather than as a pass.
         assert_eq!(accepted.len(), 5, "the CHECK's list was not read correctly");
+    }
+
+    /// Migration 10's `CHECK` on `review_reason` is the only definition of
+    /// Phase 21C's six review reasons — map lines 885-890, one value per
+    /// line, in order. Modeled on
+    /// `every_project_phase_the_type_supports_is_one_the_schema_accepts`,
+    /// reading the list **out of the migration itself** rather than out of a
+    /// second constant that could drift from it.
+    #[test]
+    fn every_review_reason_the_type_supports_is_one_the_schema_accepts() {
+        use crate::memory::ReviewReason;
+
+        let migration = MIGRATIONS[9];
+        let marker = "review_reason IN";
+        let open = migration
+            .find(marker)
+            .expect("migration 10 checks review_reason")
+            + marker.len();
+        let list = &migration[open..];
+        let list = &list[..list.find(')').expect("the CHECK's list is parenthesised")];
+        let accepted: Vec<String> = list
+            .split(',')
+            .map(|value| value.trim().trim_matches(['(', ' ', '\n', '\'']).to_owned())
+            .filter(|value| !value.is_empty())
+            .collect();
+
+        let declared: Vec<String> = ReviewReason::ALL
+            .iter()
+            .map(|reason| reason.as_str().to_owned())
+            .collect();
+
+        assert_eq!(
+            declared, accepted,
+            "a review reason was added or renamed without migration 10's CHECK, \
+             or the two fell out of the map's own order"
+        );
+        assert_eq!(accepted.len(), 6, "the CHECK's list was not read correctly");
+    }
+
+    /// Migration proof (a): a version-9 database opens, migrates to 10, and
+    /// keeps every existing row — including a memory recorded before any of
+    /// Phase 21C's columns existed.
+    #[test]
+    fn a_version_nine_database_migrates_forward_keeping_its_memories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let memory = crate::memory::ProjectMemory::open(&fixture.runtime).unwrap();
+        let store = memory.store();
+
+        let pre_existing = store
+            .record(crate::memory::NewMemory::new(
+                crate::memory::MemoryKind::Decision,
+                "amethyst decisions predate migration 10",
+            ))
+            .unwrap();
+        drop(store);
+        drop(memory);
+
+        let db_path = fixture.runtime.database_path();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE memories DROP COLUMN validity_conditions;
+                 ALTER TABLE memories DROP COLUMN invalidation_conditions;
+                 ALTER TABLE memories DROP COLUMN review_reason;
+                 ALTER TABLE memories DROP COLUMN review_marked_at;
+                 ALTER TABLE memories DROP COLUMN last_validated_at;
+
+                 DELETE FROM schema_migrations WHERE version >= 10;",
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            schema_version(&db_path),
+            9,
+            "the rollback must land on version 9"
+        );
+
+        // The next launch is an ordinary bootstrap; nothing special is asked
+        // of it, matching the way a real upgrade happens.
+        let migrated = fixture.rebootstrap().unwrap();
+        assert_eq!(
+            schema_version(&migrated.database_path()),
+            SUPPORTED_SCHEMA_VERSION,
+            "the launch must have applied migration 10"
+        );
+
+        let reopened = crate::memory::ProjectMemory::open(&migrated).unwrap();
+        let intact = reopened
+            .store()
+            .get(&pre_existing.id)
+            .unwrap()
+            .expect("the pre-migration memory must survive the upgrade");
+        assert_eq!(intact.body, pre_existing.body);
+
+        // Migration proof (c): a pre-migration row's `last_validated_at`
+        // reads as unknown, not as zero — the row existed before the column
+        // did, so `ALTER TABLE ADD COLUMN` backfills it with `NULL`, and
+        // `row_to_record` must not substitute a default for that `NULL`.
+        assert_eq!(
+            intact.last_validated_at, None,
+            "a pre-migration memory's last_validated_at must read as unknown, not as zero"
+        );
+        assert_eq!(intact.review_reason, None);
+        assert_eq!(intact.review_marked_at, None);
+    }
+
+    /// Migration proof (b): migration 10's new `CHECK` rejects a
+    /// `review_reason` outside the six the map names.
+    #[test]
+    fn migration_ten_rejects_an_unrecognized_review_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let memory = crate::memory::ProjectMemory::open(&fixture.runtime).unwrap();
+        let recorded = memory
+            .store()
+            .record(crate::memory::NewMemory::new(
+                crate::memory::MemoryKind::Finding,
+                "beryl needs a review reason that does not exist",
+            ))
+            .unwrap();
+        drop(memory);
+
+        let conn = Connection::open(fixture.runtime.database_path()).unwrap();
+        let result = conn.execute(
+            "UPDATE memories SET review_reason = 'not-a-real-reason' WHERE id = ?1",
+            [recorded.id.as_str()],
+        );
+        assert!(
+            result.is_err(),
+            "an unrecognized review_reason must be rejected by the CHECK constraint"
+        );
     }
 
     #[test]

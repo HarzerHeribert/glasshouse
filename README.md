@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████░░░░░░░░░░░░░░░░░░░░░░░` 570 / 1280 mandatory capabilities (44%)
+`██████████████████░░░░░░░░░░░░░░░░░░░░░░` 592 / 1280 mandatory capabilities (46%)
 
 <details>
-<summary>Per-phase breakdown (19 of 104 phases complete)</summary>
+<summary>Per-phase breakdown (22 of 104 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -63,11 +63,11 @@ the authoritative specification and tracks what is done.
 | Phase 18 — Raw event recording | 9/10 |
 | Phase 19 — Portable session checkpoints | 13/14 |
 | Phase 20 — Minimal durable project memory | 16/18 |
-| Phase 21 — Memory extraction | 9/13 |
+| Phase 21 — Memory extraction | 10/13 |
 | Phase 21A — Memory authority classes | 11/12 |
 | Phase 21B — Decision provenance and assumptions | 11/11 ✅ |
-| Phase 21C — Validity conditions and invalidation | 0/11 |
-| Phase 21D — Memory age and relevance decay | 0/9 |
+| Phase 21C — Validity conditions and invalidation | 11/11 ✅ |
+| Phase 21D — Memory age and relevance decay | 9/9 ✅ |
 | Phase 21E — Decision ladder and conflict handling | 0/12 |
 | Phase 21F — Memory retrieval quality | 0/11 |
 | Phase 21G — Memory revalidation | 0/9 |
@@ -75,7 +75,7 @@ the authoritative specification and tracks what is done.
 | Phase 21I — Production-aware implementation checks | 0/11 |
 | Phase 21J — Implementation review checklist | 0/9 |
 | Phase 21K — Assumption-aware implementation guardrails | 0/43 |
-| Phase 22 — Memory lifecycle and supersession | 8/9 |
+| Phase 22 — Memory lifecycle and supersession | 9/9 ✅ |
 | Phase 23 — Memory full-text search | 7/7 ✅ |
 | Phase 24 — Memory reranking | 0/6 |
 | Phase 25 — Project knowledge view | 0/10 |

@@ -205,6 +205,35 @@ pub enum ProjectPhase {
     Migration,
 }
 
+/// Why a memory was marked for review — Phase 21C's six conditions, one
+/// value per capability-map line, in the map's own order.
+///
+/// A memory is never marked for review without one of these: the pair
+/// `status = NeedsReview` plus a reason is the whole record, so that a person
+/// or a stronger agent looking at it later knows *what changed*, not only
+/// *that something did*. Migration 10's `CHECK` is the vocabulary's only
+/// definition; `every_review_reason_the_type_supports_is_one_the_schema_
+/// accepts` reads it back out of the migration so the two cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ReviewReason {
+    /// The project's current state no longer matches this memory's recorded
+    /// assumptions.
+    ProjectState,
+    /// The project phase has changed materially since this memory was
+    /// created.
+    ProjectPhaseChange,
+    /// A production incident contradicts the assumptions behind this memory.
+    ProductionIncident,
+    /// A newer benchmark or scale measurement invalidates the original
+    /// performance assumption.
+    BenchmarkOrScale,
+    /// A newer security requirement conflicts with the original design.
+    SecurityRequirement,
+    /// Current source architecture no longer resembles the architecture this
+    /// memory's decision depended on.
+    ArchitectureDrift,
+}
+
 macro_rules! sql_enum {
     ($ty:ty { $($variant:ident => $text:literal),+ $(,)? }) => {
         impl $ty {
@@ -274,6 +303,15 @@ sql_enum!(ProjectPhase {
     Beta => "beta",
     Production => "production",
     Migration => "migration",
+});
+
+sql_enum!(ReviewReason {
+    ProjectState => "project_state",
+    ProjectPhaseChange => "project_phase_change",
+    ProductionIncident => "production_incident",
+    BenchmarkOrScale => "benchmark_or_scale",
+    SecurityRequirement => "security_requirement",
+    ArchitectureDrift => "architecture_drift",
 });
 
 sql_enum!(MemoryStatus {
@@ -460,6 +498,28 @@ pub struct MemoryRecord {
     /// relationship is known. `None` on a superseded memory means it was
     /// retired without a single identifiable successor.
     pub superseded_by: Option<MemoryId>,
+    /// Phase 21C: the condition under which this memory should still be
+    /// treated as true, when the producer knew one. `None` means no
+    /// condition was recorded, never "always valid."
+    pub validity_conditions: Option<String>,
+    /// Phase 21C: the condition under which this memory should be treated as
+    /// invalidated, when the producer knew one.
+    pub invalidation_conditions: Option<String>,
+    /// Phase 21C: why this memory is [`MemoryStatus::NeedsReview`], when it
+    /// is. `None` on a memory that has never been marked for review, and also
+    /// on one whose review has since been resolved back to another status —
+    /// see [`MemoryStore::mark_for_review`].
+    pub review_reason: Option<ReviewReason>,
+    /// Phase 21C: when this memory was marked for review, seconds since the
+    /// Unix epoch. `None` means never — not "at epoch zero."
+    pub review_marked_at: Option<i64>,
+    /// Phase 21D: when this memory was last reaffirmed against current
+    /// project state, seconds since the Unix epoch. `None` means *unknown* —
+    /// migration 10's own distinction — never "validated at epoch zero," so
+    /// the decay policy in `super::policy` falls back to [`Self::created_at`]
+    /// rather than treating an unvalidated memory as infinitely stale. See
+    /// [`MemoryStore::reaffirm`].
+    pub last_validated_at: Option<i64>,
     /// Seconds since the Unix epoch.
     pub created_at: i64,
     /// Seconds since the Unix epoch.
@@ -518,6 +578,12 @@ pub struct NewMemory {
     /// Phase 21B's decision provenance. Defaults to all-absent, which is what
     /// a caller that knows none of it should store.
     pub provenance: DecisionProvenance,
+    /// Phase 21C: the condition under which this memory should still be
+    /// treated as true, when known.
+    pub validity_conditions: Option<String>,
+    /// Phase 21C: the condition under which this memory should be treated as
+    /// invalidated, when known.
+    pub invalidation_conditions: Option<String>,
 }
 
 impl NewMemory {
@@ -534,6 +600,8 @@ impl NewMemory {
             source_commit: None,
             source_events: None,
             provenance: DecisionProvenance::default(),
+            validity_conditions: None,
+            invalidation_conditions: None,
         }
     }
 
@@ -602,6 +670,29 @@ impl NewMemory {
             evidence: tidy(provenance.evidence),
             source_excerpt: tidy(provenance.source_excerpt),
         };
+        self
+    }
+
+    /// Record the condition under which this memory should still be treated
+    /// as true — Phase 21C's *"allow a durable memory to define explicit
+    /// validity conditions when known."*
+    ///
+    /// Whitespace-only is stored as `None`, for the reason
+    /// [`NewMemory::with_subject`] gives.
+    pub fn with_validity_conditions(mut self, conditions: Option<impl Into<String>>) -> Self {
+        self.validity_conditions = conditions
+            .map(Into::into)
+            .filter(|value| !value.trim().is_empty());
+        self
+    }
+
+    /// Record the condition under which this memory should be treated as
+    /// invalidated — Phase 21C's *"allow a durable memory to define explicit
+    /// invalidation conditions when known."*
+    pub fn with_invalidation_conditions(mut self, conditions: Option<impl Into<String>>) -> Self {
+        self.invalidation_conditions = conditions
+            .map(Into::into)
+            .filter(|value| !value.trim().is_empty());
         self
     }
 }
@@ -750,7 +841,9 @@ pub(super) const ALL_COLUMNS: &str = "id, project_id, kind, authority, status, s
                                       rationale, project_phase, problem, assumptions, \
                                       scale_assumptions, security_assumptions, \
                                       compatibility_assumptions, operational_assumptions, \
-                                      evidence, source_excerpt";
+                                      evidence, source_excerpt, validity_conditions, \
+                                      invalidation_conditions, review_reason, review_marked_at, \
+                                      last_validated_at";
 
 /// An open project database plus the memories inside it.
 ///
@@ -867,6 +960,14 @@ impl<'a> MemoryStore<'a> {
         self.conn
     }
 
+    /// The current time, via this store's injected clock — for the search
+    /// and snapshot surfaces in this module, so decay policy is exercised
+    /// against the same test-controllable clock as everything else instead
+    /// of reading the wall clock directly.
+    pub(super) fn now(&self) -> i64 {
+        (self.clock)()
+    }
+
     /// Store a memory, if it is one.
     ///
     /// Goes through the admission guard first, so there is no route into the
@@ -895,6 +996,14 @@ impl<'a> MemoryStore<'a> {
             source_events: new.source_events,
             provenance: new.provenance,
             superseded_by: None,
+            validity_conditions: new.validity_conditions,
+            invalidation_conditions: new.invalidation_conditions,
+            // A newly recorded memory has never been flagged and never been
+            // reaffirmed. `None` here is "not yet," not "at epoch zero" —
+            // migration 10's own distinction.
+            review_reason: None,
+            review_marked_at: None,
+            last_validated_at: None,
             created_at: now,
             updated_at: now,
         };
@@ -906,9 +1015,10 @@ impl<'a> MemoryStore<'a> {
                  source_event_last, superseded_by, created_at, updated_at, rationale, \
                  project_phase, problem, assumptions, scale_assumptions, \
                  security_assumptions, compatibility_assumptions, \
-                 operational_assumptions, evidence, source_excerpt) \
+                 operational_assumptions, evidence, source_excerpt, validity_conditions, \
+                 invalidation_conditions) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, \
-                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
                 rusqlite::params![
                     record.id.as_str(),
                     &record.project_id,
@@ -934,6 +1044,8 @@ impl<'a> MemoryStore<'a> {
                     &record.provenance.operational_assumptions,
                     &record.provenance.evidence,
                     &record.provenance.source_excerpt,
+                    &record.validity_conditions,
+                    &record.invalidation_conditions,
                 ],
             )
             .map_err(|source| MemoryStoreError::Sql {
@@ -1108,6 +1220,77 @@ impl<'a> MemoryStore<'a> {
             )
             .map_err(|source| MemoryStoreError::Sql {
                 action: "change a memory's status",
+                source,
+            })?;
+
+        self.get(id)?
+            .ok_or_else(|| MemoryStoreError::NotFound { id: id.clone() })
+    }
+
+    /// Mark a memory for review — Phase 21C: something changed that may
+    /// invalidate this memory, and a person or a stronger agent has to look.
+    ///
+    /// A state change with a stated reason, never a deletion: the memory
+    /// moves to [`MemoryStatus::NeedsReview`] and `reason` is recorded beside
+    /// it, so a later reader knows *what changed* and not only *that
+    /// something did*. Whoever resolves the review moves the status onward
+    /// with [`MemoryStore::set_status`] or [`MemoryStore::reaffirm`]; this
+    /// method only ever raises the flag, never clears it, which is why it
+    /// takes a reason and `set_status` does not.
+    pub fn mark_for_review(
+        &self,
+        id: &MemoryId,
+        reason: ReviewReason,
+    ) -> Result<MemoryRecord, MemoryStoreError> {
+        self.get(id)?
+            .ok_or_else(|| MemoryStoreError::NotFound { id: id.clone() })?;
+
+        let now = (self.clock)();
+        self.conn
+            .execute(
+                "UPDATE memories \
+                 SET status = ?2, review_reason = ?3, review_marked_at = ?4, updated_at = ?5 \
+                 WHERE id = ?1",
+                rusqlite::params![
+                    id.as_str(),
+                    MemoryStatus::NeedsReview.as_str(),
+                    reason.as_str(),
+                    now,
+                    now,
+                ],
+            )
+            .map_err(|source| MemoryStoreError::Sql {
+                action: "mark a memory for review",
+                source,
+            })?;
+
+        self.get(id)?
+            .ok_or_else(|| MemoryStoreError::NotFound { id: id.clone() })
+    }
+
+    /// Reaffirm a memory against current project state — Phase 21D: record
+    /// that it was rechecked, without touching anything else.
+    ///
+    /// Writes [`MemoryRecord::last_validated_at`] and nothing else — not
+    /// [`MemoryRecord::created_at`], which the age-tracking box in Phase 21D
+    /// asks to stay put, and not [`MemoryRecord::updated_at`] or
+    /// [`MemoryRecord::status`], which decay must not touch, because
+    /// reaffirming is a comment on how fresh a memory's *validation* is, not
+    /// on the memory's lifecycle. A memory that is [`MemoryStatus::NeedsReview`]
+    /// stays there after a reaffirm; resolve the review with
+    /// [`MemoryStore::set_status`] separately once it has actually been
+    /// looked at.
+    pub fn reaffirm(&self, id: &MemoryId) -> Result<MemoryRecord, MemoryStoreError> {
+        self.get(id)?
+            .ok_or_else(|| MemoryStoreError::NotFound { id: id.clone() })?;
+
+        self.conn
+            .execute(
+                "UPDATE memories SET last_validated_at = ?2 WHERE id = ?1",
+                rusqlite::params![id.as_str(), (self.clock)()],
+            )
+            .map_err(|source| MemoryStoreError::Sql {
+                action: "reaffirm a memory",
                 source,
             })?;
 
@@ -1419,6 +1602,21 @@ pub(super) fn row_to_record(
         }
     };
 
+    let review_reason_text: Option<String> = row.get("review_reason")?;
+    let review_reason = match review_reason_text {
+        None => None,
+        Some(text) => match ReviewReason::from_stored(&text) {
+            Some(reason) => Some(reason),
+            None => {
+                return Ok(Err(MemoryStoreError::UnknownValue {
+                    id,
+                    column: "review_reason",
+                    value: text,
+                }));
+            }
+        },
+    };
+
     Ok(Ok(MemoryRecord {
         id,
         project_id: row.get("project_id")?,
@@ -1443,6 +1641,11 @@ pub(super) fn row_to_record(
             source_excerpt: row.get("source_excerpt")?,
         },
         superseded_by: row.get::<_, Option<String>>("superseded_by")?.map(MemoryId),
+        validity_conditions: row.get("validity_conditions")?,
+        invalidation_conditions: row.get("invalidation_conditions")?,
+        review_reason,
+        review_marked_at: row.get("review_marked_at")?,
+        last_validated_at: row.get("last_validated_at")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     }))

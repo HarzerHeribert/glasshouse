@@ -50,5 +50,5 @@ pub use policy::{MemoryRefusal, admit};
 pub use store::{
     AuthorityChange, Classifier, Clock, ConflictResolver, DecisionProvenance, MemoryAuthority,
     MemoryId, MemoryKind, MemoryRecord, MemoryStatus, MemoryStore, MemoryStoreError, NewMemory,
-    ProjectMemory, ProjectPhase, SourceEvents,
+    ProjectMemory, ProjectPhase, ReviewReason, SourceEvents,
 };
