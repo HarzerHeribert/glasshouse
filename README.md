@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░` 400 / 1280 mandatory capabilities (31%)
+`█████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░` 420 / 1280 mandatory capabilities (32%)
 
 <details>
 <summary>Per-phase breakdown (12 of 104 phases complete)</summary>
@@ -50,7 +50,7 @@ the authoritative specification and tracks what is done.
 | Phase 9H — Sticky gateway routing for harness-backed interactive sessions | 13/14 |
 | Phase 9I — Free-pool routing | 13/14 |
 | Phase 9J — Harness-model pairing model | 9/20 |
-| Phase 9K — Harness-aware response profiles | 0/37 |
+| Phase 9K — Harness-aware response profiles | 20/37 |
 | Phase 10 — Unified session model | 0/14 |
 | Phase 10A — Session supervision | 0/13 |
 | Phase 11 — Session overview | 0/10 |

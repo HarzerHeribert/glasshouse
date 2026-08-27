@@ -8,6 +8,32 @@ Last updated: 2026-08-27 (Europe/Berlin)
 
 ## Current capability / phase
 
+**Phase 9K is twenty of thirty-seven.** Groups 1 and 2 — the profile model and
+harness-native application — are closed and proven in the shipped binary:
+`glasshouse response` reports the resolved profile with the precedence layer
+each of the five axes came from, and `glasshouse run --response-profile` puts
+an output style in the session's settings document and appends to the system
+prompt without ever replacing it. Of the seventeen not owned by that package,
+**ten are blocked** (four on Phase 47 and Phase 51, both at zero; one on a
+schema migration; the rest on there being no in-session profile-change surface)
+and seven are argued line by line in `docs/product/evidence/phase-9k.md`.
+
+**Two probes against Claude Code 2.1.247 are load-bearing and were re-run by
+the orchestrator.** `--settings` is **last-wins, not merge**: with a malformed
+document first, `claude doctor` reports nothing; with the same document last it
+reports the error. A response profile that appended its own `--settings` would
+have silently switched off every lifecycle hook in the session. The keys are
+merged into one document instead.
+
+**Phase 9J is nine of twenty** and its other eleven are blocked, none of them
+on each other. There is no scoring function anywhere in the crate, so a routing
+prior has nothing to be a term of.
+
+**Two Phase 0 boxes were unticked** when its evidence entry was written; one is
+back, one is still the user's call. `check-evidence-coverage.py --strict` is in
+the gate, so a box ticked without a ledger entry fails it.
+
+
 **Phase 9J is nine of twenty and the other eleven are blocked, which is the
 round's real finding.** Group 1 (pairing identity) is closed and proven end to
 end: `glasshouse pairing` reports a class per configured profile, and a
@@ -130,7 +156,29 @@ outside that partition and belong to a follow-up package:
 interrupt box below can finally be tested rather than compiled. Expect several
 jobs to fail at once on the first run; reconcile them in one sweep.
 
-**1. The residual spin, roughly two in sixty.** The highest-value open defect,
+**1. Three Phase 9K boxes are arguably closed and were left unticked.** The
+`response-profiles` worker built the additive `--append-system-prompt` path,
+which belongs to group 3, because its own line 604 requires recording that a
+native, **additive**, or fallback mechanism was applied — and with no additive
+mechanism that branch is unreachable and 604 is only half real. It wrote the
+argument for 613, 614 and 615 in `docs/product/evidence/phase-9k.md` and left
+the call deliberately. Read those three arguments and decide; the code is
+already there and proven.
+
+Two smaller ones from the same package, both cheap and both written up:
+**line 631** (a way to disable injection above a layer that has already spoken)
+is about thirty lines, and **line 632** needs migration 8 adding
+`sessions.response_profile` and `sessions.response_mechanism`, append-only, in
+the shape migration 3 used for `launch_profile`.
+
+**Line 605 is reachable on the launch path only.** `crate::shell`'s quick-open
+calls `install_hooks` and resolves no launch profile either, so it gets the
+harness untouched in every respect. The packet's partition omitted
+`shell/mod.rs`; the worker correctly did not edit it and reported the ten-line
+patch. Whoever gives the shell's quick-open a launch profile should give it a
+response profile in the same change.
+
+**2. The residual spin, roughly two in sixty.** The highest-value open defect,
 and the one with a reproducing harness already written
 (`.agent-runtime/diagnostics/hangup-exit-rate.py`, which needs a *controlling*
 terminal — a child with none receives no `SIGHUP` at all and the harness
@@ -141,7 +189,7 @@ replaces; two in sixty is three orders of magnitude more than that arithmetic
 predicts, so either the window is wider than described or there is a second
 path. **Opus specialist**, and it should produce a rate, not a pass (§60).
 
-**2. Two Phase 0 boxes are unticked and one needs the user.** Writing Phase 0's
+**3. Two Phase 0 boxes are unticked and one needs the user.** Writing Phase 0's
 evidence entry — the last phase with ticked boxes and none behind them — cost
 two of its own boxes. Box 2 ("keep the initial dependency set limited to
 libraries required for async execution, terminal UI, PTYs, serialization,
@@ -158,7 +206,7 @@ and `mpsc` throughout, so "async execution" is a granted-but-unused category.
 Recorded in design-decisions because two facts already there are facts about a
 synchronous threaded program.
 
-**3. Phase 9J line 572 is probably in the wrong phase.** "Keep evidence for the
+**4. Phase 9J line 572 is probably in the wrong phase.** "Keep evidence for the
 same nominal model distinct across different harnesses, gateways,
 quantizations, model revisions, or protocol translations" is an
 evidence-*storage* requirement and is nearly word-for-word Phase 33A's *"Keep
@@ -167,7 +215,7 @@ routes, or changing stealth-model identities"*. Whoever builds 33A closes both
 or neither. Leaving it in 9J makes that phase read one line further from done
 than it is. **A map edit, so it needs the user.**
 
-**4. The residual `SIGABRT`, 1 in 37 runs.**
+**5. The residual `SIGABRT`, 1 in 37 runs.**
 `pty_smoke::a_direct_provider_profile_reaches_a_real_child_and_only_that_child`
 fails with the child killed by signal 6. It is **not** the drain race that was
 just fixed. Four hypotheses are already ruled out with data — the `EIO` theory
@@ -175,7 +223,7 @@ just fixed. Four hypotheses are already ruled out with data — the `EIO` theory
 (2400 spawns), and mislabelling — and `report-PTY-FLAKE.md` §6 ranks where to
 look next, starting with `std::env::set_var` in a threaded test binary.
 
-**5. Phase 9I line 528** is the last free-pool line: `Allowance` separates
+**6. Phase 9I line 528** is the last free-pool line: `Allowance` separates
 request pools from token-priced allowances and only the request-pool half has a
 production feed. It needs a source for "this credential is priced per token".
 Deliberately not solved by parsing rate-limit headers on the forwarding path —

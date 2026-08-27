@@ -96,6 +96,55 @@ pub enum Command {
         #[arg(long, value_name = "ID")]
         harness: Option<String>,
     },
+    /// Report the response profile in effect and what each harness would do
+    /// with it.
+    ///
+    /// A response profile governs how an answer reads — its verbosity,
+    /// audience, progress narration, evidence presentation and final-answer
+    /// format — and nothing else. It cannot change reasoning depth,
+    /// diligence, validation, permissions, safety or tool use, and no profile
+    /// can use concision to reduce what is reported.
+    ///
+    /// This prints the resolved profile with the precedence layer each of the
+    /// five axes came from, the reports no profile may drop, and the native
+    /// mechanism, additive instruction or refusal each harness would answer
+    /// with. Record one with a `[response]` table in the configuration file;
+    /// the next run reflects it.
+    ///
+    /// Deliberately not called `profile`: `--profile` already names a
+    /// *launch* profile, and the two are separate things that a shared name
+    /// would collapse.
+    Response {
+        /// Resolve for one role — `orchestrator`, `worker`, `reviewer`,
+        /// `explainer`, or `interactive`. Absent means `interactive`.
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
+
+        /// A preset asked for at the session layer, as `glasshouse launch
+        /// --response-profile` would.
+        #[arg(long, value_name = "NAME")]
+        session: Option<String>,
+
+        /// Override one axis for this task, above every other layer.
+        #[arg(long, value_name = "VALUE")]
+        verbosity: Option<String>,
+
+        /// Override the intended audience for this task.
+        #[arg(long, value_name = "VALUE")]
+        audience: Option<String>,
+
+        /// Override progress narration for this task.
+        #[arg(long, value_name = "VALUE")]
+        narration: Option<String>,
+
+        /// Override evidence presentation for this task.
+        #[arg(long, value_name = "VALUE")]
+        evidence: Option<String>,
+
+        /// Override the final-answer format for this task.
+        #[arg(long, value_name = "VALUE")]
+        format: Option<String>,
+    },
     /// List the sessions Glasshouse has recorded for this project.
     ///
     /// Glasshouse keeps its own record of every session it starts, separate
@@ -172,6 +221,26 @@ pub enum Command {
         /// enabled, Glasshouse asks rather than guessing.
         harness: Option<String>,
 
+        /// Open the session with this response profile, by preset name.
+        ///
+        /// This is the session layer of the response-profile precedence
+        /// chain: it wins over the role's default, this project's
+        /// configuration and your user default, and loses to nothing but a
+        /// task override. `glasshouse response --session <name>` prints
+        /// exactly what a session started this way would resolve to.
+        #[arg(long, value_name = "NAME")]
+        response_profile: Option<String>,
+
+        /// Open the session in this role, for response-profile purposes —
+        /// `orchestrator`, `worker`, `reviewer`, `explainer`, or
+        /// `interactive`.
+        ///
+        /// A spawned worker never inherits a communication style from
+        /// whatever started it: its profile is resolved here, explicitly, and
+        /// recorded in the launch log.
+        #[arg(long, value_name = "ROLE")]
+        response_role: Option<String>,
+
         /// Which launch profile to resolve the session through.
         ///
         /// Names a profile configured in `.glasshouse/config.toml` or the
@@ -234,6 +303,26 @@ pub enum Command {
         /// Optional when exactly one harness is enabled. With several
         /// enabled, Glasshouse asks rather than guessing.
         harness: Option<String>,
+
+        /// Open the session with this response profile, by preset name.
+        ///
+        /// This is the session layer of the response-profile precedence
+        /// chain: it wins over the role's default, this project's
+        /// configuration and your user default, and loses to nothing but a
+        /// task override. `glasshouse response --session <name>` prints
+        /// exactly what a session started this way would resolve to.
+        #[arg(long, value_name = "NAME")]
+        response_profile: Option<String>,
+
+        /// Open the session in this role, for response-profile purposes —
+        /// `orchestrator`, `worker`, `reviewer`, `explainer`, or
+        /// `interactive`.
+        ///
+        /// A spawned worker never inherits a communication style from
+        /// whatever started it: its profile is resolved here, explicitly, and
+        /// recorded in the launch log.
+        #[arg(long, value_name = "ROLE")]
+        response_role: Option<String>,
 
         /// Which launch profile to resolve the session through.
         ///
@@ -367,6 +456,8 @@ mod tests {
         .unwrap();
         let Some(Command::Launch {
             harness,
+            response_profile,
+            response_role,
             profile,
             from_checkpoint,
             headless,
@@ -377,6 +468,11 @@ mod tests {
         };
         assert_eq!(harness.as_deref(), Some("claude-code"));
         assert_eq!(profile, None);
+        // Opt-in like every other launch flag: a launch that names no
+        // response profile and no role leaves the harness's own
+        // communication behaviour untouched.
+        assert_eq!(response_profile, None);
+        assert_eq!(response_role, None);
         // Opt-in, like `--headless`: a launch that does not name a checkpoint
         // is the plain launch it has always been.
         assert_eq!(from_checkpoint, None);

@@ -42,6 +42,8 @@
 //! either — an adapter is handed variable *names* and never a value, so the
 //! boundary is structural rather than a habit.
 
+pub mod response;
+
 use std::ffi::OsString;
 use std::fmt;
 

@@ -45,6 +45,7 @@
 //! guard, not just a string search.
 
 pub mod pairing;
+pub mod response;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -635,6 +636,24 @@ pub struct ProviderConfig {
     /// [`ProviderConfig::cost_of`], the one place that answer is computed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     free_models: Vec<String>,
+    /// A prompt transformation this backend performs on the way through —
+    /// Phase 9K line 609.
+    ///
+    /// **Backend metadata a person records, never something Glasshouse does.**
+    /// Line 608 forbids gateway-side system-prompt rewriting from being the
+    /// default way a response profile is applied, and nothing in Glasshouse
+    /// writes this field: `crate::harness::response::apply` cannot reach a
+    /// gateway at all. What this exists for is the case where a user's own
+    /// gateway or router already rewrites prompts, and a session's
+    /// instructions therefore arrive at the model altered by something
+    /// Glasshouse did not do. `glasshouse response` surfaces it with that
+    /// warning attached, which is the whole of line 609: an unsurfaced
+    /// transformation is exactly how a harness's own instructions get
+    /// silently rewritten and nobody can tell.
+    ///
+    /// Free text, because it describes somebody else's software.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt_transform: Option<String>,
 }
 
 /// Why a stored [`ProviderConfig`] could not be turned into a
@@ -742,6 +761,7 @@ impl ProviderConfig {
             headers: Vec::new(),
             enabled: true,
             free_models: Vec::new(),
+            prompt_transform: None,
         }
     }
 
@@ -816,6 +836,18 @@ impl ProviderConfig {
 
     pub fn set_free_models(&mut self, models: Vec<String>) -> &mut Self {
         self.free_models = models;
+        self
+    }
+
+    /// What this backend does to a prompt on the way through, as the user
+    /// described it — Phase 9K line 609. `None` means nothing was declared,
+    /// which is not the same as "nothing happens".
+    pub fn prompt_transform(&self) -> Option<&str> {
+        self.prompt_transform.as_deref()
+    }
+
+    pub fn set_prompt_transform(&mut self, transform: Option<String>) -> &mut Self {
+        self.prompt_transform = transform;
         self
     }
 
@@ -1597,6 +1629,12 @@ pub struct UserConfig {
     /// pairing has no `[pairing]` table in their file at all.
     #[serde(default, skip_serializing_if = "pairing::PairingConfig::is_unset")]
     pairing: pairing::PairingConfig,
+    /// Response-profile configuration — Phase 9K lines 593–597. Skipped when
+    /// empty for the same reason `pairing` is: a user who never chose a
+    /// response profile has no `[response]` table, and Glasshouse applies
+    /// nothing to their harness.
+    #[serde(default, skip_serializing_if = "response::ResponseConfig::is_unset")]
+    response: response::ResponseConfig,
 }
 
 impl Default for UserConfig {
@@ -1609,6 +1647,7 @@ impl Default for UserConfig {
             providers: ProviderTable::default(),
             routing: RoutingConfig::default(),
             pairing: pairing::PairingConfig::default(),
+            response: response::ResponseConfig::default(),
         }
     }
 }
@@ -1664,6 +1703,14 @@ impl UserConfig {
 
     pub fn pairing_mut(&mut self) -> &mut pairing::PairingConfig {
         &mut self.pairing
+    }
+
+    pub fn response(&self) -> &response::ResponseConfig {
+        &self.response
+    }
+
+    pub fn response_mut(&mut self) -> &mut response::ResponseConfig {
+        &mut self.response
     }
 
     /// Load the user-level configuration file named by `paths`.
@@ -1725,6 +1772,10 @@ pub struct ProjectConfig {
     /// [`EffectiveConfig::pairing_overrides`].
     #[serde(default, skip_serializing_if = "pairing::PairingConfig::is_unset")]
     pairing: pairing::PairingConfig,
+    /// A project may set its own response profile, and it reaches no other
+    /// project — line 597. See `crate::config::response`'s own header.
+    #[serde(default, skip_serializing_if = "response::ResponseConfig::is_unset")]
+    response: response::ResponseConfig,
 }
 
 impl Default for ProjectConfig {
@@ -1736,6 +1787,7 @@ impl Default for ProjectConfig {
             providers: ProviderTable::default(),
             routing: RoutingConfig::default(),
             pairing: pairing::PairingConfig::default(),
+            response: response::ResponseConfig::default(),
         }
     }
 }
@@ -1783,6 +1835,14 @@ impl ProjectConfig {
 
     pub fn pairing_mut(&mut self) -> &mut pairing::PairingConfig {
         &mut self.pairing
+    }
+
+    pub fn response(&self) -> &response::ResponseConfig {
+        &self.response
+    }
+
+    pub fn response_mut(&mut self) -> &mut response::ResponseConfig {
+        &mut self.response
     }
 }
 

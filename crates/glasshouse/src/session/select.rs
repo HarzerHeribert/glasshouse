@@ -20,6 +20,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::config::{EffectiveConfig, Layer};
+use crate::harness::response::Application;
 use crate::harness::{HarnessAdapter, HookCommand, HookDestination};
 use crate::integrations::{IntegrationId, IntegrationKind};
 use crate::platform::exec::{self, ResolveError, ResolvedExecutable};
@@ -140,11 +141,30 @@ impl HarnessSelection {
         Some(args)
     }
 
-    /// Install lifecycle hooks for `session`, returning the arguments that
-    /// make the harness read them.
+    /// Write the one document Glasshouse owns for this session, and return
+    /// the arguments that make the harness read it.
     ///
-    /// Where the document goes depends on the adapter's declared
-    /// [`HookDestination`]:
+    /// # Why lifecycle hooks and a response profile share one function
+    ///
+    /// Because for Claude Code they share one *file*, and finding that out the
+    /// hard way would have cost a feature silently. Probed on Claude Code
+    /// 2.1.247 on 2026-08-27: `claude --settings A --settings B doctor`
+    /// validates only `B`. A second `--settings` does not merge and does not
+    /// error — **it discards the first**. So a response profile that appended
+    /// its own `--settings` after `install_hooks` had appended one would have
+    /// turned off every lifecycle hook in the session, and nothing would have
+    /// said so.
+    ///
+    /// The rule this encodes: **at most one document per file name, and at
+    /// most one flag pointing at it.** When the adapter's hook installation
+    /// and its response-profile settings name the same file, the profile's
+    /// keys are merged into the hook document and the hook installation's own
+    /// arguments are used once.
+    ///
+    /// # Where the document goes
+    ///
+    /// Unchanged from before, and it is the adapter's declared
+    /// [`HookDestination`] that decides:
     ///
     /// - [`GlasshouseOwned`](HookDestination::GlasshouseOwned) — a directory
     ///   Glasshouse owns, inside the project's own state, never the harness's
@@ -153,54 +173,148 @@ impl HarnessSelection {
     /// - [`ProjectLocal`](HookDestination::ProjectLocal) — a fixed path
     ///   inside the user's own project, because that harness reads hooks from
     ///   nowhere else. Written only when `project_hooks_consent` is `true`;
-    ///   otherwise this creates no file and no directory and returns
-    ///   `Ok(None)`, exactly as if the harness had no hook mechanism at all.
-    ///   A working session with less telemetry is still a working session; a
-    ///   surprise file in the user's repository is not.
+    ///   otherwise this creates no file and no directory for the hooks, and a
+    ///   response profile that needs a settings document gets its own,
+    ///   Glasshouse-owned one. A working session with less telemetry is still
+    ///   a working session; a surprise file in the user's repository is not.
     ///
-    /// `Ok(None)` also covers the ordinary case of a harness with no verified
-    /// hook mechanism, which is not a failure: most of them do not, and a
-    /// session without lifecycle reporting is a perfectly good session.
+    /// An empty result is the ordinary case of a harness with no verified hook
+    /// mechanism and nothing to apply, which is not a failure.
+    pub fn install_session_document(
+        &self,
+        report: &HookCommand,
+        project_hooks_consent: bool,
+        response: &Application,
+    ) -> anyhow::Result<SessionDocument> {
+        let mut args: Vec<OsString> = Vec::new();
+        let mut hooks_installed = false;
+        let installation = self.adapter().hook_installation(report);
+
+        // The hook document, where the adapter declares one and the
+        // destination allows writing it.
+        let hooks_file = match &installation {
+            Some(installation) => {
+                let path = match installation.destination {
+                    HookDestination::GlasshouseOwned => {
+                        std::fs::create_dir_all(report.directory()).with_context(|| {
+                            format!(
+                                "could not create the session directory `{}`",
+                                report.directory().display()
+                            )
+                        })?;
+                        Some(report.file(installation.file_name))
+                    }
+                    HookDestination::ProjectLocal { relative_path } => {
+                        if project_hooks_consent {
+                            let path = report.scope().join(relative_path);
+                            if let Some(parent) = path.parent() {
+                                std::fs::create_dir_all(parent).with_context(|| {
+                                    format!("could not create `{}`", parent.display())
+                                })?;
+                            }
+                            // The first write into someone's repository is not
+                            // a silent event: this is the one place Glasshouse
+                            // ever writes inside the user's own project, and it
+                            // happens only after consent.
+                            tracing::info!(
+                                path = %path.display(),
+                                "writing project-local lifecycle hooks"
+                            );
+                            Some(path)
+                        } else {
+                            None
+                        }
+                    }
+                };
+                path.map(|path| (path, installation.file_name, installation.contents.clone()))
+            }
+            None => None,
+        };
+
+        let profile_file = response.settings_file();
+        let mut profile_keys_written = false;
+
+        if let Some((path, file_name, contents)) = hooks_file {
+            hooks_installed = true;
+            let contents = if profile_file == Some(file_name) && !response.settings().is_empty() {
+                profile_keys_written = true;
+                merge_settings(&contents, response.settings())
+                    .with_context(|| format!("could not compose `{}`", path.display()))?
+            } else {
+                contents
+            };
+            std::fs::write(&path, contents.as_bytes())
+                .with_context(|| format!("could not write `{}`", path.display()))?;
+            args.extend(
+                installation
+                    .as_ref()
+                    .expect("a hook document exists only where an installation did")
+                    .args
+                    .args()
+                    .iter()
+                    .cloned(),
+            );
+        }
+
+        // A response profile whose keys did not ride along with a hook
+        // document gets its own, in the directory Glasshouse owns.
+        if !profile_keys_written
+            && !response.settings().is_empty()
+            && let (Some(file_name), Some(flag)) = (profile_file, response.settings_flag())
+        {
+            std::fs::create_dir_all(report.directory()).with_context(|| {
+                format!(
+                    "could not create the session directory `{}`",
+                    report.directory().display()
+                )
+            })?;
+            let path = report.file(file_name);
+            std::fs::write(&path, merge_settings("{}", response.settings())?.as_bytes())
+                .with_context(|| format!("could not write `{}`", path.display()))?;
+            args.push(OsString::from(flag));
+            args.push(path.into_os_string());
+        }
+
+        // Whatever the profile puts on the command line — an additive
+        // instruction, or a native style a harness selects with a flag.
+        args.extend(response.args().iter().cloned());
+
+        Ok(SessionDocument {
+            args,
+            hooks_installed,
+        })
+    }
+
+    /// [`HarnessSelection::install_session_document`] for a caller with no
+    /// response profile to apply.
+    ///
+    /// # This is a real gap, kept visible rather than hidden
+    ///
+    /// The shell's quick-open (`n`) is the one caller. It resolves no launch
+    /// profile either — it starts a `Native` session with no overlay — so a
+    /// session opened that way gets the harness untouched in every respect,
+    /// not only this one. Closing that means giving the shell a launch profile
+    /// and a response request, which is a change to
+    /// [`mod@crate::shell`] rather than to this file.
     pub fn install_hooks(
         &self,
         report: &HookCommand,
         project_hooks_consent: bool,
     ) -> anyhow::Result<Option<Vec<OsString>>> {
-        let Some(installation) = self.adapter().hook_installation(report) else {
-            return Ok(None);
-        };
-
-        let path = match installation.destination {
-            HookDestination::GlasshouseOwned => {
-                std::fs::create_dir_all(report.directory()).with_context(|| {
-                    format!(
-                        "could not create the session directory `{}`",
-                        report.directory().display()
-                    )
-                })?;
-                report.file(installation.file_name)
-            }
-            HookDestination::ProjectLocal { relative_path } => {
-                if !project_hooks_consent {
-                    return Ok(None);
-                }
-                let path = report.scope().join(relative_path);
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .with_context(|| format!("could not create `{}`", parent.display()))?;
-                }
-                // The first write into someone's repository is not a silent
-                // event: this is the one place Glasshouse ever writes inside
-                // the user's own project, and it happens only after consent.
-                tracing::info!(path = %path.display(), "writing project-local lifecycle hooks");
-                path
-            }
-        };
-
-        std::fs::write(&path, installation.contents.as_bytes())
-            .with_context(|| format!("could not write `{}`", path.display()))?;
-
-        Ok(Some(installation.args.args().to_vec()))
+        let document = self.install_session_document(
+            report,
+            project_hooks_consent,
+            &Application::none(
+                "this launch path resolves no response profile, so the harness's own \
+                 communication behaviour is untouched",
+            ),
+        )?;
+        // `Some(vec![])` and `None` are *different answers* here, and Codex is
+        // why: it finds `.codex/hooks.json` itself, so a successful
+        // installation contributes no arguments at all. Deriving the `Option`
+        // from whether the argument list is empty would report that as "no
+        // hooks installed".
+        Ok(document.hooks_installed.then_some(document.args))
     }
 
     /// Whether this harness lets Glasshouse choose its native session
@@ -221,6 +335,44 @@ impl HarnessSelection {
     pub fn into_executable(self) -> ResolvedExecutable {
         self.executable
     }
+}
+
+/// What [`HarnessSelection::install_session_document`] wrote and composed.
+///
+/// Two fields rather than one, because `args` alone cannot answer "were hooks
+/// installed": a Codex installation succeeds and contributes no arguments,
+/// since Codex finds its own `.codex/hooks.json`. A caller that inferred
+/// installation from a non-empty argument list would report that as a failure.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionDocument {
+    /// Arguments to put in front of the harness's own.
+    pub args: Vec<OsString>,
+    /// Whether a lifecycle-hook document was actually written.
+    pub hooks_installed: bool,
+}
+
+/// `document` with `keys` set on its top-level object.
+///
+/// A real JSON parse rather than string splicing, because the hook document
+/// this merges into is nested and a textual insertion would be one escaped
+/// quote away from writing a document the harness silently ignores.
+///
+/// An existing key is replaced. Nothing else in the document is touched — in
+/// particular the `hooks` map an adapter composed is carried through
+/// unchanged, which is the whole reason the two share a file.
+fn merge_settings(document: &str, keys: &[(&'static str, String)]) -> anyhow::Result<String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(document).context("the harness settings document is not JSON")?;
+    let object = value
+        .as_object_mut()
+        .context("the harness settings document is not a JSON object")?;
+    for (key, setting) in keys {
+        object.insert(
+            (*key).to_owned(),
+            serde_json::Value::String(setting.clone()),
+        );
+    }
+    Ok(format!("{}\n", serde_json::to_string_pretty(&value)?))
 }
 
 /// Why a session could not select a harness or executable.

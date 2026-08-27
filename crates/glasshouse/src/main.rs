@@ -8,6 +8,7 @@ use glasshouse::checkpoint::{
     Checkpoint, CheckpointReason, CheckpointStore, Handoff, ProjectCheckpoints, Stored,
 };
 use glasshouse::cli::CheckpointCommand;
+use glasshouse::config::response::{ResponseProfileEntry, ResponseRequest};
 use glasshouse::config::{self, EffectiveConfig, ProjectConfig, UserConfig};
 use glasshouse::events::{
     EventBus, EventLog, LifecycleEvent, Observation, ProcessExit, TurnOutcome,
@@ -16,6 +17,7 @@ use glasshouse::integrations::Discovery;
 use glasshouse::launch::HarnessLaunch;
 use glasshouse::onboarding;
 use glasshouse::platform::HostPlatform;
+use glasshouse::profile::response::{Dimension, Role as ResponseRole};
 use glasshouse::pty::ExitStatus;
 use glasshouse::session;
 use glasshouse::session::{
@@ -92,6 +94,37 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 config::pairing::report(&effective, model.as_deref(), harness.as_deref())
             );
         }
+        Some(Command::Response {
+            role,
+            session,
+            verbosity,
+            audience,
+            narration,
+            evidence,
+            format,
+        }) => {
+            let user = UserConfig::load(runtime.paths())?;
+            let project = config::load_project_config(runtime.project())?;
+            let effective = EffectiveConfig::new(&user, project.as_ref());
+            let request = match response_request(
+                role.as_deref(),
+                session.clone(),
+                [
+                    (Dimension::Verbosity, verbosity.clone()),
+                    (Dimension::Audience, audience.clone()),
+                    (Dimension::Narration, narration.clone()),
+                    (Dimension::Evidence, evidence.clone()),
+                    (Dimension::Format, format.clone()),
+                ],
+            ) {
+                Ok(request) => request,
+                Err(err) => {
+                    eprintln!("glasshouse: {err}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            };
+            print!("{}", config::response::report(&effective, &request));
+        }
         Some(Command::Sessions) => {
             print!("{}", session_report(&runtime)?);
         }
@@ -100,6 +133,8 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         // only ever be made here, once, so the two can never diverge.
         Some(Command::Launch {
             harness,
+            response_profile,
+            response_role,
             profile,
             from_checkpoint,
             headless,
@@ -107,16 +142,27 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         })
         | Some(Command::Run {
             harness,
+            response_profile,
+            response_role,
             profile,
             from_checkpoint,
             headless,
             harness_args,
         }) => {
+            let response =
+                match response_request(response_role.as_deref(), response_profile.clone(), []) {
+                    Ok(request) => request,
+                    Err(err) => {
+                        eprintln!("glasshouse: {err}");
+                        return Ok(ExitCode::FAILURE);
+                    }
+                };
             return launch_session(
                 &runtime,
                 harness.as_deref(),
                 profile.as_deref(),
                 from_checkpoint.as_deref(),
+                &response,
                 *headless,
                 harness_args,
             );
@@ -219,11 +265,46 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
 /// Setup is deliberately not triggered here. A user who has named a harness
 /// has already said what they want; interrupting that with a first-run wizard
 /// would be answering a question they did not ask.
+/// A [`ResponseRequest`] from the command line, refusing an unknown role by
+/// name.
+///
+/// A role is refused rather than reported, because a role selects which
+/// *defaults* apply: a mistyped `--response-role reviwer` that fell back to
+/// `interactive` would silently give a session the wrong communication policy,
+/// and the user would have no way to tell. An axis value is different — it is
+/// carried through and reported by name if this build does not know it, which
+/// is the visible-degradation rule the rest of the configuration follows.
+fn response_request(
+    role: Option<&str>,
+    session_preset: Option<String>,
+    axes: impl IntoIterator<Item = (Dimension, Option<String>)>,
+) -> anyhow::Result<ResponseRequest> {
+    let role = match role {
+        Some(slug) => Some(ResponseRole::from_slug(slug).ok_or_else(|| {
+            anyhow::anyhow!(
+                "`{slug}` is not a role Glasshouse knows; the roles are: {}",
+                ResponseRole::names()
+            )
+        })?),
+        None => None,
+    };
+    let mut task = ResponseProfileEntry::default();
+    for (dimension, value) in axes {
+        task.set_axis(dimension, value);
+    }
+    Ok(ResponseRequest {
+        role,
+        session_preset,
+        task,
+    })
+}
+
 fn launch_session(
     runtime: &Runtime,
     harness: Option<&str>,
     profile_name: Option<&str>,
     from_checkpoint: Option<&str>,
+    response: &ResponseRequest,
     headless: bool,
     harness_args: &[String],
 ) -> anyhow::Result<ExitCode> {
@@ -231,6 +312,31 @@ fn launch_session(
     let project = config::load_project_config(runtime.project())?;
     let effective = EffectiveConfig::new(&user, project.as_ref());
     let selection = session::select::select(harness, effective)?;
+
+    // Phase 9K: the response profile is resolved *here*, on the production
+    // launch path, through the same `EffectiveConfig::response_profile`
+    // `glasshouse response` prints — so what a user is shown and what a
+    // session gets cannot disagree. Line 617 is why it happens at session
+    // creation rather than per turn: the instruction becomes part of the
+    // session's system prefix, and moving it later would invalidate the
+    // prompt cache on every turn.
+    let response_profile = effective.response_profile(response);
+    for problem in response_profile.problems() {
+        // Reported, never guessed at — see `ResponseProfileEntry`.
+        eprintln!("glasshouse: {problem}");
+    }
+    // Line 605: a session's response profile is always explicit. A worker
+    // does not inherit a communication style from whatever started it; the
+    // role was resolved above and the mechanism is recorded below.
+    let response_application =
+        glasshouse::harness::response::apply(selection.adapter(), response_profile.resolved());
+    tracing::info!(
+        harness = selection.id().slug(),
+        profile = %config::response::one_line(&response_profile),
+        mechanism = response_application.mechanism().category(),
+        applied = %response_application.mechanism().describe(),
+        "resolved the session's response profile"
+    );
 
     // Resolve the launch profile *before* anything is recorded or started.
     // A refusal here must cost nothing: no session record, no process. See
@@ -385,7 +491,13 @@ fn launch_session(
     let project_hooks_consent = effective.project_hooks(selection.id()).value;
     args.splice(
         0..0,
-        install_hooks(runtime, &selection, &record.id, project_hooks_consent),
+        install_session_document(
+            runtime,
+            &selection,
+            &record.id,
+            project_hooks_consent,
+            &response_application,
+        ),
     );
     let launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
     // The overlay is the only thing that may put its own arguments or
@@ -706,11 +818,12 @@ fn mechanism_summary(overlay: &glasshouse::profile::LaunchOverlay) -> String {
 /// Glasshouse knows less about, which is a smaller loss than refusing to start
 /// a session the user asked for because a configuration file could not be
 /// written.
-fn install_hooks(
+fn install_session_document(
     runtime: &Runtime,
     selection: &session::HarnessSelection,
     id: &session::SessionId,
     project_hooks_consent: bool,
+    response: &glasshouse::harness::response::Application,
 ) -> Vec<std::ffi::OsString> {
     let program = match std::env::current_exe() {
         Ok(program) => program,
@@ -727,11 +840,14 @@ fn install_hooks(
         runtime.paths().data_dir(),
         runtime.paths().config_dir(),
     );
-    match selection.install_hooks(&report, project_hooks_consent) {
-        Ok(Some(args)) => args,
-        Ok(None) => Vec::new(),
+    match selection.install_session_document(&report, project_hooks_consent, response) {
+        Ok(document) => document.args,
         Err(err) => {
-            tracing::warn!(session = %id, error = %err, "could not install lifecycle hooks");
+            tracing::warn!(
+                session = %id,
+                error = %err,
+                "could not write the session's harness document"
+            );
             Vec::new()
         }
     }
@@ -2254,6 +2370,7 @@ mod tests {
             Some("claude-code"),
             Some("gateway"),
             None,
+            &ResponseRequest::default(),
             false,
             &[],
         )
@@ -2285,6 +2402,7 @@ mod tests {
             Some("claude-code"),
             Some("yolo"),
             None,
+            &ResponseRequest::default(),
             false,
             &[],
         )

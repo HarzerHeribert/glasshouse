@@ -1,0 +1,374 @@
+# Capability evidence — phase 9k
+
+Split from the single evidence ledger this project used to keep at the repository root (see `docs/product/evidence/README.md` for the full index and the entry template / evidence rules that used to precede it).
+
+### Phase 9K — Profile model, 11 of 11 (lines 587–597)
+
+Contract: Given a project, a role and a session, Glasshouse resolves a
+*communication policy* — five independent axes, resolved one axis at a time
+down the six-layer chain line 596 names — and can say for each axis which layer
+supplied it. No axis, no preset and no configuration can reduce what a session
+reports, and a project's answer never reaches another project.
+
+State: COMPLETE
+
+Production evidence:
+- `crates/glasshouse/src/profile/response.rs` — the domain model. Five enums,
+  one per axis; `ResponseProfile` with private fields and one accessor per
+  axis; `Preset`, `Role`, `PrecedenceLayer`, `PrecedenceStack`, `resolve`.
+  Pure: it imports no configuration and no adapter, for the reason
+  `crate::profile`'s own module header gives.
+- `crates/glasshouse/src/config/response.rs: EffectiveConfig::response_stack`
+  — the one place the six layers are filled in, and the **only** builder of a
+  `PrecedenceStack` in the crate. `glasshouse response` and `glasshouse
+  launch` both go through it, so what a user is shown and what a session gets
+  cannot disagree.
+- `crates/glasshouse/src/config/response.rs: report` — **the production
+  caller**, and the single line `main.rs`'s `Command::Response` arm runs.
+- `crates/glasshouse/src/cli.rs: Command::Response` and
+  `crates/glasshouse/src/main.rs` — `glasshouse response [--role ROLE]
+  [--session NAME] [--verbosity|--audience|--narration|--evidence|--format
+  VALUE]`, the surface a person runs.
+- `crates/glasshouse/src/main.rs: launch_session` — the **second** production
+  caller, on the real launch path: it resolves the same profile and hands the
+  result to `install_session_document`. A resolved profile is never something
+  only a report has seen.
+- `crates/glasshouse/src/config/response.rs: ResponseConfig` — the
+  `[response]` and `[response.roles.<role>]` tables, in both the user and the
+  project layer.
+
+Line by line:
+- **587** — `ResponseProfile` has five fields and none of them is effort,
+  permission mode, diligence or tool access. Those live elsewhere
+  (`ApprovalSelection` is the permission one) and there is no path from a
+  response profile to any of them.
+  `directives_never_mention_effort_permissions_or_tools` renders all 324
+  combinations and fails if the word `permission`, `tool`, `effort` or `skip`
+  ever appears in the text a harness is handed.
+- **588–592** — `Verbosity`, `Audience`, `Narration`, `EvidenceDetail`,
+  `AnswerFormat`: five types with no conversion between them, five private
+  fields, five accessors, and five directive functions each of which takes
+  only its own axis's type — so `narration_directive` *cannot* consult
+  verbosity, because it was never given one. Proven by M1 and M1b.
+- **593** — `Preset` holds five axis values, a name and a description, and has
+  no field that could hold a harness's own vocabulary. Translating a preset
+  into what one harness calls it is `harness::response`'s job.
+- **594** — `concise-technical` is `Concise` verbosity and `Silent` narration,
+  which is "leads with outcomes, suppresses routine narration". The third
+  clause is not a property of that row: `REQUIRED_REPORTS` is a constant,
+  `required_reports()` returns it without reading `self`, and `directives()`
+  appends `floor_directive()` unconditionally.
+  `every_profile_reports_changed_files_verification_risks_and_blockers`
+  enumerates all 324 combinations rather than sampling.
+- **595** — `Role::default_preset` gives five separate answers; a
+  `[response.roles.<role>]` table overrides any of them, project over user.
+  `each_role_resolves_to_its_own_default_through_the_binary` reads five
+  reports out of the binary and requires at least four distinct profiles.
+- **596** — six layers, in that order, resolved per axis.
+  `every_one_of_the_six_precedence_layers_can_win_in_the_binary` silences them
+  from the top one at a time and checks the next one down takes over, all
+  through `config::response::report`. Six of the mutations below delete one
+  layer each.
+- **597** — a project's `[response]` table is read from that project's own
+  `.glasshouse/config.toml` by `load_project_config`, and `EffectiveConfig`
+  holds exactly one of them.
+  `a_projects_response_profile_does_not_reach_another_project` builds two
+  project roots against one user configuration file and resolves in both.
+
+### Phase 9K — Harness-native application, 9 of 9 (lines 601–609)
+
+Contract: Given a resolved response profile, Glasshouse prefers the harness's
+own communication-style mechanism where one has been read from that harness and
+can express the profile without weakening its coding instructions; otherwise it
+adds an instruction beside the harness's own system prompt; otherwise it
+applies nothing and says why. It never replaces a native system prompt and
+never rewrites a prompt at the gateway.
+
+State: COMPLETE
+
+Production evidence:
+- `crates/glasshouse/src/harness/response.rs: apply` — line 601 as a function:
+  nothing-was-asked-for, then native, then additive, then a refusal that names
+  the gap. `AppliedMechanism` has exactly three variants and **no variant
+  meaning "replaced"**, so nothing downstream can record a replacement and
+  nothing upstream can perform one.
+- `crates/glasshouse/src/harness/mod.rs: HarnessAdapter::native_response_style`
+  and `HarnessAdapter::additive_response_injection` — line 602's seam. Both
+  default to `None`, which is the fail-closed answer `approval_args` and
+  `direct_provider_launch` already give.
+- `crates/glasshouse/src/harness/claude_code.rs: BUILT_IN_OUTPUT_STYLES` and
+  `closest_output_style` — the only place in the crate that knows the words
+  "output style", which is line 603.
+- `crates/glasshouse/src/session/select.rs: install_session_document` — what
+  `main.rs`'s launch path calls. It writes **one** document per file name and
+  emits **one** flag pointing at it.
+- `crates/glasshouse/src/config/mod.rs: ProviderConfig::prompt_transform` —
+  line 609's backend metadata, surfaced by `glasshouse response` with the
+  warning attached. Nothing in Glasshouse ever writes it.
+
+Line by line:
+- **601** — `apply` asks for a native mechanism first. The *"without weakening
+  coding instructions"* half is answered inside the adapter, which is the only
+  thing that knows its own styles: `closest_output_style` filters on
+  `keeps_coding_instructions && communication_only`, and two of Claude Code's
+  four built-in styles fail the second test.
+- **602** — a trait method on `HarnessAdapter`, returning the harness's own
+  vocabulary with the evidence it was read from.
+- **603** — `OutputStyle` is a private type in `claude_code.rs`, unreachable
+  from anywhere else in the crate. There is no Glasshouse-level enum of style
+  names and no "personality" concept.
+- **604** — `AppliedMechanism::{Native, Additive, NotApplied}`, printed by
+  `glasshouse response` per harness and logged at launch.
+  `the_applied_record_names_the_mechanism_that_actually_reached_the_child`
+  checks the record against what was delivered rather than against itself.
+- **605** — every Glasshouse-launched session resolves its own role and its
+  own profile; the resolution has no "inherit" state, and `--response-role
+  worker` is on `launch` and `run`. `a_worker_gets_its_profile_explicitly_
+  rather_than_inheriting_one` requires the worker's answer to differ from the
+  interactive one, so "explicit" is not a synonym for "whatever the parent
+  had". **See "Missing evidence" — Glasshouse spawns no subagents of its own,
+  so this is the reachable half of the line.**
+- **606** — the settings key is merged into the document rather than replacing
+  it, `--settings` loads *additional* settings, and all four of Claude Code's
+  built-in styles declare `keepCodingInstructions: true`. The lifecycle hooks
+  written into the same document survive the merge, and
+  `the_launch_carries_exactly_one_settings_flag_and_keeps_the_lifecycle_hooks`
+  fails on a build where they do not.
+- **607** — `claude --help` documents `--system-prompt` (replaces) beside
+  `--append-system-prompt` (appends). Only the second is declared by the
+  adapter, and `the_launch_appends_to_the_system_prompt_and_never_replaces_it`
+  fails on any composed argv containing the first.
+- **608** — `harness/response.rs` imports nothing from `crate::gateway` and
+  has no path into it; the report says so in as many words with no
+  transformation configured.
+- **609** — `prompt_transform` on a provider, layered project-over-user, is
+  printed with the sentence *"This is something your backend does, not
+  something Glasshouse does. It may interact with the harness's own
+  instructions and with the profile above."*
+
+Regression evidence (macOS, `cargo test -p glasshouse`; local gate below):
+- `crates/glasshouse/tests/response_profiles.rs` — nineteen tests, **every one
+  entering through `config::response::report` or
+  `HarnessSelection::install_session_document`** against real configuration
+  files on a real filesystem, so a test cannot pass against a build whose
+  configuration layering or document composition has been deleted (§35).
+- `crates/glasshouse/src/profile/response.rs` unit tests — fourteen, including
+  two that enumerate all 324 axis combinations rather than sampling.
+- `crates/glasshouse/src/harness/response.rs` unit tests — seven, over every
+  adapter and every preset.
+- `crates/glasshouse/src/harness/claude_code.rs` unit tests — five, on the
+  declared style table and the two styles Glasshouse may never select.
+
+Mutation evidence — nineteen run, nineteen killed, each named test `ok` before,
+`FAILED` mutated, `ok` restored:
+
+| id | mutation | test | result |
+|---|---|---|---|
+| M1 | terse verbosity silently sets silent narration | `the_five_dimensions_are_independent` | FAILED |
+| M1b | concise verbosity silently sets minimal evidence | `the_five_axes_are_reported_separately_and_one_never_moves_another` | FAILED |
+| M2 | a terse or concise profile drops the floor sentence | `every_profile_reports_changed_files_verification_risks_and_blockers` | FAILED |
+| M3 | `required_reports` shrinks when evidence is minimal | `no_axis_can_reduce_the_required_reports` | FAILED |
+| M4 | the task-override layer is never set | `every_one_of_the_six_precedence_layers_can_win_in_the_binary` | FAILED |
+| M5 | the session layer is never set | same | FAILED |
+| M6 | the role layer is never set | same | FAILED |
+| M7 | the project layer is never set | same | FAILED |
+| M8 | the user-default layer is never set | same | FAILED |
+| M9 | an axis that reaches the bottom is attributed to the user default | same | FAILED |
+| M10 | the record says `native` and delivers no settings key | `the_applied_record_names_the_mechanism_that_actually_reached_the_child` | FAILED |
+| M11 | the native mechanism is never asked for | `the_report_names_the_mechanism_each_harness_would_apply` | FAILED |
+| M12 | the launch drops the profile's own arguments | `no_configured_profile_can_stop_the_binary_reporting_the_four_that_matter` | FAILED |
+| M13 | the style keys are not merged into the hook document | `the_launch_carries_exactly_one_settings_flag_and_keeps_the_lifecycle_hooks` | FAILED |
+| M14 | the project layer reads the user's table | `a_projects_response_profile_does_not_reach_another_project` | FAILED |
+| M15 | a concise profile maps to the `Learning` style | `the_report_names_the_mechanism_each_harness_would_apply` | FAILED |
+| M16 | M15 plus the `communication_only` filter removed | `no_profile_ever_selects_a_style_that_changes_what_the_agent_does` | FAILED |
+| M17 | every role returns the same default preset | `each_role_resolves_to_its_own_default_through_the_binary` | FAILED |
+| M18 | `report` ignores the request it was given | `every_one_of_the_six_precedence_layers_can_win_in_the_binary` | FAILED |
+
+M12, M13 and M18 are the §35 group: they mutate the *call*, on the production
+path, rather than the callee. M16 is the only two-edit mutation, because the
+property it attacks needs both a mapping that reaches a forbidden style and the
+guard that stops it — either alone is invisible, which is §41's warning about a
+mutation weak in the same way as its test.
+
+**One mutation survived and was a finding, not a gap.** M1b, in its first form,
+survived because `ResolvedProfile` stored the five resolved *values* a second
+time beside the sources, and the report printed the stored copy. A build in
+which `ResponseProfile::new` forced one axis from another therefore printed the
+honest value and shipped the mutated one. `ResolvedProfile` now stores the
+profile once and derives the axis list from it; there is no second copy to
+disagree.
+
+Failure/isolation evidence:
+- `a_value_this_build_does_not_know_is_reported_rather_than_guessed_at` — a
+  `verbosity = "chatty"` is named in the report and the axis falls through to
+  the layer below, never to a silent default. A typo that quietly became
+  `standard` would be a communication policy the user never chose.
+- `a_role_table_this_build_does_not_know_is_named_rather_than_ignored` and
+  `a_session_preset_the_build_does_not_know_is_refused_by_name`.
+- `an_unconfigured_project_composes_a_launch_that_says_nothing_about_
+  communication` — with nothing configured, the launch carries no
+  `--append-system-prompt` and the settings document carries no `outputStyle`.
+  An unconfigured Glasshouse leaves the harness exactly as it found it.
+- `an_adapter_that_declares_nothing_says_so_rather_than_inventing_a_mechanism`
+  — six of seven harnesses refuse, by name.
+
+Platform/external evidence (Claude Code 2.1.247, installed on the development
+machine, read on 2026-08-27; no model was called for any of it):
+- `claude --help` documents `--append-system-prompt <prompt>` — "Append a
+  system prompt to the default system prompt" — beside `--system-prompt
+  <prompt>` — "System prompt to use for the session". The declared mechanism is
+  the first.
+- The settings schema inside the installed bundle declares
+  `outputStyle: …optional().describe("Controls the output style for assistant
+  responses")`.
+- The built-in style table inside the same bundle declares four styles, each
+  with `source: "built-in"` and `keepCodingInstructions: true`: `Concise`
+  ("responds tersely, leading with results and skipping preamble and
+  narration"), `Explanatory` ("explains its implementation choices and codebase
+  patterns"), `Learning` ("pauses and asks you to write small pieces of code
+  for hands-on practice") and `Proactive` ("executes immediately, minimizes
+  interruptions, and prefers action over planning").
+- **The key is reachable through `--settings`, verified against the host it is
+  cited for.** `claude --settings '{"outputStyle": 42}' doctor` answers
+  `Invalid settings — … › outputStyle: Expected string, but received number`.
+  A control: the same command with a valid string produces no complaint.
+- **`--settings` is not repeatable; the last one wins.** `claude --settings
+  '{"outputStyle": 42}' --settings '{"theme": 99}' doctor` reports nothing,
+  while the same two flags in the opposite order report the `outputStyle`
+  error. This is why the response profile's settings key is merged into the
+  hook document rather than given a `--settings` of its own: a second flag
+  would have silently switched off every lifecycle hook in the session.
+- End-to-end against the shipped binary, with `claude-code`'s executable
+  configured to a script that recorded its argv: `glasshouse run --headless
+  --response-profile concise-technical` handed the child exactly
+  `--settings <one path> --append-system-prompt <the floor sentence>
+  --session-id <uuid> --permission-mode auto`, and the document at that path
+  contained the four lifecycle hooks **and** `"outputStyle": "Concise"`. No
+  `--system-prompt` appeared.
+
+Missing evidence:
+- **Six of seven harnesses declare no communication-style mechanism and no
+  additive mechanism, so `apply` refuses for them.** That is the honest state
+  of the declarations, not a gap in this module: `agy --help`, `codex --help`,
+  `cursor-agent --help`, `opencode --help` and `hermes --help` were each read
+  in full for Phase 9J and none documented one, and Pi is not installed. Any of
+  the six becomes usable by adding one `AdditiveInjection` to its adapter.
+- **Line 605's subagent half is unreachable.** Glasshouse spawns no subagents:
+  `Capabilities::subagents` is a declaration *about* a harness, and nothing in
+  the binary starts one. What is closed is that every session Glasshouse itself
+  opens resolves its profile explicitly, including a worker one. If Glasshouse
+  ever spawns a subagent, that spawn must resolve a profile the same way.
+- The shell's quick-open (`n`) applies no response profile. It resolves no
+  launch profile either, so a session opened that way gets the harness
+  untouched in every respect; closing it is a change to `crate::shell`, which
+  this package did not own.
+
+---
+
+### Phase 9K — Additive fallback and cache behavior, assessed (lines 613–623)
+
+State: NOT ATTEMPTED AS A GROUP — assessed, with four lines argued closed by
+work group 2 required and the orchestrator to decide.
+
+Group 2's line 604 requires recording that an *additive instruction* was
+applied, which is only meaningful if the additive path can run. It can:
+`--append-system-prompt` is declared on the Claude Code adapter and is reached
+by every profile no built-in output style expresses. Building that path
+necessarily built part of this group.
+
+- **613** ("a small stable additive response contract") — arguably closed.
+  `ResponseProfile::directives` is that contract: six sentences, one per axis
+  plus the floor, composed in one function so a terse profile cannot grow a
+  shorter variant. Against: the map may mean a contract shared across harnesses
+  and versioned, which this is not called.
+- **614** ("state that concision must not reduce analysis, verification,
+  diagnostics, error reporting, or checkpoint completeness") — arguably closed,
+  and this is the strongest of the four: `floor_directive()` says exactly that,
+  in those words, in every instruction Glasshouse writes, and
+  `no_instruction_glasshouse_writes_omits_the_floor` fails otherwise.
+- **615** ("inject through the safest adapter-supported session-start,
+  append-system, … mechanism") — arguably closed for the one harness that
+  declares a mechanism; open in the sense that six declare none.
+- **616** ("avoid repeatedly injecting an unchanged contract on every turn") —
+  **true by construction and therefore weak.** The instruction is composed once
+  at session start and there is no per-turn injection path to avoid. §5's own
+  standard suggests a line satisfied by the absence of a mechanism should not
+  be ticked.
+- **617** ("prefer selecting a profile when a session is created so the
+  system-prefix and prompt-cache behaviour stay stable") — the same shape as
+  616, with one difference: this one names a *preference* that was actually
+  exercised. `launch_session` resolves and applies at creation, and the
+  alternative (re-deriving per turn) was available and not taken.
+- **618** ("let adapters declare whether a live profile change is supported,
+  delayed until a new session, or likely to invalidate prompt caching") —
+  **half exists and predates this package.**
+  `HarnessDescription::communication_style` already carries
+  `StyleChange::{InPlace, NewSession}`, and Claude Code declares `NewSession`
+  with evidence. What is missing is the third term: nothing declares
+  prompt-cache invalidation, and nothing reads `StyleChange` today.
+- **619** ("warn before a profile change that requires clearing or recreating a
+  valuable warm session") — **blocked.** There is no in-session profile-change
+  surface to warn from: a profile is selected at launch, and a running session
+  cannot be asked to change it.
+- **620** ("a lightweight in-session communication instruction for a one-turn
+  override") — **blocked on the same thing.** The `TaskOverride` precedence
+  layer exists and is consulted, and `glasshouse response --verbosity …`
+  enters through it, but there is no way to deliver an override into a
+  *running* session. `HarnessAdapter::message` types text at a session and is
+  what such a feature would use.
+- **621** ("preserve raw native terminal output even when Glasshouse offers
+  optional folding") — **not this package, and not blocked by it.** Folding is
+  a TUI capability; `crate::tui` and `crate::shell` own it.
+- **622** ("do not run a second language model to rewrite every final answer")
+  — **true by construction.** Nothing here calls a model; there is no rewriting
+  path to disable.
+- **623** ("keep arbitrary custom prompt additions separate from named response
+  profiles and require explicit user configuration") — **open, and cheap.**
+  `ResponseConfig` has no free-text field and `Preset` cannot hold one, so the
+  separation exists; what does not exist is the arbitrary-addition surface the
+  line says to keep separate *from*.
+
+---
+
+### Phase 9K — Evaluation and safeguards, 0 of 6 (lines 627–632)
+
+State: NOT STARTED — assessed, not attempted.
+
+**Four of the six have no production caller and none can exist in this
+repository today.**
+
+- **627, 628, 629, 630** — all four begin "Measure". Nothing in Glasshouse
+  measures output tokens, time to actionable information, user steering,
+  overrides or cognitive load, and nothing records a per-pairing observation.
+  `grep -rn 'fn score\|Score' crates/glasshouse/src` finds no match, as Phase
+  9J's own assessment recorded on 2026-08-27; the same is true of any
+  measurement seam. These wait on **Phase 47 (observability)** for the
+  measurement channel and on **Phase 51 (evaluation hooks)** for anything to
+  hang an evaluation on. 630 additionally waits on **Phase 33A**, because
+  "separately for each harness-model pairing" is that ledger's key.
+  A profile-effect metric with no metric pipeline is a struct nothing reads —
+  §5, and the packet's own named failure mode.
+- **631** ("allow the user to disable Glasshouse response-profile injection and
+  use the untouched harness default") — **not blocked, and not built.** The
+  untouched harness default is already what an unconfigured Glasshouse
+  produces, and `PrecedenceLayer::HarnessDefault` already means exactly "the
+  harness untouched". What is missing is a way to *select* it above a layer
+  that has said something — a user with `[response] preset = "brief"` cannot
+  turn it off for one project. That is a `disabled = true` key on
+  `ResponseConfig` plus one arm in `response_stack`, perhaps thirty lines. It
+  was left because it is group 4's, not because it is hard.
+- **632** ("keep the active response profile and application mechanism
+  inspectable from session details") — **blocked on a schema migration.**
+  `glasshouse response` shows the profile a session *would* get and the launch
+  log records what one *did* get, but `sessions` has no column for either, so
+  `glasshouse sessions` cannot show it after the fact. Adding
+  `sessions.response_profile` and `sessions.response_mechanism` is an
+  append-only migration 8 in `crates/glasshouse/src/database.rs`, in the shape
+  migration 3 already used for `launch_profile` and `backend_resource`. That
+  file was outside this package's ownership.
+
+Missing evidence:
+- Phase 47: a metrics channel any of 627–630 could write to.
+- Phase 51: evaluation hooks.
+- Phase 33A: per-pairing observation storage, for 630.
+- `crates/glasshouse/src/database.rs` migration 8, for 632.

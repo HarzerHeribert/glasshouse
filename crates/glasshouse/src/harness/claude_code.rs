@@ -11,9 +11,12 @@ use super::{
     ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, CommunicationStyle,
     CredentialPlacement, Declared, DirectProviderPlan, DirectProviderRequest, HarnessAdapter,
     HarnessDescription, HookCommand, HookDestination, HookInstallation, Hooks, Invocation,
-    ModelOverride, SessionIds, StyleChange, Vendor, WireProtocol, pairing::OfficialModelSupport,
+    ModelOverride, SessionIds, StyleChange, Vendor, WireProtocol,
+    pairing::OfficialModelSupport,
+    response::{AdditiveInjection, NativeDelivery, NativeStyle},
 };
 use crate::integrations::IntegrationId;
+use crate::profile::response::{Narration, ResponseProfile, Verbosity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClaudeCode;
@@ -131,6 +134,156 @@ const COMMUNICATION_STYLE: Declared<CommunicationStyle> = Declared::verified(
      2.1.246 `claude --help` documents `--settings <file-or-json>` as a launch option",
 );
 
+/// The name of the settings document Glasshouse writes for a Claude Code
+/// session.
+///
+/// One name, used by [`ClaudeCode::hook_installation`] and by
+/// [`ClaudeCode::native_response_style`], because Claude Code reads **one**
+/// settings document: probed on 2.1.247, `claude --settings A --settings B
+/// doctor` validates only `B`, so a second `--settings` silently discards the
+/// first. Naming the same file from both places is what lets
+/// `crate::session::HarnessSelection::install_session_document` merge them
+/// into one document behind one flag.
+const SETTINGS_FILE_NAME: &str = "claude-settings.json";
+
+/// The settings key that selects a session's output style.
+///
+/// Read from the settings schema inside the Claude Code 2.1.247 bundle:
+/// `outputStyle: ...optional().describe("Controls the output style for
+/// assistant responses")`. Confirmed reachable through `--settings` on the
+/// installed binary without starting a session or calling a model —
+/// `claude --settings '{"outputStyle": 42}' doctor` answers
+/// `Invalid settings ... outputStyle: Expected string, but received number`,
+/// so the key is in the schema the `--settings` document is validated against
+/// and its type is a string.
+const OUTPUT_STYLE_KEY: &str = "outputStyle";
+
+/// One of Claude Code's built-in output styles.
+///
+/// Deliberately a private type in this file. Line 603 requires an output style
+/// to stay an *adapter example* rather than becoming a universal Glasshouse
+/// concept, and this type is unreachable from anywhere else in the crate.
+struct OutputStyle {
+    /// The harness's own name, which is what the settings key takes.
+    name: &'static str,
+    /// The harness's own description of it.
+    description: &'static str,
+    /// Whether selecting it keeps Claude Code's coding instructions.
+    keeps_coding_instructions: bool,
+    /// Whether it governs *communication only*.
+    ///
+    /// The half of line 601 that has to be judged rather than read: two of the
+    /// four built-in styles change what the agent **does**, not how it talks,
+    /// and a response profile that selected one would break the phase's first
+    /// fixed architectural requirement outright.
+    communication_only: bool,
+}
+
+/// Claude Code 2.1.247's four built-in output styles, read from the style
+/// table inside the installed bundle on 2026-08-27. Each entry there carries
+/// `name`, `source: "built-in"`, `description` and `keepCodingInstructions`,
+/// and all four declare `keepCodingInstructions: true`.
+///
+/// `communication_only` is Glasshouse's own judgement of the harness's own
+/// description, and it is where two of these four are ruled out:
+///
+/// - `Learning` — *"Claude pauses and asks you to write small pieces of code
+///   for hands-on practice"* changes the work, not the writing.
+/// - `Proactive` — *"Claude executes immediately, minimizes interruptions, and
+///   prefers action over planning"* is diligence and interruption policy.
+///
+/// Both are recorded rather than omitted, so that "Glasshouse never selects
+/// these two" is a fact a reader can check against the harness's own words
+/// instead of an absence.
+const BUILT_IN_OUTPUT_STYLES: &[OutputStyle] = &[
+    OutputStyle {
+        name: "Concise",
+        description: "Claude responds tersely, leading with results and skipping preamble and \
+                      narration",
+        keeps_coding_instructions: true,
+        communication_only: true,
+    },
+    OutputStyle {
+        name: "Explanatory",
+        description: "Claude explains its implementation choices and codebase patterns",
+        keeps_coding_instructions: true,
+        communication_only: true,
+    },
+    OutputStyle {
+        name: "Learning",
+        description: "Claude pauses and asks you to write small pieces of code for hands-on \
+                      practice",
+        keeps_coding_instructions: true,
+        communication_only: false,
+    },
+    OutputStyle {
+        name: "Proactive",
+        description: "Claude executes immediately, minimizes interruptions, and prefers action \
+                      over planning",
+        keeps_coding_instructions: true,
+        communication_only: false,
+    },
+];
+
+/// Where the output-style declarations above were read from.
+const OUTPUT_STYLE_EVIDENCE: &str = "Claude Code 2.1.247: the settings schema in the installed bundle declares \
+     `outputStyle` as an optional string \"Controls the output style for assistant \
+     responses\", and its built-in style table declares Concise, Explanatory, Learning and \
+     Proactive with `keepCodingInstructions: true`. `claude --settings '{\"outputStyle\": 42}' \
+     doctor` rejects the value by name, so the key reaches the harness through the settings \
+     document. Read on 2026-08-27.";
+
+/// Claude Code's mechanism for adding an instruction beside its own system
+/// prompt.
+///
+/// `--append-system-prompt`, not `--system-prompt`. The two sit next to each
+/// other in `claude --help` and only one of them is line-607 safe:
+/// `--system-prompt <prompt>` is "System prompt to use for the session", while
+/// `--append-system-prompt <prompt>` is "Append a system prompt to the default
+/// system prompt". Glasshouse declares the second and has no way to reach the
+/// first.
+const APPEND_SYSTEM_PROMPT: AdditiveInjection = AdditiveInjection {
+    mechanism: "an instruction appended to the default system prompt with \
+                `--append-system-prompt`",
+    evidence: "`claude --help` on Claude Code 2.1.247: `--append-system-prompt <prompt>` — \
+               \"Append a system prompt to the default system prompt\", read on 2026-08-27",
+    flag: "--append-system-prompt",
+};
+
+/// The built-in output style closest to `profile`, or `None`.
+///
+/// `None` is not a shortcoming: it means no built-in style Glasshouse may
+/// safely select expresses that combination of axes, and the additive
+/// mechanism covers it instead. Only styles that both keep Claude Code's
+/// coding instructions and govern communication only are ever candidates —
+/// see [`BUILT_IN_OUTPUT_STYLES`].
+///
+/// The match reads the harness's own descriptions rather than inventing a
+/// correspondence:
+///
+/// - `Concise` says "responds tersely, leading with results and skipping
+///   preamble and narration", which is a terse-or-concise verbosity *and*
+///   silent narration. Both, because the description claims both, and a style
+///   selected on half of what it says would be applying more than was asked
+///   for.
+/// - `Explanatory` says "explains its implementation choices", which is
+///   `Verbosity::Elaborate`.
+///
+/// Audience, evidence presentation and answer format are not matched on at
+/// all: no built-in style speaks about them, and reading one into a style
+/// would be exactly the invention the rest of this file refuses.
+fn closest_output_style(profile: &ResponseProfile) -> Option<&'static OutputStyle> {
+    let wanted = match (profile.verbosity(), profile.narration()) {
+        (Verbosity::Terse | Verbosity::Concise, Narration::Silent) => "Concise",
+        (Verbosity::Elaborate, _) => "Explanatory",
+        _ => return None,
+    };
+    BUILT_IN_OUTPUT_STYLES
+        .iter()
+        .find(|style| style.name == wanted)
+        .filter(|style| style.keeps_coding_instructions && style.communication_only)
+}
+
 /// The model families Anthropic produces for Claude Code, as `claude --help`
 /// spells them. Families rather than ids: the help text presents these as
 /// aliases for "the latest model" of each line, which is exactly what a
@@ -159,7 +312,7 @@ impl HarnessAdapter for ClaudeCode {
         // each event maps to a list of entries, each entry holds a list of
         // `{type, command, timeout}` hooks. Tool events additionally carry a
         // `matcher`; none of the events below is a tool event, so none does.
-        let file_name = "claude-settings.json";
+        let file_name = SETTINGS_FILE_NAME;
         Some(HookInstallation {
             file_name,
             contents: super::hooks_document(REPORTED_EVENTS, report, HOOK_TIMEOUT_SECONDS),
@@ -279,6 +432,27 @@ impl HarnessAdapter for ClaudeCode {
         }
     }
 
+    fn native_response_style(&self, profile: &ResponseProfile) -> Option<NativeStyle> {
+        let style = closest_output_style(profile)?;
+        Some(NativeStyle {
+            mechanism: "the session's output style, set in the settings document passed with \
+                        `--settings`",
+            selection: style.name,
+            selection_description: style.description,
+            evidence: OUTPUT_STYLE_EVIDENCE,
+            delivery: NativeDelivery::SettingsKey {
+                file_name: SETTINGS_FILE_NAME,
+                flag: "--settings",
+                key: OUTPUT_STYLE_KEY,
+                value: style.name,
+            },
+        })
+    }
+
+    fn additive_response_injection(&self) -> Option<AdditiveInjection> {
+        Some(APPEND_SYSTEM_PROMPT)
+    }
+
     fn describe(&self) -> HarnessDescription {
         HarnessDescription {
             vendor: Declared::verified(
@@ -372,5 +546,143 @@ impl HarnessAdapter for ClaudeCode {
             },
             communication_style: COMMUNICATION_STYLE,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profile::response::{AnswerFormat, Audience, EvidenceDetail};
+
+    /// Every one of the 324 combinations of the five axes.
+    fn every_profile() -> Vec<ResponseProfile> {
+        let mut all = Vec::new();
+        for verbosity in Verbosity::ALL {
+            for audience in Audience::ALL {
+                for narration in Narration::ALL {
+                    for evidence in EvidenceDetail::ALL {
+                        for format in AnswerFormat::ALL {
+                            all.push(ResponseProfile::new(
+                                *verbosity, *audience, *narration, *evidence, *format,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn no_profile_ever_selects_a_style_that_changes_what_the_agent_does() {
+        // `Learning` makes Claude stop and set exercises; `Proactive` makes it
+        // prefer action over planning. Both keep the coding instructions and
+        // both are still forbidden, because a response profile governs
+        // user-facing communication only — the phase's first fixed
+        // architectural requirement.
+        for profile in every_profile() {
+            if let Some(style) = closest_output_style(&profile) {
+                assert!(
+                    style.communication_only,
+                    "{profile:?} selected `{}`, which is not communication policy",
+                    style.name
+                );
+                assert!(
+                    style.keeps_coding_instructions,
+                    "{profile:?} selected `{}`, which would weaken the coding instructions",
+                    style.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_built_in_style_table_matches_what_the_harness_says_about_itself() {
+        // A guard on the declaration rather than on the behaviour: if this
+        // table is ever edited to claim a style Claude Code does not ship, or
+        // to relabel one of the two excluded styles as communication-only, the
+        // change has to be made deliberately here.
+        let names: Vec<&str> = BUILT_IN_OUTPUT_STYLES
+            .iter()
+            .map(|style| style.name)
+            .collect();
+        assert_eq!(names, ["Concise", "Explanatory", "Learning", "Proactive"]);
+        let usable: Vec<&str> = BUILT_IN_OUTPUT_STYLES
+            .iter()
+            .filter(|style| style.communication_only && style.keeps_coding_instructions)
+            .map(|style| style.name)
+            .collect();
+        assert_eq!(
+            usable,
+            ["Concise", "Explanatory"],
+            "exactly two of Claude Code's four built-in styles are communication policy"
+        );
+    }
+
+    #[test]
+    fn a_concise_profile_selects_concise_and_an_elaborate_one_explanatory() {
+        let concise = ResponseProfile::new(
+            Verbosity::Concise,
+            Audience::Technical,
+            Narration::Silent,
+            EvidenceDetail::Standard,
+            AnswerFormat::ChangeSummary,
+        );
+        assert_eq!(closest_output_style(&concise).unwrap().name, "Concise");
+
+        let elaborate = ResponseProfile::new(
+            Verbosity::Elaborate,
+            Audience::Plain,
+            Narration::Milestones,
+            EvidenceDetail::Standard,
+            AnswerFormat::Prose,
+        );
+        assert_eq!(
+            closest_output_style(&elaborate).unwrap().name,
+            "Explanatory"
+        );
+    }
+
+    #[test]
+    fn a_concise_profile_that_still_wants_narration_gets_no_native_style() {
+        // Claude Code's own description of `Concise` claims two things —
+        // terse answers *and* skipped narration. A profile that asked for only
+        // the first would be given more than it asked for, so it falls through
+        // to the additive mechanism instead.
+        let profile = ResponseProfile::new(
+            Verbosity::Concise,
+            Audience::Technical,
+            Narration::Detailed,
+            EvidenceDetail::Standard,
+            AnswerFormat::Prose,
+        );
+        assert!(closest_output_style(&profile).is_none());
+    }
+
+    #[test]
+    fn the_style_and_the_hooks_name_the_same_settings_document() {
+        // Claude Code 2.1.247 honours only the last `--settings`, so two
+        // documents would mean the second silently discarding the first.
+        let profile = ResponseProfile::new(
+            Verbosity::Terse,
+            Audience::Technical,
+            Narration::Silent,
+            EvidenceDetail::Minimal,
+            AnswerFormat::Bullets,
+        );
+        let style = ClaudeCode.native_response_style(&profile).unwrap();
+        match style.delivery {
+            NativeDelivery::SettingsKey { file_name, .. } => {
+                assert_eq!(file_name, SETTINGS_FILE_NAME);
+            }
+            NativeDelivery::Arguments(_) => panic!("Claude Code selects its style in a document"),
+        }
+    }
+
+    #[test]
+    fn the_additive_mechanism_appends_and_never_replaces() {
+        let injection = ClaudeCode.additive_response_injection().unwrap();
+        assert_eq!(injection.flag, "--append-system-prompt");
+        assert_ne!(injection.flag, "--system-prompt");
     }
 }

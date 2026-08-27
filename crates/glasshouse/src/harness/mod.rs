@@ -46,6 +46,7 @@ pub mod hermes;
 pub mod opencode;
 pub mod pairing;
 pub mod pi;
+pub mod response;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -1090,6 +1091,49 @@ pub trait HarnessAdapter: std::fmt::Debug + Send + Sync {
         request: &DirectProviderRequest<'_>,
     ) -> Option<DirectProviderPlan> {
         let _ = request;
+        None
+    }
+
+    /// This harness's own communication-style mechanism, set to whatever it
+    /// calls the style closest to `profile` — or `None`.
+    ///
+    /// `None` is the fail-closed answer [`HarnessAdapter::approval_args`] and
+    /// [`HarnessAdapter::direct_provider_launch`] already give, and it means
+    /// the same thing here: **this harness cannot express that profile
+    /// natively**, never "express it some other way". Two quite different
+    /// situations answer `None` and neither may be papered over — a harness
+    /// whose communication-style mechanism nobody has read, and a harness
+    /// whose styles exist but would weaken its coding instructions if
+    /// selected. Line 601 asks for the native mechanism *"when it can
+    /// represent the selected profile without weakening coding
+    /// instructions"*, and the adapter is the only thing that knows its own
+    /// styles well enough to answer that.
+    ///
+    /// Default `None` — never a guess, exactly as for
+    /// [`HarnessDescription::communication_style`]. An adapter that has not
+    /// read its harness's mechanism must not acquire one by inheriting a
+    /// generic implementation.
+    fn native_response_style(
+        &self,
+        profile: &crate::profile::response::ResponseProfile,
+    ) -> Option<response::NativeStyle> {
+        let _ = profile;
+        None
+    }
+
+    /// How this harness accepts an instruction **beside** its own system
+    /// prompt, or `None`.
+    ///
+    /// The word is *beside*. An adapter may declare a mechanism here only if
+    /// its harness's own documentation says the mechanism appends; a
+    /// mechanism that replaces the system prompt is forbidden by line 607 and
+    /// there is nowhere in [`mod@response`] to record having used one.
+    ///
+    /// Takes no profile because it describes the *mechanism*, not the text:
+    /// the text is always [`crate::profile::response::ResponseProfile::instruction`],
+    /// composed in one place so a terse profile cannot grow a shorter variant
+    /// that drops the floor.
+    fn additive_response_injection(&self) -> Option<response::AdditiveInjection> {
         None
     }
 

@@ -1679,3 +1679,112 @@ adds is reflected in the taxonomy without a second edit.
 6. A correction in a configuration file changes what the binary prints, and
    nothing in a router changes with it.
 
+
+## Response profiles — five axes, and a floor no axis can lower
+
+### The conflict
+
+Phase 9K asks for communication policy that a user can dial down, and its
+second fixed architectural requirement immediately forbids the obvious way to
+implement it: profiles *"must not use concision to suppress diagnostics,
+evidence, or verification"*. So the type has to be expressive enough to make an
+answer genuinely terse and constrained enough that terse can never mean
+under-reported. Written as a sentence in a prompt, that constraint is one the
+terse setting itself can argue with.
+
+### The decision: five axes, and independence that a compiler holds
+
+Verbosity, audience, progress narration, evidence presentation and
+final-answer format are five types with no conversion between them, five
+private fields on `ResponseProfile`, and five directive functions each of which
+takes only its own axis's type as its only argument. `narration_directive`
+*cannot* consult verbosity, because it was never given one. Phase 9J's three
+compatibility axes are the precedent and the mutation is the same shape: a
+build where terse quietly implies silent, or concise implies minimal evidence,
+is killed by `the_five_dimensions_are_independent`.
+
+The independence is per-*layer* as well as per-type. Precedence resolves one
+axis at a time down line 596's six layers, so a project that wants silent
+narration and nothing else records one key and inherits four. A whole-profile
+precedence would have made "set one thing" mean "restate five".
+
+### The decision: the floor is a constant, not a sentence
+
+`REQUIRED_REPORTS` — changed files, verification, risks, blockers — is a
+`const`. `ResponseProfile::required_reports` returns it and takes `&self`
+without reading it. `directives()` appends `floor_directive()` unconditionally,
+and `floor_directive` also states the standing prohibition in the map's own
+terms. There is no code path by which any of the 324 axis combinations reduces
+it, and the test enumerates all 324 rather than sampling. The concise-technical
+preset's third clause is therefore not a property of that preset at all: every
+preset carries it, because no preset can do otherwise.
+
+### The decision: the bottom of the chain is the harness untouched
+
+Line 596 ends at "harness default", and the honest reading is that an
+unconfigured Glasshouse applies *nothing*. `ResolvedProfile::is_harness_default`
+is true when every axis reached the bottom, and `apply` then produces
+`NotApplied` with a reason. This is load-bearing in a second way: the role
+layer's *built-in* default applies only when a person named a role, because a
+role layer that always answered all five axes would leave line 596's bottom
+three layers structurally unreachable.
+
+### The decision: prefer the harness's own mechanism, and let the adapter judge it
+
+`apply` asks for a native mechanism, then an additive one, then refuses. Line
+601's *"without weakening coding instructions"* is decided inside the adapter,
+which is the only thing that knows its own styles. Claude Code 2.1.247 declares
+four built-in output styles, all four keeping its coding instructions, and only
+two of them are communication policy: `Learning` sets exercises and `Proactive`
+prefers action over planning, and either would break the phase's first fixed
+requirement. Both are recorded in the adapter's table with the harness's own
+description beside them, so "Glasshouse never selects these two" is a fact a
+reader can check rather than an absence.
+
+### The decision: three applied categories, and no fourth
+
+`AppliedMechanism` is `Native`, `Additive`, or `NotApplied`. **There is no
+variant meaning "replaced".** Nothing downstream can record replacing a native
+system prompt because nothing upstream can perform one — the only things
+produced are a settings key the harness documents and arguments an adapter
+declared as additive. Claude Code makes the hazard concrete: `claude --help`
+documents `--system-prompt` (replaces) beside `--append-system-prompt`
+(appends), and only the second is declared.
+
+`NotApplied` always carries a reason, and two very different situations reach
+it: nobody asked, or this harness declares nothing Glasshouse may use. Six of
+seven harnesses are in the second state today, which is the honest state of the
+declarations rather than a gap.
+
+### The consequence: one harness reads one document
+
+Probed on Claude Code 2.1.247: `claude --settings A --settings B` honours only
+`B`. A second `--settings` does not merge and does not error — it discards the
+first. A response profile that appended its own would have turned off every
+lifecycle hook in the session, silently. So `install_session_document` writes at
+most one document per file name and emits at most one flag pointing at it,
+merging the profile's keys into the hook document when both name the same file.
+That function returns `hooks_installed` beside its arguments because Codex
+installs hooks successfully and contributes *no* arguments, and inferring
+installation from a non-empty argument list reported that as a failure.
+
+### The consequence: one representation of a resolved value
+
+`ResolvedProfile` stores the profile once and derives its per-axis report from
+it. An earlier shape stored the values a second time beside the sources, and a
+surviving mutation showed the cost: the report printed the stored value while
+the harness got the mutated one, and nothing could tell. Where a value has two
+homes, a defect gets to live in the gap.
+
+### Invariants a test must hold to
+
+1. Every one of the 324 axis combinations reports changed files, verification,
+   risks and blockers.
+2. No axis's value can be read out of, or set by, another axis.
+3. Each of line 596's six layers can win, and does when the ones above it are
+   silent.
+4. A project's response profile never reaches another project.
+5. The recorded mechanism is the mechanism that reached the child.
+6. No launch Glasshouse composes replaces a harness's own system prompt.
+7. Whenever Glasshouse writes instruction text of its own, that text carries
+   the floor.

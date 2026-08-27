@@ -584,29 +584,29 @@ Fixed architectural requirements
 
 Profile model
 
-☐ Define response profiles as communication policy rather than model capability, reasoning effort, permission mode, task diligence, or validation policy.
-☐ Model verbosity independently as terse, concise, standard, or elaborate.
-☐ Model intended audience independently as plain, technical, or executive.
-☐ Model progress narration independently as silent, milestones, or detailed.
-☐ Model evidence presentation independently as minimal, standard, or audit.
-☐ Model final-answer format independently through options such as prose, bullets, or change-summary.
-☐ Allow named presets to combine these dimensions without forcing every harness to expose the same native vocabulary.
-☐ Provide a concise-technical preset that leads with outcomes, suppresses routine narration, and still reports changed files, verification, risks, and blockers.
-☐ Allow separate defaults for orchestrator, worker, reviewer, explainer, and ordinary interactive-session roles.
-☐ Resolve response-profile precedence as task override, session, role, project, user default, then harness default.
-☐ Keep project response-profile configuration inside the project scope and prevent it from contaminating unrelated projects.
+☑ Define response profiles as communication policy rather than model capability, reasoning effort, permission mode, task diligence, or validation policy.
+☑ Model verbosity independently as terse, concise, standard, or elaborate.
+☑ Model intended audience independently as plain, technical, or executive.
+☑ Model progress narration independently as silent, milestones, or detailed.
+☑ Model evidence presentation independently as minimal, standard, or audit.
+☑ Model final-answer format independently through options such as prose, bullets, or change-summary.
+☑ Allow named presets to combine these dimensions without forcing every harness to expose the same native vocabulary.
+☑ Provide a concise-technical preset that leads with outcomes, suppresses routine narration, and still reports changed files, verification, risks, and blockers.
+☑ Allow separate defaults for orchestrator, worker, reviewer, explainer, and ordinary interactive-session roles.
+☑ Resolve response-profile precedence as task override, session, role, project, user default, then harness default.
+☑ Keep project response-profile configuration inside the project scope and prevent it from contaminating unrelated projects.
 
 Harness-native application
 
-☐ Prefer a harness’s native output-style or communication-style mechanism when it can represent the selected profile without weakening coding instructions.
-☐ Let the HarnessAdapter translate a Glasshouse response profile into the closest safe native harness configuration.
-☐ Treat Claude Code output styles, Codex personalities, and future harness-native mechanisms as adapter examples rather than universal Glasshouse concepts.
-☐ Record which native mechanism, additive instruction, or fallback was actually applied.
-☐ Keep every spawned worker’s response profile explicit because subagents may not inherit the main harness session’s communication style.
-☐ Preserve native harness engineering, safety, permission, compaction, and tool-use instructions when applying a response profile.
-☐ Never replace the complete native harness system prompt merely to control verbosity, tone, or answer structure.
-☐ Do not make gateway-side system-prompt rewriting the default way Glasshouse applies a response profile.
-☐ Treat a user-configured gateway prompt transformation as explicit backend metadata and surface that it may interact with harness instructions.
+☑ Prefer a harness’s native output-style or communication-style mechanism when it can represent the selected profile without weakening coding instructions.
+☑ Let the HarnessAdapter translate a Glasshouse response profile into the closest safe native harness configuration.
+☑ Treat Claude Code output styles, Codex personalities, and future harness-native mechanisms as adapter examples rather than universal Glasshouse concepts.
+☑ Record which native mechanism, additive instruction, or fallback was actually applied.
+☑ Keep every spawned worker’s response profile explicit because subagents may not inherit the main harness session’s communication style.
+☑ Preserve native harness engineering, safety, permission, compaction, and tool-use instructions when applying a response profile.
+☑ Never replace the complete native harness system prompt merely to control verbosity, tone, or answer structure.
+☑ Do not make gateway-side system-prompt rewriting the default way Glasshouse applies a response profile.
+☑ Treat a user-configured gateway prompt transformation as explicit backend metadata and surface that it may interact with harness instructions.
 
 Additive fallback and cache behavior
 

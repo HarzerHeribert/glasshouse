@@ -1303,3 +1303,89 @@ exits both with and without the fix under test. It measured nothing, twice,
 before the harness was corrected. Kept at `.agent-runtime/diagnostics/` with
 that failure written down, because the next worker on this defect will
 otherwise build the same wrong harness.
+
+## Batch 27 — 20 of 20, and a mutation that survived
+
+Two workers, both Opus at high effort, disjoint partitions.
+`response-profiles` closed Phase 9K's first two groups entire and assessed the
+other seventeen. `spin-residual` was still running when this was written.
+
+| | `response-profiles` |
+|---|---|
+| boxes | **20 of 20 owned**; 10 of the remaining 17 blocked, 7 argued |
+| delivered | 3,046 new lines across four files, 836 insertions in seven |
+| mutations | **19 run, 19 killed** — one only after it survived and forced a redesign |
+| gate | 12/12, twice, run alone; no `SIGABRT` flake in either |
+| orchestrator re-verification | the decisive external probe and the safety-property mutation, both reproduced |
+
+### The mutation that survived is the most valuable thing in the batch
+
+M1b — one axis silently setting another — **survived its first run**.
+`ResolvedProfile` stored the five resolved values a second time beside their
+sources, and the report printed the stored copy. So a build in which one axis
+forced another **printed the honest value and shipped the mutated one to the
+harness**, and nothing in the system could tell the difference.
+
+The worker did what §41 says to do when a mutation survives — asked what the
+test and the mutation both assumed — found the answer was "the report reads the
+profile", which it did not, and removed the second copy. M1b then killed.
+
+**A surviving mutation is not a failed mutation.** This one found a defect that
+no passing test could have surfaced, because every test agreed with the report
+and the report agreed with itself. The rule worth carrying: *where a value has
+two homes, a defect gets to live in the gap* — and a mutation is how you find
+out there were two.
+
+### The worker caught its own design being wrong, by running the binary
+
+Its first `response_stack` filled the role layer from `Role::default_preset()`
+unconditionally, so all five axes were always answered at layer three and
+**layers four, five and six could never win** — the precedence chain present
+and its bottom half structurally dead. Running the binary with no configuration
+is what showed it; no unit test would have, because each layer's own test
+passed. §33 earning its keep at the design stage rather than at review.
+
+### External observation with a control, and it changed the design
+
+`claude --settings A --settings B` honours only `B`. A second `--settings` does
+not merge and does not error — it discards the first. Re-run by the
+orchestrator (§23): a malformed document passed **first** produces no
+complaint; the same document passed **last** produces
+`outputStyle: Expected string, but received number`.
+
+Had the design appended its own `--settings`, every lifecycle hook in the
+session would have been silently switched off. **This is the fifth time this
+project has been saved by probing a claim rather than reasoning from a
+plausible one**, and the first where the probe changed the shape of the code
+rather than the confidence of a declaration.
+
+The worker also declined to build on the packet's framing. The existing
+`COMMUNICATION_STYLE` declaration cited a status-line payload — enough to
+support "a session has an output style", not "writing key X selects it". It
+read the key out of the shipped bundle and probed it, and said what it would
+have concluded had the probe failed.
+
+### A packet error, caught by the worker rather than by the round gate
+
+`YOURS` omitted `crates/glasshouse/src/shell/mod.rs`, which calls
+`install_hooks`, so line 605 ("keep every spawned worker's response profile
+explicit") is reachable only on the launch path and not through the shell's
+quick-open. The worker **did not edit it**, kept `install_hooks` as a documented
+shim over the new composer, and reported the ten-line patch it would have made.
+
+`validate_round.py` cannot catch this: it checks that partitions are disjoint,
+not that a partition is *complete* for the work described. Two rounds now have
+had a caller left outside the partition — §32's own subject. Worth asking
+whether the round gate can grep a packet's box lines for verbs like "every
+session" and warn when the obvious caller is not in `YOURS`.
+
+### Open question the round created
+
+The worker built the additive `--append-system-prompt` path, which belongs to
+group 3, because line 604 (its own) requires recording that a native, additive,
+or fallback mechanism was applied — and with no additive mechanism that branch
+is unreachable and 604 is half-real. It **did not claim** 613/614/615 and left
+the call to the orchestrator, with the argument written per line. Left unticked
+here. **Should a worker be allowed to close a neighbouring group's box when its
+own box is otherwise unprovable?** The conservative answer taken today costs
+three boxes that are arguably done.
