@@ -25,12 +25,28 @@ pub enum Request {
     /// One session's lifecycle, plus what Glasshouse recorded about its
     /// current route.
     SessionState { session: String },
-    /// Start a new session under an installed harness.
+    /// Start a new session under an installed harness — capability map
+    /// Phase 14, boxes 5, 6 and part of box 1.
     SpawnSession {
         /// A harness identifier, e.g. `claude-code`.
         harness: String,
         #[serde(default)]
         args: Vec<String>,
+        /// How the spawned session is tagged — `worker`, `orchestrator`, or
+        /// `normal`. Absent means `worker`: every session this door spawns
+        /// is spawned *by* something other than a person (an orchestrator,
+        /// a script — see this module's own doc comment), so a session with
+        /// no role stated is a worker by default rather than
+        /// indistinguishable from one a person started by hand.
+        #[serde(default)]
+        role: Option<String>,
+        /// A natural-language task delivered to the session as its first
+        /// message, the instant it is live — distinct from
+        /// [`Request::SendMessage`], which addresses a session that already
+        /// exists. Absent means the harness starts with nothing sent to it,
+        /// same as before this field existed.
+        #[serde(default)]
+        task: Option<String>,
     },
     /// Send one line of text to a live session, as Glasshouse rather than as
     /// the user.
@@ -52,6 +68,23 @@ pub enum Request {
         history: bool,
         #[serde(default = "default_memory_limit")]
         limit: usize,
+    },
+    /// Retrieve a checkpoint — capability map line 66, "retrieve a completed
+    /// worker result or checkpoint." A worker has no other durable "result"
+    /// format Glasshouse owns (Phase 19's checkpoints are the shipped
+    /// mechanism; see the evidence ledger); this is the read half of
+    /// [`Request::TakeCheckpoint`]'s write.
+    GetCheckpoint {
+        /// A checkpoint id or unambiguous prefix, or absent/`"latest"` for
+        /// the project's most recent checkpoint — the same rule
+        /// `glasshouse checkpoint show` uses.
+        #[serde(default)]
+        checkpoint: Option<String>,
+        /// The rendered handoff document, rather than the terser bootstrap
+        /// prompt — the same distinction `glasshouse checkpoint show
+        /// --document` makes.
+        #[serde(default)]
+        document: bool,
     },
     /// Take a checkpoint for a session.
     TakeCheckpoint {

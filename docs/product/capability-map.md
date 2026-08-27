@@ -716,17 +716,17 @@ Phase 13 — Direct session messaging
 
 Phase 14 — Orchestrator role
 
-☐ Allow exactly one or more sessions to be tagged with the optional orchestrator role without creating a special proprietary agent type.
-☐ Keep an orchestrator session otherwise identical to a normal native harness session.
-☐ Expose Glasshouse session-management operations to an orchestrator through a local tool interface.
-☐ Allow an orchestrator to list current-project sessions.
-☐ Allow an orchestrator to spawn a new worker session using a selected harness.
-☐ Allow an orchestrator to assign a natural-language task to a newly spawned worker.
-☐ Allow an orchestrator to send follow-up instructions to an existing worker.
-☐ Allow an orchestrator to interrupt an existing worker.
-☐ Allow an orchestrator to query worker lifecycle state.
-☐ Allow an orchestrator to retrieve a completed worker result or checkpoint.
-☐ Ensure orchestrator tools cannot access sessions belonging to another project.
+☑ Allow exactly one or more sessions to be tagged with the optional orchestrator role without creating a special proprietary agent type.
+☑ Keep an orchestrator session otherwise identical to a normal native harness session.
+☑ Expose Glasshouse session-management operations to an orchestrator through a local tool interface.
+☑ Allow an orchestrator to list current-project sessions.
+☑ Allow an orchestrator to spawn a new worker session using a selected harness.
+☑ Allow an orchestrator to assign a natural-language task to a newly spawned worker.
+☑ Allow an orchestrator to send follow-up instructions to an existing worker.
+☑ Allow an orchestrator to interrupt an existing worker.
+☑ Allow an orchestrator to query worker lifecycle state.
+☑ Allow an orchestrator to retrieve a completed worker result or checkpoint.
+☑ Ensure orchestrator tools cannot access sessions belonging to another project.
 
 Phase 15 — Orchestrator wake-up flow
 
@@ -741,13 +741,13 @@ Phase 15 — Orchestrator wake-up flow
 
 Phase 16 — Worker transparency
 
-☐ Ensure every worker created by an orchestrator appears immediately in the normal Glasshouse session list.
+☑ Ensure every worker created by an orchestrator appears immediately in the normal Glasshouse session list.
 ☐ Allow the user to enter any orchestrated worker while it is running.
 ☐ Allow direct user input to an orchestrated worker without requiring the orchestrator as an intermediary.
 ☐ Allow the user to interrupt an orchestrated worker directly.
 ☐ Record user intervention so the orchestrator can be informed that the worker state may have changed.
-☐ Never implement orchestration workers as hidden in-process LLM calls when a native harness session was requested.
-☐ Preserve the rule that every worker remains a real session the user can inspect.
+☑ Never implement orchestration workers as hidden in-process LLM calls when a native harness session was requested.
+☑ Preserve the rule that every worker remains a real session the user can inspect.
 
 Phase 17 — cmux optional integration
 

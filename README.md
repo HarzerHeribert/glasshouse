@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`██████████████████░░░░░░░░░░░░░░░░░░░░░░` 604 / 1280 mandatory capabilities (47%)
+`███████████████████░░░░░░░░░░░░░░░░░░░░░` 618 / 1280 mandatory capabilities (48%)
 
 <details>
-<summary>Per-phase breakdown (22 of 104 phases complete)</summary>
+<summary>Per-phase breakdown (23 of 104 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -56,9 +56,9 @@ the authoritative specification and tracks what is done.
 | Phase 11 — Session overview | 10/10 ✅ |
 | Phase 12 — Unified lifecycle event bus | 7/8 |
 | Phase 13 — Direct session messaging | 7/7 ✅ |
-| Phase 14 — Orchestrator role | 0/11 |
+| Phase 14 — Orchestrator role | 11/11 ✅ |
 | Phase 15 — Orchestrator wake-up flow | 0/8 |
-| Phase 16 — Worker transparency | 0/7 |
+| Phase 16 — Worker transparency | 3/7 |
 | Phase 17 — cmux optional integration | 0/10 |
 | Phase 18 — Raw event recording | 9/10 |
 | Phase 19 — Portable session checkpoints | 13/14 |

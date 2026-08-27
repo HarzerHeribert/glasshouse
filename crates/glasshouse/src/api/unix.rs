@@ -9,14 +9,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use glasshouse::Runtime;
-use glasshouse::checkpoint::store::ProjectCheckpoints;
+use glasshouse::checkpoint::store::{ProjectCheckpoints, StoreError as CheckpointStoreError};
 use glasshouse::checkpoint::{Checkpoint, CheckpointReason, Handoff};
 use glasshouse::config::{self, EffectiveConfig, UserConfig};
 use glasshouse::launch::HarnessLaunch;
 use glasshouse::session::api::{ApiError, SessionApi};
 use glasshouse::session::{
-    NewSession, ProjectSessions, SessionId, SessionLifecycle, SessionPresentation, SessionRuntime,
-    SessionStore,
+    NewSession, ProjectSessions, SessionId, SessionLifecycle, SessionPresentation, SessionRole,
+    SessionRuntime, SessionStore,
 };
 
 use super::protocol::{Request, Response};
@@ -268,9 +268,12 @@ fn dispatch(
                 Err(err) => Response::err(api_error(err)),
             }
         }
-        Request::SpawnSession { harness, args } => {
-            spawn_session(runtime, &store, live, &harness, args)
-        }
+        Request::SpawnSession {
+            harness,
+            args,
+            role,
+            task,
+        } => spawn_session(runtime, &store, live, &harness, args, role.as_deref(), task),
         Request::SendMessage { session, text } => {
             let mut guard = lock(live);
             let mut api = SessionApi::new(&store, &mut guard);
@@ -288,6 +291,10 @@ fn dispatch(
             }
         }
         Request::ResourceCapacity => resource_capacity(runtime),
+        Request::GetCheckpoint {
+            checkpoint,
+            document,
+        } => get_checkpoint(runtime, checkpoint.as_deref(), document),
         Request::QueryMemory {
             query,
             history,
@@ -330,6 +337,7 @@ fn session_summary(record: &glasshouse::session::SessionRecord) -> serde_json::V
     serde_json::json!({
         "session": record.id.as_str(),
         "harness": record.harness,
+        "role": record.role.as_str(),
         "lifecycle": lifecycle_str(record.lifecycle),
         "backend_resource": record.backend_resource,
         "model": record.model.as_ref().map(|m| m.label().to_owned()),
@@ -353,6 +361,30 @@ fn api_error(err: ApiError) -> String {
     err.to_string()
 }
 
+/// Parse the wire spelling of a role — box 1: a session is tagged with the
+/// orchestrator role by naming it here, never by a separate proprietary
+/// mechanism. Absent means [`SessionRole::Worker`]: every session this door
+/// spawns is spawned by something other than a person (this module's own
+/// doc comment), so an unstated role is a worker rather than
+/// indistinguishable from a session a person started by hand.
+fn parse_role(role: Option<&str>) -> Result<SessionRole, String> {
+    match role {
+        None => Ok(SessionRole::Worker),
+        Some(text) => [
+            SessionRole::Normal,
+            SessionRole::Orchestrator,
+            SessionRole::Worker,
+        ]
+        .into_iter()
+        .find(|candidate| candidate.as_str() == text)
+        .ok_or_else(|| {
+            format!(
+                "`{text}` is not a role Glasshouse knows; the roles are: normal, orchestrator, worker"
+            )
+        }),
+    }
+}
+
 /// Start a new session under an installed harness — box 3.
 ///
 /// Deliberately narrower than `main.rs`'s own `launch_session`: it resolves
@@ -372,7 +404,13 @@ fn spawn_session(
     live: &Mutex<SessionRuntime>,
     harness: &str,
     args: Vec<String>,
+    role: Option<&str>,
+    task: Option<String>,
 ) -> Response {
+    let role = match parse_role(role) {
+        Ok(role) => role,
+        Err(err) => return Response::err(err),
+    };
     let user = match UserConfig::load(runtime.paths()) {
         Ok(user) => user,
         Err(err) => return Response::err(err),
@@ -389,7 +427,8 @@ fn spawn_session(
 
     let record = match store.create(
         NewSession::embedded(selection.id().slug())
-            .with_presentation(SessionPresentation::Headless),
+            .with_presentation(SessionPresentation::Headless)
+            .with_role(role),
     ) {
         Ok(record) => record,
         Err(err) => return Response::err(err),
@@ -397,10 +436,73 @@ fn spawn_session(
 
     let launch = HarnessLaunch::new(selection.executable().clone(), runtime.project()).args(args);
     let mut guard = lock(live);
-    match guard.start(record.id.clone(), SessionPresentation::Headless, &launch) {
-        Ok(_) => Response::ok(serde_json::json!({ "session": record.id.as_str() })),
-        Err(err) => Response::err(err),
+    if let Err(err) = guard.start(record.id.clone(), SessionPresentation::Headless, &launch) {
+        return Response::err(err);
     }
+
+    // Box 6: a natural-language task assigned at spawn, distinct from
+    // `Request::SendMessage`'s follow-up to a session that already exists.
+    // Delivered through the same seam `SendMessage` uses, immediately after
+    // the process is live, so a caller that asks for both a spawn and a
+    // task gets one atomic call rather than a spawn that can race a
+    // separate `send_message`.
+    if let Some(task) = task {
+        let mut api = SessionApi::new(store, &mut guard);
+        if let Err(err) = api.send_text(&record.id, &task) {
+            return Response::err(format!(
+                "session `{}` was spawned but its task could not be delivered: {err}",
+                record.id
+            ));
+        }
+    }
+
+    Response::ok(serde_json::json!({ "session": record.id.as_str() }))
+}
+
+/// Retrieve a checkpoint — box 10, the read half of [`request_checkpoint`].
+///
+/// Resolution mirrors `main.rs`'s own `resolve_checkpoint` (private to that
+/// file, so reproduced here against the same public [`ProjectCheckpoints`]
+/// surface rather than duplicated by copy): a named id or unambiguous
+/// prefix, `"latest"`, or nothing, all meaning what `glasshouse checkpoint
+/// show` already means by them. Scoped to this project the same way every
+/// other request this door answers is — the socket was opened for one
+/// project's own database file, and a checkpoint's row lives in that file
+/// alone (see `database.rs`'s per-project file separation).
+fn get_checkpoint(runtime: &Runtime, checkpoint: Option<&str>, document: bool) -> Response {
+    let checkpoints = match ProjectCheckpoints::open(runtime) {
+        Ok(checkpoints) => checkpoints,
+        Err(err) => return Response::err(err),
+    };
+    let store = checkpoints.store();
+
+    let resolved = match checkpoint {
+        None | Some("latest") => store.latest(),
+        Some(named) => match store.resolve_id(named) {
+            Ok(id) => store.get(&id),
+            Err(err) => return Response::err(checkpoint_store_err(err)),
+        },
+    };
+
+    match resolved {
+        Ok(Some(stored)) => Response::ok(serde_json::json!({
+            "checkpoint": stored.id.short(),
+            "session": stored.checkpoint.session.as_str(),
+            "harness": stored.checkpoint.harness,
+            "trimmed": stored.checkpoint.trimmed,
+            "document": if document {
+                stored.checkpoint.render()
+            } else {
+                stored.checkpoint.bootstrap_prompt()
+            },
+        })),
+        Ok(None) => Response::err("this project has no checkpoints yet"),
+        Err(err) => Response::err(checkpoint_store_err(err)),
+    }
+}
+
+fn checkpoint_store_err(err: CheckpointStoreError) -> String {
+    err.to_string()
 }
 
 /// Current resource capacity and quota telemetry — capability map line 1679.

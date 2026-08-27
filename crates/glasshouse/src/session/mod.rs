@@ -187,3 +187,82 @@ pub fn owning_harness(harness: &str) -> Result<(), SessionStoreError> {
         }),
     }
 }
+
+#[cfg(test)]
+mod role_is_inert_tests {
+    /// Phase 14's second box, structurally: *"keep an orchestrator session
+    /// otherwise identical to a normal native harness session."*
+    ///
+    /// This is an **absence** claim, and `orchestrator-role`'s audit closed it
+    /// by reading every `SessionRole` site in the crate and finding none in the
+    /// lifecycle path. That reading was correct — re-verified by the integrator
+    /// — but an audit protects nothing against the next edit. `routing::
+    /// interactive` already carries this project's pattern for exactly this
+    /// shape of claim (`the_assignment_is_not_a_session_of_its_own`), and this
+    /// is that pattern applied to the file the map's line is about.
+    ///
+    /// The list below is the map's own allowance read narrowly: a role may
+    /// change how an answer *reads* (`config::response`) and how a session is
+    /// *displayed* (`shell/**`), and nothing else. If a future edit makes the
+    /// launch path branch on a role, this fails and the box reopens — which is
+    /// the whole point of writing it down as a test rather than a paragraph.
+    const LIFECYCLE_FILES: [(&str, &str); 5] = [
+        ("session/runtime.rs", include_str!("runtime.rs")),
+        ("session/lifecycle.rs", include_str!("lifecycle.rs")),
+        ("session/attach.rs", include_str!("attach.rs")),
+        ("session/select.rs", include_str!("select.rs")),
+        ("session/native_id.rs", include_str!("native_id.rs")),
+    ];
+
+    /// Production half only, comments stripped — `routing::interactive`'s own
+    /// helper, copied rather than shared because these two modules have no
+    /// dependency on each other and a test helper is not worth creating one.
+    ///
+    /// **Scans by `str::lines` on purpose (§14).** `include_str!` reads the
+    /// file as checked out, so on a runner whose Git converts line endings the
+    /// source carries `\r\n`; `lines()` strips the carriage return, while any
+    /// search for a multi-line literal would silently find nothing and the
+    /// guard would pass by failing to look.
+    fn production_code(source: &str) -> String {
+        source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split always yields at least one part")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_sessions_role_never_reaches_its_lifecycle() {
+        for (name, source) in LIFECYCLE_FILES {
+            let code = production_code(source);
+            assert!(
+                !code.contains("SessionRole"),
+                "{name} names `SessionRole`: an orchestrator session has stopped being \
+                 identical to a normal one, which is Phase 14's second box. A role may \
+                 change how an answer reads (`config::response`) and how a session is \
+                 displayed (`shell/**`) — nothing else."
+            );
+        }
+    }
+
+    /// §14's second rule: an LF checkout never exercises the CRLF path, so the
+    /// scan is tested against a CRLF copy of its own input. Without this the
+    /// guard is untested precisely where it was once needed — a source scan
+    /// took Windows CI red on this project in August for this exact reason.
+    #[test]
+    fn the_scan_reads_the_same_source_with_windows_line_endings() {
+        for (name, source) in LIFECYCLE_FILES {
+            let lf = production_code(source);
+            let crlf = production_code(&source.replace('\n', "\r\n"));
+            assert_eq!(
+                lf.contains("SessionRole"),
+                crlf.contains("SessionRole"),
+                "{name}: the scan disagrees with itself across line endings, so it would \
+                 pass on a CRLF checkout by failing to look"
+            );
+        }
+    }
+}
