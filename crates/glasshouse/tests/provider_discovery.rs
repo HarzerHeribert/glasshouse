@@ -868,6 +868,61 @@ fn the_shipped_binary_shows_every_windows_start_and_reset_state_when_verbose() {
     assert!(stdout.contains("resets unmeasured (unknown)"), "{stdout}");
 }
 
+/// **BRIDGE-QUOTA's own §35 negative, and the sharpest evidence in this
+/// package's report.**
+///
+/// A reading planted exactly where `GatewayQuotaCache::new` would put it —
+/// under the same `--data-dir` this fixture already points the binary at —
+/// must NOT reach the shipped binary's report, because
+/// `main.rs::resources_report` never calls
+/// `GatheredTelemetry::gather_gateway_quota`. If this test ever starts
+/// failing on its own — the planted reading showing up — it means someone
+/// added the missing line without updating this test to expect it, which is
+/// exactly backwards: update this test's expectation *first*, deliberately,
+/// the day that line lands.
+///
+/// This is the one test in this package that goes through the real
+/// `Command::Resources` arm the way
+/// `the_shipped_binary_reports_every_resource_it_can_describe` does, so it is
+/// the test that would actually prove the bridge complete — and it proves
+/// the opposite today, on purpose.
+#[test]
+fn a_planted_gateway_reading_does_not_yet_reach_the_shipped_binarys_report() {
+    let fixture = BinaryFixture::new();
+    // `BinaryFixture::run` points both `--data-dir` and `--config-dir` at
+    // `fixture.config`, so this is the exact directory
+    // `GatewayQuotaCache::new` would resolve from `runtime.paths().data_dir()`
+    // once the missing `main.rs` line exists.
+    let quota_cache_dir = fixture.config.path().join("gateway-quota");
+    let cache = glasshouse::provider::telemetry::GatewayQuotaCache::at(&quota_cache_dir);
+    cache.store(
+        "anyrouter",
+        &RateLimitHeaders::read(vec![
+            ("ratelimit-limit", "300"),
+            ("ratelimit-remaining", "297"),
+        ]),
+        TELEMETRY_OBSERVED,
+    );
+    assert!(
+        std::fs::read_dir(&quota_cache_dir)
+            .expect("GatewayQuotaCache::store created its directory")
+            .next()
+            .is_some(),
+        "the planted reading must actually be on disk for this test to mean anything"
+    );
+
+    let stdout = fixture.run(&["resources", "--no-harness"]);
+    let row = stdout
+        .split("\n\n")
+        .find(|block| block.starts_with("anyrouter"))
+        .unwrap_or_else(|| panic!("no anyrouter block in:\n{stdout}"));
+    assert!(
+        row.contains("capacity        unknown"),
+        "the shipped binary must not show a percentage from a planted reading until \
+         main.rs calls `gather_gateway_quota` — see this package's report:\n{row}"
+    );
+}
+
 /// The note that tells a user the override exists, when they have set none.
 /// A screen full of `unknown` with no way out of it is the failure this
 /// guards against.

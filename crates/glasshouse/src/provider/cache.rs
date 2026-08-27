@@ -313,7 +313,12 @@ impl ModelCache {
 /// of the *original* name are appended. The slug is for a human reading
 /// `ls`; the digest is what makes it correct, because it keeps `my provider`
 /// and `my/provider` — which slugify identically — in separate files.
-fn file_stem(provider: &str) -> String {
+///
+/// `pub(crate)` rather than private: [`crate::provider::telemetry`]'s
+/// `GatewayQuotaCache` keys a second per-provider directory the same way,
+/// and a second slugify-and-hash implementation is a second place for the
+/// path-escape guarantee below to go stale.
+pub(crate) fn file_stem(provider: &str) -> String {
     let mut slug: String = provider
         .chars()
         .map(|c| {

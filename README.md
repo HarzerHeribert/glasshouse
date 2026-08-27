@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████░░░░░░░░░░░░░░░░░░░░░░░` 557 / 1280 mandatory capabilities (43%)
+`█████████████████░░░░░░░░░░░░░░░░░░░░░░░` 565 / 1280 mandatory capabilities (44%)
 
 <details>
-<summary>Per-phase breakdown (18 of 104 phases complete)</summary>
+<summary>Per-phase breakdown (19 of 104 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -121,7 +121,7 @@ the authoritative specification and tracks what is done.
 | Phase 45 — Failure handling | 7/9 |
 | Phase 46 — Security and contamination tests | 5/8 |
 | Phase 47 — Observability without spectacle | 5/15 |
-| Phase 48 — CLI ergonomics | 0/8 |
+| Phase 48 — CLI ergonomics | 8/8 ✅ |
 | Phase 49 — Configuration | 12/16 |
 | Phase 50 — Tracked project knowledge as an optional feature | 0/7 |
 | Phase 51 — Evaluation hooks | 0/37 |

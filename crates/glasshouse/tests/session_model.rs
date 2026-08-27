@@ -765,6 +765,87 @@ fn an_explicit_response_profile_flag_overrides_the_launch_profiles_preset() {
     );
 }
 
+/// Capability map line 1780, through the `Command::Doctor` dispatch arm.
+///
+/// `doctor_report_includes_project_identity_and_never_panics`
+/// (`integrations/mod.rs`) already proves the report's own content by
+/// calling `doctor_report` directly — but that is exactly the §35 shape: a
+/// test that enters below `main.rs`'s match can survive the dispatch arm
+/// being deleted. This one goes in through `glasshouse doctor` itself.
+#[test]
+fn doctor_dispatches_through_the_command_and_reports_this_project() {
+    let fixture = Fixture::new(PROBE_PROFILE);
+    let report = fixture.run(&["doctor"]);
+    // Identify the project by its *name*, not by comparing the whole root path.
+    // On Windows the report prints the canonicalised root while `fixture.root`
+    // is whatever `TEMP` handed the fixture, and those differ — observed on the
+    // ARM64 VM, where the report said
+    // `C:\Users\glasshouse\AppData\Local\Temp\...` and the assertion failed.
+    // The exact normalisation is not established and does not need to be: a
+    // full-path comparison makes this test depend on it, and the name does not.
+    // The §35 property is untouched — deleting `main.rs`'s `Command::Doctor` arm
+    // produces no report at all, so both halves still fail.
+    let project_name = fixture
+        .root
+        .file_name()
+        .expect("the fixture root always has a final component")
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        report.contains("Glasshouse doctor") && report.contains(&project_name),
+        "`glasshouse doctor` must print this project ({project_name}): {report}"
+    );
+}
+
+/// Capability map line 1778, through the `MemoryCommand::Search` dispatch
+/// arm — the same §35 gap as `doctor` above: `tests/memory_search.rs` never
+/// invokes the binary, only `memory::search` in-process, so nothing there
+/// would notice the dispatch arm going away.
+#[test]
+fn memory_search_dispatches_through_the_command() {
+    let fixture = Fixture::new(PROBE_PROFILE);
+    let report = fixture.run(&["memory", "search", "nonexistent-term-xyz"]);
+    assert!(
+        report.contains("No current memories match"),
+        "`glasshouse memory search` must reach `memory_report`: {report}"
+    );
+}
+
+/// Capability map line 1779, through `main.rs::status_report`: `glasshouse
+/// status` is not a static screen, it reads the same store `glasshouse
+/// sessions` does. A launched session's count and identifier must show up
+/// in it, which is what distinguishes a real composition from a stub that
+/// always prints "none recorded" — deleting the `Command::Status` dispatch
+/// arm, or hardcoding the session count in `status_report`, fails this the
+/// same way.
+#[test]
+fn status_reports_a_launched_sessions_count_and_the_project_identity() {
+    let fixture = Fixture::new(PROBE_PROFILE);
+
+    let before = fixture.run(&["status"]);
+    assert!(
+        before.contains("Sessions     none recorded"),
+        "a fresh project should report no recorded sessions:\n{before}"
+    );
+
+    fixture.run(&["launch", "claude-code", "--profile", "probe", "--headless"]);
+    let id = fixture.only_session();
+
+    let after = fixture.run(&["status"]);
+    assert!(
+        after.contains(fixture.root.file_name().unwrap().to_str().unwrap()),
+        "the project name must appear in `glasshouse status`:\n{after}"
+    );
+    assert!(
+        after.contains("Sessions     1 recorded"),
+        "the launched session must be counted:\n{after}"
+    );
+    assert!(
+        after.contains(&id.as_str()[..12]),
+        "the most recently active session's identifier must appear:\n{after}"
+    );
+}
+
 /// Phase 42 — the external control API, against the shipped binary.
 ///
 /// Every capability the socket door claims is proven the same way this

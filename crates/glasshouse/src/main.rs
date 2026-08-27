@@ -79,6 +79,9 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
     );
 
     match &cli.command {
+        Some(Command::Status) => {
+            print!("{}", status_report(&runtime)?);
+        }
         Some(Command::Doctor) => {
             print!("{}", glasshouse::integrations::doctor_report(&runtime));
         }
@@ -2451,6 +2454,71 @@ fn session_report(runtime: &Runtime) -> anyhow::Result<String> {
             )
         );
     }
+    Ok(out)
+}
+
+/// A one-screen project and resource summary — capability map line 1779.
+///
+/// Composes what `doctor`, `sessions` and `resources` already compute —
+/// [`Discovery::run`], [`ProjectSessions`], and
+/// [`glasshouse::provider::registry::registry`] — into counts, rather than
+/// re-deriving any of their own rendering. A reader who needs more than a
+/// count already has the command that produces it.
+fn status_report(runtime: &Runtime) -> anyhow::Result<String> {
+    use std::fmt::Write as _;
+
+    let project = runtime.project();
+    let mut out = String::new();
+
+    let _ = writeln!(out, "Glasshouse status");
+    let _ = writeln!(out, "=================");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Project");
+    let _ = writeln!(out, "  name: {}", project.name());
+    let _ = writeln!(out, "  root: {}", project.display_root().display());
+    let _ = writeln!(out, "  id:   {}", project.id());
+    let _ = writeln!(out);
+
+    let discovery = glasshouse::integrations::Discovery::run(project);
+    let harnesses: Vec<_> = discovery.harnesses().collect();
+    let usable = harnesses.iter().filter(|d| d.is_usable()).count();
+    let problems: usize = harnesses.iter().map(|d| d.problems().len()).sum();
+    let problem_note = if problems == 0 {
+        String::new()
+    } else {
+        format!(
+            " ({problems} problem{} — see `glasshouse doctor`)",
+            if problems == 1 { "" } else { "s" }
+        )
+    };
+    let _ = writeln!(
+        out,
+        "Harnesses    {usable}/{} usable{problem_note}",
+        harnesses.len()
+    );
+
+    let sessions = ProjectSessions::open(runtime)?;
+    let records = sessions.store().list()?;
+    if records.is_empty() {
+        let _ = writeln!(out, "Sessions     none recorded — see `glasshouse launch`");
+    } else {
+        let _ = writeln!(
+            out,
+            "Sessions     {} recorded, most recent {} ({}, {})",
+            records.len(),
+            short_id(&records[0].id),
+            disposition_word(&records[0]),
+            format_age(records[0].last_activity_at)
+        );
+    }
+
+    let resources = glasshouse::provider::registry::registry();
+    let _ = writeln!(
+        out,
+        "Resources    {} tracked — see `glasshouse resources` for quota detail",
+        resources.len()
+    );
+
     Ok(out)
 }
 

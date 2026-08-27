@@ -1772,14 +1772,14 @@ Fixed architectural requirements
 
 Phase 48 — CLI ergonomics
 
-☐ Make bare glasshouse open the current project’s interactive TUI.
-☐ Add glasshouse session list for a non-interactive project-session summary.
-☐ Add glasshouse session new <harness> for starting a project session from the shell.
-☐ Add glasshouse memory search <query> for non-interactive project-memory search.
-☐ Add glasshouse status for a concise project and resource summary.
-☐ Add glasshouse doctor for checking harness executables, optional cmux support, database health, and configuration.
-☐ Keep CLI commands project-scoped unless an explicitly administrative command is clearly global.
-☐ Avoid requiring a separate initialization command for normal Git repositories unless persistent project configuration becomes necessary.
+☑ Make bare glasshouse open the current project’s interactive TUI.
+☑ Add glasshouse session list for a non-interactive project-session summary.
+☑ Add glasshouse session new <harness> for starting a project session from the shell.
+☑ Add glasshouse memory search <query> for non-interactive project-memory search.
+☑ Add glasshouse status for a concise project and resource summary.
+☑ Add glasshouse doctor for checking harness executables, optional cmux support, database health, and configuration.
+☑ Keep CLI commands project-scoped unless an explicitly administrative command is clearly global.
+☑ Avoid requiring a separate initialization command for normal Git repositories unless persistent project configuration becomes necessary.
 
 Phase 49 — Configuration
 

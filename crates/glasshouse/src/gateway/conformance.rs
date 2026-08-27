@@ -82,7 +82,7 @@ use super::fixture::{FixtureUpstream, RecordedRequest};
 use super::ingress::{Exchange, Outcome, serve};
 use super::upstream::{Route, Upstream, UpstreamBackend, agent};
 use super::{Gateway, GatewayToken};
-use crate::provider::telemetry::RateLimitHeaders;
+use crate::provider::telemetry::{GatewayQuotaCache, RateLimitHeaders};
 use crate::secret::{REDACTED, Secret, redact};
 
 /// The three protocols the ingress can serve, spelled as `crate::profile`
@@ -242,6 +242,16 @@ fn upstream_to(fixture: &FixtureUpstream) -> Upstream {
 /// `fixture`.
 fn gateway_to(fixture: &FixtureUpstream) -> Gateway {
     Gateway::start(upstream_to(fixture)).expect("loopback is bindable")
+}
+
+/// [`gateway_to`], persisting every captured reading to `cache` — the write
+/// half of capability map line 1229's bridge across the process boundary,
+/// proven the same way [`gateway_to`]'s own callers prove the in-memory
+/// half: a real socket, a real accept loop, never [`super::ingress::serve`]
+/// called directly.
+fn gateway_to_with_quota_cache(fixture: &FixtureUpstream, cache: GatewayQuotaCache) -> Gateway {
+    Gateway::start_with_quota_cache(upstream_to(fixture), Some(cache))
+        .expect("loopback is bindable")
 }
 
 /// A loopback address with nothing listening on it.
@@ -515,6 +525,73 @@ fn a_real_forwarded_exchanges_rate_limit_headers_reach_the_gateway() {
     assert_eq!(headers.token_limit(), Some(6000));
     assert_eq!(headers.token_remaining(), Some(5991));
     assert!(observed_at > 0, "the observation must be dated");
+}
+
+/// The durable half of the same reading, proven the same way: a real socket,
+/// a real accept loop, and — this test's own addition — a real file read
+/// back through [`GatewayQuotaCache::load`] rather than the in-memory
+/// [`Gateway::quota_headers`] the test above already covers.
+///
+/// Mutating away `gateway/mod.rs`'s `cache.store(&exchange.provider, &quota,
+/// now)` call in the accept loop's connection thread fails this test rather
+/// than a helper's — the write side's own §35 proof, named in this
+/// package's report.
+#[test]
+fn a_real_forwarded_exchanges_rate_limit_headers_are_persisted_for_the_next_process() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let cache = GatewayQuotaCache::at(dir.path());
+    let fixture = FixtureUpstream::answering(
+        "HTTP/1.1 200 OK",
+        "content-type: application/json\r\n\
+         x-ratelimit-limit-requests: 7000\r\n\
+         x-ratelimit-remaining-requests: 6999\r\n",
+        "{\"ok\":true}",
+    );
+    let gateway = gateway_to_with_quota_cache(&fixture, cache.clone());
+    assert!(
+        cache.load("fixture").is_none(),
+        "a gateway that has forwarded nothing yet must not already have written a reading"
+    );
+
+    let response = as_text(&send_and_read(
+        gateway.address(),
+        &messages_request(gateway.token().expose(), "{}"),
+    ));
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK"),
+        "the exchange did not complete: {response}"
+    );
+
+    // The write happens on the connection thread, after the response is
+    // already on the wire back to the client above — poll rather than
+    // assume it has landed by the time `send_and_read` returns, the same
+    // margin `an_empty_reading_does_not_clear_a_previous_one` and its
+    // siblings give the in-memory half via `gateway.quota_headers()`
+    // (a direct read with no thread hop at all). A real disk write is the
+    // one step here neither of those has, so it gets an explicit wait
+    // instead of borrowing their zero-wait assumption.
+    let mut attempts = 0;
+    let (headers, observed_at) = loop {
+        if let Some(found) = cache.load("fixture") {
+            break found;
+        }
+        attempts += 1;
+        assert!(
+            attempts < 200,
+            "no reading was persisted for `fixture` within 2s of a completed exchange"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(headers.limit(), Some(7000));
+    assert_eq!(headers.remaining(), Some(6999));
+    assert!(observed_at > 0, "the observation must be dated");
+
+    // The same reading is also in memory, through the ordinary path — the
+    // write side is additive, not a replacement for it.
+    assert_eq!(
+        gateway.quota_headers().and_then(|(h, _)| h.limit()),
+        Some(7000)
+    );
 }
 
 /// The negative half of the same property, at the seam that actually decides

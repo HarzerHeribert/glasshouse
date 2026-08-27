@@ -67,6 +67,17 @@ pub struct Cli {
 /// from the working directory or `--scope`, never across projects.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Print a concise project and resource summary.
+    ///
+    /// One screenful: the project identity, how many harnesses are usable,
+    /// how many sessions are recorded and which one was active most
+    /// recently, and how many model resources Glasshouse can describe.
+    ///
+    /// This composes what `doctor`, `sessions` and `resources` already
+    /// compute rather than re-deriving any of it, and it never goes deeper
+    /// than a count — a harness's setup problems, a session's seven facts,
+    /// and a resource's quota detail are what those three commands are for.
+    Status,
     /// Report detected harnesses, optional integrations, and setup problems.
     Doctor,
     /// Reopen the first-run setup wizard.

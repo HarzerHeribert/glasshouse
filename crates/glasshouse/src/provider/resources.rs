@@ -47,8 +47,8 @@ use crate::provider::quota::{
 };
 use crate::provider::registry::{ResourceKind, registry};
 use crate::provider::telemetry::{
-    HarnessTelemetry, RateLimitHeaders, apply_harness_report, apply_provider_headers,
-    apply_user_configuration, read_harness_plan,
+    GatewayQuotaCache, HarnessTelemetry, RateLimitHeaders, apply_harness_report,
+    apply_provider_headers, apply_user_configuration, read_harness_plan,
 };
 
 /// The status interface of a harness that has one, as a command line
@@ -249,6 +249,34 @@ impl GatheredTelemetry {
             if report.known_plan().is_measured() {
                 self.harness.insert(harness.slug(), report);
             }
+        }
+        self
+    }
+
+    /// Fold in whatever a local gateway has captured off real forwarded
+    /// traffic and persisted to disk — capability map line 1229's gateway
+    /// half, bridged across the process boundary between the `glasshouse
+    /// run`/`glasshouse launch` that ran the gateway and this
+    /// `glasshouse resources` invocation, which is never the same process.
+    ///
+    /// A read of [`GatewayQuotaCache::load_all`] — no network, no
+    /// subprocess, no credential, exactly [`Self::gather_harness_status`]'s
+    /// own cost. Providers this fills in are folded through
+    /// [`Self::with_provider_headers`], the same seam `--probe` already
+    /// uses, so `report`'s D3 staleness handling and D5's "prefer
+    /// authoritative" ordering both apply to a gateway-sourced reading
+    /// exactly as they do to a probed one — there is no second code path for
+    /// this source to disagree with the first through.
+    ///
+    /// **Not yet called from `glasshouse resources`.** The caller this
+    /// method exists for is `main.rs::resources_report`, which this
+    /// package's `FORBIDDEN FILES` does not let it reach — see the report
+    /// for the one line that call site needs. Tests exercise this method
+    /// directly, which is what proves the model side of the bridge without
+    /// claiming the production reach it does not yet have (practice §35).
+    pub fn gather_gateway_quota(mut self, cache: &GatewayQuotaCache) -> Self {
+        for (provider, headers, observed_at_unix) in cache.load_all() {
+            self = self.with_provider_headers(provider, headers, observed_at_unix);
         }
         self
     }
@@ -991,7 +1019,7 @@ mod tests {
         BudgetPeriod, MonetaryBudget, ProjectConfig, ProviderConfig, QuotaOverride, UserConfig,
     };
     use crate::provider::quota::{Capacity, NativeAmount, Reading, ReadingSource};
-    use crate::provider::telemetry::RateLimitHeaders;
+    use crate::provider::telemetry::{GatewayQuotaCache, RateLimitHeaders};
 
     const OBSERVED: i64 = 1_787_800_000;
     const NOW: i64 = OBSERVED + 30;
@@ -1118,6 +1146,110 @@ mod tests {
         // stays open on its own honest terms, and the report says so rather
         // than inventing one.
         assert!(row.contains("starts unmeasured (unknown)"), "{row}");
+    }
+
+    // --- BRIDGE-QUOTA: a gateway-captured reading, folded in ---------------
+
+    /// Capability map lines 1217/1218's antecedent, reached at the actual
+    /// rendering function `main.rs::resources_report` calls, for the first
+    /// time in this phase's history.
+    ///
+    /// **The numbers are synthetic and say so.** No live host `--probe` can
+    /// reach has ever sent both halves of a pool in one unit — AnyRouter's
+    /// own real header carries a limit and no remaining count at all (see
+    /// `anyrouter_headers`, above); Groq's real inference response does
+    /// carry both, proven at the model level by `provider::telemetry`'s
+    /// `groqs_reading_produces_a_real_exact_percentage_from_the_model_alone`,
+    /// but Groq is not a provider this build ships a registry template for,
+    /// so it cannot appear in `report`'s own registry loop. This test uses
+    /// AnyRouter's real provider slug with an invented remaining count, to
+    /// isolate what this package can actually prove: that a reading reaching
+    /// [`GatewayQuotaCache`] reaches this unmodified rendering function and
+    /// produces a real, correctly-labelled percentage — not that a live host
+    /// has ever supplied one over this seam.
+    ///
+    /// This is [`GatheredTelemetry::gather_gateway_quota`]'s only production-
+    /// shaped proof: nothing in the shipped binary calls it yet (see the
+    /// package report for the one line `main.rs::resources_report` needs),
+    /// so this cannot claim §35's production-caller mutation the way
+    /// `a_providers_own_rate_limit_header_reaches_the_report_as_authoritative`
+    /// can for `--probe`. What it proves is narrower and still real: *if*
+    /// that line existed, this is exactly what a user would see.
+    #[test]
+    fn a_persisted_gateway_reading_reaches_the_rendered_report() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayQuotaCache::at(dir.path());
+        cache.store(
+            "anyrouter",
+            &RateLimitHeaders::read(vec![
+                ("ratelimit-limit", "300"),
+                ("ratelimit-remaining", "297"),
+            ]),
+            OBSERVED,
+        );
+
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let telemetry = GatheredTelemetry::new().gather_gateway_quota(&cache);
+        let row = anyrouter_row(&report(&effective, &telemetry, options()));
+
+        assert!(
+            row.contains("capacity        99%"),
+            "a reading with both halves must render a real, unlabelled-as-estimate \
+             percentage: {row}"
+        );
+        assert!(
+            !row.contains("capacity        unknown"),
+            "the gathered reading must have reached the report: {row}"
+        );
+    }
+
+    /// The negative half: a cache with nothing in it changes nothing, so
+    /// `gather_gateway_quota` is safe to fold in unconditionally rather than
+    /// only when a gateway happens to have run.
+    #[test]
+    fn an_empty_gateway_quota_cache_leaves_the_report_exactly_as_before() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayQuotaCache::at(dir.path());
+
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let without = report(&effective, &GatheredTelemetry::new(), options());
+        let with = report(
+            &effective,
+            &GatheredTelemetry::new().gather_gateway_quota(&cache),
+            options(),
+        );
+        assert_eq!(without, with);
+    }
+
+    /// An explicit `--probe`'s own reading, folded in after
+    /// `gather_gateway_quota`, still wins — a live probe the user just ran is
+    /// never staled out by whatever a gateway happened to persist earlier,
+    /// mirroring `Capacity::prefer`'s own freshness rule at the seam these
+    /// two sources actually meet in `main.rs::resources_report`.
+    #[test]
+    fn an_explicit_probe_reading_overrides_a_persisted_gateway_one_for_the_same_provider() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayQuotaCache::at(dir.path());
+        cache.store(
+            "anyrouter",
+            &RateLimitHeaders::read(vec![("ratelimit-limit", "300")]),
+            OBSERVED,
+        );
+
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let telemetry = GatheredTelemetry::new()
+            .gather_gateway_quota(&cache)
+            .with_provider_headers(
+                "anyrouter",
+                RateLimitHeaders::read(vec![("ratelimit-limit", "150")]),
+                OBSERVED + 60,
+            );
+        let row = anyrouter_row(&report(&effective, &telemetry, options()));
+        assert!(row.contains("150 requests"), "{row}");
+        assert!(!row.contains("300 requests"), "{row}");
     }
 
     /// The quiet view's own rule, extended to windows: nothing measured means

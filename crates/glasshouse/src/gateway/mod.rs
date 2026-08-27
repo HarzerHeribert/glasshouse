@@ -261,13 +261,45 @@ pub struct Gateway {
 }
 
 impl Gateway {
-    /// Bind the listener, mint the token, and start accepting.
+    /// Bind the listener, mint the token, and start accepting, with no
+    /// durable quota cache — capability map line 1229's gateway half stays
+    /// in memory only, exactly as before this package.
     ///
     /// Private on purpose. [`start_if_required`] is the only way in from
     /// outside this module, which is what stops a gateway from being started
     /// by a caller that simply decided to, rather than by a profile that
     /// asked for one.
     fn start(upstream: Upstream) -> Result<Self> {
+        Self::start_with_quota_cache(upstream, None)
+    }
+
+    /// [`Self::start`], with a [`crate::provider::telemetry::GatewayQuotaCache`]
+    /// a real forwarded exchange's rate-limit headers are persisted to —
+    /// capability map lines 1217/1218/1229's bridge across the process
+    /// boundary between this gateway and a later `glasshouse resources`
+    /// invocation.
+    ///
+    /// `None` reproduces [`Self::start`] exactly: nothing is ever written to
+    /// disk, and every existing caller of [`Self::start`] — including every
+    /// test in [`super::conformance`] that runs a real accept loop — is
+    /// unaffected. **No caller resolves
+    /// [`crate::paths::RuntimePaths::resolve`] here, and none may be added
+    /// here**: this module has never had a project or a data directory in
+    /// scope, and a gateway that resolved its own OS-standard directory
+    /// would write into whichever machine happens to be running `cargo test`
+    /// every time a conformance test forwards a request with a rate-limit
+    /// header — see [`crate::provider::telemetry::GatewayQuotaCache`]'s own
+    /// doc for why that is the wrong owner for the resolve step. A caller
+    /// that wants persistence resolves its own
+    /// [`crate::paths::RuntimePaths`] and hands this a
+    /// [`crate::provider::telemetry::GatewayQuotaCache::new`] built from it.
+    ///
+    /// Private on purpose, exactly as [`Self::start`] is: reached from
+    /// outside this module only through [`start_if_required_with_quota_cache`].
+    fn start_with_quota_cache(
+        upstream: Upstream,
+        quota_cache: Option<crate::provider::telemetry::GatewayQuotaCache>,
+    ) -> Result<Self> {
         let listener = TcpListener::bind((GATEWAY_INTERFACE, EPHEMERAL_PORT))
             .context("could not bind the local Glasshouse gateway to loopback")?;
         // Port 0 was a request, not an address. This is the answer, and it is
@@ -283,6 +315,7 @@ impl Gateway {
         let stop = Arc::new(AtomicBool::new(false));
         let upstream = Arc::new(upstream);
         let routing = Arc::new(SessionRouting::new());
+        let quota_cache = quota_cache.map(Arc::new);
 
         let accept = std::thread::Builder::new()
             .name("glasshouse-gateway-accept".to_owned())
@@ -291,7 +324,8 @@ impl Gateway {
                 let stop = Arc::clone(&stop);
                 let upstream = Arc::clone(&upstream);
                 let routing = Arc::clone(&routing);
-                move || accept_loop(listener, stop, token, upstream, routing)
+                let quota_cache = quota_cache.clone();
+                move || accept_loop(listener, stop, token, upstream, routing, quota_cache)
             })
             .context("could not start the local Glasshouse gateway's accept thread")?;
 
@@ -404,6 +438,7 @@ fn accept_loop(
     token: Arc<GatewayToken>,
     upstream: Arc<Upstream>,
     routing: Arc<SessionRouting>,
+    quota_cache: Option<Arc<crate::provider::telemetry::GatewayQuotaCache>>,
 ) {
     // One agent for the life of the gateway: it owns the connection pool to
     // the provider, so a warm TLS connection survives from one request to
@@ -418,6 +453,7 @@ fn accept_loop(
                 let upstream = Arc::clone(&upstream);
                 let agent = Arc::clone(&agent);
                 let routing = Arc::clone(&routing);
+                let quota_cache = quota_cache.clone();
                 let spawned = std::thread::Builder::new()
                     .name("glasshouse-gateway-exchange".to_owned())
                     .spawn(move || {
@@ -435,10 +471,18 @@ fn accept_loop(
                         // one place `is_empty()` is checked, so an ordinary
                         // exchange that carried no rate-limit header is a
                         // silent no-op rather than a cleared reading.
-                        routing.observe_quota_headers(
-                            quota,
-                            crate::provider::cache::now_unix_seconds(),
-                        );
+                        let now = crate::provider::cache::now_unix_seconds();
+                        // The durable half of the same reading — capability
+                        // map lines 1217/1218/1229's bridge across the
+                        // process boundary, see
+                        // `GatewayQuotaCache::store`'s own doc. `exchange`
+                        // already names the configured provider this
+                        // response came from; nothing else in this crate
+                        // knows that at the point a reading is captured.
+                        if let Some(cache) = &quota_cache {
+                            cache.store(&exchange.provider, &quota, now);
+                        }
+                        routing.observe_quota_headers(quota, now);
                         exchange.record();
                     });
                 if spawned.is_err() {
@@ -488,6 +532,33 @@ pub fn start_if_required(
         return Ok(None);
     }
     Gateway::start(upstream()?).map(Some)
+}
+
+/// [`start_if_required`], with a
+/// [`crate::provider::telemetry::GatewayQuotaCache`] a started gateway
+/// persists every real forwarded exchange's rate-limit headers to.
+///
+/// **Not called from `crates/glasshouse/src/main.rs` today.** That file's
+/// two launch paths (`launch_session` and the resume path,
+/// `overlay_resolution`) both still call plain [`start_if_required`], which
+/// this function reproduces exactly when `quota_cache` is `None`. Wiring a
+/// real reading into `glasshouse resources` needs both of those call sites
+/// changed to this function, with
+/// `Some(crate::provider::telemetry::GatewayQuotaCache::new(runtime.paths()))`
+/// — `runtime` is already in scope at both, since
+/// `UserConfig::load(runtime.paths())` is the first line of
+/// `main.rs::resources_report`'s own read of the same [`crate::paths::RuntimePaths`].
+/// `crates/glasshouse/src/main.rs` is this package's `FORBIDDEN FILES`; see
+/// the report.
+pub fn start_if_required_with_quota_cache(
+    profiles: &[LaunchProfile],
+    upstream: impl FnOnce() -> Result<Upstream>,
+    quota_cache: Option<crate::provider::telemetry::GatewayQuotaCache>,
+) -> Result<Option<Gateway>> {
+    if !gateway_is_required(profiles) {
+        return Ok(None);
+    }
+    Gateway::start_with_quota_cache(upstream()?, quota_cache).map(Some)
 }
 
 #[cfg(test)]

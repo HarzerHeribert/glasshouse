@@ -639,3 +639,58 @@ Platform/external evidence:
 
 See `.agent-runtime/report-QUOTA-FOLLOWUP.md` for the full audit table,
 probes still needed, and what this packet got wrong.
+
+---
+
+## Appended by BRIDGE-QUOTA, 2026-08-27 — D2 answered, still no caller
+
+QUOTA-FOLLOWUP's own account of 1199/1217/1218 (above) named the remaining
+gap exactly: "the gateway now captures them... but nothing in the shipped
+binary asks a percentage question of a gateway-captured reading," because
+`main.rs`, `cli.rs` and `shell/**` were that package's own `FORBIDDEN FILES`.
+This package's brief (`.agent-runtime/packet-bridge-quota.md`) was to answer
+D2's own open question — persist, share a process, or report that a durable
+store is a bigger piece of work than one package — and build whichever answer
+survived testing. See `.agent-runtime/report-BRIDGE-QUOTA.md` for the full
+account; summarised against this file's own line 1229 and its neighbours:
+
+**D2 answered: a durable, per-provider cache
+(`provider::telemetry::GatewayQuotaCache`), written by the gateway's accept
+loop and read by `GatheredTelemetry`.** Not a shared process — confirmed
+before building anything that no shipped code path runs the interactive
+shell and a gateway-backed session in the same process (`shell/mod.rs`'s own
+`start_session` never resolves a gateway-backed profile at all), so
+`shell/state.rs`/`shell/view.rs` had nothing live to read from regardless of
+partition.
+
+**Both halves are built, tested against their own real production-shaped call
+site, and neither is wired.** The write side
+(`Gateway::start_with_quota_cache`, additive — `Gateway::start` still takes
+no cache and behaves exactly as this package found it) is mutation-killed
+through a real accept loop and a real socket, the same discipline this file's
+own `a_real_forwarded_exchanges_rate_limit_headers_reach_the_gateway` set for
+1229's in-memory half. The read side
+(`GatheredTelemetry::gather_gateway_quota`) is mutation-killed through the
+actual `report()` function `main.rs::resources_report` calls unmodified. What
+neither can be is a §35 proof of *production* reach, because the three lines
+that would call them from `main.rs` belong to `PACKET-PHASE-48-CLI` this
+round — named exactly, with their line numbers, in the report.
+
+**Line 1229 itself is unaffected — it was already CLOSED by this file's own
+QUOTA-FOLLOWUP section**, and this package did not reopen it: the gateway
+already reads and exposes rate-limit headers from both API and gateway
+responses, in memory, which is what that line's text asks. What this package
+adds is a second consumer of the same in-memory reading (a durable copy,
+written alongside the existing `SessionRouting::observe_quota_headers` call,
+never instead of it) — 1229's own box stays exactly as QUOTA-FOLLOWUP left
+it.
+
+**The honest ceiling, recorded here because it is this file's own 1199 that
+it bears most directly on:** even once `main.rs` calls both new entry
+points, 1199 does not close for a real user by that alone. Groq — the only
+host observed anywhere sending a token pool's both halves — has no registry
+template in this build; a gateway session against any provider this build
+does ship a template for has never been observed sending a token header at
+all. The wiring removes the structural blocker; it does not manufacture the
+evidence, and this package did not invent any to compensate, per D1 and
+practice §23.

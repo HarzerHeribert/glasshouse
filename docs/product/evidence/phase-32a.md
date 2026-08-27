@@ -360,3 +360,55 @@ reading, so the antecedent still does not fire for a real user. 1199, 1205,
 publishes a start), 1212, 1213, 1215 and 1218 are unchanged for the original
 reason: nothing publishes the number to a caller this package's partition
 can reach.
+
+---
+
+## Appended by BRIDGE-QUOTA, 2026-08-27 — the bridge is built; still zero close
+
+QUOTA-FOLLOWUP's own account named the blocker precisely: "nothing in the
+shipped binary asks that question of a gateway-captured reading" because a
+gateway-backed session and a `glasshouse resources` invocation are different
+processes, and bridging one into the other "needs either a shell-side surface
+or a persisted cache, both outside this package's partition." This package's
+whole brief was that bridge. See `.agent-runtime/report-BRIDGE-QUOTA.md` for
+the full account; summarised against this file's own lines:
+
+**Still zero of the sixteen close, and the reason has sharpened again rather
+than moved.** `provider::telemetry::GatewayQuotaCache` now persists a
+gateway-captured reading to a per-provider file under
+`RuntimePaths::data_dir()`, exactly `provider::cache::ModelCache`'s own shape,
+and `GatheredTelemetry::gather_gateway_quota` folds it back in through the
+same `with_provider_headers` seam `--probe` already uses — proven at the
+actual `report()` function with a reading planted where the cache would put
+one. **Nothing in the shipped binary calls either new entry point.** Both
+call sites are in `crates/glasshouse/src/main.rs`
+(`gateway::start_if_required` on the write side, two call sites;
+`GatheredTelemetry::new()` on the read side, one), which is
+`PACKET-PHASE-48-CLI`'s this round — the report names the exact three lines.
+
+**And a layer under that was found and is worth recording here rather than
+only in the report.** Even with those three lines, 1199/1217/1218 would still
+not close **for a real user** today: Groq — the only host observed anywhere
+sending both halves of a pool in one unit — is not a provider this build
+ships a registry template for (`grep -rl groq crates/glasshouse/src` outside
+test fixtures returns nothing), and AnyRouter — a real shipped template —
+has never been observed sending a remaining count on either its `/models`
+path or (per the QUOTA-FOLLOWUP probe) authenticated. So closing these lines
+for real needs the wiring **and** either a Groq template or new evidence from
+a registered provider's inference path — neither of which this package
+invented, per D1/§23.
+
+**`shell/state.rs` and `shell/view.rs`, granted as a hedge, turned out to be a
+dead end and it is worth recording why rather than leaving it to be
+rediscovered.** `shell::run`'s own session-launch path
+(`shell/mod.rs::start_session`) never resolves a gateway-backed profile —
+every quick-opened session is `LaunchProfile::native`. A `Gateway` only ever
+exists inside `main.rs::launch_session`'s or `resolve_resume_overlay`'s
+single blocking call, never inside the interactive shell's process. Any
+future package wanting the shell to show *live* gateway-backed quota, rather
+than reading the persisted cache this package built, needs `shell/mod.rs`
+itself in its partition — not the state/view split alone.
+
+1210 stays open on the same grounds it has for three packages running: no
+host anywhere publishes a window start. This is now the **fourth** package to
+report the same absence.

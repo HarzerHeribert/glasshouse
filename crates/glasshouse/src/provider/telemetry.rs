@@ -132,6 +132,8 @@
 //! this module's allowlist — headers only, never a byte of the body — from
 //! every response it forwards. See that module for where.
 
+use std::path::PathBuf;
+
 use crate::provider::quota::{
     Capacity, CapacityState, KnownPlan, LimitingUnit, LongWindowRequests, NativeAmount, Pool,
     RateCeilings, Reading, ReadingSource,
@@ -563,6 +565,59 @@ impl RateLimitHeaders {
             .find(|name| self.read_from.contains(name))
             .copied()
             .unwrap_or(candidates[0])
+    }
+
+    /// The primitive fields underneath this value, in the shape
+    /// [`PersistedGatewayReading`] stores them.
+    ///
+    /// `read_from` is names only, exactly as [`RateLimitHeaders::read_from`]
+    /// already guarantees — nothing new crosses the boundary here.
+    fn to_persisted(&self) -> PersistedGatewayReadingFields {
+        PersistedGatewayReadingFields {
+            limit: self.limit,
+            remaining: self.remaining,
+            reset: self.reset,
+            window_seconds: self.window_seconds,
+            retry_after_seconds: self.retry_after_seconds,
+            token_limit: self.token_limit,
+            token_remaining: self.token_remaining,
+            token_reset: self.token_reset,
+            read_from: self
+                .read_from
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+        }
+    }
+
+    /// The inverse of [`Self::to_persisted`].
+    ///
+    /// `read_from` is matched back against [`RATE_LIMIT_HEADERS`] rather than
+    /// trusted as written: a name a hand-edited or corrupted cache file
+    /// carries that is not on the allowlist is dropped rather than believed,
+    /// the same refusal [`RateLimitHeaders::read`] already applies to a wire
+    /// header this parser does not recognise.
+    fn from_persisted(fields: &PersistedGatewayReadingFields) -> Self {
+        Self {
+            limit: fields.limit,
+            remaining: fields.remaining,
+            reset: fields.reset,
+            window_seconds: fields.window_seconds,
+            retry_after_seconds: fields.retry_after_seconds,
+            token_limit: fields.token_limit,
+            token_remaining: fields.token_remaining,
+            token_reset: fields.token_reset,
+            read_from: fields
+                .read_from
+                .iter()
+                .filter_map(|name| {
+                    RATE_LIMIT_HEADERS
+                        .iter()
+                        .find(|known| *known == name)
+                        .copied()
+                })
+                .collect(),
+        }
     }
 }
 
@@ -1008,6 +1063,222 @@ pub fn pool_with_measured_limit(
 /// caller can rebuild one without importing four types.
 pub fn uniform_rate_ceilings(unknown: Capacity<NativeAmount>) -> RateCeilings {
     RateCeilings::uniform(unknown, Capacity::Unmeasured)
+}
+
+// --- a gateway-captured reading, surviving its own process -----------------
+//
+// Capability map line 1229's gateway half has a reader
+// (`RateLimitHeaders::apply_to`, above) and a writer
+// (`crate::gateway::ingress`'s capture), and both only ever run inside a
+// `glasshouse run`/`glasshouse launch` process that is blocked on the
+// harness it started. `glasshouse resources` — the one caller that turns a
+// reading into a rendered line — is a separate invocation of the binary, and
+// nothing in memory connects the two. This is that connection: the gateway
+// process writes what it captured, and a later `glasshouse resources`
+// process reads it back. See this package's report for why this is a
+// durable cache rather than a shared-process design, and for the one line
+// each side still needs before a real reading reaches the report.
+
+/// The on-disk format's version — [`crate::provider::cache::ModelCatalogue`]'s
+/// own pattern, for the same reason: a shape change should be a cache miss,
+/// never a misread.
+const GATEWAY_QUOTA_FORMAT_VERSION: u32 = 1;
+
+/// [`RateLimitHeaders`]'s private fields, in the shape that survives a JSON
+/// round trip. A separate type rather than `#[derive(Serialize,
+/// Deserialize)]` directly on [`RateLimitHeaders`], because `read_from` is
+/// `Vec<&'static str>` there — borrowed from [`RATE_LIMIT_HEADERS`] — and a
+/// deserializer cannot hand back a `'static` reference from bytes it just
+/// read; [`RateLimitHeaders::from_persisted`] is where an owned name is
+/// matched back against that list.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct PersistedGatewayReadingFields {
+    limit: Option<i64>,
+    remaining: Option<i64>,
+    reset: Option<i64>,
+    window_seconds: Option<i64>,
+    retry_after_seconds: Option<i64>,
+    token_limit: Option<i64>,
+    token_remaining: Option<i64>,
+    token_reset: Option<i64>,
+    read_from: Vec<String>,
+}
+
+/// One provider's file: the fields above, plus what the file itself needs to
+/// say about itself — [`crate::provider::cache::ModelCatalogue`]'s own three
+/// reasons, unchanged here: a format version to reject rather than misread,
+/// the provider name to catch a file moved or hand-edited into disagreeing
+/// with its own name, and the observation time D3 requires so a stale
+/// reading can be told from a fresh one after it crosses a process boundary.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct PersistedGatewayReading {
+    version: u32,
+    provider: String,
+    observed_at_unix: i64,
+    #[serde(flatten)]
+    fields: PersistedGatewayReadingFields,
+}
+
+/// Where a gateway-captured rate-limit reading is kept between processes —
+/// capability map line 1229's gateway half, bridged to line 1217/1218's
+/// caller.
+///
+/// Exactly [`crate::provider::cache::ModelCache`]'s own shape: [`Self::at`]
+/// for tests, [`Self::new`] for production, one JSON file per provider named
+/// by `crate::provider::cache::file_stem`, written to a temporary file and
+/// renamed into place so a crash mid-write cannot leave [`Self::load`] a
+/// half-written file to trip over. User-scoped rather than project-scoped
+/// for the reason [`crate::paths::RuntimePaths::provider_cache_dir`]
+/// gives for the model catalogue: a provider's rate-limit window belongs to
+/// the account a credential names, not to whichever project a gateway
+/// happened to be started for.
+///
+/// # Never resolved automatically — deliberately
+///
+/// This type never calls [`crate::paths::RuntimePaths::resolve`] itself.
+/// `crate::gateway` has never had a project or a data directory in scope —
+/// [`crate::gateway::start_if_required`] takes only launch profiles and an
+/// upstream closure — and every other cache in this crate
+/// ([`crate::provider::cache::ModelCache`] included) is handed an
+/// already-resolved [`crate::paths::RuntimePaths`] by whatever constructed
+/// [`crate::Runtime`] rather than resolving one of its own. A gateway that
+/// resolved its own OS-standard data directory would also fire inside every
+/// existing conformance test that runs a real accept loop, writing into
+/// whichever machine happens to run `cargo test` — which is exactly why
+/// `crate::gateway::Gateway::start` keeps taking no cache at all, and
+/// `crate::gateway::Gateway::start_with_quota_cache` takes one only when a
+/// caller explicitly supplies it. See this package's report for the caller
+/// neither of those is yet: wiring a real [`crate::paths::RuntimePaths`] into
+/// [`crate::gateway::start_if_required`]'s two call sites is
+/// `crates/glasshouse/src/main.rs`, which this package may not edit.
+#[derive(Debug, Clone)]
+pub struct GatewayQuotaCache {
+    root: PathBuf,
+}
+
+impl GatewayQuotaCache {
+    /// The cache under this installation's data directory — the production
+    /// constructor, for a caller that already resolved
+    /// [`crate::paths::RuntimePaths`].
+    pub fn new(paths: &crate::paths::RuntimePaths) -> Self {
+        Self {
+            root: paths.data_dir().join("gateway-quota"),
+        }
+    }
+
+    /// A cache rooted at an explicit directory. For tests, exactly like
+    /// [`crate::provider::cache::ModelCache::at`].
+    pub fn at(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    fn path_for(&self, provider: &str) -> PathBuf {
+        self.root.join(format!(
+            "{}.json",
+            crate::provider::cache::file_stem(provider)
+        ))
+    }
+
+    /// The most recent gateway-captured reading for `provider`, if the
+    /// gateway has ever forwarded a response for it that carried one.
+    ///
+    /// **Returns no error, ever, and reads no network.**
+    /// [`crate::provider::cache::ModelCache::load`]'s own contract, for the
+    /// same reason: every way this read can fail — absent, unreadable,
+    /// truncated, another format version, a provider name the file
+    /// disagrees with — means the same thing to a caller, which is "no
+    /// reading here", never a reason to fail `glasshouse resources`.
+    pub fn load(&self, provider: &str) -> Option<(RateLimitHeaders, i64)> {
+        let path = self.path_for(provider);
+        let bytes = std::fs::read(&path).ok()?;
+        let stored: PersistedGatewayReading = serde_json::from_slice(&bytes).ok()?;
+        if stored.version != GATEWAY_QUOTA_FORMAT_VERSION || stored.provider != provider {
+            return None;
+        }
+        Some((
+            RateLimitHeaders::from_persisted(&stored.fields),
+            stored.observed_at_unix,
+        ))
+    }
+
+    /// Every provider this cache currently holds a reading for.
+    ///
+    /// What [`crate::provider::resources::GatheredTelemetry::gather_gateway_quota`]
+    /// folds in without being told which providers to ask about — a gateway
+    /// may have forwarded for any of them, and this is the one place that
+    /// knows which files exist rather than guessing from the registry.
+    pub fn load_all(&self) -> Vec<(String, RateLimitHeaders, i64)> {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(bytes) = std::fs::read(entry.path()) else {
+                continue;
+            };
+            let Ok(stored) = serde_json::from_slice::<PersistedGatewayReading>(&bytes) else {
+                continue;
+            };
+            if stored.version != GATEWAY_QUOTA_FORMAT_VERSION {
+                continue;
+            }
+            out.push((
+                stored.provider.clone(),
+                RateLimitHeaders::from_persisted(&stored.fields),
+                stored.observed_at_unix,
+            ));
+        }
+        out
+    }
+
+    /// Persist `headers` for `provider`, replacing whatever it had before —
+    /// the gateway's own half of capability map line 1229.
+    ///
+    /// A no-op when `headers` is empty, mirroring
+    /// `crate::gateway::session::SessionRouting::observe_quota_headers`'s
+    /// own guard: an ordinary exchange that carried no rate-limit header must
+    /// not overwrite a real reading a previous one left on disk, any more
+    /// than it may in memory.
+    ///
+    /// Best-effort on a write failure — logged, not propagated. The accept
+    /// loop this is called from cannot fail a real session's exchange over a
+    /// full disk or a permissions problem; see
+    /// `crate::gateway::Gateway::start_with_quota_cache`'s own doc for the
+    /// call site.
+    pub fn store(&self, provider: &str, headers: &RateLimitHeaders, observed_at_unix: i64) {
+        if headers.is_empty() {
+            return;
+        }
+        if let Err(err) = self.try_store(provider, headers, observed_at_unix) {
+            tracing::debug!(
+                provider,
+                error = %err,
+                "could not persist a gateway-captured quota reading"
+            );
+        }
+    }
+
+    fn try_store(
+        &self,
+        provider: &str,
+        headers: &RateLimitHeaders,
+        observed_at_unix: i64,
+    ) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.root)?;
+        let stored = PersistedGatewayReading {
+            version: GATEWAY_QUOTA_FORMAT_VERSION,
+            provider: provider.to_owned(),
+            observed_at_unix,
+            fields: headers.to_persisted(),
+        };
+        let encoded = serde_json::to_vec_pretty(&stored)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        let path = self.path_for(provider);
+        let temporary = path.with_extension("json.writing");
+        std::fs::write(&temporary, &encoded)?;
+        std::fs::rename(&temporary, &path)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1735,15 +2006,19 @@ mod tests {
     /// structural guarantee Phase 32A built, exercised for the first time by
     /// a live reading rather than by hand-built test data.
     ///
-    /// **This does not close either line.** Nothing in the shipped binary
-    /// calls `.normalized()` on a state built from these headers: they only
-    /// ever arrive on the gateway's forwarding path (`crate::gateway::
-    /// ingress`), and bridging a gateway-captured reading into
-    /// `glasshouse resources` — the one caller that renders a percentage —
-    /// needs either a shell-side surface or a persisted cache, both outside
-    /// this package's partition. Recorded here as proof the model is ready
-    /// the day a caller exists, per practice §36: a reading arriving is not
-    /// the same question as something asking for a percentage.
+    /// **This still does not close either line, and the reason has moved
+    /// again.** BRIDGE-QUOTA built the persisted cache
+    /// (`GatewayQuotaCache`, below) and the gateway-side write into it
+    /// (`crate::gateway::Gateway::start_with_quota_cache`), so a reading
+    /// this shaped can now survive the process boundary between the gateway
+    /// and a `glasshouse resources` invocation — proven end to end at
+    /// `resources::tests::a_persisted_gateway_reading_reaches_the_rendered_report`.
+    /// What still does not exist is the one line in `main.rs` that would
+    /// call either new entry point from the shipped binary; see this
+    /// package's report for exactly which line, at which of two call sites.
+    /// Recorded here as proof the model is ready the day that caller exists,
+    /// per practice §36: a reading arriving is not the same question as
+    /// something asking for a percentage.
     #[test]
     fn groqs_reading_produces_a_real_exact_percentage_from_the_model_alone() {
         let state = RateLimitHeaders::read(groq_inference_headers()).apply_to(
@@ -1764,5 +2039,253 @@ mod tests {
             .expect("both halves of the token pool were read");
         assert_eq!(tokens_score.percent().exact(), Some(99));
         assert!(!tokens_score.percent().render().contains("estimated"));
+    }
+
+    // --- GatewayQuotaCache: a reading surviving its own process ------------
+
+    #[test]
+    fn a_stored_reading_comes_back_with_every_field_and_its_timestamp() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayQuotaCache::at(dir.path());
+        let written = RateLimitHeaders::read(groq_inference_headers());
+        cache.store("groq", &written, OBSERVED);
+
+        let (read, observed_at_unix) = cache.load("groq").expect("the reading is cached");
+        assert_eq!(read.limit(), Some(7000));
+        assert_eq!(read.remaining(), Some(6999));
+        assert_eq!(read.token_limit(), Some(6000));
+        assert_eq!(read.token_remaining(), Some(5991));
+        assert_eq!(observed_at_unix, OBSERVED);
+        // The round trip is exact enough to reproduce the same real
+        // percentage the model-level test above computes directly — proof
+        // that persisting and reading back changes nothing about what the
+        // reading means.
+        let state = read.apply_to(
+            ResourceKind::from_direct_provider("groq").capacity(),
+            OBSERVED,
+        );
+        assert_eq!(
+            state
+                .requests()
+                .normalized()
+                .and_then(|s| s.percent().exact()),
+            Some(99)
+        );
+    }
+
+    #[test]
+    fn a_provider_with_no_persisted_reading_is_a_miss_rather_than_an_error() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        assert!(
+            GatewayQuotaCache::at(dir.path())
+                .load("never-forwarded")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn storing_again_replaces_the_previous_reading_for_the_same_provider() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayQuotaCache::at(dir.path());
+        cache.store(
+            "anyrouter",
+            &RateLimitHeaders::read(vec![("ratelimit-limit", "300")]),
+            OBSERVED,
+        );
+        cache.store(
+            "anyrouter",
+            &RateLimitHeaders::read(vec![("ratelimit-limit", "150")]),
+            OBSERVED + 60,
+        );
+        let (read, observed_at_unix) = cache.load("anyrouter").expect("cached");
+        assert_eq!(read.limit(), Some(150), "the newer reading must win");
+        assert_eq!(observed_at_unix, OBSERVED + 60);
+    }
+
+    #[test]
+    fn an_empty_reading_is_never_written_at_all() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayQuotaCache::at(dir.path());
+        cache.store("groq", &RateLimitHeaders::read(Vec::new()), OBSERVED);
+        assert!(
+            !dir.path().exists() || std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+            "an exchange that carried no rate-limit header must not create a cache file"
+        );
+    }
+
+    #[test]
+    fn a_reading_already_on_disk_is_not_erased_by_a_later_empty_one() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayQuotaCache::at(dir.path());
+        cache.store(
+            "groq",
+            &RateLimitHeaders::read(vec![("x-ratelimit-limit-requests", "7000")]),
+            OBSERVED,
+        );
+        cache.store("groq", &RateLimitHeaders::read(Vec::new()), OBSERVED + 60);
+        assert_eq!(
+            cache.load("groq").and_then(|(h, _)| h.limit()),
+            Some(7000),
+            "an empty reading must not overwrite a real one on disk, mirroring \
+             SessionRouting::observe_quota_headers's own in-memory guard"
+        );
+    }
+
+    #[test]
+    fn load_all_finds_every_provider_a_gateway_has_ever_written_for() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayQuotaCache::at(dir.path());
+        cache.store(
+            "groq",
+            &RateLimitHeaders::read(groq_inference_headers()),
+            OBSERVED,
+        );
+        cache.store(
+            "anyrouter",
+            &RateLimitHeaders::read(vec![("ratelimit-limit", "300")]),
+            OBSERVED + 10,
+        );
+        let mut found: Vec<String> = cache
+            .load_all()
+            .into_iter()
+            .map(|(provider, _, _)| provider)
+            .collect();
+        found.sort();
+        assert_eq!(found, vec!["anyrouter".to_owned(), "groq".to_owned()]);
+    }
+
+    #[test]
+    fn a_provider_name_that_looks_like_a_path_cannot_escape_the_cache_directory() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayQuotaCache::at(dir.path());
+        cache.store(
+            "../../.ssh/authorized_keys",
+            &RateLimitHeaders::read(vec![("ratelimit-limit", "1")]),
+            OBSERVED,
+        );
+        assert!(
+            !dir.path().parent().unwrap().join(".ssh").exists(),
+            "a hostile provider name must never steer a write outside the cache directory"
+        );
+        assert_eq!(
+            cache
+                .load("../../.ssh/authorized_keys")
+                .and_then(|(h, _)| h.limit()),
+            Some(1),
+            "the same hostile name must still round-trip through its own digested file"
+        );
+    }
+
+    /// A cache file for one provider must never answer another provider's
+    /// query, even if the file were somehow moved or hand-edited to a
+    /// different provider name inside — [`ModelCache::load`]'s own guard,
+    /// mirrored here.
+    #[test]
+    fn a_reading_stored_for_one_provider_is_never_returned_for_another() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayQuotaCache::at(dir.path());
+        cache.store(
+            "groq",
+            &RateLimitHeaders::read(groq_inference_headers()),
+            OBSERVED,
+        );
+        assert!(cache.load("anyrouter").is_none());
+    }
+
+    /// design-decisions.md's own rule, checked against the bytes actually
+    /// written: header *values* Groq or AnyRouter sent become parsed
+    /// integers or vanish, and only names Glasshouse chose from
+    /// [`RATE_LIMIT_HEADERS`] ever reach the file — mirroring
+    /// `discovery::tests::nothing_but_an_allowlisted_header_survives_the_capture`
+    /// at the point this reading is written to disk rather than read off the
+    /// wire.
+    #[test]
+    fn nothing_but_an_allowlisted_header_name_survives_into_the_persisted_file() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayQuotaCache::at(dir.path());
+        cache.store(
+            "groq",
+            &RateLimitHeaders::read(vec![
+                ("x-ratelimit-limit-requests", "7000"),
+                ("set-cookie", "__cf_bm=a-planted-session-cookie-value"),
+                ("authorization", "Bearer sk-planted-provider-credential"),
+            ]),
+            OBSERVED,
+        );
+        let bytes = std::fs::read(cache.path_for("groq")).expect("the file was written");
+        let text = String::from_utf8(bytes).expect("the cache file is UTF-8 JSON");
+        assert!(!text.contains("cf_bm"));
+        assert!(!text.contains("planted-session-cookie"));
+        assert!(!text.contains("planted-provider-credential"));
+        assert!(!text.contains("authorization"));
+        assert!(text.contains("x-ratelimit-limit-requests"));
+    }
+
+    /// A file written by a future format version is a miss, not a misread —
+    /// [`ModelCache::load`]'s own contract, mirrored here.
+    #[test]
+    fn a_future_format_version_is_ignored_rather_than_misread() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayQuotaCache::at(dir.path());
+        cache.store(
+            "groq",
+            &RateLimitHeaders::read(groq_inference_headers()),
+            OBSERVED,
+        );
+        // Overwrite with a hand-bumped version, the same way a future build
+        // that changed the shape would leave one behind for this build.
+        // `serde_json::Value` rather than a string replace, so this does not
+        // depend on `to_vec_pretty`'s exact spacing.
+        let path = cache.path_for("groq");
+        let bytes = std::fs::read(&path).expect("written above");
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+        value["version"] = serde_json::json!(99);
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).expect("overwritten");
+        assert!(cache.load("groq").is_none());
+    }
+
+    /// A corrupted or partially written file is a miss, not a panic — the
+    /// same crash-mid-write case
+    /// `crate::provider::cache::ModelCache::store`'s own doc names, proven
+    /// here at the read end.
+    #[test]
+    fn a_truncated_file_is_a_miss_rather_than_a_panic() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayQuotaCache::at(dir.path());
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(cache.path_for("groq"), b"{\"version\":1,\"provider\":\"gr")
+            .expect("a deliberately truncated file");
+        assert!(cache.load("groq").is_none());
+    }
+
+    /// [`RateLimitHeaders::from_persisted`]'s own refusal: a name in a
+    /// hand-edited file that is not on [`RATE_LIMIT_HEADERS`] must not
+    /// survive into `read_from`, the same way a header off the wire that is
+    /// not on the allowlist never does.
+    #[test]
+    fn a_hand_edited_read_from_name_off_the_allowlist_is_dropped_on_load() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayQuotaCache::at(dir.path());
+        cache.store(
+            "groq",
+            &RateLimitHeaders::read(vec![("x-ratelimit-limit-requests", "7000")]),
+            OBSERVED,
+        );
+        let path = cache.path_for("groq");
+        let text = std::fs::read_to_string(&path).unwrap().replacen(
+            "\"x-ratelimit-limit-requests\"",
+            "\"x-a-name-nobody-chose\"",
+            1,
+        );
+        std::fs::write(&path, text).unwrap();
+
+        let (read, _) = cache
+            .load("groq")
+            .expect("the rest of the file is still valid");
+        assert_eq!(
+            read.read_from(),
+            &[] as &[&str],
+            "a name off the allowlist must not reach read_from even once the number beside it did"
+        );
     }
 }
