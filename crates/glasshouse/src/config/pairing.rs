@@ -160,6 +160,369 @@ impl PairingHarnessOverride {
     }
 }
 
+/// Line 576 and Phase 49's line 1797: how strongly a user wants a
+/// vendor-native pairing preferred, as a configuration value a policy reads —
+/// never as a vendor name a policy branches on.
+///
+/// Four values, and the fourth is not a strength. `Strong`, `Weak` and `Off`
+/// scale [`native_pairing_prior_contribution`]'s magnitude; `Pin` does not
+/// convert to a magnitude at all — see [`PairingPreference::strength`] — it
+/// is the one value the map allows to behave like a hard rule, because the
+/// user asked for it by name for an explicitly chosen session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairingPreference {
+    Strong,
+    Weak,
+    Off,
+    Pin,
+}
+
+impl PairingPreference {
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Strong => "strong",
+            Self::Weak => "weak",
+            Self::Off => "off",
+            Self::Pin => "pin",
+        }
+    }
+
+    /// Parse the spelling a configuration file uses, or `None`. A value this
+    /// build does not understand is ignored rather than refused — the same
+    /// visible-degradation rule [`ModelBehaviourFit::from_slug`] follows.
+    pub fn from_slug(slug: &str) -> Option<Self> {
+        match slug {
+            "strong" => Some(Self::Strong),
+            "weak" => Some(Self::Weak),
+            "off" => Some(Self::Off),
+            "pin" => Some(Self::Pin),
+            _ => None,
+        }
+    }
+
+    /// This value's strength, when it has one.
+    ///
+    /// `Pin` returns `None` on purpose: [`native_pairing_prior_contribution`]
+    /// takes a [`PriorStrength`], not a [`PairingPreference`], so a caller
+    /// cannot pass a pin into the additive scorer even by mistake — it has to
+    /// notice the `None` and apply the pin as the hard rule it is, before any
+    /// scoring runs. That is design decision 7 made structural rather than a
+    /// convention a later edit could quietly break.
+    pub fn strength(self) -> Option<PriorStrength> {
+        match self {
+            Self::Strong => Some(PriorStrength::Strong),
+            Self::Weak => Some(PriorStrength::Weak),
+            Self::Off => Some(PriorStrength::Off),
+            Self::Pin => None,
+        }
+    }
+}
+
+impl std::fmt::Display for PairingPreference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.slug())
+    }
+}
+
+/// [`PairingPreference`] with `Pin` removed — the type
+/// [`native_pairing_prior_contribution`] actually accepts, so that the one
+/// value that must never be scored cannot type-check as an argument to the
+/// function that scores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriorStrength {
+    Strong,
+    Weak,
+    Off,
+}
+
+impl PriorStrength {
+    /// The prior's magnitude at zero reliable observations, before decay.
+    /// Bounded and small relative to what a handful of real observations can
+    /// contribute (see [`evidence_signal`]) — design decision 1: a prior a
+    /// sufficiently strong observation can always outrank.
+    fn base_magnitude(self) -> f64 {
+        match self {
+            Self::Strong => 1.0,
+            Self::Weak => 0.4,
+            Self::Off => 0.0,
+        }
+    }
+}
+
+/// Reliable local observations after which the native-pairing prior
+/// contributes exactly nothing.
+///
+/// Design decision 4: the prior decays to zero, not to a floor. A count at or
+/// past this contributes `0.0` exactly — not merely small — which is what
+/// makes it possible to write a test that asserts zero rather than "smaller
+/// than before".
+const FULL_DECAY_OBSERVATIONS: usize = 20;
+
+/// The prior's decay factor at `count` reliable observations: `1.0` at zero,
+/// linear down to exactly `0.0` at [`FULL_DECAY_OBSERVATIONS`] and beyond.
+fn decay_factor(count: usize) -> f64 {
+    if count >= FULL_DECAY_OBSERVATIONS {
+        0.0
+    } else {
+        1.0 - (count as f64 / FULL_DECAY_OBSERVATIONS as f64)
+    }
+}
+
+/// What local observation has established about one [`pairing::EvidenceKey`],
+/// if anything.
+///
+/// Line 571 names five kinds of evidence and a user override; this is that
+/// list, reduced to a bounded summary rather than one opaque score. Every
+/// field is independent and optional on purpose — lines 573 and 574 each need
+/// exactly one component to move while the others say nothing, and a single
+/// pre-blended number could not be driven that way by a test.
+///
+/// **No production source of this exists.** Phase 33A (the routing evidence
+/// ledger) is 0 of 15 and unbuilt; this struct is what it would eventually
+/// fill in, and today only a test double ever constructs one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ObservedEvidence {
+    /// How many reliable observations back the rest of this struct. Also
+    /// what the native-pairing prior decays against — the same count answers
+    /// "how much do we trust this" for both the prior's decay and the
+    /// evidence signal's confidence.
+    pub reliable_observation_count: usize,
+    /// `0.0..=1.0`. Higher is better.
+    pub task_success_rate: Option<f64>,
+    /// `0.0..=1.0`. Higher is better.
+    pub usable_tool_call_rate: Option<f64>,
+    /// `0.0..=1.0`. Lower is better — a repair is a correction the harness
+    /// needed after the model's own turn.
+    pub repair_rate: Option<f64>,
+    /// Effective time-to-first-content, as a ratio to a baseline pairing.
+    /// Below `1.0` is faster than the baseline; above is slower.
+    pub effective_ttfc_ratio: Option<f64>,
+    /// `0.0..=1.0`. Higher is better.
+    pub reliability: Option<f64>,
+    /// An explicit user override, `-1.0..=1.0`: negative is "I moved away
+    /// from this pairing", positive is "I chose it and kept it".
+    pub user_override_signal: Option<f64>,
+}
+
+impl ObservedEvidence {
+    /// No local evidence at all — the state every pairing starts in before
+    /// Phase 33A ever records anything for it.
+    pub fn none() -> Self {
+        Self {
+            reliable_observation_count: 0,
+            task_success_rate: None,
+            usable_tool_call_rate: None,
+            repair_rate: None,
+            effective_ttfc_ratio: None,
+            reliability: None,
+            user_override_signal: None,
+        }
+    }
+}
+
+/// A source of local observations for one evidence key.
+///
+/// A trait rather than a concrete store, on purpose: Phase 33A (the routing
+/// evidence ledger this would eventually read) does not exist, verified by
+/// `grep -rn 'fn score\|Score' crates/glasshouse/src` finding no match and by
+/// `docs/product/evidence/phase-9j.md`'s own account of the two routing
+/// callers, neither of which ranks anything. Scoring against a trait means
+/// the policy below compiles and is provable with a test double today, and
+/// gets a real implementation the day Phase 33A lands — without this file
+/// changing.
+pub trait ObservationSource {
+    /// What has been observed for exactly this evidence key, or `None` when
+    /// nothing has.
+    fn observed(&self, key: &pairing::EvidenceKey) -> Option<ObservedEvidence>;
+}
+
+/// An [`ObservationSource`] that answers from nothing, for a caller with no
+/// evidence store yet. Every pairing prior computed against this decays
+/// exactly like a fresh session's, because a fresh session is exactly what
+/// this represents.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoObservations;
+
+impl ObservationSource for NoObservations {
+    fn observed(&self, _key: &pairing::EvidenceKey) -> Option<ObservedEvidence> {
+        None
+    }
+}
+
+/// How many reliable observations it takes for [`evidence_signal`] to speak
+/// at full confidence. Below this, a real but thin observation record still
+/// contributes — scaled down, never zeroed — because "no evidence yet" and
+/// "one data point" must not read identically to a routing explanation.
+const CONFIDENT_AT_OBSERVATIONS: f64 = 5.0;
+
+/// Reduce one [`ObservedEvidence`] to a single signed number: positive means
+/// the observations support this pairing, negative means they contradict it.
+///
+/// Unbounded, deliberately, unlike [`PriorStrength::base_magnitude`] — this
+/// is design decision 1's escape hatch. A handful of real observations must
+/// be able to outrank the prior's bounded maximum, and a signal that saturated
+/// at the same ceiling as the prior could never do that no matter how bad or
+/// good the evidence was.
+fn evidence_signal(observed: &ObservedEvidence) -> f64 {
+    let mut signal = 0.0;
+    if let Some(rate) = observed.task_success_rate {
+        signal += (rate - 0.5) * 2.0;
+    }
+    if let Some(rate) = observed.usable_tool_call_rate {
+        signal += (rate - 0.5) * 2.0;
+    }
+    if let Some(rate) = observed.repair_rate {
+        // Lower is better, so the sign flips relative to the rates above.
+        signal += (0.5 - rate) * 2.0;
+    }
+    if let Some(ratio) = observed.effective_ttfc_ratio {
+        signal += (1.0 - ratio).clamp(-1.0, 1.0);
+    }
+    if let Some(rate) = observed.reliability {
+        signal += (rate - 0.5) * 2.0;
+    }
+    if let Some(override_signal) = observed.user_override_signal {
+        signal += override_signal;
+    }
+    let confidence =
+        (observed.reliable_observation_count as f64 / CONFIDENT_AT_OBSERVATIONS).min(1.0);
+    signal * confidence
+}
+
+/// A sentence naming which of [`ObservedEvidence`]'s components were
+/// actually established, for a routing explanation's evidence text.
+fn describe_observed(observed: &ObservedEvidence) -> String {
+    let mut parts = Vec::new();
+    if let Some(v) = observed.task_success_rate {
+        parts.push(format!("task success {v:.2}"));
+    }
+    if let Some(v) = observed.usable_tool_call_rate {
+        parts.push(format!("usable tool calls {v:.2}"));
+    }
+    if let Some(v) = observed.repair_rate {
+        parts.push(format!("repair rate {v:.2}"));
+    }
+    if let Some(v) = observed.effective_ttfc_ratio {
+        parts.push(format!("effective TTFC {v:.2}x baseline"));
+    }
+    if let Some(v) = observed.reliability {
+        parts.push(format!("reliability {v:.2}"));
+    }
+    if let Some(v) = observed.user_override_signal {
+        parts.push(format!("user override signal {v:.2}"));
+    }
+    if parts.is_empty() {
+        format!(
+            "{} reliable observation(s), no component established",
+            observed.reliable_observation_count
+        )
+    } else {
+        format!(
+            "{} reliable observation(s): {}",
+            observed.reliable_observation_count,
+            parts.join(", ")
+        )
+    }
+}
+
+/// Line 566 through 575, as one function: what the native-pairing prior and
+/// the local evidence for `key` contribute to routing `candidate`.
+///
+/// `candidate` must already have survived every hard protocol, tool,
+/// capability, privacy and user constraint — [`crate::routing::EligibleCandidate`]
+/// is what makes that structural (design decision 2) rather than a comment
+/// asking a future caller to remember the order.
+///
+/// The explanation always carries the pairing class and the evidence count
+/// (line 575's first two terms, magnitude `0.0`, informational), then either:
+/// - a `pinned` line, when `preference` is [`PairingPreference::Pin`] — the
+///   prior is not scored at all, because a pin is a hard rule; or
+/// - a `native-pairing prior` contribution (line 575's third term), zero
+///   unless the pairing is vendor-native, decayed toward zero as reliable
+///   observations accumulate; plus
+/// - a `local observed evidence` contribution, present only when at least one
+///   reliable observation exists, and unbounded — so a strong enough
+///   observation can always outrank the prior (design decision 1), and enough
+///   bad observations against a vendor-native pairing can make its total
+///   lower than a neutral candidate's (line 574).
+///
+/// **No production caller exists for this function.** See this module's
+/// worker report for why: the two routing callers in the binary
+/// (`InteractiveRouting`, `DisposableRouting`) do not rank candidates at all,
+/// and `InteractiveRouting::on_provider_failure`'s own documentation assigns
+/// ranking to "Phase 9J's job and not this one's" without Phase 9J having a
+/// caller to hand it to. This is proven only by the tests in
+/// `tests/pairing_prior.rs`.
+pub fn native_pairing_prior_contribution(
+    candidate: &crate::routing::EligibleCandidate<pairing::Pairing>,
+    key: &pairing::EvidenceKey,
+    preference: PairingPreference,
+    evidence: &dyn ObservationSource,
+) -> crate::routing::RoutingExplanation {
+    use crate::routing::Contribution;
+
+    let pairing = candidate.value();
+    let observed = evidence.observed(key);
+    let count = observed
+        .as_ref()
+        .map(|o| o.reliable_observation_count)
+        .unwrap_or(0);
+
+    let mut explanation = crate::routing::RoutingExplanation::new();
+    explanation.push(Contribution::new(
+        "pairing class",
+        0.0,
+        format!("{} — {}", pairing.class(), pairing.reason()),
+    ));
+    explanation.push(Contribution::new(
+        "local evidence strength",
+        0.0,
+        format!(
+            "{count} reliable observation(s) for this exact harness, launch profile, model and \
+             backend combination"
+        ),
+    ));
+
+    let Some(strength) = preference.strength() else {
+        explanation.push(Contribution::new(
+            "native-pairing preference",
+            0.0,
+            "pinned: this session was explicitly chosen, so the preference is applied as a hard \
+             rule before scoring rather than as a prior contribution"
+                .to_owned(),
+        ));
+        return explanation;
+    };
+
+    let is_native = pairing.class().is_vendor_native();
+    let magnitude = if is_native {
+        strength.base_magnitude() * decay_factor(count)
+    } else {
+        0.0
+    };
+    explanation.push(Contribution::new(
+        "native-pairing prior",
+        magnitude,
+        format!(
+            "{preference} preference, {} vendor-native, decayed for {count} reliable \
+             observation(s) (fully decayed at {FULL_DECAY_OBSERVATIONS})",
+            if is_native { "is" } else { "is not" }
+        ),
+    ));
+
+    if let Some(observed) = observed
+        && observed.reliable_observation_count > 0
+    {
+        explanation.push(Contribution::new(
+            "local observed evidence",
+            evidence_signal(&observed),
+            describe_observed(&observed),
+        ));
+    }
+
+    explanation
+}
+
 /// The `[pairing]` table of one configuration layer.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingConfig {
@@ -167,6 +530,11 @@ pub struct PairingConfig {
     models: BTreeMap<String, PairingModelOverride>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     harnesses: BTreeMap<String, PairingHarnessOverride>,
+    /// `strong`, `weak`, `off` or `pin` — see [`PairingPreference`]. A value
+    /// this build does not understand is ignored rather than refused, the
+    /// same visible-degradation rule every other field in this file follows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_pairing_preference: Option<String>,
 }
 
 impl PairingConfig {
@@ -174,7 +542,38 @@ impl PairingConfig {
     /// was never asked about pairing carries no `[pairing]` table at all —
     /// the same rule `RoutingConfig::is_unset` follows.
     pub fn is_unset(&self) -> bool {
-        self.models.is_empty() && self.harnesses.is_empty()
+        self.models.is_empty()
+            && self.harnesses.is_empty()
+            && self.native_pairing_preference.is_none()
+    }
+
+    /// This layer's own native-pairing preference, parsed — `None` when
+    /// unset or when the layer names a spelling this build does not
+    /// recognise.
+    pub fn native_pairing_preference(&self) -> Option<PairingPreference> {
+        self.native_pairing_preference_raw()
+            .and_then(PairingPreference::from_slug)
+    }
+
+    /// The spelling this layer actually stored, parsed or not.
+    ///
+    /// [`PairingConfig::native_pairing_preference`] cannot distinguish "unset"
+    /// from "set to something this build cannot use", and the difference is
+    /// the whole content of the visible-degradation rule this file follows:
+    /// every other field here shows an unrecognised value back to the user
+    /// (`behaviour=nonsense`) rather than swallowing it. A resolver that
+    /// reported a misspelled preference as *nothing configured* would be
+    /// telling the user their file is empty when it is not.
+    pub fn native_pairing_preference_raw(&self) -> Option<&str> {
+        self.native_pairing_preference.as_deref()
+    }
+
+    pub fn set_native_pairing_preference(
+        &mut self,
+        preference: Option<PairingPreference>,
+    ) -> &mut Self {
+        self.native_pairing_preference = preference.map(|p| p.slug().to_owned());
+        self
     }
 
     pub fn models(&self) -> impl Iterator<Item = (&str, &PairingModelOverride)> {
@@ -253,6 +652,48 @@ impl EffectiveConfig<'_> {
             many => many.join(" and "),
         };
         PairingOverrides::from_parts(source, models, harnesses)
+    }
+
+    /// The native-pairing preference in effect, project-over-user like every
+    /// other lookup on [`EffectiveConfig`] except `bypass_acknowledged`, and
+    /// the layer it came from for a trace.
+    ///
+    /// Defaults to [`PairingPreference::Strong`] when nothing is configured
+    /// — line 566 asks for "a positive initial routing prior for a fresh
+    /// session with little local evidence" as the out-of-the-box behaviour,
+    /// not something a user must opt into first.
+    /// A spelling this build does not understand is **ignored, and said so**.
+    /// Every other field in this module degrades visibly — a bad `behaviour`
+    /// prints back as `behaviour=nonsense` — and a preference that fell back
+    /// silently while reporting "nothing configured" would be the one field
+    /// that lies about the user's own file. The layer and the unusable
+    /// spelling both travel with the answer.
+    pub fn native_pairing_preference(&self) -> (PairingPreference, String) {
+        let layers: [(&str, Option<&PairingConfig>); 2] = [
+            (
+                "this project's configuration file",
+                self.project.map(|p| p.pairing()),
+            ),
+            ("the user configuration file", Some(self.user.pairing())),
+        ];
+
+        let mut ignored = Vec::new();
+        for (layer, config) in layers {
+            let Some(raw) = config.and_then(PairingConfig::native_pairing_preference_raw) else {
+                continue;
+            };
+            match PairingPreference::from_slug(raw) {
+                Some(preference) => {
+                    return (preference, describe_preference_source(layer, &ignored));
+                }
+                None => ignored.push(format!("{layer} set `{raw}`")),
+            }
+        }
+
+        (
+            PairingPreference::Strong,
+            describe_preference_source("the default — nothing configured", &ignored),
+        )
     }
 
     /// One pairing question per configured launch profile.
@@ -435,6 +876,22 @@ fn layer_name(layer: Layer) -> &'static str {
 /// The production caller of [`crate::harness::pairing::classify`], and the
 /// function `main.rs`'s `pairing` arm calls. `model` and `harness` are the
 /// command's two optional arguments.
+/// Where a resolved native-pairing preference came from, naming any layer
+/// whose spelling had to be ignored on the way.
+///
+/// Separate from the resolver so the sentence is written once: the ignored
+/// list is almost always empty, and when it is not, it is the more important
+/// half of the answer.
+fn describe_preference_source(source: &str, ignored: &[String]) -> String {
+    if ignored.is_empty() {
+        return source.to_owned();
+    }
+    format!(
+        "{source}; ignoring {} — not one of strong, weak, off, pin",
+        ignored.join(" and ")
+    )
+}
+
 pub fn report(
     effective: &EffectiveConfig<'_>,
     model: Option<&str>,
@@ -464,6 +921,17 @@ pub fn report(
 
     let _ = writeln!(out, "Pairing corrections in effect");
     write_corrections(&mut out, effective);
+    let _ = writeln!(out);
+
+    let (preference, source) = effective.native_pairing_preference();
+    let _ = writeln!(
+        out,
+        "Native-pairing preference: {preference} (from {source})"
+    );
+    let _ = writeln!(
+        out,
+        "  no router in this build reads this yet — see Phase 35B — but it is stored and \n  layered project-over-user like every other pairing setting, and a user can set it \n  today with `[pairing]\\nnative_pairing_preference = \"strong\" | \"weak\" | \"off\" | \"pin\"`."
+    );
     let _ = writeln!(out);
 
     let requested_harness = harness.map(|slug| {
@@ -748,5 +1216,101 @@ fn write_configured(out: &mut String, entry: &ConfiguredPairing, overrides: &Pai
     row(out, "why:", pairing.reason());
     if let Some(note) = entry.note() {
         row(out, "note:", note);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Design decision 7: `Pin` is not a strength, and it must not
+    /// type-check where a strength is required. This does not compile if
+    /// `strength()` is ever widened to return `Some` for `Pin`, and it is
+    /// checked at runtime too, since a `match` arm could still be edited to
+    /// agree with a widened signature.
+    #[test]
+    fn pin_is_the_one_preference_with_no_strength() {
+        assert_eq!(
+            PairingPreference::Strong.strength(),
+            Some(PriorStrength::Strong)
+        );
+        assert_eq!(
+            PairingPreference::Weak.strength(),
+            Some(PriorStrength::Weak)
+        );
+        assert_eq!(PairingPreference::Off.strength(), Some(PriorStrength::Off));
+        assert_eq!(PairingPreference::Pin.strength(), None);
+    }
+
+    #[test]
+    fn preference_slugs_round_trip() {
+        for preference in [
+            PairingPreference::Strong,
+            PairingPreference::Weak,
+            PairingPreference::Off,
+            PairingPreference::Pin,
+        ] {
+            assert_eq!(
+                PairingPreference::from_slug(preference.slug()),
+                Some(preference)
+            );
+        }
+        assert_eq!(PairingPreference::from_slug("aggressive"), None);
+    }
+
+    /// Design decision 4: the decay reaches exactly zero at the stated
+    /// count, not asymptotically close to it.
+    #[test]
+    fn the_prior_decays_to_exactly_zero_not_a_floor() {
+        assert_eq!(decay_factor(0), 1.0);
+        assert!(decay_factor(FULL_DECAY_OBSERVATIONS / 2) > 0.0);
+        assert!(decay_factor(FULL_DECAY_OBSERVATIONS / 2) < 1.0);
+        assert_eq!(decay_factor(FULL_DECAY_OBSERVATIONS), 0.0);
+        assert_eq!(decay_factor(FULL_DECAY_OBSERVATIONS * 10), 0.0);
+    }
+
+    /// Bad observations must pull the signal negative, and good ones
+    /// positive — line 574 rests on this half existing at all.
+    #[test]
+    fn evidence_signal_has_both_signs() {
+        let mut good = ObservedEvidence::none();
+        good.reliable_observation_count = 20;
+        good.task_success_rate = Some(1.0);
+        good.reliability = Some(1.0);
+        assert!(evidence_signal(&good) > 0.0);
+
+        let mut bad = ObservedEvidence::none();
+        bad.reliable_observation_count = 20;
+        bad.task_success_rate = Some(0.0);
+        bad.reliability = Some(0.0);
+        assert!(evidence_signal(&bad) < 0.0);
+    }
+
+    /// A single observation must not speak as loudly as twenty. Confidence
+    /// scales with the count, or a routing explanation would treat one data
+    /// point as settled fact.
+    #[test]
+    fn evidence_signal_scales_with_how_many_observations_back_it() {
+        let mut thin = ObservedEvidence::none();
+        thin.reliable_observation_count = 1;
+        thin.task_success_rate = Some(1.0);
+
+        let mut thick = thin;
+        thick.reliable_observation_count = 20;
+
+        assert!(evidence_signal(&thin).abs() < evidence_signal(&thick).abs());
+    }
+
+    /// `NoObservations` answers `None` for anything asked of it — the state
+    /// every caller starts in until Phase 33A exists.
+    #[test]
+    fn no_observations_source_establishes_nothing() {
+        let key = pairing::EvidenceKey::new(
+            IntegrationId::ClaudeCode,
+            "default",
+            AssignedModel::named("claude-fable-5"),
+            ServingRoute::default(),
+        );
+        assert!(NoObservations.observed(&key).is_none());
     }
 }

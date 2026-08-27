@@ -1794,7 +1794,7 @@ Phase 49 — Configuration
 ☑ Allow the user to configure protected reserve percentages for premium subscriptions.
 ☐ Allow the user to configure the routing-model fallback chain.
 ☐ Allow the user to configure workload-tier ceilings for individual models.
-☐ Allow the user to configure native-pairing preference strength without hard-coding vendor-specific routing rules.
+☑ Allow the user to configure native-pairing preference strength without hard-coding vendor-specific routing rules.
 ☑ Allow named response profiles and separate role defaults for orchestrator, worker, reviewer, explainer, and ordinary sessions.
 ☑ Allow response-profile injection to be disabled independently from automatic routing and memory extraction.
 ☑ Allow cmux integration to be disabled even when cmux is detected.

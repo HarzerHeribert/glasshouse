@@ -184,3 +184,84 @@ Missing evidence:
 - `PairingClass::is_vendor_native` is the seam the prior attaches to. It has a
   caller for its own sake (the report) and no routing caller, which is the
   correct state for it until 35B exists.
+
+### Phase 9J lines 566–576 — the pairing prior is built, and closes nothing
+
+Contract: Given several eligible harness/model candidates, when Glasshouse
+ranks them, a vendor-native pairing receives a positive but soft initial prior
+that reliable local observations progressively overrule — while preserving the
+rule that no candidate is ever *excluded* for being cross-vendor.
+
+State: NOT STARTED, blocked. **All eleven lines stay open. The mechanism is
+built, tested and mutation-proofed; it has no caller in the shipped binary.**
+
+**Why, precisely.** Nothing in Glasshouse ranks routing candidates at all. The
+binary has exactly two routing callers, and neither compares two eligible
+options:
+
+- `routing::interactive::InteractiveRouting` keeps a session on its assigned
+  backend and fails over on a real provider failure. Its own
+  `on_provider_failure` returns the **first** candidate for which
+  `compatible()` is `Ok`, in the caller's order.
+- `routing::disposable::DisposableRouting` picks a free resource for one
+  disposable job.
+
+`on_provider_failure`'s doc comment — written before this batch and unchanged by
+it — says it takes the first survivor "rather than ranking them, because ranking
+backends on quality is Phase 9J's job **and not this one's**." Phase 9J has
+never had anywhere to put that job. **Phase 35B (candidate scoring) is 0 of 25
+and Phase 33A (routing evidence ledger) is 0 of 15; lines 566–575 rest on one or
+both existing.** This is §5 applied honestly: a mechanism proven only by its own
+tests does not get its box.
+
+Built and available for the caller that does not yet exist:
+- `routing/mod.rs: Contribution`, `RoutingExplanation` — a general, ordered list
+  of named signed contributions with `.total()` and `.render()`. **Deliberately
+  not named after pairing**: Phase 32F line 1293 needs the identical shape for
+  protected quota reserve, and a pairing-specific type would have to be rebuilt.
+- `routing/mod.rs: HardConstraint`, `EligibleCandidate<T>`,
+  `apply_hard_constraints` — line 568's ordering as a **type-level fact**. The
+  only way to obtain an `EligibleCandidate` is `apply_hard_constraints` actually
+  running the caller's check; the field is private and there is no other
+  constructor. A scorer that takes `&EligibleCandidate<Pairing>` cannot be
+  called before the filter ran.
+- `harness/pairing.rs: EvidenceKey { harness, launch_profile, model, route }` —
+  line 572. Two keys differing only in `route.gateway` or `route.protocol`
+  compare unequal, so the same nominal model served two ways is never one body
+  of evidence.
+- `config/pairing.rs: decay_factor`, `evidence_signal`,
+  `native_pairing_prior_contribution`, `ObservedEvidence`, `ObservationSource`.
+  The prior decays to **exactly zero** at `FULL_DECAY_OBSERVATIONS = 20`, not to
+  a floor.
+
+Regression evidence (non-production; this is why the boxes stay open):
+- `tests/pairing_prior.rs`, 12 tests, and unit tests in `routing::tests`,
+  `harness::pairing` and `config::pairing::tests`.
+- Seven mutations run, seven killed, each reverted — including M6, which is the
+  one worth recording: the worker's own first draft compared candidates at 20
+  observations, where the native prior is *already fully decayed to zero*, so
+  deleting the entire evidence signal would have left the comparison tests
+  passing. It caught that itself, lowered the count to 5, and re-ran. **A test
+  that passes for the wrong reason is the failure §41 exists to prevent, and it
+  was found by the worker rather than by review.**
+
+Missing evidence:
+- A candidate-scoring caller (Phase 35B) that builds a hard-constraint check and
+  ranks `EligibleCandidate`s by `RoutingExplanation::total()`.
+- An `ObservationSource` implementation backed by a real ledger (Phase 33A),
+  replacing `NoObservations`.
+- **Line 569 was not attempted at all**, and that is stated rather than folded
+  into "no caller". A warm session is `crate::session` state, and
+  `routing/interactive.rs` carries a test that scans for `crate::session` and
+  fails the build if it appears — the routing policy must not become a session
+  of its own. The continuation is a caller-supplied `Contribution`, the same
+  shape as `ObservedEvidence`, once a session-lifecycle caller exists to ground
+  what "continuity evidence" means.
+
+**The packet's hypothesis was killed, and the kill is the round's finding.** It
+claimed `StayReason` / `MigrationRefusal` / `ChangeCause` / `RoutingRecord` were
+close enough to a routing explanation that line 575 was mostly rendering. They
+are not: they explain a **first-match search**, never a scored one, and none of
+them carries a magnitude. `RoutingRecord` is a log of assignment changes that
+already happened. Line 575 asks "how much did each factor weigh," which had no
+home. One new small general type, and no invented scoring subsystem.

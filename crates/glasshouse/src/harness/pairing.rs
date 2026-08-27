@@ -463,6 +463,60 @@ impl PairingOverrides {
     }
 }
 
+/// The four-part identity Phase 9J line 572 requires local evidence to be
+/// kept apart by: harness, launch profile, model, and the exact serving
+/// route.
+///
+/// A nominal model id is not enough — the same id reached through a different
+/// gateway, quantization, revision or protocol translation is different
+/// evidence, and [`ServingRoute`] is exactly the value that already carries
+/// that distinction (its `gateway` and `protocol` fields), so this type reuses
+/// it rather than inventing a parallel notion of "route". Two
+/// [`EvidenceKey`]s compare equal only when all four parts match; nothing
+/// here collapses a model to itself across two routes.
+///
+/// Deliberately pure, like the rest of this module: building one needs no
+/// configuration, only the identity of a pairing that was already resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceKey {
+    harness: IntegrationId,
+    launch_profile: String,
+    model: AssignedModel,
+    route: ServingRoute,
+}
+
+impl EvidenceKey {
+    pub fn new(
+        harness: IntegrationId,
+        launch_profile: impl Into<String>,
+        model: AssignedModel,
+        route: ServingRoute,
+    ) -> Self {
+        Self {
+            harness,
+            launch_profile: launch_profile.into(),
+            model,
+            route,
+        }
+    }
+
+    pub fn harness(&self) -> IntegrationId {
+        self.harness
+    }
+
+    pub fn launch_profile(&self) -> &str {
+        &self.launch_profile
+    }
+
+    pub fn model(&self) -> &AssignedModel {
+        &self.model
+    }
+
+    pub fn route(&self) -> &ServingRoute {
+        &self.route
+    }
+}
+
 /// Everything [`classify`] needs about one harness-and-model pairing.
 ///
 /// A plain value: the caller resolves configuration, looks the provider up,
@@ -1440,5 +1494,87 @@ mod tests {
         }
         assert!(catalogued("claude-fable-5-turbo").is_none());
         assert!(catalogued("openrouter/opus").is_none());
+    }
+
+    /// Line 572: the same nominal model through a different gateway is
+    /// different evidence. A key built from two routes that differ only in
+    /// `gateway` must not compare equal.
+    #[test]
+    fn an_evidence_key_separates_the_same_model_across_gateways() {
+        let direct = ServingRoute {
+            provider: Some("openrouter".to_owned()),
+            ..ServingRoute::default()
+        };
+        let mut gatewayed = direct.clone();
+        gatewayed.gateway = Some("glasshouse".to_owned());
+
+        let a = EvidenceKey::new(
+            IntegrationId::ClaudeCode,
+            "default",
+            AssignedModel::named("claude-fable-5"),
+            direct,
+        );
+        let b = EvidenceKey::new(
+            IntegrationId::ClaudeCode,
+            "default",
+            AssignedModel::named("claude-fable-5"),
+            gatewayed,
+        );
+        assert_ne!(
+            a, b,
+            "the same model through a gateway must be a different evidence key"
+        );
+    }
+
+    /// The same line, for a protocol translation rather than a gateway: two
+    /// routes that differ only in wire protocol are different evidence too.
+    #[test]
+    fn an_evidence_key_separates_the_same_model_across_protocols() {
+        let anthropic = ServingRoute {
+            protocol: Some(WireProtocol::AnthropicMessages),
+            ..ServingRoute::default()
+        };
+        let openai = ServingRoute {
+            protocol: Some(WireProtocol::OpenAiChat),
+            ..ServingRoute::default()
+        };
+
+        let a = EvidenceKey::new(
+            IntegrationId::Codex,
+            "default",
+            AssignedModel::named("some-model"),
+            anthropic,
+        );
+        let b = EvidenceKey::new(
+            IntegrationId::Codex,
+            "default",
+            AssignedModel::named("some-model"),
+            openai,
+        );
+        assert_ne!(a, b);
+    }
+
+    /// And the identical route, harness, profile and model produce an equal
+    /// key — the positive case that guards against an over-eager distinction.
+    #[test]
+    fn an_evidence_key_is_equal_for_an_identical_route() {
+        let route = ServingRoute {
+            provider: Some("openrouter".to_owned()),
+            gateway: None,
+            protocol: Some(WireProtocol::AnthropicMessages),
+        };
+        let a = EvidenceKey::new(
+            IntegrationId::ClaudeCode,
+            "default",
+            AssignedModel::named("claude-fable-5"),
+            route.clone(),
+        );
+        let b = EvidenceKey::new(
+            IntegrationId::ClaudeCode,
+            "default",
+            AssignedModel::named("claude-fable-5"),
+            route,
+        );
+        assert_eq!(a, b);
     }
 }

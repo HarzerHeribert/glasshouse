@@ -291,3 +291,76 @@ through the binary, and assert no extraction is attempted. Ten lines, in
 
 Restored byte-identical afterwards; the tree the batch was integrated from is the
 tree that passed 13/13.
+
+### Phase 49 line 1797 — native-pairing preference strength, configurable
+
+Contract: Given a user who wants Glasshouse to weight vendor-native
+harness/model pairings more or less heavily, when they set
+`native_pairing_preference` in a `[pairing]` table, Glasshouse records that
+choice, layers it project-over-user, and shows it in effect — while preserving
+the rule that no routing logic branches on a vendor's name.
+
+State: **COMPLETE** for the configuration capability. **Phase 9J's eleven
+scoring lines stay open** and this entry does not claim otherwise — see below.
+
+Production evidence:
+- `config/pairing.rs: PairingConfig::native_pairing_preference` — a field on
+  the struct `config/mod.rs` already embeds by value in both the user and the
+  project layer, so no `config/mod.rs` change was needed.
+- `config/pairing.rs: EffectiveConfig::native_pairing_preference` — resolves
+  project-over-user, falls back to `Strong`, and **names any layer whose
+  spelling it had to ignore**.
+- `config/pairing.rs: report` — the one line `main.rs`'s `pairing` arm calls,
+  and the same function `tests/pairing.rs` enters through. The preference line
+  is printed from there, so a mutation to the resolution is a mutation to the
+  path the shipped binary runs (§35).
+
+Regression evidence:
+- `tests/pairing_prior.rs::the_report_the_binary_prints_names_the_configured_preference`
+  — the report the binary prints names the configured value. Mutation M7
+  (hard-code `"MUTATED"` instead of interpolating) killed it.
+- `tests/pairing_prior.rs::an_unusable_preference_spelling_is_reported_rather_than_silently_defaulted`
+  — added by the integrator, see the finding below. Mutation (make the source
+  description drop the ignored list) killed it: *"the ignored spelling was
+  swallowed instead of reported"*.
+- Four `preference_for` layering tests: default, user layer, project layer,
+  project-over-user.
+
+Failure/isolation evidence:
+- A spelling this build cannot parse is ignored **and reported**, with the
+  layer that set it. Verified in the shipped binary, not only in tests.
+- No vendor literal reaches production logic. Independently re-grepped by the
+  integrator: the one match in `routing/mod.rs` is a pre-existing
+  `"anthropic-messages"` wire-protocol slug in a `mod tests` fixture, and the
+  two in `config/pairing.rs` are `IntegrationId::ClaudeCode` and a model id in
+  tests. Every new function reads `PairingClass::is_vendor_native()`.
+
+Platform/external evidence:
+- Verified against the built binary on macOS across all four valid spellings,
+  the unset case, and an invalid spelling. Batch 36 gate and `--windows-vm`
+  to follow with the rest of the batch.
+
+**Why this closes while Phase 9J's eleven do not.** The line asks that the user
+be *able to configure* a preference strength. They can, it layers, and the
+binary shows it. That is the same bar three sibling lines in this phase were
+already ticked at — including *"Allow the user to configure protected reserve
+percentages for premium subscriptions"*, which is checked today while Phase 32F,
+the policy that would read it, is 0 of 8. The trailing clause *"without
+hard-coding vendor-specific routing rules"* is a constraint on **how** it is
+implemented, and it is satisfied and re-verified. Phase 9J's lines ask for a
+*prior contributing to a routing decision*, which is a different claim with no
+caller: nothing in this build ranks candidates at all.
+
+**The worker left this box open and referred the judgement up** (practice §33).
+It was right to; the orchestrator ticked it on the sibling-line precedent above,
+and this paragraph records which way that went and why.
+
+**Integrator's finding — the fix that came with the tick.** As delivered, an
+unusable spelling fell back to `Strong` and reported *"from the default —
+nothing configured"*, which is false when a value is sitting in the file. The
+worker cited the right rule — every other field here degrades *visibly*, and a
+bad `behaviour` prints back as `behaviour=nonsense` — and then did not
+implement it. A person debugging their own configuration would have been told
+to add the setting they had already added. Fixed in
+`EffectiveConfig::native_pairing_preference` and
+`describe_preference_source`, with the regression test above.

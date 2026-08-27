@@ -421,6 +421,180 @@ impl std::fmt::Display for UseReason {
     }
 }
 
+/// One named contribution to a routing decision, with the magnitude it added
+/// and the evidence behind it.
+///
+/// Phase 9J line 575 asks for "the contribution of the pairing prior in
+/// routing explanations"; this type is deliberately not named after pairing.
+/// `phase-32d`'s protected-quota reserve needs the identical shape for a
+/// completely different contribution, and a type only pairing could populate
+/// would have to be rebuilt for it. A magnitude of `0.0` is a legitimate
+/// contribution — an informational line (which class a pairing is, how much
+/// evidence exists) that adds nothing to the total but still belongs in the
+/// explanation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Contribution {
+    name: String,
+    magnitude: f64,
+    evidence: String,
+}
+
+impl Contribution {
+    pub fn new(name: impl Into<String>, magnitude: f64, evidence: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            magnitude,
+            evidence: evidence.into(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn magnitude(&self) -> f64 {
+        self.magnitude
+    }
+
+    pub fn evidence(&self) -> &str {
+        &self.evidence
+    }
+}
+
+/// An ordered list of named contributions behind one routing decision, and
+/// their sum.
+///
+/// Ordered because a reader compares a decision to its reasons top to bottom,
+/// and because the caller that builds one (a scoring policy) is the only
+/// party that knows which contribution logically comes first. Nothing here
+/// deduplicates or reorders by name: two contributions with the same name are
+/// two lines, and that is a policy's own affair, not this type's.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RoutingExplanation {
+    contributions: Vec<Contribution>,
+}
+
+impl RoutingExplanation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&mut self, contribution: Contribution) -> &mut Self {
+        self.contributions.push(contribution);
+        self
+    }
+
+    pub fn contributions(&self) -> &[Contribution] {
+        &self.contributions
+    }
+
+    /// The sum of every contribution's magnitude — the score a policy would
+    /// rank candidates by, not a value this type interprets on its own.
+    pub fn total(&self) -> f64 {
+        self.contributions.iter().map(Contribution::magnitude).sum()
+    }
+
+    /// One line per contribution, signed magnitude first, for a diagnostic.
+    pub fn render(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        for contribution in &self.contributions {
+            let _ = writeln!(
+                out,
+                "  {:+.3}  {} — {}",
+                contribution.magnitude(),
+                contribution.name(),
+                contribution.evidence()
+            );
+        }
+        out
+    }
+}
+
+/// A hard constraint a candidate failed, named so a routing explanation can
+/// say *which* one rather than only that the candidate was refused.
+///
+/// Phase 9J line 568 — "apply hard protocol, tool, capability, privacy, and
+/// user constraints before applying the pairing prior" — names exactly these
+/// five, and no others, on purpose: it is the map's own list, not this
+/// module's guess at what a hard constraint could be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardConstraint {
+    Protocol,
+    ToolSemantics,
+    Capability,
+    Privacy,
+    UserConstraint,
+}
+
+impl HardConstraint {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Protocol => "protocol",
+            Self::ToolSemantics => "tool semantics",
+            Self::Capability => "capability",
+            Self::Privacy => "privacy",
+            Self::UserConstraint => "user constraint",
+        }
+    }
+}
+
+impl std::fmt::Display for HardConstraint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+/// A candidate that has survived every hard constraint, and therefore the
+/// only thing a scoring policy — a pairing prior among them — may be asked to
+/// rank.
+///
+/// Phase 9J's design settled this as a structural requirement rather than a
+/// convention (design decision 2): a policy function that scores a bare `T`
+/// could be called before hard constraints ever ran, and nothing would say
+/// so. A policy that scores `EligibleCandidate<T>` cannot be called that way,
+/// because the only way to produce one is [`apply_hard_constraints`] actually
+/// running the check. The private field is the whole mechanism — there is no
+/// public constructor here to bypass it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EligibleCandidate<T> {
+    value: T,
+}
+
+impl<T> EligibleCandidate<T> {
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    pub fn into_inner(self) -> T {
+        self.value
+    }
+}
+
+/// Filter `candidates` by `check`, in order, into what survives every hard
+/// constraint and what was rejected and why.
+///
+/// This is the one function in Glasshouse that can produce an
+/// [`EligibleCandidate`]. `check` is supplied by the caller rather than fixed
+/// here, because "capability" and "privacy" are decided by configuration this
+/// module does not read (line 568 names them; it does not define them) — this
+/// function's job is only to make the *ordering* structural, not to invent
+/// what a capability or a privacy constraint is.
+pub fn apply_hard_constraints<T>(
+    candidates: Vec<T>,
+    check: impl Fn(&T) -> Result<(), HardConstraint>,
+) -> (Vec<EligibleCandidate<T>>, Vec<(T, HardConstraint)>) {
+    let mut eligible = Vec::new();
+    let mut rejected = Vec::new();
+    for candidate in candidates {
+        match check(&candidate) {
+            Ok(()) => eligible.push(EligibleCandidate { value: candidate }),
+            Err(reason) => rejected.push((candidate, reason)),
+        }
+    }
+    (eligible, rejected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,5 +757,69 @@ mod tests {
     fn cost_has_no_third_state() {
         assert!(Cost::Free.is_free());
         assert!(!Cost::Metered.is_free());
+    }
+
+    /// A routing explanation is a plain ordered sum, and nothing here filters
+    /// a contribution out for being zero or negative — the general surface
+    /// must never itself become a hard rule.
+    #[test]
+    fn a_routing_explanation_sums_every_contribution_in_order() {
+        let mut explanation = RoutingExplanation::new();
+        explanation.push(Contribution::new("a", 1.0, "first"));
+        explanation.push(Contribution::new("b", -0.25, "second"));
+        explanation.push(Contribution::new("c", 0.0, "informational only"));
+
+        assert_eq!(explanation.contributions().len(), 3);
+        assert_eq!(explanation.contributions()[0].name(), "a");
+        assert!((explanation.total() - 0.75).abs() < 1e-9);
+        assert!(explanation.render().contains("informational only"));
+    }
+
+    /// The one function that can build an `EligibleCandidate`: candidates
+    /// that fail `check` are rejected with a reason, and the rest come back
+    /// wrapped, in the same order they went in.
+    #[test]
+    fn apply_hard_constraints_actually_filters_and_names_the_reason() {
+        let candidates = vec![1, 2, 3, 4];
+        let (eligible, rejected) = apply_hard_constraints(candidates, |n| {
+            if *n % 2 == 0 {
+                Ok(())
+            } else {
+                Err(HardConstraint::Protocol)
+            }
+        });
+
+        assert_eq!(
+            eligible
+                .iter()
+                .map(EligibleCandidate::value)
+                .collect::<Vec<_>>(),
+            vec![&2, &4]
+        );
+        assert_eq!(
+            rejected,
+            vec![(1, HardConstraint::Protocol), (3, HardConstraint::Protocol)]
+        );
+    }
+
+    /// The structural half of design decision 2: nothing outside this module
+    /// can construct an `EligibleCandidate` directly — its field is private
+    /// and no `pub fn new`/`pub value` exists, so the only source is
+    /// `apply_hard_constraints` actually running the check. A mutation that
+    /// makes the field public or adds a bypass constructor is exactly what
+    /// this guards.
+    #[test]
+    fn eligible_candidate_has_no_public_constructor_other_than_the_filter() {
+        let code = production_code(include_str!("mod.rs"));
+        assert!(
+            !code.contains("pub value: T"),
+            "EligibleCandidate's field must stay private, or a caller could build one without \
+             passing through apply_hard_constraints"
+        );
+        assert!(
+            !code.contains("impl<T> EligibleCandidate<T> {\n    pub fn new"),
+            "a public constructor on EligibleCandidate would let a caller skip \
+             apply_hard_constraints entirely"
+        );
     }
 }
