@@ -2237,3 +2237,37 @@ reason a fallback has to exist rather than being tidied away.
 find out what that program will tell you if you ask.** Three fixes to a
 heuristic cost more than reading the protocol document this project had already
 written about exactly this event.
+
+### §62, addendum — a turn-end event is not a finished worker
+
+The `Stop` hook landed and fired correctly within the hour. The watch then
+announced `windows-defects` as done while it was **forty-two minutes into its
+package and still running**.
+
+The hook is not wrong and neither is the harness.
+`docs/process/harness-hook-protocol.md` says exactly what the event means, and
+said it before any of this was built:
+
+> `turn.completed` — a model turn became idle; **work may or may not be done.**
+
+The defect was in the consumer. The hook writes a marker at the end of every
+model turn; nothing clears it; so the **first** turn boundary latched "done"
+permanently. **A transient event was stored as durable state**, and that is the
+whole bug in one sentence.
+
+The two signals compose the other way round from how they were wired:
+
+- **the pane** says whether a turn is running *right now* — so it gates, and
+  busy always wins;
+- **the marker** says a turn has ended at least once — which is what separates
+  *finished* from *died before it ever spoke*, and is worth having for exactly
+  that.
+
+Reading the protocol document would have prevented this, and the protocol
+document is one this project wrote. That is now twice in one day that the answer
+was already in `harness-hook-protocol.md` — once for the mechanism, once for its
+semantics.
+
+**The general rule: when you consume an event, write down what it asserts before
+you write down what you will do about it.** "A turn ended" and "the work is
+finished" are different claims, and only one of them was on offer.

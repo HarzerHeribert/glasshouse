@@ -74,10 +74,14 @@ BUSY_RE='esc to interrupt|esc to cancel|[0-9]+s · ↓|\([0-9]+[hms]|[⠋⠙⠹�
 # that carries the pane's own last words would have caught both false idles
 # without anyone opening the pane.
 last_words() {
+  # Skip the status bar as well as the blanks and rules: it is drawn last, so a
+  # naive `tail -1` quotes `/rc` and tells the reader nothing. What is wanted is
+  # the last thing the WORKER said.
   cmux read-screen --surface "$SURFACE" 2>/dev/null \
-    | grep -vE '^\s*$|^─+$|^\s*❯\s*$' \
+    | grep -vE '^\s*$|^─+$|^\s*❯\s*$|^\s*/rc\s*$|auto mode on|^\s*Opus |^\s*Sonnet |[░█]{6}|^\s*⎿|Tip: Use' \
     | tail -1 \
-    | cut -c1-100
+    | sed 's/^[[:space:]]*//' \
+    | cut -c1-110
 }
 
 # The authoritative signal: the worker said so itself, via worker-done.sh.
@@ -134,7 +138,20 @@ while true; do
     continue
   fi
 
-  if ! worker_signalled && is_busy; then
+  # BUSY ALWAYS WINS, and the done marker never overrides it.
+  #
+  # The Stop hook fires at the end of every model TURN, not at the end of the
+  # work — `harness-hook-protocol.md` says so in as many words: "turn.completed
+  # — a model turn became idle; work may or may not be done." The first version
+  # of this treated the marker as authoritative, so the first turn boundary
+  # latched 'done' forever and the watch announced a worker that was 42 minutes
+  # into its package and still running.
+  #
+  # A transient event stored as durable state is the defect. The two signals
+  # compose the other way round: the pane says whether a turn is running RIGHT
+  # NOW, and the marker says a turn has ended at least once — which is what
+  # separates 'finished' from 'died before it ever spoke'.
+  if is_busy; then
     quiet=0
     continue
   fi

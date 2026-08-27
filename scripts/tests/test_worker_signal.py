@@ -39,6 +39,25 @@ def main() -> int:
     failures = []
     import json
 
+    watch = (REPO / "scripts" / "worker-watch.sh").read_text()
+
+    # The Stop hook fires at the end of every model TURN, not the end of the
+    # work. Treating its marker as authoritative latched "done" on the first
+    # turn boundary and announced a worker 42 minutes into its package. The
+    # pane must gate: busy always wins, and the marker only labels which
+    # signal fired.
+    if "if is_busy; then" not in watch:
+        failures.append(
+            "worker-watch.sh no longer gates on is_busy alone; a done marker that "
+            "can override a busy pane turns a turn-end event into a permanent "
+            "'finished', which is the 2026-08-27 defect"
+        )
+    if "worker_signalled && is_busy" in watch:
+        failures.append(
+            "the done marker is short-circuiting the busy check again — a transient "
+            "turn-end event is being stored as durable state"
+        )
+
     settings = json.loads(SETTINGS.read_text())
     if "Stop" not in settings.get("hooks", {}):
         failures.append(
