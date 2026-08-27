@@ -4,7 +4,84 @@
 > here is a product requirement. Capability requirements live only in
 > `docs/product/capability-map.md`.
 
-Last updated: 2026-08-27 late evening (Europe/Berlin)
+Last updated: 2026-08-28 (Europe/Berlin)
+
+## Checkpoint — 2026-08-28, batch 35 landed: 604 / 1280 (47%)
+
+`2d8e569` pushed, tree clean. Local gate **13/13** including the ubuntu clippy
+leg. Three Sonnet workers, thirty-five boxes, three commits.
+
+| package | closed | what it settled |
+|---|---|---|
+| `pairing-prior` | 1 / 12 | no router exists to rank candidates |
+| `mem-validity` | 22 / 24 | Phase 21C 11/11, Phase 21D 9/9, migration 10 |
+| `phase-32d` | 12 / 20 | capacity score, bands, fail-closed thresholds, capacity API |
+
+Also landed `db5510e`: `check-evidence-coverage.py` now validates the ledger's
+state vocabulary (warn-only, §51). **Twenty** declarations are outside the
+SDLC's six states, not the twelve an earlier checkpoint estimated.
+
+### The next round should build a consumer, not another producer
+
+**Eighteen boxes in this round were blocked by one missing thing**, and two
+separate packages hit it independently: Glasshouse has no component that ranks
+candidates and decides.
+
+- Phase 9J, all eleven — `native_pairing_prior_contribution` has no caller.
+- Phase 32F, seven of eight — `evaluate_reserve_spend` is called only from
+  `tests/capacity_score.rs`.
+- Plus map line 1293 and Phase 9J line 569.
+
+Both workers built their half correctly and stopped, which was right. A third
+package building a fourth unreachable mechanism would be waste. **Phase 35B
+(candidate scoring, 0/25) or Phase 37 (basic session-aware router, 0/11) is what
+unblocks those eighteen plus its own.** Its dependency is Phase 33A (routing
+evidence ledger, 0/15), which supplies the `ObservationSource` the prior decays
+against.
+
+The seams are written down and should be quoted into that packet:
+`report-PAIRING-PRIOR.md`'s last section gives the exact scorer signature;
+`docs/product/evidence/phase-32f.md` gives the reserve half. `routing/mod.rs`
+now has `Contribution`, `RoutingExplanation`, `EligibleCandidate<T>` and
+`apply_hard_constraints` waiting for exactly that caller.
+
+Full partition plan, with the files each package needs, is in
+`.agent-runtime/plan-batch-36.md`.
+
+### `discover.py --seam`'s verdict line can be wrong — read it as "look here"
+
+It reported three call sites for `evaluate_reserve_spend` and concluded a box
+could close. All three were inside `quota.rs`: two intra-doc links and the
+definition itself. §49 already says a match is a lead rather than proof; this is
+the first time that changed a tick. **A one-line fix is available to whoever
+next owns `scripts/`: exclude the definition and `///` lines before counting.**
+
+### Mutate what a report calls load-bearing, not what it lists as proven
+
+All three review findings this round came from that, and none was a gate
+failure — every worker's gate numbers were exactly right. `mem-validity` called
+the search over-fetch load-bearing in its own prose and had no test for it;
+removing it left all 1750 tests green.
+
+### Settled, stop re-checking
+
+- **Map line 1210** (quota window *start*) — five packages now. No host
+  publishes one.
+- **Phase 20 lines 828/829 and Phase 21A line 862** — all three ask for a
+  judgement about the project that the storage layer cannot make. A keyword
+  heuristic would refuse real memories and admit fake ones. Recorded in the
+  ledger with the reasoning; do not re-derive it.
+
+### Standing debt, unchanged
+
+`session::api::tests::interrupting_through_the_api_is_recorded_as_machine_initiated`
+— reproduced once more under full-suite parallel load this round, passed alone
+and on a second full run. Nobody's regression. Beside the 1-in-37 `pty_smoke`
+`SIGABRT`.
+
+**`RETRIEVAL_WEIGHT_FLOOR = 0.15`** is tuned against one ordering scenario, not
+derived. Recorded in `phase-21d.md` as provisional so it is not mistaken for a
+constant with a proof behind it.
 
 ## Checkpoint — 2026-08-28 early, batch 34 landed: 569 / 1280 (44%)
 

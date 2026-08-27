@@ -256,6 +256,72 @@ class DiscoverSeamTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
 
+    # --- a definition is not a call site (added 2026-08-28) ----------------
+    #
+    # `discover.py --seam evaluate_reserve_spend` reported "3 non-test call
+    # sites ... a box depending on this seam can close" when all three lines
+    # were inside its own module: two `///` intra-doc links and the `pub fn`
+    # itself. The function was reachable from tests only, and the verdict
+    # nearly ticked seven capability-map boxes with no production caller.
+
+    def test_a_functions_own_definition_is_not_counted_as_a_caller(self):
+        write(self.tmp / "src" / "lib.rs", "pub fn seam(x: u8) -> u8 { x }\n")
+        hits = disc.find_call_sites("seam", str(self.tmp))
+        self.assertEqual(hits["literal"], [], "a definition is not a call site")
+        self.assertEqual(len(hits["definition"]), 1)
+
+    def test_doc_comments_naming_the_seam_are_not_counted_as_callers(self):
+        write(
+            self.tmp / "src" / "lib.rs",
+            "/// See [`seam`] for the rule this applies.\n"
+            "//! Module doc mentioning seam as well.\n"
+            "// An ordinary comment about seam.\n"
+            "pub fn other() {}\n",
+        )
+        hits = disc.find_call_sites("seam", str(self.tmp))
+        self.assertEqual(hits["literal"], [])
+        self.assertEqual(len(hits["definition"]), 3)
+
+    def test_a_real_caller_beside_the_definition_still_counts(self):
+        """The whole point: definition excluded, caller kept."""
+        write(
+            self.tmp / "src" / "lib.rs",
+            "/// Doc naming seam.\n"
+            "pub fn seam() {}\n"
+            "pub fn caller() { seam(); }\n",
+        )
+        hits = disc.find_call_sites("seam", str(self.tmp))
+        self.assertEqual(len(hits["literal"]), 1)
+        self.assertIn("caller()", hits["literal"][0][2])
+
+    def test_a_one_line_function_body_containing_a_call_is_still_a_call(self):
+        """The narrowing that the first version of this fix got wrong.
+
+        `fn real() { Thing::seam(); }` both declares `real` and calls the
+        seam. A predicate testing "does this line start with `fn`" swallowed
+        it and lost a genuine call site -- so the rule is *declares the
+        seam*, not *declares anything*.
+        """
+        write(self.tmp / "src" / "lib.rs", "fn real() { Thing::seam(); }\n")
+        hits = disc.find_call_sites("Thing::seam", str(self.tmp))
+        self.assertEqual(len(hits["literal"]), 1)
+        self.assertEqual(hits["definition"], [])
+
+    def test_an_impl_block_for_the_seam_type_is_a_definition(self):
+        write(
+            self.tmp / "src" / "lib.rs",
+            "pub struct Widget;\n"
+            "impl Widget {\n"
+            "    pub fn go(&self) {}\n"
+            "}\n"
+            "fn use_it(w: &Widget) { w.go(); }\n",
+        )
+        hits = disc.find_call_sites("Widget", str(self.tmp))
+        defined = {text for _rel, _line, text in hits["definition"]}
+        self.assertTrue(any(d.startswith("pub struct Widget") for d in defined))
+        self.assertTrue(any(d.startswith("impl Widget") for d in defined))
+        self.assertTrue(any("use_it" in text for _r, _l, text in hits["literal"]))
+
     def test_excludes_tests_directory(self):
         write(self.tmp / "src" / "lib.rs", "fn f() { Thing::seam(); }\n")
         write(self.tmp / "tests" / "it.rs", "fn t() { Thing::seam(); }\n")

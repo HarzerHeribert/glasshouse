@@ -71,6 +71,50 @@ def test_block_line_numbers(lines: list[str]) -> set[int]:
     return skip
 
 
+_DECL_KEYWORDS = r"fn|struct|enum|trait|type|union|mod|static|const|impl"
+_DECL_PREFIX = (
+    r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?"
+    r"(?:default\s+|const\s+|async\s+|unsafe\s+|extern\s+\"[^\"]*\"\s+)*"
+)
+
+
+def _declares(line: str, name: str) -> bool:
+    """True when `line` DECLARES `name`, rather than merely mentioning it.
+
+    The distinction matters and getting it wrong in either direction is a real
+    misreport. Matching "any line starting with `fn`" classified the fixture
+    `fn real() { Thing::seam(); }` as a definition and lost a genuine call
+    site — so the declared identifier has to be the seam itself, not just any
+    identifier.
+
+    `impl` is included because `impl NormalizedCapacity {` introduces the type
+    rather than calling it; `impl<T> Foo<T>` and `impl Trait for Foo` are both
+    covered by allowing generics and a `for` clause before the name.
+    """
+    decl = re.compile(
+        _DECL_PREFIX
+        + r"(?:" + _DECL_KEYWORDS + r")\b"
+        + r"(?:\s*<[^>]*>)?"          # generics on the keyword: impl<T>
+        + r"(?:\s+[A-Za-z_][\w:]*\s+for)?"   # impl Trait for Name
+        + r"\s+" + re.escape(name) + r"\b"
+    )
+    return bool(decl.match(line))
+
+
+def is_definition_or_doc(line: str, seam: str) -> bool:
+    """True for a line that mentions `seam` without calling it.
+
+    Two cases, both of which counted as call sites until 2026-08-28: a doc or
+    ordinary comment (`///`, `//!`, `//`, or a `*` continuation inside a block
+    comment), and the seam's own declaration.
+    """
+    stripped = line.lstrip()
+    if stripped.startswith(("///", "//!", "//", "*", "/*")):
+        return True
+    name = seam.rsplit("::", 1)[-1]
+    return _declares(line, name)
+
+
 def find_call_sites(seam: str, src_root: str) -> dict:
     """Find non-test call sites of `seam` (`Type::method` or `method`).
 
@@ -79,6 +123,19 @@ def find_call_sites(seam: str, src_root: str) -> dict:
     component, since idiomatic Rust calls a trait method as `x.method(...)`
     rather than `Type::method(...)`. The fallback is reported as a heuristic,
     not asserted as equivalent to the literal form.
+
+    **A symbol's own definition and its doc comments are not call sites**, and
+    counting them produced a wrong verdict on 2026-08-28: `evaluate_reserve_spend`
+    was reported as having "3 non-test call sites … a box depending on this seam
+    can close" when all three were inside its own module — two `///` intra-doc
+    links and the `pub fn` line itself. The function was reachable from tests
+    only. Practice §49 already said a match is a lead rather than proof; that
+    was the first time it changed a tick, and this split is why it should not
+    again.
+
+    Definitions and doc lines are still *reported*, because "here is where it
+    lives, and nothing calls it" is exactly the finding a reader wants. They are
+    just kept out of the count the verdict is drawn from.
     """
     method = seam.rsplit("::", 1)[-1]
     literal_re = re.compile(re.escape(seam))
@@ -86,6 +143,7 @@ def find_call_sites(seam: str, src_root: str) -> dict:
 
     literal_hits: list[tuple[str, int, str]] = []
     method_hits: list[tuple[str, int, str]] = []
+    defn_hits: list[tuple[str, int, str]] = []
 
     for path in sorted(Path(src_root).rglob("*.rs")):
         rel = path.as_posix()
@@ -101,25 +159,37 @@ def find_call_sites(seam: str, src_root: str) -> dict:
             if idx in skip:
                 continue
             if literal_re.search(line):
-                literal_hits.append((rel, idx + 1, line.strip()))
+                bucket = defn_hits if is_definition_or_doc(line, seam) else literal_hits
+                bucket.append((rel, idx + 1, line.strip()))
             elif method_re.search(line):
                 method_hits.append((rel, idx + 1, line.strip()))
 
-    return {"literal": literal_hits, "method": method_hits}
+    return {"literal": literal_hits, "method": method_hits, "definition": defn_hits}
 
 
 def report_seam(seam: str, src_root: str) -> None:
     hits = find_call_sites(seam, src_root)
     literal, method = hits["literal"], hits["method"]
+    definition = hits.get("definition", [])
+
+    def show_definitions() -> None:
+        if not definition:
+            return
+        print(f"  ({len(definition)} definition/doc-comment line(s) found and "
+              f"NOT counted as callers:)")
+        for rel, lineno, text in definition:
+            print(f"    {rel}:{lineno}: {text}")
 
     if literal:
         print(f"discover.py: {len(literal)} non-test call site(s) of `{seam}` "
               f"(literal match):")
         for rel, lineno, text in literal:
             print(f"  {rel}:{lineno}: {text}")
+        show_definitions()
         print(
-            "A box that depends on this seam can close: it has a production "
-            "caller in the current tree."
+            "A box that depends on this seam MAY be closeable: it has at least "
+            "one production line that is not its own definition. Read them "
+            "before crediting a caller (practice §49)."
         )
         return
 
@@ -142,6 +212,12 @@ def report_seam(seam: str, src_root: str) -> None:
         f"No box depending on this seam can close — it has no production "
         f"caller in the current tree (practice §5, §36)."
     )
+    show_definitions()
+    if definition:
+        print(
+            "  It is DEFINED in production and called from nowhere but tests — "
+            "the shape that cost two packages eighteen boxes in batch 35."
+        )
 
 
 def parse_box_lines(lines: list[str]) -> list[tuple[int, str, str]]:

@@ -2277,3 +2277,117 @@ value. Re-aimed at the real one, the test killed it at once.
 **The wrong conclusion was one keystroke away** — a logged coverage gap that does
 not exist, in the package whose entire value rests on that template being real.
 The rule works; what makes it work is applying it before writing the finding down.
+
+## Batch 35 — three concurrent Sonnets, and the same missing consumer twice
+
+`7e1ccb8` / `994ba4f` / `2d8e569`, 569 → 604. Three Sonnet implementers at high
+effort, started ten minutes apart, partitioned by file, `validate_round.py` run
+before dispatch (clean, no collisions).
+
+| | pairing-prior | mem-validity | phase-32d |
+|---|---|---|---|
+| boxes in packet | 12 | 24 | 20 |
+| **boxes closed** | **1** | **22** | **12** |
+| worker's own proposal | 0 | 22 | 19 |
+| orchestrator's ruling | **+1** | agreed | **−7** |
+| diff | +1741/−76 | +1759/−59 | +2555/−77 |
+| worker cost | ~$7.4 | ~$14.2 | ~$14.9 |
+| wall clock | 28 min | 38 min | 40 min |
+| cost per box | $7.40 | $0.65 | $1.24 |
+
+Total ~$36.5 for 35 boxes, ~$1.04 per box, three workers inside one 40-minute
+window. Local gate **13/13** on the integrated tree, including the ubuntu clippy
+leg.
+
+### The finding: two packages built a mechanism nothing calls, for the same reason
+
+`pairing-prior` left **eleven** Phase 9J lines open because
+`native_pairing_prior_contribution` has no production caller. `phase-32d` had
+**seven** Phase 32F lines refused for the identical reason —
+`evaluate_reserve_spend` is called only from `tests/capacity_score.rs`. Add map
+line 1293 and Phase 9J line 569 and that is **eighteen boxes in one round whose
+sole obstacle is that Glasshouse has no component that ranks candidates and
+decides.**
+
+Neither worker was wrong to build its half; both were explicitly asked to. But
+**the scheduling lesson is that a producer whose consumer does not exist is a
+package that cannot close its boxes however well it is executed** — and this
+round bought that lesson twice at full price. The seam query catches a *dead*
+centre (§32); it does not catch a *missing* consumer, because the consumer is
+not a symbol you can grep for yet.
+
+**Cheap check to add before sizing any policy package:** name the function that
+would call the thing you are about to build, and find it. If you cannot, the
+package's boxes will not close and its real deliverable is the seam plus the
+report.
+
+### `discover.py --seam` produced a wrong verdict, and it changed a tick
+
+    discover.py: 3 non-test call site(s) of `evaluate_reserve_spend`
+    A box that depends on this seam can close: it has a production caller.
+
+All three were inside `quota.rs`: two intra-doc links and the definition itself.
+The verdict line counts matches, and a symbol's own definition and doc comments
+match. §49 already says a match is a lead rather than proof; this is the first
+recorded case of that warning changing an outcome. **The tool is still worth
+running — it was right about `NormalizedCapacity` and about `CmuxPresentation`'s
+zero — but its verdict sentence should be read as "look here", never as "yes".**
+
+Worth a small fix when someone owns `scripts/`: exclude the definition line and
+`///` comment lines from the count before printing the verdict.
+
+### Review found something real in all three, and none was a gate failure
+
+Every worker's gates were accurate. All three findings came from reading what
+the mechanism connects to — the same place batch 13–14's findings came from.
+
+1. **`pairing-prior`** — an unparseable config value silently reported *"from the
+   default — nothing configured"*. The worker cited the module's own
+   visible-degradation rule and then did not implement it; every sibling field
+   prints a bad value back (`behaviour=nonsense`). Found by running the binary
+   with a deliberately invalid value, which the worker's own transcript had not
+   done.
+2. **`mem-validity`** — the over-fetch that lets decay *promote* a result was
+   called load-bearing in the worker's own report and had **no test**. Reducing
+   `overfetch_limit` to the identity left all 1750 tests green, because every
+   test in the file used a corpus smaller than its own `limit`. Found by
+   mutating the thing the report called important rather than the things it
+   listed as proven.
+3. **`phase-32d`** — the seven-box override above.
+
+**The transferable rule: mutate what the report calls load-bearing, not what it
+lists as proven.** A worker's mutation table covers what it thought to test; the
+sentence where it explains why something matters is where the untested claim
+lives.
+
+### Two workers policed themselves, and that is worth as much as the boxes
+
+`pairing-prior` caught its own **vacuous** test: its first draft compared
+candidates at 20 observations, where the native prior has already decayed to
+zero, so deleting the entire evidence signal would have left the comparison
+green. It noticed, lowered the count to 5, and re-ran.
+
+`mem-validity` reported a **surviving** mutation rather than claiming
+five-for-five, diagnosed it correctly as redundant defence (an early return
+*and* an infinite half-life both protect invariants), removed both layers, and
+watched a pre-existing test it had not written catch it.
+
+Neither was asked for in the packet beyond the standing §41 instruction. Both
+are the behaviour the rule exists to produce, arriving without supervision.
+
+### Open question 1 gets more data, and the answer is holding
+
+*"Does the Sonnet tier close boxes at Opus's rate on amber work?"* Three Sonnets,
+35 boxes, ~$1.04 per box, no red-risk escalation needed and no architecture
+disputed. The spread within the tier ($0.65 to $7.40) is again **how much was
+already built**, not the model — `mem-validity` extended a settled schema and
+ranker; `pairing-prior` wrote a subsystem from nothing and then honestly
+declined to tick it. That is batch 31's correction confirmed a second time:
+**cost per box measures the package, not the tier.**
+
+### Sizing note: 20–24 boxes per Sonnet packet was right
+
+All three ran 28–40 minutes — inside §1's 20–40 minute target, on the first
+attempt, with packets of 12/24/20 boxes. Three returns did **not** collide
+because the reviews were serial and the workers finished 7 minutes apart.
+The ten-minute stagger did its job.
