@@ -2391,3 +2391,42 @@ All three ran 28–40 minutes — inside §1's 20–40 minute target, on the fir
 attempt, with packets of 12/24/20 boxes. Three returns did **not** collide
 because the reviews were serial and the workers finished 7 minutes apart.
 The ten-minute stagger did its job.
+
+### Attributing a red Windows gate cost four runs, and the answer was "not you"
+
+Batch 35's Windows gate failed twice on
+`interrupting_through_the_api_is_recorded_as_machine_initiated`. The handoff
+already called it a standing flake, so the cheap move was to accept that. Two
+things argued against accepting it: the batch had failed **2 of 2**, and its lib
+suite appeared **10× slower** (4.86s → 48.16s), which reads exactly like a
+performance regression.
+
+So a worktree was cut at the pre-batch commit and the Windows suite run against
+it three times.
+
+| tree | runs | fails |
+|---|---|---|
+| `9f60f07` pre-batch | pass 4.86s, pass 4.78s, FAIL 47.99s | 1 of 3 |
+| `2d8e569` batch 35 | FAIL 48.16s, FAIL 48.01s | 2 of 2 |
+| earlier checkpoints | — | 2 of 6 |
+
+**Three in nine on unchanged code — 33%.** Batch 35 exonerated.
+
+**The 10× slowdown was not a second symptom; it was the same one.** A pass costs
+~5s and a failure ~48s, because the test waits out a 45-second deadline. Reading
+suite wall-clock as an independent signal would have produced a confident, wrong
+finding about performance — §58's shape exactly: *a wrong cause that predicts the
+right symptom*. The tell was that 48s ≈ the deadline, which is one subtraction
+and was nearly not done.
+
+**What this cost, and the rule it buys.** Four Windows runs, about forty minutes,
+to conclude "not you." That is the price of attribution on a 33% flake, and every
+future orchestrator pays it again unless the flake gets an owner. **A flake left
+unowned is not free; its cost is one attribution per batch, paid by whoever is
+holding the gate.** Record the rate when you measure it — this entry exists so
+the next orchestrator can skip the four runs and go straight to owning it.
+
+**Method note worth keeping.** `glasshouse-windows-ci` honours
+`GLASSHOUSE_CI_REPO`, so a detached worktree at any commit can be run against
+the same VM. Comparing a suspect tree against its own base is three commands and
+is the only thing that separates "your batch" from "this machine".

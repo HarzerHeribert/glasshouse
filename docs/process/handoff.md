@@ -72,12 +72,56 @@ removing it left all 1750 tests green.
   heuristic would refuse real memories and admit fake ones. Recorded in the
   ledger with the reasoning; do not re-derive it.
 
-### Standing debt, unchanged
+### Windows: the batch is green apart from one flake, now MEASURED at 33%
 
-`session::api::tests::interrupting_through_the_api_is_recorded_as_machine_initiated`
-— reproduced once more under full-suite parallel load this round, passed alone
-and on a second full run. Nobody's regression. Beside the 1-in-37 `pty_smoke`
-`SIGABRT`.
+`--windows-vm` build and msrv pass. `test (windows) / test` failed on **both**
+runs of this tree, always the same test:
+
+    session::api::tests::interrupting_through_the_api_is_recorded_as_machine_initiated
+
+**Batch 35 was suspected and is exonerated, by measurement rather than by
+assumption.** A worktree was cut at the pre-batch commit `9f60f07` and the
+Windows suite run against it three times:
+
+| tree | windows lib runs | fails |
+|---|---|---|
+| `9f60f07` pre-batch | pass 4.86s, pass 4.78s, **FAIL 47.99s** | 1 of 3 |
+| `2d8e569` batch 35 | **FAIL 48.16s**, **FAIL 48.01s** | 2 of 2 |
+| historical (earlier checkpoints) | — | 2 of 6 |
+
+**Three failures in nine runs of unchanged code — 33%**, matching the rate
+earlier checkpoints recorded. Two consecutive failures is what a 33% rate
+produces about one time in nine. Not a regression.
+
+**The suspicion was reasonable and worth recording**: the batch's lib suite
+appeared 10× slower (4.86s → 48.16s), which looked like a performance
+regression. It is not — a pass costs ~5s and a failure costs ~48s because the
+test waits out a 45-second deadline. **The suite time and the failure are the
+same fact**, so wall-clock here says only which way the coin landed.
+
+### This flake should stop being nobody's job
+
+It is now the single reason this project cannot claim three green platforms,
+and it has cost real time: attributing it this round took **four Windows runs
+and about forty minutes**. At 33% it will redden roughly one gate in three,
+forever, and every future orchestrator will pay the same attribution cost
+before trusting a red Windows result.
+
+What is known, from the test's own comments and this round's runs:
+- Windows-only. The harness is a `.cmd` script; `cmd.exe` intercepts Ctrl-C
+  rather than dying, so the assertion waits for `^C` to appear in the
+  scrollback rather than for process death.
+- The deadline is already 45s, raised from 15s once before. **Raising it again
+  is §57's "one more string" and should not be the fix.**
+- It fails by the deadline expiring, not by a wrong value.
+
+**Red tier** — Windows console control events, PTY, and a real child process.
+Give it a package of its own with the brief: *find out whether `^C` genuinely
+never arrives or merely arrives late, and if late, what it is waiting on.* A
+test that cannot distinguish "the interrupt did not work" from "the console was
+slow" is the actual defect.
+
+Beside the 1-in-37 `pty_smoke` `SIGABRT`, still unowned.
 
 **`RETRIEVAL_WEIGHT_FLOOR = 0.15`** is tuned against one ordering scenario, not
 derived. Recorded in `phase-21d.md` as provisional so it is not mistaken for a
