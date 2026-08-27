@@ -63,6 +63,46 @@ exchange's honest, transport-level subset of identity, timing and outcome,
 while preserving every prior row unedited and computing every rolling
 summary on read rather than replacing the raw rows that produced it.
 
+State: **COMPLETE** for map lines 1329, 1330, 1337, 1338, 1342 and 1343 — six
+of fifteen. **NOT STARTED, blocked** for the other nine.
+
+> **Orchestrator's ruling, and the line it draws.** A box closes here when the
+> **recording** path runs in the shipped binary, which it now does: `main.rs`
+> hands a real `EvidenceLedger` to every gateway it starts, and
+> `gateway/mod.rs`'s accept loop appends a row per forwarded exchange —
+> mutation-proven against a real socket by the package, and re-proven by the
+> integrator.
+>
+> **The nine that stay open split into two kinds, and the difference matters
+> for whoever picks this up.** Four (1331, 1332, 1333, 1334) are blocked
+> because the gateway is *structurally* unable to read a response body — no
+> amount of work inside `gateway/**` reaches them, and the component that
+> could is one that reads the response stream's own framing. Five (1335, 1336,
+> 1339, 1340, 1341) are the aggregate half: `summarize` is real, tested and
+> called **only from tests**. That is `evaluate_reserve_spend`'s exact
+> position in Phase 32F, refused there in this same batch, and refused here
+> for the same reason.
+>
+> **Integrator's finding on its own wiring, recorded because it was mine.** The
+> first version passed `EvidenceLedger::open(runtime)?` — evaluated on every
+> launch whether or not a gateway is required, with `?` turning a telemetry
+> failure into a failed session. A read-only data directory would have meant
+> "glasshouse will not start". Now `evidence_ledger(runtime)` warns and
+> returns `None`; telemetry is the one subsystem here whose failure must
+> always be survivable.
+>
+> **And the wiring was invisible to the tests.** Removing the ledger from both
+> call sites left the entire suite green, so
+> `main.rs::tests::every_gateway_the_binary_starts_is_given_the_evidence_ledger`
+> now scans the production source for it — `main.rs`'s own existing
+> `production_code` idiom, the same one
+> `a_single_attempt_loses_the_race_that_the_bound_wins` uses. It fails on
+> exactly the edit that previously went unnoticed. **It proves structure, not
+> behaviour, and no box above closes on it** — what it prevents is a future
+> edit silently dropping the ledger back to `None`.
+
+Original package's assessment:
+
 State: **PARTIALLY VERIFIED.** The ledger itself — schema, storage,
 rolling summaries, decay, context-state separation, project isolation — is
 built, tested, and reached from real production code inside the gateway

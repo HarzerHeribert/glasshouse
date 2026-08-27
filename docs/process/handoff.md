@@ -6,6 +6,64 @@
 
 Last updated: 2026-08-28 (Europe/Berlin)
 
+## Checkpoint — 2026-08-28, batch 36 landed: 631 / 1280 (49%)
+
+Three Sonnet workers, twenty-seven boxes. Phase 14 **eleven of eleven**, Phase 16
+three of seven, Phase 33A six of fifteen, Phase 35B seven of twenty-five.
+
+### Batch 35's headline finding was half wrong, and batch 36 corrected it
+
+"Eighteen boxes wait on one missing consumer" folded together **two different**
+missing consumers:
+
+- **The reserve half was right.** `evaluate_reserve_spend` is now called from
+  `DisposableRouting::choose`, mutation-proven, reached from `main.rs:1120`.
+- **The pairing half was wrong.** `PairingQuery::harness` is a required
+  `IntegrationId`; all ten variants are third-party coding harnesses a user
+  launches; a disposable job is **Glasshouse's own internal call** and carries no
+  harness. **Phase 9J's eleven need `InteractiveRouting`**, not the disposable
+  router — a different caller in a different file.
+
+**Before sizing that package, check one thing:** does a bound gateway session
+know which `IntegrationId` it serves? If `SessionRouting::bind`'s `Assignment`
+does not carry it, Phase 9J is blocked deeper than one caller.
+
+### The cheapest next package is a reader for the ledger
+
+Phase 33A's five aggregate boxes (1335, 1336, 1339, 1340, 1341) are all
+`summarize` having no production consumer, and `ObservedEvidenceSource` already
+implements the trait `routing-score` stubbed with `NoObservations` only because
+`evidence.rs` belonged to another worker that round. **Those two halves are one
+small package now that both files are free.**
+
+### What is blocked and on what
+
+- **Phase 16's four** — a cross-process architecture decision. `glasshouse api
+  serve` is a *separate process* from the TUI and `session/attach.rs` says its
+  input path is not reusable inside a longer-lived interface. Red tier, product
+  question first. See `docs/product/evidence/phase-16.md`.
+- **Phase 35B line 1550** — the reserve gate is dead in the binary because
+  `main.rs::disposable_candidates` never builds a metered candidate. Closing it
+  decides whether a background job may spend paid quota unasked; no source for
+  "which metered model" exists in `ProviderConfig`.
+- **Phase 33A's other four** (1331–1334) — the gateway cannot read a response
+  body **by design**. Needs a component that reads the response stream's framing.
+
+### A near-term win nobody has taken
+
+**Line 1547**, failure-domain diversity. `routing::free::FreePool`'s allowance is
+already keyed per credential, so "two models sharing one exhausted credential" is
+a signal that exists in this build today. Left only for time.
+
+### Two defects in the integrator's own work, both found by self-mutation
+
+`EvidenceLedger::open(runtime)?` ran on every launch and would have turned a
+telemetry failure into a failed session — fixed to warn and continue. Then the
+wiring proved **invisible to every test**: removing it left the suite green, so
+`every_gateway_the_binary_starts_is_given_the_evidence_ledger` now scans for it.
+**Apply the mutation discipline to your own integration edits, not only to
+workers' diffs.**
+
 ## Checkpoint — 2026-08-28, batch 35 landed: 604 / 1280 (47%)
 
 `2d8e569` pushed, tree clean. Local gate **13/13** including the ubuntu clippy

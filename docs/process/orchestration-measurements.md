@@ -2430,3 +2430,73 @@ the next orchestrator can skip the four runs and go straight to owning it.
 `GLASSHOUSE_CI_REPO`, so a detached worktree at any commit can be run against
 the same VM. Comparing a suspect tree against its own base is three commands and
 is the only thing that separates "your batch" from "this machine".
+
+## Batch 36 — the consumer round, and two packets whose premises were wrong
+
+`044496b` / `87897d2` / (routing-score), 604 → 631. Three Sonnets at high effort,
+partitioned by file, `validate_round.py` clean before dispatch.
+
+| | orchestrator-role | routing-ledger | routing-score |
+|---|---|---|---|
+| boxes in packet | 18 | 15 | 25 |
+| **closed** | **14** | **6** | **7** |
+| diff | +1222/−31 | +2674/−149 | +1163/−64 |
+| cost | ~$5.8 | ~$18.8 | ~$11.6 |
+| wall clock | 20 min | 36 min | 39 min |
+
+### Two of three packets rested on a premise that was wrong, and both workers killed it
+
+This is the round's headline and it is about **packet-writing**, not worker
+quality. Both hypotheses were labelled killable (§44) and both were killed with
+structural evidence rather than a shrug:
+
+1. **`routing-ledger`** — the packet claimed `gateway/session.rs` sees enough of
+   a turn to record a real observation. It does not: `gateway::ingress` is
+   *deliberately incapable of reading a response body*, so first-byte,
+   first-token, tokens, cost and tool rounds are unreachable **by design, not by
+   omission**. Four boxes stay open on that alone.
+2. **`routing-score`** — the packet listed the pairing prior as ready to wire.
+   `PairingQuery::harness` is a required `IntegrationId`, all ten variants are
+   third-party harnesses a user launches, and a disposable job is *Glasshouse's
+   own internal call*. Three boxes stay open, and **Phase 9J's eleven need a
+   different caller entirely** (`InteractiveRouting`).
+
+**The orchestrator's own batch-35 finding was half wrong because of this.**
+"Eighteen boxes wait on one missing consumer" folded together two different
+missing consumers. The reserve half was right; the pairing half needed the
+gateway session, not the disposable router. **A finding that names one cause for
+boxes in two different files deserves one more check before it becomes a plan.**
+
+### The cheap check that would have caught both
+
+Both failures are the same shape: *the input the packet promised cannot be
+constructed at the caller the packet chose.* Neither needed a seam query — they
+needed one look at the **type the input requires** and one at **what the caller
+has**. `PairingQuery::harness` is a required field; `DisposableCandidate` has no
+harness. That is two greps.
+
+**Add to packet-writing: for each input you claim is ready to wire, name the type
+that produces it and the field on the caller that feeds it.** If you cannot name
+both, the claim is a hypothesis and should be labelled as one.
+
+### Three review findings, and two of them were the integrator's own work
+
+- **`orchestrator-role`**: box 2 closed on an audit. The audit was correct — and
+  an audit protects nothing against the next edit, so a structural guard was
+  added in this project's existing pattern, with a CRLF twin per §14.
+- **The integrator's `main.rs` wiring was a defect.** `EvidenceLedger::open(runtime)?`
+  ran on every launch whether or not a gateway was needed, and `?` turned a
+  telemetry failure into a failed session. Fixed to warn and continue.
+- **The integrator's wiring was then invisible to the tests.** Removing the
+  ledger from both call sites left the whole suite green. A source-scanning guard
+  now fails on exactly that edit. **Both of these were found by mutating my own
+  change with the same discipline applied to workers' changes** — which is the
+  only reason they were found at all.
+
+### `discover.py`'s fix paid for itself within the hour
+
+The definition-vs-caller split shipped in `5db74b2` was used immediately to size
+this round: it cleanly separated four real `InteractiveRouting` callers from six
+doc mentions, which is how `main.rs:1120`'s live `DisposableRouting` decision was
+found. **A tool fix that changes a tick once tends to change sizing every round
+after.**

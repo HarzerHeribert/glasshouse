@@ -265,3 +265,45 @@ are not: they explain a **first-match search**, never a scored one, and none of
 them carries a magnitude. `RoutingRecord` is a log of assignment changes that
 already happened. Line 575 asks "how much did each factor weigh," which had no
 home. One new small general type, and no invented scoring subsystem.
+
+
+### Phase 9J after batch 36 — the caller is `InteractiveRouting`, not `DisposableRouting`
+
+Still 0 of 11, and the reason is now **narrower and more useful** than "no
+component ranks candidates."
+
+Batch 36 built exactly that component — `DisposableRouting::choose` now scores
+candidates with a real `RoutingExplanation` reached from `main.rs` — and the
+pairing prior **still cannot be wired to it**. `routing-score` checked before
+building, per its packet's instruction, and found a structural bar rather than a
+missing value:
+
+- `native_pairing_prior_contribution` needs a `harness::pairing::Pairing`, built
+  by `classify(query: &PairingQuery, …)`.
+- `PairingQuery::harness` is a **required, non-optional `IntegrationId`**.
+- `IntegrationId`'s ten variants are all third-party coding harnesses a user
+  launches. There is no "Glasshouse itself" variant.
+- `DisposableCandidate` carries provider, model, credential and cost — **no
+  harness, and it cannot honestly gain one**: a disposable job (memory
+  extraction, classification, reranking) is Glasshouse's own internal call to a
+  model API, never run inside one of those ten harnesses.
+
+Constructing a `PairingQuery` for a disposable candidate would mean choosing an
+`IntegrationId` that has nothing to do with the actual call — the same
+"do not invent a source" rule that keeps eight other Phase 35B lines open.
+
+**So the caller Phase 9J needs is `routing::interactive::InteractiveRouting`**,
+which serves real harness-backed sessions through `gateway/session.rs` and
+therefore has a harness identity to classify. That is where the next attempt
+belongs.
+
+**One thing to check before sizing that package**, because it decides whether
+Phase 9J is one caller away or blocked deeper: does a bound gateway session
+actually know which `IntegrationId` it is serving? `SessionRouting::bind` binds
+an `Assignment`; if the harness is not on it, Phase 9J needs that carried
+through first.
+
+**This corrects the orchestrator, not the worker.** Batch 36's packet listed
+lines 1540 and 1541 as closable at the disposable caller. They were not, and the
+worker was asked to check rather than assume — which is why this is recorded as
+a finding instead of shipped as a wrong tick.

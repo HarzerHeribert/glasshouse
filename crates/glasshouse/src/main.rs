@@ -480,12 +480,23 @@ fn launch_session(
     // upstream is a closure, called only after the predicate says yes.
     // The guard lives to the end of this function, so the listener goes away
     // with the instance on every path out.
-    let gateway = match glasshouse::gateway::start_if_required_with_quota_cache(
+    let gateway = match glasshouse::gateway::start_if_required_with_telemetry(
         std::slice::from_ref(&launch_profile),
         || gateway_upstream(&user, project.as_ref(), &effective, &secrets),
         Some(glasshouse::provider::telemetry::GatewayQuotaCache::new(
             runtime.paths(),
         )),
+        // Phase 33A: the routing evidence ledger, reached from the shipped
+        // binary only here — the same shape `GatewayQuotaCache` had for a
+        // batch before `QUOTA-LIVE` wired it.
+        //
+        // **Never `?`.** This argument is evaluated on every launch, gateway
+        // or not, and a ledger that cannot be opened must cost an observation
+        // rather than the user's session. Telemetry is the one subsystem in
+        // this binary whose failure is always survivable, and a `?` here would
+        // make a read-only data directory or a locked database into "glasshouse
+        // will not start".
+        evidence_ledger(runtime),
     ) {
         Ok(gateway) => gateway,
         Err(err) => {
@@ -922,13 +933,45 @@ fn run_shim(
 /// withdrawn since the original launch, or a provider since removed from
 /// configuration, is a reason to fall back to a plain native resume, not a
 /// reason to make an otherwise-healthy session unresumable.
+/// The routing evidence ledger for this project, or `None` with a warning.
+///
+/// Phase 33A records an observation per forwarded gateway exchange. Opening
+/// its store touches the project database, and both callers evaluate this
+/// **before** `start_if_required_with_telemetry` decides whether a gateway is
+/// needed at all — so this runs on every launch and every resume.
+///
+/// It therefore must not fail the caller. A launch that refused to start
+/// because a telemetry table could not be opened would trade the user's whole
+/// session for a row nobody is waiting on, and this project's own product
+/// invariant is that Glasshouse orchestrates real harnesses rather than
+/// standing between the user and one. The warning is `tracing::warn!` for the
+/// same reason `set_lifecycle`'s is: it belongs in the log, not on the
+/// terminal the harness is about to take over.
+fn evidence_ledger(
+    runtime: &glasshouse::Runtime,
+) -> Option<std::sync::Arc<glasshouse::routing::evidence::EvidenceLedger>> {
+    match glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
+        Ok(ledger) => Some(std::sync::Arc::new(ledger)),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "routing evidence ledger unavailable; this session's turns will not be recorded"
+            );
+            None
+        }
+    }
+}
+
 fn resolve_resume_overlay(
     effective: &EffectiveConfig<'_>,
     user: &UserConfig,
     project: Option<&ProjectConfig>,
     selection: &session::HarnessSelection,
     profile_name: &str,
-    paths: &glasshouse::paths::RuntimePaths,
+    // The whole `Runtime`, not just its paths: `EvidenceLedger::open` reads
+    // the project's database and its project id, and narrowing to `paths`
+    // here would put the ledger out of reach on the resume path alone.
+    runtime: &glasshouse::Runtime,
 ) -> anyhow::Result<(
     glasshouse::profile::LaunchProfile,
     glasshouse::profile::LaunchOverlay,
@@ -948,12 +991,13 @@ fn resolve_resume_overlay(
     // credential is never carried across processes, let alone across the gap
     // between the original launch and this resume.
     let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
-    let gateway = glasshouse::gateway::start_if_required_with_quota_cache(
+    let gateway = glasshouse::gateway::start_if_required_with_telemetry(
         std::slice::from_ref(&launch_profile),
         || gateway_upstream(user, project, effective, &secrets),
         Some(glasshouse::provider::telemetry::GatewayQuotaCache::new(
-            paths,
+            runtime.paths(),
         )),
+        evidence_ledger(runtime),
     )?;
     let resolution = glasshouse::profile::Resolution {
         adapter: selection.adapter(),
@@ -1092,7 +1136,18 @@ fn disposable_extraction_model(runtime: &Runtime) -> Box<dyn glasshouse::memory:
     };
     let effective = EffectiveConfig::new(&user, project.as_ref());
     let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
-    let candidates = disposable_candidates(&user, project.as_ref(), &effective, &secrets);
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+    let telemetry = glasshouse::provider::resources::GatheredTelemetry::new().gather_gateway_quota(
+        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths()),
+    );
+    let candidates = disposable_candidates(
+        &user,
+        project.as_ref(),
+        &effective,
+        &secrets,
+        &telemetry,
+        now_unix,
+    );
     let free_preferences = glasshouse::routing::free::FreePreferences::new()
         .with_order(
             effective
@@ -1136,11 +1191,20 @@ fn disposable_extraction_model(runtime: &Runtime) -> Box<dyn glasshouse::memory:
 /// A provider that named no free models, or whose credential does not
 /// currently resolve, contributes nothing — never a candidate with an
 /// invented model name or a credential this process cannot actually use.
+///
+/// Each candidate carries whatever real capacity data `telemetry` has cached
+/// for its provider — map lines 1536 and 1549, the same
+/// [`glasshouse::provider::resources::observed_capacity`] `resources_report`
+/// reads for `glasshouse resources`, applied here for the first time to a
+/// candidate a routing *decision* actually ranks rather than only a report a
+/// person reads.
 fn disposable_candidates(
     user: &UserConfig,
     project: Option<&ProjectConfig>,
     effective: &EffectiveConfig<'_>,
     secrets: &dyn glasshouse::secret::SecretStore,
+    telemetry: &glasshouse::provider::resources::GatheredTelemetry,
+    now_unix: i64,
 ) -> Vec<glasshouse::routing::disposable::DisposableCandidate> {
     use glasshouse::routing::Cost;
     use glasshouse::routing::CredentialId;
@@ -1158,6 +1222,7 @@ fn disposable_candidates(
         if !provider_config.enabled() || provider_config.free_models().is_empty() {
             continue;
         }
+        let capacity = disposable_candidate_capacity(&name, effective, telemetry, now_unix);
         for var in provider_config.credential_env() {
             let reference = SecretRef::Environment { var: var.clone() };
             if secrets.resolve(&reference).is_none() {
@@ -1165,16 +1230,55 @@ fn disposable_candidates(
             }
             let credential_id = CredentialId::new(name.clone(), reference);
             for model in provider_config.free_models() {
-                candidates.push(DisposableCandidate::new(
-                    name.clone(),
-                    model.clone(),
-                    credential_id.clone(),
-                    Cost::Free,
-                ));
+                candidates.push(
+                    DisposableCandidate::new(
+                        name.clone(),
+                        model.clone(),
+                        credential_id.clone(),
+                        Cost::Free,
+                    )
+                    .with_capacity(capacity.clone()),
+                );
             }
         }
     }
     candidates
+}
+
+/// What real telemetry says about `provider`'s remaining capacity right now
+/// — map lines 1536, 1549 and 1550's inputs, read the same way
+/// [`resources_report`] reads them for `glasshouse resources`, from the same
+/// on-disk [`glasshouse::provider::telemetry::GatewayQuotaCache`] and no
+/// network call of its own.
+///
+/// Every field defaults to "nothing known" when no reading has ever been
+/// cached for this provider — a fresh install, or a provider only ever used
+/// through a harness's own native subscription — which
+/// `routing::disposable::DisposableRouting::score` renders as an honest
+/// `0.0` contribution rather than a guess.
+fn disposable_candidate_capacity(
+    provider: &str,
+    effective: &EffectiveConfig<'_>,
+    telemetry: &glasshouse::provider::resources::GatheredTelemetry,
+    now_unix: i64,
+) -> glasshouse::routing::disposable::CandidateCapacity {
+    let kind = glasshouse::provider::registry::ResourceKind::from_direct_provider(provider);
+    let state =
+        glasshouse::provider::resources::observed_capacity(&kind, effective, telemetry, now_unix);
+    let remaining_capacity = state.remaining_capacity_score();
+    let seconds_until_reset = state.seconds_until_reset(now_unix);
+    let thresholds = effective
+        .capacity_band_thresholds()
+        .value
+        .with_resource_reserve(effective.reserve_percent(provider).value.get());
+    let band = remaining_capacity
+        .as_ref()
+        .map(|score| score.band(&thresholds));
+
+    glasshouse::routing::disposable::CandidateCapacity::new()
+        .with_remaining_capacity(remaining_capacity)
+        .with_seconds_until_reset(seconds_until_reset)
+        .with_band(band)
 }
 
 /// [`report_hook`] with the extraction model supplied.
@@ -1868,7 +1972,7 @@ fn resume_session(
             project.as_ref(),
             &selection,
             name,
-            runtime.paths(),
+            runtime,
         ) {
             Ok(resolved) => Some(resolved),
             Err(err) => {
@@ -2978,6 +3082,50 @@ mod tests {
         holder.join().expect("holder thread");
     }
 
+    /// Every gateway this binary starts is handed the routing evidence
+    /// ledger — Phase 33A's wiring, which no behavioural test can reach.
+    ///
+    /// **Why a source scan rather than a real assertion.** Both call sites are
+    /// inside `launch_session` and `resolve_resume_overlay`, and reaching
+    /// either needs a launch profile that actually requires a gateway plus a
+    /// real harness process. The integrator removed the ledger from both sites
+    /// and the entire suite stayed green — so the wiring was, to the tests,
+    /// invisible. That is the gap this closes, and it is the same reason
+    /// `a_single_attempt_loses_the_race_that_the_bound_wins` above exists:
+    /// keep a defect from quietly returning when nothing else would notice.
+    ///
+    /// It deliberately proves *structure*, not behaviour, and the evidence
+    /// ledger says so — Phase 33A's boxes do not close on this test. What it
+    /// prevents is a future edit dropping the ledger back to `None` with
+    /// nothing to object.
+    ///
+    /// Scans by `str::lines` via `production_code` (§14): `include_str!` reads
+    /// the file as checked out, and a CRLF checkout would otherwise make a
+    /// multi-line search silently find nothing.
+    #[test]
+    fn every_gateway_the_binary_starts_is_given_the_evidence_ledger() {
+        let code = production_code(include_str!("main.rs"));
+
+        let starts = code.matches("start_if_required_with_telemetry(").count();
+        let ledgers = code.matches("evidence_ledger(runtime)").count();
+        assert_eq!(
+            starts, 2,
+            "this binary should start a gateway at exactly two sites (launch and \
+             resume); if that changed, this test needs to change with it"
+        );
+        assert_eq!(
+            ledgers, starts,
+            "a gateway is started somewhere without being handed the routing \
+             evidence ledger: Phase 33A records nothing for that path, and no \
+             behavioural test in this crate would notice"
+        );
+        assert!(
+            !code.contains("start_if_required_with_quota_cache("),
+            "a call site still uses the pre-Phase-33A entry point, which cannot \
+             carry an evidence ledger at all"
+        );
+    }
+
     /// This file's own source, with its `#[cfg(test)]` block (and `//`
     /// comments) stripped — the same idiom as
     /// `harness::resolving_a_launch_profile_touches_no_files`'s
@@ -3803,6 +3951,83 @@ mod tests {
             described.contains("no model was called"),
             "an evaluation must never be mistakeable later for evidence a model did the work: \
              {described}"
+        );
+        // Map lines 1530 and 1554, at this same real production entry
+        // point: the winning candidate's inspectable score travels all the
+        // way to `describe()`, not only to a unit test that constructs
+        // `DisposableRouting` directly. No telemetry was ever cached for
+        // this provider, so the honest absence contributions are what must
+        // appear — see the paired test below for the populated case.
+        assert!(
+            described.contains("normalized remaining capacity"),
+            "the scorer's own contributions must reach the production caller's description: \
+             {described}"
+        );
+        assert!(
+            described.contains("no capacity telemetry cached"),
+            "a provider nothing has been read about must say so rather than guess: {described}"
+        );
+    }
+
+    /// The same production entry point as
+    /// `disposable_extraction_model_prefers_a_configured_free_model_and_names_the_reason`,
+    /// with one difference: a real [`glasshouse::provider::telemetry::GatewayQuotaCache`]
+    /// entry planted on disk first — the same on-disk reading
+    /// `glasshouse resources` already reads, and phase-32d's own report
+    /// planted for the identical reason. Map lines 1536 and 1549 close only
+    /// if this reading reaches `DisposableRouting::choose` through
+    /// `disposable_extraction_model` itself, not through a test that
+    /// constructs the routing policy by hand — so this calls no
+    /// `routing::disposable` type directly.
+    #[test]
+    fn disposable_extraction_model_reflects_real_cached_capacity_telemetry() {
+        const VAR: &str = "GLASSHOUSE_TEST_ONLY_WIRE_DISPOSABLE_CAPACITY_KEY";
+        const PROVIDER: &str = "wire-disposable-capacity-test-provider";
+        // SAFETY: `VAR` is unique to this test and removed again below.
+        unsafe {
+            std::env::set_var(VAR, "sk-fabricated-test-value-not-a-real-credential");
+        }
+
+        let fixture = CliFixture::new();
+        let mut user = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let mut provider = glasshouse::config::ProviderConfig::new("openai-compatible");
+        provider.set_credential_env(vec![VAR.to_owned()]);
+        provider.set_free_models(vec!["a-free-model".to_owned()]);
+        user.providers_mut().set(PROVIDER, provider);
+        user.save(fixture.runtime.paths()).unwrap();
+
+        let now_unix = glasshouse::provider::cache::now_unix_seconds();
+        glasshouse::provider::telemetry::GatewayQuotaCache::new(fixture.runtime.paths()).store(
+            PROVIDER,
+            &glasshouse::provider::telemetry::RateLimitHeaders::read(vec![
+                ("x-ratelimit-limit-requests", "7000"),
+                ("x-ratelimit-limit-tokens", "6000"),
+                ("x-ratelimit-remaining-requests", "6999"),
+                ("x-ratelimit-remaining-tokens", "5991"),
+                ("x-ratelimit-reset-requests", "300s"),
+                ("x-ratelimit-reset-tokens", "300s"),
+            ]),
+            now_unix,
+        );
+
+        let model = disposable_extraction_model(&fixture.runtime);
+        let described = model.describe();
+
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+
+        assert!(
+            !described.contains("no capacity telemetry cached"),
+            "a real cached reading must displace the absence contribution: {described}"
+        );
+        assert!(
+            described.contains("normalized remaining capacity"),
+            "the capacity contribution must still be named: {described}"
+        );
+        assert!(
+            !described.contains("no reset time known"),
+            "a real cached reading carries a reset time too: {described}"
         );
     }
 

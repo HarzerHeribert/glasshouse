@@ -1326,21 +1326,21 @@ Phase 33 — Resource health
 
 Phase 33A — Routing evidence ledger
 
-☐ Store project-local routing observations as an append-oriented evidence ledger rather than only maintaining current aggregate counters.
-☐ Record provider, route, model identity, authenticated quota context, harness, request purpose, and observation timestamp for each measurable turn.
+☑ Store project-local routing observations as an append-oriented evidence ledger rather than only maintaining current aggregate counters.
+☑ Record provider, route, model identity, authenticated quota context, harness, request purpose, and observation timestamp for each measurable turn.
 ☐ Record dispatch time, first-byte time, time to first real token, time to first tool call, and completion time when the protocol exposes them.
 ☐ Do not treat whitespace padding, transport keepalives, or reasoning-only deltas as the first generated token.
 ☐ Record input tokens, output tokens, cached-input tokens, and monetary cost only when they are actually exposed or can be estimated with an explicit confidence label.
 ☐ Record successful tool rounds, retries, repairs, failovers, and the final user-visible outcome separately.
 ☐ Preserve raw observations alongside rolling aggregates so a routing decision can be audited and aggregation logic can be recalibrated.
 ☐ Compute robust rolling summaries such as median, tail latency, exponentially weighted averages, failure rates, and sample counts where useful.
-☐ Separate warm-context, cold-context, and unknown-context observations instead of averaging away cache effects.
-☐ Keep metrics distinct for materially different model versions, quantizations, routes, or changing stealth-model identities.
+☑ Separate warm-context, cold-context, and unknown-context observations instead of averaging away cache effects.
+☑ Keep metrics distinct for materially different model versions, quantizations, routes, or changing stealth-model identities.
 ☐ Attach source, observation window, sample size, freshness, and confidence to every aggregate used for routing.
 ☐ Apply conservative priors or keep a metric unknown when the sample is too small to support a routing decision.
 ☐ Decay or expire stale operational evidence without deleting durable raw observations prematurely.
-☐ Treat token volume, request count, context size, and spend as resource telemetry rather than evidence of quality or progress.
-☐ Keep the evidence ledger physically project-scoped and require explicit export before observations leave the project.
+☑ Treat token volume, request count, context size, and spend as resource telemetry rather than evidence of quality or progress.
+☑ Keep the evidence ledger physically project-scoped and require explicit export before observations leave the project.
 
 Phase 33B — Reliability-adjusted agent performance
 
@@ -1527,13 +1527,13 @@ Fixed architectural requirements
 - Cost, free capacity, and vendor pairing are soft signals after hard constraints.
 - Observed task success, tool behavior, effective TTFC, reliability, and user pins may outweigh vendor alignment and nominal token abundance.
 
-☐ Score every routing candidate using an inspectable weighted function.
+☑ Score every routing candidate using an inspectable weighted function.
 ☐ Include workload-tier fit in candidate scoring.
-☐ Include hard capability satisfaction as a prerequisite rather than a soft bonus.
+☑ Include hard capability satisfaction as a prerequisite rather than a soft bonus.
 ☐ Include existing session affinity in candidate scoring.
 ☐ Include context quality in candidate scoring.
 ☐ Include prompt-cache temperature in candidate scoring.
-☐ Include normalized remaining capacity in candidate scoring.
+☑ Include normalized remaining capacity in candidate scoring.
 ☐ Include provider health in candidate scoring.
 ☐ Include expected marginal cost in candidate scoring.
 ☐ Include expected latency in candidate scoring.
@@ -1546,12 +1546,12 @@ Fixed architectural requirements
 ☐ Include current cadence availability separately from general route health.
 ☐ Include failure-domain diversity when ranking fallback and failover candidates.
 ☐ Reduce the influence of performance observations with small samples, low confidence, or stale windows.
-☐ Include time until quota reset in candidate scoring.
+☑ Include time until quota reset in candidate scoring.
 ☐ Include protected-reserve policy in candidate scoring.
 ☐ Include session-switching and bootstrap cost in candidate scoring.
-☐ Include user preference and pinning as explicit high-priority policy inputs.
-☐ Avoid collapsing hard constraints and soft preferences into one opaque model-generated score.
-☐ Return the top candidate plus a concise explanation of the most important reasons it won.
+☑ Include user preference and pinning as explicit high-priority policy inputs.
+☑ Avoid collapsing hard constraints and soft preferences into one opaque model-generated score.
+☑ Return the top candidate plus a concise explanation of the most important reasons it won.
 
 Phase 35C — Capacity-aware tier escalation and downgrade
 
