@@ -2312,3 +2312,25 @@ not non-commercial as the packet asserted; and Hugging Face's free inference
 allowance is **$0.10 a month**, which is not a routing target however reachable
 its endpoint is. Reachable is not the same as useful, and the ledger now says
 which is which.
+
+### §62, second addendum — fixing a watch does not fix the watches already running
+
+The semantics fix landed and the very next notification was another false
+positive, from a watch armed twenty minutes **before** it. Bash had already
+parsed that loop; editing the file on disk changes nothing for a process that is
+already inside it.
+
+Two watches were still on the old logic and both had to be killed, their markers
+cleared, and re-armed from the corrected script. Nothing in the notification
+said which version produced it, which is why the pane had to be opened again to
+find out — the worker was at `✶ Enchanting… (53m 18s)`.
+
+**So the rule: after changing a long-running watchdog, re-arm every instance of
+it, and do it in the same turn as the change.** `pgrep -f worker-watch.sh` lists
+them. A fix that only applies to watches armed afterwards leaves the ones you
+already trust reporting the defect you just removed — and those are the ones
+you have stopped questioning.
+
+The generalisation is worth having beyond this script: **a running process is a
+copy, not a reference.** Editing the source of something already executing —
+a shell loop, a daemon, a cron body — changes the next start and nothing else.
