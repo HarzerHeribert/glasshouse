@@ -24,13 +24,15 @@ Missing evidence: none for this line.
 
 ---
 
-### Phase 0 — Keep the initial dependency set limited to libraries required for async execution, terminal UI, PTYs, serialization, SQLite, and basic process control
+### Phase 0 — Keep the dependency set limited to libraries required for async execution, terminal UI, PTYs, serialization, SQLite, basic process control, error handling, CLI parsing, logging, OS path conventions, HTTP, hashing, cryptographic randomness, and OS credential storage
 
 Map line 2 (`docs/product/capability-map.md:82`).
 
 Contract: Every direct dependency of the `glasshouse` crate serves one of the six named purposes.
 
-State: **PARTIALLY VERIFIED — contradicted as literally worded against the tree today.** See `RECOMMEND UNTICK` in the report.
+State: **VERIFIED against the reworded line — see the update at the end of this entry. The account below is what the original wording produced, kept because it is what got the line changed.**
+
+Original state, against the original wording: **PARTIALLY VERIFIED — contradicted as literally worded.**
 
 Production evidence — `cargo tree --depth 1` (macOS build; 22 direct dependencies, one of which, `keyring`, is macOS-only):
 
@@ -60,6 +62,61 @@ At minimum **eleven** direct dependencies — `anyhow`, `clap`, `directories`, `
 Failure/isolation evidence: not applicable — this is a manifest-shape claim, not a runtime behavior.
 
 Missing evidence: none — the dependency tree is fully enumerable and was fully enumerated. The finding is not a gap in evidence; it is a claim the current tree does not satisfy.
+
+
+#### Update — the line was reworded, and now holds
+
+The original wording was **unsatisfiable by any tree that also satisfies Phase
+0's own boxes 4, 6 and 7**: `clap` is what boxes 5 and 6 are built on,
+`tracing`/`tracing-subscriber` are what box 7 *is*, and `directories` is what
+box 4 needs — and none of the three is one of the six categories the old line
+permitted. That is a specification defect rather than a code defect, so the box
+was unticked and the question put to the user rather than decided here.
+
+**The user's decision: widen the list to what the binary actually needs, and
+keep it a standing lean-dependency constraint** — on the map's own
+implementation-quality principle, which says to revisit stale rules instead of
+building complexity around them. The word *initial* is gone with it: this is
+now a claim about the tree today, not a historical note about the tree at
+Phase 0.
+
+The list gained error handling, CLI parsing, logging, OS path conventions,
+HTTP, hashing, cryptographic randomness, and OS credential storage. Every one of
+the twenty-two direct dependencies now falls in a named category:
+
+| dependency | category |
+|---|---|
+| crossterm, ratatui, vt100 | terminal UI |
+| portable-pty | PTYs |
+| serde, serde_json, toml | serialization |
+| rusqlite | SQLite |
+| ctrlc, libc, which | basic process control |
+| anyhow, thiserror | error handling |
+| clap | CLI parsing |
+| tracing, tracing-subscriber | logging |
+| directories | OS path conventions |
+| ureq | HTTP |
+| sha2, hex | hashing |
+| getrandom | cryptographic randomness |
+| keyring | OS credential storage |
+
+**`getrandom` was added on top of the user's list, and deliberately.** It was
+the one dependency their categories did not reach, and folding it into
+"hashing" would have been wrong: it produces the local gateway's authentication
+token, and `gateway/mod.rs` states the distinction in its own words — an
+identifier needs to be **unique**, an authentication token needs to be
+**unpredictable to an attacker**, "which is a different requirement". Naming it
+separately keeps that distinction in the constraint instead of blurring it.
+
+**"async execution" is still in the list and still unused.** No `tokio`,
+`async-std` or `smol` appears at any depth; concurrency is threads and `mpsc`
+throughout. The user was offered dropping it as a separate option and did not
+take it, so the category stands as a permission nobody has exercised. Recorded
+in `docs/product/design-decisions.md`, because two facts already there are facts
+about a synchronous threaded program.
+
+Re-verified after the rewording: `cargo tree --depth 1` lists twenty-two direct
+dependencies (`keyring` macOS-only), and every one appears in the table above.
 
 ---
 

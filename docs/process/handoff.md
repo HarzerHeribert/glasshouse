@@ -189,24 +189,23 @@ replaces; two in sixty is three orders of magnitude more than that arithmetic
 predicts, so either the window is wider than described or there is a second
 path. **Opus specialist**, and it should produce a rate, not a pass (§60).
 
-**3. Two Phase 0 boxes are unticked and one needs the user.** Writing Phase 0's
-evidence entry — the last phase with ticked boxes and none behind them — cost
-two of its own boxes. Box 2 ("keep the initial dependency set limited to
-libraries required for async execution, terminal UI, PTYs, serialization,
-SQLite, and basic process control") is **false as worded and cannot be made
-true**: eleven of twenty-two direct dependencies fall outside those six
-categories, and `clap`, `tracing` and `directories` are required by Phase 0's
-own boxes 5/6, 7 and 4. It is a specification defect, not a code defect; the
-question is parked with `scripts/ask-user.sh` under the slug `phase0-box2`.
-Box 8's "panic" clause was reproducibly false at 3 of 12 pty trials and is
-being fixed; re-tick it with that worker's evidence.
+**Phase 0 is closed, eight of eight.** Its two failing boxes are both resolved.
+Box 8's panic clause was fixed and re-ticked with the exit code measured before
+and after. Box 2 was **unsatisfiable by any tree that also satisfied Phase 0's
+own boxes 4, 6 and 7** — a specification defect, not a code defect — and the
+user's decision was to widen the list to what the binary actually needs and
+keep it a standing lean-dependency constraint, on the map's own principle that
+stale rules get revisited rather than built around. The word *initial* went with
+it: the line is now a claim about the tree today.
 
-**Also found there: there is no async runtime anywhere in the tree.** Threads
-and `mpsc` throughout, so "async execution" is a granted-but-unused category.
-Recorded in design-decisions because two facts already there are facts about a
-synchronous threaded program.
+`getrandom` was added on top of the user's list, deliberately: it was the one
+dependency their categories did not reach, and folding it into "hashing" would
+have blurred a distinction `gateway/mod.rs` makes in its own words — an
+identifier needs to be unique, an authentication token needs to be
+unpredictable. **"async execution" stays in the list and stays unused**; the
+user was offered dropping it separately and did not.
 
-**4. Phase 9J line 572 is probably in the wrong phase.** "Keep evidence for the
+**3. Phase 9J line 572 is probably in the wrong phase.** "Keep evidence for the
 same nominal model distinct across different harnesses, gateways,
 quantizations, model revisions, or protocol translations" is an
 evidence-*storage* requirement and is nearly word-for-word Phase 33A's *"Keep
@@ -215,7 +214,7 @@ routes, or changing stealth-model identities"*. Whoever builds 33A closes both
 or neither. Leaving it in 9J makes that phase read one line further from done
 than it is. **A map edit, so it needs the user.**
 
-**5. The residual `SIGABRT`, 1 in 37 runs.**
+**4. The residual `SIGABRT`, 1 in 37 runs.**
 `pty_smoke::a_direct_provider_profile_reaches_a_real_child_and_only_that_child`
 fails with the child killed by signal 6. It is **not** the drain race that was
 just fixed. Four hypotheses are already ruled out with data — the `EIO` theory
@@ -223,7 +222,7 @@ just fixed. Four hypotheses are already ruled out with data — the `EIO` theory
 (2400 spawns), and mislabelling — and `report-PTY-FLAKE.md` §6 ranks where to
 look next, starting with `std::env::set_var` in a threaded test binary.
 
-**6. Phase 9I line 528** is the last free-pool line: `Allowance` separates
+**5. Phase 9I line 528** is the last free-pool line: `Allowance` separates
 request pools from token-priced allowances and only the request-pool half has a
 production feed. It needs a source for "this credential is priced per token".
 Deliberately not solved by parsing rate-limit headers on the forwarding path —

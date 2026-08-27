@@ -79,7 +79,7 @@ Fixed architectural requirements
 - Do not introduce a web frontend, Electron shell, distributed service topology, or parallel application runtime as an alternative core architecture without an explicit specification revision.
 
 ☑ Create Glasshouse as a Rust workspace that builds a single glasshouse executable.
-☐ Keep the initial dependency set limited to libraries required for async execution, terminal UI, PTYs, serialization, SQLite, and basic process control.
+☑ Keep the dependency set limited to libraries required for async execution, terminal UI, PTYs, serialization, SQLite, basic process control, error handling, CLI parsing, logging, OS path conventions, HTTP, hashing, cryptographic randomness, and OS credential storage.
 ☑ Make glasshouse run without requiring a global daemon, background service, Node installation, or Python environment.
 ☑ Make all runtime paths configurable so the binary can be used from a user-owned tools directory without a package-manager installation.
 ☑ Add a glasshouse --version command that prints the binary version.

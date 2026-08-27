@@ -19,14 +19,14 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░` 420 / 1280 mandatory capabilities (32%)
+`█████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░` 421 / 1280 mandatory capabilities (32%)
 
 <details>
-<summary>Per-phase breakdown (12 of 104 phases complete)</summary>
+<summary>Per-phase breakdown (13 of 104 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
-| Phase 0 — Repository and executable foundation | 7/8 |
+| Phase 0 — Repository and executable foundation | 8/8 ✅ |
 | Phase 1 — Project-root detection and hard isolation | 14/15 |
 | Phase 2A — Cross-platform runtime | 16/16 ✅ |
 | Phase 2B — Agent and tool auto-detection | 16/16 ✅ |
