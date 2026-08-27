@@ -329,6 +329,11 @@ fn a_version_three_database_gains_the_memory_table_with_its_sessions_intact() {
              ALTER TABLE sessions DROP COLUMN response_mechanism;
              ALTER TABLE sessions DROP COLUMN display_name;
              ALTER TABLE sessions DROP COLUMN purpose;
+             ALTER TABLE sessions DROP COLUMN process_id;
+             ALTER TABLE sessions DROP COLUMN process_started_at;
+             ALTER TABLE sessions DROP COLUMN process_host;
+             ALTER TABLE sessions DROP COLUMN supervision;
+             ALTER TABLE sessions DROP COLUMN supervision_reason;
              DELETE FROM schema_migrations WHERE version >= 4;",
         )
         .unwrap();
@@ -359,8 +364,8 @@ fn a_version_three_database_gains_the_memory_table_with_its_sessions_intact() {
         })
         .unwrap();
     assert_eq!(
-        version, 8,
-        "the launch must have applied migrations 4, 5, 6, 7 and 8"
+        version, 9,
+        "the launch must have applied migrations 4, 5, 6, 7, 8 and 9"
     );
 
     // The session recorded before the migration is untouched.

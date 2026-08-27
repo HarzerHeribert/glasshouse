@@ -30,6 +30,14 @@
 //!   place a machine-originated message is distinguished from a keystroke;
 //! - [`recovery`] decides what may happen to a task whose session died, and
 //!   refuses rather than guesses when it cannot tell.
+//!
+//! [`supervision`] is the fourth, and it is about a different question from
+//! all of them: not what a session *is* or what it *said*, but whether the
+//! process it was started in is still there. It discovers what this project
+//! recorded, verifies each process against the identity recorded for it,
+//! adopts what it can verify, quarantines what is alive and unaccounted for,
+//! and refuses to start a second session beside either. It never ends
+//! anything.
 
 pub mod api;
 pub mod attach;
@@ -39,16 +47,24 @@ pub mod recovery;
 pub mod runtime;
 pub mod select;
 pub mod store;
+pub mod supervision;
 
 pub use attach::attach;
 pub use lifecycle::{event_for, lifecycle_for, may_apply, observe};
-pub use runtime::{CrashReport, LiveSession, RuntimeError, Scrollback, SessionRuntime};
+pub use runtime::{
+    CrashReport, HEALTHY_AFTER, LiveSession, MAX_CONSECUTIVE_RESTARTS, RuntimeError, Scrollback,
+    SessionRuntime, StartRefused,
+};
 pub use select::{ExecutableSource, HarnessSelection, SelectionError, select};
 pub use store::{
     LabelError, NewSession, ProjectSessions, ResponseMechanism, ResumableSession,
     SessionDisposition, SessionId, SessionLifecycle, SessionName, SessionPairingClass,
     SessionPresentation, SessionProtocol, SessionPurpose, SessionRecord, SessionRole, SessionStore,
-    SessionStoreError,
+    SessionStoreError, SupervisionRecord,
+};
+pub use supervision::{
+    ProcessIdentity, ProcessState, SupervisedSession, Supervision, SupervisionRefusal,
+    SupervisionReport, Verdict,
 };
 
 // ------------------------------------------------------------------

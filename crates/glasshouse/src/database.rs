@@ -58,9 +58,12 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// Version 8 adds the rest of what Phase 10 line 645 requires a session to
 /// record — `model`, `pairing_class`, `protocol`, `response_profile` and
 /// `response_mechanism` — plus the two labels a person owns, `display_name`
-/// and `purpose`. Later migrations are appended to [`MIGRATIONS`], and this
-/// constant moves with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 8;
+/// and `purpose`. Version 9 adds the supervision columns Phase 10A needs — the
+/// identity of the process a session was started in (`process_id`,
+/// `process_started_at`, `process_host`) and what supervision has since
+/// concluded about it (`supervision`, `supervision_reason`). Later migrations
+/// are appended to [`MIGRATIONS`], and this constant moves with them.
+const SUPPORTED_SCHEMA_VERSION: i64 = 9;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -893,6 +896,80 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
     ALTER TABLE sessions ADD COLUMN purpose TEXT
         CHECK (purpose IS NULL
                OR (purpose <> '' AND length(purpose) <= 32));
+    ",
+    // 9: Phase 10A — the durable process identity a session is supervised by,
+    // and what supervision has concluded about it.
+    //
+    // # Why a process id is not an identity
+    //
+    // Operating systems reuse process ids. A record holding `4711` alone will
+    // eventually match a stranger that happens to be `4711` today, and a
+    // control plane that trusted it would report someone else's process as
+    // this project's session — or, worse, refuse to start a session because a
+    // text editor is sitting on the number. `process_started_at` is what makes
+    // the pair an identity: the kernel's own start time for that process, in
+    // milliseconds since the Unix epoch, which no later process can inherit.
+    //
+    // Milliseconds since the epoch, rather than each platform's native unit,
+    // for one reason: Linux reports a process's start time in clock ticks
+    // *since boot*, which repeats after every reboot, so storing it raw would
+    // leave the same collision this column exists to close. `session::
+    // supervision` converts on the way in — see its `observe`.
+    //
+    // `process_host` is the third part. A project directory can be shared or
+    // synchronised between machines, and a process id from another host means
+    // nothing here. A record whose host is not this one is never verified and
+    // never assumed dead; it is reported as unverifiable, which is the second
+    // architectural requirement of this phase applied to a case that has
+    // nothing to do with processes dying.
+    //
+    // # Why supervision is recorded rather than recomputed each time
+    //
+    // Quarantine is a conclusion about a process that was observed at a
+    // particular moment. The next Glasshouse to open this database may not be
+    // able to observe the same thing — the process may have gone in between —
+    // and "there was something alive here that I could not account for" must
+    // survive that. `supervision_reason` carries the sentence a person needs,
+    // because "quarantined" on its own tells nobody what was seen.
+    //
+    // # NULL, here as everywhere in this schema
+    //
+    // NULL is *"the build that wrote this row recorded nothing here"*, never a
+    // default. A session recorded before this migration has no process
+    // identity, and supervision must therefore refuse to conclude anything
+    // about it rather than treating it as stopped — see
+    // `session::supervision::Verdict::Unrecorded`.
+    //
+    // # `ALTER TABLE ADD COLUMN`, and nothing else
+    //
+    // Migration 3's shape, for migration 8's reasons. No table is rebuilt, no
+    // existing `CHECK` is altered — SQLite cannot alter one — and no existing
+    // row is touched. In particular `lifecycle_events` is left alone: its
+    // `seq` is `AUTOINCREMENT` and `memories` references it, so a supervision
+    // conclusion is a column on `sessions` and never a new event kind.
+    "
+    ALTER TABLE sessions ADD COLUMN process_id INTEGER
+        CHECK (process_id IS NULL OR process_id > 0);
+
+    ALTER TABLE sessions ADD COLUMN process_started_at INTEGER
+        CHECK (process_started_at IS NULL OR process_started_at >= 0);
+
+    ALTER TABLE sessions ADD COLUMN process_host TEXT
+        CHECK (process_host IS NULL OR process_host <> '');
+
+    -- What supervision concluded, in the vocabulary `session::supervision`
+    -- encodes through an exhaustive match. `owned` is this Glasshouse's own
+    -- session; `adopted` is one it verified alive and took back rather than
+    -- starting a second beside it; `quarantined` is alive and unaccounted
+    -- for; `lost` is a recorded process that is no longer running.
+    ALTER TABLE sessions ADD COLUMN supervision TEXT
+        CHECK (supervision IS NULL
+               OR supervision IN ('owned', 'adopted', 'quarantined', 'lost'));
+
+    -- Why. A quarantine with no stated reason is an accusation, and boxes 9
+    -- and 10 of this phase both ask for a stated reason outright.
+    ALTER TABLE sessions ADD COLUMN supervision_reason TEXT
+        CHECK (supervision_reason IS NULL OR supervision_reason <> '');
     ",
 ];
 

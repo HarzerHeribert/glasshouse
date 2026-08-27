@@ -287,6 +287,93 @@ impl<'a> HarnessLaunch<'a> {
     }
 }
 
+/// A [`HarnessLaunch`] that owns everything it needs to be used again.
+///
+/// # Why this exists
+///
+/// [`HarnessLaunch`] borrows the active [`Project`], which is right for the
+/// one thing it was built for: a caller that has a project in hand and starts
+/// one session with it. It is wrong for anything that has to launch the *same
+/// harness twice*, because the borrow ties the launch to a scope that ended
+/// when the first session started.
+///
+/// Restarting a session is exactly that. `SessionRuntime` notices a harness
+/// exit long after `start` returned, in `poll_exits`, with no project in
+/// scope — so the only way it can put the same harness back is to have kept
+/// the whole recipe. This is the recipe, and cloning a `Project` is cheap:
+/// an identifier, a root, and two flags.
+///
+/// It is deliberately a separate type rather than a lifetime parameter on
+/// `HarnessLaunch`: making the project owned-or-borrowed would put that
+/// choice into the signature of every function that takes a launch, including
+/// [`crate::session::SessionRuntime::start`], whose type is written out in
+/// the binary.
+#[derive(Clone)]
+pub struct OwnedHarnessLaunch {
+    executable: ResolvedExecutable,
+    project: Project,
+    args: Vec<OsString>,
+    env_changes: Vec<EnvChange>,
+    size: TerminalSize,
+}
+
+impl std::fmt::Debug for OwnedHarnessLaunch {
+    /// Delegated, so this type cannot drift into printing an argument or an
+    /// environment value that [`HarnessLaunch`]'s own `Debug` is careful to
+    /// withhold.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.borrow(), f)
+    }
+}
+
+impl OwnedHarnessLaunch {
+    /// Borrow this back as the type everything else takes.
+    ///
+    /// One definition of what a launch *is* — `HarnessLaunch::build_command`
+    /// — so an owned launch can never assemble a command line the borrowed
+    /// one would not have.
+    pub fn borrow(&self) -> HarnessLaunch<'_> {
+        HarnessLaunch {
+            executable: self.executable.clone(),
+            project: &self.project,
+            args: self.args.clone(),
+            env_changes: self.env_changes.clone(),
+            size: self.size,
+        }
+    }
+
+    /// Open a pseudo-terminal and start the harness inside its project.
+    pub fn spawn(&self) -> anyhow::Result<(PtyProcess, PtyOutput)> {
+        self.borrow().spawn()
+    }
+
+    /// The size the next spawn will ask the pseudo-terminal for.
+    ///
+    /// A restarted session inherits the size the surface last gave it, not the
+    /// size the first launch was built with — a terminal resized between the
+    /// crash and the restart would otherwise put the new harness back at the
+    /// old dimensions.
+    pub fn set_size(&mut self, size: TerminalSize) {
+        self.size = size;
+    }
+}
+
+impl HarnessLaunch<'_> {
+    /// Copy this launch into one that owns its project.
+    ///
+    /// Named `into_owned` rather than `to_owned` deliberately: `to_owned` is
+    /// [`std::borrow::ToOwned`]'s method and would read as returning `Self`.
+    pub fn into_owned(&self) -> OwnedHarnessLaunch {
+        OwnedHarnessLaunch {
+            executable: self.executable.clone(),
+            project: self.project.clone(),
+            args: self.args.clone(),
+            env_changes: self.env_changes.clone(),
+            size: self.size,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

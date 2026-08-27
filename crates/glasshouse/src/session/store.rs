@@ -32,6 +32,7 @@
 //! turns it back into a running process, so it verifies rather than assumes.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension, Row};
@@ -41,6 +42,8 @@ use crate::profile::response::{
     AnswerFormat, Audience, Dimension, EvidenceDetail, Narration, ResponseProfile, Verbosity,
 };
 use crate::routing::AssignedModel;
+
+use super::supervision::{self, ProcessIdentity, Supervision, SupervisionRefusal};
 
 /// A Glasshouse session identifier.
 ///
@@ -704,6 +707,32 @@ pub struct ResumableSession {
     pub native_session_id: String,
 }
 
+/// Whether a lifecycle change counts as the session having done something.
+///
+/// A marker rather than a `bool`, because the two call sites that differ are
+/// three lines apart and `false` at a call site says nothing about what it
+/// means. See [`SessionStore::write_lifecycle_locked`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Activity {
+    Yes,
+    No,
+}
+
+/// What this project last recorded about a session's process.
+///
+/// Read separately from [`SessionRecord`] — see
+/// [`SessionStore::supervision_of`] for why the two are not one type.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SupervisionRecord {
+    /// The process the session was started in, or `None` when the build that
+    /// wrote the row recorded none.
+    pub identity: Option<ProcessIdentity>,
+    /// What supervision last concluded about that process.
+    pub supervision: Option<Supervision>,
+    /// Why it concluded that, in a sentence meant for a person.
+    pub reason: Option<String>,
+}
+
 /// Failures a caller has to distinguish.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionStoreError {
@@ -738,6 +767,8 @@ pub enum SessionStoreError {
     },
     #[error("`{prefix}` is not a session identifier; identifiers are hexadecimal")]
     MalformedId { prefix: String },
+    #[error(transparent)]
+    Supervision(#[from] SupervisionRefusal),
     #[error("session `{id}` stored an unrecognized {column} value `{value}`")]
     UnknownValue {
         id: SessionId,
@@ -821,6 +852,12 @@ pub struct ProjectSessions {
     conn: Connection,
     project_id: String,
     clock: Clock,
+    /// Where this project keeps a session's own files, so a quarantine can
+    /// name what is still held. Carried rather than recomputed because
+    /// `SessionStore` has no `Runtime` and must not grow one — it is a
+    /// database-facing type, and the whole point of the split is that the
+    /// paths come from the runtime.
+    sessions_root: PathBuf,
 }
 
 impl fmt::Debug for ProjectSessions {
@@ -838,16 +875,87 @@ impl ProjectSessions {
     }
 
     /// [`ProjectSessions::open`] with the clock replaced.
+    ///
+    /// # Supervision runs here — Phase 10A's second line
+    ///
+    /// *"Discover, on start, the sessions this project previously recorded
+    /// whose processes are still running."* This is the door: `glasshouse
+    /// launch`, `glasshouse resume`, `glasshouse sessions`, `glasshouse hook`
+    /// and the interactive shell all open the project's sessions through
+    /// here, and every one of them is a "start" in the sense the line means —
+    /// a Glasshouse that is about to act on this project's sessions.
+    ///
+    /// Putting it in the shell alone would have missed the processes this
+    /// phase exists because of: nobody was in the shell when they ran away.
+    ///
+    /// A failure to supervise is not a failure to open. Discovery reads the
+    /// operating system, and an operating system that will not answer is a
+    /// reason to say less, never a reason to refuse the user their session
+    /// list.
     pub fn open_with_clock(runtime: &crate::Runtime, clock: Clock) -> anyhow::Result<Self> {
         let conn = crate::database::open(runtime)?;
         let project_id = SessionStore::with_clock(&conn, Arc::clone(&clock))?
             .project_id()
             .to_owned();
-        Ok(Self {
+        let sessions = Self {
             conn,
             project_id,
             clock,
-        })
+            sessions_root: runtime.session_dir(""),
+        };
+        sessions.supervise();
+        Ok(sessions)
+    }
+
+    /// Reconcile every recorded live session against the machine, and tell the
+    /// user about anything they have to decide.
+    ///
+    /// Phase 10A's eighth line — *"surface a quarantined session to the user
+    /// with what is known about it and what it still holds"* — is the
+    /// `eprintln!`. Standard error rather than standard output, because a
+    /// script reading `glasshouse sessions` must keep getting the session
+    /// list and nothing else; and it is written before any interface claims
+    /// the terminal, because this runs at open.
+    fn supervise(&self) {
+        let store = self.store();
+        let identity = supervision::ProcessIdentity::of_this_process();
+        let now = (self.clock)();
+        let report = match supervision::reconcile(&store, identity.as_ref(), now, &|id| {
+            self.session_dir(id)
+        }) {
+            Ok(report) => report,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not supervise this project's sessions");
+                return;
+            }
+        };
+        if let Some(described) = report.describe() {
+            eprint!("{described}");
+        }
+        for session in report
+            .adopted
+            .iter()
+            .chain(&report.quarantined)
+            .chain(&report.lost)
+            .chain(&report.never_ready)
+        {
+            tracing::info!(
+                session = %session.id,
+                harness = %session.harness,
+                supervision = %session.supervision,
+                reason = %session.reason,
+                "supervision reached a conclusion about a recorded session"
+            );
+        }
+    }
+
+    /// Where Glasshouse keeps one session's own files.
+    ///
+    /// The same path [`crate::Runtime::session_dir`] produces; derived from
+    /// the root captured at open so that this type needs no `Runtime` of its
+    /// own.
+    pub fn session_dir(&self, id: &SessionId) -> PathBuf {
+        self.sessions_root.join(id.as_str())
     }
 
     /// The sessions in this project.
@@ -856,6 +964,7 @@ impl ProjectSessions {
             conn: &self.conn,
             project_id: self.project_id.clone(),
             clock: Arc::clone(&self.clock),
+            sessions_root: self.sessions_root.clone(),
         }
     }
 }
@@ -869,6 +978,11 @@ pub struct SessionStore<'a> {
     conn: &'a Connection,
     project_id: String,
     clock: Clock,
+    /// See [`ProjectSessions::sessions_root`]. Empty for a store opened
+    /// straight over a connection, which is how the unit tests build one; a
+    /// refusal then names the session directory relatively, which is still
+    /// true and still useful.
+    sessions_root: PathBuf,
 }
 
 impl fmt::Debug for SessionStore<'_> {
@@ -912,12 +1026,19 @@ impl<'a> SessionStore<'a> {
             project_id: project_id.ok_or(SessionStoreError::UnboundDatabase)?,
             conn,
             clock,
+            sessions_root: PathBuf::from("sessions"),
         })
     }
 
     /// The project every record in this store belongs to.
     pub fn project_id(&self) -> &str {
         &self.project_id
+    }
+
+    /// Where Glasshouse keeps one session's own files — see
+    /// [`ProjectSessions::session_dir`], which is where the root comes from.
+    pub fn session_dir(&self, id: &SessionId) -> PathBuf {
+        self.sessions_root.join(id.as_str())
     }
 
     /// Start tracking a session.
@@ -931,6 +1052,28 @@ impl<'a> SessionStore<'a> {
         // Refusing before an identifier is minted means a refused session
         // leaves nothing behind at all.
         require_owning_harness(&new.harness)?;
+
+        // Phase 10A, first line. Recorded here because `create` is the only
+        // door a session record comes through, so no future caller can start
+        // a session Glasshouse would later be unable to identify.
+        //
+        // `None` is a real answer — a platform that will not name its
+        // processes gets a session with no identity, and supervision then
+        // refuses to conclude anything about it rather than guessing. That is
+        // strictly better than a placeholder, which would match every other
+        // placeholder on every other machine.
+        let identity = supervision::ProcessIdentity::of_this_process();
+
+        // Phase 10A, seventh line. A replacement must not be started while a
+        // process nobody can account for still holds the same resources, and
+        // the resource a *new* record can collide with is the harness's own
+        // conversation. Checked before an identifier is minted, so a refused
+        // session leaves nothing behind at all — `require_owning_harness`'s
+        // argument, one line up, applied to the other refusal.
+        if let Some(native) = new.native_session_id.as_deref() {
+            self.refuse_if_quarantined_holds(&new.harness, native)?;
+        }
+
         let id = SessionId(self.generate_id()?);
 
         let record = SessionRecord {
@@ -961,9 +1104,10 @@ impl<'a> SessionStore<'a> {
                 "INSERT INTO sessions (id, project_id, harness, native_session_id, \
                  role, lifecycle, presentation, created_at, last_activity_at, \
                  launch_profile, backend_resource, model, pairing_class, protocol, \
-                 response_profile, response_mechanism) \
+                 response_profile, response_mechanism, process_id, \
+                 process_started_at, process_host, supervision) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
-                 ?14, ?15, ?16)",
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                 rusqlite::params![
                     record.id.as_str(),
                     &record.project_id,
@@ -984,6 +1128,19 @@ impl<'a> SessionStore<'a> {
                         .as_ref()
                         .map(encode_response_profile),
                     record.response_mechanism.map(ResponseMechanism::as_str),
+                    identity.as_ref().map(|identity| identity.pid),
+                    identity.as_ref().map(|identity| identity.started_at_ms),
+                    identity.as_ref().map(|identity| identity.host.as_str()),
+                    // This Glasshouse started it and this Glasshouse is
+                    // responsible for it. `owned` is the only conclusion
+                    // `create` may reach; every other word in the vocabulary
+                    // is something `supervision::reconcile` observed later,
+                    // and writing one here would record an observation nobody
+                    // made.
+                    identity
+                        .as_ref()
+                        .map(|_| Supervision::Owned)
+                        .map(Supervision::as_str),
                 ],
             )
             .map_err(|source| SessionStoreError::Sql {
@@ -1125,17 +1282,329 @@ impl<'a> SessionStore<'a> {
     }
 
     /// Move a session to a new lifecycle state, which also counts as activity.
+    ///
+    /// # This is the single ordered path — Phase 10A's twelfth line
+    ///
+    /// Every lifecycle change in the shipped binary arrives here: the launch
+    /// path's `note_lifecycle`, the shell's exit handling and its failed-start
+    /// handling, and `glasshouse hook` when a harness reports something. They
+    /// are **separate operating-system processes**, so nothing in Rust's type
+    /// system orders them, and until this method took a transaction they raced
+    /// in the classic read-check-write shape:
+    ///
+    /// 1. a hook process reads `running` and decides `idle`;
+    /// 2. the launch process observes the harness exit and writes `stopped`;
+    /// 3. the hook process writes `idle`.
+    ///
+    /// The result is `idle` — a live state for a session whose process is
+    /// gone. Neither writer asked for that, which is exactly the interleaving
+    /// the line forbids.
+    ///
+    /// `BEGIN IMMEDIATE` takes SQLite's write lock **before** the read, so the
+    /// read and the write are one indivisible step and the second writer's
+    /// check runs against what the first writer actually left. The order is
+    /// then decided by the lock rather than by which process happened to read
+    /// first, and the losing writer sees the winner's state and declines.
+    ///
+    /// # What it declines
+    ///
+    /// One rule, and it is [`super::lifecycle::may_apply`]'s: **a session that
+    /// has finished may not be moved back to a live state.** It refuses
+    /// nothing the shipped binary legitimately does — every real transition is
+    /// from a live state — so this is not a new policy, it is the existing
+    /// policy moved to where two processes cannot step over it. A declined
+    /// change returns the record as it stands rather than an error: the caller
+    /// asked for something that is no longer true, which is not its fault and
+    /// not a failure.
     pub fn set_lifecycle(
         &self,
         id: &SessionId,
         lifecycle: SessionLifecycle,
     ) -> Result<SessionRecord, SessionStoreError> {
-        self.update(
-            id,
-            "UPDATE sessions SET lifecycle = ?2, last_activity_at = ?3 WHERE id = ?1",
-            rusqlite::params![id.as_str(), lifecycle.as_str(), (self.clock)()],
-            "update a session's lifecycle",
-        )
+        let action = "update a session's lifecycle";
+        self.in_a_write_transaction(action, || {
+            self.write_lifecycle_locked(id, lifecycle, Activity::Yes, action)
+        })?;
+        self.get(id)?
+            .ok_or(SessionStoreError::NotFound { id: id.clone() })
+    }
+
+    /// **The only statement in this crate that moves a session's lifecycle.**
+    ///
+    /// That is what "a single ordered path" means at the level a reader can
+    /// check: not that one function is polite about it, but that there is one
+    /// `UPDATE` and everything else has to come through it.
+    /// `one_statement_moves_a_sessions_lifecycle` fails if a second appears,
+    /// because a second writer is a second order and two orders are no order.
+    ///
+    /// Callers must already hold a write transaction — see
+    /// [`SessionStore::in_a_write_transaction`], which is what makes the read
+    /// below and the write after it one indivisible step.
+    ///
+    /// # What it declines
+    ///
+    /// One rule, and it is [`super::lifecycle::may_apply`]'s: **a session that
+    /// has finished may not be moved back to a live state.** It refuses
+    /// nothing the shipped binary legitimately does — every real transition is
+    /// from a live state — so this is not a new policy, it is the existing
+    /// policy moved to where two processes cannot step over it. A declined
+    /// change leaves the record as it stands rather than erroring: the caller
+    /// asked for something that is no longer true, which is not its fault.
+    fn write_lifecycle_locked(
+        &self,
+        id: &SessionId,
+        next: SessionLifecycle,
+        activity: Activity,
+        action: &'static str,
+    ) -> Result<(), SessionStoreError> {
+        let current = self.read_lifecycle_locked(id, action)?;
+
+        // A finished session stays finished.
+        if !current.is_live() && next.is_live() {
+            return Ok(());
+        }
+
+        // Whether the change counts as activity is decided *inside the one
+        // statement*, rather than by having two statements. Closing a record
+        // is something a person did to it, not something the session did —
+        // see `SessionStore::close` — and stamping it would push a finished
+        // session back to the top of a list ordered by when it last ran.
+        self.conn
+            .execute(
+                "UPDATE sessions SET lifecycle = ?2, \
+                 last_activity_at = CASE WHEN ?4 THEN ?3 ELSE last_activity_at END \
+                 WHERE id = ?1",
+                rusqlite::params![
+                    id.as_str(),
+                    next.as_str(),
+                    (self.clock)(),
+                    activity == Activity::Yes
+                ],
+            )
+            .map_err(|source| SessionStoreError::Sql { action, source })?;
+        Ok(())
+    }
+
+    /// A session's current lifecycle, read inside the caller's write
+    /// transaction so that what it decides cannot be stale by the time it
+    /// writes.
+    fn read_lifecycle_locked(
+        &self,
+        id: &SessionId,
+        action: &'static str,
+    ) -> Result<SessionLifecycle, SessionStoreError> {
+        let current: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT lifecycle FROM sessions WHERE id = ?1",
+                [id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| SessionStoreError::Sql { action, source })?;
+        let Some(current) = current else {
+            return Err(SessionStoreError::NotFound { id: id.clone() });
+        };
+        SessionLifecycle::from_str(&current).ok_or(SessionStoreError::UnknownValue {
+            id: id.clone(),
+            column: "lifecycle",
+            value: current,
+        })
+    }
+
+    /// Run `body` with SQLite's write lock already held, and end the
+    /// transaction on every path out.
+    ///
+    /// `IMMEDIATE`, not the default `DEFERRED`. A deferred transaction takes
+    /// only a read lock until its first write and then has to *upgrade*; if
+    /// another connection has committed in between, SQLite refuses the upgrade
+    /// rather than waiting, and `busy_timeout` does not help because there is
+    /// nothing to wait for — the read is already stale. Taking the write lock
+    /// up front turns that failure into a wait, which is what makes several
+    /// `glasshouse` processes writing to one session's record safe rather than
+    /// merely lucky.
+    fn in_a_write_transaction<T>(
+        &self,
+        action: &'static str,
+        body: impl FnOnce() -> Result<T, SessionStoreError>,
+    ) -> Result<T, SessionStoreError> {
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|source| SessionStoreError::Sql { action, source })?;
+        let outcome = body();
+        let ended = if outcome.is_ok() {
+            self.conn.execute_batch("COMMIT")
+        } else {
+            self.conn.execute_batch("ROLLBACK")
+        };
+        let value = outcome?;
+        ended.map_err(|source| SessionStoreError::Sql { action, source })?;
+        Ok(value)
+    }
+
+    /// Everything supervision recorded about one session's process.
+    ///
+    /// # Why this is not five more fields on [`SessionRecord`]
+    ///
+    /// A `SessionRecord` is what a session *is*. Whether the process it was
+    /// started in is still running is a fact about the machine right now, it
+    /// changes without the record changing, and every caller that wants one
+    /// wants it fresh. Folding it into the record would also have made a
+    /// session's identity depend on a reading of the operating system, so two
+    /// records of the same session taken a second apart would compare unequal.
+    ///
+    /// Returns [`SupervisionRecord::default`] — no identity, no conclusion —
+    /// for a session recorded by a build that stored none. That is a real
+    /// answer and callers treat it as one: nothing may be adopted, quarantined
+    /// or declared stopped on the strength of an absent identity.
+    pub fn supervision_of(&self, id: &SessionId) -> Result<SupervisionRecord, SessionStoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT process_id, process_started_at, process_host, supervision, \
+                 supervision_reason FROM sessions WHERE id = ?1",
+                [id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|source| SessionStoreError::Sql {
+                action: "read a session's supervision",
+                source,
+            })?;
+
+        let Some((pid, started_at, host, supervision, reason)) = row else {
+            return Err(SessionStoreError::NotFound { id: id.clone() });
+        };
+
+        // The three identity columns are read together or not at all. A pid
+        // without a start time is not an identity — it is exactly what Phase
+        // 10A's first line stops Glasshouse trusting — and a start time
+        // without a host is a number about a machine that may not be this one.
+        // A partially recorded identity therefore reads as no identity, and
+        // supervision refuses to conclude anything rather than guessing at the
+        // missing part.
+        let identity = match (pid, started_at, host) {
+            (Some(pid), Some(started_at_ms), Some(host)) => {
+                u32::try_from(pid).ok().map(|pid| ProcessIdentity {
+                    pid,
+                    started_at_ms,
+                    host,
+                })
+            }
+            _ => None,
+        };
+
+        let supervision = match supervision {
+            None => None,
+            Some(word) => Some(Supervision::from_str(&word).ok_or_else(|| {
+                SessionStoreError::UnknownValue {
+                    id: id.clone(),
+                    column: "supervision",
+                    value: word,
+                }
+            })?),
+        };
+
+        Ok(SupervisionRecord {
+            identity,
+            supervision,
+            reason,
+        })
+    }
+
+    /// Record what supervision concluded about a session's process, and — when
+    /// the conclusion implies one — the lifecycle state that follows from it.
+    ///
+    /// Both writes go through the same transaction as every other lifecycle
+    /// change, for the reason [`SessionStore::set_lifecycle`] gives: a
+    /// supervision pass in one `glasshouse` process runs beside a hook in
+    /// another, and a conclusion drawn from a read that is already stale is
+    /// worse than no conclusion.
+    ///
+    /// **This never ends anything.** `Lost` is written because the process was
+    /// observed to be gone, and `Quarantined` deliberately leaves the
+    /// lifecycle alone: a quarantined session is neither stopped nor healthy,
+    /// and overwriting its state with either would erase the whole distinction
+    /// this phase is about.
+    pub fn record_supervision(
+        &self,
+        id: &SessionId,
+        supervision: Supervision,
+        reason: &str,
+        lifecycle: Option<SessionLifecycle>,
+    ) -> Result<SessionRecord, SessionStoreError> {
+        let action = "record a supervision conclusion";
+        self.in_a_write_transaction(action, || {
+            let changed = self
+                .conn
+                .execute(
+                    "UPDATE sessions SET supervision = ?2, supervision_reason = ?3 \
+                     WHERE id = ?1",
+                    rusqlite::params![id.as_str(), supervision.as_str(), reason],
+                )
+                .map_err(|source| SessionStoreError::Sql { action, source })?;
+            if changed == 0 {
+                return Err(SessionStoreError::NotFound { id: id.clone() });
+            }
+            // Through the same one statement every other lifecycle change goes
+            // through, inside the same transaction as the conclusion that
+            // implied it — so a supervision pass and a hook in another process
+            // cannot each half-apply.
+            match lifecycle {
+                Some(lifecycle) => {
+                    self.write_lifecycle_locked(id, lifecycle, Activity::Yes, action)
+                }
+                None => Ok(()),
+            }
+        })?;
+        self.get(id)?
+            .ok_or(SessionStoreError::NotFound { id: id.clone() })
+    }
+
+    /// Refuse a new session that would take a conversation a quarantined
+    /// process still holds — Phase 10A's seventh line.
+    ///
+    /// Scoped to the harness as well as the identifier, because the unique
+    /// index that already exists is scoped that way: two harnesses may
+    /// coincidentally spell an identifier the same, and refusing across that
+    /// coincidence would refuse a start for no reason.
+    fn refuse_if_quarantined_holds(
+        &self,
+        harness: &str,
+        native_session_id: &str,
+    ) -> Result<(), SessionStoreError> {
+        let held: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM sessions WHERE harness = ?1 AND native_session_id = ?2 \
+                 AND supervision = 'quarantined'",
+                rusqlite::params![harness, native_session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| SessionStoreError::Sql {
+                action: "check whether a quarantined session holds this conversation",
+                source,
+            })?;
+        match held {
+            None => Ok(()),
+            Some(id) => Err(SupervisionRefusal::Quarantined {
+                id: SessionId(id),
+                holds: format!("the {harness} conversation `{native_session_id}`"),
+                reason: "a process Glasshouse cannot account for was still running when \
+                         that session was last examined"
+                    .to_owned(),
+            }
+            .into()),
+        }
     }
 
     /// Record the harness's own identifier, once it is known.
@@ -1259,21 +1728,25 @@ impl<'a> SessionStore<'a> {
     /// somebody filed it away is a different fact, and this column is not the
     /// place for it.
     pub fn close(&self, id: &SessionId) -> Result<SessionRecord, SessionStoreError> {
-        let record = self
-            .get(id)?
-            .ok_or_else(|| SessionStoreError::NotFound { id: id.clone() })?;
-        if record.lifecycle.is_live() {
-            return Err(SessionStoreError::StillLive {
-                id: id.clone(),
-                lifecycle: record.lifecycle,
-            });
-        }
-        self.update(
-            id,
-            "UPDATE sessions SET lifecycle = ?2 WHERE id = ?1",
-            rusqlite::params![id.as_str(), SessionLifecycle::Closed.as_str()],
-            "close a session record",
-        )
+        // Through the same ordered path as every other lifecycle change —
+        // Phase 10A's twelfth line. The liveness check and the write used to
+        // be a read outside a transaction followed by a write, which is the
+        // interleaving that line forbids: a hook process moving the session
+        // back to `running` in between would leave a `closed` row that a live
+        // harness kept updating. Reading under the write lock closes it.
+        let action = "close a session record";
+        self.in_a_write_transaction(action, || {
+            let current = self.read_lifecycle_locked(id, action)?;
+            if current.is_live() {
+                return Err(SessionStoreError::StillLive {
+                    id: id.clone(),
+                    lifecycle: current,
+                });
+            }
+            self.write_lifecycle_locked(id, SessionLifecycle::Closed, Activity::No, action)
+        })?;
+        self.get(id)?
+            .ok_or(SessionStoreError::NotFound { id: id.clone() })
     }
 
     fn update(
@@ -1321,6 +1794,23 @@ impl<'a> SessionStore<'a> {
                 actual: record.project_id,
             });
         }
+
+        // Phase 10A, lines five and seven, and they are asked *before* the
+        // disposition question on purpose.
+        //
+        // A record whose process is verified still running is refused for
+        // being still running, naming the process; a record held by something
+        // Glasshouse cannot account for is refused for that, naming what is
+        // held. Asking `disposition` first would answer both with *"still
+        // running"* or *"closed"* — true of the record, useless about the
+        // machine, and in the quarantine case actively misleading, because a
+        // quarantined session is neither.
+        supervision::guard_start(
+            &record,
+            &self.supervision_of(&record.id)?,
+            supervision::ProcessIdentity::of_this_process().as_ref(),
+            &|id| self.session_dir(id),
+        )?;
 
         let disposition = record.disposition();
         if disposition != SessionDisposition::Resumable {
@@ -2317,6 +2807,19 @@ mod tests {
                 "sessions.response_mechanism",
                 "sessions.display_name",
                 "sessions.purpose",
+                // Migration 9. A process id, a kernel start time, a host
+                // name, one of four fixed supervision words, and a sentence
+                // Glasshouse composes itself in `session::supervision`. None
+                // of the five is ever written from anything a user typed or a
+                // provider returned, and the two that are free-form are
+                // `process_host` — the machine's own name — and
+                // `supervision_reason`, whose every producer is a `format!`
+                // in this crate over a process id and a timestamp.
+                "sessions.process_id",
+                "sessions.process_started_at",
+                "sessions.process_host",
+                "sessions.supervision",
+                "sessions.supervision_reason",
             ],
             "the project database schema changed; confirm the new column cannot \
              hold a provider credential before updating this list"
@@ -2442,6 +2945,11 @@ mod tests {
                  ALTER TABLE sessions DROP COLUMN response_mechanism;
                  ALTER TABLE sessions DROP COLUMN display_name;
                  ALTER TABLE sessions DROP COLUMN purpose;
+                 ALTER TABLE sessions DROP COLUMN process_id;
+                 ALTER TABLE sessions DROP COLUMN process_started_at;
+                 ALTER TABLE sessions DROP COLUMN process_host;
+                 ALTER TABLE sessions DROP COLUMN supervision;
+                 ALTER TABLE sessions DROP COLUMN supervision_reason;
                  DROP TABLE IF EXISTS memories_fts;
                  DROP TABLE IF EXISTS memories;
                  DROP TABLE IF EXISTS lifecycle_events;
@@ -2457,8 +2965,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 8,
-            "the launch must have applied migrations 3, 4, 5, 6, 7 and 8"
+            version, 9,
+            "the launch must have applied migrations 3, 4, 5, 6, 7, 8 and 9"
         );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
@@ -2644,8 +3152,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 8,
-            "the launch must have applied migrations 2, 3, 4, 5, 6, 7 and 8"
+            version, 9,
+            "the launch must have applied migrations 2, 3, 4, 5, 6, 7, 8 and 9"
         );
 
         let store = SessionStore::new(&reopened).unwrap();
@@ -2901,6 +3409,71 @@ mod tests {
 
         let read_back = store.get(&record.id).unwrap().expect("the session");
         assert_eq!(read_back.native_session_id, Some(native));
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 10A — one ordered path for lifecycle changes.
+    // ---------------------------------------------------------------
+
+    /// *"Apply session lifecycle changes through a single ordered path."*
+    ///
+    /// The ordering is worth nothing if there are two paths, and a second one
+    /// is the natural thing to add: supervision needs to move a session to
+    /// `stopped` when it finds the process gone, and writing its own `UPDATE`
+    /// beside the conclusion it had just drawn was in fact the first way this
+    /// was written. It passed every behavioural test and left two writers with
+    /// two orders.
+    ///
+    /// So the structure is the assertion. Reads by lines, so it is blind to
+    /// line endings by construction — see `docs/product/design-decisions.md`.
+    #[test]
+    fn one_statement_moves_a_sessions_lifecycle() {
+        let source = include_str!("store.rs");
+        let lines: Vec<&str> = source.lines().collect();
+        let end = lines
+            .windows(2)
+            .position(|pair| {
+                pair[0].trim_end() == "#[cfg(test)]" && pair[1].trim_end().starts_with("mod tests")
+            })
+            .unwrap_or(lines.len());
+        let code: String = lines[..end]
+            .iter()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(|line| line.chars().filter(|c| !c.is_whitespace()))
+            .collect();
+
+        let writes = code.matches("UPDATEsessionsSETlifecycle").count();
+        assert_eq!(
+            writes, 1,
+            "{writes} statements move a session's lifecycle; there must be exactly \
+             one, and every caller must reach it through `write_lifecycle_locked` \
+             inside `in_a_write_transaction`"
+        );
+
+        let locked = code
+            .find("fnwrite_lifecycle_locked(")
+            .expect("the one write site must still be called `write_lifecycle_locked`");
+        let write = code
+            .find("UPDATEsessionsSETlifecycle")
+            .expect("checked above");
+        assert!(
+            write > locked,
+            "the lifecycle write must be inside `write_lifecycle_locked`, where the \
+             read that decides it is also taken"
+        );
+
+        // And the transaction it must be run inside is `IMMEDIATE`. A deferred
+        // one reads without the write lock and then has to upgrade, which
+        // SQLite refuses outright once another connection has committed.
+        assert!(
+            code.contains(r#"execute_batch("BEGINIMMEDIATE")"#),
+            "the write transaction must take SQLite's write lock up front"
+        );
+        assert!(
+            !code.contains(r#"execute_batch("BEGINDEFERRED")"#)
+                && !code.contains(r#"execute_batch("BEGIN")"#),
+            "a deferred write transaction cannot order two writers"
+        );
     }
 
     mod phase_10 {
@@ -3502,6 +4075,11 @@ mod tests {
                      ALTER TABLE sessions DROP COLUMN response_mechanism;
                      ALTER TABLE sessions DROP COLUMN display_name;
                      ALTER TABLE sessions DROP COLUMN purpose;
+                     ALTER TABLE sessions DROP COLUMN process_id;
+                     ALTER TABLE sessions DROP COLUMN process_started_at;
+                     ALTER TABLE sessions DROP COLUMN process_host;
+                     ALTER TABLE sessions DROP COLUMN supervision;
+                     ALTER TABLE sessions DROP COLUMN supervision_reason;
                      DELETE FROM schema_migrations WHERE version >= 8;",
                 )
                 .unwrap();
@@ -3512,7 +4090,10 @@ mod tests {
                     row.get(0)
                 })
                 .unwrap();
-            assert_eq!(version, 8, "the launch must have applied migration 8");
+            assert_eq!(
+                version, 9,
+                "the launch must have applied migrations 8 and 9"
+            );
 
             let after = SessionStore::new(&reopened)
                 .unwrap()

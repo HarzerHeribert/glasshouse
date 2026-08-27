@@ -25,15 +25,14 @@
 use std::collections::VecDeque;
 use std::io::Read;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
-#[cfg(windows)]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
 use crate::events::{EventBus, LifecycleEvent, MessageOrigin, ProcessExit, RecordedEvent};
-use crate::launch::HarnessLaunch;
+use crate::launch::{HarnessLaunch, OwnedHarnessLaunch};
 use crate::pty::{ExitStatus, PtyOutput, PtyProcess, TerminalSize};
+use crate::session::supervision;
 use crate::session::{SessionId, SessionPresentation};
 
 /// How much of each session's output is kept by default.
@@ -62,6 +61,36 @@ const READ_CHUNK: usize = 8 * 1024;
 /// simply never ends would otherwise hang whoever asked about it. See
 /// [`SessionRuntime::crash_report`].
 const OUTPUT_DRAIN_WAIT: Duration = Duration::from_millis(250);
+
+/// How many times in a row Glasshouse will put a session's harness back before
+/// it stops and says why — Phase 10A's tenth line.
+///
+/// Three, because the failures a restart actually fixes are transient and
+/// singular: a harness killed by the machine running out of memory, a
+/// provider socket dropped mid-turn, a `.cmd` shim whose parent console went
+/// away. Nothing that has failed three times in a row with no healthy interval
+/// between them is going to be fixed by a fourth process, and each attempt is
+/// a real harness with a real cost.
+///
+/// The bound is *consecutive*, and what clears it is [`HEALTHY_AFTER`] rather
+/// than a restart having been attempted. That is the whole design: a counter
+/// reset on "started" turns a crash loop into an infinite one.
+pub const MAX_CONSECUTIVE_RESTARTS: u32 = 3;
+
+/// How long a session's process must stay alive, and keep verifying against
+/// the identity recorded for it, before it counts as **healthy**.
+///
+/// # Why a constant here is safe, when one at start time was not
+///
+/// This phase removed a timing constant from `SessionRuntime::start` because
+/// its length decided *whether a session existed at all*, and the two
+/// platforms answered differently — see [`SessionRuntime::start`]. This one
+/// decides only *when a restart counter may be cleared*, and it is one-sided:
+/// too long merely delays the reset, so a healthy session's next crash counts
+/// against a bound it has already outgrown. Too short would be the dangerous
+/// direction, and two seconds is more than two orders of magnitude above the
+/// millisecond crash loop it exists to refuse to reset for.
+pub const HEALTHY_AFTER: Duration = Duration::from_secs(2);
 
 /// "The pseudo-terminal has nothing more to give", and a way to wait for it.
 ///
@@ -333,6 +362,62 @@ pub struct LiveSession {
     exit_seen: Option<Instant>,
     presentation: SessionPresentation,
     exit: Option<ExitStatus>,
+    /// Everything needed to put this harness back — Phase 10A's tenth line.
+    ///
+    /// Owned rather than borrowed because the exit that would need it is
+    /// noticed in [`SessionRuntime::poll_exits`], long after `start` returned
+    /// and with no project in scope. See [`OwnedHarnessLaunch`].
+    launch: OwnedHarnessLaunch,
+    /// When the process now under `process` was started.
+    ///
+    /// Read only by the health rule below, which asks whether it has been
+    /// alive long enough to count — see [`HEALTHY_AFTER`].
+    started: Instant,
+    /// The identity supervision recorded for the process now under `process`,
+    /// or `None` if the pseudo-terminal would not name it.
+    identity: Option<supervision::ProcessIdentity>,
+    /// Whether the process now under `process` has been observed alive and
+    /// verified for [`HEALTHY_AFTER`].
+    ///
+    /// Phase 10A's eleventh line — *"reset the consecutive-restart count only
+    /// when a restarted session has been verified healthy, never when it has
+    /// merely been started"* — is this field being the only thing that clears
+    /// `restarts`.
+    verified_healthy: bool,
+    /// Whether **any** process of this session has ever been verified healthy.
+    ///
+    /// The gate on restarting at all. A harness that has never once come up is
+    /// not a session that *exited unexpectedly*; it is a start that did not
+    /// work, and putting it back three more times would turn a mistyped
+    /// executable into four processes instead of one.
+    was_ever_healthy: bool,
+    /// Consecutive restarts since this session was last verified healthy.
+    restarts: u32,
+    /// Why this session will not be restarted again, once the bound is
+    /// reached — Phase 10A's tenth line's second half, *"stop with a stated
+    /// reason"*.
+    restart_halted: Option<String>,
+    /// Set by [`SessionRuntime::close`] and friends: an ending the user asked
+    /// for is not an unexpected exit and must never be restarted.
+    ended_deliberately: bool,
+    /// Held for the whole of one delivery — Phase 10A's thirteenth line.
+    ///
+    /// *"Never deliver two inputs to the same session concurrently."* Today
+    /// `&mut self` on every delivery method already excludes a second one,
+    /// and the shipped binary wraps this runtime in a `Mutex` besides, so
+    /// this lock is never contended in the build it ships in.
+    ///
+    /// It is here anyway, and on an `Arc` rather than as a plain flag, for
+    /// what it makes *impossible to add*: the day a delivery path takes
+    /// `&self`, or hands a session to a thread, or drains a queue without the
+    /// outer lock, the second delivery is refused rather than interleaved
+    /// with the first. A harness reading half of one message and half of
+    /// another is not a defect anyone would find by reading a diff.
+    ///
+    /// The invariant it enforces is guarded structurally as well:
+    /// `only_one_path_writes_to_a_session` fails if a second call site
+    /// appears.
+    delivery: Arc<Mutex<()>>,
 }
 
 impl std::fmt::Debug for LiveSession {
@@ -398,9 +483,134 @@ impl LiveSession {
         self.output_ended.ended()
     }
 
+    /// Whether this session's current process has been verified healthy.
+    ///
+    /// Alive, and still the process whose identity was recorded when it
+    /// started, for at least [`HEALTHY_AFTER`]. Decided in
+    /// [`SessionRuntime::poll_exits`] and nowhere else.
+    pub fn verified_healthy(&self) -> bool {
+        self.verified_healthy
+    }
+
+    /// Consecutive restarts since this session was last verified healthy.
+    pub fn restarts(&self) -> u32 {
+        self.restarts
+    }
+
+    /// Why Glasshouse will not put this harness back again, once the bound in
+    /// [`MAX_CONSECUTIVE_RESTARTS`] has been reached or a restart itself
+    /// failed. `None` while restarting is still on the table.
+    pub fn restart_halted(&self) -> Option<&str> {
+        self.restart_halted.as_deref()
+    }
+
+    /// Whether the process now under this session is still the one whose
+    /// identity was recorded for it.
+    ///
+    /// A session started through a pseudo-terminal that would not name its
+    /// child has no identity, and an unanswerable question is answered `false`
+    /// here rather than assumed: the consequence of a wrong `true` is a
+    /// crash-loop counter cleared by a stranger, and the consequence of a
+    /// wrong `false` is a bound that is reached slightly sooner.
+    fn identity_still_verifies(&self) -> bool {
+        let Some(identity) = self.identity.as_ref() else {
+            return false;
+        };
+        supervision::host_name().is_some_and(|host| {
+            supervision::verify(identity, &host) == supervision::Verdict::Verified
+        })
+    }
+
+    /// Write one line of Glasshouse's own into the session's scrollback.
+    ///
+    /// The session's terminal is where a user looks to find out what happened
+    /// to it, so a restart and the decision to stop restarting belong there
+    /// and not only in a log nobody has open. `\r\n` because this buffer holds
+    /// what a terminal was sent.
+    fn note(&self, text: &str) {
+        if let Ok(mut scrollback) = self.scrollback.lock() {
+            scrollback.push(format!("\r\nglasshouse: {text}\r\n").as_bytes());
+        }
+    }
+
     pub fn process_id(&self) -> Option<u32> {
         self.process.process_id()
     }
+
+    /// The one path an input reaches this session by — Phase 10A's thirteenth
+    /// line.
+    ///
+    /// *"Never deliver two inputs to the same session concurrently."* Two
+    /// things make that true, and neither on its own would:
+    ///
+    /// - **One path.** Keystrokes, a line typed at the shell's prompt, a
+    ///   machine-sent message, an interrupt, and the runtime's own answer to
+    ///   a terminal query all arrive here. A second place that touched
+    ///   `self.process` would be a second order nobody arbitrates, which is
+    ///   why `only_one_path_writes_to_a_session` fails if one appears. The
+    ///   terminal-query reply is in that list deliberately: it is bytes on the
+    ///   same terminal, and a `\x1b[24;80R` landing in the middle of a line
+    ///   somebody typed corrupts both.
+    /// - **A per-session lock, held across the whole delivery.** `try_lock`
+    ///   rather than `lock`: a second concurrent delivery is *refused* and the
+    ///   caller told, never queued behind the first. Queuing would deliver it
+    ///   eventually, out of the order its sender believed, which is the
+    ///   failure this project already paid for once in its own process — a
+    ///   second message into a worker mid-turn ended that turn and stranded
+    ///   it.
+    ///
+    /// In today's build the lock is never contended, because every delivery
+    /// method takes `&mut self` and the shipped binary owns the runtime behind
+    /// a `Mutex`. It is here for the shape of the change that would break it,
+    /// which is a shape that compiles.
+    fn deliver(&mut self, what: Delivery<'_>) -> Result<(), RuntimeError> {
+        if self.exit.is_some() {
+            return Err(RuntimeError::Exited {
+                id: self.id.clone(),
+            });
+        }
+        let lock = Arc::clone(&self.delivery);
+        let Ok(_delivering) = lock.try_lock() else {
+            // Reported as `Io` with `WouldBlock` rather than as a variant of
+            // its own: `RuntimeError` is matched exhaustively in the shell,
+            // whose rendering of `Io` is the source's own sentence, and
+            // *"a write would block because one is already in flight"* is
+            // exactly what `WouldBlock` means. See
+            // `docs/product/evidence/phase-10a.md` for the variant this wants
+            // to be once that file can be touched.
+            return Err(RuntimeError::Io {
+                id: self.id.clone(),
+                action: "deliver to",
+                source: std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "another input is already being delivered to it, and Glasshouse \
+                     will not interleave a second one",
+                ),
+            });
+        };
+        match what {
+            Delivery::Bytes(bytes) => self.process.write_input(bytes),
+            Delivery::Interrupt => self.process.interrupt(),
+        }
+        .map_err(|source| RuntimeError::Io {
+            id: self.id.clone(),
+            action: match what {
+                Delivery::Bytes(_) => "write to",
+                Delivery::Interrupt => "interrupt",
+            },
+            source,
+        })
+    }
+}
+
+/// One input, on its way to a session.
+///
+/// A closed set rather than a byte slice, because an interrupt is not bytes
+/// and must still be ordered against them — see [`SessionRuntime::deliver`].
+#[derive(Debug, Clone, Copy)]
+enum Delivery<'a> {
+    Bytes(&'a [u8]),
+    Interrupt,
 }
 
 /// Every live session in one project, and which of them has the keyboard.
@@ -451,6 +661,30 @@ pub enum RuntimeError {
         #[source]
         source: std::io::Error,
     },
+}
+
+/// Why a session was not started.
+///
+/// Separate from [`RuntimeError`] because it is a different question: that
+/// enum is about acting on a session that exists, and every one of its
+/// variants is something the shell renders as *"cannot do that to this
+/// session"*. This one is not about an existing session at all — it says the
+/// session is already there, so a second must not be started beside it.
+///
+/// There is deliberately no variant for a start whose process died: that is a
+/// session that failed, not a session that was refused. See
+/// [`SessionRuntime::start`] for the measurement behind that distinction.
+///
+/// [`SessionRuntime::start`] returns `anyhow::Result`, so this travels as a
+/// source rather than as a new variant of a type somebody else exhaustively
+/// matches.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum StartRefused {
+    #[error(
+        "session `{id}` is already running in this Glasshouse; refusing to start a \
+         second session beside it"
+    )]
+    AlreadyLive { id: SessionId },
 }
 
 /// What is left of a session after its process died.
@@ -512,7 +746,78 @@ impl SessionRuntime {
         presentation: SessionPresentation,
         launch: &HarnessLaunch<'_>,
     ) -> Result<&LiveSession> {
+        // Phase 10A, fifth line, in its in-process form: *"refuse to start a
+        // session that would duplicate a live, verified session of the same
+        // record."* Verification is free here — this runtime holds the process
+        // itself — and the duplicate is not hypothetical: two `LiveSession`s
+        // under one identifier would give `get`, `focus` and `poll_exits`
+        // whichever the vector happened to reach first, and one of the two
+        // processes would then be steerable by nobody.
+        //
+        // The cross-process half of the same line lives in
+        // `store::SessionStore::open_for_resume`, where the duplicate is a
+        // process this Glasshouse did not start.
+        if let Some(existing) = self.get(&id)
+            && existing.is_running()
+        {
+            return Err(StartRefused::AlreadyLive { id }.into());
+        }
+
         let (process, output) = launch.spawn()?;
+
+        // Phase 10A, ninth line — *"require a started session to become
+        // verifiably ready within a bounded time, and record a start that never
+        // became ready as a failure with a stated reason rather than as a
+        // session"* — is deliberately **not** enforced here, and this comment is
+        // the reason why.
+        //
+        // An earlier version of this phase waited `READINESS_SETTLE` for the
+        // process to prove itself and refused the start when it died inside the
+        // window. It could not be made to mean the same thing on two operating
+        // systems, and it cost a capability that was already closed.
+        //
+        // # What was measured
+        //
+        // The fixture is `echo STARTED; kill -9 $$` — the harness
+        // `tests/events_lifecycle.rs` has used since Phase 45 closed
+        // *"preserve terminal output and event history after a worker
+        // crashes"*. One tree, one gate run: **macOS 5 passed, Linux 3 passed
+        // and 2 failed.** The cause is not the length of the window. It is that
+        // the two kernels disagree about a process that has died and not yet
+        // been reaped: `/proc/<pid>/stat` still describes a zombie, so Linux
+        // keeps looking and the parent handle reports the `SIGKILL` first;
+        // `proc_pidinfo` stops answering for one, so macOS concludes it cannot
+        // identify the process and keeps the session. Same code, opposite
+        // answers, neither of them a coin flip — so no larger settle window
+        // fixes it.
+        //
+        // # And there is no in-start refusal that would have been right
+        // {#no-deterministic-refusal}
+        //
+        // `spawn` returns a live process id before anyone knows whether the
+        // `exec` behind it worked, so at start time *"the process is alive"* is
+        // always true and *"it died"* is always a later observation. That
+        // observation is the same one for a harness whose configuration was
+        // unreadable and for a harness that ran and crashed: on Windows the two
+        // fixtures this repository uses for those cases are the same three
+        // lines. Nothing separates them — not the exit status, and not whether
+        // output arrived, which under Linux container load is the flake §34
+        // already records.
+        //
+        // # So the line is answered where the difference is real
+        //
+        // In the record. A start that never became ready is one whose record
+        // never left `starting` and whose process is gone;
+        // `supervision::reconcile` concludes exactly that, durably,
+        // identically on every platform, and says so in `supervision_reason` —
+        // and a session whose harness died is recorded as `failed` by
+        // [`SessionRuntime::poll_exits`], with the harness's own last words
+        // still in its scrollback. Both are failures with a stated reason, and
+        // neither throws away the output the user needs to see why.
+        //
+        // Refusing the start is what discarded that output, and it is what a
+        // capability that was already closed was closed *against*.
+
         let scrollback = Arc::new(Mutex::new(Scrollback::new(self.scrollback_bytes)));
         let output_ended = Arc::new(OutputEnd::default());
         // Read back from the process rather than from the launch: this is the
@@ -521,38 +826,22 @@ impl SessionRuntime {
         let size = process.size();
         let screen = Arc::new(Mutex::new(vt100::Parser::new(size.rows, size.cols, 0)));
         let pending_queries = Arc::new(Mutex::new(Vec::new()));
+        // Recorded, never judged. What the kernel says about the process now is
+        // what `supervision::verify` will be given later to decide whether the
+        // thing still running under this pid is still this session's harness —
+        // which is the question the health rule in `poll_exits` asks, and the
+        // only question asked of it at start time.
+        let pid = process.process_id();
 
-        {
-            let scrollback = Arc::clone(&scrollback);
-            let screen = Arc::clone(&screen);
-            let pending_queries = Arc::clone(&pending_queries);
-            let output_ended = Arc::clone(&output_ended);
-            let name = format!("glasshouse-session-{}", short(&id));
-            // The bus travels into the reader thread rather than being
-            // consulted from the outside, because this thread is the only one
-            // that knows when the pseudo-terminal stopped giving output. It is
-            // also the thread that must never wait: a reader that blocks stops
-            // draining the terminal, whose buffer then fills, and the harness
-            // itself blocks on `write`. `EventBus::publish` is bounded work
-            // with no wait on any consumer, which is what makes putting it
-            // here safe — see `crate::events::bus`.
-            let events = self.events.clone();
-            let session = id.clone();
-            std::thread::Builder::new()
-                .name(name)
-                .spawn(move || {
-                    pump(
-                        output,
-                        &scrollback,
-                        &screen,
-                        &pending_queries,
-                        &output_ended,
-                        &events,
-                        &session,
-                    )
-                })
-                .context("could not start the session output reader")?;
-        }
+        spawn_reader(
+            &id,
+            output,
+            &scrollback,
+            &screen,
+            &pending_queries,
+            &output_ended,
+            &self.events,
+        )?;
 
         let focusable = presentation != SessionPresentation::Headless;
         self.sessions.push(LiveSession {
@@ -566,6 +855,15 @@ impl SessionRuntime {
             exit_seen: None,
             presentation,
             exit: None,
+            launch: launch.into_owned(),
+            started: Instant::now(),
+            identity: pid.and_then(supervision::ProcessIdentity::of),
+            verified_healthy: false,
+            was_ever_healthy: false,
+            restarts: 0,
+            restart_halted: None,
+            ended_deliberately: false,
+            delivery: Arc::new(Mutex::new(())),
         });
         if self.focused.is_none() && focusable {
             self.focused = Some(id.clone());
@@ -646,18 +944,34 @@ impl SessionRuntime {
 
     /// Send raw bytes to a session, focused or not.
     pub fn write_input(&mut self, id: &SessionId, bytes: &[u8]) -> Result<(), RuntimeError> {
-        let session = self.get_mut(id)?;
-        if session.exit.is_some() {
-            return Err(RuntimeError::Exited { id: id.clone() });
-        }
-        session
-            .process
-            .write_input(bytes)
-            .map_err(|source| RuntimeError::Io {
-                id: id.clone(),
-                action: "write to",
-                source,
-            })
+        self.deliver(id, Delivery::Bytes(bytes))
+    }
+
+    /// The one path an input reaches a session by — Phase 10A's thirteenth
+    /// line.
+    ///
+    /// *"Never deliver two inputs to the same session concurrently."* Two
+    /// things make that true, and neither on its own would:
+    ///
+    /// - **One path.** Keystrokes, a line typed at the shell's prompt, a
+    ///   machine-sent message and an interrupt all arrive here. A second place
+    ///   that touched `session.process` would be a second order nobody
+    ///   arbitrates, which is why `only_one_path_writes_to_a_session` fails if
+    ///   one appears.
+    /// - **A per-session lock, held across the whole delivery.** `try_lock`
+    ///   rather than `lock`: a second concurrent delivery is *refused* and the
+    ///   caller told, never queued behind the first. Queuing would deliver it
+    ///   eventually, out of the order its sender believed, which is the
+    ///   failure this project already paid for once in its own process — a
+    ///   second message into a worker mid-turn ended that turn and stranded
+    ///   it.
+    ///
+    /// In today's build the lock is never contended, because every delivery
+    /// method takes `&mut self` and the shipped binary owns this runtime
+    /// behind a `Mutex`. It is here for the shape of the change that would
+    /// break it, which is a shape that compiles.
+    fn deliver(&mut self, id: &SessionId, what: Delivery<'_>) -> Result<(), RuntimeError> {
+        self.get_mut(id)?.deliver(what)
     }
 
     /// Send text to a session without needing it in the viewport.
@@ -712,18 +1026,18 @@ impl SessionRuntime {
         id: &SessionId,
         origin: MessageOrigin,
     ) -> Result<(), RuntimeError> {
-        let session = self.get_mut(id)?;
-        if session.exit.is_some() {
-            return Err(RuntimeError::Exited { id: id.clone() });
+        // An interrupt is an input: it arrives at the same session through the
+        // same terminal and is ordered against text by the same rule. Sending
+        // it beside a line of text would let the harness see the interrupt in
+        // the middle of the line it was meant to cancel.
+        self.deliver(id, Delivery::Interrupt)?;
+        // A harness that ends because it was interrupted did not exit
+        // unexpectedly, so it is not restarted. The mark lasts only until the
+        // session is next seen alive — see `SessionRuntime::poll_exits` — so
+        // it excuses the exit this interrupt caused and no later one.
+        if let Some(session) = self.sessions.iter_mut().find(|session| &session.id == id) {
+            session.ended_deliberately = true;
         }
-        session
-            .process
-            .interrupt()
-            .map_err(|source| RuntimeError::Io {
-                id: id.clone(),
-                action: "interrupt",
-                source,
-            })?;
         self.events
             .publish(id, LifecycleEvent::InterruptDelivered { origin });
         Ok(())
@@ -807,7 +1121,29 @@ impl SessionRuntime {
                     }
                     ended.push((session.id.clone(), status));
                 }
-                Ok(None) => {}
+                // Still running, and therefore the only moment at which this
+                // session's *health* can be decided — Phase 10A's eleventh
+                // line. Healthy is deliberately not "it was started": it is
+                // alive here, now, having been alive for `HEALTHY_AFTER`, and
+                // still verifying against the identity recorded for it. A
+                // harness that crash-loops in milliseconds never reaches a
+                // poll in that state, which is exactly what stops it from
+                // clearing the bound it is about to run into.
+                Ok(None) => {
+                    // A signal the user asked for only excuses an exit that
+                    // follows it. Having survived to this poll, it does not.
+                    session.ended_deliberately = false;
+                    if !session.verified_healthy
+                        && session.started.elapsed() >= HEALTHY_AFTER
+                        && session.identity_still_verifies()
+                    {
+                        session.verified_healthy = true;
+                        session.was_ever_healthy = true;
+                        // The reset, and the only one. See
+                        // `MAX_CONSECUTIVE_RESTARTS`.
+                        session.restarts = 0;
+                    }
+                }
                 Err(error) => {
                     // One session Glasshouse cannot ask about must not cost
                     // the others their poll. This loop has no `?` in it for
@@ -828,6 +1164,17 @@ impl SessionRuntime {
                     exit: ProcessExit::from_status(status),
                 },
             );
+        }
+
+        // Phase 10A, tenth line: *"restart a session that exits unexpectedly
+        // up to a bounded number of consecutive attempts, and stop with a
+        // stated reason when that bound is reached."*
+        //
+        // After the exits are published, so that the history records the death
+        // before it records the session starting again — a consumer reading
+        // the bus must never see a restart it has no exit for.
+        for (id, status) in &ended {
+            self.consider_restart(id, status);
         }
 
         // On Windows, this is also where a session's output is declared
@@ -890,6 +1237,124 @@ impl SessionRuntime {
     ///
     /// Called from the interface's tick. Best effort per session: one harness
     /// that cannot be written to must not stop the others being answered.
+    /// Put a session's harness back, if this exit was one worth restarting
+    /// for and the bound has not been reached — Phase 10A's tenth line.
+    ///
+    /// # What counts as *exiting unexpectedly*
+    ///
+    /// Four things exclude a restart, and each of them is a case where putting
+    /// the harness back would be wrong rather than merely unnecessary:
+    ///
+    /// - **A clean exit.** A harness that did its work and left has not
+    ///   failed; this project already refuses to call that finishing, and it
+    ///   must not call it crashing either.
+    /// - **An ending the user asked for.** `interrupt` marks the session, and
+    ///   the mark survives only until the session is seen alive again, so it
+    ///   excuses the exit it caused and no later one.
+    /// - **A session that was never healthy.** This is the load-bearing one. A
+    ///   harness that has not once come up did not *exit unexpectedly* — it is
+    ///   a start that did not work, and restarting it three more times turns a
+    ///   mistyped executable into four processes. It is also the reason this
+    ///   line does not disturb `tests/events_lifecycle.rs`: a harness that
+    ///   prints one line and dies has crashed, and Glasshouse keeps its output
+    ///   and its history rather than trying again.
+    /// - **A bound already reached, or a restart that itself failed.** Once
+    ///   there is a stated reason, it stands.
+    fn consider_restart(&mut self, id: &SessionId, status: &ExitStatus) {
+        let events = self.events.clone();
+        let Some(session) = self.sessions.iter_mut().find(|session| &session.id == id) else {
+            return;
+        };
+        if status.success()
+            || session.ended_deliberately
+            || !session.was_ever_healthy
+            || session.restart_halted.is_some()
+        {
+            return;
+        }
+
+        if session.restarts >= MAX_CONSECUTIVE_RESTARTS {
+            let reason = format!(
+                "the harness has failed {} times in a row without staying up for \
+                 {}s; Glasshouse will not restart it again",
+                session.restarts,
+                HEALTHY_AFTER.as_secs()
+            );
+            tracing::warn!(session = %id, restarts = session.restarts, "restart bound reached");
+            session.note(&reason);
+            session.restart_halted = Some(reason);
+            return;
+        }
+
+        // The size the surface last gave this session, not the one the first
+        // launch was built with: a terminal resized between the crash and the
+        // restart would otherwise put the new harness back at the old size.
+        session.launch.set_size(session.process.size());
+        let (process, output) = match session.launch.spawn() {
+            Ok(started) => started,
+            Err(error) => {
+                let reason = format!("the harness could not be restarted: {error:#}");
+                tracing::warn!(session = %id, %error, "a session could not be restarted");
+                session.note(&reason);
+                session.restart_halted = Some(reason);
+                return;
+            }
+        };
+
+        // A fresh end-of-output flag and a fresh screen, because both describe
+        // the process rather than the session — but the **same scrollback**,
+        // because what the harness said before it died is the session's, and
+        // Phase 45 requires a crash not to cost it.
+        let size = process.size();
+        let screen = Arc::new(Mutex::new(vt100::Parser::new(size.rows, size.cols, 0)));
+        let pending_queries = Arc::new(Mutex::new(Vec::new()));
+        let output_ended = Arc::new(OutputEnd::default());
+        if let Err(error) = spawn_reader(
+            id,
+            output,
+            &session.scrollback,
+            &screen,
+            &pending_queries,
+            &output_ended,
+            &events,
+        ) {
+            // The process is running and nothing is reading its terminal,
+            // which fills and blocks it. Ending it here is the one case in
+            // this module where Glasshouse stops a process it started, and it
+            // is the lesser harm: the alternative is a wedged harness nobody
+            // can see or steer.
+            let mut process = process;
+            let _ = process.signal(crate::pty::ProcessSignal::Kill);
+            let reason = format!("the restarted harness could not be read: {error:#}");
+            session.note(&reason);
+            session.restart_halted = Some(reason);
+            return;
+        }
+
+        session.restarts += 1;
+        session.note(&format!(
+            "the harness exited unexpectedly ({status}); restarting it \
+             (attempt {} of {MAX_CONSECUTIVE_RESTARTS})",
+            session.restarts
+        ));
+        session.identity = process
+            .process_id()
+            .and_then(supervision::ProcessIdentity::of);
+        session.process = process;
+        session.screen = screen;
+        session.pending_queries = pending_queries;
+        session.output_ended = output_ended;
+        session.exit = None;
+        session.started = Instant::now();
+        session.verified_healthy = false;
+        #[cfg(windows)]
+        {
+            session.exit_seen = None;
+        }
+        tracing::info!(session = %id, attempt = session.restarts, "restarted a session");
+        events.publish(id, LifecycleEvent::SessionStarted);
+    }
+
     pub fn answer_terminal_queries(&mut self) {
         for session in &mut self.sessions {
             if session.exit.is_some() {
@@ -932,7 +1397,12 @@ impl SessionRuntime {
                     }
                 };
 
-                if let Err(error) = session.process.write_input(reply.as_bytes()) {
+                // Through the funnel, like every other byte — see
+                // `LiveSession::deliver`. An answer to a terminal query is
+                // still an input to the harness's terminal, and it is exactly
+                // the kind of write that would otherwise be added beside the
+                // ordered path rather than through it.
+                if let Err(error) = session.deliver(Delivery::Bytes(reply.as_bytes())) {
                     tracing::debug!(
                         session = %session.id,
                         ?query,
@@ -1044,6 +1514,51 @@ impl SessionRuntime {
     }
 }
 
+/// Start the thread that drains one session's pseudo-terminal.
+///
+/// Factored out of [`SessionRuntime::start`] because a restarted session needs
+/// exactly the same thread against a new process, and two copies of this would
+/// eventually differ in one of the details below.
+///
+/// The bus travels *into* the thread rather than being consulted from outside,
+/// because this thread is the only one that knows when the pseudo-terminal
+/// stopped giving output. It is also the thread that must never wait: a reader
+/// that blocks stops draining the terminal, whose buffer then fills, and the
+/// harness itself blocks on `write`. `EventBus::publish` is bounded work with
+/// no wait on any consumer, which is what makes putting it here safe — see
+/// [`crate::events::bus`].
+fn spawn_reader(
+    id: &SessionId,
+    output: PtyOutput,
+    scrollback: &Arc<Mutex<Scrollback>>,
+    screen: &Arc<Mutex<vt100::Parser>>,
+    pending_queries: &Arc<Mutex<Vec<TerminalQuery>>>,
+    output_ended: &Arc<OutputEnd>,
+    events: &EventBus,
+) -> Result<()> {
+    let scrollback = Arc::clone(scrollback);
+    let screen = Arc::clone(screen);
+    let pending_queries = Arc::clone(pending_queries);
+    let output_ended = Arc::clone(output_ended);
+    let events = events.clone();
+    let session = id.clone();
+    std::thread::Builder::new()
+        .name(format!("glasshouse-session-{}", short(id)))
+        .spawn(move || {
+            pump(
+                output,
+                &scrollback,
+                &screen,
+                &pending_queries,
+                &output_ended,
+                &events,
+                &session,
+            )
+        })
+        .context("could not start the session output reader")?;
+    Ok(())
+}
+
 /// Drain a pseudo-terminal into a scrollback until it has nothing left.
 fn pump(
     mut output: PtyOutput,
@@ -1113,6 +1628,55 @@ fn short(id: &SessionId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase 10A's thirteenth line, as a structural guard rather than a
+    /// promise — *"never deliver two inputs to the same session
+    /// concurrently."*
+    ///
+    /// Two inputs can only interleave if there are two places that write. The
+    /// funnel is `SessionRuntime::deliver`, and this fails the moment a second
+    /// call site touches a session's process directly — which is how the
+    /// invariant would actually be lost: not by someone removing the lock, but
+    /// by someone adding a path that never takes it.
+    ///
+    /// The scan reads by lines, so it is blind to line endings by
+    /// construction — see `docs/product/design-decisions.md`.
+    #[test]
+    fn only_one_path_writes_to_a_session() {
+        // Whitespace is removed before matching, because `rustfmt` decides
+        // where a method chain breaks and the invariant does not depend on
+        // its decision. A scan that matched source lines would pass or fail
+        // on formatting, which is the worst possible property for a guard.
+        let code: String = include_str!("runtime.rs")
+            .lines()
+            .take_while(|line| !line.trim_end().starts_with("mod tests"))
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(|line| line.chars().filter(|c| !c.is_whitespace()))
+            .collect();
+
+        for (what, pattern) in [
+            ("writes bytes to", ".process.write_input("),
+            ("interrupts", ".process.interrupt()"),
+        ] {
+            let sites = code.matches(pattern).count();
+            assert_eq!(
+                sites, 1,
+                "{sites} places in the runtime {what} a session; there must be exactly \
+                 one, because two orders of delivery are no order at all"
+            );
+        }
+
+        // And the one place must be the funnel, not whichever function
+        // happened to be written first.
+        let funnel = code
+            .find("fndeliver(")
+            .expect("the delivery funnel must still be called `deliver`");
+        let write = code.find(".process.write_input(").expect("checked above");
+        assert!(
+            write > funnel,
+            "the only write to a session must be inside `deliver`"
+        );
+    }
 
     /// The wait `crash_report` depends on costs nothing when there is
     /// nothing to wait for, which is the ordinary case and the one that must
