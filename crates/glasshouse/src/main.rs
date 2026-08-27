@@ -496,7 +496,7 @@ fn launch_session(
         // this binary whose failure is always survivable, and a `?` here would
         // make a read-only data directory or a locked database into "glasshouse
         // will not start".
-        evidence_ledger(runtime),
+        evidence_ledger(runtime, std::slice::from_ref(&launch_profile)),
     ) {
         Ok(gateway) => gateway,
         Err(err) => {
@@ -933,7 +933,28 @@ fn run_shim(
 /// withdrawn since the original launch, or a provider since removed from
 /// configuration, is a reason to fall back to a plain native resume, not a
 /// reason to make an otherwise-healthy session unresumable.
-/// The routing evidence ledger for this project, or `None` with a warning.
+/// The routing evidence ledger for this project — **only when a gateway will
+/// actually be started** — or `None` with a warning.
+///
+/// # Why the gate, and what it cost to learn
+///
+/// The first version opened the ledger unconditionally, before
+/// `start_if_required_with_telemetry` decided whether a gateway was needed at
+/// all. On macOS and Linux that was merely wasted work. On Windows it **hung
+/// six memory-extraction tests indefinitely** — a 37-minute stall with no
+/// output, on a tree whose local gate was 13/13 green.
+///
+/// [`crate::routing::evidence::EvidenceLedger`] holds `Mutex<Connection>`: an
+/// open SQLite handle for its whole lifetime. SQLite locks with advisory
+/// POSIX locks on Unix and with mandatory `LockFileEx` on Windows, so a handle
+/// this function opened on a launch that never needed it blocks a later writer
+/// on Windows and is invisible on Unix. **Opening a database you may not use is
+/// not free, and the platform that charges for it is not the one this project
+/// develops on.**
+///
+/// Gating on [`glasshouse::gateway::gateway_is_required`] makes the open happen
+/// exactly when the gateway that consumes it is started, which is also what
+/// `start_if_required_with_telemetry` would have decided a moment later.
 ///
 /// Phase 33A records an observation per forwarded gateway exchange. Opening
 /// its store touches the project database, and both callers evaluate this
@@ -949,7 +970,11 @@ fn run_shim(
 /// terminal the harness is about to take over.
 fn evidence_ledger(
     runtime: &glasshouse::Runtime,
+    profiles: &[glasshouse::profile::LaunchProfile],
 ) -> Option<std::sync::Arc<glasshouse::routing::evidence::EvidenceLedger>> {
+    if !glasshouse::gateway::gateway_is_required(profiles) {
+        return None;
+    }
     match glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
         Ok(ledger) => Some(std::sync::Arc::new(ledger)),
         Err(err) => {
@@ -997,7 +1022,7 @@ fn resolve_resume_overlay(
         Some(glasshouse::provider::telemetry::GatewayQuotaCache::new(
             runtime.paths(),
         )),
-        evidence_ledger(runtime),
+        evidence_ledger(runtime, std::slice::from_ref(&launch_profile)),
     )?;
     let resolution = glasshouse::profile::Resolution {
         adapter: selection.adapter(),
@@ -3107,7 +3132,12 @@ mod tests {
         let code = production_code(include_str!("main.rs"));
 
         let starts = code.matches("start_if_required_with_telemetry(").count();
-        let ledgers = code.matches("evidence_ledger(runtime)").count();
+        // Counts the *gated* form on purpose. An ungated `evidence_ledger(runtime)`
+        // is the exact shape that hung six Windows tests for 37 minutes, so this
+        // test must not accept it back.
+        let ledgers = code
+            .matches("evidence_ledger(runtime, std::slice::from_ref(&launch_profile))")
+            .count();
         assert_eq!(
             starts, 2,
             "this binary should start a gateway at exactly two sites (launch and \
