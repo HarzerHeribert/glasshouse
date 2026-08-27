@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░` 443 / 1280 mandatory capabilities (34%)
+`███████████████░░░░░░░░░░░░░░░░░░░░░░░░░` 487 / 1280 mandatory capabilities (38%)
 
 <details>
-<summary>Per-phase breakdown (15 of 104 phases complete)</summary>
+<summary>Per-phase breakdown (17 of 104 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -52,8 +52,8 @@ the authoritative specification and tracks what is done.
 | Phase 9J — Harness-model pairing model | 9/20 |
 | Phase 9K — Harness-aware response profiles | 21/37 |
 | Phase 10 — Unified session model | 14/14 ✅ |
-| Phase 10A — Session supervision | 0/13 |
-| Phase 11 — Session overview | 0/10 |
+| Phase 10A — Session supervision | 13/13 ✅ |
+| Phase 11 — Session overview | 10/10 ✅ |
 | Phase 12 — Unified lifecycle event bus | 7/8 |
 | Phase 13 — Direct session messaging | 7/7 ✅ |
 | Phase 14 — Orchestrator role | 0/11 |
@@ -85,7 +85,7 @@ the authoritative specification and tracks what is done.
 | Phase 29 — Memory commits | 0/8 |
 | Phase 30 — Session context metadata | 0/8 |
 | Phase 31 — Compaction-aware behavior | 0/7 |
-| Phase 32 — Resource registry | 0/12 |
+| Phase 32 — Resource registry | 11/12 |
 | Phase 32A — Unified quota and capacity model | 0/21 |
 | Phase 32B — Quota telemetry sources | 0/14 |
 | Phase 32C — Subscription capacity estimation | 0/12 |
@@ -122,7 +122,7 @@ the authoritative specification and tracks what is done.
 | Phase 46 — Security and contamination tests | 0/8 |
 | Phase 47 — Observability without spectacle | 0/15 |
 | Phase 48 — CLI ergonomics | 0/8 |
-| Phase 49 — Configuration | 0/16 |
+| Phase 49 — Configuration | 10/16 |
 | Phase 50 — Tracked project knowledge as an optional feature | 0/7 |
 | Phase 51 — Evaluation hooks | 0/37 |
 | Phase 52 — Criteria before adding semantic/vector retrieval | 0/6 |

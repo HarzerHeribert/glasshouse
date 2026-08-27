@@ -661,32 +661,32 @@ Fixed architectural requirements
 - A process that is alive and no longer owned is a distinct condition from one that has stopped, and is never treated as either stopped or healthy.
 - Glasshouse reports and refuses; it never ends a session the user did not ask it to end.
 
-☐ Record a durable process identity for every session Glasshouse starts, including the process start time, so that a reused process identifier cannot match a stale record.
-☐ Discover, on start, the sessions this project previously recorded whose processes are still running.
-☐ Verify a discovered process against its recorded identity before treating it as the session it claims to be.
-☐ Adopt a verified live session rather than starting a second session beside it.
-☐ Refuse to start a session that would duplicate a live, verified session of the same record.
-☐ Detect a recorded session whose process is alive but whose identity no longer matches what was recorded, and mark it quarantined rather than reusing or replacing it.
-☐ Refuse to start a replacement while a quarantined process still holds the same resources.
-☐ Surface a quarantined session to the user with what is known about it and what it still holds.
-☐ Require a started session to become verifiably ready within a bounded time, and record a start that never became ready as a failure with a stated reason rather than as a session.
-☐ Restart a session that exits unexpectedly up to a bounded number of consecutive attempts, and stop with a stated reason when that bound is reached.
-☐ Reset the consecutive-restart count only when a restarted session has been verified healthy, never when it has merely been started.
-☐ Apply session lifecycle changes through a single ordered path so that two concurrent requests cannot interleave into a state neither requested.
-☐ Never deliver two inputs to the same session concurrently.
+☑ Record a durable process identity for every session Glasshouse starts, including the process start time, so that a reused process identifier cannot match a stale record.
+☑ Discover, on start, the sessions this project previously recorded whose processes are still running.
+☑ Verify a discovered process against its recorded identity before treating it as the session it claims to be.
+☑ Adopt a verified live session rather than starting a second session beside it.
+☑ Refuse to start a session that would duplicate a live, verified session of the same record.
+☑ Detect a recorded session whose process is alive but whose identity no longer matches what was recorded, and mark it quarantined rather than reusing or replacing it.
+☑ Refuse to start a replacement while a quarantined process still holds the same resources.
+☑ Surface a quarantined session to the user with what is known about it and what it still holds.
+☑ Require a started session to become verifiably ready within a bounded time, and record a start that never became ready as a failure with a stated reason rather than as a session.
+☑ Restart a session that exits unexpectedly up to a bounded number of consecutive attempts, and stop with a stated reason when that bound is reached.
+☑ Reset the consecutive-restart count only when a restarted session has been verified healthy, never when it has merely been started.
+☑ Apply session lifecycle changes through a single ordered path so that two concurrent requests cannot interleave into a state neither requested.
+☑ Never deliver two inputs to the same session concurrently.
 
 Phase 11 — Session overview
 
-☐ Add a session overview that lists all current project sessions in one screen.
-☐ Show the harness name for every session.
-☐ Show the user-assigned session name or purpose for every session.
-☐ Show the current lifecycle state for every session.
-☐ Show the last activity time for every session.
-☐ Show whether the native session can be resumed.
-☐ Show whether the session is embedded, headless, or external.
-☐ Allow the user to focus any live embedded session from the overview.
-☐ Allow the user to resume any compatible stopped session from the overview.
-☐ Allow the user to interrupt a running session from the overview.
+☑ Add a session overview that lists all current project sessions in one screen.
+☑ Show the harness name for every session.
+☑ Show the user-assigned session name or purpose for every session.
+☑ Show the current lifecycle state for every session.
+☑ Show the last activity time for every session.
+☑ Show whether the native session can be resumed.
+☑ Show whether the session is embedded, headless, or external.
+☑ Allow the user to focus any live embedded session from the overview.
+☑ Allow the user to resume any compatible stopped session from the overview.
+☑ Allow the user to interrupt a running session from the overview.
 
 Phase 12 — Unified lifecycle event bus
 
@@ -1181,17 +1181,17 @@ Fixed architectural requirements
 - Subscriptions, metered APIs, free pools, local inference, and gateways are normalized through one resource model without pretending that their native quota semantics are identical.
 
 ☐ Create a registry describing model resources available to Glasshouse.
-☐ Represent native subscriptions separately from API-key or gateway resources.
-☐ Represent local inference resources separately from remote resources.
-☐ Allow the registry to describe Claude Code subscription capacity.
-☐ Allow the registry to describe Codex or ChatGPT-backed capacity.
-☐ Allow the registry to describe Google or Antigravity-backed capacity.
-☐ Allow the registry to describe OpenRouter-like gateways.
-☐ Allow the registry to describe other user-configured gateways such as UnoRouter, AnyRouter, Kilo, or Nous.
-☐ Allow the registry to describe Ollama-backed local models.
-☐ Allow the registry to describe llama.cpp-backed local models.
-☐ Store secrets through environment references, OS keychain integration, or provider-native authentication rather than plaintext project memory.
-☐ Keep resource configuration outside durable project knowledge.
+☑ Represent native subscriptions separately from API-key or gateway resources.
+☑ Represent local inference resources separately from remote resources.
+☑ Allow the registry to describe Claude Code subscription capacity.
+☑ Allow the registry to describe Codex or ChatGPT-backed capacity.
+☑ Allow the registry to describe Google or Antigravity-backed capacity.
+☑ Allow the registry to describe OpenRouter-like gateways.
+☑ Allow the registry to describe other user-configured gateways such as UnoRouter, AnyRouter, Kilo, or Nous.
+☑ Allow the registry to describe Ollama-backed local models.
+☑ Allow the registry to describe llama.cpp-backed local models.
+☑ Store secrets through environment references, OS keychain integration, or provider-native authentication rather than plaintext project memory.
+☑ Keep resource configuration outside durable project knowledge.
 
 Phase 32A — Unified quota and capacity model
 
@@ -1783,22 +1783,22 @@ Phase 48 — CLI ergonomics
 
 Phase 49 — Configuration
 
-☐ Support a small user-level Glasshouse configuration file for harness executable paths and optional resource definitions.
-☐ Support an optional project-level Glasshouse configuration file for project-specific behavior.
-☐ Keep project-level configuration inside the project root when the user explicitly chooses to create it.
-☐ Keep secrets out of tracked project configuration.
-☐ Make sensible defaults sufficient for Claude Code and Codex when their native executables are already usable from the shell.
+☑ Support a small user-level Glasshouse configuration file for harness executable paths and optional resource definitions.
+☑ Support an optional project-level Glasshouse configuration file for project-specific behavior.
+☑ Keep project-level configuration inside the project root when the user explicitly chooses to create it.
+☑ Keep secrets out of tracked project configuration.
+☑ Make sensible defaults sufficient for Claude Code and Codex when their native executables are already usable from the shell.
 ☐ Allow automatic routing and memory extraction to be disabled independently.
 ☐ Allow the user to configure provider-specific quota overrides when automatic telemetry is unavailable.
 ☐ Allow the user to configure a monthly or rolling monetary budget for metered providers.
-☐ Allow the user to configure protected reserve percentages for premium subscriptions.
+☑ Allow the user to configure protected reserve percentages for premium subscriptions.
 ☐ Allow the user to configure the routing-model fallback chain.
 ☐ Allow the user to configure workload-tier ceilings for individual models.
 ☐ Allow the user to configure native-pairing preference strength without hard-coding vendor-specific routing rules.
-☐ Allow named response profiles and separate role defaults for orchestrator, worker, reviewer, explainer, and ordinary sessions.
-☐ Allow response-profile injection to be disabled independently from automatic routing and memory extraction.
-☐ Allow cmux integration to be disabled even when cmux is detected.
-☐ Keep configuration schema small until real usage demonstrates a need for additional options.
+☑ Allow named response profiles and separate role defaults for orchestrator, worker, reviewer, explainer, and ordinary sessions.
+☑ Allow response-profile injection to be disabled independently from automatic routing and memory extraction.
+☑ Allow cmux integration to be disabled even when cmux is detected.
+☑ Keep configuration schema small until real usage demonstrates a need for additional options.
 
 Phase 50 — Tracked project knowledge as an optional feature
 
