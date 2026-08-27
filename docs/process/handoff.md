@@ -4,7 +4,58 @@
 > here is a product requirement. Capability requirements live only in
 > `docs/product/capability-map.md`.
 
-Last updated: 2026-08-27 evening (Europe/Berlin)
+Last updated: 2026-08-27 late evening (Europe/Berlin)
+
+## Checkpoint — 2026-08-27 late, batch 32 landed: 557 / 1280 (43%)
+
+Pushed, clean, **green on all three platforms on this exact tree** — local 13/13,
+`--windows-vm` 3/3. Two Sonnet workers, 18 boxes.
+
+**Phase 35 closed fourteen of fourteen for about twenty lines of production code.**
+The classifier shipped in batch 30 and closed nothing; its only possible caller
+lives in `main.rs` and `cli.rs`, which that packet's partition excluded. Adding
+`glasshouse classify` closed every box. Second time in one day that the same lever
+moved — `glasshouse resources` did it for Phase 32.
+
+**The gateway now reads its own rate-limit headers** (map 1229), never a byte of
+the body, proven through a real TCP exchange and the accept loop's unmodified call.
+Plus 1230 (OpenRouter's `/key`, parsed with a real absent/null/number distinction),
+1200, and 1202 which turned out already closed.
+
+### Four boxes stayed open on one honest finding, and it is the next real job
+
+`quota-followup` built a working reader for Groq's rate-limit headers and proved it
+produces a real `Percentage::Exact(99)` — **the first live percentage this product
+has ever computed** — then left map lines 1199, 1211, 1217 and 1218 **open**,
+because **nothing in the shipped binary bridges a gateway-captured reading into
+`glasshouse resources`'s registry loop.**
+
+**That bridge is the highest-value next package.** It needs `main.rs` or `shell/**`
+plus `provider/**` in one partition, and it closes four boxes that are otherwise
+permanently stuck behind a reader that already works.
+
+### Two gate findings, neither of them a worker's fault
+
+**`lint / clippy` and `lint (ubuntu) / clippy` are not peers.** The container
+installs clippy **1.98.0** per run; this machine's `stable` is **0.1.96** with
+nothing newer installed. A `question_mark` lint failed only on Linux. **Read a
+green local clippy as provisional until the ubuntu leg agrees**, and consider
+having `ci-local.sh` print both versions when they differ. §20's family, third
+instance.
+
+**Twelve evidence entries use states the SDLC does not define** — five `CLOSED`,
+three `VERIFIED`, two `NOT ATTEMPTED`, two `BLOCKED`. `check-evidence-coverage.py`
+asks only whether a phase *has* an entry, never what state it declares, so
+`CLAUDE.md`'s one rule about the ledger is unenforced at the entry level.
+`phase-35`'s was corrected by hand this round. **Extend the checker to validate the
+vocabulary, warn-only first** (§51 — a gate that starts red gets overridden).
+
+### Cost per box is not a tier property, and batch 31 read it as one
+
+$0.26 and $6.39, same tier, same effort, same day. It measures **how much of the
+work was already built**, not the model: `phase-35-classify` inherited batch 30's
+717 lines, `quota-followup` wrote 1,932 of its own and then declined to overclaim.
+Open question 1 goes back to open — see `orchestration-measurements.md`.
 
 ## Checkpoint — 2026-08-27 evening, batch 31 landed: 539 / 1280 (42%)
 

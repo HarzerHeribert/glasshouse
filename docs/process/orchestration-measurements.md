@@ -2035,3 +2035,106 @@ nothing". It joins the standing flake debt beside the 1-in-37 `pty_smoke`
 is green". It did work — `build` went from four dead-code errors to PASS — but a
 single green run cannot distinguish a fixed defect from a flake that happened to
 win its coin flip, which is the whole content of §60.
+
+## The local clippy leg is weaker than the Linux one, and nothing said so
+
+Batch 32's gate returned `PASS lint / clippy` and `FAIL lint (ubuntu) / clippy` on
+the same tree, for one diagnostic:
+
+    error: this block may be rewritten with the `?` operator
+      --> crates/glasshouse/src/provider/telemetry.rs:599:12
+      = note: `-D clippy::question-mark` implied by `-D warnings`
+      = help: ...rust-clippy/rust-1.98.0/index.html#question_mark
+
+**It is not a platform difference.** It is a toolchain-version difference:
+
+    local (macOS)      clippy 0.1.96      <- `rustup toolchain list` has nothing newer
+    container (Linux)  clippy 1.98.0      <- the container installs a current toolchain per run
+
+The newer clippy has lints the older one does not emit. So **`PASS lint / clippy`
+means "this machine's clippy passed", not "clippy passed"**, and the summary
+presents the two legs as peers.
+
+**Both workers ran clippy locally, both were clean, and both were right about what
+they could see.** The lint was unreachable from where they stood. This is not a
+worker-discipline failure and must not be written up as one.
+
+### Why this is §20's shape for a third time
+
+§20 asked *what change would make this gate fail?* and found two gates that could
+not fail at all. This is the softer version: a gate that **can** fail, does fail
+usefully, and has a sibling wearing the same name that is quietly weaker. A reader
+of the summary sees seven `lint /` PASSes and two `(ubuntu)` PASSes and reasonably
+concludes the tree is clean under clippy. On this machine, seven of those nine
+prove less than they appear to.
+
+Same family as the MSRV gate that resolved `rustc` from `PATH` (§20), the `chmod
+000` test that ran as root (§27), and the `su -c` step whose quoting made its exit
+status meaningless (§31): **the check ran, reported, and measured something other
+than what its name claimed.**
+
+### What to do about it, in increasing order of cost
+
+1. **Read a green local `lint / clippy` as provisional** until the `(ubuntu)` leg
+   agrees. It already runs in the same command; this costs nothing but a habit.
+2. **Have `ci-local.sh` print both clippy versions in its summary** when they
+   differ. One line, and it turns an invisible asymmetry into a visible one — the
+   same move §54 made for `blind` versus a number.
+3. Keeping the local toolchain current would close the gap, but that is the user's
+   machine and their call, and it would not stop the gap reopening next quarter.
+
+**The generalisable rule: when two legs of a gate share a name, check that they
+share a version.** A gate's identity is its command *and* its toolchain, and only
+one of those appears in the summary line.
+
+## Batch 32 outcomes — and a correction to what batch 31 concluded
+
+Integrated as one commit, 539 → 557, green on all three platforms (local 13/13,
+`--windows-vm` 3/3).
+
+| worker | tier | effort | wall | cost | in play | closed | $/box |
+|---|---|---|---|---|---|---|---|
+| `phase-35-classify` | Sonnet | high | 14m | $3.69 | 14 | **14** | **$0.26** |
+| `quota-followup` | Sonnet | high | 50m | $25.56 | ~11 | **4** | **$6.39** |
+
+### Cost per box is not a property of the tier. Batch 31 read it as one.
+
+Batch 31 measured $1.52–$1.59 across three packages and two tiers and called it a
+first answer to open question 1. **Batch 32 puts two packages at the same tier,
+same effort, same day, twenty-five times apart.** So the batch-31 numbers agreeing
+to four cents was a coincidence of package composition, not a signal about Sonnet.
+
+**What cost per box actually measures is how much of the work was already done.**
+
+- `phase-35-classify` closed fourteen boxes with **~20 lines**, because batch 30
+  had already written **~717** into `routing/**` and closed zero for want of a
+  caller. The cheap number is batch 30's cost showing up in batch 32's column.
+- `quota-followup` wrote **~1,932 lines** for four boxes — genuinely new work — and
+  then *honestly declined to close four more* it had built working readers for.
+
+**Both effects push in the same direction and neither is about the model.** A
+package that inherits finished work looks brilliant; a package that builds
+foundations and refuses to overclaim looks expensive. Ranking workers on $/box
+would reward the first and punish the second, which is exactly backwards — the
+second one is the batch that made the first one possible.
+
+**So: open question 1 goes back to open**, and the useful reformulation is not
+"which tier is cheaper per box" but **"how much of this package is already
+built?"** — which the seam query answers before dispatch, for free, and which
+predicts the cost far better than the tier does.
+
+The one operational claim from batch 31 that survives: **Sonnet at `high` handled
+a four-file, 1,900-line package across `gateway/**` and `provider/**` with 19
+mutations and no architectural mistakes.** That is a statement about capability at
+that effort, and it is unaffected by the accounting.
+
+### The finding worth more than either package's boxes
+
+`quota-followup` built a working reader for Groq's rate-limit headers, proved it
+produces a real `Percentage::Exact(99)` — **the first live percentage this product
+has ever computed** — and left the box **open**, because nothing in the shipped
+binary bridges a gateway-captured reading into the resource registry.
+
+That is §5 and §36 applied by a worker to its own output, unprompted, against its
+own interest. It is the third round running where the most valuable paragraph in a
+report is the one explaining why a box stays open.
