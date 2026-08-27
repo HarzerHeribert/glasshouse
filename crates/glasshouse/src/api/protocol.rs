@@ -37,6 +37,14 @@ pub enum Request {
     SendMessage { session: String, text: String },
     /// Interrupt a live session, as Glasshouse rather than as the user.
     Interrupt { session: String },
+    /// Current resource capacity and quota telemetry for every model
+    /// resource Glasshouse can describe — capability map line 1679.
+    ///
+    /// Read-only, like every other request this door answers: it never
+    /// makes a network request of its own. See
+    /// `glasshouse::provider::resources::capacity_json`, which this is
+    /// answered with directly, for the exact shape.
+    ResourceCapacity,
     /// Search this project's durable memory.
     QueryMemory {
         query: String,

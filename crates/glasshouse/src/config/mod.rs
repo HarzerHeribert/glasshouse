@@ -881,6 +881,18 @@ pub struct QuotaOverride {
     /// line 1237. `None` means [`QuotaStaleAfterSeconds::DEFAULT`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stale_after_seconds: Option<QuotaStaleAfterSeconds>,
+    /// This provider's own protected reserve percentage — capability map
+    /// line 1288, Phase 32F's *"allow each premium resource to define a
+    /// protected reserve percentage"*. Reuses [`PremiumReservePercent`]
+    /// rather than a second 0–100 type: it is the same question
+    /// (`crate::provider::quota::CapacityBandThresholds::with_resource_reserve`
+    /// is where this reaches the band the packet's design decision 6 asks
+    /// for), asked per provider instead of once globally.
+    /// [`EffectiveConfig::reserve_percent`]'s own default is
+    /// [`EffectiveConfig::premium_reserve`] — the existing global routing
+    /// preference — when a provider states none of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reserve_percent: Option<PremiumReservePercent>,
 }
 
 impl QuotaOverride {
@@ -912,9 +924,23 @@ impl QuotaOverride {
         self
     }
 
+    /// This provider's own protected reserve percentage, or `None` for
+    /// "never decided" — capability map line 1288.
+    pub fn reserve_percent(&self) -> Option<PremiumReservePercent> {
+        self.reserve_percent
+    }
+
+    pub fn set_reserve_percent(&mut self, value: Option<PremiumReservePercent>) -> &mut Self {
+        self.reserve_percent = value;
+        self
+    }
+
     /// Whether the user recorded anything at all here.
     pub fn is_empty(&self) -> bool {
-        self.plan.is_none() && self.budget.is_none() && self.stale_after_seconds.is_none()
+        self.plan.is_none()
+            && self.budget.is_none()
+            && self.stale_after_seconds.is_none()
+            && self.reserve_percent.is_none()
     }
 }
 
@@ -930,6 +956,92 @@ pub enum QuotaValueError {
         "a monetary budget of {micro_usd} microdollars is above the maximum {max_micro_usd};          this field is in millionths of a US dollar, so a plain dollar figure here is off by a          million"
     )]
     Budget { micro_usd: u64, max_micro_usd: u64 },
+
+    /// Capability map line 1270: capacity-band thresholds must be ascending
+    /// and are refused outright rather than sorted into shape. Wraps
+    /// [`crate::provider::quota::CapacityBandThresholdsError`] rather than
+    /// repeating its fields, so the two can never say different things about
+    /// the same refusal.
+    #[error("{0}")]
+    BandThresholds(#[from] crate::provider::quota::CapacityBandThresholdsError),
+}
+
+/// The raw, on-disk shape [`CapacityBandThresholdsConfig`] validates itself
+/// out of. A private intermediate rather than a public one: nothing outside
+/// `serde`'s `try_from` machinery should ever hold an unvalidated set of
+/// thresholds.
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct RawCapacityBandThresholds {
+    exhausted_percent: u8,
+    reserve_percent: u8,
+    tight_percent: u8,
+    healthy_percent: u8,
+}
+
+/// User-configurable capacity-band thresholds — capability map line 1270.
+///
+/// Four ascending percentages, validated as one unit at deserialization time
+/// via `#[serde(try_from = "RawCapacityBandThresholds")]` — the same
+/// fail-closed idiom [`QuotaStaleAfterSeconds`], [`RouterCostMicroUsd`] and
+/// [`PremiumReservePercent`] already use for a single field, applied here
+/// across four so a non-monotonic set is refused at `UserConfig::load` /
+/// `load_project_config` time rather than sorted silently or discovered only
+/// when a band is computed. See
+/// [`crate::provider::quota::CapacityBandThresholds`], the domain type this
+/// converts to via [`CapacityBandThresholdsConfig::to_domain`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawCapacityBandThresholds")]
+pub struct CapacityBandThresholdsConfig {
+    exhausted_percent: u8,
+    reserve_percent: u8,
+    tight_percent: u8,
+    healthy_percent: u8,
+}
+
+impl TryFrom<RawCapacityBandThresholds> for CapacityBandThresholdsConfig {
+    type Error = QuotaValueError;
+
+    fn try_from(raw: RawCapacityBandThresholds) -> Result<Self, Self::Error> {
+        crate::provider::quota::CapacityBandThresholds::new(
+            raw.exhausted_percent,
+            raw.reserve_percent,
+            raw.tight_percent,
+            raw.healthy_percent,
+        )?;
+        Ok(Self {
+            exhausted_percent: raw.exhausted_percent,
+            reserve_percent: raw.reserve_percent,
+            tight_percent: raw.tight_percent,
+            healthy_percent: raw.healthy_percent,
+        })
+    }
+}
+
+impl From<crate::provider::quota::CapacityBandThresholds> for CapacityBandThresholdsConfig {
+    /// A domain value is already known-monotonic by its own constructor, so
+    /// this is a plain field copy rather than a second validation pass.
+    fn from(domain: crate::provider::quota::CapacityBandThresholds) -> Self {
+        Self {
+            exhausted_percent: domain.exhausted_percent(),
+            reserve_percent: domain.reserve_percent(),
+            tight_percent: domain.tight_percent(),
+            healthy_percent: domain.healthy_percent(),
+        }
+    }
+}
+
+impl CapacityBandThresholdsConfig {
+    /// The validated domain value — see
+    /// [`crate::provider::quota::CapacityBandThresholds::band_for_percent`].
+    pub fn to_domain(self) -> crate::provider::quota::CapacityBandThresholds {
+        crate::provider::quota::CapacityBandThresholds::new(
+            self.exhausted_percent,
+            self.reserve_percent,
+            self.tight_percent,
+            self.healthy_percent,
+        )
+        .expect("validated once already at deserialization")
+    }
 }
 
 /// Why a stored [`ProviderConfig`] could not be turned into a
@@ -1773,6 +1885,11 @@ pub struct RoutingConfig {
     /// rather than refusing to load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     free_resource_pin: Option<FreeResourceRef>,
+    /// User-overridden capacity-band thresholds — capability map line 1270.
+    /// `None` means the defaults in
+    /// [`crate::provider::quota::CapacityBandThresholds::DEFAULT`] apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capacity_band_thresholds: Option<CapacityBandThresholdsConfig>,
 }
 
 impl RoutingConfig {
@@ -1855,6 +1972,20 @@ impl RoutingConfig {
         self
     }
 
+    /// This layer's recorded capacity-band thresholds, or `None` for "never
+    /// decided" — capability map line 1270.
+    pub fn capacity_band_thresholds(&self) -> Option<CapacityBandThresholdsConfig> {
+        self.capacity_band_thresholds
+    }
+
+    pub fn set_capacity_band_thresholds(
+        &mut self,
+        value: Option<CapacityBandThresholdsConfig>,
+    ) -> &mut Self {
+        self.capacity_band_thresholds = value;
+        self
+    }
+
     /// This layer's three free-resource preferences, folded into the shape
     /// [`crate::routing::disposable::DisposableRouting`] actually consumes.
     /// A layer that recorded nothing produces
@@ -1887,6 +2018,7 @@ impl RoutingConfig {
             && self.free_resource_order.is_none()
             && self.free_resource_disabled.is_none()
             && self.free_resource_pin.is_none()
+            && self.capacity_band_thresholds.is_none()
     }
 }
 
@@ -2551,6 +2683,40 @@ impl<'a> EffectiveConfig<'a> {
             return Layered::new(value, Layer::User);
         }
         Layered::new(PremiumReservePercent::DEFAULT, Layer::Default)
+    }
+
+    /// Capacity-band thresholds, resolved per field — capability map line
+    /// 1270. [`crate::provider::quota::CapacityBandThresholds::DEFAULT`] when
+    /// neither layer recorded any, converted through
+    /// [`CapacityBandThresholdsConfig::to_domain`] rather than re-validated
+    /// here: it was already validated once, at deserialization.
+    pub fn capacity_band_thresholds(
+        &self,
+    ) -> Layered<crate::provider::quota::CapacityBandThresholds> {
+        if let Some(value) = self
+            .project
+            .and_then(|p| p.routing().capacity_band_thresholds())
+        {
+            return Layered::new(value.to_domain(), Layer::Project);
+        }
+        if let Some(value) = self.user.routing().capacity_band_thresholds() {
+            return Layered::new(value.to_domain(), Layer::User);
+        }
+        Layered::new(
+            crate::provider::quota::CapacityBandThresholds::DEFAULT,
+            Layer::Default,
+        )
+    }
+
+    /// One resource's own protected reserve percentage — capability map line
+    /// 1288 — or the global [`EffectiveConfig::premium_reserve`] preference
+    /// when the provider has not stated one of its own.
+    pub fn reserve_percent(&self, name: &str) -> Layered<PremiumReservePercent> {
+        let configured = self.quota_override(name);
+        match configured.value.reserve_percent() {
+            Some(value) => Layered::new(value, configured.layer),
+            None => self.premium_reserve(),
+        }
     }
 
     /// The user's preferred order over free resources, resolved per field —
@@ -5136,5 +5302,63 @@ mod tests {
         assert_eq!(RouterLatencyMs::DEFAULT.get(), 2_000);
         assert_eq!(RouterCostMicroUsd::DEFAULT.get(), 1_000);
         assert_eq!(PremiumReservePercent::DEFAULT.get(), 20);
+    }
+
+    /// Capability map line 1270: capacity-band thresholds are user-
+    /// configurable, and a non-ascending set is refused at load time rather
+    /// than sorted into shape — the same fail-closed idiom
+    /// `routing_policy_values_round_trip_layer_independently_and_reject_absurd_inputs`
+    /// already proves for the single-field routing values, applied here to a
+    /// value validated across four fields at once.
+    #[test]
+    fn capacity_band_thresholds_round_trip_and_reject_a_non_monotonic_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
+
+        let mut user = UserConfig::default();
+        assert_eq!(user.routing().capacity_band_thresholds(), None);
+        user.routing_mut().set_capacity_band_thresholds(Some(
+            crate::provider::quota::CapacityBandThresholds::new(1, 10, 30, 60)
+                .unwrap()
+                .into(),
+        ));
+        user.save(&paths).unwrap();
+        let loaded = UserConfig::load(&paths).unwrap();
+        assert_eq!(
+            loaded.routing().capacity_band_thresholds(),
+            user.routing().capacity_band_thresholds()
+        );
+
+        let effective = EffectiveConfig::new(&loaded, None);
+        let resolved = effective.capacity_band_thresholds();
+        assert_eq!(resolved.layer, Layer::User);
+        assert_eq!(resolved.value.reserve_percent(), 10);
+
+        // §35-adjacent: prove the *loader* itself is the fail-closed gate,
+        // not merely `CapacityBandThresholds::new` in isolation — this
+        // parses through the exact path `UserConfig::load` uses.
+        for invalid in [
+            // reserve (50) above tight (30): not ascending.
+            "[routing.capacity_band_thresholds]\nexhausted_percent = 2\nreserve_percent = 50\n\
+             tight_percent = 30\nhealthy_percent = 70\n",
+            // healthy_percent above 100.
+            "[routing.capacity_band_thresholds]\nexhausted_percent = 2\nreserve_percent = 10\n\
+             tight_percent = 30\nhealthy_percent = 150\n",
+        ] {
+            let text = format!("version = 1\n{invalid}");
+            assert!(
+                toml::from_str::<UserConfig>(&text).is_err(),
+                "a non-monotonic set of capacity-band thresholds was accepted: {invalid}"
+            );
+        }
+
+        // With nothing recorded, the domain default applies.
+        let empty = UserConfig::default();
+        let effective = EffectiveConfig::new(&empty, None);
+        assert_eq!(
+            effective.capacity_band_thresholds().value,
+            crate::provider::quota::CapacityBandThresholds::DEFAULT
+        );
+        assert_eq!(effective.capacity_band_thresholds().layer, Layer::Default);
     }
 }

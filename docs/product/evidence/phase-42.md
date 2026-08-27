@@ -353,3 +353,52 @@ loudly and specifically (a timeout naming what it was waiting for, or a
 wrong-mode assertion, or a CLI refusal naming the missing id) rather than
 surviving quietly — no case here needed a second look at what the mutation
 and its test both assumed.
+
+---
+
+## Appended by PACKET-PHASE-32D, 2026-08-27 — 1679 closes
+
+This file's own Pass 1 recorded the blocker precisely: *"there is nothing
+this package could route a socket handler to that would not be reporting a
+number Glasshouse never actually reads."* Phase 32A had shipped the
+capacity model with no live telemetry; Phase 32B/QUOTA-FOLLOWUP/BRIDGE-QUOTA/
+PACKET-QUOTA-LIVE built and wired the telemetry readers across four
+consecutive packages after this one — the missing mechanism this section
+named is what those built. This package's own brief was the normalized
+score, its bands, and the protected reserve (`phase-32d.md`, `phase-32f.md`),
+and it closes 1679 as a side effect of finally having something real to
+route the socket to.
+
+**`Request::ResourceCapacity`** (`api/protocol.rs`) → **`api::unix::resource_capacity`**
+→ **`provider::resources::capacity_json`** — the same registry loop
+`report()` (this file's own production entry point for `glasshouse
+resources`) already walks, returned as structured JSON instead of text, so
+the CLI and the API can never disagree about what Glasshouse believes.
+Never makes a network request: it reads the user's configuration, the
+persisted `GatewayQuotaCache`, and asks each installed harness for its own
+status the same cheap way the no-flag CLI path already does.
+
+Proven end to end, over the real socket, by `tests/capacity_api.rs`
+(3 tests, following this file's own `control_api` harness shape): the
+registry's every resource kind appears; a provider's own configured
+protected-reserve percentage (Phase 32F, `phase-32f.md`) is visible through
+the socket, proving `EffectiveConfig` and not just the static registry is
+actually read on this path; an unknown `op` is refused cleanly and the
+server keeps serving afterward, matching this file's own
+`a_malformed_request_is_refused_and_the_server_keeps_serving` guarantee for
+every other request.
+
+**Mutation-proof, and stronger than a runtime mutation.** `dispatch`'s
+`match` over `Request` has no wildcard arm. Deleting
+`Request::ResourceCapacity => resource_capacity(runtime),` was tried by hand
+and does not compile — `error[E0004]: non-exhaustive patterns:
+protocol::Request::ResourceCapacity not covered` — which is a stronger
+guarantee than a test catching a silent regression: nothing can land in this
+file that stops dispatching a known request variant. Restored, `ok`.
+
+**1679 — CLOSED.**
+
+Gate, for this appended section only:
+- `cargo build -p glasshouse` and `cargo test -p glasshouse --test
+  capacity_api` (3/3, run alone) — see `phase-32d.md`'s own gate section for
+  the full-crate run this appended section shares.

@@ -1757,6 +1757,586 @@ impl ResourceKind {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 32D — a normalized remaining-capacity score, and the bands a routing
+// policy reads off it.
+// ---------------------------------------------------------------------------
+
+/// A normalized remaining-capacity score for one resource — capability map
+/// line 1259.
+///
+/// Beside [`NormalizedCapacity`] and [`Percentage`], not a replacement for
+/// either — packet PHASE-32D's own design decision #1. Line 1259 asks for a
+/// score "between zero and one", not a redefinition of the existing labelled
+/// 0–100 percentage line 1234 already closed, and both survive. There is no
+/// constructor that takes a bare `f64`: the only way to build one is
+/// [`CapacityState::remaining_capacity_score`], and every value carries the
+/// dimension that bound it and the [`Percentage`] it was derived from — the
+/// same discipline [`NormalizedCapacity`] already enforces for its own raw
+/// readings, applied one layer up so a number can never reach a caller with
+/// its reasoning discarded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemainingCapacityScore {
+    dimension: &'static str,
+    percent: Percentage,
+}
+
+impl RemainingCapacityScore {
+    /// The digits alone, out of the two public accessors [`Percentage`]
+    /// already offers — never [`Percentage::number`], which is private
+    /// precisely so nothing outside that type can read a figure without its
+    /// qualification. This reassembles the same figure from the qualified
+    /// accessors instead of reaching around them.
+    fn digits(&self) -> u8 {
+        self.percent
+            .exact()
+            .or_else(|| self.percent.estimated().map(|(percent, _, _)| percent))
+            .expect("a Percentage is always Exact or Estimated")
+    }
+
+    /// The dimension that bound this score — capability map line 1260's own
+    /// requirement that a score name its own constraint rather than average
+    /// it away.
+    pub fn dimension(&self) -> &'static str {
+        self.dimension
+    }
+
+    /// The percentage this score was derived from, still fully labelled —
+    /// capability map line 1268: native units and the class of claim behind
+    /// them are never replaced by this score, only joined by it.
+    pub fn percent(&self) -> &Percentage {
+        &self.percent
+    }
+
+    /// The raw fraction, `0.0..=1.0` — capability map line 1259's own words.
+    pub fn fraction(&self) -> f64 {
+        f64::from(self.digits()) / 100.0
+    }
+
+    /// A conservative fraction for comparing this resource against another —
+    /// capability map line 1266, design decision #4.
+    ///
+    /// An estimate is attenuated **downward** by how weak its confidence is,
+    /// so a low-confidence estimate can never outrank a high-confidence
+    /// measurement that is actually tighter: a [`Confidence::Low`] estimate
+    /// of 90% (`0.90 - 0.30 = 0.60`) still loses to a `High`-confidence
+    /// measured 80% (`0.80`). Never inflated — an exact reading passes
+    /// through unchanged, and there is no path in this function that adds to
+    /// the raw fraction.
+    pub fn routing_fraction(&self) -> f64 {
+        let penalty = match &self.percent {
+            Percentage::Exact(_) => 0.0,
+            Percentage::Estimated { confidence, .. } => match confidence {
+                Confidence::High => 0.05,
+                Confidence::Medium => 0.15,
+                Confidence::Low => 0.30,
+            },
+        };
+        (self.fraction() - penalty).max(0.0)
+    }
+
+    /// Effective availability once a known quota reset is taken into account
+    /// — capability map lines 1264 and 1265, design decision #3.
+    ///
+    /// **The raw score is never mutated by this.** [`RemainingCapacityScore::fraction`]
+    /// and [`RemainingCapacityScore::routing_fraction`] still answer exactly
+    /// what they answered before this was called; `effective` is a third,
+    /// separately-named number derived from one of them and how soon the
+    /// binding pool's window turns. `seconds_until_reset` is `None` — no
+    /// reset known — is the identity: effective equals
+    /// [`RemainingCapacityScore::routing_fraction`] exactly, per the design
+    /// decision's own instruction not to fabricate a reset when none is
+    /// known. See [`CapacityState::seconds_until_reset`] for where a caller
+    /// gets this number.
+    ///
+    /// A reset within [`RESET_IMMINENT_SECONDS`] is treated as "happening
+    /// now": conservation stops mattering and the effective value rises
+    /// toward `1.0`. A reset [`RESET_DISTANT_SECONDS`] away or further is
+    /// treated exactly like no reset was known — line 1264's "far away
+    /// relative to the remaining capacity" case, where the effective value
+    /// stays at the (already conservative) routing fraction rather than
+    /// being boosted. Linear between the two, so a resource crossing either
+    /// boundary does not jump.
+    pub fn effective(&self, seconds_until_reset: Option<i64>) -> f64 {
+        let raw = self.routing_fraction();
+        let Some(seconds) = seconds_until_reset else {
+            return raw;
+        };
+        let urgency = reset_urgency(seconds);
+        raw + (1.0 - raw) * urgency
+    }
+
+    /// Which capacity band this score falls in against `thresholds` —
+    /// capability map line 1268.
+    pub fn band(&self, thresholds: &CapacityBandThresholds) -> CapacityBand {
+        thresholds.band_for_percent(self.digits())
+    }
+}
+
+/// A reset within this many seconds is treated as imminent —
+/// [`RemainingCapacityScore::effective`] line 1265.
+pub const RESET_IMMINENT_SECONDS: i64 = 300;
+
+/// A reset this many seconds away or further is treated exactly like no
+/// reset is known — [`RemainingCapacityScore::effective`] line 1264, and
+/// [`evaluate_reserve_spend`]'s own "distant reset" branch.
+pub const RESET_DISTANT_SECONDS: i64 = 3_600;
+
+/// How much a known quota reset should currently matter, `0.0` (far away, or
+/// no different from unknown) to `1.0` (imminent, or already past).
+///
+/// A reset already in the past (`seconds_until_reset <= 0`) is the most
+/// urgent case, not an error: a window that just turned is the clearest
+/// possible reason to stop conserving, and this module has no clock of its
+/// own to have detected the turn any sooner.
+fn reset_urgency(seconds_until_reset: i64) -> f64 {
+    if seconds_until_reset <= RESET_IMMINENT_SECONDS {
+        1.0
+    } else if seconds_until_reset >= RESET_DISTANT_SECONDS {
+        0.0
+    } else {
+        1.0 - (seconds_until_reset - RESET_IMMINENT_SECONDS) as f64
+            / (RESET_DISTANT_SECONDS - RESET_IMMINENT_SECONDS) as f64
+    }
+}
+
+/// A capacity band a routing policy may read off a [`RemainingCapacityScore`]
+/// — capability map line 1268.
+///
+/// An enum rather than a raw comparison at each call site, so a policy names
+/// a band instead of re-deriving one from a threshold it has to remember.
+/// `Ord`, with [`CapacityBand::Exhausted`] lowest — the packet's own
+/// requirement — so a policy may compare bands directly
+/// (`band <= CapacityBand::Reserve`) without a match of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CapacityBand {
+    Exhausted,
+    Reserve,
+    Tight,
+    Healthy,
+    Plenty,
+}
+
+impl CapacityBand {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CapacityBand::Exhausted => "exhausted",
+            CapacityBand::Reserve => "reserve",
+            CapacityBand::Tight => "tight",
+            CapacityBand::Healthy => "healthy",
+            CapacityBand::Plenty => "plenty",
+        }
+    }
+}
+
+impl std::fmt::Display for CapacityBand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Where each [`CapacityBand`] boundary sits, as a percent (`0..=100`) —
+/// capability map line 1270. Ascending and inclusive-below-the-next: a
+/// resource at exactly `reserve_percent` is [`CapacityBand::Reserve`], not
+/// [`CapacityBand::Exhausted`].
+///
+/// # Fail-closed, not sorted
+///
+/// The only ways to build one are [`CapacityBandThresholds::new`] and
+/// [`CapacityBandThresholds::DEFAULT`]; `new` refuses a non-monotonic set
+/// outright rather than sorting it into shape, matching design decision #5
+/// and how every other quota value in this crate is fail-closed rather than
+/// best-effort (see [`crate::config::QuotaStaleAfterSeconds`] and its
+/// siblings). [`crate::config`] is where a user overrides these; see
+/// `crate::config::CapacityBandThresholdsConfig`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapacityBandThresholds {
+    exhausted_percent: u8,
+    reserve_percent: u8,
+    tight_percent: u8,
+    healthy_percent: u8,
+}
+
+impl CapacityBandThresholds {
+    /// Two percent exhausted, fifteen reserve, thirty-five tight, seventy
+    /// healthy. Round numbers with no measurement behind them — this
+    /// build has no usage history to calibrate against — chosen so that
+    /// the five bands are not degenerate: every one of them is reachable.
+    pub const DEFAULT: Self = Self {
+        exhausted_percent: 2,
+        reserve_percent: 15,
+        tight_percent: 35,
+        healthy_percent: 70,
+    };
+
+    /// Build a set of thresholds, refusing one that is not ascending.
+    pub fn new(
+        exhausted_percent: u8,
+        reserve_percent: u8,
+        tight_percent: u8,
+        healthy_percent: u8,
+    ) -> Result<Self, CapacityBandThresholdsError> {
+        if exhausted_percent <= reserve_percent
+            && reserve_percent <= tight_percent
+            && tight_percent <= healthy_percent
+            && healthy_percent <= 100
+        {
+            Ok(Self {
+                exhausted_percent,
+                reserve_percent,
+                tight_percent,
+                healthy_percent,
+            })
+        } else {
+            Err(CapacityBandThresholdsError {
+                exhausted_percent,
+                reserve_percent,
+                tight_percent,
+                healthy_percent,
+            })
+        }
+    }
+
+    /// The same thresholds, with the reserve boundary replaced by one
+    /// resource's own protected reserve percentage — capability map line
+    /// 1288, design decision #6: *"reserve is one band, and Phase 32F is the
+    /// policy that reads it… a resource's protected reserve percentage is
+    /// where the reserve band begins for that resource."*
+    ///
+    /// **Not re-validated as a fresh [`CapacityBandThresholds::new`] call,
+    /// and deliberately not clamped either.** [`CapacityBandThresholds::band_for_percent`]'s
+    /// sequential comparisons are total for any `u8` ordering: a reserve
+    /// percentage set above the tight boundary does not panic or invert
+    /// anything, it only makes [`CapacityBand::Tight`] unreachable for this
+    /// resource — every percentage that would have been Tight is Reserve
+    /// instead, which is exactly what a user asking to protect a larger
+    /// share of a premium resource's capacity means. There is nothing to
+    /// clamp; the earlier version of this method did, and the doc comment
+    /// it left behind was solving a problem the total comparison chain
+    /// never had.
+    pub fn with_resource_reserve(mut self, reserve_percent: u8) -> Self {
+        self.reserve_percent = reserve_percent;
+        self
+    }
+
+    pub fn exhausted_percent(&self) -> u8 {
+        self.exhausted_percent
+    }
+
+    pub fn reserve_percent(&self) -> u8 {
+        self.reserve_percent
+    }
+
+    pub fn tight_percent(&self) -> u8 {
+        self.tight_percent
+    }
+
+    pub fn healthy_percent(&self) -> u8 {
+        self.healthy_percent
+    }
+
+    /// Which band `percent` falls in.
+    pub fn band_for_percent(&self, percent: u8) -> CapacityBand {
+        if percent < self.exhausted_percent {
+            CapacityBand::Exhausted
+        } else if percent < self.reserve_percent {
+            CapacityBand::Reserve
+        } else if percent < self.tight_percent {
+            CapacityBand::Tight
+        } else if percent < self.healthy_percent {
+            CapacityBand::Healthy
+        } else {
+            CapacityBand::Plenty
+        }
+    }
+}
+
+impl Default for CapacityBandThresholds {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// A [`CapacityBandThresholds::new`] call whose four percentages are not
+/// ascending — capability map line 1270's own "fail closed" requirement,
+/// stated in code rather than sorted around.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "capacity band thresholds must be ascending and at most 100 \
+     (exhausted {exhausted_percent} <= reserve {reserve_percent} <= tight {tight_percent} <= \
+     healthy {healthy_percent} <= 100); refusing rather than sorting them"
+)]
+pub struct CapacityBandThresholdsError {
+    pub exhausted_percent: u8,
+    pub reserve_percent: u8,
+    pub tight_percent: u8,
+    pub healthy_percent: u8,
+}
+
+impl CapacityState {
+    /// Seconds from `now_unix` until the nearer of this resource's two
+    /// windows resets, if either has ever been read — the reset half of
+    /// capability map lines 1264 and 1265's own antecedent, and what
+    /// [`RemainingCapacityScore::effective`] takes as its second argument.
+    ///
+    /// `None` when neither window's reset is known, which — per the phase
+    /// 32B/QUOTA-FOLLOWUP evidence this packet's own hypothesis section
+    /// cites — is most resources in this build. A negative result (the
+    /// window already turned, by this machine's clock) is returned as-is
+    /// rather than clamped to zero: [`RemainingCapacityScore::effective`]'s
+    /// own urgency calculation already treats anything non-positive as
+    /// maximally imminent, so clamping here would
+    /// only discard information a caller could otherwise log.
+    pub fn seconds_until_reset(&self, now_unix: i64) -> Option<i64> {
+        [
+            self.windows.rolling().resets_at_unix(),
+            self.windows.calendar().resets_at_unix(),
+        ]
+        .into_iter()
+        .filter_map(|resets| resets.reading().map(|r| *r.value() - now_unix))
+        .min()
+    }
+
+    /// The normalized remaining-capacity score for this resource —
+    /// capability map lines 1259 and 1260.
+    ///
+    /// # The limiting-dimension rule, widened (design decision #2)
+    ///
+    /// [`CapacityState::normalized`] already takes the minimum across
+    /// [`CapacityState::pools`]. Rate ceilings are not pools —
+    /// [`RateCeilings::requests_per_minute`] is a single ceiling with no
+    /// paired "remaining" reading of its own, so [`CapacityState::normalized`]
+    /// cannot see it at all. This widens the candidate set with one
+    /// synthetic pairing: the general request pool's own *remaining* reading
+    /// against the per-minute ceiling instead of the pool's own limit, when
+    /// both are stated in the same unit, and keeps whichever of the two
+    /// produces the tighter percentage.
+    ///
+    /// **Checked against today's own telemetry reader rather than assumed
+    /// (practice §23).** `crate::provider::telemetry::RateLimitHeaders::apply_to`
+    /// currently fills a pool's limit and the per-minute ceiling from the
+    /// *same* header reading in one call, so the two agree today for every
+    /// live host this build has observed — this widening changes nothing
+    /// for them. It matters the moment the two readings arrive from
+    /// different observations (a stale general limit beside a fresher
+    /// per-minute one, or a user-configured override on one but not the
+    /// other): without it, [`CapacityState::normalized`] would keep reading
+    /// the general pool's own limit even after a tighter per-minute ceiling
+    /// became known, which is exactly the invisibility capability map line
+    /// 1261 names.
+    ///
+    /// # Local inference (design decision #7)
+    ///
+    /// A resource with [`LimitingUnits::None`] has nothing to normalize:
+    /// every pool is [`Capacity::Inapplicable`] by construction, so
+    /// [`CapacityState::normalized`] always answers `None` for one. Line
+    /// 1267 asks that local inference be treated as high-capacity while
+    /// still being able to fall on measured latency or concurrency, so this
+    /// returns a fixed high estimate carrying an explicit "no evidence" note
+    /// instead of `None`. **This build has no latency or concurrency reader
+    /// anywhere** — nothing in [`CapacityState`] carries either quantity —
+    /// so the honest answer is a score that says it is not backed by a
+    /// measurement, not a score that invents one. See the evidence ledger
+    /// for whether this closes line 1267 or only partially does.
+    pub fn remaining_capacity_score(&self) -> Option<RemainingCapacityScore> {
+        if matches!(self.limits, LimitingUnits::None) {
+            return Some(RemainingCapacityScore {
+                dimension: "local inference (no latency or concurrency evidence)",
+                percent: Percentage::Estimated {
+                    percent: 100,
+                    confidence: Confidence::Medium,
+                    source: "local inference has no provider-defined ceiling; no latency or \
+                             concurrency reading exists in this build to lower it below full"
+                        .to_owned(),
+                },
+            });
+        }
+
+        let mut best = self.normalized();
+
+        if let (Some(remaining), Some(ceiling)) = (
+            self.requests.remaining().reading(),
+            self.rates.requests_per_minute().reading(),
+        ) && remaining.value().commensurable_with(ceiling.value())
+        {
+            let synthetic = Pool::inapplicable()
+                .with_remaining(Capacity::Measured(remaining.clone()))
+                .with_limit(Capacity::Measured(ceiling.clone()));
+            if let Some(score) = synthetic.normalized() {
+                let candidate = ("requests per minute", score);
+                best = Some(match best {
+                    Some(current) if current.1.percent() <= candidate.1.percent() => current,
+                    _ => candidate,
+                });
+            }
+        }
+
+        best.map(|(dimension, score)| RemainingCapacityScore {
+            dimension,
+            percent: score.percent(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 32F — the protected quota reserve, as policy functions rather than a
+// scheduler. Capability map lines 1287-1292 and 1294.
+// ---------------------------------------------------------------------------
+
+/// One reserve-spend decision — allow or deny, with the reason stated rather
+/// than left for a caller to infer from a bare boolean.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReserveDecision {
+    Allow { reason: String },
+    Deny { reason: String },
+}
+
+impl ReserveDecision {
+    pub fn is_allowed(&self) -> bool {
+        matches!(self, ReserveDecision::Allow { .. })
+    }
+
+    pub fn reason(&self) -> &str {
+        match self {
+            ReserveDecision::Allow { reason } | ReserveDecision::Deny { reason } => reason,
+        }
+    }
+}
+
+/// Everything [`evaluate_reserve_spend`] needs to decide whether spending a
+/// resource's protected reserve is justified — capability map lines
+/// 1288-1292 and 1294, gathered into one input rather than six positional
+/// booleans a call site could transpose.
+#[derive(Debug, Clone, Copy)]
+pub struct ReserveDecisionInputs {
+    /// This resource's current band — see [`RemainingCapacityScore::band`],
+    /// built against thresholds that already carry this resource's own
+    /// protected reserve percentage via
+    /// [`CapacityBandThresholds::with_resource_reserve`] — capability map
+    /// line 1288.
+    pub band: CapacityBand,
+    /// The task's required workload tier —
+    /// [`crate::routing::classify::WorkloadTier`], read here rather than
+    /// re-invented: a task's capability *requirement* is exactly what Phase
+    /// 35 already models, and duplicating it would be two scales for one
+    /// question.
+    pub tier: crate::routing::classify::WorkloadTier,
+    /// Whether a resource outside the reserve band could adequately serve
+    /// this task instead — capability map line 1289.
+    pub cheaper_adequate_resource_exists: bool,
+    /// Whether the user explicitly overrode reserve protection for this task
+    /// or session — capability map line 1291.
+    pub user_override: bool,
+    /// Seconds until this resource's quota resets, if known — see
+    /// [`CapacityState::seconds_until_reset`]. Capability map lines 1292 and
+    /// its distant-reset complement.
+    pub seconds_until_reset: Option<i64>,
+    /// Whether the task this decision is for is almost complete — capability
+    /// map line 1294's guard on migration.
+    pub task_nearly_complete: bool,
+}
+
+/// Whether spending this resource's protected reserve is justified —
+/// capability map lines 1288 through 1292 and 1294, as one decision function
+/// over the tuple the packet's design decision #8 names, rather than a
+/// scheduler. Every branch states its own reason and cites the line it
+/// answers, so the reason a caller receives is also the box it closes.
+///
+/// # Precedence, and why this order
+///
+/// 1. **Line 1294 first, unconditionally.** An almost-complete high-value
+///    task is never moved "solely because a reserve threshold was crossed" —
+///    the line's own words — so nothing below this can override it.
+/// 2. **Line 1291 next.** An explicit user override is a statement about
+///    *this* task or session that the user made on purpose; it outranks
+///    every automatic signal below it, but not line 1294's guard, which
+///    protects work already in flight regardless of what either party
+///    intended about reserve.
+/// 3. **The band itself.** Above [`CapacityBand::Reserve`], nothing here is
+///    protected in the first place and every request is allowed —
+///    the bands below `Reserve` are the only ones this function ever has
+///    an opinion about.
+/// 4. **Reset proximity** — lines 1292 and its distant-reset complement.
+///    Imminent (within [`RESET_IMMINENT_SECONDS`]) makes the policy
+///    permissive outright; distant ([`RESET_DISTANT_SECONDS`] or further, or
+///    explicitly known and not imminent) makes it strictly conservative,
+///    denying even a task with no cheaper alternative unless it needs the
+///    heavy tier.
+/// 5. **Tier and alternatives** — lines 1289 and 1290. A heavy-tier task's
+///    requirement justifies spending the reserve; a lighter task may spend
+///    it only when nothing cheaper is adequate.
+pub fn evaluate_reserve_spend(inputs: ReserveDecisionInputs) -> ReserveDecision {
+    use crate::routing::classify::WorkloadTier;
+
+    if inputs.task_nearly_complete {
+        return ReserveDecision::Allow {
+            reason: "the task is almost complete; capability map line 1294 forbids moving an \
+                     almost-complete high-value task to another session solely because a \
+                     reserve threshold was crossed"
+                .to_owned(),
+        };
+    }
+
+    if inputs.user_override {
+        return ReserveDecision::Allow {
+            reason: "the user explicitly overrode reserve protection for this task or session \
+                     (line 1291)"
+                .to_owned(),
+        };
+    }
+
+    if inputs.band > CapacityBand::Reserve {
+        return ReserveDecision::Allow {
+            reason: format!(
+                "the resource is in the {} band, which has not crossed into its protected \
+                 reserve",
+                inputs.band
+            ),
+        };
+    }
+
+    if let Some(seconds) = inputs.seconds_until_reset {
+        if seconds <= RESET_IMMINENT_SECONDS {
+            return ReserveDecision::Allow {
+                reason: format!(
+                    "the quota resets in {seconds}s, within the reserve policy's imminent \
+                     window; conserving now buys little (line 1292)"
+                ),
+            };
+        }
+        if seconds >= RESET_DISTANT_SECONDS && inputs.tier != WorkloadTier::Heavy {
+            return ReserveDecision::Deny {
+                reason: format!(
+                    "the next reset is {seconds}s away, past the reserve policy's distant \
+                     threshold, so only heavy-tier work may spend the reserve"
+                ),
+            };
+        }
+    }
+
+    if inputs.tier == WorkloadTier::Heavy {
+        return ReserveDecision::Allow {
+            reason: "the task requires the heavy workload tier, which justifies spending \
+                     protected reserve (line 1290)"
+                .to_owned(),
+        };
+    }
+
+    if inputs.cheaper_adequate_resource_exists {
+        return ReserveDecision::Deny {
+            reason: "a cheaper adequate resource exists and this task does not require the \
+                     heavy tier, so protected reserve is not spent on it (line 1289)"
+                .to_owned(),
+        };
+    }
+
+    ReserveDecision::Allow {
+        reason: "no cheaper adequate resource exists, so spending protected reserve is the \
+                 least-bad option available"
+            .to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

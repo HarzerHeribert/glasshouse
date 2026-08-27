@@ -1256,18 +1256,18 @@ Phase 32C — Subscription capacity estimation
 
 Phase 32D — Normalized remaining-capacity score
 
-☐ Compute a normalized remaining-capacity score between zero and one for routable resources.
-☐ Derive the normalized score from the limiting resource dimension rather than averaging away a hard quota constraint.
-☐ Lower the score when short-window request capacity is close to exhaustion.
-☐ Lower the score when token or credit capacity is close to exhaustion.
+☑ Compute a normalized remaining-capacity score between zero and one for routable resources.
+☑ Derive the normalized score from the limiting resource dimension rather than averaging away a hard quota constraint.
+☑ Lower the score when short-window request capacity is close to exhaustion.
+☑ Lower the score when token or credit capacity is close to exhaustion.
 ☐ Lower the score when user-defined spending budget is close to exhaustion.
-☐ Lower the score when a reset is far away relative to the remaining capacity.
-☐ Increase effective availability when a near-term quota reset makes current conservation less important.
-☐ Include estimator confidence so low-confidence subscription estimates do not dominate routing decisions.
+☑ Lower the score when a reset is far away relative to the remaining capacity.
+☑ Increase effective availability when a near-term quota reset makes current conservation less important.
+☑ Include estimator confidence so low-confidence subscription estimates do not dominate routing decisions.
 ☐ Treat unlimited local inference as high-capacity but still account for measured latency and concurrency.
-☐ Expose the normalized score alongside native units rather than replacing provider-native information.
-☐ Allow the routing policy to use capacity bands such as plenty, healthy, tight, reserve, and exhausted.
-☐ Keep capacity-band thresholds user-configurable.
+☑ Expose the normalized score alongside native units rather than replacing provider-native information.
+☑ Allow the routing policy to use capacity bands such as plenty, healthy, tight, reserve, and exhausted.
+☑ Keep capacity-band thresholds user-configurable.
 
 Phase 32E — Burn rate and exhaustion forecasting
 
@@ -1284,7 +1284,7 @@ Phase 32E — Burn rate and exhaustion forecasting
 
 Phase 32F — Protected quota reserve
 
-☐ Allow each premium resource to define a protected reserve percentage.
+☑ Allow each premium resource to define a protected reserve percentage.
 ☐ Avoid spending protected reserve on low-tier work while cheaper adequate resources exist.
 ☐ Allow high-tier tasks to consume protected reserve when their capability requirement justifies it.
 ☐ Allow the user to override reserve protection for a specific task or session.
@@ -1676,7 +1676,7 @@ Fixed architectural requirements
 ☑ Allow the API to send messages to sessions.
 ☑ Allow the API to interrupt sessions.
 ☑ Allow the API to retrieve lifecycle state.
-☐ Allow the API to retrieve current resource capacity and quota telemetry.
+☑ Allow the API to retrieve current resource capacity and quota telemetry.
 ☐ Allow the API to retrieve the current routing-model selection and health.
 ☐ Allow the API to request an inspectable routing recommendation without executing it.
 ☑ Allow the API to query project memory.

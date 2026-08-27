@@ -43,7 +43,8 @@ use std::fmt::Write as _;
 use crate::config::{EffectiveConfig, Layer, QuotaStaleAfterSeconds};
 use crate::integrations::{IntegrationId, IntegrationKind};
 use crate::provider::quota::{
-    Capacity, CapacityState, Freshness, NativeAmount, Pool, TelemetryClass, UNKNOWN_TELEMETRY,
+    Capacity, CapacityBandThresholds, CapacityState, Freshness, NativeAmount, Pool, TelemetryClass,
+    UNKNOWN_TELEMETRY,
 };
 use crate::provider::registry::{ResourceKind, registry};
 use crate::provider::telemetry::{
@@ -390,7 +391,7 @@ pub fn report(
     for kind in registry() {
         let state = observed_capacity(&kind, effective, telemetry, options.now_unix);
         let age_limit = stale_after(&kind, effective);
-        render_resource(&mut out, &kind, &state, age_limit, options);
+        render_resource(&mut out, &kind, &state, age_limit, effective, options);
         out.push('\n');
     }
 
@@ -398,11 +399,60 @@ pub fn report(
     out
 }
 
+/// What [`report`] prints, as structured data instead of text — capability
+/// map line 1679: *"allow the API to retrieve current resource capacity and
+/// quota telemetry."* The bin crate's control-API `resource_capacity`
+/// request (`api::unix::resource_capacity`, declared from `main.rs`) is the
+/// production caller; see `tests/capacity_api.rs` for the same guarantee
+/// `tests/provider_discovery.rs` already holds [`report`] to, driven over
+/// the real socket instead of a fixture.
+///
+/// A pure function of the same three inputs [`report`] takes, so the two
+/// can never disagree about what Glasshouse believes: both fold the same
+/// [`observed_capacity`] over the same [`registry`].
+pub fn capacity_json(
+    effective: &EffectiveConfig<'_>,
+    telemetry: &GatheredTelemetry,
+    now_unix: i64,
+) -> serde_json::Value {
+    let resources: Vec<serde_json::Value> = registry()
+        .into_iter()
+        .map(|kind| {
+            let state = observed_capacity(&kind, effective, telemetry, now_unix);
+            let thresholds = capacity_band_thresholds_for(&kind, effective);
+            let capacity = state.remaining_capacity_score().map(|score| {
+                let band = score.band(&thresholds);
+                let reset_seconds = state.seconds_until_reset(now_unix);
+                serde_json::json!({
+                    "dimension": score.dimension(),
+                    "percent": score.percent().render(),
+                    "band": band.as_str(),
+                    "score": score.fraction(),
+                    "routing_score": score.routing_fraction(),
+                    "effective": score.effective(reset_seconds),
+                    "seconds_until_reset": reset_seconds,
+                })
+            });
+            serde_json::json!({
+                "resource": kind.label(),
+                "quota_shape": state.model().as_str(),
+                "locality": state.locality().as_str(),
+                "limited_by": describe_limits(&state),
+                "telemetry_class": state.telemetry_class_str(),
+                "last_observed_at_unix": state.last_observed_at_unix(),
+                "capacity": capacity,
+            })
+        })
+        .collect();
+    serde_json::json!({ "resources": resources })
+}
+
 fn render_resource(
     out: &mut String,
     kind: &ResourceKind,
     state: &CapacityState,
     age_limit: QuotaStaleAfterSeconds,
+    effective: &EffectiveConfig<'_>,
     options: ReportOptions,
 ) {
     let _ = writeln!(out, "{}", kind.label());
@@ -457,6 +507,12 @@ fn render_resource(
         }
     }
 
+    // Phase 32D — capability map lines 1259-1268: the normalized 0.0..=1.0
+    // score, the band a routing policy may read off it, and the effective
+    // value a known reset adjusts. Never in place of the native-unit lines
+    // above — line 1268 — only beside them.
+    render_capacity_band(out, kind, state, effective, options);
+
     let mut shown = 0usize;
     for (label, pool) in state.pools() {
         if !options.verbose && !pool_has_a_reading(pool) {
@@ -474,6 +530,60 @@ fn render_resource(
 
     render_rate_ceilings(out, state, options);
     render_windows(out, state, age_limit, options);
+}
+
+/// This resource's [`CapacityBandThresholds`] — the shared defaults, or a
+/// user's own overrides, with a `DirectProvider`'s own protected reserve
+/// percentage folded in where it has one — capability map line 1288, design
+/// decision #6.
+fn capacity_band_thresholds_for(
+    kind: &ResourceKind,
+    effective: &EffectiveConfig<'_>,
+) -> CapacityBandThresholds {
+    let thresholds = effective.capacity_band_thresholds().value;
+    match kind {
+        ResourceKind::DirectProvider { provider, .. } => {
+            thresholds.with_resource_reserve(effective.reserve_percent(provider).value.get())
+        }
+        _ => thresholds,
+    }
+}
+
+/// Capability map lines 1259-1268: the normalized score, the band a routing
+/// policy may read off it, and the reset-adjusted effective value — never
+/// replacing the native-unit lines [`render_resource`] already printed,
+/// only joining them.
+fn render_capacity_band(
+    out: &mut String,
+    kind: &ResourceKind,
+    state: &CapacityState,
+    effective: &EffectiveConfig<'_>,
+    options: ReportOptions,
+) {
+    let Some(score) = state.remaining_capacity_score() else {
+        let _ = writeln!(
+            out,
+            "  band            {UNKNOWN_TELEMETRY} — no dimension normalizes to a score yet"
+        );
+        return;
+    };
+    let thresholds = capacity_band_thresholds_for(kind, effective);
+    let band = score.band(&thresholds);
+    let reset_seconds = state.seconds_until_reset(options.now_unix);
+    let effective_value = score.effective(reset_seconds);
+    let reset_note = match reset_seconds {
+        Some(seconds) => format!(", reset in {seconds}s"),
+        None => String::new(),
+    };
+    let _ = writeln!(
+        out,
+        "  band            {band} (score {:.2}, routing {:.2}, effective {:.2}{reset_note}; \
+         bound by {})",
+        score.fraction(),
+        score.routing_fraction(),
+        effective_value,
+        score.dimension()
+    );
 }
 
 /// Capability map lines 1210 and 1211: when this resource's quota window
@@ -1016,7 +1126,8 @@ fn render_usage_probe(
 mod tests {
     use super::*;
     use crate::config::{
-        BudgetPeriod, MonetaryBudget, ProjectConfig, ProviderConfig, QuotaOverride, UserConfig,
+        BudgetPeriod, MonetaryBudget, PremiumReservePercent, ProjectConfig, ProviderConfig,
+        QuotaOverride, UserConfig,
     };
     use crate::provider::quota::{Capacity, NativeAmount, Reading, ReadingSource};
     use crate::provider::telemetry::{GatewayQuotaCache, RateLimitHeaders};
@@ -1201,6 +1312,110 @@ mod tests {
         assert!(
             !row.contains("capacity        unknown"),
             "the gathered reading must have reached the report: {row}"
+        );
+    }
+
+    // --- Phase 32D/32F, through the same production rendering function ----
+
+    /// Capability map lines 1259-1268, at the actual rendering function
+    /// `main.rs::resources_report` calls: a real gateway-captured reading
+    /// produces a real band line, not just a percentage.
+    #[test]
+    fn a_persisted_gateway_reading_reaches_the_rendered_band_line() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayQuotaCache::at(dir.path());
+        cache.store(
+            "anyrouter",
+            &RateLimitHeaders::read(vec![
+                ("ratelimit-limit", "300"),
+                ("ratelimit-remaining", "297"),
+            ]),
+            OBSERVED,
+        );
+
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let telemetry = GatheredTelemetry::new().gather_gateway_quota(&cache);
+        let row = anyrouter_row(&report(&effective, &telemetry, options()));
+
+        assert!(
+            row.contains("band            plenty"),
+            "297/300 = 99% must fall in the default Plenty band: {row}"
+        );
+        assert!(row.contains("bound by requests"), "{row}");
+    }
+
+    /// §35: mutate the call, not the callee. Deleting `render_capacity_band`'s
+    /// call inside `render_resource` must make a named test go red — proven
+    /// here by asserting the line's own presence, so the mutation described
+    /// in the package report (removing that one call) fails exactly this
+    /// test rather than only a lower-level unit test that enters below the
+    /// production rendering path.
+    #[test]
+    fn the_band_line_is_present_for_every_registry_resource_even_with_no_score() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let rendered = report(&effective, &GatheredTelemetry::new(), options());
+        let resource_blocks = rendered.split("\n\n").filter(|block| {
+            block
+                .lines()
+                .any(|line| line.trim_start().starts_with("quota shape"))
+        });
+        let mut checked = 0usize;
+        for block in resource_blocks {
+            assert!(
+                block
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("band")),
+                "every resource block must print a band line, even `unknown`: {block}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "expected at least one resource block in:\n{rendered}"
+        );
+    }
+
+    /// Capability map line 1288: a provider's own protected reserve
+    /// percentage — configured, not hardcoded — narrows where the Reserve
+    /// band begins for that resource specifically, reached through the same
+    /// `EffectiveConfig` every other quota field in this file already goes
+    /// through.
+    #[test]
+    fn a_providers_own_reserve_percentage_narrows_its_reserve_band() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayQuotaCache::at(dir.path());
+        // 40% remaining: Plenty by the global defaults (>= 70% is Plenty,
+        // but 40% falls in Healthy — see CapacityBandThresholds::DEFAULT),
+        // and Reserve once this provider protects 50% of its own capacity.
+        cache.store(
+            "anyrouter",
+            &RateLimitHeaders::read(vec![
+                ("ratelimit-limit", "100"),
+                ("ratelimit-remaining", "40"),
+            ]),
+            OBSERVED,
+        );
+        let telemetry = GatheredTelemetry::new().gather_gateway_quota(&cache);
+
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let without_override = anyrouter_row(&report(&effective, &telemetry, options()));
+        assert!(
+            without_override.contains("band            healthy"),
+            "{without_override}"
+        );
+
+        let mut quota = QuotaOverride::default();
+        quota.set_reserve_percent(Some(PremiumReservePercent::try_from(50u16).unwrap()));
+        let user = user_with_anyrouter(quota);
+        let effective = EffectiveConfig::new(&user, None);
+        let with_override = anyrouter_row(&report(&effective, &telemetry, options()));
+        assert!(
+            with_override.contains("band            reserve"),
+            "a 50% protected reserve must move a 40%-remaining resource into Reserve: \
+             {with_override}"
         );
     }
 

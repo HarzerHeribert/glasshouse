@@ -287,6 +287,7 @@ fn dispatch(
                 Err(err) => Response::err(api_error(err)),
             }
         }
+        Request::ResourceCapacity => resource_capacity(runtime),
         Request::QueryMemory {
             query,
             history,
@@ -400,6 +401,38 @@ fn spawn_session(
         Ok(_) => Response::ok(serde_json::json!({ "session": record.id.as_str() })),
         Err(err) => Response::err(err),
     }
+}
+
+/// Current resource capacity and quota telemetry — capability map line 1679.
+///
+/// Mirrors `main.rs`'s own `resources_report` for its non-probe path: reads
+/// the user's configuration, folds in the persisted gateway-quota cache
+/// [`crate::api`]'s door doc comment already promises this project shares
+/// with every other process, and asks each installed harness for its own
+/// status the same cheap, no-quota way `glasshouse resources` does with no
+/// flags. Never makes a network request — this request carries no provider
+/// name to probe, unlike the CLI's own `--probe`.
+fn resource_capacity(runtime: &Runtime) -> Response {
+    let user = match UserConfig::load(runtime.paths()) {
+        Ok(user) => user,
+        Err(err) => return Response::err(err),
+    };
+    let project_config = match config::load_project_config(runtime.project()) {
+        Ok(project_config) => project_config,
+        Err(err) => return Response::err(err),
+    };
+    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+
+    let telemetry = glasshouse::provider::resources::GatheredTelemetry::new()
+        .gather_gateway_quota(&glasshouse::provider::telemetry::GatewayQuotaCache::new(
+            runtime.paths(),
+        ))
+        .gather_harness_status(now_unix);
+
+    Response::ok(glasshouse::provider::resources::capacity_json(
+        &effective, &telemetry, now_unix,
+    ))
 }
 
 /// Search this project's durable memory — box 10.

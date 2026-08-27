@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`██████████████████░░░░░░░░░░░░░░░░░░░░░░` 592 / 1280 mandatory capabilities (46%)
+`██████████████████░░░░░░░░░░░░░░░░░░░░░░` 604 / 1280 mandatory capabilities (47%)
 
 <details>
 <summary>Per-phase breakdown (22 of 104 phases complete)</summary>
@@ -89,9 +89,9 @@ the authoritative specification and tracks what is done.
 | Phase 32A — Unified quota and capacity model | 11/21 |
 | Phase 32B — Quota telemetry sources | 13/14 |
 | Phase 32C — Subscription capacity estimation | 0/12 |
-| Phase 32D — Normalized remaining-capacity score | 0/12 |
+| Phase 32D — Normalized remaining-capacity score | 10/12 |
 | Phase 32E — Burn rate and exhaustion forecasting | 0/10 |
-| Phase 32F — Protected quota reserve | 0/8 |
+| Phase 32F — Protected quota reserve | 1/8 |
 | Phase 32G — Provider-aware request-cost estimation | 0/10 |
 | Phase 33 — Resource health | 0/15 |
 | Phase 33A — Routing evidence ledger | 0/15 |
@@ -115,7 +115,7 @@ the authoritative specification and tracks what is done.
 | Phase 39 — Gateway-backed disposable jobs | 0/9 |
 | Phase 40 — Fresh-session handoff | 0/9 |
 | Phase 41 — Project overview | 9/15 |
-| Phase 42 — External control API | 10/13 |
+| Phase 42 — External control API | 11/13 |
 | Phase 43 — MCP surface for orchestrators | 0/10 |
 | Phase 44 — User control and override | 0/9 |
 | Phase 45 — Failure handling | 7/9 |

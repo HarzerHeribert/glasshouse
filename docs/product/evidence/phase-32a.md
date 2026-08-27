@@ -563,3 +563,35 @@ limit above, which this package did not verify and is not this package's
 to verify). The four boxes stay unticked here, per the packet's own
 instruction; this section states the evidence and the orchestrator's call
 is the tick.
+
+---
+
+## Appended by PACKET-PHASE-32D, 2026-08-27 — the normalized score built on
+this module, and both ways its own packet's hypothesis could have been wrong
+
+`crates/glasshouse/src/provider/quota.rs::CapacityState::remaining_capacity_score`,
+`RemainingCapacityScore`, `CapacityBand`/`CapacityBandThresholds`, and the
+Phase 32F reserve-spend policy are all built directly on this module's own
+`CapacityState::normalized`, `Pool`, and `Percentage` — no new module, no
+edit to anything this file already recorded as closed. Full account in
+`phase-32d.md` and `phase-32f.md`; summarised against this file's own two
+open questions about `CapacityState::normalized`:
+
+**Does the existing minimum exclude the user's spending budget or
+credits?** Checked, not assumed: no. `CapacityState::pools()` already
+listed both `credits` and `user budget` since this file's own original
+package. The concern named in `PACKET-PHASE-32D`'s own hypothesis section
+did not materialize.
+
+**Does `Percentage`'s `Ord` do the right thing when an `Estimated` 5%
+competes with an `Exact` 5%?** Checked: yes, and deliberately — the type's
+own doc comment already states *"where the two tie, the one Glasshouse can
+defend is the one to report,"* and an exact reading sorts as the tighter
+one at a tied percentage. A router should prefer the exact reading at a
+tie, and this module already does.
+
+Both checks came back negative — no defect, no widening needed beyond what
+`PACKET-PHASE-32D` itself built for line 1261 (short-window request
+pressure, genuinely invisible to the old minimum). Recorded here because a
+killed hypothesis that killed nothing is still the finding practice §44
+asks for, not a reason to skip stating it.
