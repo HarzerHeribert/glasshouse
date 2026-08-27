@@ -122,7 +122,19 @@ class PacketFixture:
     """A minimal packet file built from YOURS/FORBIDDEN path lists."""
 
     def __init__(self, tmp: Path, name: str, yours: list[str], forbidden: list[str] | None = None, boxes: list[str] | None = None):
-        lines = ["# PACKET", "", "## FILE PARTITION", "", "**YOURS**", ""]
+        # These fixtures exercise the partition and box-quoting checks, not
+        # Phase -1, so they take the exemption the feasibility check offers —
+        # which also keeps that escape hatch exercised on every run.
+        lines = [
+            "# PACKET",
+            "",
+            "FEASIBILITY: not applicable — fixture for the partition checks",
+            "",
+            "## FILE PARTITION",
+            "",
+            "**YOURS**",
+            "",
+        ]
         lines += [f"    {p}" for p in yours]
         if forbidden:
             lines += ["", "**FORBIDDEN**", ""]
@@ -131,6 +143,68 @@ class PacketFixture:
             lines += ["", "Quoted from the map:", ""]
             lines += [f"    {b}" for b in boxes]
         self.path = write(tmp / name, "\n".join(lines) + "\n")
+
+
+class FeasibilityCheckTests(unittest.TestCase):
+    """Phase -1: a packet must show its mechanism can connect end to end.
+
+    The rule exists because two packets on 2026-08-28 were dispatched on
+    structurally impossible premises and cost roughly $30 of worker compute that
+    no downstream assurance optimization could recover. See
+    `docs/process/assurance-economics.md`.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def _findings(self, body: str):
+        path = write(self.tmp / "p.md", body)
+        findings = []
+        vr.check_feasibility_block([vr.Packet(str(path))], findings)
+        return findings
+
+    def test_a_packet_with_no_feasibility_block_is_refused(self):
+        self.assertEqual(len(self._findings("# PACKET\n\n**YOURS**\n\n    a.rs\n")), 1)
+
+    def test_all_four_links_named_passes(self):
+        body = (
+            "# PACKET\n\n## FEASIBILITY\n\n"
+            "Input producer: src/a.rs::Thing\n"
+            "Caller field: Thing.harness\n"
+            "Propagation path: Thing.harness -> Req.harness\n"
+            "Consumer: src/b.rs::score\n"
+        )
+        self.assertEqual(self._findings(body), [])
+
+    def test_a_missing_link_is_named_in_the_finding(self):
+        body = (
+            "# PACKET\n\n## FEASIBILITY\n\n"
+            "Input producer: src/a.rs::Thing\n"
+            "Caller field: Thing.harness\n"
+            "Consumer: src/b.rs::score\n"
+        )
+        findings = self._findings(body)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("propagation", findings[0].message)
+
+    def test_the_heading_spelling_this_project_actually_uses_is_accepted(self):
+        """The first version of this check refused the packet it was written for.
+
+        Packets head the block `## FEASIBILITY — Phase -1, verified before
+        dispatch`; a matcher accepting only `FEASIBILITY:` and `**FEASIBILITY**`
+        rejected it. Pinned so the matcher cannot narrow again.
+        """
+        body = (
+            "# PACKET\n\n## FEASIBILITY — Phase -1, verified before dispatch\n\n"
+            "Input producer: x\nCaller field: y\nPropagation path: z\nConsumer: w\n"
+        )
+        self.assertEqual(self._findings(body), [])
+
+    def test_an_exemption_must_state_a_reason(self):
+        bare = "# PACKET\n\nFEASIBILITY: not applicable\n"
+        with_reason = "# PACKET\n\nFEASIBILITY: not applicable — an inventory package\n"
+        self.assertEqual(len(self._findings(bare)), 1)
+        self.assertEqual(self._findings(with_reason), [])
 
 
 class ValidateRoundChecksTests(unittest.TestCase):
@@ -444,14 +518,25 @@ class RealAcceptanceTests(unittest.TestCase):
     @unittest.skipUnless(
         _packets_present("packet-round-tools.md"),
         "packet fixture is not on this machine (.agent-runtime is gitignored)")
-    def test_real_round_tools_packet_passes(self):
+    def test_a_real_dispatched_packet_passes(self):
+        """A packet this project actually dispatches must clear every check.
+
+        Pointed at the current exemplar rather than `packet-round-tools.md`,
+        which predates Phase -1 and carries no FEASIBILITY block. That older
+        packet failing is the rule working, not a regression — but an
+        acceptance test asserting "a real packet passes" has to name one that
+        is real *today*.
+        """
+        packet = SIBLING_GLASSHOUSE / ".agent-runtime" / "packet-gateway-evidence.md"
+        if not packet.exists():
+            self.skipTest("the current exemplar packet is not on this machine")
         result = subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts" / "validate_round.py"),
              "--map", str(SIBLING_GLASSHOUSE / "docs" / "product" / "capability-map.md"),
-             ".agent-runtime/packet-round-tools.md"],
+             ".agent-runtime/packet-gateway-evidence.md"],
             capture_output=True, text=True, cwd=str(SIBLING_GLASSHOUSE),
         )
-        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_real_extraction_model_seam_reported(self):
         result = subprocess.run(

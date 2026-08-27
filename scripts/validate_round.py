@@ -11,7 +11,23 @@ names the offending file and line the first time any of the following fails:
  2. every YOURS path exists on disk, or is marked `(new)`;
  3. every quoted `☐`/`☑` box line matches the capability map verbatim;
  4. a packet's own FORBIDDEN list does not also claim a path in its own YOURS;
- 5. every YOURS block is non-empty.
+ 5. every YOURS block is non-empty;
+ 6. every packet carries a FEASIBILITY block — assurance-economics.md's Phase -1.
+
+Check 6 is the cheapest one here and the one with the largest measured payoff.
+On 2026-08-28 two packets were dispatched whose premises were structurally
+impossible: the pairing prior was claimed ready to wire into a caller with no
+harness field, and the gateway was claimed able to record turn timings it is
+designed not to see. Both workers executed correctly, both produced mechanisms
+nothing could use, and roughly $30 of worker compute was unrecoverable. Neither
+needed a seam query -- each needed one look at the type producing the input and
+one at the field on the caller meant to carry it.
+
+So a packet must name, for every claimed input, all of: the producing
+type/symbol, the caller field or state that holds it, the propagation path, and
+the consumer that observes it -- each as something findable in current
+production code. A packet that cannot is `premise-invalid` and is returned
+rather than dispatched.
 
 Exits 0, printing a clean summary, only when every packet passes every check.
 """
@@ -294,6 +310,67 @@ def check_no_self_contradiction(packets: list[Packet], findings: list[Finding]) 
                     )
 
 
+def check_feasibility_block(packets: list[Packet], findings: list[Finding]) -> None:
+    """Phase -1: a packet must show its mechanism can connect end to end.
+
+    Deliberately structural rather than semantic. This cannot tell a real
+    propagation path from a plausible-sounding one -- only a reader can -- so it
+    checks that the orchestrator was made to write one down at all. That is the
+    step that did not happen twice on 2026-08-28, and writing the four links out
+    is what forces the two greps that would have caught both.
+
+    A packet may declare itself exempt with `FEASIBILITY: not applicable` plus a
+    reason on the same line -- an investigation or inventory package claims no
+    mechanism and has nothing to connect. The escape hatch is deliberate and
+    narrow: it must state a reason, so an exemption is a sentence somebody wrote
+    rather than an omission nobody noticed.
+    """
+    required = ("producer", "caller", "propagation", "consumer")
+    for p in packets:
+        text = "\n".join(p.lines)
+        # Allow the three spellings packets actually use: a markdown heading
+        # (`## FEASIBILITY - ...`), a bold label (`**FEASIBILITY**`), and a
+        # plain `FEASIBILITY:` line. The first version of this check accepted
+        # only the last two and refused the very packet it was written for.
+        header = re.search(
+            r"^#{0,4}\s*\**FEASIBILITY\**\s*(?::|[-\u2014\u2013]|$)(.*)$",
+            text,
+            re.M | re.I,
+        )
+        if header is None:
+            findings.append(
+                Finding(
+                    "feasibility-declared",
+                    f"{p.path} has no FEASIBILITY block. Name the producing "
+                    f"type, the caller field, the propagation path and the "
+                    f"consumer for every claimed input, or declare "
+                    f"`FEASIBILITY: not applicable -- <reason>`.",
+                )
+            )
+            continue
+        if "not applicable" in header.group(1).lower():
+            if len(header.group(1).strip()) < len("not applicable") + 8:
+                findings.append(
+                    Finding(
+                        "feasibility-declared",
+                        f"{p.path} declares FEASIBILITY not applicable without a "
+                        f"reason; an exemption has to be a sentence.",
+                    )
+                )
+            continue
+        body = text[header.end():].lower()
+        missing = [word for word in required if word not in body]
+        if missing:
+            findings.append(
+                Finding(
+                    "feasibility-declared",
+                    f"{p.path}'s FEASIBILITY block never names: "
+                    f"{', '.join(missing)}. Phase -1 needs all four links, each "
+                    f"findable in current production code.",
+                )
+            )
+
+
 def check_yours_non_empty(packets: list[Packet], findings: list[Finding]) -> None:
     for p in packets:
         if not p.yours:
@@ -309,6 +386,7 @@ def validate(packet_paths: list[str], map_path: str) -> list[Finding]:
     packets = [Packet(path) for path in packet_paths]
     findings: list[Finding] = []
     check_yours_non_empty(packets, findings)
+    check_feasibility_block(packets, findings)
     check_partitions_disjoint(packets, findings)
     check_no_self_contradiction(packets, findings)
     check_yours_paths_exist(packets, findings)

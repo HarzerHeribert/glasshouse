@@ -13,10 +13,11 @@ working as the primary orchestrator, read these files completely in this order:
 8. `docs/product/design-decisions.md`
 9. `docs/process/orchestration-practice.md`
 10. `docs/process/orchestration-measurements.md`
+11. `docs/process/assurance-economics.md`
 
 ## If you are a worker, this list is not yours
 
-The ten documents above are the **orchestrator's** reading, and reading them
+The eleven documents above are the **orchestrator's** reading, and reading them
 costs about 175,000 tokens. A worker that reads them spends more context
 orienting than working — measured: a four-box package used 288k tokens, over
 half of it on documents it did not need.
@@ -56,6 +57,15 @@ at a time has already cost this project a session.
 `docs/process/orchestration-measurements.md` is a standing inherited experiment
 measuring which model tier closes capability boxes at what cost. Add every
 batch to its ledger and answer one of its open questions when you can.
+
+`docs/process/assurance-economics.md` is how verification compute is spent, and
+its **Phase −1 is a hard gate you owe before every dispatch**: a packet must
+demonstrate, from current production code, that each claimed input has a
+producer, a caller that carries it, a propagation path, and a consumer that can
+observe it. **If one link cannot be shown, do not dispatch — return the packet as
+premise-invalid.** Two packets on 2026-08-28 failed this and cost ~$30 of worker
+compute that no downstream optimization could recover. `scripts/validate_round.py`
+enforces it, so the check is free.
 
 **Every worker gets a nagging watch, armed in the same turn it is started:**
 `Monitor(command: "scripts/worker-watch.sh <name> <surface> <report>", persistent: true)`.
