@@ -23,15 +23,22 @@ from pathlib import Path
 WATCH = Path(__file__).resolve().parents[1] / "worker-watch.sh"
 
 
-def busy_re() -> str:
+def _re(name: str) -> str:
     for line in WATCH.read_text().splitlines():
-        if line.startswith("BUSY_RE="):
-            return line[len("BUSY_RE="):].strip().strip("'")
-    raise AssertionError("worker-watch.sh no longer defines BUSY_RE")
+        if line.startswith(f"{name}="):
+            return line[len(name) + 1:].strip().strip("'")
+    raise AssertionError(f"worker-watch.sh no longer defines {name}")
+
+
+def is_busy(screen: str) -> bool:
+    """The script's own order: a completion line beats every busy signal."""
+    if re.search(_re("DONE_RE"), screen):
+        return False
+    return bool(re.search(_re("BUSY_RE"), screen))
 
 
 BUSY = {
-    "star spinner with an elapsed timer (the 2026-08-27 miss)":
+    "star spinner with an elapsed timer (the first 2026-08-27 miss)":
         "✶ Photosynthesizing… (1h 34m 48s · almost done thinking with high effort)",
     "the other star spinner, token counter":
         "✽ Discombobulating… (11m 7s · ↓ 34.9k tokens)",
@@ -46,6 +53,14 @@ BUSY = {
 }
 
 IDLE = {
+    "the completion line, which uses the SAME glyph as the spinner "
+    "(the third 2026-08-27 miss: two finished workers unreported for 35 and 47 minutes)":
+        "✻ Churned for 35m 7s · done 8:42 AM\n"
+        "❯ \n"
+        "  Opus 5 · high  · worker · ~2 · Glasshouse Windows …   5h 10% 4h15m · 7d 63%\n"
+        "  ████████▊░░░░░░░░░░░░░░░░╎░░░ 20% · 203k/1M                  47m · ~$9.40",
+    "a completion line for a longer run":
+        "✽ Worked for 2h 4m 9s · done 11:15 AM\n❯ ",
     "a finished pane, prompt and status bar":
         "⏺ Done. Report written.\n"
         "❯ \n"
@@ -63,19 +78,18 @@ IDLE = {
 
 
 def main() -> int:
-    pattern = busy_re()
     failures = []
 
     for why, screen in BUSY.items():
-        if not re.search(pattern, screen):
+        if not is_busy(screen):
             failures.append(f"should be BUSY but reads as idle — {why}\n    {screen!r}")
 
     for why, screen in IDLE.items():
-        if re.search(pattern, screen):
-            hit = re.search(pattern, screen)
+        if is_busy(screen):
+            hit = re.search(_re("BUSY_RE"), screen)
             failures.append(
                 f"should be IDLE but reads as busy — {why}\n"
-                f"    matched {hit.group(0)!r} in {screen!r}"
+                f"    matched {hit.group(0) if hit else '?'!r} in {screen!r}"
             )
 
     # The announcement has to carry the pane's own last line. Both false idles

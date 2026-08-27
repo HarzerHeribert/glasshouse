@@ -32,9 +32,14 @@ fi
 
 NAME="$1"
 MARKER="$IDLE_DIR/$NAME"
-if [ -f "$MARKER" ]; then
-  rm -f "$MARKER"
+# The worker's own done signal is cleared here too. Leaving it would make the
+# next watch armed for the same name fire instantly on a stale file, which is
+# how a "finished" notification arrives for work that has not started.
+DONE_FILE="$REPO/.agent-runtime/done/$NAME"
+
+if [ -f "$MARKER" ] || [ -f "$DONE_FILE" ]; then
+  rm -f "$MARKER" "$DONE_FILE"
   echo "acknowledged: $NAME"
 else
-  echo "nothing pending for '$NAME' (already acknowledged, or never went idle)"
+  echo "nothing pending for '$NAME' (already acknowledged, or never reported done)"
 fi

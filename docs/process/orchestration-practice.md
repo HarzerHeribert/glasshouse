@@ -2190,3 +2190,50 @@ window, and proposed the watchdog rather than silently working around the ban.
 A freshness freeze is a **stop-and-report**, never a stop-and-abandon. Say so in
 the packet, or a worker will treat the forbidden file as a dead end and quietly
 solve a smaller problem.
+
+## §62 — the harness already emits the event; stop parsing its user interface
+
+`worker-watch.sh` decided a worker had finished by matching a pattern against
+its cmux pane. On one day that pattern was wrong **three times**:
+
+1. an API retry countdown drew no spinner and no counter, so a working worker
+   read as finished;
+2. a spinner glyph was missing from the list, so a working worker read as
+   finished — **and the fix for (1) had been to add one string, which is
+   exactly why there was a (2)**;
+3. the glyphs added to fix (2) turned out to be the same glyphs the harness
+   prints in its **completion** line (`✻ Churned for 35m 7s · done 8:42 AM`),
+   so two *finished* workers read as busy and sat unreported for 35 and 47
+   minutes. The user noticed before the orchestrator did.
+
+The third is the worst of the three because it fails **silently**. A false idle
+announces itself and gets checked; a false busy says nothing at all, and the
+watch that exists so nobody has to poll becomes the reason nobody polls.
+
+Each fix was a better guess about a user interface that was never meant to be
+parsed, and cmux exposes no activity state to ask instead. **The harness does.**
+Claude Code has a `Stop` hook; `docs/process/harness-hook-protocol.md` had
+already normalized it as `turn.completed` and already said it is advisory —
+a turn ending means the model stopped, not that the work is right. That document
+existed before any of these three misses, and the mechanism was already wired:
+`.claude/settings.json` carried a `PreToolUse` hook the whole time.
+
+`scripts/hooks/worker-turn-ended.sh` is now registered on `Stop`. It derives the
+worker's name from its worktree directory, so nothing per-worker is configured;
+it locates the main checkout through `git worktree list`, so any worktree can
+find where the watch is looking; and it **exits 0 in every case, prints nothing,
+and refuses to fire in the main checkout** — an orchestrator that signals its own
+completion acknowledges work nobody did.
+
+The pane heuristic stays as a **fallback**, and the notification says which
+signal fired, because they mean different things: *the worker signalled* means
+the turn ended, while *the pane went quiet* means only that nothing is drawing —
+a crash, a kill, and a worker waiting on a question all look the same.
+`scripts/worker-done.sh` also stays, for a richer status and for harnesses with
+no hook mechanism at all — **Antigravity declares none**, which is the whole
+reason a fallback has to exist rather than being tidied away.
+
+**The transferable rule: before writing a parser for another program's output,
+find out what that program will tell you if you ask.** Three fixes to a
+heuristic cost more than reading the protocol document this project had already
+written about exactly this event.
