@@ -16,6 +16,10 @@
 
 use std::time::{Duration, Instant};
 
+use glasshouse::routing::classify::{
+    self, ClassificationSource, Complexity, Confidence, TaskClassification, WarmContextValue,
+    WorkloadTier,
+};
 use glasshouse::routing::disposable::{
     DisposableCandidate, DisposableRouting, JobKind, MeteredUse, NoResource,
 };
@@ -779,5 +783,106 @@ mod policy_divergence {
             "the two policy classes must not converge on the same model from the same input — \
              that is Phase 9I line 533's actual, behavioural content"
         );
+    }
+}
+
+/// Independent tests of `glasshouse::routing::classify` (Phase 35), against
+/// its own doc-comment claims rather than `classify.rs`'s unit tests — the
+/// same split this file's header describes for the two routing policies.
+mod classification {
+    use super::*;
+
+    /// `classify_heuristically`'s doc comment claims it is "a pure function
+    /// of `request_text`: same text in, same `TaskClassification` out,
+    /// always". Checked from outside the module, on inputs the module's own
+    /// unit tests do not use.
+    #[test]
+    fn classify_heuristically_is_deterministic() {
+        for text in [
+            "run the migration and fix the fallout",
+            "what is a race condition?",
+            "take a screenshot of the settings page",
+            "",
+            "asdkjfh",
+        ] {
+            assert_eq!(
+                classify::classify_heuristically(text),
+                classify::classify_heuristically(text),
+                "classify_heuristically({text:?}) produced two different answers for the same \
+                 input"
+            );
+        }
+    }
+
+    /// The module doc comment claims `classify_heuristically` "makes none"
+    /// of the network calls `mod@super::super` forbids its two policy
+    /// classes from making. Same scan idiom as
+    /// `no_routing_policy_can_make_a_request` above, extended to this
+    /// module.
+    #[test]
+    fn the_classifier_cannot_make_a_request_either() {
+        let source = include_str!("../src/routing/classify.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split always yields at least one part")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for forbidden in ["ureq", "TcpStream", "reqwest", "std::net"] {
+            assert!(
+                !source.contains(forbidden),
+                "routing/classify.rs names `{forbidden}`: a classifier that can open a \
+                 connection is not the lightweight, model-optional mechanism Phase 35 asks for"
+            );
+        }
+    }
+
+    /// An empty request is the sharpest boundary this heuristic has: no
+    /// keyword list can match it, so it must land exactly where an
+    /// unmatched, ambiguous request lands — `Confidence::Low`, escalated by
+    /// the conservative accessor — never a panic and never a confident
+    /// guess.
+    #[test]
+    fn an_empty_request_is_low_confidence_not_a_panic_or_a_confident_guess() {
+        let c = classify::classify_heuristically("");
+        assert_eq!(c.confidence(), Confidence::Low);
+        assert_eq!(c.conservative_workload_tier(), WorkloadTier::Standard);
+    }
+
+    /// `classify`'s doc comment claims the caller's `model_output` is
+    /// "never called for here" — it is a plain `Option` the function either
+    /// returns as-is or ignores in favour of the heuristic. Proven by a
+    /// model answer that actively disagrees with what the heuristic would
+    /// say about the same text, so a bug that merged the two rather than
+    /// picking one outright would be visible.
+    #[test]
+    fn classify_returns_the_model_answer_unmodified_even_when_it_disagrees_with_the_heuristic() {
+        let text = "run cargo test and fix whatever fails";
+        let heuristic_only = classify::classify_heuristically(text);
+        assert_eq!(heuristic_only.workload_tier(), WorkloadTier::Heavy);
+
+        let disagreeing_model_answer = TaskClassification::new(
+            false,
+            false,
+            false,
+            false,
+            Complexity::Trivial,
+            false,
+            WorkloadTier::Leaf,
+            true,
+            WarmContextValue::PreferStrongerCold,
+            Confidence::High,
+            ClassificationSource::Model {
+                label: "disagreeing-test-model".to_owned(),
+            },
+        );
+        let result = classify::classify(text, Some(disagreeing_model_answer.clone()));
+        assert_eq!(
+            result, disagreeing_model_answer,
+            "classify() must return the supplied model answer exactly, not a blend of it and \
+             the heuristic"
+        );
+        assert_ne!(result.workload_tier(), heuristic_only.workload_tier());
     }
 }

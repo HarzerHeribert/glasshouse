@@ -12,7 +12,12 @@
 //! 4. That secret credentials never leak into raw cache file bytes on disk.
 
 use glasshouse::harness::Declared;
+use glasshouse::integrations::IntegrationId;
 use glasshouse::provider::cache::{ModelCache, ModelCatalogue, ModelEntry};
+use glasshouse::provider::quota::{
+    Capacity, LimitingUnit, LimitingUnits, NativeAmount, Pool, Reading, ReadingSource, UnitScale,
+};
+use glasshouse::provider::registry::{Locality, ResourceKind, registry};
 use glasshouse::provider::templates;
 
 /// The complete discovery-availability matrix of built-in templates.
@@ -538,5 +543,158 @@ fn a_planted_credential_never_reaches_the_raw_bytes_of_the_cache_file_on_disk() 
     assert!(
         contains_timestamp,
         "positive control: cache file must contain the stored timestamp"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 32A — the capacity model, from outside the crate
+//
+// `provider::quota` is exercised in depth by its own unit tests. What only an
+// integration test can establish is that the model is *usable* through the
+// crate's public API and that it holds across every template the binary
+// actually ships, rather than across the two or three a unit test names.
+// ---------------------------------------------------------------------------
+
+/// Every shipped template classifies into a capacity state, and its quota
+/// shape and that state agree.
+///
+/// The launch path reads `ResourceKind::quota`. If it were computed beside
+/// the capacity model instead of projected out of it, a template could be
+/// described one way by one and another way by the other, and no test of
+/// either half alone would see it.
+#[test]
+fn every_shipped_template_has_a_capacity_state_that_agrees_with_its_quota_shape() {
+    for provider in templates() {
+        let kind = ResourceKind::from_direct_provider(&provider.name);
+        let capacity = kind.capacity();
+        assert_eq!(
+            kind.quota(),
+            capacity.model(),
+            "`{}` has a quota shape its own capacity state disagrees with",
+            provider.name
+        );
+    }
+}
+
+/// The map's own rule: Glasshouse must never invent exact token balances for
+/// opaque subscriptions — and, since nothing reads telemetry yet, it must not
+/// invent one for anything else either.
+///
+/// Asserted over every resource the registry can describe, not a sample:
+/// nothing the shipped binary can classify reports a measured number or a
+/// normalized capacity score, because there is nothing anywhere that could
+/// have measured one.
+#[test]
+fn nothing_the_registry_can_describe_reports_a_capacity_number_it_could_not_have_read() {
+    for kind in registry() {
+        let capacity = kind.capacity();
+        assert!(
+            capacity.normalized().is_none(),
+            "`{}` produced a normalized capacity score with no telemetry behind it",
+            kind.label()
+        );
+        for (pool_label, pool) in capacity.pools() {
+            assert!(
+                !pool.remaining().is_measured(),
+                "`{}` claims a measured `{pool_label}` remaining",
+                kind.label()
+            );
+            assert!(
+                !pool.limit().is_measured(),
+                "`{}` claims a measured `{pool_label}` limit",
+                kind.label()
+            );
+        }
+    }
+}
+
+/// A subscription's token pools are not merely unread — they are unreadable,
+/// and a local server's are not readable either, for a different reason. Both
+/// have to stay distinguishable from the metered case that Phase 32B may
+/// legitimately fill in, or a telemetry pass has no way to know which
+/// resources it must leave alone.
+#[test]
+fn a_subscription_a_local_server_and_a_metered_account_give_three_different_unknowns() {
+    let subscription = ResourceKind::NativeSubscription {
+        harness: IntegrationId::ClaudeCode,
+    }
+    .capacity();
+    let local = ResourceKind::from_direct_provider("ollama").capacity();
+    let metered = ResourceKind::from_direct_provider("openrouter").capacity();
+
+    // Only the metered account's token pool is something telemetry may read.
+    assert!(!subscription.tokens().combined().remaining().is_readable());
+    assert!(!local.tokens().combined().remaining().is_readable());
+    assert!(metered.tokens().combined().remaining().is_readable());
+
+    // And the three unknowns are three different words, not one.
+    let words = [
+        subscription.tokens().combined().remaining().as_str(),
+        local.tokens().combined().remaining().as_str(),
+        metered.tokens().combined().remaining().as_str(),
+    ];
+    assert_eq!(
+        words
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3,
+        "three resource shapes collapsed into fewer than three answers: {words:?}"
+    );
+}
+
+/// Capability map line 1204, from outside: local inference is unlimited in a
+/// way that is not the gateway's answer and not a remote provider's.
+#[test]
+fn local_inference_the_gateway_and_a_remote_provider_answer_the_limiting_unit_question_apart() {
+    let local = ResourceKind::from_direct_provider("llama-cpp").capacity();
+    let gateway = ResourceKind::GlasshouseGateway.capacity();
+    let remote = ResourceKind::from_direct_provider("nous").capacity();
+
+    assert_eq!(*local.limiting_units(), LimitingUnits::None);
+    assert_eq!(local.locality(), Locality::Local);
+
+    assert_eq!(*gateway.limiting_units(), LimitingUnits::Delegated);
+    assert!(gateway.limiting_units().named().is_none());
+
+    assert!(remote.limiting_units().includes(LimitingUnit::Credits));
+    assert_eq!(remote.locality(), Locality::Remote);
+}
+
+/// The public API is enough to build a fully measured capacity state and read
+/// a normalized score back out of it *with the provider's own unit intact* —
+/// which is what Phase 32B will have to do from outside this module.
+#[test]
+fn a_caller_outside_the_crate_can_record_a_reading_and_normalize_it_without_losing_the_unit() {
+    const OBSERVED: i64 = 1_756_000_000;
+    let source = ReadingSource::ProviderEndpoint("https://openrouter.ai/api/v1/credits".to_owned());
+
+    let capacity = ResourceKind::from_direct_provider("openrouter")
+        .capacity()
+        .with_credits(
+            Pool::unmeasured()
+                .with_limit(Capacity::Measured(Reading::new(
+                    NativeAmount::millionths(8_000_000, "USD"),
+                    OBSERVED,
+                    source.clone(),
+                )))
+                .with_remaining(Capacity::Measured(Reading::new(
+                    NativeAmount::millionths(1_200_000, "USD"),
+                    OBSERVED,
+                    source.clone(),
+                ))),
+        );
+
+    let (pool, score) = capacity.normalized().expect("the credit pool was read");
+    assert_eq!(pool, "credits");
+    assert_eq!(score.percent(), 15);
+    assert_eq!(score.native_unit(), "USD");
+    assert_eq!(score.remaining().value().value(), 1_200_000);
+    assert_eq!(score.remaining().value().scale(), UnitScale::Millionths);
+    assert_eq!(score.remaining().source(), &source);
+    // The score did not consume the state it came from.
+    assert_eq!(
+        capacity.credits().remaining().value().unwrap().value(),
+        1_200_000
     );
 }

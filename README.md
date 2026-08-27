@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████░░░░░░░░░░░░░░░░░░░░░░░░░` 492 / 1280 mandatory capabilities (38%)
+`████████████████░░░░░░░░░░░░░░░░░░░░░░░░` 514 / 1280 mandatory capabilities (40%)
 
 <details>
 <summary>Per-phase breakdown (17 of 104 phases complete)</summary>
@@ -86,7 +86,7 @@ the authoritative specification and tracks what is done.
 | Phase 30 — Session context metadata | 0/8 |
 | Phase 31 — Compaction-aware behavior | 0/7 |
 | Phase 32 — Resource registry | 11/12 |
-| Phase 32A — Unified quota and capacity model | 0/21 |
+| Phase 32A — Unified quota and capacity model | 3/21 |
 | Phase 32B — Quota telemetry sources | 0/14 |
 | Phase 32C — Subscription capacity estimation | 0/12 |
 | Phase 32D — Normalized remaining-capacity score | 0/12 |
@@ -114,8 +114,8 @@ the authoritative specification and tracks what is done.
 | Phase 38 — Quota-preserving routing | 0/7 |
 | Phase 39 — Gateway-backed disposable jobs | 0/9 |
 | Phase 40 — Fresh-session handoff | 0/9 |
-| Phase 41 — Project overview | 0/15 |
-| Phase 42 — External control API | 0/13 |
+| Phase 41 — Project overview | 9/15 |
+| Phase 42 — External control API | 10/13 |
 | Phase 43 — MCP surface for orchestrators | 0/10 |
 | Phase 44 — User control and override | 0/9 |
 | Phase 45 — Failure handling | 7/9 |

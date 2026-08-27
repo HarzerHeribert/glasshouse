@@ -135,6 +135,7 @@ pub mod cache;
 pub mod discovery;
 #[cfg(test)]
 pub(crate) mod fixture;
+pub mod quota;
 pub mod registry;
 
 use crate::harness::{Declared, WireProtocol};

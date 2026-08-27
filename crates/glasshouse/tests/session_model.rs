@@ -764,3 +764,452 @@ fn an_explicit_response_profile_flag_overrides_the_launch_profiles_preset() {
         "an explicit `--response-profile` must win over the profile's own preset: {profile}"
     );
 }
+
+/// Phase 42 — the external control API, against the shipped binary.
+///
+/// Every capability the socket door claims is proven the same way this
+/// file proves everything else: run `glasshouse` for real and observe what
+/// actually happened, never by calling the door's handlers in-process. That
+/// is not a stylistic choice here — `mod api` is declared from `main.rs`,
+/// so nothing outside the binary can reach it any other way (see that
+/// module's own doc comment for why).
+#[cfg(unix)]
+mod control_api {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixStream;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const TIMEOUT: Duration = Duration::from_secs(15);
+
+    /// A project with an installed harness that echoes every line it reads,
+    /// forever — alive long enough for a send and, separately, for an
+    /// interrupt to have something real to land on. Every line it receives
+    /// is also appended to `received.log` in the project root, which is how
+    /// these tests observe a machine-sent line without the control API
+    /// itself exposing a way to read scrollback — box 4 is "send", not
+    /// "read back", and this fixture proves the send with a side channel
+    /// the API never touches instead of manufacturing a capability nobody
+    /// asked for.
+    struct ApiFixture {
+        _tmp: tempfile::TempDir,
+        base: PathBuf,
+    }
+
+    impl ApiFixture {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let base = tmp.path().to_path_buf();
+
+            let bin_dir = base.join("bin");
+            std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+            let harness = install_looping_echo_harness(&bin_dir);
+
+            let config_dir = base.join("config");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+            let escaped = harness.display().to_string().replace('\\', "\\\\");
+            std::fs::write(
+                config_dir.join("config.toml"),
+                format!(
+                    "version = 1\n\n[integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n"
+                ),
+            )
+            .expect("write user config");
+
+            Self { _tmp: tmp, base }
+        }
+
+        /// A project root under this fixture's shared data/config roots,
+        /// created fresh. Two calls make two projects sharing one machine,
+        /// exactly as two real projects would.
+        fn project_root(&self, name: &str) -> PathBuf {
+            let root = self.base.join("workspace").join(name);
+            std::fs::create_dir_all(root.join(".git")).expect("create project root");
+            std::fs::canonicalize(&root).expect("canonicalize project root")
+        }
+
+        fn received_log(&self, root: &Path) -> PathBuf {
+            root.join("received.log")
+        }
+    }
+
+    #[cfg(unix)]
+    fn install_looping_echo_harness(bin_dir: &Path) -> PathBuf {
+        let path = bin_dir.join("looping-echo-harness");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\n\
+             echo READY\n\
+             echo $$ > \"$PWD/pid\"\n\
+             touch \"$PWD/ready\"\n\
+             while IFS= read -r line; do\n\
+             echo \"$line\" >> \"$PWD/received.log\"\n\
+             echo \"got:$line\"\n\
+             done\n",
+        )
+        .expect("write looping echo harness");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    /// A running `glasshouse api serve`, killed on drop so a failing
+    /// assertion never leaks a process holding a real pty open.
+    struct Server {
+        child: Child,
+        socket: PathBuf,
+    }
+
+    impl Server {
+        fn start(fixture: &ApiFixture, root: &Path) -> Self {
+            let mut child = Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+                .arg("--scope")
+                .arg(root)
+                .arg("--data-dir")
+                .arg(fixture.base.join("data"))
+                .arg("--config-dir")
+                .arg(fixture.base.join("config"))
+                .arg("api")
+                .arg("serve")
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn `glasshouse api serve`");
+
+            let stderr = child.stderr.take().expect("captured stderr");
+            let mut reader = BufReader::new(stderr);
+            let deadline = Instant::now() + TIMEOUT;
+            let socket = loop {
+                let mut line = String::new();
+                let read = reader.read_line(&mut line).expect("read server stderr");
+                assert!(read > 0, "the server exited before announcing its socket");
+                if let Some(path) = line
+                    .trim_end()
+                    .strip_prefix("glasshouse: control API listening on ")
+                {
+                    break PathBuf::from(path);
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for the server to announce its socket"
+                );
+            };
+
+            Self { child, socket }
+        }
+
+        /// Send one request, and return its parsed response.
+        ///
+        /// A fresh connection per call, exactly as the protocol document
+        /// (`src/api/protocol.rs`) says: one request, one response, then the
+        /// connection closes.
+        fn call(&self, request: serde_json::Value) -> serde_json::Value {
+            let deadline = Instant::now() + TIMEOUT;
+            let mut stream = loop {
+                match UnixStream::connect(&self.socket) {
+                    Ok(stream) => break stream,
+                    Err(err) => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "timed out connecting to the control socket: {err}"
+                        );
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                }
+            };
+            let mut payload = serde_json::to_string(&request).expect("encode request");
+            payload.push('\n');
+            stream.write_all(payload.as_bytes()).expect("write request");
+
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read response");
+            serde_json::from_str(line.trim_end()).expect("parse response")
+        }
+
+        /// Send raw bytes instead of a well-formed request, to prove a
+        /// malformed line gets a clean refusal rather than killing the
+        /// connection or the server.
+        fn call_raw(&self, bytes: &[u8]) -> String {
+            let deadline = Instant::now() + TIMEOUT;
+            let mut stream = loop {
+                match UnixStream::connect(&self.socket) {
+                    Ok(stream) => break stream,
+                    Err(err) => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "timed out connecting to the control socket: {err}"
+                        );
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                }
+            };
+            stream.write_all(bytes).expect("write raw request");
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read response");
+            line
+        }
+    }
+
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    fn wait_for<F: FnMut() -> bool>(what: &str, mut done: F) {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if done() {
+                return;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Boxes 2 ("list"), 3 ("spawn"), 4 ("send"), and 6 ("lifecycle state"),
+    /// end to end through the socket.
+    #[test]
+    fn spawning_listing_messaging_and_reading_state_go_through_the_socket() {
+        let fixture = ApiFixture::new();
+        let root = fixture.project_root("alpha");
+        let server = Server::start(&fixture, &root);
+
+        let spawned =
+            server.call(serde_json::json!({"op": "spawn_session", "harness": "claude-code"}));
+        let session = spawned["result"]["session"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected a spawned session id: {spawned}"))
+            .to_owned();
+
+        let listed = server.call(serde_json::json!({"op": "list_sessions"}));
+        let ids: Vec<String> = listed["result"]
+            .as_array()
+            .expect("a session list")
+            .iter()
+            .map(|entry| entry["session"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(
+            ids.contains(&session),
+            "the spawned session must appear in the listing: {listed}"
+        );
+
+        server.call(serde_json::json!({
+            "op": "send_message",
+            "session": session,
+            "text": "hello-from-the-api",
+        }));
+
+        let received_log = fixture.received_log(&root);
+        wait_for("the harness to record the sent line", || {
+            std::fs::read_to_string(&received_log)
+                .map(|text| text.contains("hello-from-the-api"))
+                .unwrap_or(false)
+        });
+
+        let state = server.call(serde_json::json!({"op": "session_state", "session": session}));
+        let lifecycle = state["result"]["lifecycle"].as_str().unwrap();
+        assert!(
+            matches!(lifecycle, "running" | "idle" | "starting"),
+            "a session with a live process must not report a terminal lifecycle: {state}"
+        );
+    }
+
+    /// Box 5: interrupt reaches a real, still-running process, not just an
+    /// event-log entry.
+    #[test]
+    fn interrupting_through_the_socket_kills_a_real_process() {
+        let fixture = ApiFixture::new();
+        let root = fixture.project_root("alpha");
+        let server = Server::start(&fixture, &root);
+
+        let spawned =
+            server.call(serde_json::json!({"op": "spawn_session", "harness": "claude-code"}));
+        let session = spawned["result"]["session"].as_str().unwrap().to_owned();
+
+        // Wait for the harness's own readiness marker before interrupting,
+        // the same discipline `session/api.rs`'s own interrupt test uses: an
+        // interrupt delivered before the child is really running would
+        // "succeed" against nothing. The control API exposes lifecycle as
+        // Glasshouse recorded it, not raw process liveness — this fixture's
+        // harness never calls `glasshouse hook`, so the store's lifecycle
+        // never leaves `starting`; the marker file is this test's own,
+        // out-of-band proof that the real child is past its first line.
+        let ready_marker = root.join("ready");
+        wait_for("the harness to be ready", || ready_marker.exists());
+        let pid: i32 = std::fs::read_to_string(root.join("pid"))
+            .expect("read the harness's own pid")
+            .trim()
+            .parse()
+            .expect("a pid is an integer");
+
+        server.call(serde_json::json!({"op": "interrupt", "session": session}));
+
+        // The real proof is the operating system's, not Glasshouse's own
+        // bookkeeping: `kill -0` only succeeds while a process with this
+        // pid still exists. A dead-at-handshake child, or an interrupt that
+        // only wrote an event-log entry, could never make this pass.
+        wait_for("the interrupted process to actually exit", || {
+            let probe = Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .output()
+                .expect("run kill -0");
+            !probe.status.success()
+        });
+    }
+
+    /// Box 13: a session in one project must never appear in another
+    /// project's listing, even though both share this machine's data and
+    /// config roots and both doors are open at once.
+    #[test]
+    fn a_session_never_crosses_into_another_projects_listing() {
+        let fixture = ApiFixture::new();
+        let alpha_root = fixture.project_root("alpha");
+        let beta_root = fixture.project_root("beta");
+
+        let alpha = Server::start(&fixture, &alpha_root);
+        let beta = Server::start(&fixture, &beta_root);
+
+        let spawned =
+            alpha.call(serde_json::json!({"op": "spawn_session", "harness": "claude-code"}));
+        let session = spawned["result"]["session"].as_str().unwrap().to_owned();
+
+        let alpha_listing = alpha.call(serde_json::json!({"op": "list_sessions"}));
+        let alpha_ids: Vec<String> = alpha_listing["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["session"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(alpha_ids.contains(&session));
+
+        let beta_listing = beta.call(serde_json::json!({"op": "list_sessions"}));
+        let beta_ids: Vec<String> = beta_listing["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["session"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(
+            !beta_ids.contains(&session),
+            "a project's socket must never list another project's session: {beta_listing}"
+        );
+
+        // And the other project's door refuses to act on it by name, the
+        // same `ForeignProject` refusal `SessionApi` gives everywhere else.
+        let foreign_state =
+            beta.call(serde_json::json!({"op": "session_state", "session": session}));
+        assert_eq!(foreign_state["status"], "error");
+    }
+
+    /// Box 12's filesystem half: the socket is owner-only the moment it
+    /// exists, not eventually.
+    #[test]
+    fn the_control_socket_is_owner_only() {
+        let fixture = ApiFixture::new();
+        let root = fixture.project_root("alpha");
+        let server = Server::start(&fixture, &root);
+
+        let mode = std::fs::metadata(&server.socket)
+            .expect("stat the control socket")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the control socket must be readable and writable only by its owner"
+        );
+    }
+
+    /// A malformed request must get a clean, typed refusal — and the server
+    /// must still be serving afterwards, proving one bad connection cannot
+    /// wedge or kill the accept loop.
+    #[test]
+    fn a_malformed_request_is_refused_and_the_server_keeps_serving() {
+        let fixture = ApiFixture::new();
+        let root = fixture.project_root("alpha");
+        let server = Server::start(&fixture, &root);
+
+        let raw = server.call_raw(b"not json at all\n");
+        let parsed: serde_json::Value = serde_json::from_str(raw.trim_end())
+            .unwrap_or_else(|_| panic!("even the refusal must be well-formed JSON: {raw:?}"));
+        assert_eq!(parsed["status"], "error");
+
+        // The server must still answer a well-formed request on a new
+        // connection.
+        let listed = server.call(serde_json::json!({"op": "list_sessions"}));
+        assert_eq!(listed["status"], "ok");
+    }
+
+    /// Boxes 10 ("query memory") and 11 ("request a checkpoint"): both reach
+    /// the same durable store `glasshouse memory search` and `glasshouse
+    /// checkpoint show` read, proven by writing through the socket and
+    /// reading back through the CLI.
+    #[test]
+    fn memory_query_and_checkpoint_reach_the_same_store_the_cli_reads() {
+        let fixture = ApiFixture::new();
+        let root = fixture.project_root("alpha");
+        let server = Server::start(&fixture, &root);
+
+        let spawned =
+            server.call(serde_json::json!({"op": "spawn_session", "harness": "claude-code"}));
+        let session = spawned["result"]["session"].as_str().unwrap().to_owned();
+
+        let empty_search = server.call(serde_json::json!({
+            "op": "query_memory",
+            "query": "nothing-should-match-this",
+        }));
+        assert_eq!(empty_search["status"], "ok");
+        assert!(
+            empty_search["result"]["report"]
+                .as_str()
+                .unwrap()
+                .contains("No current memories match"),
+            "{empty_search}"
+        );
+
+        let checkpointed = server.call(serde_json::json!({
+            "op": "take_checkpoint",
+            "session": session,
+            "objective": "prove the checkpoint box end to end",
+            "state": "spawned a session through the socket and checkpointed it",
+        }));
+        assert_eq!(checkpointed["status"], "ok", "{checkpointed}");
+        let checkpoint_id = checkpointed["result"]["checkpoint"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        drop(server);
+
+        let shown = Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+            .arg("--scope")
+            .arg(&root)
+            .arg("--data-dir")
+            .arg(fixture.base.join("data"))
+            .arg("--config-dir")
+            .arg(fixture.base.join("config"))
+            .arg("checkpoint")
+            .arg("show")
+            .arg(&checkpoint_id)
+            .arg("--document")
+            .output()
+            .expect("run `glasshouse checkpoint show`");
+        assert!(
+            shown.status.success(),
+            "{}",
+            String::from_utf8_lossy(&shown.stderr)
+        );
+        let document = String::from_utf8_lossy(&shown.stdout);
+        assert!(
+            document.contains("prove the checkpoint box end to end"),
+            "the checkpoint taken through the socket must be the one the CLI reads back: {document}"
+        );
+    }
+}

@@ -50,6 +50,13 @@ pub enum Overlay {
     /// the data behind it — this marker carries none of it, the same way
     /// [`Overlay::Overview`] carries none of the session list it shows.
     Settings,
+    /// The project-level summary: sessions grouped by role and lifecycle
+    /// rather than listed one by one, active decisions and constraints, and
+    /// unresolved memory todos. [`Overlay::Overview`]'s project-level
+    /// sibling (Phase 41) — that overlay answers "what is this session
+    /// doing", this one answers "what is this project doing". See
+    /// [`ProjectOverviewState`] for the data behind it.
+    ProjectOverview,
 }
 
 /// Who currently owns the keyboard.
@@ -172,6 +179,14 @@ pub enum Action {
     /// module deliberately does not hold — see `shell::resume_session`, the
     /// run loop's counterpart to `shell::start_session`.
     ResumeSession(SessionId),
+    /// Open the project overview. Reading current binding memory and
+    /// unresolved todos is file I/O this module deliberately does not hold —
+    /// the run loop reads them and calls
+    /// [`ShellState::open_project_overview`], reporting a read failure back
+    /// through `memory_note` rather than `set_status`, because sessions
+    /// still display and the overlay still opens either way. Phase 41's
+    /// project-level sibling of [`Action::OpenSettings`].
+    OpenProjectOverview,
 }
 
 /// A session's screen, as a terminal would have drawn it, ready to draw.
@@ -270,6 +285,52 @@ impl OverviewState {
     /// The line being typed, or `None` when no field is open.
     pub fn entry(&self) -> Option<&str> {
         self.entry.as_deref()
+    }
+}
+
+/// The project overview's own data: memory the run loop already read from
+/// disk, formatted into one line per entry.
+///
+/// Sessions are not duplicated here — [`ShellState::sessions`] already holds
+/// every session record, and the view groups them by role and lifecycle at
+/// render time, the same way `render_overview` derives its columns from
+/// [`SessionRecord`] rather than from a copy. Memory is different: reading
+/// it is file I/O this module deliberately does not hold, exactly like
+/// [`ShellState::open_settings`]'s rows, so the run loop reads it and hands
+/// back plain strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectOverviewState {
+    /// Current binding memory — decisions and constraints, most recently
+    /// updated first. See [`crate::memory::store::MemoryStore::binding`].
+    decisions: Vec<String>,
+    /// Current, unresolved [`crate::memory::store::MemoryKind::Todo`]
+    /// entries, most recently updated first.
+    todos: Vec<String>,
+    /// How many further open todos exist beyond `todos` — Phase 26's
+    /// snapshot budget, not a number invented here.
+    todos_omitted: usize,
+    /// Set when the run loop could not read project memory at all — a
+    /// missing or unreadable database, say. The overlay still opens and
+    /// still shows sessions; only the memory sections are empty, and this
+    /// explains why rather than leaving them silently blank.
+    memory_note: Option<String>,
+}
+
+impl ProjectOverviewState {
+    pub fn decisions(&self) -> &[String] {
+        &self.decisions
+    }
+
+    pub fn todos(&self) -> &[String] {
+        &self.todos
+    }
+
+    pub fn todos_omitted(&self) -> usize {
+        self.todos_omitted
+    }
+
+    pub fn memory_note(&self) -> Option<&str> {
+        self.memory_note.as_deref()
     }
 }
 
@@ -373,6 +434,9 @@ pub struct ShellState {
     /// same split as `settings`, and for the same reason. See
     /// [`OverviewState`] for why its cursor is not `selected`.
     overview: Option<OverviewState>,
+    /// The project overview's own data, or `None` when it is not open — the
+    /// same split as `settings` and `overview`.
+    project_overview: Option<ProjectOverviewState>,
     /// Recent lifecycle events, newest first, bounded at [`ACTIVITY_ROWS`].
     /// See [`ShellState::note_events`].
     activity: Vec<RecordedEvent>,
@@ -397,6 +461,7 @@ impl ShellState {
             viewport_grid: ViewportGrid::default(),
             settings: None,
             overview: None,
+            project_overview: None,
             activity: Vec::new(),
         }
     }
@@ -517,6 +582,37 @@ impl ShellState {
         self.overview.as_ref()
     }
 
+    /// Open the project overview with memory the run loop already read from
+    /// disk. Reading `crate::memory` is file I/O this module deliberately
+    /// does not hold — see [`ShellState::open_settings`] for the same split.
+    ///
+    /// Opens even when `memory_note` is `Some`: a project whose memory
+    /// database could not be read still has sessions to show, and closing
+    /// the whole overlay over one failed section would hide the part that
+    /// worked. See `shell::build_project_overview_memory`'s doc comment for
+    /// why the two failure paths both reach this.
+    pub fn open_project_overview(
+        &mut self,
+        decisions: Vec<String>,
+        todos: Vec<String>,
+        todos_omitted: usize,
+        memory_note: Option<String>,
+    ) -> Action {
+        self.overlay = Some(Overlay::ProjectOverview);
+        self.project_overview = Some(ProjectOverviewState {
+            decisions,
+            todos,
+            todos_omitted,
+            memory_note,
+        });
+        Action::Redraw
+    }
+
+    /// The project overview's own data, or `None` when it is not open.
+    pub fn project_overview(&self) -> Option<&ProjectOverviewState> {
+        self.project_overview.as_ref()
+    }
+
     /// The session the overview's cursor is on — the one an interrupt or a
     /// sent line acts on. `None` when the overview is closed or the project
     /// has no sessions.
@@ -536,6 +632,7 @@ impl ShellState {
         self.overlay = None;
         self.settings = None;
         self.overview = None;
+        self.project_overview = None;
         Action::Redraw
     }
 
@@ -868,6 +965,12 @@ impl ShellState {
             return self.handle_overview_key(key, had_status);
         }
 
+        // Read-only, like the Overview above: it owns nothing but its own
+        // close key and lets ordinary navigation pass through underneath.
+        if self.overlay == Some(Overlay::ProjectOverview) {
+            return self.handle_project_overview_key(key, had_status);
+        }
+
         self.handle_control_key(key, had_status)
     }
 
@@ -882,6 +985,7 @@ impl ShellState {
             KeyCode::BackTab | KeyCode::Left => self.previous_session(),
             KeyCode::Char('o') => self.open_overview(),
             KeyCode::Char('s') => Action::OpenSettings,
+            KeyCode::Char('p') => Action::OpenProjectOverview,
             KeyCode::Enter | KeyCode::Char('i') => self.enter_session_mode(),
             KeyCode::Char('n') => Action::StartSession,
             // Shift-N is the same session `n` starts, minus the viewport —
@@ -955,6 +1059,20 @@ impl ShellState {
             // unclaimed here and unclaimed by Settings' own `r` binding,
             // which belongs to a different overlay entirely.
             KeyCode::Char('r') if !ctrl => self.resume_overview_target(),
+            _ => self.handle_control_key(key, had_status),
+        }
+    }
+
+    /// Answer one key while the project overview is open.
+    ///
+    /// Unlike the session [`Overlay::Overview`], this popup has no cursor and
+    /// nothing to act on — the map's boxes ask it to *show* things, never to
+    /// act on them from here — so every key but its own close key passes
+    /// through to ordinary navigation underneath, exactly like the Overview
+    /// does for the keys it does not claim.
+    fn handle_project_overview_key(&mut self, key: KeyEvent, had_status: bool) -> Action {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('p') => self.close_overlay(),
             _ => self.handle_control_key(key, had_status),
         }
     }

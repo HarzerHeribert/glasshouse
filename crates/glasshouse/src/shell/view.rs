@@ -18,7 +18,10 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 
 use crate::config::{Layer, RoutingModelChoice};
 use crate::provider::discovery::ProbeOutcome;
-use crate::session::{SessionDisposition, SessionLifecycle, SessionPresentation, SessionRecord};
+use crate::session::{
+    SessionDisposition, SessionLifecycle, SessionPairingClass, SessionPresentation, SessionRecord,
+    SessionRole,
+};
 
 use super::state::{
     Mode, Overlay, OverviewState, ProbeKind, ProviderRow, SettingsPathInputView, SettingsSection,
@@ -67,6 +70,7 @@ pub fn render(state: &ShellState, frame: &mut Frame) {
     match state.overlay() {
         Some(Overlay::Overview) => render_overview(state, frame, area),
         Some(Overlay::Settings) => render_settings(state, frame, area),
+        Some(Overlay::ProjectOverview) => render_project_overview(state, frame, area),
         None => {}
     }
 }
@@ -319,8 +323,9 @@ fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
             "tab section   up/down move   space toggle   section keys edit   \
              w save   W project   r setup   esc close"
         }
+        (Mode::Control, Some(Overlay::ProjectOverview)) => "esc back to session   q quit",
         (Mode::Control, None) => {
-            "tab session   enter session   n new   N headless   o overview   q quit"
+            "tab session   enter session   n new   N headless   o overview   p project   q quit"
         }
     };
     let mut spans = vec![Span::styled(hint, Style::default().fg(Color::DarkGray))];
@@ -485,6 +490,250 @@ fn render_overview(state: &ShellState, frame: &mut Frame, area: Rect) {
     }
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The project overview — Phase 41's project-level sibling of
+/// [`render_overview`]: where that popup answers "what is this session
+/// doing", this one answers "what is this project doing".
+///
+/// Read-only by construction (map line 1664: no decorative AI commentary) —
+/// every line here is either a [`SessionRecord`] field already recorded on
+/// the production launch and lifecycle paths, or a memory the run loop read
+/// straight from [`crate::memory::store::MemoryStore`] with no summarizing
+/// model in between. A section with nothing to show says so in words rather
+/// than being silently absent, for the same reason the session overview's
+/// "no recorded sessions" line exists.
+fn render_project_overview(state: &ShellState, frame: &mut Frame, area: Rect) {
+    let popup = centered(area, 84, 78);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" project ")
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines = Vec::new();
+
+    let orchestrator = state
+        .sessions()
+        .iter()
+        .find(|session| session.role == SessionRole::Orchestrator);
+    lines.push(Line::from(Span::styled(
+        "ORCHESTRATOR",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    match orchestrator {
+        Some(session) => {
+            lines.push(Line::from(format!(
+                "  {}  {}",
+                short_id(session),
+                session_detail(session)
+            )));
+        }
+        None => lines.push(Line::from(Span::styled(
+            "  no session is designated as this project's orchestrator",
+            Style::default().fg(Color::DarkGray),
+        ))),
+    }
+
+    let workers: Vec<&SessionRecord> = state
+        .sessions()
+        .iter()
+        .filter(|session| session.role == SessionRole::Worker)
+        .collect();
+    let running: Vec<&&SessionRecord> = workers
+        .iter()
+        .filter(|session| session.lifecycle == SessionLifecycle::Running)
+        .collect();
+    let waiting: Vec<&&SessionRecord> = workers
+        .iter()
+        .filter(|session| session.lifecycle == SessionLifecycle::WaitingForUser)
+        .collect();
+    let mut completed: Vec<&&SessionRecord> = workers
+        .iter()
+        .filter(|session| {
+            matches!(
+                session.disposition(),
+                SessionDisposition::Closed | SessionDisposition::Resumable
+            )
+        })
+        .collect();
+    completed.sort_by_key(|session| std::cmp::Reverse(session.last_activity_at));
+    completed.truncate(RECENTLY_COMPLETED_ROWS);
+
+    lines.push(Line::from(""));
+    push_worker_section(
+        &mut lines,
+        "RUNNING WORKERS",
+        &running,
+        "no workers running",
+    );
+    lines.push(Line::from(""));
+    push_worker_section(
+        &mut lines,
+        "WORKERS WAITING FOR INPUT",
+        &waiting,
+        "no workers waiting for input",
+    );
+    lines.push(Line::from(""));
+    push_worker_section(
+        &mut lines,
+        "RECENTLY COMPLETED WORKERS",
+        &completed,
+        "no completed workers recorded",
+    );
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "ACTIVE DECISIONS AND CONSTRAINTS",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    if state
+        .project_overview()
+        .is_some_and(|o| !o.decisions().is_empty())
+    {
+        for line in state
+            .project_overview()
+            .into_iter()
+            .flat_map(|o| o.decisions())
+        {
+            lines.push(Line::from(format!("  {line}")));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  no current binding decisions or constraints",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "UNRESOLVED MEMORY TODOS",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    if let Some(overview) = state.project_overview() {
+        if overview.todos().is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  no open todos in project memory",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            for line in overview.todos() {
+                lines.push(Line::from(format!("  {line}")));
+            }
+            if overview.todos_omitted() > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!("  ...and {} more", overview.todos_omitted()),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "RESOURCE STATE",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  not tracked in this build: capacity bands, quota pressure, reset \
+         times and routing-model latency are Phase 32A/32B/33/34 work",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    if let Some(note) = state.project_overview().and_then(|o| o.memory_note()) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            note.to_owned(),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// How many recently completed workers the project overview shows.
+///
+/// Not the same bound as [`super::state::ACTIVITY_ROWS`]: that list is every
+/// kind of lifecycle event across every session, this is worker sessions
+/// only, so the two are free to differ without either meaning the other is
+/// wrong.
+const RECENTLY_COMPLETED_ROWS: usize = 5;
+
+fn push_worker_section(
+    lines: &mut Vec<Line<'static>>,
+    title: &'static str,
+    sessions: &[&&SessionRecord],
+    empty_note: &'static str,
+) {
+    lines.push(Line::from(Span::styled(
+        title,
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    if sessions.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  {empty_note}"),
+            Style::default().fg(Color::DarkGray),
+        )));
+        return;
+    }
+    let now = crate::provider::cache::now_unix_seconds();
+    for session in sessions {
+        lines.push(Line::from(format!(
+            "  {}  {}  {}",
+            short_id(session),
+            describe_age(now, session.last_activity_at),
+            session_detail(session)
+        )));
+    }
+}
+
+/// Map line 1662's harness, backend, model, pairing class and response
+/// profile, one session at a time — the detail [`render_overview`]'s table
+/// has no room for because it is one line per session across every session
+/// in the project, not one block per session in a project-level summary.
+fn session_detail(session: &SessionRecord) -> String {
+    let backend = session.backend_resource.as_deref().unwrap_or("unresolved");
+    let model = session
+        .model
+        .as_ref()
+        .map_or("unresolved".to_owned(), |m| m.label().to_owned());
+    format!(
+        "harness={} backend={} model={} pairing={} profile={}",
+        session.harness,
+        backend,
+        model,
+        pairing_label(session.pairing_class),
+        response_profile_label(session.response_profile.as_ref())
+    )
+}
+
+fn pairing_label(pairing: Option<SessionPairingClass>) -> &'static str {
+    match pairing {
+        None => "not recorded",
+        Some(SessionPairingClass::VendorNative) => "vendor-native",
+        Some(SessionPairingClass::VendorSupported) => "vendor-supported",
+        Some(SessionPairingClass::ProtocolNative) => "protocol-native",
+        Some(SessionPairingClass::ProtocolCompatible) => "protocol-compatible",
+        Some(SessionPairingClass::ProtocolTranslated) => "protocol-translated",
+        Some(SessionPairingClass::Unknown) => "unknown (recorded)",
+    }
+}
+
+fn response_profile_label(profile: Option<&crate::profile::response::ResponseProfile>) -> String {
+    match profile {
+        None => "not recorded".to_owned(),
+        Some(profile) => format!(
+            "{:?}/{:?}/{:?}/{:?}/{:?}",
+            profile.verbosity(),
+            profile.audience(),
+            profile.narration(),
+            profile.evidence(),
+            profile.format()
+        ),
+    }
 }
 
 fn disposition_label(session: &SessionRecord) -> &'static str {
@@ -2361,6 +2610,151 @@ mod tests {
         assert!(
             no_name.contains("(unnamed)"),
             "an absent name must say so, not render nothing:\n{no_name}"
+        );
+    }
+
+    /// Map lines 1651-1654: the orchestrator, running workers, waiting
+    /// workers and recently completed workers must each be distinguishable
+    /// in the project overview — not collapsed into one undifferentiated
+    /// session list, which a reader could not act on.
+    #[test]
+    fn the_project_overview_separates_orchestrator_and_workers_by_role_and_lifecycle() {
+        // Exactly 12 characters each — `short_session_id` truncates there,
+        // and this test asserts on the truncated identifier a real overlay
+        // would show, not the untruncated fixture id.
+        let mut orchestrator = record("orchestrator", "claude-code", SessionLifecycle::Running);
+        orchestrator.role = SessionRole::Orchestrator;
+
+        let mut running_worker = record("run-worker01", "codex", SessionLifecycle::Running);
+        running_worker.role = SessionRole::Worker;
+
+        let mut waiting_worker = record("wait-worker1", "codex", SessionLifecycle::WaitingForUser);
+        waiting_worker.role = SessionRole::Worker;
+
+        let mut completed_worker = record("done-worker1", "codex", SessionLifecycle::Stopped);
+        completed_worker.role = SessionRole::Worker;
+        completed_worker.native_session_id = Some("native-completed".to_owned());
+
+        let mut state = ShellState::new(
+            "glasshouse",
+            "/work",
+            "0.1.0",
+            vec![
+                orchestrator,
+                running_worker,
+                waiting_worker,
+                completed_worker,
+            ],
+        );
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),
+            crate::shell::state::Action::OpenProjectOverview
+        );
+        state.open_project_overview(Vec::new(), Vec::new(), 0, None);
+
+        let text = rendered(&state, 120, 40);
+        assert!(text.contains("orchestrator"), "orchestrator row:\n{text}");
+        assert!(text.contains("run-worker01"), "running row:\n{text}");
+        assert!(text.contains("wait-worker1"), "waiting row:\n{text}");
+        assert!(text.contains("done-worker1"), "completed row:\n{text}");
+        assert!(
+            !text.contains("no session is designated"),
+            "an orchestrator was designated; the overlay must not say otherwise:\n{text}"
+        );
+    }
+
+    /// The same box, with no orchestrator and no workers at all: every
+    /// section says so honestly instead of rendering an empty heading — the
+    /// same rule `render_overview` follows for its own activity section.
+    #[test]
+    fn the_project_overview_says_so_when_a_section_has_nothing() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        state.open_project_overview(Vec::new(), Vec::new(), 0, None);
+
+        let text = rendered(&state, 120, 40);
+        assert!(text.contains("no session is designated"), "{text}");
+        assert!(text.contains("no workers running"), "{text}");
+        assert!(text.contains("no workers waiting for input"), "{text}");
+        assert!(text.contains("no completed workers recorded"), "{text}");
+        assert!(text.contains("no current binding decisions"), "{text}");
+        assert!(text.contains("no open todos"), "{text}");
+    }
+
+    /// Map lines 1655 and 1656: decisions/constraints and unresolved todos
+    /// the run loop read from project memory must actually reach the
+    /// screen — through [`ShellState::open_project_overview`], the same call
+    /// the real run loop makes, not a value the view invents.
+    #[test]
+    fn the_project_overview_shows_memory_the_run_loop_handed_it() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        state.open_project_overview(
+            vec!["constraint: never run ci-local beside cargo".to_owned()],
+            vec!["todo: wire the shell into main".to_owned()],
+            3,
+            None,
+        );
+
+        let text = rendered(&state, 120, 40);
+        assert!(
+            text.contains("never run ci-local beside cargo"),
+            "decision/constraint line:\n{text}"
+        );
+        assert!(
+            text.contains("wire the shell into main"),
+            "todo line:\n{text}"
+        );
+        assert!(
+            text.contains("...and 3 more"),
+            "omitted todos must be counted, not silently dropped:\n{text}"
+        );
+    }
+
+    /// A memory read failure still opens the overlay — sessions are still
+    /// worth showing — and says plainly that memory could not be read,
+    /// rather than presenting empty sections as if there were nothing to
+    /// show.
+    #[test]
+    fn a_project_memory_read_failure_still_opens_with_an_honest_note() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        state.open_project_overview(
+            Vec::new(),
+            Vec::new(),
+            0,
+            Some("project memory unavailable: disk full".to_owned()),
+        );
+
+        let text = rendered(&state, 120, 40);
+        assert!(
+            text.contains("project memory unavailable: disk full"),
+            "{text}"
+        );
+    }
+
+    /// Map line 1664: the overview must be derived state, never generated
+    /// commentary — proven the same way `nothing_draws_with_block_elements`
+    /// proves the rest of the shell stays text-first: every character in the
+    /// popup traces to a session field or a memory string the run loop
+    /// handed in, never a phrase invented at render time beyond the fixed,
+    /// literal section headings and empty-state notes already asserted
+    /// above.
+    #[test]
+    fn the_project_overview_footer_names_its_own_key() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        state.open_project_overview(Vec::new(), Vec::new(), 0, None);
+        let text = rendered(&state, 120, 40);
+        assert!(
+            text.contains("esc back to session"),
+            "project overview footer:\n{text}"
+        );
+
+        let control_text = rendered(&sample(), 120, 24);
+        assert!(
+            control_text.contains("p project"),
+            "control-mode footer must advertise the key:\n{control_text}"
         );
     }
 }

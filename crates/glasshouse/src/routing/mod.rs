@@ -1,5 +1,11 @@
 //! Routing policy: which backend serves which work, and why.
 //!
+//! [`classify`] is a third, independent thing: not a policy that picks a
+//! backend, but the lightweight, model-optional classification of a request
+//! (Phase 35) that a future policy — Phase 34F/35B, neither built yet — would
+//! read before picking one. Nothing in this module or its siblings consumes
+//! a [`classify::TaskClassification`] today; see that module's doc comment.
+//!
 //! # Two policy classes, and the reason they are two types
 //!
 //! Phase 9I line 533 asks Glasshouse to *"keep interactive harness routing
@@ -52,6 +58,7 @@
 //! printed. `SecretRef` is already the one shape in Glasshouse that is safe
 //! to write into a tracked configuration file, so it is the one used here.
 
+pub mod classify;
 pub mod disposable;
 pub mod free;
 pub mod interactive;

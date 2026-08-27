@@ -7,7 +7,7 @@ use std::io::IsTerminal;
 use glasshouse::checkpoint::{
     Checkpoint, CheckpointReason, CheckpointStore, Handoff, ProjectCheckpoints, Stored,
 };
-use glasshouse::cli::CheckpointCommand;
+use glasshouse::cli::{ApiCommand, CheckpointCommand};
 use glasshouse::config::response::{ResponseProfileEntry, ResponseRequest};
 use glasshouse::config::{self, EffectiveConfig, ProjectConfig, UserConfig};
 use glasshouse::events::{
@@ -28,6 +28,8 @@ use glasshouse::shim::{self, ShimRequest};
 use glasshouse::{Cli, Command, MemoryCommand, Runtime, SessionCommand, logging, shutdown};
 
 use clap::Parser;
+
+mod api;
 
 fn main() -> ExitCode {
     // Installed before anything can touch the terminal so a failure on any path
@@ -255,6 +257,11 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         }) => {
             return run_shim(harness, profile, dir, name.as_deref(), *force);
         }
+        Some(Command::Api { command }) => match command {
+            ApiCommand::Serve { socket } => {
+                api::serve(&runtime, socket.clone())?;
+            }
+        },
         None => {
             // Setup runs by itself the first time, so a new user does not have
             // to know a command exists before Glasshouse is useful.

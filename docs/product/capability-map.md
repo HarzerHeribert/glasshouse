@@ -1195,13 +1195,13 @@ Fixed architectural requirements
 
 Phase 32A — Unified quota and capacity model
 
-☐ Define a provider-independent CapacityState model for describing how much usable capacity a resource has left.
+☑ Define a provider-independent CapacityState model for describing how much usable capacity a resource has left.
 ☐ Allow CapacityState to represent token-limited resources.
 ☐ Allow CapacityState to represent request-limited resources.
-☐ Allow CapacityState to represent credit-limited resources.
+☑ Allow CapacityState to represent credit-limited resources.
 ☐ Allow CapacityState to represent subscription resources with opaque provider-defined limits.
 ☐ Allow CapacityState to represent user-defined monetary budgets for metered APIs.
-☐ Allow CapacityState to represent effectively unlimited local inference separately from remote quota.
+☑ Allow CapacityState to represent effectively unlimited local inference separately from remote quota.
 ☐ Track input-token budget independently from output-token budget when the provider exposes separate limits.
 ☐ Track cached-input usage independently when the provider exposes cache telemetry.
 ☐ Track request count independently from token consumption when both can constrain a resource.
@@ -1647,21 +1647,21 @@ Fixed architectural requirements
 
 Phase 41 — Project overview
 
-☐ Add a project overview screen that summarizes active sessions, open work, recent memory, and resource state.
-☐ Show the current orchestrator session if one is designated.
-☐ Show currently running workers.
-☐ Show workers waiting for user input.
-☐ Show recently completed workers.
-☐ Show important active decisions and constraints.
-☐ Show unresolved project-memory todos.
+☑ Add a project overview screen that summarizes active sessions, open work, recent memory, and resource state.
+☑ Show the current orchestrator session if one is designated.
+☑ Show currently running workers.
+☑ Show workers waiting for user input.
+☑ Show recently completed workers.
+☑ Show important active decisions and constraints.
+☑ Show unresolved project-memory todos.
 ☐ Show known resource degradation or quota pressure.
 ☐ Show normalized remaining-capacity bands for configured resources.
 ☐ Show whether each displayed capacity value is measured, estimated, manual, or unknown.
 ☐ Show the next known or estimated reset time for constrained resources.
 ☐ Show the currently selected routing model and its recent latency.
-☐ Show the harness, backend, model, pairing class, and response profile for active sessions when relevant.
+☑ Show the harness, backend, model, pairing class, and response profile for active sessions when relevant.
 ☐ Show protected premium reserves when they influence routing.
-☐ Keep the overview factual and derived from stored state rather than generating decorative AI commentary by default.
+☑ Keep the overview factual and derived from stored state rather than generating decorative AI commentary by default.
 
 Phase 42 — External control API
 
@@ -1670,19 +1670,19 @@ Fixed architectural requirements
 - The external API controls the same core session, routing, memory, and event services as the TUI.
 - It must not introduce a second session manager, duplicate state machine, or alternate agent loop.
 
-☐ Expose a local project-scoped control API for Glasshouse operations.
-☐ Allow the API to list sessions.
-☐ Allow the API to spawn sessions.
-☐ Allow the API to send messages to sessions.
-☐ Allow the API to interrupt sessions.
-☐ Allow the API to retrieve lifecycle state.
+☑ Expose a local project-scoped control API for Glasshouse operations.
+☑ Allow the API to list sessions.
+☑ Allow the API to spawn sessions.
+☑ Allow the API to send messages to sessions.
+☑ Allow the API to interrupt sessions.
+☑ Allow the API to retrieve lifecycle state.
 ☐ Allow the API to retrieve current resource capacity and quota telemetry.
 ☐ Allow the API to retrieve the current routing-model selection and health.
 ☐ Allow the API to request an inspectable routing recommendation without executing it.
-☐ Allow the API to query project memory.
-☐ Allow the API to request a checkpoint.
-☐ Authenticate or restrict the local control channel so unrelated local processes cannot casually control active agent sessions.
-☐ Bind every control request to the current Glasshouse project scope.
+☑ Allow the API to query project memory.
+☑ Allow the API to request a checkpoint.
+☑ Authenticate or restrict the local control channel so unrelated local processes cannot casually control active agent sessions.
+☑ Bind every control request to the current Glasshouse project scope.
 
 Phase 43 — MCP surface for orchestrators
 

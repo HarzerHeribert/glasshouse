@@ -1,0 +1,479 @@
+//! The Unix domain socket transport and its request handlers.
+
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use glasshouse::Runtime;
+use glasshouse::checkpoint::store::ProjectCheckpoints;
+use glasshouse::checkpoint::{Checkpoint, CheckpointReason, Handoff};
+use glasshouse::config::{self, EffectiveConfig, UserConfig};
+use glasshouse::launch::HarnessLaunch;
+use glasshouse::session::api::{ApiError, SessionApi};
+use glasshouse::session::{
+    NewSession, ProjectSessions, SessionId, SessionLifecycle, SessionPresentation, SessionRuntime,
+    SessionStore,
+};
+
+use super::protocol::{Request, Response};
+
+/// The socket file's name inside the project's own state directory, when
+/// nothing overrides it.
+const DEFAULT_SOCKET_NAME: &str = "control.sock";
+
+/// `sockaddr_un.sun_path` is 104 bytes on macOS/BSD and 108 on Linux,
+/// including the terminating nul this crate never sees. A path within this
+/// bound is safe on every Unix `glasshouse` ships for; anything longer binds
+/// with `EINVAL`/`ENAMETOOLONG` well before this door gets to authorize a
+/// single connection. Chosen as 90 rather than the tighter platform minimum
+/// so the margin survives a slightly longer project id without needing a
+/// per-platform constant.
+const MAX_SOCKET_PATH_BYTES: usize = 90;
+
+/// How often the background tick answers terminal queries and reaps exited
+/// sessions between requests. Mirrors `run_headless`'s `POLL` in `main.rs`:
+/// short enough that `poll_exits` marks a dead session promptly, long enough
+/// not to spin the accept thread's sibling for no reason.
+const TICK: Duration = Duration::from_millis(50);
+
+/// Run the control API until the process is killed.
+///
+/// Binds a fresh Unix domain socket at `socket_override`, or the project's
+/// own state directory when nothing is given and that path fits
+/// `sockaddr_un` — see [`socket_path_for`] for what happens when it does
+/// not. Refuses to keep a stale file from a crashed prior run. Every
+/// accepted connection is authorized (see [`authorize`]) before its one
+/// request is read.
+pub fn serve(runtime: &Runtime, socket_override: Option<PathBuf>) -> anyhow::Result<()> {
+    let socket_path = match socket_override {
+        Some(path) => path,
+        None => socket_path_for(runtime),
+    };
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // A stale socket from a process that never got to unlink it on the way
+    // out must not permanently block this project's door.
+    if socket_path.exists() {
+        std::fs::remove_file(&socket_path)?;
+    }
+    let listener = UnixListener::bind(&socket_path)?;
+    // Owner-only. Box 12's first half — see `authorize` for the second.
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
+
+    eprintln!(
+        "glasshouse: control API listening on {}",
+        socket_path.display()
+    );
+
+    let sessions = ProjectSessions::open(runtime)?;
+    let live = Arc::new(Mutex::new(SessionRuntime::new()));
+
+    // The accept loop only touches the runtime while a request is being
+    // handled; a session with nothing asking about it between requests would
+    // otherwise never have its exit reaped. This mirrors `run_headless`'s own
+    // reason for ticking outside the wait for the next event.
+    {
+        let live = Arc::clone(&live);
+        std::thread::spawn(move || {
+            loop {
+                {
+                    let mut live = lock(&live);
+                    live.answer_terminal_queries();
+                    for _ in live.poll_exits() {}
+                }
+                std::thread::sleep(TICK);
+            }
+        });
+    }
+
+    for incoming in listener.incoming() {
+        let stream = match incoming {
+            Ok(stream) => stream,
+            Err(err) => {
+                eprintln!("glasshouse: control API accept error: {err}");
+                continue;
+            }
+        };
+        if let Err(refusal) = authorize(&stream) {
+            eprintln!("glasshouse: control API refused a connection: {refusal}");
+            continue;
+        }
+        if let Err(err) = handle_connection(stream, runtime, &sessions, &live) {
+            eprintln!("glasshouse: control API connection error: {err}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Where the socket binds when nothing overrides it.
+///
+/// The project's own state directory is preferred — it keeps the door next
+/// to everything else this project owns, and cleans up the same way. But a
+/// state directory nested under a long data directory (a test's temp
+/// directory, a CI runner's workspace, a home directory itself deep in some
+/// deployments) can push `control.sock`'s full path past `sockaddr_un`'s
+/// limit, and `bind(2)` refuses that outright — not a permissions problem
+/// [`authorize`] could ever see, a path that never becomes a socket at all.
+/// When the preferred path would not fit, this falls back to a short name
+/// under the system temp directory, keyed by the project id so two projects
+/// never collide and one project always gets the same path back.
+fn socket_path_for(runtime: &Runtime) -> PathBuf {
+    let preferred = runtime.state_dir().join(DEFAULT_SOCKET_NAME);
+    if preferred.as_os_str().len() <= MAX_SOCKET_PATH_BYTES {
+        return preferred;
+    }
+
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(runtime.project().id().as_str().as_bytes());
+    let digest = hasher.finalize();
+    let short = hex::encode(&digest[..8]);
+    std::env::temp_dir().join(format!("glasshouse-{short}.sock"))
+}
+
+/// Restrict the control channel to processes running as the same user —
+/// box 12.
+///
+/// The socket file's `0600` permissions are the first check, enforced by the
+/// kernel before `connect(2)` ever succeeds for another user; this is the
+/// second, defence in depth against a umask or a copied file that loosened
+/// them. `SO_PEERCRED` (Linux) and `getpeereid` (the BSD family, including
+/// macOS) both read the credentials the kernel attached to the connection
+/// itself — supplied by the connecting process's own kernel-verified
+/// identity, not by anything the peer said — so there is nothing for an
+/// unrelated local process to spoof by sending a convincing first line.
+fn authorize(stream: &UnixStream) -> Result<(), String> {
+    let peer_uid =
+        peer_uid(stream).map_err(|err| format!("could not read peer identity: {err}"))?;
+    let self_uid = process_uid();
+    if peer_uid != self_uid {
+        return Err(format!(
+            "peer uid {peer_uid} does not match this Glasshouse's uid {self_uid}"
+        ));
+    }
+    Ok(())
+}
+
+fn process_uid() -> u32 {
+    // SAFETY: `getuid` takes no arguments, has no failure mode, and returns
+    // a plain integer — there is no invariant for the caller to uphold.
+    unsafe { libc::getuid() }
+}
+
+#[cfg(target_os = "linux")]
+fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `cred` and `len` are sized and initialized for exactly the
+    // `SO_PEERCRED` option this reads, and the file descriptor is a live
+    // socket owned by `stream` for the duration of the call.
+    let ret = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut libc::ucred as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(cred.uid)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: `uid` and `gid` are valid, aligned out-parameters for the
+    // duration of the call, and the file descriptor is a live socket owned
+    // by `stream`.
+    let ret = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(uid)
+}
+
+/// Take the runtime's lock, ignoring poisoning — a panicking handler thread
+/// must not strand every session the door already holds. Mirrors
+/// `main.rs`'s own `lock` helper for `run_headless`'s runtime.
+fn lock(live: &Mutex<SessionRuntime>) -> std::sync::MutexGuard<'_, SessionRuntime> {
+    live.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Read one request line, dispatch it, and write back one response line.
+fn handle_connection(
+    stream: UnixStream,
+    runtime: &Runtime,
+    sessions: &ProjectSessions,
+    live: &Mutex<SessionRuntime>,
+) -> anyhow::Result<()> {
+    let mut writer = stream.try_clone()?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+
+    let response = match serde_json::from_str::<Request>(line.trim_end()) {
+        Ok(request) => dispatch(request, runtime, sessions, live),
+        Err(err) => Response::err(format!("malformed request: {err}")),
+    };
+
+    let mut payload = serde_json::to_string(&response)?;
+    payload.push('\n');
+    writer.write_all(payload.as_bytes())?;
+    Ok(())
+}
+
+fn dispatch(
+    request: Request,
+    runtime: &Runtime,
+    sessions: &ProjectSessions,
+    live: &Mutex<SessionRuntime>,
+) -> Response {
+    let store = sessions.store();
+
+    match request {
+        // Through `SessionApi::list`, not `store.list` directly — box 13.
+        // `SessionStore::list` trusts its own connection to already be
+        // scoped to one project (true for every real database file, which
+        // carries its own `project_id` and a trigger refusing any other
+        // one), but `SessionApi` re-checks per record anyway, precisely for
+        // the row that should never exist. Going around that seam here
+        // would leave this door's own listing the one caller in the binary
+        // that did not have to.
+        Request::ListSessions => {
+            let mut guard = lock(live);
+            let api = SessionApi::new(&store, &mut guard);
+            match api.list() {
+                Ok(records) => Response::ok(serde_json::json!(
+                    records.iter().map(session_summary).collect::<Vec<_>>()
+                )),
+                Err(err) => Response::err(api_error(err)),
+            }
+        }
+        Request::SessionState { session } => {
+            let mut guard = lock(live);
+            let api = SessionApi::new(&store, &mut guard);
+            match api.state(&SessionId::new(session)) {
+                Ok(state) => Response::ok(serde_json::json!({ "lifecycle": lifecycle_str(state) })),
+                Err(err) => Response::err(api_error(err)),
+            }
+        }
+        Request::SpawnSession { harness, args } => {
+            spawn_session(runtime, &store, live, &harness, args)
+        }
+        Request::SendMessage { session, text } => {
+            let mut guard = lock(live);
+            let mut api = SessionApi::new(&store, &mut guard);
+            match api.send_text(&SessionId::new(session), &text) {
+                Ok(()) => Response::ok(serde_json::json!({})),
+                Err(err) => Response::err(api_error(err)),
+            }
+        }
+        Request::Interrupt { session } => {
+            let mut guard = lock(live);
+            let mut api = SessionApi::new(&store, &mut guard);
+            match api.interrupt(&SessionId::new(session)) {
+                Ok(()) => Response::ok(serde_json::json!({})),
+                Err(err) => Response::err(api_error(err)),
+            }
+        }
+        Request::QueryMemory {
+            query,
+            history,
+            limit,
+        } => query_memory(runtime, &query, history, limit),
+        Request::TakeCheckpoint {
+            session,
+            objective,
+            state,
+            decisions,
+            failed_approaches,
+            files,
+            test_state,
+            next_actions,
+        } => request_checkpoint(
+            runtime,
+            sessions,
+            session.as_deref(),
+            objective,
+            state,
+            decisions,
+            failed_approaches,
+            files,
+            test_state,
+            next_actions,
+        ),
+    }
+}
+
+/// A session record's summary, as JSON: everything box 8 asks for that this
+/// door can actually answer. `backend_resource`, `model` and `protocol` are
+/// this project's durable record of a session's route — see
+/// `SessionRecord`'s own doc comment — but no live *health* signal is
+/// exposed here: `routing::free::ResourceHealth` lives in whichever
+/// process's `Gateway` last computed a route, in memory, and this door's own
+/// `SpawnSession` never touches the gateway at all (see that handler's doc
+/// comment). A field this door cannot honestly fill in is left out rather
+/// than reported as `null` and misread as "no route assigned".
+fn session_summary(record: &glasshouse::session::SessionRecord) -> serde_json::Value {
+    serde_json::json!({
+        "session": record.id.as_str(),
+        "harness": record.harness,
+        "lifecycle": lifecycle_str(record.lifecycle),
+        "backend_resource": record.backend_resource,
+        "model": record.model.as_ref().map(|m| m.label().to_owned()),
+        "protocol": record.protocol.as_ref().map(|p| format!("{p:?}")),
+    })
+}
+
+fn lifecycle_str(lifecycle: SessionLifecycle) -> &'static str {
+    match lifecycle {
+        SessionLifecycle::Starting => "starting",
+        SessionLifecycle::Running => "running",
+        SessionLifecycle::Idle => "idle",
+        SessionLifecycle::WaitingForUser => "waiting_for_user",
+        SessionLifecycle::Stopped => "stopped",
+        SessionLifecycle::Failed => "failed",
+        SessionLifecycle::Closed => "closed",
+    }
+}
+
+fn api_error(err: ApiError) -> String {
+    err.to_string()
+}
+
+/// Start a new session under an installed harness — box 3.
+///
+/// Deliberately narrower than `main.rs`'s own `launch_session`: it resolves
+/// which executable answers to `harness` through `session::select`, the same
+/// resolver `launch_session` uses, but skips launch-profile and
+/// response-profile resolution entirely. Both live behind `config::` and
+/// `profile::` machinery this phase's packet does not hold, and — more to
+/// the point — both are about how a session *presents itself to a person*,
+/// which an API-spawned session run by something other than a person has no
+/// occasion to need. What every session gets regardless — a store record and
+/// a running process this door can message and interrupt — this gives in
+/// full. Argued in the evidence ledger as the deliberate simplification it
+/// is, not an oversight.
+fn spawn_session(
+    runtime: &Runtime,
+    store: &SessionStore<'_>,
+    live: &Mutex<SessionRuntime>,
+    harness: &str,
+    args: Vec<String>,
+) -> Response {
+    let user = match UserConfig::load(runtime.paths()) {
+        Ok(user) => user,
+        Err(err) => return Response::err(err),
+    };
+    let project_config = match config::load_project_config(runtime.project()) {
+        Ok(project_config) => project_config,
+        Err(err) => return Response::err(err),
+    };
+    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+    let selection = match glasshouse::session::select(Some(harness), effective) {
+        Ok(selection) => selection,
+        Err(err) => return Response::err(err),
+    };
+
+    let record = match store.create(
+        NewSession::embedded(selection.id().slug())
+            .with_presentation(SessionPresentation::Headless),
+    ) {
+        Ok(record) => record,
+        Err(err) => return Response::err(err),
+    };
+
+    let launch = HarnessLaunch::new(selection.executable().clone(), runtime.project()).args(args);
+    let mut guard = lock(live);
+    match guard.start(record.id.clone(), SessionPresentation::Headless, &launch) {
+        Ok(_) => Response::ok(serde_json::json!({ "session": record.id.as_str() })),
+        Err(err) => Response::err(err),
+    }
+}
+
+/// Search this project's durable memory — box 10.
+///
+/// Delegates to `main.rs`'s own `memory_report`, the exact function
+/// `glasshouse memory search` prints from, so this door and that command can
+/// never disagree about what a query finds.
+fn query_memory(runtime: &Runtime, query: &str, history: bool, limit: usize) -> Response {
+    match crate::memory_report(runtime, query, history, limit) {
+        Ok(report) => Response::ok(serde_json::json!({ "report": report })),
+        Err(err) => Response::err(err),
+    }
+}
+
+/// Take a checkpoint — box 11.
+///
+/// Mirrors `main.rs`'s `CheckpointCommand::Save` arm: the same session
+/// resolution (`crate::active_session`, named or the project's most recently
+/// active), the same `Checkpoint::capture`, the same store. Duplicated
+/// rather than called through because that arm prints to standard output as
+/// part of returning an `ExitCode`, which has nothing to do with what this
+/// door writes to a socket.
+#[allow(clippy::too_many_arguments)]
+fn request_checkpoint(
+    runtime: &Runtime,
+    sessions: &ProjectSessions,
+    session: Option<&str>,
+    objective: String,
+    implementation_state: String,
+    decisions: Vec<String>,
+    failed_approaches: Vec<String>,
+    files: Vec<String>,
+    test_state: Option<String>,
+    next_actions: Vec<String>,
+) -> Response {
+    let record = match crate::active_session(sessions, session) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            return Response::err(
+                "this project has no recorded sessions to check point; start one first",
+            );
+        }
+        Err(err) => return Response::err(err),
+    };
+
+    let checkpoints = match ProjectCheckpoints::open(runtime) {
+        Ok(checkpoints) => checkpoints,
+        Err(err) => return Response::err(err),
+    };
+    let store = checkpoints.store();
+
+    let checkpoint = Checkpoint::capture(
+        &record.id,
+        &record.harness,
+        CheckpointReason::Manual,
+        store.now(),
+        runtime.project().root(),
+        Handoff {
+            objective,
+            implementation_state,
+            decisions,
+            failed_approaches,
+            files,
+            test_state,
+            next_actions,
+        },
+    );
+
+    match store.save(checkpoint) {
+        Ok(stored) => Response::ok(serde_json::json!({
+            "checkpoint": stored.id.short(),
+            "session": record.id.as_str(),
+            "trimmed": stored.checkpoint.trimmed,
+        })),
+        Err(err) => Response::err(err),
+    }
+}

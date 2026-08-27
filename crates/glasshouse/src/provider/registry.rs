@@ -129,19 +129,22 @@ impl ResourceKind {
     }
 
     /// The shape of this resource's quota — see [`QuotaModel`].
+    ///
+    /// Phase 32A: projected out of
+    /// [`crate::provider::quota::CapacityState`] rather than computed beside
+    /// it. The shape a resource's quota takes is one fact *about* its
+    /// capacity, and deriving it twice is how the two would come to
+    /// disagree — a resource whose capacity model said "nothing can exhaust
+    /// this" while its quota shape said `MeteredBalance` would be a bug no
+    /// test of either half alone could see.
+    ///
+    /// This is also what puts the capacity model on the production launch
+    /// path without a new caller: `profile::apply_direct_provider` and
+    /// `profile::apply_gateway` already call this method for every session's
+    /// `"resource kind"` mechanism note, so every launch now builds a
+    /// [`crate::provider::quota::CapacityState`] and reads its shape out.
     pub fn quota(&self) -> QuotaModel {
-        match self {
-            ResourceKind::NativeSubscription { .. } => QuotaModel::RollingWindowSubscription,
-            ResourceKind::DirectProvider {
-                locality: Locality::Local,
-                ..
-            } => QuotaModel::Unmetered,
-            ResourceKind::DirectProvider {
-                locality: Locality::Remote,
-                ..
-            } => QuotaModel::MeteredBalance,
-            ResourceKind::GlasshouseGateway => QuotaModel::DelegatedToUpstream,
-        }
+        self.capacity().model()
     }
 
     /// The [`ResourceKind`] a resolved

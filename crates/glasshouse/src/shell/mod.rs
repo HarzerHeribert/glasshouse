@@ -217,6 +217,28 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                             state.set_status(format!("could not open settings: {err:#}"));
                         }
                     },
+                    Action::OpenProjectOverview => match build_project_overview_memory(runtime) {
+                        Ok(memory) => {
+                            state.open_project_overview(
+                                memory.decisions,
+                                memory.todos,
+                                memory.todos_omitted,
+                                None,
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                "could not read project memory for the overview"
+                            );
+                            state.open_project_overview(
+                                Vec::new(),
+                                Vec::new(),
+                                0,
+                                Some(format!("project memory unavailable: {err:#}")),
+                            );
+                        }
+                    },
                     Action::SaveUserSettings => {
                         let harness_edits = state.settings_edits();
                         let provider_edits = state.settings_provider_edits();
@@ -1222,6 +1244,86 @@ type SettingsRows = (
     Vec<ProfileRow>,
     RoutingRow,
 );
+
+/// Current binding memory (decisions and constraints) and unresolved todos,
+/// summarized into display lines for [`state::ShellState::open_project_overview`].
+///
+/// Reading `crate::memory` is file I/O this module deliberately does not
+/// hold in `shell/state.rs`, exactly like [`build_settings`] and
+/// `EffectiveConfig`. `binding` and `snapshot` are otherwise only exercised
+/// by `tests/memory_authority.rs` and `tests/memory_snapshot.rs` — this is
+/// their first production caller.
+struct ProjectOverviewMemory {
+    decisions: Vec<String>,
+    todos: Vec<String>,
+    todos_omitted: usize,
+}
+
+/// How many current binding memories (decisions and constraints) the
+/// overview shows. Generous, because this is a summary a person reads once
+/// in a while rather than a paginated list — see [`ProjectOverviewMemory`].
+const PROJECT_OVERVIEW_DECISION_LIMIT: usize = 20;
+const PROJECT_OVERVIEW_TODO_LIMIT: usize = 20;
+const PROJECT_OVERVIEW_BODY_CHARS: usize = 96;
+
+fn build_project_overview_memory(runtime: &Runtime) -> anyhow::Result<ProjectOverviewMemory> {
+    use crate::memory::MemoryKind;
+    use crate::memory::ProjectMemory;
+    use crate::memory::snapshot::{SnapshotBudget, snapshot};
+
+    let memory = ProjectMemory::open(runtime)?;
+    let store = memory.store();
+
+    let decisions = store
+        .binding(PROJECT_OVERVIEW_DECISION_LIMIT)?
+        .into_iter()
+        .map(|record| summarize_memory_line(record.kind, record.subject.as_deref(), &record.body))
+        .collect();
+
+    let budget = SnapshotBudget::new(PROJECT_OVERVIEW_TODO_LIMIT, PROJECT_OVERVIEW_BODY_CHARS);
+    let snap = snapshot(&store, &budget)?;
+    let (todos, todos_omitted) = match snap.section(MemoryKind::Todo) {
+        Some(section) => (
+            section
+                .entries
+                .iter()
+                .map(|entry| {
+                    summarize_memory_line(MemoryKind::Todo, entry.subject.as_deref(), &entry.body)
+                })
+                .collect(),
+            section.omitted,
+        ),
+        None => (Vec::new(), 0),
+    };
+
+    Ok(ProjectOverviewMemory {
+        decisions,
+        todos,
+        todos_omitted,
+    })
+}
+
+/// One display line: the memory's kind, and its subject if it has one or its
+/// body cut to [`PROJECT_OVERVIEW_BODY_CHARS`] otherwise.
+///
+/// Prefers the subject over the body when both exist because the subject is
+/// already the producer's own summary (`MemoryRecord::subject`'s doc
+/// comment) — cutting the body instead would show less of a memory that
+/// already told us how to describe it concisely.
+fn summarize_memory_line(
+    kind: crate::memory::MemoryKind,
+    subject: Option<&str>,
+    body: &str,
+) -> String {
+    let text = subject.unwrap_or(body);
+    let char_count = text.chars().count();
+    if char_count <= PROJECT_OVERVIEW_BODY_CHARS {
+        format!("{kind}: {text}")
+    } else {
+        let cut: String = text.chars().take(PROJECT_OVERVIEW_BODY_CHARS).collect();
+        format!("{kind}: {cut}…")
+    }
+}
 
 /// Build the rows the Settings overlay shows, from a fresh [`Discovery`]
 /// pass and the configuration currently on disk.
@@ -2856,6 +2958,177 @@ mod settings_persistence_tests {
         let (_, _, providers, profiles, _) = build_settings(&runtime).unwrap();
         assert!(!providers[0].config.enabled());
         assert!(!profiles[0].config.enabled());
+    }
+}
+
+/// Phase 41: the project overview reads real binding memory and real
+/// unresolved todos through [`build_project_overview_memory`] — the
+/// production function `Action::OpenProjectOverview`'s handler calls, not a
+/// helper that re-implements the query. `MemoryStore::binding` and
+/// `memory::snapshot::snapshot` had no other production caller before this
+/// (only `tests/memory_authority.rs` and `tests/memory_snapshot.rs`
+/// exercised them), so the overview is what makes them reachable at all.
+#[cfg(test)]
+mod project_overview_tests {
+    use super::*;
+    use crate::memory::{MemoryAuthority, MemoryKind, NewMemory, ProjectMemory};
+
+    /// Bootstrap a `Runtime` over fresh, isolated data/config/workspace
+    /// directories, matching `settings_persistence_tests::bootstrapped_runtime`.
+    fn bootstrapped_runtime() -> (tempfile::TempDir, tempfile::TempDir, crate::Runtime) {
+        use clap::Parser;
+
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join(".git")).unwrap();
+
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+            "--config-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, workspace.path()).unwrap();
+        (data, workspace, runtime)
+    }
+
+    /// A project with no memory at all gets empty, honest sections — not an
+    /// error. `ProjectMemory::open` creates the database on first use, so
+    /// "no memory yet" and "could not read memory" must not collapse into
+    /// the same outcome.
+    #[test]
+    fn a_project_with_no_memory_yet_reports_empty_sections_not_an_error() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let memory = build_project_overview_memory(&runtime).expect("must not fail");
+        assert!(memory.decisions.is_empty());
+        assert!(memory.todos.is_empty());
+        assert_eq!(memory.todos_omitted, 0);
+    }
+
+    /// A recorded, active constraint and decision both come back from the
+    /// real `MemoryStore::binding` call, and a memory with no authority
+    /// classification (`None`, never presented as a rule) does not.
+    #[test]
+    fn active_decisions_and_constraints_are_read_through_the_real_binding_query() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let memory = ProjectMemory::open(&runtime).expect("open");
+        let store = memory.store();
+
+        store
+            .record(
+                NewMemory::new(MemoryKind::Constraint, "the local gate must run alone")
+                    .with_authority(Some(MemoryAuthority::Constraint)),
+            )
+            .unwrap();
+        store
+            .record(
+                NewMemory::new(MemoryKind::Decision, "sonnet closes phase 41")
+                    .with_authority(Some(MemoryAuthority::Decision)),
+            )
+            .unwrap();
+        // Never classified, so `binding()` must not return it — see
+        // `MemoryStore::binding`'s own doc comment.
+        store
+            .record(NewMemory::new(
+                MemoryKind::Finding,
+                "an unclassified finding",
+            ))
+            .unwrap();
+
+        let overview = build_project_overview_memory(&runtime).expect("must not fail");
+        assert_eq!(overview.decisions.len(), 2);
+        assert!(
+            overview
+                .decisions
+                .iter()
+                .any(|line| line.contains("the local gate must run alone"))
+        );
+        assert!(
+            overview
+                .decisions
+                .iter()
+                .any(|line| line.contains("sonnet closes phase 41"))
+        );
+        assert!(
+            overview
+                .decisions
+                .iter()
+                .all(|line| !line.contains("an unclassified finding"))
+        );
+    }
+
+    /// A resolved todo is queryable but must never be presented as open work
+    /// — `MemoryStatus::is_open_work`'s own contract, proven here through the
+    /// same `snapshot` call the overview uses.
+    #[test]
+    fn only_unresolved_todos_are_shown() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let memory = ProjectMemory::open(&runtime).expect("open");
+        let store = memory.store();
+
+        store
+            .record(NewMemory::new(MemoryKind::Todo, "wire the shell into main"))
+            .unwrap();
+        let resolved = store
+            .record(NewMemory::new(MemoryKind::Todo, "already done"))
+            .unwrap();
+        store
+            .set_status(&resolved.id, crate::memory::MemoryStatus::Resolved)
+            .unwrap();
+
+        let overview = build_project_overview_memory(&runtime).expect("must not fail");
+        assert_eq!(overview.todos.len(), 1);
+        assert!(overview.todos[0].contains("wire the shell into main"));
+        assert!(
+            overview
+                .todos
+                .iter()
+                .all(|line| !line.contains("already done"))
+        );
+    }
+
+    /// The `p` key opens the overlay through the real run-loop action, and
+    /// the overlay carries the memory the run loop read — not a
+    /// hand-constructed fixture.
+    #[test]
+    fn opening_the_project_overview_shows_real_memory() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let memory = ProjectMemory::open(&runtime).expect("open");
+        memory
+            .store()
+            .record(
+                NewMemory::new(MemoryKind::Constraint, "never run ci-local beside cargo")
+                    .with_authority(Some(MemoryAuthority::Constraint)),
+            )
+            .unwrap();
+
+        let mut state = state::ShellState::new(
+            "glasshouse",
+            runtime.project().display_root(),
+            "test",
+            Vec::new(),
+        );
+        assert_eq!(
+            state.handle_key(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Char('p')
+            )),
+            state::Action::OpenProjectOverview
+        );
+
+        let built = build_project_overview_memory(&runtime).expect("must not fail");
+        state.open_project_overview(built.decisions, built.todos, built.todos_omitted, None);
+
+        assert_eq!(state.overlay(), Some(state::Overlay::ProjectOverview));
+        let overview = state.project_overview().expect("open");
+        assert!(
+            overview
+                .decisions()
+                .iter()
+                .any(|line| line.contains("never run ci-local beside cargo"))
+        );
     }
 }
 

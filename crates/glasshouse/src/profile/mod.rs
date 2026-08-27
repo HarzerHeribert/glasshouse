@@ -905,7 +905,24 @@ pub fn resolve_with_gateway(
             };
             apply_gateway(profile, gateway, adapter, &mut overlay)?;
         }
-        BackendResource::Native => {}
+        // Phase 32 line 1184, and the gap Phase 32A's audit found: the other
+        // two arms each record their resource kind, and this one recorded
+        // nothing — so `ResourceKind::NativeSubscription` existed as a type
+        // and was never constructed on any real launch. A distinction the
+        // shipped binary never draws is not a distinction it makes.
+        //
+        // This adds a note and nothing else. It does not touch the harness's
+        // argv, environment or configuration, which is what "Native behaviour
+        // does not change" has always meant here.
+        BackendResource::Native => {
+            let kind = crate::provider::registry::ResourceKind::NativeSubscription {
+                harness: profile.harness,
+            };
+            overlay.mechanisms.push(MechanismNote {
+                category: "resource kind",
+                detail: format!("{} — {}", kind.label(), kind.quota().as_str()),
+            });
+        }
     }
 
     // An automatic-review mode is not necessarily served by whatever the
@@ -2425,6 +2442,38 @@ mod tests {
     /// resolved to local inference or a remote one, and the two say
     /// different things about quota — this is the registry's classification
     /// actually reaching the launch path, not merely existing as a type.
+    /// Phase 32 line 1184 — a native subscription is represented separately
+    /// from an API-key or gateway resource, **on a real launch** and not only
+    /// as a type.
+    ///
+    /// Phase 32A's audit found this arm recording nothing while the other two
+    /// recorded their kind, so `ResourceKind::NativeSubscription` was
+    /// constructed nowhere outside tests. A distinction the shipped binary
+    /// never draws is not one it makes, and this is the test that keeps the
+    /// arm honest — deleting the push in `resolve` fails here and nowhere else.
+    #[test]
+    fn resolving_a_native_profile_records_it_as_a_subscription_resource() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let secrets = FakeSecrets::empty();
+        let profile = profile_for(IntegrationId::ClaudeCode);
+
+        let overlay = resolve(&profile, &native_cx(adapter, false, &secrets))
+            .expect("a native profile resolves");
+        let kind = overlay
+            .mechanisms
+            .iter()
+            .find(|note| note.category == "resource kind")
+            .expect("a native launch records its resource kind");
+
+        // Its quota is a rolling window, which is precisely what must not be
+        // flattened into the metered balance a direct provider reports.
+        assert!(kind.detail.contains("rolling"), "{kind:?}");
+        assert!(
+            !kind.detail.contains("metered balance"),
+            "a subscription must not claim a metered balance: {kind:?}"
+        );
+    }
+
     #[test]
     fn resolving_a_direct_provider_profile_records_whether_it_is_local_or_remote() {
         let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");

@@ -416,6 +416,34 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Run the local, project-scoped control API — Phase 42.
+    ///
+    /// Everything else in this file is a one-shot invocation: open the
+    /// project's database, do one thing, exit. `api serve` is the one
+    /// long-running door, so that something other than a person typing
+    /// commands — an orchestrator, a script — can list, spawn, message, and
+    /// interrupt this project's sessions, query its memory, and take
+    /// checkpoints, without a shell already open.
+    Api {
+        #[command(subcommand)]
+        command: ApiCommand,
+    },
+}
+
+/// `glasshouse api` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ApiCommand {
+    /// Listen on this project's control socket until killed.
+    ///
+    /// Binds a Unix domain socket restricted to this machine's user (socket
+    /// permissions plus a peer-credential check) and answers one JSON
+    /// request per connection. Refuses on any platform without a Unix
+    /// domain socket.
+    Serve {
+        /// Bind here instead of the project's own state directory.
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
+    },
 }
 
 #[cfg(test)]
