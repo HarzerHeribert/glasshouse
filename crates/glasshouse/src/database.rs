@@ -64,9 +64,12 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// concluded about it (`supervision`, `supervision_reason`). Version 10 adds
 /// Phase 21C's validity and invalidation conditions and the review/decay
 /// bookkeeping Phase 21D needs (`review_reason`, `review_marked_at`,
-/// `last_validated_at`). Later migrations are appended to [`MIGRATIONS`], and
-/// this constant moves with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 10;
+/// `last_validated_at`). Version 11 adds `routing_observations`, Phase 33A's
+/// append-oriented ledger of what actually happened on a routed turn — see the
+/// migration's own doc comment for its shape and why it accepts no `UPDATE`.
+/// Later migrations are appended to [`MIGRATIONS`], and this constant moves
+/// with them.
+const SUPPORTED_SCHEMA_VERSION: i64 = 11;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -1031,6 +1034,149 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
     ALTER TABLE memories ADD COLUMN last_validated_at INTEGER
         CHECK (last_validated_at IS NULL OR last_validated_at >= 0);
     ",
+    // 11: Phase 33A's routing evidence ledger — an append-oriented record of
+    // what actually happened on a routed turn, so a routing decision can be
+    // audited and its aggregation recalibrated against the raw rows rather
+    // than a counter that has already forgotten what produced it.
+    //
+    // # A new table, not more columns on `sessions`
+    //
+    // `sessions` is one row per session and this is many rows per session —
+    // every measurable turn a session makes, at whatever rate its harness
+    // makes them. Folding that into `sessions` would mean either widening one
+    // row's meaning to "the latest turn" (losing every one before it, exactly
+    // what line 1329 forbids) or a one-to-many column nothing else in this
+    // schema does. A dedicated table with its own `seq` is migration 4's own
+    // argument for `lifecycle_events` over a column on `sessions`, applied
+    // here for the same reason.
+    //
+    // # `AUTOINCREMENT`, and no `UPDATE` path
+    //
+    // Append-oriented is a property of the code as much as the schema: this
+    // migration adds no trigger that would let a later migration alter a
+    // measurement in place, and [`crate::routing::evidence`]'s store offers a
+    // `record` method and reads, never a method that edits a recorded
+    // observation. `AUTOINCREMENT` (migration 4's own reasoning for
+    // `lifecycle_events` and `memories`) means a `seq` is never reused even
+    // after rows are pruned by some future retention policy, so a stored
+    // reference to one observation can never come to mean another.
+    //
+    // # Identity: six columns, because two turns are the same evidence only
+    // when all of them agree
+    //
+    // `provider`, `model` and `route` are line 1338's "materially different
+    // model versions, quantizations, routes, or changing stealth-model
+    // identities" kept apart rather than averaged together; `harness` and
+    // `purpose` are line 1330's own list; `quota_context` is the authenticated
+    // credential or account context a reading is scoped to, so two credentials
+    // against the same provider are never folded into one rate. All nullable
+    // except `provider` and `model`, because a row this schema will accept
+    // must at minimum say which provider and which model it is evidence
+    // about — see [`crate::routing::evidence`]'s own doc comment for which of
+    // these a real gateway exchange can actually supply today.
+    //
+    // # Timing, tokens, cost: nullable, every one, for the reason line 1331
+    // gives
+    //
+    // "When the protocol exposes them." A gateway that forwards bytes without
+    // parsing them cannot see inside a response stream, so
+    // `first_token_at`/`first_tool_call_at` are NULL from that producer today
+    // — not zero, not the dispatch time, `NULL`, which is this schema's
+    // standing rule for "the build that wrote this row recorded nothing
+    // here." The same is true of the token and cost columns: nothing in this
+    // migration invents a way to read them, it only makes room for a producer
+    // that can. `cost_confidence`'s `CHECK` is paired with `cost_micro_usd` so
+    // that a cost can never be stored without saying how well it is known —
+    // line 1333's "explicit confidence label" enforced at the storage layer
+    // rather than left to a caller's discipline, the same move migration 6
+    // makes for `project_phase` and migration 10 for `review_reason`.
+    //
+    // # `context_state` is the one column that is `NOT NULL`
+    //
+    // Every other column's NULL means "not recorded." This one may not be
+    // silently absent, because line 1337 forbids *averaging away* cache
+    // effects: a row that does not know whether its context was warm or cold
+    // must say `unknown` outright, so that a rolling summary can separate the
+    // three rather than one of them quietly vanishing into the others.
+    // `DEFAULT 'unknown'` is what makes that automatic for any future insert
+    // path that forgets to think about it.
+    //
+    // # Two triggers, migration 4's pair, unchanged
+    //
+    // `IS NOT` rather than `<>`, so a missing binding row aborts the write
+    // instead of the comparison evaluating to NULL and letting it through —
+    // migration 2's argument, copied verbatim rather than re-derived. This is
+    // the structural half of line 1343's "keep the evidence ledger physically
+    // project-scoped"; the second half — "require explicit export before
+    // observations leave the project" — is a property of which functions
+    // exist in [`crate::routing::evidence`], not of the schema, and is
+    // recorded there.
+    "
+    CREATE TABLE routing_observations (
+        seq                INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id         TEXT    NOT NULL,
+        observed_at        INTEGER NOT NULL,
+
+        provider           TEXT    NOT NULL,
+        model              TEXT    NOT NULL,
+        route              TEXT,
+        quota_context      TEXT,
+        harness            TEXT,
+        purpose            TEXT,
+
+        dispatched_at      INTEGER,
+        first_byte_at      INTEGER,
+        first_token_at     INTEGER,
+        first_tool_call_at INTEGER,
+        completed_at       INTEGER,
+
+        input_tokens        INTEGER CHECK (input_tokens        IS NULL OR input_tokens        >= 0),
+        output_tokens       INTEGER CHECK (output_tokens       IS NULL OR output_tokens       >= 0),
+        cached_input_tokens INTEGER CHECK (cached_input_tokens IS NULL OR cached_input_tokens >= 0),
+        cost_micro_usd      INTEGER CHECK (cost_micro_usd      IS NULL OR cost_micro_usd       >= 0),
+        cost_confidence     TEXT
+            CHECK (cost_confidence IS NULL
+                   OR cost_confidence IN ('exact', 'estimated', 'unknown')),
+
+        tool_rounds        INTEGER CHECK (tool_rounds IS NULL OR tool_rounds >= 0),
+        retries            INTEGER CHECK (retries     IS NULL OR retries     >= 0),
+        repairs            INTEGER CHECK (repairs     IS NULL OR repairs     >= 0),
+        failovers          INTEGER CHECK (failovers   IS NULL OR failovers   >= 0),
+        outcome            TEXT
+            CHECK (outcome IS NULL
+                   OR outcome IN ('succeeded', 'failed', 'cancelled', 'unknown')),
+
+        context_state      TEXT NOT NULL DEFAULT 'unknown'
+            CHECK (context_state IN ('warm', 'cold', 'unknown')),
+
+        CHECK (cost_micro_usd IS NULL OR cost_confidence IS NOT NULL)
+    );
+
+    -- Reading back one route's recent observations, newest first: the access
+    -- pattern every rolling summary in `crate::routing::evidence` uses.
+    CREATE INDEX routing_observations_by_route_time
+        ON routing_observations (provider, model, route, observed_at DESC);
+
+    CREATE TRIGGER routing_observations_reject_foreign_project_insert
+    BEFORE INSERT ON routing_observations
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'routing observation belongs to a different project');
+    END;
+
+    CREATE TRIGGER routing_observations_reject_foreign_project_update
+    BEFORE UPDATE OF project_id ON routing_observations
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'routing observation belongs to a different project');
+    END;
+    ",
 ];
 
 pub(crate) const PROJECT_ID_KEY: &str = "project_id";
@@ -1616,7 +1762,9 @@ mod tests {
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(
-                "ALTER TABLE memories DROP COLUMN validity_conditions;
+                "DROP TABLE routing_observations;
+
+                 ALTER TABLE memories DROP COLUMN validity_conditions;
                  ALTER TABLE memories DROP COLUMN invalidation_conditions;
                  ALTER TABLE memories DROP COLUMN review_reason;
                  ALTER TABLE memories DROP COLUMN review_marked_at;
@@ -1687,6 +1835,115 @@ mod tests {
             result.is_err(),
             "an unrecognized review_reason must be rejected by the CHECK constraint"
         );
+    }
+
+    /// Migration proof (a): a version-10 database migrates to 11 keeping
+    /// every existing row, and gains a working `routing_observations` table.
+    #[test]
+    fn a_version_ten_database_migrates_forward_keeping_its_memories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let memory = crate::memory::ProjectMemory::open(&fixture.runtime).unwrap();
+        let pre_existing = memory
+            .store()
+            .record(crate::memory::NewMemory::new(
+                crate::memory::MemoryKind::Decision,
+                "citrine decisions predate migration 11",
+            ))
+            .unwrap();
+        drop(memory);
+
+        let db_path = fixture.runtime.database_path();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "DROP TABLE routing_observations;
+                 DELETE FROM schema_migrations WHERE version >= 11;",
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            schema_version(&db_path),
+            10,
+            "the rollback must land on version 10"
+        );
+
+        // The next launch is an ordinary bootstrap; nothing special is asked
+        // of it, matching the way a real upgrade happens.
+        let migrated = fixture.rebootstrap().unwrap();
+        assert_eq!(
+            schema_version(&migrated.database_path()),
+            SUPPORTED_SCHEMA_VERSION,
+            "the launch must have applied migration 11"
+        );
+
+        let reopened = crate::memory::ProjectMemory::open(&migrated).unwrap();
+        let intact = reopened
+            .store()
+            .get(&pre_existing.id)
+            .unwrap()
+            .expect("the pre-migration memory must survive the upgrade");
+        assert_eq!(intact.body, pre_existing.body);
+
+        let conn = Connection::open(migrated.database_path()).unwrap();
+        let project_id = stored_project_id(&migrated.database_path());
+        conn.execute(
+            "INSERT INTO routing_observations (project_id, observed_at, provider, model) \
+             VALUES (?1, 1000, 'fixture', 'fixture-model')",
+            [project_id.as_str()],
+        )
+        .expect("a freshly migrated database must accept a routing observation");
+    }
+
+    /// Migration proof (b): the isolation trigger really aborts a foreign
+    /// `project_id`, migration 4's own pair applied to `routing_observations`.
+    #[test]
+    fn migration_eleven_rejects_a_routing_observation_from_a_foreign_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let conn = Connection::open(fixture.runtime.database_path()).unwrap();
+
+        let result = conn.execute(
+            "INSERT INTO routing_observations (project_id, observed_at, provider, model) \
+             VALUES ('a-different-project-entirely', 1000, 'fixture', 'fixture-model')",
+            [],
+        );
+        assert!(
+            result.is_err(),
+            "an insert naming a foreign project_id must be rejected by the isolation trigger"
+        );
+    }
+
+    /// Migration proof (c): the `cost_micro_usd`/`cost_confidence` `CHECK`
+    /// refuses a cost with no confidence label.
+    #[test]
+    fn migration_eleven_refuses_a_cost_with_no_confidence_label() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let conn = Connection::open(fixture.runtime.database_path()).unwrap();
+        let project_id = stored_project_id(&fixture.runtime.database_path());
+
+        let result = conn.execute(
+            "INSERT INTO routing_observations \
+             (project_id, observed_at, provider, model, cost_micro_usd) \
+             VALUES (?1, 1000, 'fixture', 'fixture-model', 500)",
+            [project_id.as_str()],
+        );
+        assert!(
+            result.is_err(),
+            "a stored cost with no cost_confidence must be rejected by the CHECK constraint"
+        );
+
+        // The paired value is accepted, so the failure above is about the
+        // missing label and not about the column existing at all.
+        conn.execute(
+            "INSERT INTO routing_observations \
+             (project_id, observed_at, provider, model, cost_micro_usd, cost_confidence) \
+             VALUES (?1, 1000, 'fixture', 'fixture-model', 500, 'estimated')",
+            [project_id.as_str()],
+        )
+        .expect("a cost paired with a confidence label must be accepted");
     }
 
     #[test]

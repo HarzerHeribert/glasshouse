@@ -59,8 +59,8 @@
 //! to write into a tracked configuration file, so it is the one used here.
 
 pub mod classify;
-pub mod evidence;
 pub mod disposable;
+pub mod evidence;
 pub mod free;
 pub mod interactive;
 

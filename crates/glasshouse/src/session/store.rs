@@ -2796,6 +2796,39 @@ mod tests {
                 "memories_fts_idx.pgno",
                 "project_metadata.key",
                 "project_metadata.value",
+                // Migration 11: `routing_observations` (Phase 33A). `seq`,
+                // `observed_at`, the timestamps, the counters and the
+                // fixed-vocabulary columns cannot hold a credential; the
+                // free-text ones (`route`, `quota_context`, `harness`,
+                // `purpose`) are names and slugs a producer inside this crate
+                // constructs, never text copied from a provider response body
+                // — the gateway that writes this table is structurally unable
+                // to read a response body at all (see `routing::evidence`).
+                "routing_observations.seq",
+                "routing_observations.project_id",
+                "routing_observations.observed_at",
+                "routing_observations.provider",
+                "routing_observations.model",
+                "routing_observations.route",
+                "routing_observations.quota_context",
+                "routing_observations.harness",
+                "routing_observations.purpose",
+                "routing_observations.dispatched_at",
+                "routing_observations.first_byte_at",
+                "routing_observations.first_token_at",
+                "routing_observations.first_tool_call_at",
+                "routing_observations.completed_at",
+                "routing_observations.input_tokens",
+                "routing_observations.output_tokens",
+                "routing_observations.cached_input_tokens",
+                "routing_observations.cost_micro_usd",
+                "routing_observations.cost_confidence",
+                "routing_observations.tool_rounds",
+                "routing_observations.retries",
+                "routing_observations.repairs",
+                "routing_observations.failovers",
+                "routing_observations.outcome",
+                "routing_observations.context_state",
                 "schema_migrations.version",
                 "sessions.id",
                 "sessions.project_id",
@@ -2877,6 +2910,7 @@ mod tests {
                 "memories_fts_docsize",
                 "memories_fts_idx",
                 "project_metadata",
+                "routing_observations",
                 "schema_migrations",
                 "sessions",
             ],
@@ -2968,6 +3002,7 @@ mod tests {
                  DROP TABLE IF EXISTS memories;
                  DROP TABLE IF EXISTS lifecycle_events;
                  DROP TABLE IF EXISTS checkpoints;
+                 DROP TABLE IF EXISTS routing_observations;
                  DELETE FROM schema_migrations WHERE version >= 3;",
             )
             .unwrap();
@@ -2979,8 +3014,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 10,
-            "the launch must have applied migrations 3, 4, 5, 6, 7, 8, 9 and 10"
+            version, 11,
+            "the launch must have applied migrations 3, 4, 5, 6, 7, 8, 9, 10 and 11"
         );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
@@ -3154,6 +3189,7 @@ mod tests {
                  DROP TABLE IF EXISTS memories;
                  DROP TABLE IF EXISTS lifecycle_events;
                  DROP TABLE IF EXISTS checkpoints;
+                 DROP TABLE IF EXISTS routing_observations;
                  DELETE FROM schema_migrations WHERE version >= 2;",
             )
             .unwrap();
@@ -3166,8 +3202,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 10,
-            "the launch must have applied migrations 2, 3, 4, 5, 6, 7, 8, 9 and 10"
+            version, 11,
+            "the launch must have applied migrations 2, 3, 4, 5, 6, 7, 8, 9, 10 and 11"
         );
 
         let store = SessionStore::new(&reopened).unwrap();
@@ -4103,7 +4139,8 @@ mod tests {
                      ALTER TABLE sessions DROP COLUMN process_host;
                      ALTER TABLE sessions DROP COLUMN supervision;
                      ALTER TABLE sessions DROP COLUMN supervision_reason;
-                     DELETE FROM schema_migrations WHERE version >= 8;",
+                     DROP TABLE IF EXISTS routing_observations;
+                 DELETE FROM schema_migrations WHERE version >= 8;",
                 )
                 .unwrap();
 
@@ -4114,8 +4151,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 10,
-                "the launch must have applied migrations 8, 9 and 10"
+                version, 11,
+                "the launch must have applied migrations 8, 9, 10 and 11"
             );
 
             let after = SessionStore::new(&reopened)

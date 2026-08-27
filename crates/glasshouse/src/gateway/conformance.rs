@@ -73,9 +73,10 @@
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use clap::Parser;
 use ureq::Agent;
 
 use super::fixture::{FixtureUpstream, RecordedRequest};
@@ -591,6 +592,130 @@ fn a_real_forwarded_exchanges_rate_limit_headers_are_persisted_for_the_next_proc
     assert_eq!(
         gateway.quota_headers().and_then(|(h, _)| h.limit()),
         Some(7000)
+    );
+}
+
+// --- Phase 33A: the routing evidence ledger's gateway producer -------------
+
+/// A real project database plus an [`crate::routing::evidence::EvidenceLedger`]
+/// opened on it — the same [`crate::bootstrap`] door
+/// `crate::routing::evidence::tests` and every other module's own store tests
+/// use, so a durable write here is proven against the real schema rather than
+/// an in-memory stand-in.
+fn evidence_ledger_fixture(
+    base: &std::path::Path,
+) -> Arc<crate::routing::evidence::EvidenceLedger> {
+    let root = base.join("workspace").join("proj");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let cli = crate::Cli::try_parse_from([
+        "glasshouse",
+        "--data-dir",
+        base.join("data").to_str().unwrap(),
+        "--config-dir",
+        base.join("config").to_str().unwrap(),
+    ])
+    .unwrap();
+    let runtime = crate::bootstrap(&cli, &root).unwrap();
+    Arc::new(crate::routing::evidence::EvidenceLedger::open(&runtime).unwrap())
+}
+
+/// [`gateway_to`], recording every bound, provider-reaching exchange to
+/// `ledger` — the write half of Phase 33A, proven the way every other
+/// production-feed test in this file is: a real socket, a real accept loop,
+/// never `SessionRouting::record_routing_observation` called directly.
+fn gateway_to_with_evidence_ledger(
+    fixture: &FixtureUpstream,
+    ledger: Arc<crate::routing::evidence::EvidenceLedger>,
+) -> Gateway {
+    Gateway::start_with_telemetry(upstream_to(fixture), None, Some(ledger))
+        .expect("loopback is bindable")
+}
+
+/// A real forwarded exchange, driven through a real [`Gateway`] and a real
+/// accept loop — mutating away `gateway/mod.rs`'s call to
+/// `routing.record_routing_observation(...)` in the accept loop's connection
+/// thread fails this test rather than a helper's (practice §35).
+#[test]
+fn a_real_forwarded_exchange_reaches_the_routing_evidence_ledger() {
+    use crate::routing::AssignedModel;
+    use crate::routing::evidence::{ObservationQuery, Outcome};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ledger = evidence_ledger_fixture(tmp.path());
+    let fixture = FixtureUpstream::answering(
+        "HTTP/1.1 200 OK",
+        "content-type: application/json\r\n",
+        "{\"ok\":true}",
+    );
+    let gateway = gateway_to_with_evidence_ledger(&fixture, Arc::clone(&ledger));
+
+    // Nothing is bound yet, so the producer has no identity to record —
+    // `record_routing_observation`'s own first refusal, exercised for real
+    // before the positive case below.
+    let unbound_response = as_text(&send_and_read(
+        gateway.address(),
+        &messages_request(gateway.token().expose(), "{}"),
+    ));
+    assert!(unbound_response.starts_with("HTTP/1.1 200 OK"));
+
+    gateway.routing().bind(
+        "fixture-harness",
+        ANTHROPIC_MESSAGES,
+        AssignedModel::named("fixture-model"),
+        gateway.upstream(),
+    );
+
+    let response = as_text(&send_and_read(
+        gateway.address(),
+        &messages_request(gateway.token().expose(), "{}"),
+    ));
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK"),
+        "the exchange did not complete: {response}"
+    );
+
+    let query = ObservationQuery {
+        provider: "fixture",
+        model: "fixture-model",
+        route: Some(ANTHROPIC_MESSAGES),
+        harness: Some("fixture-harness"),
+    };
+
+    // The write happens on the connection thread after the response is
+    // already on the wire — poll rather than assume it has landed, the same
+    // margin `a_real_forwarded_exchanges_rate_limit_headers_are_persisted_for_the_next_process`
+    // gives its own disk write.
+    let mut attempts = 0;
+    let rows = loop {
+        let rows = ledger.recent(query, 10).unwrap();
+        if !rows.is_empty() {
+            break rows;
+        }
+        attempts += 1;
+        assert!(
+            attempts < 200,
+            "no routing observation was recorded within 2s of a completed, bound exchange"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        rows.len(),
+        1,
+        "exactly the one bound exchange must have been recorded, not the earlier unbound one"
+    );
+    let row = &rows[0];
+    assert_eq!(row.outcome, Some(Outcome::Succeeded));
+    assert!(row.dispatched_at_unix.is_some());
+    assert!(row.completed_at_unix.is_some());
+    assert!(row.duration_ms().is_some());
+    assert_eq!(
+        row.quota_context.as_deref(),
+        Some("fixture/FIXTURE_API_KEY")
+    );
+    assert_eq!(
+        row.first_byte_at_unix, None,
+        "this producer never supplies it — see `crate::routing::evidence`'s own header"
     );
 }
 

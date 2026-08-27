@@ -300,6 +300,37 @@ impl Gateway {
         upstream: Upstream,
         quota_cache: Option<crate::provider::telemetry::GatewayQuotaCache>,
     ) -> Result<Self> {
+        Self::start_with_telemetry(upstream, quota_cache, None)
+    }
+
+    /// [`Self::start_with_quota_cache`], with a
+    /// [`crate::routing::evidence::EvidenceLedger`] every real forwarded
+    /// exchange that has been bound to an assignment is recorded to —
+    /// capability map Phase 33A, this package's own production producer. See
+    /// [`crate::gateway::session::SessionRouting::record_routing_observation`]
+    /// for exactly what is and is not recorded from one exchange.
+    ///
+    /// `None` reproduces [`Self::start_with_quota_cache`] exactly — the same
+    /// additive guarantee that constructor already gives
+    /// [`Self::start`], and for the same reason: this module has never had a
+    /// project or a data directory in scope (see
+    /// [`Self::start_with_quota_cache`]'s own doc), so a caller that wants a
+    /// durable evidence ledger resolves its own [`crate::Runtime`] and hands
+    /// this an already-opened
+    /// [`crate::routing::evidence::EvidenceLedger::open`].
+    ///
+    /// **Not called from `crates/glasshouse/src/main.rs` today** — the same
+    /// gap [`Self::start_with_quota_cache`]'s own doc records for the quota
+    /// cache, and for the identical reason: `main.rs` is this package's
+    /// `FORBIDDEN FILES`. See the report for the exact patch.
+    ///
+    /// Private on purpose: reached from outside this module only through
+    /// [`start_if_required_with_telemetry`].
+    fn start_with_telemetry(
+        upstream: Upstream,
+        quota_cache: Option<crate::provider::telemetry::GatewayQuotaCache>,
+        evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
+    ) -> Result<Self> {
         let listener = TcpListener::bind((GATEWAY_INTERFACE, EPHEMERAL_PORT))
             .context("could not bind the local Glasshouse gateway to loopback")?;
         // Port 0 was a request, not an address. This is the answer, and it is
@@ -325,7 +356,18 @@ impl Gateway {
                 let upstream = Arc::clone(&upstream);
                 let routing = Arc::clone(&routing);
                 let quota_cache = quota_cache.clone();
-                move || accept_loop(listener, stop, token, upstream, routing, quota_cache)
+                let evidence_ledger = evidence_ledger.clone();
+                move || {
+                    accept_loop(
+                        listener,
+                        stop,
+                        token,
+                        upstream,
+                        routing,
+                        quota_cache,
+                        evidence_ledger,
+                    )
+                }
             })
             .context("could not start the local Glasshouse gateway's accept thread")?;
 
@@ -439,6 +481,7 @@ fn accept_loop(
     upstream: Arc<Upstream>,
     routing: Arc<SessionRouting>,
     quota_cache: Option<Arc<crate::provider::telemetry::GatewayQuotaCache>>,
+    evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
 ) {
     // One agent for the life of the gateway: it owns the connection pool to
     // the provider, so a warm TLS connection survives from one request to
@@ -454,16 +497,40 @@ fn accept_loop(
                 let agent = Arc::clone(&agent);
                 let routing = Arc::clone(&routing);
                 let quota_cache = quota_cache.clone();
+                let evidence_ledger = evidence_ledger.clone();
                 let spawned = std::thread::Builder::new()
                     .name("glasshouse-gateway-exchange".to_owned())
                     .spawn(move || {
+                        // Phase 33A's own honest caveat, named where it is
+                        // stamped rather than only in `routing::evidence`'s
+                        // doc: this is the instant the connection was handed
+                        // to `ingress::serve`, not the instant a request left
+                        // for the provider — the true dispatch instant lives
+                        // inside `ingress::forward`, outside this partition.
+                        let dispatched_at = crate::provider::cache::now_unix_seconds();
                         let (exchange, quota) = ingress::serve(stream, &token, &upstream, &agent);
+                        // The exchange is genuinely over here: every byte of
+                        // the response has been relayed. Stamped before
+                        // anything below it so nothing added later can push
+                        // this reading later than the real completion.
+                        let completed_at = crate::provider::cache::now_unix_seconds();
                         // Phase 9H and 9I's production feed. After the
                         // exchange, so the routing lock is never held across
                         // the provider hop, and before the log line, so a
                         // failover the exchange caused is already recorded
                         // when its own record is read.
                         routing.observe_exchange(&upstream, &exchange, std::time::Instant::now());
+                        // Phase 33A's production producer — see
+                        // `crate::gateway::session::SessionRouting::record_routing_observation`
+                        // for exactly what this can and cannot supply.
+                        if let Some(ledger) = &evidence_ledger {
+                            routing.record_routing_observation(
+                                ledger,
+                                &exchange,
+                                dispatched_at,
+                                completed_at,
+                            );
+                        }
                         // Capability map line 1229's gateway half — a passive
                         // reader, not a prober: this fires only when a real
                         // session actually forwards a request through this
@@ -559,6 +626,28 @@ pub fn start_if_required_with_quota_cache(
         return Ok(None);
     }
     Gateway::start_with_quota_cache(upstream()?, quota_cache).map(Some)
+}
+
+/// [`start_if_required_with_quota_cache`], with a
+/// [`crate::routing::evidence::EvidenceLedger`] a started gateway records
+/// every bound, provider-reaching exchange to — Phase 33A.
+///
+/// **Not called from `crates/glasshouse/src/main.rs` today**, for the exact
+/// reason [`start_if_required_with_quota_cache`]'s own doc gives for the
+/// quota cache: `main.rs` is this package's `FORBIDDEN FILES`. See the
+/// report's `PATCHES ANOTHER PACKAGE MUST APPLY` for the three-line change
+/// that wires a real [`crate::routing::evidence::EvidenceLedger::open`] into
+/// both of `main.rs`'s gateway launch sites.
+pub fn start_if_required_with_telemetry(
+    profiles: &[LaunchProfile],
+    upstream: impl FnOnce() -> Result<Upstream>,
+    quota_cache: Option<crate::provider::telemetry::GatewayQuotaCache>,
+    evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
+) -> Result<Option<Gateway>> {
+    if !gateway_is_required(profiles) {
+        return Ok(None);
+    }
+    Gateway::start_with_telemetry(upstream()?, quota_cache, evidence_ledger).map(Some)
 }
 
 #[cfg(test)]

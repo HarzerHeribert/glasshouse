@@ -30,6 +30,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::provider::telemetry::RateLimitHeaders;
+use crate::routing::evidence::{EvidenceLedger, NewObservation, Outcome as RoutingOutcome};
 use crate::routing::free::{FreePool, FreeResource, WorkloadOutcome};
 use crate::routing::interactive::{
     Assignment, AssignmentChange, ChangeCause, FailureResponse, InteractiveRouting,
@@ -201,6 +202,77 @@ impl SessionRouting {
     /// line 1229's gateway half, read by [`super::Gateway::quota_headers`].
     pub fn quota_headers(&self) -> Option<(RateLimitHeaders, i64)> {
         self.lock().quota.clone()
+    }
+
+    /// Phase 33A's one production producer this round: turn one finished
+    /// exchange into a [`crate::routing::evidence::RoutingObservation`], when
+    /// there is enough to say. See `crate::routing::evidence`'s own module
+    /// documentation for exactly which fields this can and cannot supply and
+    /// why — this method is simply where that honest subset gets built.
+    ///
+    /// Two conditions must both hold before anything is recorded, mirroring
+    /// [`classify`]'s own filter:
+    ///
+    /// - the exchange must have reached the provider (`Forwarded` or
+    ///   `Unreachable` — the same two outcomes [`Self::observe_exchange`]
+    ///   treats as saying something about the backend), because nothing else
+    ///   is a measurable turn;
+    /// - a launch profile must already have called [`Self::bind`], because a
+    ///   provider/model identity recorded for an unbound session would be
+    ///   invented rather than observed.
+    ///
+    /// `dispatched_at_unix` and `completed_at_unix` come from the accept
+    /// loop, the only place in this partition with a timestamp on both sides
+    /// of `ingress::serve`.
+    pub(super) fn record_routing_observation(
+        &self,
+        ledger: &EvidenceLedger,
+        exchange: &Exchange,
+        dispatched_at_unix: i64,
+        completed_at_unix: i64,
+    ) {
+        let outcome = match &exchange.outcome {
+            Outcome::Forwarded {
+                upstream_status, ..
+            } => Some(if (200..400).contains(upstream_status) {
+                RoutingOutcome::Succeeded
+            } else {
+                RoutingOutcome::Failed
+            }),
+            Outcome::Unreachable { .. } => Some(RoutingOutcome::Failed),
+            Outcome::Unauthenticated
+            | Outcome::Declined
+            | Outcome::Unrouted
+            | Outcome::ClientGone
+            | Outcome::Idle => None,
+        };
+        let Some(outcome) = outcome else {
+            return;
+        };
+
+        let Some(assignment) = self.lock().assignment.clone() else {
+            return;
+        };
+
+        let new = NewObservation::new(
+            exchange.provider.clone(),
+            assignment.backend().model().label().to_owned(),
+        )
+        .with_route(exchange.protocol.clone())
+        .with_harness(Some(assignment.harness().to_owned()))
+        .with_quota_context(Some(assignment.backend().credential().label()))
+        .with_timing(Some(dispatched_at_unix), Some(completed_at_unix))
+        .with_outcome(outcome);
+
+        // Best-effort, exactly like `observe_quota_headers`'s own write to
+        // `GatewayQuotaCache`: the accept loop cannot fail a real session's
+        // exchange over a full disk or a locked database.
+        if let Err(err) = ledger.record(new, completed_at_unix) {
+            tracing::debug!(
+                error = %err,
+                "could not record a routing observation"
+            );
+        }
     }
 
     /// Fold in one finished exchange: update the resource's health, and, when

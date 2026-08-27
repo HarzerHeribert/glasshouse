@@ -264,8 +264,7 @@ fn a_checkpoint_taken_through_the_socket_is_retrieved_through_the_socket() {
     let root = fixture.project_root("alpha");
     let server = Server::start(&fixture, &root);
 
-    let spawned =
-        server.call(serde_json::json!({"op": "spawn_session", "harness": "claude-code"}));
+    let spawned = server.call(serde_json::json!({"op": "spawn_session", "harness": "claude-code"}));
     let session = spawned["result"]["session"].as_str().unwrap().to_owned();
 
     let taken = server.call(serde_json::json!({
@@ -294,7 +293,10 @@ fn a_checkpoint_taken_through_the_socket_is_retrieved_through_the_socket() {
 
     let latest = server.call(serde_json::json!({ "op": "get_checkpoint" }));
     assert_eq!(latest["status"], "ok", "{latest}");
-    assert_eq!(latest["result"]["checkpoint"].as_str().unwrap(), checkpoint_id);
+    assert_eq!(
+        latest["result"]["checkpoint"].as_str().unwrap(),
+        checkpoint_id
+    );
 
     let missing = server.call(serde_json::json!({
         "op": "get_checkpoint",
@@ -320,8 +322,7 @@ fn every_orchestrator_operation_refuses_a_session_from_another_project() {
 
     let alpha = Server::start(&fixture, &alpha_root);
 
-    let spawned =
-        alpha.call(serde_json::json!({"op": "spawn_session", "harness": "claude-code"}));
+    let spawned = alpha.call(serde_json::json!({"op": "spawn_session", "harness": "claude-code"}));
     let session = spawned["result"]["session"].as_str().unwrap().to_owned();
 
     let ready_marker = alpha_root.join("ready");
