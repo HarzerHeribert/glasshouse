@@ -6,6 +6,43 @@
 
 Last updated: 2026-08-28 (Europe/Berlin)
 
+## Checkpoint — 2026-08-28, batch 38 landed: 645 / 1280 (50%)
+
+One worker, one box — map line 576, the user's configured `PairingPreference`
+now reaching the scorer. Three mutations at three layers, all killed; the
+config-resolution one re-run independently by the integrator.
+
+### Phase 9J is nine of eleven, and the last two need a different caller
+
+566 (a prior for a **fresh session**) and 569 (warm-session continuity) both need
+a caller where the prior can decide something. **It cannot decide a same-model
+failover** — `classify` derives `PairingClass` without reading `route`, so the
+whole group scores identically however the preference is set. The preference does
+differ across the `OfferMigration` group, which is what the user is shown.
+
+**Do not send another package at `on_provider_failure` for those two lines.**
+`next_turn` or session start is where they live, and `next_turn` is deliberately
+sticky (lines 508/509) — making the prior participate there is a materially
+larger change the map does not currently ask for.
+
+### Phase −1 did something it was not designed for
+
+Checking link 2 surfaced that **`profile/**` must not import `crate::config`** —
+`Resolution`'s own doc says the caller does the lookup, and
+`provider: Option<&'a Provider>` is that rule in practice. The packet therefore
+told the worker the shape rather than letting it discover the ban mid-package.
+
+**The gate does not only refuse impossible packets; it surfaces the
+architectural constraint that decides how a possible one must be built.** Look
+for that deliberately when writing the FEASIBILITY block.
+
+### §66 — a worker killed mid-report has not lost its work
+
+This one died to `API Error: Connection lost mid-response` **after** finishing its
+code and running the full suite. Recovery was one message — *"write the report
+now, do not redo any code work"* — against a 29-minute, ~$13 re-run. **Establish
+what a dead worker actually lost before deciding what to do.**
+
 ## Checkpoint — 2026-08-28, batch 37 landed: 644 / 1280 (50%)
 
 **Green on all three platforms on this exact tree** — local gate 13/13 including

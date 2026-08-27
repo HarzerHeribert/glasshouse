@@ -356,6 +356,23 @@ fn response_request(
     })
 }
 
+/// Phase 9J line 576: the native-pairing preference and corrections in
+/// effect, resolved into the form `crate::profile`'s gateway path accepts —
+/// see `glasshouse::profile::GatewayPairing`'s own doc comment for why that
+/// module cannot resolve this itself. Both of `launch_session`'s and
+/// `resolve_resume_overlay`'s gateway-backed launches call this, so a
+/// configured preference reaches a resumed session exactly as it reaches a
+/// fresh one.
+fn resolved_gateway_pairing(
+    effective: &EffectiveConfig<'_>,
+) -> glasshouse::profile::GatewayPairing {
+    let (preference, _source) = effective.native_pairing_preference();
+    glasshouse::profile::GatewayPairing {
+        preference_slug: preference.slug(),
+        overrides: effective.pairing_overrides(),
+    }
+}
+
 fn launch_session(
     runtime: &Runtime,
     harness: Option<&str>,
@@ -511,10 +528,16 @@ fn launch_session(
         provider: provider.as_ref(),
         secrets: &secrets,
     };
+    // Phase 9J line 576: the user's configured native-pairing preference and
+    // corrections, resolved here — the same place `provider` above is — and
+    // handed to the gateway path rather than looked up inside `profile/**`,
+    // which may not import `crate::config`. See `resolved_gateway_pairing`.
+    let pairing = resolved_gateway_pairing(&effective);
     let mut overlay = match glasshouse::profile::resolve_with_gateway(
         &launch_profile,
         &resolution,
         gateway.as_ref(),
+        &pairing,
     ) {
         Ok(overlay) => overlay,
         Err(refusal) => {
@@ -1030,8 +1053,15 @@ fn resolve_resume_overlay(
         provider: provider.as_ref(),
         secrets: &secrets,
     };
-    let overlay =
-        glasshouse::profile::resolve_with_gateway(&launch_profile, &resolution, gateway.as_ref())?;
+    // Phase 9J line 576 — see `launch_session`'s own call for why this is
+    // resolved here rather than inside `profile/**`.
+    let pairing = resolved_gateway_pairing(effective);
+    let overlay = glasshouse::profile::resolve_with_gateway(
+        &launch_profile,
+        &resolution,
+        gateway.as_ref(),
+        &pairing,
+    )?;
     Ok((launch_profile, overlay, gateway))
 }
 
@@ -3012,6 +3042,43 @@ fn setup(runtime: &Runtime, trigger: SetupTrigger) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase 9J line 576's §35 proof for `main.rs`'s own two lines: what a
+    /// user actually configured reaches `GatewayPairing`, not
+    /// `glasshouse::profile::GatewayPairing::default`'s `"strong"`. If
+    /// `resolved_gateway_pairing` (or either of its two call sites) went back
+    /// to constructing `GatewayPairing::default()` instead of resolving
+    /// `effective.native_pairing_preference()`, this would still read
+    /// `"strong"` and fail.
+    #[test]
+    fn resolved_gateway_pairing_reflects_the_users_configured_preference() {
+        let mut user = UserConfig::default();
+        user.pairing_mut().set_native_pairing_preference(Some(
+            glasshouse::config::pairing::PairingPreference::Off,
+        ));
+        let effective = EffectiveConfig::new(&user, None);
+
+        let pairing = resolved_gateway_pairing(&effective);
+
+        assert_eq!(
+            pairing.preference_slug, "off",
+            "the user configured `off`; a default-valued `GatewayPairing` would read `strong` \
+             instead"
+        );
+    }
+
+    /// The out-of-the-box answer, for a user who has never configured this —
+    /// matches `EffectiveConfig::native_pairing_preference`'s own documented
+    /// default, and `GatewayPairing::default`'s.
+    #[test]
+    fn resolved_gateway_pairing_defaults_to_strong_when_nothing_is_configured() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+
+        let pairing = resolved_gateway_pairing(&effective);
+
+        assert_eq!(pairing.preference_slug, "strong");
+    }
 
     /// Hold the runtime's lock for `held`, signalling once it is definitely
     /// taken so a test never races its own fixture.

@@ -2570,3 +2570,56 @@ producing type and the caller's field; this suggests also asking what the
 producer's output actually *varies with*.** A value that exists but is constant
 across the candidates being compared is a caller-shaped gap the current four
 links do not catch.
+
+## Batch 38 — one box, a killed hypothesis, and a worker recovered from death
+
+`pairing-config`, 644 → 645. One Sonnet, ~$13, 29 minutes, +489/-83, **one box**.
+
+**Cost per box is $13 and that is the correct number to record**, not an
+embarrassment to explain away. The package closed map line 576 *and* answered
+the question that decides where Phase 9J goes next. Batch 34's ledger already
+records that cost-per-box measures how much was already built, not the tier —
+this is the same effect at n=1.
+
+### The Phase -1 preflight settled an architecture question before dispatch
+
+`profile/**` must not import `crate::config` — `Resolution`'s own doc says the
+caller does the lookup, and `provider: Option<&'a Provider>` is that rule in
+practice. The preflight found this while checking link 2, so **the packet told
+the worker the shape** instead of letting it discover the ban mid-package and
+rebuild.
+
+That is a second, unbudgeted return from Phase -1: it does not only refuse
+impossible packets, it **surfaces the architectural constraint that decides how a
+possible one must be built**. Worth looking for deliberately.
+
+### §66 — a worker killed mid-report has not lost its work
+
+`API Error: Connection lost mid-response` killed this worker **while it was
+writing its report**, after the code was finished and the full suite had run. The
+watch reported it exactly — pane quiet, no done-signal, no report — and the
+recovery was **one message**, not a re-dispatch:
+
+> ...cut off while you were writing the report — all your code work survived.
+> Write the report now. **Do not redo any code work.**
+
+It produced a complete, accurate report on the next turn. Re-dispatching would
+have discarded ~$13 and 29 minutes of finished work and produced a second diff to
+reconcile.
+
+**The measurement: recovery cost one turn against a 29-minute re-run.** Always
+establish what a dead worker actually lost before deciding what to do — a
+worktree diff and a live pane are two independent copies, and an API error
+usually costs neither.
+
+### Two cargo runs hung with zero CPU this session
+
+Both were `cargo test` blocked at 0:00 CPU for minutes — once at 10 minutes, once
+at 4 — in a shared private `CARGO_TARGET_DIR` while other cargo processes existed.
+Killing and re-running with a **narrower test filter** succeeded immediately both
+times.
+
+Not diagnosed further, and recorded rather than explained: if a `cargo` invocation
+shows elapsed minutes against ~zero CPU, it is not slow, it is stuck. **Kill it,
+narrow the filter, and re-run** — and check first whether it left a source file
+mid-mutation, because one of these did.

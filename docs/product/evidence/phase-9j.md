@@ -378,3 +378,41 @@ job's, and recorded here as provisional rather than derived. And its
 real hard constraints (`compatible()`) already ran on the `Backend` before
 `score_candidate` is reached, so the type is documenting an order that genuinely
 held rather than manufacturing one.
+
+### Phase 9J line 576 — the configured preference reaches the scorer
+
+State: **COMPLETE**. Phase 9J is **nine of eleven**; 566 and 569 stay open.
+
+`Resolution` gains a resolved pairing value that `main.rs` fills from
+`EffectiveConfig`, exactly as `provider: Option<&Provider>` already works —
+**`profile/**` still imports no `crate::config`**, which its module doc requires
+and which is why the packet settled this shape before dispatch rather than
+letting a worker discover the ban.
+
+Production evidence: `main.rs::resolved_gateway_pairing` →
+`profile::Resolution` → `apply_gateway` → `SessionRouting::set_pairing_preference`
+→ `gateway/session.rs::observe_exchange` → `routing/interactive.rs::score_candidate`.
+
+Regression evidence, three mutations at three layers, all killed:
+- pure function — `on_provider_failure_reads_the_callers_preference_not_a_hardcoded_default`
+  asserts `Strong` scores nonzero and `Off` exactly `0.0` for the same pairing.
+- production entry — replacing `state.pairing_preference` with a literal
+  `Strong` in `observe_exchange` killed
+  `observe_exchange_scores_a_real_failover_against_the_configured_preference`.
+- **config resolution, re-run independently by the integrator** — replacing
+  `resolved_gateway_pairing`'s body with `GatewayPairing::default()` kills
+  `resolved_gateway_pairing_reflects_the_users_configured_preference`.
+
+**The ruling, because the worker referred it up and it is not obvious.** The
+preference reaches the scorer, varies the prior's magnitude and the rendered
+explanation — and **still cannot decide a real same-model failover**, for the
+structural reason recorded above: `classify` never reads `route`, so the whole
+group moves together. It *can* differ across the `OfferMigration` group, which
+is what the user is shown.
+
+Line 576 asks that users be **able to prefer** — four values, settable,
+reaching the decision, inspectable. That is the bar map line 1797 (its
+configuration-side twin) and line 1287 were both ticked at, the latter while its
+reserve policy had no caller at all. **Ticking it here is consistent with those;
+refusing it would not be.** The inertness is recorded against **566**, which is
+the line that actually asks the prior to matter, and 566 stays open.

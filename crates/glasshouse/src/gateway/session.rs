@@ -29,7 +29,12 @@
 use std::sync::Mutex;
 use std::time::Instant;
 
-use crate::config::pairing::{NoObservations, ObservationSource};
+// `PairingOverrides` comes from `crate::config::pairing`'s own `pub use`, not
+// from `crate::harness::pairing` directly — this module must never name
+// `crate::harness` at all, see the module documentation above.
+use crate::config::pairing::{
+    NoObservations, ObservationSource, PairingOverrides, PairingPreference,
+};
 use crate::provider::telemetry::RateLimitHeaders;
 use crate::routing::evidence::{
     EvidenceLedger, NewObservation, ObservedEvidenceSource, Outcome as RoutingOutcome,
@@ -66,6 +71,18 @@ struct State {
     /// `ingress`'s own doc comment on why that type stays incapable of
     /// carrying a header value; this is a second, separate observation.
     quota: Option<(RateLimitHeaders, i64)>,
+    /// Phase 9J line 576: the user's configured native-pairing preference and
+    /// corrections, as `crate::profile`'s gateway path resolved them. Held
+    /// here rather than on `policy`, because `Self::pin_to_serving_provider`
+    /// and `Self::unpin` replace `policy` wholesale, and a resolved
+    /// preference must survive that replacement — see
+    /// `Self::set_pairing_preference`. Defaults match
+    /// `EffectiveConfig::native_pairing_preference`'s own out-of-the-box
+    /// answer, so a gateway nothing has called `set_pairing_preference` on
+    /// yet — every test double, and any future caller that forgets — scores
+    /// exactly as `on_provider_failure` always has.
+    pairing_preference: PairingPreference,
+    pairing_overrides: PairingOverrides,
 }
 
 /// What one finished exchange said about the backend that served it.
@@ -107,6 +124,36 @@ impl SessionRouting {
         };
         let mut state = self.lock();
         state.assignment = Some(state.policy.assign(harness, backend));
+    }
+
+    /// Phase 9J line 576, called beside [`Self::bind`]: record the
+    /// native-pairing preference and corrections `crate::profile`'s gateway
+    /// path resolved from configuration for this session, so
+    /// `Self::observe_exchange`'s failover scores candidates against what
+    /// the user actually configured instead of the out-of-the-box default
+    /// [`InteractiveRouting::on_provider_failure`] used before this method
+    /// existed.
+    ///
+    /// Kept separate from [`Self::bind`] rather than folded into it: `bind`
+    /// answers only when a backend was actually resolved (its early `return`
+    /// above), while a pairing preference is known whether or not that
+    /// lookup succeeds, and a caller that skipped `bind` for a real reason
+    /// should not lose its pairing configuration as a side effect.
+    ///
+    /// `preference_slug` is [`PairingPreference::slug`]'s own spelling, not
+    /// the type itself — `crate::profile`, the only caller, may not import
+    /// `crate::config` (see that module's own documentation), so it resolves
+    /// the value and hands over the spelling. An unrecognised spelling
+    /// degrades to [`PairingPreference::Strong`], the same out-of-the-box
+    /// default `EffectiveConfig::native_pairing_preference` itself falls back
+    /// to — this method never refuses a launch over a configuration value it
+    /// cannot parse.
+    pub fn set_pairing_preference(&self, preference_slug: &str, overrides: PairingOverrides) {
+        let preference =
+            PairingPreference::from_slug(preference_slug).unwrap_or(PairingPreference::Strong);
+        let mut state = self.lock();
+        state.pairing_preference = preference;
+        state.pairing_overrides = overrides;
     }
 
     /// The backend serving this session, once one has been bound.
@@ -376,10 +423,14 @@ impl SessionRouting {
             None => &no_observations,
         };
 
-        match state
-            .policy
-            .on_provider_failure(&current, failure, &candidates, evidence)
-        {
+        match state.policy.on_provider_failure(
+            &current,
+            failure,
+            &candidates,
+            state.pairing_preference,
+            &state.pairing_overrides,
+            evidence,
+        ) {
             FailureResponse::FailOver {
                 to,
                 cache,
@@ -707,6 +758,102 @@ mod tests {
         assert_eq!(
             routing.assignment().map(|a| a.provider().to_owned()),
             Some("second".to_owned())
+        );
+    }
+
+    /// The rendered explanation `Self::observe_exchange` logs for a real
+    /// failover, captured the way `gateway::ingress::tests::recorded` reads
+    /// `Exchange::record`'s own log line — through the exact `tracing` call
+    /// site the accept loop's own build would emit from, not a value handed
+    /// back for a test to inspect.
+    fn failover_explanation_log(preference_slug: &str) -> String {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("no test panics while holding this")
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+            type Writer = Capture;
+            fn make_writer(&'a self) -> Capture {
+                self.clone()
+            }
+        }
+
+        // A vendor-native pairing for `claude-code` — the same fixture
+        // `routing::interactive::tests::a_failover_explanation_names_the_pairing_class_it_scored`
+        // uses — so the native-pairing prior actually has a nonzero
+        // magnitude to vary under `Strong` and zero it under `Off`.
+        let upstream = Upstream::with_failover(vec![
+            upstream_backend("openrouter"),
+            upstream_backend("nous"),
+        ])
+        .expect("two backends is not none");
+        let routing = SessionRouting::new();
+        routing.bind(
+            "claude-code",
+            "anthropic-messages",
+            AssignedModel::named("claude-fable-5"),
+            &upstream,
+        );
+        routing.set_pairing_preference(preference_slug, PairingOverrides::default());
+
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(Capture(Arc::clone(&sink)))
+            .with_max_level(tracing::Level::DEBUG)
+            .without_time()
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            routing.observe_exchange(
+                &upstream,
+                &unreachable_exchange("openrouter"),
+                Instant::now(),
+                None,
+                0,
+            );
+        });
+
+        let captured = sink
+            .lock()
+            .expect("no test panics while holding this")
+            .clone();
+        String::from_utf8_lossy(&captured).into_owned()
+    }
+
+    /// Phase 9J line 576's own proof for this package's wiring: what
+    /// `Self::set_pairing_preference` was given reaches
+    /// `Self::observe_exchange`'s real failover, not a hardcoded
+    /// `PairingPreference::Strong`. If the call inside `observe_exchange`
+    /// still passed a literal `PairingPreference::Strong` instead of
+    /// `state.pairing_preference`, both log lines below would read
+    /// `+1.000  native-pairing prior` and this test would fail on the second
+    /// assertion.
+    #[test]
+    fn observe_exchange_scores_a_real_failover_against_the_configured_preference() {
+        let strong = failover_explanation_log("strong");
+        let off = failover_explanation_log("off");
+
+        assert!(
+            strong.contains("+1.000  native-pairing prior"),
+            "a Strong preference on a real vendor-native pairing must log a full-magnitude \
+             prior: {strong}"
+        );
+        assert!(
+            off.contains("+0.000  native-pairing prior"),
+            "an Off preference must log a zeroed prior for the very same pairing: {off}"
         );
     }
 }

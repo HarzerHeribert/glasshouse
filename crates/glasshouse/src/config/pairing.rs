@@ -32,9 +32,15 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::harness::pairing::{
-    self, ModelBehaviourFit, ModelCorrection, ModelDeveloper, PairingOverrides, PairingQuery,
-    ServingRoute, SupportCorrection,
+    self, ModelBehaviourFit, ModelCorrection, ModelDeveloper, PairingQuery, ServingRoute,
+    SupportCorrection,
 };
+// `pub use`, not a plain import: `crate::gateway::session` must never name
+// `crate::harness` at all — see that module's own header and
+// `gateway::tests::the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness`
+// — so it reaches this type through `crate::config::pairing::PairingOverrides`
+// instead of importing it directly.
+pub use crate::harness::pairing::PairingOverrides;
 use crate::harness::{Declared, WireProtocol};
 use crate::integrations::IntegrationId;
 use crate::profile::BackendResource;
@@ -175,6 +181,18 @@ pub enum PairingPreference {
     Weak,
     Off,
     Pin,
+}
+
+impl Default for PairingPreference {
+    /// [`EffectiveConfig::native_pairing_preference`]'s own out-of-the-box
+    /// answer when nothing is configured — see that method's doc comment.
+    /// Kept here, next to the type, so a caller that needs "no preference
+    /// resolved yet" (Phase 9J line 576's own patch) gets the same default
+    /// the configuration layer would have, rather than a second place this
+    /// could drift from it.
+    fn default() -> Self {
+        Self::Strong
+    }
 }
 
 impl PairingPreference {
@@ -446,13 +464,15 @@ fn describe_observed(observed: &ObservedEvidence) -> String {
 ///   bad observations against a vendor-native pairing can make its total
 ///   lower than a neutral candidate's (line 574).
 ///
-/// **No production caller exists for this function.** See this module's
-/// worker report for why: the two routing callers in the binary
-/// (`InteractiveRouting`, `DisposableRouting`) do not rank candidates at all,
-/// and `InteractiveRouting::on_provider_failure`'s own documentation assigns
-/// ranking to "Phase 9J's job and not this one's" without Phase 9J having a
-/// caller to hand it to. This is proven only by the tests in
-/// `tests/pairing_prior.rs`.
+/// **The production caller is `InteractiveRouting::on_provider_failure`**,
+/// by way of its own `score_candidate` helper, reached from
+/// `crate::gateway::session::SessionRouting::observe_exchange`. `preference`
+/// and `evidence` both come from that caller now — see
+/// `SessionRouting::set_pairing_preference`, called beside `Self::bind` by
+/// `crate::profile`'s gateway path, for where `preference` is actually
+/// resolved from configuration. `DisposableRouting` still does not rank
+/// candidates at all (Phase 9J line 566 needs a different caller for that,
+/// per this package's report).
 pub fn native_pairing_prior_contribution(
     candidate: &crate::routing::EligibleCandidate<pairing::Pairing>,
     key: &pairing::EvidenceKey,

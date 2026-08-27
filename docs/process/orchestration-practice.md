@@ -2435,3 +2435,40 @@ Sixth Windows-only defect here to survive a green local gate, and the **first to
 present as a hang**. That is worse than a failure: a failure prints a result
 line, and a hang prints nothing at all. `--windows-vm` on every landing round is
 what caught it (§56), and a 37-minute silence is what it looks like when it does.
+
+
+## §66 — a worker killed mid-report has not lost its work
+
+`pairing-config` finished its code — six files, +489/-83, full workspace suite
+run — and then died with `API Error: Connection lost mid-response` **while
+writing its report**. The watch reported it precisely:
+
+    pane went quiet, NO done signal — it may have died or be waiting, but NO
+    report — its last line was: ✻ Cogitated for 28m 33s · done 1:00 AM
+
+That message contains the whole diagnosis if you read it: a completion line in
+the pane, no done-signal, no report file. §62's three-way distinction earning
+its keep.
+
+**The recovery is one message, not a re-dispatch.** The diff is on disk and the
+worker's context is still in the pane, so:
+
+> Your previous turn was cut off by an API connection error while you were
+> writing the report — all your code work survived. Please write the report now
+> to `<absolute path>`, in the structured-facts format the packet specifies.
+> **Do not redo any code work.**
+
+It wrote a complete, accurate report on the next turn. Re-dispatching would have
+thrown away about **$13 and 29 minutes** of finished work and produced a second
+diff to reconcile against the first.
+
+**The general rule: when a worker dies, establish what it lost before deciding
+what to do.** A worktree diff and a live pane are two independent copies of the
+work, and an API error usually costs neither. The cases actually worth
+re-dispatching are the ones where the *diff* is bad, not the ones where the
+*report* is missing.
+
+**And say "do not redo any code work" explicitly.** A worker asked to "finish
+up" after an error may reasonably re-verify everything, which is the expensive
+half of its budget (measured this session at 25% of a package's compute — see
+`assurance-economics.md`). Naming what you want costs one clause.

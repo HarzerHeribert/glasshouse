@@ -52,6 +52,7 @@ use std::fmt;
 
 use crate::gateway::upstream::UpstreamBackend;
 use crate::gateway::{Gateway, Route, Upstream};
+use crate::harness::pairing::PairingOverrides;
 use crate::harness::{
     ApprovalKind, ApprovalMode, ConfigFileNameProblem, CredentialPlacement, CredentialVarProblem,
     Declared, DirectProviderRequest, GeneratedConfigSite, HarnessAdapter, WireProtocol,
@@ -772,6 +773,50 @@ pub struct Resolution<'a> {
     pub secrets: &'a dyn SecretStore,
 }
 
+/// Phase 9J line 576: the native-pairing preference and corrections a
+/// gateway-backed launch resolves once from configuration, then hands to the
+/// gateway it points the child at — `apply_gateway` passes this to
+/// [`crate::gateway::session::SessionRouting::set_pairing_preference`] beside
+/// its own call to [`crate::gateway::session::SessionRouting::bind`].
+///
+/// A parameter on [`resolve_with_gateway`] rather than a field on
+/// [`Resolution`], for the reason that function's own doc comment gives for
+/// keeping `gateway` off `Resolution` too: this is a property of *this
+/// gateway-backed call*, not of the profile or the adapter, and every
+/// existing caller that resolves a [`Resolution`] by hand (`config`'s and
+/// `onboarding`'s tests, `tests/pty_smoke.rs`, `tests/launch_overlay.rs`) can
+/// go on doing so unchanged.
+///
+/// `preference_slug` is [`crate::config::pairing::PairingPreference::slug`]'s
+/// own spelling, not that type itself: this module may not import
+/// `crate::config` (see the module documentation), the same reason
+/// [`gateway_upstream`]'s `free` closure answers a plain `bool` instead of a
+/// `crate::config` type. [`SessionRouting::set_pairing_preference`] parses it
+/// back and degrades an unrecognised spelling to
+/// [`PairingPreference::Strong`], never refusing a launch over it.
+///
+/// [`PairingPreference::Strong`]: crate::config::pairing::PairingPreference::Strong
+/// [`SessionRouting::set_pairing_preference`]: crate::gateway::session::SessionRouting::set_pairing_preference
+#[derive(Debug, Clone)]
+pub struct GatewayPairing {
+    pub preference_slug: &'static str,
+    pub overrides: PairingOverrides,
+}
+
+impl Default for GatewayPairing {
+    /// The same out-of-the-box answer
+    /// [`crate::config::EffectiveConfig::native_pairing_preference`]
+    /// itself falls back to when nothing is configured — for a caller with no
+    /// `EffectiveConfig` to resolve one from, which is every caller in this
+    /// module's own test suite.
+    fn default() -> Self {
+        Self {
+            preference_slug: "strong",
+            overrides: PairingOverrides::default(),
+        }
+    }
+}
+
 /// Resolve `profile` against `cx.adapter`, producing the overlay for exactly
 /// one child process — or refusing, which starts nothing.
 ///
@@ -819,7 +864,7 @@ pub struct Resolution<'a> {
 ///
 /// [`BackendResource::Native`] behaviour does not change by one byte.
 pub fn resolve(profile: &LaunchProfile, cx: &Resolution<'_>) -> Result<LaunchOverlay, Refusal> {
-    resolve_with_gateway(profile, cx, None)
+    resolve_with_gateway(profile, cx, None, &GatewayPairing::default())
 }
 
 /// [`resolve`], for a caller that has a running local gateway to offer.
@@ -851,10 +896,17 @@ pub fn resolve(profile: &LaunchProfile, cx: &Resolution<'_>) -> Result<LaunchOve
 /// variables Claude Code reads are the harness's own declared knowledge, and
 /// naming `ANTHROPIC_BASE_URL` here instead would put that knowledge in a
 /// second place, where the two copies could disagree.
+///
+/// `pairing` is [`GatewayPairing::default`] for every caller that has no
+/// [`crate::config::EffectiveConfig`] to resolve one from — the same
+/// pre-Phase-9J-line-576 behaviour every caller other than `main.rs`'s own
+/// two production sites gets today. Ignored entirely unless `gateway` is
+/// `Some` and the profile's backend actually resolves through it.
 pub fn resolve_with_gateway(
     profile: &LaunchProfile,
     cx: &Resolution<'_>,
     gateway: Option<&Gateway>,
+    pairing: &GatewayPairing,
 ) -> Result<LaunchOverlay, Refusal> {
     let adapter = cx.adapter;
 
@@ -903,7 +955,7 @@ pub fn resolve_with_gateway(
                     harness: profile.harness,
                 });
             };
-            apply_gateway(profile, gateway, adapter, &mut overlay)?;
+            apply_gateway(profile, gateway, adapter, pairing, &mut overlay)?;
         }
         // Phase 32 line 1184, and the gap Phase 32A's audit found: the other
         // two arms each record their resource kind, and this one recorded
@@ -1025,6 +1077,10 @@ pub fn resolve_with_gateway(
 /// it already established rather than pay for a second search. A caller that
 /// has not should call [`crate::harness::ExecutablePresence::detect`] itself,
 /// which performs the real check this precondition asks for.
+///
+/// Always resolves with [`GatewayPairing::default`] — this entry point has no
+/// production caller today (only this module's own tests use it), so there is
+/// no resolved `EffectiveConfig` value for it to thread through yet.
 pub fn resolve_checked(
     profile: &LaunchProfile,
     cx: &Resolution<'_>,
@@ -1039,7 +1095,7 @@ pub fn resolve_checked(
             detail: harness_executable.detail(profile.harness),
         });
     }
-    resolve_with_gateway(profile, cx, gateway)
+    resolve_with_gateway(profile, cx, gateway, &GatewayPairing::default())
 }
 
 /// Point one child process at the local gateway, or refuse.
@@ -1061,10 +1117,16 @@ pub fn resolve_checked(
 /// destination variable — comes from the adapter's own declaration, so a
 /// harness that changes how it is pointed at a backend changes it in one
 /// place.
+///
+/// 4. Phase 9J line 576: `pairing` is recorded on the gateway's routing
+///    state beside the assignment `Gateway::routing().bind` just made, so a
+///    later failover (`crate::gateway::session::SessionRouting::observe_exchange`)
+///    scores candidates against what the user actually configured.
 fn apply_gateway(
     profile: &LaunchProfile,
     gateway: &Gateway,
     adapter: &dyn HarnessAdapter,
+    pairing: &GatewayPairing,
     overlay: &mut LaunchOverlay,
 ) -> Result<(), Refusal> {
     // A harness that selects its provider through the model needs one here
@@ -1130,6 +1192,17 @@ fn apply_gateway(
         model,
         gateway.upstream(),
     );
+
+    // Phase 9J line 576, recorded beside the assignment above: the user's
+    // configured native-pairing preference and corrections, so
+    // `on_provider_failure` scores a later failover against them instead of
+    // the out-of-the-box `PairingPreference::Strong` default. Unlike `bind`,
+    // this never returns early — a preference is known whether or not the
+    // protocol/backend lookup above found a route, and there is no honest
+    // reason to drop it because of that.
+    gateway
+        .routing()
+        .set_pairing_preference(pairing.preference_slug, pairing.overrides.clone());
 
     // Phase 9H line 518, applied where the assignment was just made. A pin
     // recorded on the profile is the user's own statement, so it is honoured
@@ -2392,6 +2465,7 @@ mod tests {
             &profile,
             &native_cx(adapter, false, &FakeSecrets::empty()),
             Some(&gateway),
+            &GatewayPairing::default(),
         )
         .expect("the gateway serves the protocol this harness speaks");
 
@@ -2526,6 +2600,7 @@ mod tests {
             &profile,
             &native_cx(adapter, false, &FakeSecrets::empty()),
             Some(&gateway),
+            &GatewayPairing::default(),
         )
         .expect("a profile need not name a model");
 
@@ -2557,6 +2632,7 @@ mod tests {
             &profile,
             &native_cx(adapter, false, &FakeSecrets::empty()),
             Some(&gateway),
+            &GatewayPairing::default(),
         )
         .expect("the gateway serves the protocol this harness speaks");
 
@@ -2587,6 +2663,7 @@ mod tests {
             &profile,
             &native_cx(adapter, false, &FakeSecrets::empty()),
             Some(&gateway),
+            &GatewayPairing::default(),
         )
         .expect("resolvable");
 
@@ -2671,6 +2748,7 @@ mod tests {
             &profile,
             &native_cx(adapter, false, &FakeSecrets::empty()),
             Some(&gateway),
+            &GatewayPairing::default(),
         )
         .expect("a Codex profile resolves against a gateway that serves Responses");
 
@@ -2740,6 +2818,7 @@ mod tests {
                 &profile,
                 &native_cx(adapter, false, &FakeSecrets::empty()),
                 Some(&gateway),
+                &GatewayPairing::default(),
             )
             .unwrap_or_else(|err| panic!("{harness:?} did not resolve: {err}"));
 
@@ -2811,6 +2890,7 @@ mod tests {
             &profile,
             &native_cx(adapter, false, &FakeSecrets::empty()),
             Some(&gateway),
+            &GatewayPairing::default(),
         )
         .expect("a gateway-backed Claude Code profile resolves once a gateway is running");
 
@@ -2884,6 +2964,7 @@ mod tests {
             &profile,
             &native_cx(adapter, false, &FakeSecrets::empty()),
             Some(&gateway),
+            &GatewayPairing::default(),
         )
         .expect_err("there is no OpenAI Responses ingress in this phase");
         assert!(
@@ -2907,6 +2988,7 @@ mod tests {
             &profile,
             &native_cx(adapter, false, &FakeSecrets::empty()),
             Some(&gateway),
+            &GatewayPairing::default(),
         )
         .expect_err("Claude Code cannot be pointed at openai-chat at all");
         // Refused by the generic protocol check before the gateway arm is
@@ -4200,16 +4282,26 @@ mod tests {
                 let gateway = running_gateway();
                 let mut p = profile_for(IntegrationId::Codex);
                 p.backend = BackendResource::GlasshouseGateway;
-                resolve_with_gateway(&p, &native_cx(codex, false, &secrets), Some(&gateway))
-                    .unwrap_err()
+                resolve_with_gateway(
+                    &p,
+                    &native_cx(codex, false, &secrets),
+                    Some(&gateway),
+                    &GatewayPairing::default(),
+                )
+                .unwrap_err()
             }),
             ("gateway token unplaceable", {
                 let gateway = running_gateway();
                 let double = TokenUnplaceable;
                 let mut p = profile_for(IntegrationId::Pi);
                 p.backend = BackendResource::GlasshouseGateway;
-                resolve_with_gateway(&p, &native_cx(&double, false, &secrets), Some(&gateway))
-                    .unwrap_err()
+                resolve_with_gateway(
+                    &p,
+                    &native_cx(&double, false, &secrets),
+                    Some(&gateway),
+                    &GatewayPairing::default(),
+                )
+                .unwrap_err()
             }),
             ("unconfigured provider", {
                 let p = direct_profile(IntegrationId::ClaudeCode, "nope");
@@ -4784,7 +4876,7 @@ mod tests {
         // resolves (once a gateway is running) whether or not a capability
         // check was ever considered.
         let gateway = running_gateway();
-        resolve_with_gateway(&profile, &cx, Some(&gateway))
+        resolve_with_gateway(&profile, &cx, Some(&gateway), &GatewayPairing::default())
             .expect("the absent capability check must not block the launch");
     }
 

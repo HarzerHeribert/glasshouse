@@ -573,7 +573,7 @@ Pairing prior and evidence
 ☑ Avoid concluding that a cross-vendor pairing is poor solely because it is cross-vendor.
 ☑ Avoid concluding that a native pairing is superior when current project evidence contradicts the prior.
 ☑ Surface the pairing class, current evidence strength, and contribution of the pairing prior in routing explanations.
-☐ Allow users to prefer native pairing strongly, weakly, not at all, or as a hard pin for explicitly chosen sessions.
+☑ Allow users to prefer native pairing strongly, weakly, not at all, or as a hard pin for explicitly chosen sessions.
 
 Phase 9K — Harness-aware response profiles
 

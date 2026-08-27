@@ -449,11 +449,22 @@ impl InteractiveRouting {
     /// stays a pure function of its arguments (see this module's own header)
     /// with no knowledge of `crate::routing::evidence::EvidenceLedger` or how
     /// its caller reached it.
+    ///
+    /// `preference` and `overrides` are Phase 9J line 576's own patch: the
+    /// user's configured native-pairing preference and corrections, resolved
+    /// once from configuration by `crate::profile`'s gateway path and carried
+    /// here by `crate::gateway::session::SessionRouting`, which is why this
+    /// method takes them as arguments rather than storing them on `self` —
+    /// `self.pin` is session *policy* state that a pin or an unpin replaces
+    /// wholesale, while a resolved preference must survive that replacement
+    /// unchanged.
     pub fn on_provider_failure(
         &self,
         current: &Assignment,
         failure: ProviderFailure,
         candidates: &[Backend],
+        preference: PairingPreference,
+        overrides: &pairing::PairingOverrides,
         evidence: &dyn ObservationSource,
     ) -> FailureResponse {
         let _ = failure;
@@ -485,7 +496,9 @@ impl InteractiveRouting {
                 Ok(()) => {
                     let to = Assignment::new(current.harness(), candidate.clone());
                     let explanation = match harness {
-                        Some(harness) => score_candidate(harness, candidate, evidence),
+                        Some(harness) => {
+                            score_candidate(harness, candidate, preference, overrides, evidence)
+                        }
                         None => {
                             let mut explanation = RoutingExplanation::new();
                             explanation.push(Contribution::new(
@@ -594,28 +607,25 @@ fn resolve_harness(slug: &str) -> Option<IntegrationId> {
 /// prior and local observed evidence contribute to routing `candidate`,
 /// given the harness the failing session was serving.
 ///
-/// Two things this consumer does not have, and degrades honestly rather than
-/// inventing:
+/// `preference` and `overrides` are the caller's own resolved configuration —
+/// Phase 9J line 576's patch. `on_provider_failure` receives them as
+/// arguments and this function never looks them up itself, matching every
+/// other value this module reads: it stays a pure function of what it is
+/// given.
 ///
-/// - **Configured pairing corrections and the user's native-pairing
-///   preference**, both of which live in configuration `crate::profile`'s
-///   gateway path resolves once and which never reaches
-///   [`crate::gateway::session::SessionRouting::bind`] today — see this
-///   package's report for the exact patch. Until that is threaded
-///   through, every candidate is scored against
-///   [`crate::harness::pairing::PairingOverrides::default`] (no corrections
-///   applied) and [`PairingPreference::Strong`] — the same out-of-the-box
-///   default `EffectiveConfig::native_pairing_preference` itself falls back
-///   to when nothing is configured.
-/// - **The candidate's protocol as a [`crate::harness::WireProtocol`]** —
-///   [`Backend::protocol`] is deliberately kept as an opaque slug (see that
-///   method's own doc comment); [`pairing::wire_protocol_from_slug`] is the
-///   reverse lookup, and it answers `None` for a slug it does not recognise
-///   rather than guessing, which only weakens `Pairing::protocol_fit`, a
-///   field `native_pairing_prior_contribution` never reads.
+/// One thing this consumer still does not have, and degrades honestly rather
+/// than inventing: **the candidate's protocol as a
+/// [`crate::harness::WireProtocol`]** — [`Backend::protocol`] is deliberately
+/// kept as an opaque slug (see that method's own doc comment);
+/// [`pairing::wire_protocol_from_slug`] is the reverse lookup, and it answers
+/// `None` for a slug it does not recognise rather than guessing, which only
+/// weakens `Pairing::protocol_fit`, a field `native_pairing_prior_contribution`
+/// never reads.
 fn score_candidate(
     harness: IntegrationId,
     candidate: &Backend,
+    preference: PairingPreference,
+    overrides: &pairing::PairingOverrides,
     evidence: &dyn ObservationSource,
 ) -> RoutingExplanation {
     let route = pairing::ServingRoute {
@@ -635,8 +645,7 @@ fn score_candidate(
         tool_calls: Declared::Unverified,
         provider_protocols: Vec::new(),
     };
-    let overrides = pairing::PairingOverrides::default();
-    let pairing_value = pairing::classify(&query, &overrides);
+    let pairing_value = pairing::classify(&query, overrides);
 
     // `compatible()` already ran `candidate` through every hard constraint
     // `on_provider_failure` enforces (protocol, tool semantics) before this
@@ -657,7 +666,7 @@ fn score_candidate(
     // launch profile name to supply one honestly.
     let key = pairing::EvidenceKey::new(harness, String::new(), candidate.model().clone(), route);
 
-    native_pairing_prior_contribution(&eligible, &key, PairingPreference::Strong, evidence)
+    native_pairing_prior_contribution(&eligible, &key, preference, evidence)
 }
 
 /// The best-scoring `(Assignment, RoutingExplanation)` in `candidates`,
@@ -909,6 +918,8 @@ mod tests {
             &current,
             ProviderFailure::Unreachable,
             &[other_model_first, same_model],
+            PairingPreference::Strong,
+            &pairing::PairingOverrides::default(),
             &NoObservations,
         );
 
@@ -934,6 +945,8 @@ mod tests {
             &current,
             ProviderFailure::Refused { status: 503 },
             &[backend("kilo", "a-different-model")],
+            PairingPreference::Strong,
+            &pairing::PairingOverrides::default(),
             &NoObservations,
         );
         match response {
@@ -963,6 +976,8 @@ mod tests {
             &current,
             ProviderFailure::Unreachable,
             &[wrong_protocol],
+            PairingPreference::Strong,
+            &pairing::PairingOverrides::default(),
             &NoObservations,
         );
 
@@ -1007,6 +1022,8 @@ mod tests {
             &current,
             ProviderFailure::Unreachable,
             &[known_absent, unverified],
+            PairingPreference::Strong,
+            &pairing::PairingOverrides::default(),
             &NoObservations,
         );
 
@@ -1036,6 +1053,8 @@ mod tests {
             &current,
             ProviderFailure::Unreachable,
             &[perfect],
+            PairingPreference::Strong,
+            &pairing::PairingOverrides::default(),
             &NoObservations,
         );
 
@@ -1092,6 +1111,8 @@ mod tests {
             &current,
             ProviderFailure::Unreachable,
             &[poor_evidence_first, good_evidence_second],
+            PairingPreference::Strong,
+            &pairing::PairingOverrides::default(),
             &FakeEvidence {
                 good_provider: "nous",
             },
@@ -1122,6 +1143,8 @@ mod tests {
             &current,
             ProviderFailure::Unreachable,
             &[candidate],
+            PairingPreference::Strong,
+            &pairing::PairingOverrides::default(),
             &NoObservations,
         );
 
@@ -1138,6 +1161,56 @@ mod tests {
         }
     }
 
+    /// Phase 9J line 576's own proof: the preference the caller passes in
+    /// reaches the scorer — this is not a hardcoded `PairingPreference::Strong`
+    /// wearing a parameter. `Off` must zero the native-pairing prior's
+    /// magnitude for the very same vendor-native pairing that scores nonzero
+    /// under `Strong`; if `score_candidate` still used a literal `Strong`
+    /// internally, `off_magnitude` below would still read nonzero and this
+    /// test would fail. `native_pairing_prior_contribution` itself is proven
+    /// never to zero the *contribution line*, only its magnitude, by
+    /// `tests/pairing_prior.rs`'s
+    /// `the_prior_is_never_a_filter_even_when_the_preference_is_off`; this is
+    /// that same property reached through the real caller.
+    #[test]
+    fn on_provider_failure_reads_the_callers_preference_not_a_hardcoded_default() {
+        let routing = InteractiveRouting::new();
+        let current = Assignment::new("claude-code", backend("openrouter", "claude-fable-5"));
+        let candidate = backend("nous", "claude-fable-5");
+
+        let prior_magnitude = |preference: PairingPreference| {
+            let response = routing.on_provider_failure(
+                &current,
+                ProviderFailure::Unreachable,
+                std::slice::from_ref(&candidate),
+                preference,
+                &pairing::PairingOverrides::default(),
+                &NoObservations,
+            );
+            match response {
+                FailureResponse::FailOver { explanation, .. } => explanation
+                    .contributions()
+                    .iter()
+                    .find(|contribution| contribution.name() == "native-pairing prior")
+                    .expect("score_candidate always pushes a native-pairing prior contribution")
+                    .magnitude(),
+                other => panic!("expected a failover: {other:?}"),
+            }
+        };
+
+        let strong_magnitude = prior_magnitude(PairingPreference::Strong);
+        let off_magnitude = prior_magnitude(PairingPreference::Off);
+
+        assert_ne!(
+            strong_magnitude, 0.0,
+            "a Strong preference on a real vendor-native pairing must score a nonzero prior"
+        );
+        assert_eq!(
+            off_magnitude, 0.0,
+            "an Off preference must zero the prior even for the same vendor-native pairing"
+        );
+    }
+
     /// A harness slug this build does not recognise degrades to a `0.0`
     /// contribution rather than panicking or silently dropping the
     /// candidate — the failover itself still happens.
@@ -1151,6 +1224,8 @@ mod tests {
             &current,
             ProviderFailure::Unreachable,
             &[candidate],
+            PairingPreference::Strong,
+            &pairing::PairingOverrides::default(),
             &NoObservations,
         );
 

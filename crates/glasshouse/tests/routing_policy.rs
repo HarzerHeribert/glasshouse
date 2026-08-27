@@ -16,7 +16,8 @@
 
 use std::time::{Duration, Instant};
 
-use glasshouse::config::pairing::NoObservations;
+use glasshouse::config::pairing::{NoObservations, PairingPreference};
+use glasshouse::harness::pairing::PairingOverrides;
 use glasshouse::routing::classify::{
     self, ClassificationSource, Complexity, Confidence, TaskClassification, WarmContextValue,
     WorkloadTier,
@@ -256,12 +257,16 @@ mod order_dependence {
             &current,
             ProviderFailure::Unreachable,
             &[other_model.clone(), same_model.clone()],
+            PairingPreference::Strong,
+            &PairingOverrides::default(),
             &NoObservations,
         );
         let reversed = routing.on_provider_failure(
             &current,
             ProviderFailure::Unreachable,
             &[same_model.clone(), other_model.clone()],
+            PairingPreference::Strong,
+            &PairingOverrides::default(),
             &NoObservations,
         );
 
@@ -299,6 +304,8 @@ mod order_dependence {
             &current,
             ProviderFailure::Unreachable,
             &[candidate_a.clone(), candidate_b.clone()],
+            PairingPreference::Strong,
+            &PairingOverrides::default(),
             &NoObservations,
         );
         match a_first {
@@ -310,6 +317,8 @@ mod order_dependence {
             &current,
             ProviderFailure::Unreachable,
             &[candidate_b, candidate_a],
+            PairingPreference::Strong,
+            &PairingOverrides::default(),
             &NoObservations,
         );
         match b_first {
@@ -388,6 +397,8 @@ mod identity {
             &current,
             ProviderFailure::Unreachable,
             &[prefixed_provider],
+            PairingPreference::Strong,
+            &PairingOverrides::default(),
             &NoObservations,
         );
 
@@ -418,6 +429,8 @@ mod identity {
             &current,
             ProviderFailure::Unreachable,
             &[prefixed_model],
+            PairingPreference::Strong,
+            &PairingOverrides::default(),
             &NoObservations,
         );
 
