@@ -1824,3 +1824,90 @@ Still **not a rate** — six instances, one round, no denominator for how many
 claims were made in total. Batches 30–32 still owe the answer. But the prevention
 has now been validated twice: **check the artefact, not its description.** Both
 catches cost one command.
+
+## Batch 30 — five workers, 492 → 514, recorded after the fact
+
+Integrated at `60f8c9f` by the orchestrator that ran it; the entry is written by
+its successor from the commit and the reports, so treat the per-worker costs as
+unrecorded rather than zero.
+
+| worker | tier | boxes | closed |
+|---|---|---|---|
+| `phase-9k` | Sonnet | 16 | 6 — **zero production code**, all six argued from the existing tree |
+| `phase-42` | Sonnet | 13 | 10 — the Unix-socket control API |
+| `phase-41` | Sonnet | 15 | 9 — the project overview; **all six opens want Phase 32B** |
+| `phase-32a` | Opus | 21 | 3 — **fifteen of its eighteen opens wait on Phase 32B** |
+| `phase-35` | Sonnet | 14 | **0** |
+
+**`phase-35` closed nothing and its orchestrator recorded why against itself:**
+its partition was `routing/**` while every production entry point — `main.rs`,
+`cli.rs`, `shell/**` — belonged to someone else. That is §32, *"put the caller's
+file in the partition"*, which this project first recorded from batch 13–14.
+
+## Batch 31 — two workers, sized by a seam query rather than a box count
+
+Dispatched 2026-08-27 ~16:2x from `60f8c9f`, by the successor orchestrator.
+
+| worker | tier | effort | boxes in play | worktree |
+|---|---|---|---|---|
+| `phase-32b` | Opus | high | 33 | `glasshouse-phase-32b` |
+| `phase-47` | Sonnet | high | 6 | `glasshouse-phase-47` |
+
+### §32 has now bitten three times, and the third was invisible
+
+Before sizing either packet the successor ran one command:
+
+    $ python3 scripts/discover.py --seam ResourceRegistry
+    ZERO non-test call sites of `ResourceRegistry` in crates/**/src/**.
+
+`main.rs` contains no reference to the registry or to quota at all. **Phase 32 and
+Phase 32A — roughly 2,000 lines across `provider/registry.rs` and
+`provider/quota.rs` — are reachable from nothing in the shipped binary.**
+
+That is the same defect as `phase-35`'s and `lead-extract`'s, and it is the
+**hardest of the three to see**, because the phase does not look stranded:
+Phase 32 reads **11 of 12** and only its *first* line — "create a registry" — is
+open. A phase that is 92% ticked with a dead centre does not advertise itself.
+
+**The measurement: three occurrences, and the detector costs one command.**
+
+| # | batch | phase | how it was found | when |
+|---|---|---|---|---|
+| 1 | 18–19 | `lead-extract`, memory | after integration — 0 of 25 | too late |
+| 2 | 30 | `phase-35`, routing | after integration — 0 of 14 | too late |
+| 3 | 31 | Phase 32 / 32A, provider | **before dispatch**, by `discover.py --seam` | in time |
+
+**So the rule earns a mechanical form.** §32 currently says *find where each
+capability's production caller will live*, which is a judgement. The cheap version
+is: **before sizing a package, run `discover.py --seam <the phase's central type>`.
+If it answers zero, the package's first deliverable is the caller, and the
+partition must contain the file the caller lives in — or the round is already
+lost.** Both packets this round were sized that way; `packet-phase-32b.md` owns
+`cli.rs` and `main.rs` for no other reason.
+
+### `validate_round.py` was mutation-tested rather than trusted
+
+§20 says apply mutation discipline to gates. The round validator passed on both
+packets, which is exactly the state open question 6 says to suspect. One quoted box
+line was corrupted (`percentage` → `rate`):
+
+    REFUSED — [box-lines-match-map] packet-phase-47.md:41 quotes `…error rate.`
+    which does not match docs/product/capability-map.md:1763 verbatim
+
+Restored from a `cp` backup, byte-identical, and it passed again. **The gate
+bites.** Cost: about ninety seconds. This is the third gate in this project
+verified this way and the first that was already alive.
+
+### Questions this round is opened with
+
+1. **Does the "seam query before sizing" detector generalise?** It caught the
+   third instance in time. Run it on the next round's phases *before* dispatch and
+   record whether it changed the partition. One command per phase.
+2. **Is a 33-box package too large for one Opus worker, when 16 of the 33 are
+   another phase's boxes that only need a reading taken?** Batch 20–21 found
+   partition width, not box count, was the binding constraint; this tests the
+   claim from the other side.
+3. **Does Sonnet at `high` effort close a 6-box package that is mostly negative
+   requirements?** Three of `phase-47`'s six are *absence* claims — no spend
+   totals, no non-optional diagnostics, no animation — and §17 says this project
+   has already shipped one absence test that passed for the wrong reason.
