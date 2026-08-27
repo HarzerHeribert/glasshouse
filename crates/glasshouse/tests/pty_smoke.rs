@@ -3872,6 +3872,390 @@ fn a_recorded_session_is_resumed_under_the_identifier_it_was_given() {
     );
 }
 
+/// A fake harness that appends every invocation's arguments as one line to
+/// `$ARGV_LOG`, rather than printing them to its own stdout the way
+/// [`install_argv_harness`] does.
+///
+/// A session started *inside the interactive shell* has its stdout drawn
+/// character-by-cell into the viewport, through a real `vt100::Parser` and
+/// then through `ratatui`'s own diffing against the previous frame: a redraw
+/// only re-emits the cells whose *value* changed from the last one actually
+/// sent to the pty, so the raw byte stream this test's `Session` captures is
+/// not the screen's full content, only the deltas. A flag and its value that
+/// were two cells apart on screen because the terminal cursor jumped between
+/// them, rather than because a literal space was written, come back from
+/// [`strip_terminal_sequences`] glued together with no separator at all for
+/// the same reason. A log file sidesteps all of it: it is exactly the bytes
+/// the harness was given, unaffected by anything Glasshouse draws.
+///
+/// The two markers below are the same length with no character equal at the
+/// same position — `FIRST_MARKER` is `1` repeated, `SECOND_MARKER` is `9`
+/// repeated — specifically so the second one's diff against the first can
+/// never come back partial the way `"STARTED-VIEW"` then `"RESUMED-VIEW"`
+/// did the first time this test was written: those share `"D-VIEW"` at the
+/// same trailing positions, so ratatui's diff never re-sent it, and a raw
+/// substring search for `"RESUMED-VIEW"` timed out even though the screen
+/// was, in fact, correct.
+#[cfg(unix)]
+const FIRST_MARKER: &str = "1111111111";
+#[cfg(unix)]
+const SECOND_MARKER: &str = "9999999999";
+
+#[cfg(unix)]
+fn install_argv_log_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join(name);
+    let script = format!(
+        "#!/bin/sh\n\
+         echo \"$*\" >> \"$ARGV_LOG\"\n\
+         case \"$*\" in\n\
+         \x20\x20*--resume*) echo {SECOND_MARKER} ;;\n\
+         \x20\x20*) echo {FIRST_MARKER} ;;\n\
+         esac\n\
+         exit 0\n"
+    );
+    std::fs::write(&path, script).expect("write fake harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Phase 11 line 688, through the shipped binary: `n` starts an embedded
+/// session, the fake harness exits immediately, the shell's own tick loop
+/// notices and the record turns `Resumable`, and `r` from the overview
+/// reopens it under the identifier it was given — inside the *same*
+/// `glasshouse` process, unlike the sibling test above, which proves the CLI
+/// `resume` command's separate invocation.
+///
+/// This is also the regression test for `shell::resume_session`'s
+/// `live.close` call. `SessionRuntime` never drops an exited `LiveSession` on
+/// its own, and `get`/`focus` resolve the *first* entry with a given id, so a
+/// resume that started a fresh process without forgetting the dead one first
+/// would leave the viewport frozen on the exited session's last screen: the
+/// resumed process's own second log line would still be written (the log
+/// file does not go through the viewport at all), but `SECOND_MARKER`,
+/// which that same invocation writes to its own stdout — which *does* go
+/// through the viewport — would never reach it, because the viewport would
+/// still be showing the exited process's last frame. That split is why the
+/// mutation table records this one as a hang, not an assertion failure.
+#[cfg(unix)]
+#[test]
+fn a_session_started_from_the_shell_is_resumed_from_the_overview() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    let bin_dir = tmp.path().join("bin");
+    for dir in [&state_dir, &config_dir, &bin_dir] {
+        std::fs::create_dir_all(dir).expect("create dir");
+    }
+
+    let harness = install_argv_log_harness(&bin_dir, "fake-claude");
+    let argv_log = tmp.path().join("argv.log");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[onboarding]\ncompleted = true\n\n\
+         [integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n",
+            harness.display()
+        ),
+    )
+    .expect("write user config");
+
+    let read_log = || std::fs::read_to_string(&argv_log).unwrap_or_default();
+    let wait_for_lines = |shell: &mut Session, count: usize| -> Vec<String> {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            shell.answer_pending_queries();
+            let lines: Vec<String> = read_log().lines().map(str::to_owned).collect();
+            if lines.len() >= count {
+                return lines;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "the harness never wrote {count} line(s) to its log; got {lines:?}\n\
+                     --- shell output ---\n{}\n--- end ---",
+                    shell.output()
+                );
+            }
+            std::thread::sleep(POLL);
+        }
+    };
+
+    let mut shell = Session::spawn(
+        TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path())
+            .args([
+                "--scope".to_owned(),
+                project_dir.display().to_string(),
+                "--data-dir".to_owned(),
+                state_dir.display().to_string(),
+                "--config-dir".to_owned(),
+                config_dir.display().to_string(),
+            ])
+            .env("ARGV_LOG", &argv_log),
+    );
+    shell.expect("root ");
+
+    shell.send("n");
+    shell.expect("claude-code");
+
+    let started = wait_for_lines(&mut shell, 1)[0].clone();
+    let assigned = started
+        .split("--session-id")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no --session-id when starting: {started}"))
+        .split_whitespace()
+        .next()
+        .expect("an identifier")
+        .to_owned();
+
+    // Confirmed through the store the shell itself writes to, not guessed
+    // from a fixed number of ticks — the same reasoning
+    // `a_codex_session_started_from_the_shell_has_its_identifier_captured_on_exit`
+    // gives for reading the database directly instead of the screen.
+    let cli = Cli::try_parse_from([
+        "glasshouse",
+        "--scope",
+        &project_dir.display().to_string(),
+        "--data-dir",
+        &state_dir.display().to_string(),
+        "--config-dir",
+        &config_dir.display().to_string(),
+    ])
+    .expect("parse cli");
+    let runtime = bootstrap(&cli, &project_dir).expect("bootstrap runtime");
+    let deadline = Instant::now() + TIMEOUT;
+    let mut resumable = false;
+    while Instant::now() < deadline {
+        shell.answer_pending_queries();
+        let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+        let records = sessions.store().list().expect("list sessions");
+        if records
+            .iter()
+            .any(|record| record.disposition() == SessionDisposition::Resumable)
+        {
+            resumable = true;
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+    assert!(
+        resumable,
+        "the exited session never became resumable\n--- output ---\n{}\n--- end ---",
+        shell.output()
+    );
+
+    shell.send("o");
+    shell.expect("resumable");
+    shell.send("r");
+    // Back to the viewport: this is what proves the resume actually reached
+    // the screen, not just the log — see this test's own doc comment on why
+    // that is a separate fact from the log file filling in.
+    shell.send("\x1b");
+    shell.expect(SECOND_MARKER);
+
+    let lines = wait_for_lines(&mut shell, 2);
+    let resumed = lines[1].clone();
+    assert!(
+        resumed.contains("--resume"),
+        "resuming did not use the harness's own resume mechanism: {resumed}"
+    );
+    assert!(
+        resumed.contains(&assigned),
+        "resumed a different conversation:\n  assigned {assigned}\n  resumed  {resumed}"
+    );
+    assert!(
+        !resumed.contains("--session-id"),
+        "a resumed session must not also be assigned a fresh identifier: {resumed}"
+    );
+
+    shell.send("q");
+    let status = shell.wait_for_exit();
+    assert!(
+        status.success(),
+        "the shell should exit cleanly on `q`: {status}\n--- output ---\n{}\n--- end ---",
+        shell.output()
+    );
+}
+
+/// An echo harness like [`install_echo_harness`], except it prefixes its
+/// reply with the `--session-id` it was itself given, read from its own
+/// argument list before it blocks on `read`.
+///
+/// Two sessions in the same test run the identical script, so their replies
+/// are otherwise indistinguishable — this is what lets a test tell *which*
+/// of two live sessions a forwarded keystroke actually reached, which
+/// [`install_echo_harness`]'s plain `GOT:$line` cannot: with only one
+/// session's text ever different from the other's, wrong-session routing and
+/// right-session routing would print the same thing.
+#[cfg(windows)]
+fn install_tagged_echo_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let path = bin_dir.join(format!("{name}.cmd"));
+    std::fs::write(
+        &path,
+        "@echo off\r\nsetlocal enabledelayedexpansion\r\n\
+         :parse\r\nif \"%1\"==\"\" goto read\r\n\
+         if \"%1\"==\"--session-id\" set ID=%2\r\n\
+         shift\r\ngoto parse\r\n\
+         :read\r\nset /p line=\r\necho GOT:%ID%:%line%\r\n",
+    )
+    .expect("write tagged echo harness");
+    path
+}
+
+#[cfg(unix)]
+fn install_tagged_echo_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join(name);
+    std::fs::write(
+        &path,
+        "#!/bin/sh\n\
+         id=\"\"\n\
+         while [ $# -gt 0 ]; do\n\
+         \x20\x20if [ \"$1\" = \"--session-id\" ]; then id=\"$2\"; fi\n\
+         \x20\x20shift\n\
+         done\n\
+         read line\n\
+         echo \"GOT:$id:$line\"\n",
+    )
+    .expect("write tagged echo harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Phase 11 line 687, through the shipped binary: `Enter` from inside the
+/// overview focuses the session under the cursor — not whichever one the
+/// bar happens to be presenting — and hands it the keyboard.
+///
+/// Two live sessions, cursor moved off the presented one before `Enter`,
+/// exactly like `shell::state`'s own
+/// `enter_focuses_the_cursors_session_not_the_presented_one` — but that unit
+/// test cannot tell a genuine cursor-based focus from `Enter` merely falling
+/// through to the pre-existing `handle_control_key` binding
+/// (`Enter`/`i` → `enter_session_mode`, which focuses `active_session()`,
+/// **not** the cursor): with one session the two disagree on nothing, so a
+/// single-session version of this test passed unchanged with the new key
+/// binding deleted entirely — caught only because this one uses two.
+/// [`install_tagged_echo_harness`]'s reply names which session answered, so
+/// this asserts the *right* one did, not merely that *a* harness echoed.
+#[test]
+fn enter_from_the_overview_focuses_the_cursors_session_not_the_presented_one() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&state_dir).expect("create state dir");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+
+    let harness = install_tagged_echo_harness(&bin_dir, "tagged-echo");
+    let toml_path = |p: &std::path::Path| p.display().to_string().replace('\\', "\\\\");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n[onboarding]\ncompleted = true\n\n\
+             [integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n",
+            toml_path(&harness)
+        ),
+    )
+    .expect("write user config");
+
+    let mut shell = Session::spawn(
+        TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path()).args([
+            "--scope".to_owned(),
+            project_dir.display().to_string(),
+            "--data-dir".to_owned(),
+            state_dir.display().to_string(),
+            "--config-dir".to_owned(),
+            config_dir.display().to_string(),
+        ]),
+    );
+    shell.expect("root ");
+
+    let cli = Cli::try_parse_from([
+        "glasshouse",
+        "--scope",
+        &project_dir.display().to_string(),
+        "--data-dir",
+        &state_dir.display().to_string(),
+        "--config-dir",
+        &config_dir.display().to_string(),
+    ])
+    .expect("parse cli");
+    let runtime = bootstrap(&cli, &project_dir).expect("bootstrap runtime");
+    let native_ids = |shell: &mut Session, count: usize| -> Vec<String> {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            shell.answer_pending_queries();
+            let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+            let ids: Vec<String> = sessions
+                .store()
+                .list()
+                .expect("list sessions")
+                .into_iter()
+                .map(|record| record.native_session_id.expect("claude-code assigns one"))
+                .collect();
+            if ids.len() >= count {
+                return ids;
+            }
+            if Instant::now() >= deadline {
+                panic!("expected {count} recorded session(s); got {ids:?}");
+            }
+            std::thread::sleep(POLL);
+        }
+    };
+
+    // `ShellState::refresh` keeps the bar's selection on whichever session
+    // was active *before* the refresh, by identity — see its own doc
+    // comment — so starting a second session does not move the viewport off
+    // the first one, and `open_overview`'s cursor starts on that same
+    // presented row. This test does not trust that reading of the source
+    // alone, though: `list()`'s tie-breaking between two sessions recorded
+    // in the same second is not specified, so which array index a session
+    // lands at is not something to assume. `presented`, captured while it
+    // is genuinely the *only* session, is ground truth regardless; `target`
+    // is then whichever of the two is *not* it, however `list()` orders
+    // them once there are two.
+    shell.send("n");
+    shell.expect("claude-code");
+    let presented = native_ids(&mut shell, 1)[0].clone();
+
+    shell.send("n");
+    shell.expect("2 claude-code");
+    let both = native_ids(&mut shell, 2);
+    let target = both
+        .into_iter()
+        .find(|id| id != &presented)
+        .expect("the second session must have a different native id");
+
+    shell.send("o");
+    shell.expect("sessions");
+    shell.send("\x1b[B");
+    shell.send("\r");
+    shell.expect("ctrl-]");
+
+    shell.send("quiet\r");
+    shell.expect(&format!("GOT:{target}:quiet"));
+
+    shell.send("\x1d");
+    shell.send("q");
+
+    let status = shell.wait_for_exit();
+    assert!(
+        status.success(),
+        "the shell should exit cleanly on `q`: {status}\n--- output ---\n{}\n--- end ---",
+        shell.output()
+    );
+}
+
 /// Combines [`install_codex_rollout_harness`] and [`install_argv_harness`]: a
 /// single fake `codex` that both writes a real rollout header under
 /// `$CODEX_HOME` (so a `glasshouse launch codex` records a native identifier

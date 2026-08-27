@@ -181,6 +181,27 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     Action::SendSessionText { id, text } => {
                         send_session_text(&mut live, &mut state, id, text);
                     }
+                    Action::ResumeSession(id) => {
+                        let name = state::short_session_id(id);
+                        match resume_session(
+                            runtime,
+                            &mut live,
+                            &sessions,
+                            id,
+                            viewport_terminal_size(&screen),
+                        ) {
+                            Ok(()) => {
+                                if let Ok(records) = sessions.store().list() {
+                                    state.refresh(records);
+                                }
+                                state.set_status(format!("resumed session `{name}`"));
+                            }
+                            Err(err) => {
+                                tracing::warn!(session = %id, error = %err, "could not resume a session");
+                                state.set_status(format!("could not resume `{name}`: {err:#}"));
+                            }
+                        }
+                    }
                     Action::OpenSettings => match build_settings(runtime) {
                         Ok((harnesses, integrations, providers, profiles, routing)) => {
                             state.open_settings_with_routing(
@@ -339,7 +360,9 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                 live.answer_terminal_queries();
 
                 let mut redraw = false;
-                for (id, status) in live.poll_exits() {
+                let exits = live.poll_exits();
+                let any_exited = !exits.is_empty();
+                for (id, status) in exits {
                     // `ProcessExit` owns this classification and is the only
                     // place it lives. It used to be computed inline here as
                     // well, which is two definitions of "did it crash" — and
@@ -369,6 +392,18 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     {
                         redraw = true;
                     }
+                }
+                // Phase 11 line 688: a session's disposition can only turn
+                // `Resumable` here, on exit, and nothing else ever refreshes
+                // `state.sessions()` on its own — the session bar and
+                // overview otherwise only re-read the store on specific
+                // triggers (starting a session, `AppEvent::Redraw`), and an
+                // exit noticed on this tick is neither. Without this, `r`
+                // pressed against a session that exited moments ago would
+                // refuse it as "still running" against a record this loop
+                // had already, correctly, marked `Stopped` underneath it.
+                if any_exited && state.refresh(sessions.store().list()?) == Action::Redraw {
+                    redraw = true;
                 }
 
                 // Everything that happened since the last tick, from both
@@ -1022,6 +1057,141 @@ fn start_session(
             );
         }
         return Err(err);
+    }
+
+    Ok(())
+}
+
+/// Reopen a recorded session, embedded in this shell — Phase 11 line 688,
+/// "allow the user to resume any compatible stopped session from the
+/// overview".
+///
+/// This is `main.rs::resume_session`'s embedded counterpart, cut down to
+/// what the overview's key needs and mirroring `start_session` above rather
+/// than that CLI path: the shell keeps every live harness inside its own
+/// [`SessionRuntime`] rather than handing the terminal away with
+/// `session::attach`, so this calls `live.start` exactly as a fresh session
+/// does, with the resumed session's own recorded id.
+///
+/// # What this does not do
+///
+/// It does not re-resolve the session's launch profile overlay the way
+/// `main.rs::resume_session` does — that machinery
+/// (`resolve_resume_overlay`) is private to `main.rs`, which this package may
+/// not edit (see the packet's `FORBIDDEN FILES`), so a resumed session here
+/// runs on a plain resume invocation with no regenerated provider
+/// configuration. A session resumed from the overview that needs its
+/// original overlay reapplied is a gap for the next package, not a silent
+/// approximation — recorded in this phase's evidence rather than hidden.
+///
+/// It also cannot record [`LifecycleEvent::SessionResumed`]:
+/// [`SessionRuntime::start`] always publishes `SessionStarted`, and that is
+/// `session/runtime.rs`, also outside this package's `FORBIDDEN FILES`. The
+/// activity feed will therefore say "session started" for a resume, which is
+/// the same finding one layer down — the event model already draws this
+/// exact distinction (see `describe_event`'s doc comment), and the seam that
+/// would let `SessionRuntime::start` publish the right one is not this
+/// package's to open.
+fn resume_session(
+    app_runtime: &Runtime,
+    live: &mut SessionRuntime,
+    sessions: &ProjectSessions,
+    id: &SessionId,
+    size: TerminalSize,
+) -> anyhow::Result<()> {
+    let store = sessions.store();
+    // The store's own gate, not a second copy of it: `open_for_resume`
+    // refuses a session that belongs to another project, is still running,
+    // or was never given a native identifier to resume to — the same check
+    // `main.rs::resume_session` relies on, so an overview resume and a CLI
+    // one refuse exactly the same sessions for exactly the same reasons.
+    let resumable = store.open_for_resume(id)?;
+    let record = store
+        .get(&resumable.id)?
+        .expect("open_for_resume already proved this session's record exists");
+
+    let user = UserConfig::load(app_runtime.paths())?;
+    let project_config = config::load_project_config(app_runtime.project())?;
+    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+    // The record's own harness, not whatever is configured now — resuming a
+    // Codex conversation in Claude Code would be nonsense, and this is the
+    // same rule `main.rs::resume_session`'s doc comment states for the CLI
+    // path.
+    let selection = session::select::select(Some(resumable.harness.as_str()), effective)?;
+
+    let Some(mut args) = selection.resume_args(&resumable.native_session_id, Vec::<String>::new())
+    else {
+        anyhow::bail!(
+            "{} has no resume mechanism Glasshouse has verified, so this session cannot be \
+             reopened",
+            selection.id().display_name()
+        );
+    };
+
+    let response_request = config::response::ResponseRequest {
+        role: Some(config::response::ResponseRequest::role_for(record.role)),
+        ..config::response::ResponseRequest::default()
+    };
+    let response_profile = effective.response_profile(&response_request);
+    for problem in response_profile.problems() {
+        tracing::warn!(problem, "could not read part of the response profile");
+    }
+    let response_application =
+        crate::harness::response::apply(selection.adapter(), response_profile.resolved());
+
+    let project_hooks_consent = effective.project_hooks(selection.id()).value;
+    let document_args = std::env::current_exe()
+        .map_err(anyhow::Error::from)
+        .and_then(|program| {
+            let report = crate::harness::HookCommand::new(
+                program,
+                resumable.id.as_str(),
+                app_runtime.session_dir(resumable.id.as_str()),
+                app_runtime.project().root(),
+                app_runtime.paths().data_dir(),
+                app_runtime.paths().config_dir(),
+            );
+            selection.install_session_document(
+                &report,
+                project_hooks_consent,
+                &response_application,
+            )
+        });
+    match document_args {
+        Ok(document) => {
+            args.splice(0..0, document.args);
+        }
+        Err(err) => {
+            tracing::warn!(session = %resumable.id, error = %err, "could not install lifecycle hooks");
+        }
+    }
+
+    // `open_for_resume` already proved this session's process exited, but its
+    // `LiveSession` is still sitting in `live` — `SessionRuntime` never drops
+    // one on its own, and `get`/`focus`/`interrupt`/`send_text` all resolve
+    // the *first* entry with a given id. Starting a fresh process under this
+    // same id without forgetting the dead one first would leave every one of
+    // those calls silently talking to the exited process's frozen screen
+    // instead of the one just started. `close` is best-effort: `NotLive`
+    // here would only mean the entry was already gone, which is fine.
+    let _ = live.close(&resumable.id);
+
+    let launch = HarnessLaunch::new(selection.into_executable(), app_runtime.project())
+        .args(args)
+        .size(size);
+    if let Err(err) = live.start(resumable.id.clone(), record.presentation, &launch) {
+        if let Err(store_err) = store.set_lifecycle(&resumable.id, SessionLifecycle::Failed) {
+            tracing::warn!(
+                session = %resumable.id,
+                error = %store_err,
+                "could not record a failed session resume"
+            );
+        }
+        return Err(err);
+    }
+
+    if let Err(err) = store.set_lifecycle(&resumable.id, SessionLifecycle::Running) {
+        tracing::warn!(session = %resumable.id, %err, "could not record a session resume");
     }
 
     Ok(())

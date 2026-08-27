@@ -31,7 +31,7 @@ use crate::provider::discovery::{ProbeOutcome, ProbeTarget};
 use crate::routing::disposable::DisposableChoice;
 use crate::secret::native::{PreferNativeSecretStore, os_credential_for_variable};
 use crate::secret::{SecretRef, SecretStore};
-use crate::session::{SessionId, SessionPresentation, SessionRecord};
+use crate::session::{SessionDisposition, SessionId, SessionPresentation, SessionRecord};
 
 /// A Glasshouse-owned screen drawn over the session viewport.
 ///
@@ -162,6 +162,16 @@ pub enum Action {
     /// holds — both are the run loop's job, exactly like
     /// [`Action::OpenSettings`].
     ReopenOnboarding,
+    /// Reopen the overview's cursor session where it left off — Phase 11's
+    /// "resume any compatible stopped session from the overview".
+    ///
+    /// Carries its target for the same reason [`Action::InterruptSession`]
+    /// does: the session acted on is the one under the cursor, not whichever
+    /// one the bar happens to be presenting. Selecting a harness, building
+    /// its resume arguments, and starting the process are all I/O this
+    /// module deliberately does not hold — see `shell::resume_session`, the
+    /// run loop's counterpart to `shell::start_session`.
+    ResumeSession(SessionId),
 }
 
 /// A session's screen, as a terminal would have drawn it, ready to draw.
@@ -933,6 +943,18 @@ impl ShellState {
             // cursor, never on the session in the viewport.
             KeyCode::Char('c') if !ctrl => self.interrupt_overview_target(),
             KeyCode::Char('m') if !ctrl => self.begin_overview_send(),
+            // Phase 11 line 687: bring the cursor's session into the
+            // viewport. Bound to Enter specifically because it was unclaimed
+            // here — `handle_overview_entry_key` above claims Enter too, but
+            // only while the send field is open, which the guard at the top
+            // of this function already routes around before this match is
+            // ever reached.
+            KeyCode::Enter => self.focus_overview_target(),
+            // Phase 11 line 688: reopen the cursor's session where it left
+            // off. Not `c`/`m`'s neighbour by coincidence — `r` for resume,
+            // unclaimed here and unclaimed by Settings' own `r` binding,
+            // which belongs to a different overlay entirely.
+            KeyCode::Char('r') if !ctrl => self.resume_overview_target(),
             _ => self.handle_control_key(key, had_status),
         }
     }
@@ -1010,6 +1032,96 @@ impl ShellState {
             overview.entry = Some(String::new());
         }
         Action::Redraw
+    }
+
+    /// Bring the session under the cursor into the viewport and hand it the
+    /// keyboard — Phase 11 line 687: "focus any live embedded session from
+    /// the overview".
+    ///
+    /// Deliberately not built on `actionable_overview_target` alone. That
+    /// helper's liveness refusal is exactly right here too — a stopped
+    /// session has no process to give the keyboard to — but the box names a
+    /// second adjective the helper knows nothing about: *embedded*. A
+    /// headless session is live and still has no viewport to focus into, so
+    /// it needs its own refusal on top, spoken rather than silent for the
+    /// same reason every other overview key is.
+    fn focus_overview_target(&mut self) -> Action {
+        let Some(id) = self.actionable_overview_target("focus") else {
+            return Action::Redraw;
+        };
+        // Re-read after the liveness check rather than trusting the id
+        // alone: `actionable_overview_target` looked this session up by the
+        // cursor's position, and re-finding it by identity here is what
+        // keeps this correct if that ever changes.
+        let Some(index) = self.sessions.iter().position(|record| record.id == id) else {
+            return Action::Redraw;
+        };
+        if self.sessions[index].presentation != SessionPresentation::Embedded {
+            self.set_status(format!(
+                "cannot focus session `{}`: it is {}, not embedded — there is no viewport to focus into",
+                short_session_id(&id),
+                self.sessions[index].presentation,
+            ));
+            return Action::Redraw;
+        }
+        self.selected = index;
+        self.overlay = None;
+        self.overview = None;
+        self.mode = Mode::Session;
+        Action::Redraw
+    }
+
+    /// The session under the cursor, if it may be resumed — and a spoken
+    /// refusal naming the session and its actual state if not. The resume
+    /// half of Phase 11 line 688.
+    ///
+    /// Deliberately not `actionable_overview_target`: that helper refuses
+    /// every session whose lifecycle is not live, which is backwards for
+    /// resume — a live session has nothing to resume *to*, and the whole
+    /// point of this key is the session that is *not* running. Gated on
+    /// [`SessionRecord::disposition`] instead, so the session this key acts
+    /// on is exactly the one the STATE column already labels `resumable`.
+    fn resumable_overview_target(&mut self) -> Option<SessionId> {
+        let target = self
+            .overview_target()
+            .map(|record| (record.id.clone(), record.disposition()));
+        match target {
+            None => {
+                self.set_status("nothing to resume: this project has no sessions");
+                None
+            }
+            Some((id, SessionDisposition::Resumable)) => Some(id),
+            Some((id, SessionDisposition::Active)) => {
+                self.set_status(format!(
+                    "cannot resume session `{}`: it is still running",
+                    short_session_id(&id)
+                ));
+                None
+            }
+            Some((id, SessionDisposition::Failed)) => {
+                self.set_status(format!(
+                    "cannot resume session `{}`: it failed, with no session to reopen",
+                    short_session_id(&id)
+                ));
+                None
+            }
+            Some((id, SessionDisposition::Closed)) => {
+                self.set_status(format!(
+                    "cannot resume session `{}`: it is closed, with no native session id \
+                     recorded to resume to",
+                    short_session_id(&id)
+                ));
+                None
+            }
+        }
+    }
+
+    /// Resume the session under the cursor.
+    fn resume_overview_target(&mut self) -> Action {
+        match self.resumable_overview_target() {
+            Some(id) => Action::ResumeSession(id),
+            None => Action::Redraw,
+        }
     }
 
     /// Answer one key while the send field is open.
@@ -6290,6 +6402,160 @@ mod overview_tests {
             assert_eq!(state.handle_key(key), Action::Redraw);
             assert!(state.status().is_some(), "{key:?} said nothing");
         }
+    }
+
+    /// Line 687: Enter brings the cursor's session into the viewport and
+    /// hands it the keyboard — not the session the bar was already
+    /// presenting, which is the entire reason `focus_overview_target` reads
+    /// the cursor rather than reusing `active_session`.
+    #[test]
+    fn enter_focuses_the_cursors_session_not_the_presented_one() {
+        let mut state = overview_on_the_other_session();
+
+        let action = state.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(action, Action::Redraw);
+        assert_eq!(
+            state.active_session().map(|r| r.id.as_str()),
+            Some("background"),
+            "focus must move the viewport onto the cursor's session"
+        );
+        assert_eq!(
+            state.mode(),
+            Mode::Session,
+            "focus must hand the keyboard to the focused session"
+        );
+        assert_eq!(
+            state.overlay(),
+            None,
+            "focusing a session must close the overview it was opened from"
+        );
+    }
+
+    /// A headless session is live, so `actionable_overview_target` alone
+    /// would let it through — but it has no viewport to focus into, and the
+    /// box names both adjectives. Refused by name, and nothing moves.
+    #[test]
+    fn enter_refuses_a_live_headless_session_by_name() {
+        let mut state = ShellState::new(
+            "p",
+            "/p",
+            "0.1.0",
+            vec![SessionRecord {
+                presentation: SessionPresentation::Headless,
+                ..record("bg-headless", SessionLifecycle::Running)
+            }],
+        );
+        state.handle_key(press(KeyCode::Char('o')));
+        let before_mode = state.mode();
+        let before_selected = state.selected_index();
+
+        let action = state.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(action, Action::Redraw);
+        let status = state.status().unwrap_or_default().to_owned();
+        assert!(
+            status.contains("bg-headless") && status.contains("headless"),
+            "the refusal must name the session and why; got {status:?}"
+        );
+        assert_eq!(
+            state.mode(),
+            before_mode,
+            "a refusal must not enter Session mode"
+        );
+        assert_eq!(state.selected_index(), before_selected);
+        assert_eq!(
+            state.overlay(),
+            Some(Overlay::Overview),
+            "a refusal must leave the overview open"
+        );
+    }
+
+    /// Enter still refuses a stopped session, through the same liveness gate
+    /// `c` and `m` already use — resume is `r`'s job, not Enter's.
+    #[test]
+    fn enter_refuses_a_stopped_session() {
+        let mut state = ShellState::new(
+            "p",
+            "/p",
+            "0.1.0",
+            vec![
+                record("alive", SessionLifecycle::Running),
+                record("finished", SessionLifecycle::Stopped),
+            ],
+        );
+        state.handle_key(press(KeyCode::Char('o')));
+        state.handle_key(press(KeyCode::Down));
+
+        let action = state.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(action, Action::Redraw);
+        assert_eq!(state.mode(), Mode::Control);
+        let status = state.status().unwrap_or_default().to_owned();
+        assert!(status.contains("finished"), "got {status:?}");
+    }
+
+    /// Line 688: `r` resumes the session under the cursor — a *stopped* one,
+    /// which is exactly what `actionable_overview_target`'s liveness gate
+    /// would refuse, and the reason `resumable_overview_target` is its own
+    /// gate rather than a reuse of that helper.
+    #[test]
+    fn r_resumes_a_stopped_session_with_a_native_identifier() {
+        let mut state = ShellState::new(
+            "p",
+            "/p",
+            "0.1.0",
+            vec![SessionRecord {
+                native_session_id: Some("native-42".to_owned()),
+                ..record("finished", SessionLifecycle::Stopped)
+            }],
+        );
+        state.handle_key(press(KeyCode::Char('o')));
+
+        let action = state.handle_key(press(KeyCode::Char('r')));
+
+        assert_eq!(action, Action::ResumeSession(SessionId::new("finished")));
+    }
+
+    /// A stopped session with no native identifier is `closed`, not
+    /// `resumable` — `SessionRecord::disposition`'s own rule, so `r` must
+    /// refuse it exactly as the STATE column already reports it.
+    #[test]
+    fn r_refuses_a_stopped_session_with_no_native_identifier() {
+        let mut state = ShellState::new(
+            "p",
+            "/p",
+            "0.1.0",
+            vec![record("finished", SessionLifecycle::Stopped)],
+        );
+        state.handle_key(press(KeyCode::Char('o')));
+
+        let action = state.handle_key(press(KeyCode::Char('r')));
+
+        assert_eq!(action, Action::Redraw);
+        let status = state.status().unwrap_or_default().to_owned();
+        assert!(
+            status.contains("finished") && status.contains("closed"),
+            "got {status:?}"
+        );
+    }
+
+    /// `r` must refuse a *live* session — the opposite mistake from every
+    /// other overview action, and the one `actionable_overview_target` would
+    /// make if resume reused it: that helper accepts exactly the sessions
+    /// resume must refuse.
+    #[test]
+    fn r_refuses_a_live_session() {
+        let mut state = overview_on_the_other_session();
+
+        let action = state.handle_key(press(KeyCode::Char('r')));
+
+        assert_eq!(action, Action::Redraw);
+        let status = state.status().unwrap_or_default().to_owned();
+        assert!(
+            status.contains("background") && status.contains("running"),
+            "got {status:?}"
+        );
     }
 }
 

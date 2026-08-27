@@ -18,7 +18,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 
 use crate::config::{Layer, RoutingModelChoice};
 use crate::provider::discovery::ProbeOutcome;
-use crate::session::{SessionDisposition, SessionPresentation, SessionRecord};
+use crate::session::{SessionDisposition, SessionLifecycle, SessionPresentation, SessionRecord};
 
 use super::state::{
     Mode, Overlay, OverviewState, ProbeKind, ProviderRow, SettingsPathInputView, SettingsSection,
@@ -361,10 +361,19 @@ fn render_overview(state: &ShellState, frame: &mut Frame, area: Rect) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    // `NAME` and `ACTIVE` are written last, after `SESSION`, on purpose: this
+    // popup's width scales with the terminal's, and at a realistic width the
+    // row is the first thing to run out of room. Everything the interrupt,
+    // send and resume keys need to identify a row — the harness, the state,
+    // whether it is presented, and the identifier those keys' own status
+    // notes quote — comes first and is what survives a narrow terminal; the
+    // two columns this phase adds are what clips. See
+    // `the_new_overview_columns_survive_a_realistic_and_a_wide_width` for the
+    // proof, and its doc comment for what "realistic" turned out to mean here.
     let mut lines = vec![Line::from(Span::styled(
         format!(
-            "  {:<14}  {:<12}  {:<10}  {:<12}  {}",
-            "HARNESS", "STATE", "ROLE", "PRESENTED", "SESSION"
+            "  {:<14}  {:<12}  {:<10}  {:<12}  {:<12}  {:<14}  {:<16}",
+            "HARNESS", "STATE", "ROLE", "PRESENTED", "SESSION", "ACTIVE", "NAME"
         ),
         Style::default().add_modifier(Modifier::BOLD),
     ))];
@@ -377,6 +386,7 @@ fn render_overview(state: &ShellState, frame: &mut Frame, area: Rect) {
     }
 
     let cursor = state.overview().map(OverviewState::cursor);
+    let now = crate::provider::cache::now_unix_seconds();
     for (index, session) in state.sessions().iter().enumerate() {
         // Two different facts, and conflating them is what would make the
         // overview useless for its own capability: the *cursor* is the row a
@@ -398,14 +408,16 @@ fn render_overview(state: &ShellState, frame: &mut Frame, area: Rect) {
         };
         lines.push(Line::from(Span::styled(
             format!(
-                "{} {:<14}  {:<12}  {:<10}  {:<12}  {}{}",
+                "{} {:<14}  {:<12}  {:<10}  {:<12}  {:<12}{}  {:<14}  {}",
                 if selected { ">" } else { " " },
                 session.harness,
-                disposition_label(session),
+                state_label(session),
                 session.role,
                 session.presentation,
                 short_id(session),
                 presented,
+                describe_age(now, session.last_activity_at),
+                name_or_purpose(session),
             ),
             style,
         )));
@@ -481,6 +493,82 @@ fn disposition_label(session: &SessionRecord) -> &'static str {
         SessionDisposition::Resumable => "resumable",
         SessionDisposition::Closed => "closed",
         SessionDisposition::Failed => "failed",
+    }
+}
+
+/// One word for each of [`crate::session::SessionLifecycle`]'s seven values.
+///
+/// The map's line 683 asks for *"the current lifecycle state"*, and
+/// [`disposition_label`] answers a different, coarser question — see
+/// [`state_label`]'s doc comment. This is the finer one, kept as its own
+/// function rather than folded into `state_label` so a reader can see the
+/// seven-way match is exhaustive at a glance.
+fn lifecycle_word(lifecycle: SessionLifecycle) -> &'static str {
+    match lifecycle {
+        SessionLifecycle::Starting => "starting",
+        SessionLifecycle::Running => "running",
+        SessionLifecycle::Idle => "idle",
+        // Shortened from the stored `waiting_for_user`: this is a column in a
+        // fixed-width table, not the stored word, and the parenthesised
+        // disposition beside it already says whose session this is.
+        SessionLifecycle::WaitingForUser => "waiting",
+        SessionLifecycle::Stopped => "stopped",
+        SessionLifecycle::Failed => "failed",
+        SessionLifecycle::Closed => "closed",
+    }
+}
+
+/// The STATE column's full text: the disposition a resume or an interrupt
+/// acts on, and — for the two dispositions that do not already pin it down —
+/// the finer lifecycle state the map's line 683 actually asks for.
+///
+/// Two answers, not one, because they are two different questions. `active`
+/// alone cannot distinguish a session waiting on the user from one mid-turn,
+/// and `disposition()`'s own doc comment explains why collapsing that
+/// distinction is deliberate for the *resumable/interrupt* question — but it
+/// means a column that shows only the disposition is not "the current
+/// lifecycle state" the box asks for. Keeping both rather than replacing one
+/// with the other answers both questions honestly instead of picking a
+/// winner.
+///
+/// `Resumable` and `Failed` are skipped here, not because they are less
+/// important, but because `disposition()`'s own match makes each of them
+/// answer to exactly one [`SessionLifecycle`] — `Resumable` only ever means
+/// `Stopped` with a native identifier, `Failed` only ever means `Failed` —
+/// so appending the lifecycle word would repeat the disposition rather than
+/// add to it. `Active` (four lifecycles) and `Closed` (`Stopped` with no
+/// native identifier, or `Closed` itself) are genuinely ambiguous without it.
+fn state_label(session: &SessionRecord) -> String {
+    match session.disposition() {
+        SessionDisposition::Active | SessionDisposition::Closed => {
+            format!(
+                "{}/{}",
+                disposition_label(session),
+                lifecycle_word(session.lifecycle)
+            )
+        }
+        SessionDisposition::Resumable | SessionDisposition::Failed => {
+            disposition_label(session).to_owned()
+        }
+    }
+}
+
+/// The NAME column: what a person called this session, or what they tagged
+/// it with, or an explicit sentinel — never a blank cell.
+///
+/// The map's line 682 asks for "the user-assigned session name or purpose",
+/// one fact with two possible sources, so this is one column rather than two:
+/// a session with both shows the name first with the purpose alongside for
+/// context, and a session with neither says so in words. An empty cell would
+/// be indistinguishable from a name that happened to render as nothing, or
+/// from a column truncated away — `"(unnamed)"` cannot be confused with
+/// either.
+fn name_or_purpose(session: &SessionRecord) -> String {
+    match (&session.display_name, &session.purpose) {
+        (Some(name), Some(purpose)) => format!("{name} ({purpose})"),
+        (Some(name), None) => name.to_string(),
+        (None, Some(purpose)) => purpose.to_string(),
+        (None, None) => "(unnamed)".to_owned(),
     }
 }
 
@@ -2215,6 +2303,65 @@ mod tests {
                 "the session must be named beside its event, width {width}:\n{text}"
             );
         }
+    }
+
+    /// Phase 11 lines 682 and 684: a session's name/purpose and its last
+    /// activity time, both already on [`SessionRecord`] since Phase 10, shown
+    /// in the overview table rather than nowhere.
+    ///
+    /// Asserted at a realistic width and a wide one — see §17. "Realistic"
+    /// here is wider than the 100 columns the activity-feed test above uses:
+    /// with `NAME` and `ACTIVE` written last in the row (see `render_overview`'s
+    /// comment on why), a 100-column terminal clips them before the identifier
+    /// the interrupt/send/resume keys act on, which is the trade this makes on
+    /// purpose. 160 is where they first survive on this fixture — recorded
+    /// here as a measurement, not assumed.
+    #[test]
+    fn the_new_overview_columns_survive_a_realistic_and_a_wide_width() {
+        use crate::session::{SessionName, SessionPurpose};
+
+        let now = crate::provider::cache::now_unix_seconds();
+        let named = SessionRecord {
+            display_name: Some(SessionName::parse("payment retries").expect("valid name")),
+            last_activity_at: now - 90,
+            ..record("aaaaaaaaaaaa1", "claude-code", SessionLifecycle::Running)
+        };
+        let purposed = SessionRecord {
+            purpose: Some(SessionPurpose::parse("tests").expect("valid purpose")),
+            last_activity_at: now - 3 * 86_400,
+            ..record("bbbbbbbbbbbb2", "codex", SessionLifecycle::Stopped)
+        };
+        let mut state = ShellState::new(
+            "glasshouse",
+            "/Users/someone/projects/glasshouse",
+            "0.1.0",
+            vec![named, purposed],
+        );
+        state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+
+        for (width, height) in [(160, 30), (400, 30)] {
+            let text = rendered(&state, width, height);
+            assert!(text.contains("payment retries"), "width {width}:\n{text}");
+            assert!(text.contains("tests"), "width {width}:\n{text}");
+            assert!(text.contains("1 minute ago"), "width {width}:\n{text}");
+            assert!(text.contains("3 days ago"), "width {width}:\n{text}");
+            // Line 683: a `Running` session's fine state, not only its
+            // coarse `active` disposition — and a `Stopped`-with-no-native-id
+            // one's, which `Closed` alone does not distinguish from a
+            // session that was explicitly closed.
+            assert!(text.contains("active/running"), "width {width}:\n{text}");
+            assert!(text.contains("closed/stopped"), "width {width}:\n{text}");
+        }
+
+        // A session with neither is a spoken sentinel, not a blank cell — an
+        // empty cell here would be indistinguishable from one truncated away.
+        let mut unnamed = sample();
+        unnamed.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        let no_name = rendered(&unnamed, 400, 30);
+        assert!(
+            no_name.contains("(unnamed)"),
+            "an absent name must say so, not render nothing:\n{no_name}"
+        );
     }
 }
 
