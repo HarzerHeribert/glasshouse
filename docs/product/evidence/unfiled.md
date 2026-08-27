@@ -51,6 +51,53 @@ entries at 09:00 and `369` an hour later. A catalogue that moves within the hour
 is why every citation names a date, and why nothing downstream may treat a count
 as stable.
 
+### Settled 2026-08-27: the key arrived, and the `200` was never about the path
+
+The authenticated request this entry said was needed has been made. **The
+correction above was right and stays; one row of its table was being read for
+more than it says.**
+
+Six probes against `api.z.ai` — the host these declarations are about — all
+re-run from this repository within the same minute:
+
+| request | no credential | authenticated |
+|---|---|---|
+| `/api/paas/v4/models` | `401` `{"error":{"code":"1001",…}}` | **`200`, ten models** |
+| `/api/paas/v4/definitely-not-real-xyz` | `401` identical envelope | **`404`** |
+| `/api/paas/v9/models` | **`200`** `{"code":1001,"msg":…,"success":false}` | **`404`** |
+
+**`zai.model_list_endpoint` is `Verified`.** `https://api.z.ai/api/paas/v4/models`
+serves a ten-model list (`glm-4.5` … `glm-5.3-flash`) to an authenticated `GET`,
+and the authenticated control on a sibling path under the same prefix answers
+`404`. Both axes discriminate now, which is exactly what the entry above said
+was missing.
+
+**And the `v9 → 200` row does not mean what it looks like.** It was read as
+"this host answers `200` for a path that does not exist", which would make every
+absence claim about it worthless. It is not that. z.ai has **two auth gates with
+two error schemas**: a request under the recognised `/v4/` prefix meets the
+current gate, which answers `401` with the documented `{"error":{…}}` envelope;
+an *unrecognised version prefix* falls through to an older gate that answers
+**`200`** with a legacy `{code,msg,success}` body carrying the same error `1001`
+and the message *"Authentication parameter not received in Header, unable to
+authenticate"*. The `200` was an authentication failure wearing a success code,
+and it was never a statement about the path at all — with a credential present
+both gates route normally and `/v9/models` correctly `404`s.
+
+**The rule this adds to the one above.** That rule says run the control against
+the host it justifies. This one says: **a status code is a claim by the layer
+that answered, and you may be talking to a different layer than you think.**
+An unrecognised prefix can route to older middleware with its own error
+vocabulary, so two paths on one host can disagree about how to spell the same
+failure. Read the body's schema, not only its status — a response whose shape
+does not match the host's own documented error envelope is itself the tell.
+
+The same re-probe was nearly run against the wrong host: `open.bigmodel.cn`
+reproduces this pattern identically (in Chinese rather than English), but it is
+a different service and these declarations name `api.z.ai`. Reproducing a
+mechanism on a sibling host is not evidence about this one — which is this
+entry's own lesson, arriving a second time in the same investigation.
+
 ### The design defect the worker refused to implement
 
 The task packet asked for a `NativeSessionSource` with

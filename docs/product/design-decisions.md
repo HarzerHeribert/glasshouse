@@ -1907,3 +1907,50 @@ treated as sensitive by default**: classified against, and never copied whole
 into a log, a diagnostic, a session record, or anything a user might share.
 That is the same rule already applied to the request side, applied to the
 response.
+
+### The mirror: a `2xx` can mean "you did not authenticate"
+
+The table above is about failure codes *understating* — a `404` that means "you
+have no credit". **The same host family supplies the opposite, and it is the
+worse direction because it fails silently.**
+
+z.ai answers an unauthenticated `GET /api/paas/v9/models` with **HTTP `200`**
+and a body of `{"code":1001,"msg":"Authentication parameter not received in
+Header, unable to authenticate","success":false}`. The mechanism is two auth
+gates with two error schemas: the recognised `/v4/` prefix meets the current
+gate and answers `401` with a documented `{"error":{…}}` envelope, while an
+unrecognised version prefix falls through to older middleware that reports the
+identical failure as a success code. Measured on 2026-08-27 against both
+`api.z.ai` and `open.bigmodel.cn`, unauthenticated and authenticated.
+
+**A provider health check that asserts `status == 200` would mark this provider
+reachable and healthy with no credential at all.** That is not a hypothetical
+— it is the check anyone writes first.
+
+So the rule the table states has to hold in both directions, and the 2xx
+direction needs one addition: **compare the body's *schema* against the one that
+host documents for success.** A `200` carrying `success: false`, or an envelope
+that does not match the shape a successful call returns, is a failure regardless
+of its status line. Status is a claim by whichever layer answered, and an
+unrecognised path may be answered by a different layer than the one whose
+contract you read.
+
+### And a `200` with empty content is not a dead provider either
+
+A one-token liveness probe is the natural cheap health check and it does not
+survive contact with a reasoning model. `glm-4.6` with `max_tokens: 8` returns
+HTTP `200`, `finish_reason: "length"`, `content: ""`, and all eight completion
+tokens accounted for as `reasoning_tokens` — the budget was spent thinking and
+none of it reached the visible message.
+
+**So empty content is not evidence of a broken provider**, and a check that
+treats it as such will report healthy models as dead. A liveness probe against a
+model that may reason must either allow enough budget for the model to finish
+thinking and still speak, or treat `finish_reason: "length"` with non-zero
+`reasoning_tokens` as a success — the request was served, which is what liveness
+asks.
+
+Taken together with the entitlement table: **`200` can be a failure, `404` can
+be a billing state, and empty content can be a success.** No single field of an
+HTTP response is load-bearing on its own, which is the whole design constraint
+this section exists to record.
