@@ -6,6 +6,43 @@
 
 Last updated: 2026-08-27 late evening (Europe/Berlin)
 
+## Checkpoint — 2026-08-28 early, batch 34 landed: 569 / 1280 (44%)
+
+`7215d3d` pushed, clean, green on all three platforms — local 13/13,
+`--windows-vm` **3/3**.
+
+**`glasshouse resources` computed a real percentage for the first time.** Map lines
+1199, 1211, 1217 and 1218 close together: a Groq registry template plus the three
+`main.rs` edits `bridge-quota` had located. Neither half closes anything alone —
+Groq is the only host ever observed sending both halves of a pool, and this build
+shipped no template for it.
+
+**1217/1218 had been open across four consecutive packages**, each declining to
+tick a structural guarantee that had never fired in the shipped binary. It fires
+now.
+
+### What is next, in order
+
+1. **Nothing in the 32-family is blocked on evidence any more.** 32C (subscription
+   estimation), 32D (normalized score), 32E–32G are all unblocked by a live
+   reading existing. 32D in particular now has real input.
+2. **The TUI pty harness.** Still unbuilt, still Red tier, and now wanted by a
+   third thing: `quota-live` noted a CLI-level write-side mutation needs a harness
+   that drives a gateway-backed session through the binary. Named twice, wanted
+   three times.
+3. **`check-evidence-coverage.py` should validate the state vocabulary.**
+   Twelve entries use states the SDLC does not define. Warn-only first (§51).
+4. **`worker-watch.sh` needs §28's worktree-growth signal.** Now wanted by two
+   mechanisms — see the measurements entry on the heartbeat blind spot.
+5. **Settled, stop re-checking: map line 1210.** Five packages have now reported
+   that no host publishes a quota window *start*, only resets.
+
+### Standing debt
+
+`session::api::tests::interrupting_through_the_api_is_recorded_as_machine_initiated`
+— **2 failures in 6 Windows runs**, unchanged code since `d35fe6a`, nobody's
+regression. Beside the 1-in-37 `pty_smoke` `SIGABRT`.
+
 ## Checkpoint — 2026-08-27 night, batch 33 landed: 565 / 1280 (44%)
 
 `c40194e` pushed, tree clean. Local gate 13/13; `--windows-vm` build+msrv pass with

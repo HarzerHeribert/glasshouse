@@ -2236,3 +2236,44 @@ screen shows.* `quota-live`'s worktree sat at exactly `+141/-45` across both fal
 idles — one `git -C <worktree> diff --shortstat` would have answered it, and the
 same signal would give the heartbeat a liveness input that does not depend on
 another watch being armed. **Proposed in §28, now wanted by two mechanisms.**
+
+## Batch 34 — the five-package chain, and what the zero-box package bought
+
+`7215d3d`, 565 → 569. `quota-live`: Sonnet high, ~$4, four boxes.
+
+    32A              modelled capacity                                     3 boxes
+    32B              the reader + `glasshouse resources`                  16 boxes
+    QUOTA-FOLLOWUP   the gateway captures headers                          4 boxes
+    BRIDGE-QUOTA     the durable store, and "a template is missing"        0 boxes
+    QUOTA-LIVE       template + wiring, together                           4 boxes
+
+**BRIDGE-QUOTA is why batch 34 worked.** Without its finding, this round would have
+landed three `main.rs` edits into a path with nothing flowing through it, and 1217
+would still be open with a live caller pointing at an empty cache. It cost $10.75,
+closed nothing, and is the reason the next package cost $4 and closed four.
+
+**Any ranking by boxes or by cost-per-box scores it last.** That is now recorded
+twice in this file, because the metric is easy to build and would actively mislead.
+
+### Four packages declined to tick 1217/1218, and all four were right
+
+The property was structurally guaranteed from 32A onward. Every package could have
+ticked it on the guarantee; none did, each saying in its own words that a guarantee
+which has never fired in the shipped binary is not a closed box. It fired in batch
+34 and ticked immediately.
+
+**That is the evidence discipline paying a visible dividend rather than costing
+one.** Had 32A ticked it, the four rounds since would have built a percentage
+nobody was waiting for, and the box would have been a number that lied for a week.
+
+### A weak mutation nearly produced a false finding, and §5 caught it
+
+The orchestrator mutated Groq's base URL to an invented one; it **survived** —
+apparently a hole in a test the worker had specifically claimed pins that URL.
+§5 says a survivor is more often a weak mutation than a weak test, so the mutation
+was inspected first: it had replaced the URL inside a **doc comment**, not the
+value. Re-aimed at the real one, the test killed it at once.
+
+**The wrong conclusion was one keystroke away** — a logged coverage gap that does
+not exist, in the package whose entire value rests on that template being real.
+The rule works; what makes it work is applying it before writing the finding down.
