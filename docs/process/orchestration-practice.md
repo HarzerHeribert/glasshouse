@@ -2041,3 +2041,52 @@ written.
 
 **Check the exit status of the thing you are relying on**, and when you build a
 mechanism that reports, make the report conditional on the work.
+
+## §60 — a single-trial acceptance test cannot tell "fixed" from "fixed most of the time"
+
+`tests/terminal_loss.rs` proves that a terminal going away ends the interface.
+It passed on every run, on both platforms, and three mutations killed it. The
+orchestrator wrote "the spin is gone" into a commit message on that evidence.
+
+Then a different harness — same scenario, run sixty times instead of once —
+found the process still spinning at `Rs+ 100.0` in **two of sixty** trials.
+
+Nothing about the test is wrong. `portable-pty` does `setsid` and `TIOCSCTTY`,
+so it exercises exactly the controlling-terminal case that fails; it simply
+runs it **once**, against a defect that fires about one time in thirty, and
+wins that coin flip 97% of the time. Three mutations killed it because the
+mutations made it fail *always*.
+
+**A test that runs a scenario once measures whether the defect is gone only if
+the defect was deterministic.** This project already knows that a flake needs a
+rate (§34) — the missing half is that the same arithmetic applies to a *fix*.
+A one-shot pass is consistent with a residual rate of anything up to roughly
+1-in-3, and no amount of mutation-proofing closes that gap, because mutations
+test the test, not the tail.
+
+**So the rule.** When the defect being fixed is a race — anything where the
+words "window", "at the same instant", or "depends on scheduling" appear in the
+diagnosis — the acceptance test needs a trial count, and the report needs a
+rate rather than a pass. Where a per-run loop is too slow for the gate, run the
+rate once by hand and record it beside the test, so that the next person reads
+"0 in 60" instead of inferring "0" from "ok".
+
+Corollary for the orchestrator: **"the tests pass" is not "the defect is
+gone"** for a race, and writing the stronger sentence into a commit message is
+a claim the evidence does not carry. Say what was run and how many times.
+
+### §60, addendum — run `cargo doc` before you run the gate
+
+Twice in one round, a twelve-job gate run failed on `lint / rustdoc` alone
+while `build`, `test`, `clippy --all-targets` and `fmt` were all green: once for
+a worker, once for the orchestrator, both times a public doc comment linking a
+private item. The gate already runs rustdoc third, before the Docker jobs, so
+it does surface early — but it still costs the run, and the check itself takes
+about two seconds:
+
+    cargo doc -p glasshouse --no-deps
+
+Nothing else catches it. Intra-doc links are resolved by rustdoc and by nothing
+in the compile path, so a link to a private item is invisible to every other
+job and to every test. Run it before starting the gate, the way you would check
+`git status` before committing.

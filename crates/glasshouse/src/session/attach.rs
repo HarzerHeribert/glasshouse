@@ -248,21 +248,105 @@ fn pump_output(mut output: PtyOutput, drained: &AtomicBool) {
 /// that Ctrl-C becomes in raw mode, and the terminal's reply to a cursor
 /// position query — is carried by exactly these bytes, and any interpretation
 /// here would break one of them.
+///
+/// # Why a lost terminal ends the session rather than just this thread
+///
+/// This thread cannot be cancelled — see the module doc — so when its read
+/// ends there is no second chance to notice why. Ending quietly, as this used
+/// to, left the reason unrecorded anywhere `supervise` could see it.
+///
+/// # This is belt-and-suspenders, not the only thing standing between a lost
+/// # terminal and a leaked session
+///
+/// `supervise` (below) already reacts to `crate::shutdown::shutdown_requested`
+/// every [`POLL_INTERVAL`], and the terminal hanging up delivers `SIGHUP` to
+/// this process's foreground process group — which [`crate::shutdown`]'s
+/// `ctrlc` handler (installed with the `termination` feature) already turns
+/// into exactly that flag. Measured directly: with this arm reverted to a
+/// bare `break`, closing the terminal on an attached session still sets
+/// `shutdown_requested` and still ends the session, on the signal path alone.
+/// So unlike [`crate::tui::event::wait_for_terminal`] — whose loop can go a
+/// full tick without ever returning to its own `shutdown_requested` check,
+/// which is what let the field incident spin for nineteen hours — `supervise`
+/// was never capable of missing a flag that was already set.
+///
+/// What this arm adds is a second, independent way to *set* that flag: one
+/// that does not depend on a signal reaching this process at all, only on the
+/// read this thread is already blocked in returning. If the signal path ever
+/// stops applying — a container or job-control setup that does not deliver
+/// `SIGHUP` the way a real terminal emulator does, a future change to the
+/// `ctrlc` wiring — this is what still notices. A zero-byte read here is not
+/// treated as self-explanatory, for the same reason `wait_for_terminal` does
+/// not trust a bare readable poll: it is [`std::io::Read::read`] returning
+/// `Ok(0)` on `stdin`, and `attach` requires stdin to be a terminal and puts
+/// it in raw mode before this thread starts, so no keystroke can produce it —
+/// Ctrl-D's canonical-mode EOF behaviour does not apply in raw mode, it
+/// arrives as a literal `0x04` byte instead. The one way a blocking read on a
+/// live raw terminal returns `Ok(0)` is the far end closing. Still,
+/// `stdin_hung_up` confirms it with the same `POLLHUP` check
+/// `wait_for_terminal` uses, rather than trusting that inference alone, so a
+/// stray `Err` unrelated to a hangup — which this arm also catches — cannot
+/// trigger a shutdown it does not warrant. A wrong shutdown here is worse
+/// than a missed one.
 fn pump_input(process: &Mutex<PtyProcess>) {
     let mut buffer = [0u8; 4096];
     let mut stdin = std::io::stdin();
     loop {
         let read = match stdin.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
+            Ok(0) | Err(_) => {
+                // Confirmed hangup, not merely inferred: only this fires
+                // shutdown. `attach` owns the terminal for the whole life of
+                // the process (module doc), so there is nothing else in it
+                // for a process-wide shutdown to wrongly take down.
+                if stdin_hung_up() {
+                    crate::shutdown::request_shutdown();
+                }
+                break;
+            }
             Ok(n) => n,
         };
         // Held only for the write; the blocking read above deliberately
         // happens outside the lock so a quiet session never keeps the
-        // supervising loop from polling.
+        // supervising loop from polling. A failure here means the harness
+        // itself is gone, not the terminal — `supervise` already learns that
+        // from the child's own exit status, so this does not request
+        // shutdown too.
         if lock(process).write_input(&buffer[..read]).is_err() {
             break;
         }
     }
+}
+
+/// Whether standard input's far end has gone away.
+///
+/// Mirrors [`crate::tui::event::wait_for_terminal`]'s `POLLHUP` check rather
+/// than duplicating its reasoning by inference: a hung-up descriptor reports
+/// `POLLHUP` (and `POLLERR`/`POLLNVAL`, the same unusable-descriptor outcome
+/// by a different route) independently of whatever a prior read on it
+/// returned. The poll has a zero timeout — the read that got us here already
+/// did the waiting, so this only asks what state the descriptor is in now.
+#[cfg(unix)]
+fn stdin_hung_up() -> bool {
+    use std::os::fd::AsRawFd;
+
+    let mut watched = libc::pollfd {
+        fd: std::io::stdin().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `watched` is one initialised `pollfd` and the count says so.
+    // `poll` reads `fd`/`events` and writes only `revents`.
+    let ready = unsafe { libc::poll(&mut watched, 1, 0) };
+    ready > 0 && watched.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+}
+
+/// This platform has no hangup answer yet — see
+/// [`crate::tui::event::wait_for_terminal`]'s own Windows note. Reporting
+/// "not hung up" here keeps the old behaviour exactly: the pump still ends,
+/// it just does not request a shutdown nobody has confirmed is warranted.
+#[cfg(not(unix))]
+fn stdin_hung_up() -> bool {
+    false
 }
 
 /// Lock the shared process, ignoring poisoning.

@@ -85,7 +85,7 @@ Fixed architectural requirements
 ☑ Add a glasshouse --version command that prints the binary version.
 ☑ Add a glasshouse --help command that documents the initial CLI surface.
 ☑ Add structured application logging that can be enabled for debugging without polluting the interactive TUI.
-☐ Add a clean shutdown path that restores the terminal state after normal exit, panic, or interrupt.
+☑ Add a clean shutdown path that restores the terminal state after normal exit, panic, or interrupt.
 
 Phase 1 — Project-root detection and hard isolation
 

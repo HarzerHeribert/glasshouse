@@ -165,7 +165,9 @@ Map line 8 (`docs/product/capability-map.md:88`).
 
 Contract: Given the TUI has engaged raw mode and the alternate screen, whether Glasshouse ends by a normal quit, a signal, or a panic, the terminal is left in its normal (non-raw, primary-screen, cursor-visible) state and the process exits promptly with no leaked process.
 
-State: **PARTIALLY VERIFIED — true for normal exit and a single interrupt; reproducibly false for the terminal-hangup case, about one run in four, as of this tree.** `docs/process/orchestration-practice.md` §33: this is a case, not a coin flip, but see the mechanism below.
+State: **VERIFIED as of `HEAD` — see the update at the end of this entry. The account below is the first-hand reproduction that was true of commit `9e3cdde`, kept because it is what found the defect and because two of its measurements are the before-halves of the fix.**
+
+Original state, at `9e3cdde`: **PARTIALLY VERIFIED — true for normal exit and a single interrupt; reproducibly false for the terminal-hangup case, about one run in four.** `docs/process/orchestration-practice.md` §33: this is a case, not a coin flip, but see the mechanism below.
 
 Checked at `crates/glasshouse/src/shutdown.rs`: `restore_terminal` (disables raw mode, leaves the alternate screen, shows the cursor, idempotent), `install_panic_hook` (calls `restore_terminal` before the previous hook), `install_signal_handler`/`force_exit` (`std::process::exit(130)`, bypassing destructors, after running best-effort forced-exit cleanups and `restore_terminal` directly).
 
@@ -189,5 +191,55 @@ To confirm the causal mechanism rather than just the symptom: fifteen further tr
 `crates/glasshouse/.agent-runtime/report-HANGUP-FOLLOWUP.md` (checked immediately before writing this entry, and again now) **does not exist yet** — the `hangup-followup` worker named in this packet has not landed its fix on this tree. The finding above is this worker's own first-hand reproduction, not a restatement of that worker's claim.
 
 Missing evidence: a synthetic in-TUI panic *unrelated* to terminal loss (i.e., on a still-live terminal) was not exercised — there is no reachable CLI path to trigger one without editing source, and none was needed to answer the box's actual open question. The forced-exit path (a genuine second `SIGINT`) is implemented and read, not independently forced.
+
+
+#### Update — both halves fixed, measured on `HEAD`
+
+Two changes landed after the account above was written, and this entry's own
+finding is what routed one of them.
+
+**The uncaught panic (exit 101) is fixed.** `tui::mod`'s `Screen` holds its
+`ratatui::Terminal` in `ManuallyDrop` and drops it through
+`drop_terminal_tolerantly`, under `catch_unwind`. Ratatui shows the cursor on
+drop and `eprintln!`s behind an `.expect` when that write fails; on a terminal
+that has gone away the fallback write fails too, and that is the panic. Killed
+by a mutation reducing the function to a bare `drop`, re-run by the
+orchestrator: `dropping_a_terminal_that_writes_on_drop_does_not_panic ...
+FAILED`, restored, `ok`. Exit code through `Screen::drop` after a hangup:
+**101 before, 0 after.**
+
+**The exit-130 half was not clean either, and is also fixed.** The entry above
+correctly identifies the race — the `ctrlc` handler finding `SHUTDOWN_REQUESTED`
+already `true` and calling `force_exit` — and describes that outcome as
+"clean". It is controlled, but it is `std::process::exit` with **no destructors
+run**, and it was reached by a *single* hangup rather than by the impatient
+second Ctrl-C the policy exists for. `install_signal_handler` now counts
+signals in a `SIGNALS_SEEN` counter that only it may touch, and the decision is
+a named function, `interpret_signal`, so it can be tested; re-applying the old
+line as a mutation fails
+`a_shutdown_already_requested_elsewhere_is_not_a_second_interrupt`.
+
+Measured end to end by the orchestrator, ten trials each, on a pty **with a
+controlling terminal** (`pty.fork`, so `SIGHUP` is genuinely delivered):
+
+| tree | exit codes |
+|---|---|
+| old line, re-applied as a mutation | `130 130 TIMEOUT 130 130 130 130 130 130 TIMEOUT` |
+| shipped | `0 0 0 0 0 0 0 0 0 TIMEOUT` |
+
+**The remaining limit, and it is this box's honest edge.** `TIMEOUT` is a
+process that survived the hangup, at `Rs+ 100.0` with cumulative processor time
+equal to its whole lifetime — the residual spin, roughly two in sixty across
+this measurement and forty further trials. It is not a terminal-restoration
+failure, which is what this box claims, and an idle Glasshouse with a live
+terminal is `Ss+ 0:00.03 0.3%` over the same interval across twelve trials, so
+it is not the harness's own load either. It is tracked as the first item in the
+handoff's next-action list, with its reproducing harness kept at
+`.agent-runtime/diagnostics/`.
+
+This box is ticked for what it claims — the terminal is restored and the
+process exits promptly on normal exit, on interrupt, and on the panic path that
+was failing. The process that does not exit at all is a different defect and is
+recorded as one.
 
 ---

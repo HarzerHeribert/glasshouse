@@ -45,26 +45,66 @@ policy has its caller (Phase 9I is 13 of 14), migration 7 landed with `seq`
 proven durable, and the Linux gate's random failures are fixed — 8 failures in
 17 full-suite runs before, 0 in 20 after.
 
-**The TUI spin is fixed.** A terminal that goes away now ends the interface
-instead of pinning a core forever. The wait moved out of crossterm into
-`tui::event::wait_for_terminal`, which uses `libc::poll` on the descriptor
-crossterm itself reads from and answers `HangUp` on `POLLHUP` before it ever
-looks at `POLLIN` — a hung-up pty reports both at once (`0x11`, measured), and
-reading the `POLLIN` half of that is precisely the spin.
+**The TUI spin is fixed for the deterministic case and survives at roughly two
+in sixty.** A terminal that goes away now ends the interface instead of pinning
+a core. The wait moved out of crossterm into `tui::event::wait_for_terminal`,
+which uses `libc::poll` on the descriptor crossterm itself reads from and
+answers `HangUp` on `POLLHUP` before it ever looks at `POLLIN` — a hung-up pty
+reports both at once (`0x11`, measured), and reading the `POLLIN` half of that
+is precisely the spin.
+
+**Do not read `tests/terminal_loss.rs` passing as "the spin is gone" — practice
+§60.** That test runs the scenario once per gate run. A sixty-trial harness on
+the same tree still caught the process alive at `Rs+ 100.0` twice, with
+cumulative CPU equal to its whole lifetime; an idle Glasshouse with a live
+terminal is `Ss+ 0:00.03 0.3%` over the same interval, measured twelve times,
+so the residual is real and not the harness's own load. The harness that
+reproduces it is kept at `.agent-runtime/diagnostics/` with what it measured.
+**This is the next package on this defect**, and `terminal-loss`'s own report
+named the likely window: a terminal that dies between `Wait::Ready` and
+crossterm's `read`. That report called the window microseconds wide; two in
+sixty says it is wider than that, or that there is a second path.
 
 **The packet's account of the cause was wrong, and the correction is the
 transferable part** — practice §58. Crossterm's `try_read` does not burn a tick
 and return; `Ok(0)` falls through an inner loop that checks no timeout, so the
 call never returns at all. The pre-check the packet proposed would therefore
-have fixed nothing. It also rewrites the incident: those orphans were **not**
-un-signalled. A `SIGHUP` had already arrived and been recorded, and the loop
-never returned to the line that reads the flag.
+have fixed nothing.
+
+**A third defect came out of the fix itself and is now also fixed.**
+`shutdown.rs`'s handler implemented "a second signal forces the process down"
+by reading `SHUTDOWN_REQUESTED` — sound for as long as a signal was the only
+thing that could set it, and false the moment `wait_for_terminal` began
+answering a hangup by requesting shutdown. Closing a terminal delivers `SIGHUP`
+and `POLLHUP` at the same instant, so one hangup looked like two interrupts and
+the process was forced down through `force_exit` with no destructors, exit 130
+instead of 0. Measured before the fix at **eight of ten** on macOS with a
+controlling terminal, and by the worker at **ten of ten** in a Linux container;
+after, **nine of ten clean zeros** with the one residual spin above. The handler
+now counts signals in `SIGNALS_SEEN`, which only it may touch.
 
 Windows is **deliberately unhandled and says so in the doc comment**: a console
 going away raises `CTRL_CLOSE_EVENT` on a handle, not endless zero-byte reads
 on a descriptor. `Wait::Unavailable` keeps the old behaviour there byte for
 byte. Compiling that path locally with the cfg flipped (§18) caught a real
 `-D warnings` break that would have failed the Windows job on a green tree.
+
+**`session/attach.rs` now notices its own terminal dying, and the fix is inert
+today.** `pump_input`'s `Ok(0)` confirms with the same `POLLHUP` check before
+requesting shutdown. The worker built the acceptance test the packet asked for,
+found it passed with the fix reverted, instrumented `supervise` to find out
+why, and reported honestly: `ctrlc`'s `termination` feature already delivers
+`SIGHUP` to the same flag, and `supervise` polls it every 20ms, so the signal
+path already saves that process. The fix is a second, independent way to set
+the flag that does not depend on a signal arriving at all. **It is kept, it
+cannot mis-fire, and it has no test** — which is the right report to have
+written rather than a test that appeared to prove more.
+
+**Ratatui's drop no longer panics on the way out.** `Screen`'s terminal is
+`ManuallyDrop` and goes through `drop_terminal_tolerantly`, which drops it
+under `catch_unwind`; Ratatui shows the cursor on drop and `eprintln!`s behind
+an `.expect` when that write fails, which it does once the terminal is gone.
+Exit code after a hangup reaching `Screen::drop`: **101 before, 0 after.**
 
 **This also removes an orchestration hazard, not only a product defect.**
 Practice §38 says the only way to drive the binary is a cmux pane, so every
@@ -90,7 +130,18 @@ outside that partition and belong to a follow-up package:
 interrupt box below can finally be tested rather than compiled. Expect several
 jobs to fail at once on the first run; reconcile them in one sweep.
 
-**1. Two Phase 0 boxes are unticked and one needs the user.** Writing Phase 0's
+**1. The residual spin, roughly two in sixty.** The highest-value open defect,
+and the one with a reproducing harness already written
+(`.agent-runtime/diagnostics/hangup-exit-rate.py`, which needs a *controlling*
+terminal — a child with none receives no `SIGHUP` at all and the harness
+measures nothing). `terminal-loss`'s report names the likely window: a terminal
+that dies between `Wait::Ready` and crossterm's `read` puts crossterm back in
+the unbounded loop. It called that window microseconds wide against the 16ms it
+replaces; two in sixty is three orders of magnitude more than that arithmetic
+predicts, so either the window is wider than described or there is a second
+path. **Opus specialist**, and it should produce a rate, not a pass (§60).
+
+**2. Two Phase 0 boxes are unticked and one needs the user.** Writing Phase 0's
 evidence entry — the last phase with ticked boxes and none behind them — cost
 two of its own boxes. Box 2 ("keep the initial dependency set limited to
 libraries required for async execution, terminal UI, PTYs, serialization,
@@ -107,7 +158,7 @@ and `mpsc` throughout, so "async execution" is a granted-but-unused category.
 Recorded in design-decisions because two facts already there are facts about a
 synchronous threaded program.
 
-**2. Phase 9J line 572 is probably in the wrong phase.** "Keep evidence for the
+**3. Phase 9J line 572 is probably in the wrong phase.** "Keep evidence for the
 same nominal model distinct across different harnesses, gateways,
 quantizations, model revisions, or protocol translations" is an
 evidence-*storage* requirement and is nearly word-for-word Phase 33A's *"Keep
@@ -116,7 +167,7 @@ routes, or changing stealth-model identities"*. Whoever builds 33A closes both
 or neither. Leaving it in 9J makes that phase read one line further from done
 than it is. **A map edit, so it needs the user.**
 
-**3. The residual `SIGABRT`, 1 in 37 runs.**
+**4. The residual `SIGABRT`, 1 in 37 runs.**
 `pty_smoke::a_direct_provider_profile_reaches_a_real_child_and_only_that_child`
 fails with the child killed by signal 6. It is **not** the drain race that was
 just fixed. Four hypotheses are already ruled out with data — the `EIO` theory
@@ -124,7 +175,7 @@ just fixed. Four hypotheses are already ruled out with data — the `EIO` theory
 (2400 spawns), and mislabelling — and `report-PTY-FLAKE.md` §6 ranks where to
 look next, starting with `std::env::set_var` in a threaded test binary.
 
-**4. Phase 9I line 528** is the last free-pool line: `Allowance` separates
+**5. Phase 9I line 528** is the last free-pool line: `Allowance` separates
 request pools from token-priced allowances and only the request-pool half has a
 production feed. It needs a source for "this credential is priced per token".
 Deliberately not solved by parsing rate-limit headers on the forwarding path —

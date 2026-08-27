@@ -29,6 +29,25 @@
 //! Not in `pty_smoke.rs`, which carries a known Linux flake under load
 //! (practice §34). A new proof should not inherit an old reputation: when
 //! this file fails it should be believed.
+//!
+//! # A related exit-code defect proved elsewhere, on purpose
+//!
+//! `Screen::drop` (`tui::mod`) can still panic on the way out here — Ratatui's
+//! own `Drop for Terminal` writes to show a cursor it left hidden, and panics
+//! if that write fails, which it does once the terminal is gone (packet
+//! HANGUP-FOLLOWUP, defect 2). The test below deliberately does not check an
+//! exit code because of it.
+//!
+//! A real end-to-end proof of the fix was attempted here first and pulled
+//! back out: closing a real terminal also delivers `SIGHUP`, which races
+//! `crate::shutdown`'s own signal handling against the clean-shutdown path
+//! this file's test proves — a pre-existing defect, independent of both of
+//! this packet's, reported rather than fixed. On this development machine
+//! that race decided anywhere from roughly half to (in a container, every
+//! single time observed) *all* attempts, so an end-to-end test of the
+//! exit-code fix cannot be made to fail reliably on the unfixed tree here.
+//! `tui::mod`'s own tests prove it instead, directly against the drop
+//! mechanism, without a real terminal, pty, or signal in the way.
 
 #![cfg(unix)]
 

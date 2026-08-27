@@ -7,7 +7,7 @@
 
 use std::io::Write;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
@@ -87,17 +87,61 @@ pub fn install_panic_hook() {
 /// a user expects from a normal CLI command. While the TUI owns the terminal
 /// the first signal asks for a graceful shutdown and a second one forces the
 /// process down, restoring the terminal either way.
+///
+/// "A second one" counts **signals**, not shutdown requests, and the difference
+/// is not academic. This used to read `SHUTDOWN_REQUESTED` and treat a flag
+/// that was already set as an impatient second Ctrl-C. That was true for as
+/// long as a signal was the only thing that could set it — and it stopped being
+/// true when `tui::event::wait_for_terminal` began answering a terminal hangup
+/// by requesting shutdown itself. Closing a terminal delivers `SIGHUP` and a
+/// `POLLHUP` at the same instant: two observations of one event. Whenever the
+/// handler thread was scheduled second, one hangup looked like two interrupts
+/// and the process was forced down through `force_exit` — no destructors,
+/// exit code 130 — instead of shutting down cleanly and exiting 0. Measured at
+/// roughly even odds on macOS and **ten times out of ten** inside a Linux
+/// container.
 pub fn install_signal_handler() -> Result<()> {
-    ctrlc::set_handler(|| {
-        if !TERMINAL_ENGAGED.load(Ordering::SeqCst) {
-            force_exit();
-        }
-        if SHUTDOWN_REQUESTED.swap(true, Ordering::SeqCst) {
-            force_exit();
-        }
+    ctrlc::set_handler(|| match interpret_signal() {
+        SignalMeaning::LeaveImmediately | SignalMeaning::StopWaiting => force_exit(),
+        SignalMeaning::AskToStop => request_shutdown(),
     })
     .context("could not install signal handler")
 }
+
+/// What one signal means, given what has already happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignalMeaning {
+    /// Nothing owns the terminal, so there is nothing to wind down.
+    LeaveImmediately,
+    /// The first ask: let the interface stop and restore the terminal.
+    AskToStop,
+    /// A second ask, from someone who is done waiting for the first.
+    StopWaiting,
+}
+
+/// Decide what a signal means, and record that it arrived.
+///
+/// This is the function that *asks* the policy; the handler above only acts on
+/// the answer. It is separate because a handler can only be exercised by
+/// ending the process, and the distinction it draws is worth a test.
+fn interpret_signal() -> SignalMeaning {
+    if !TERMINAL_ENGAGED.load(Ordering::SeqCst) {
+        return SignalMeaning::LeaveImmediately;
+    }
+    if SIGNALS_SEEN.fetch_add(1, Ordering::SeqCst) > 0 {
+        return SignalMeaning::StopWaiting;
+    }
+    SignalMeaning::AskToStop
+}
+
+/// How many signals have asked Glasshouse to stop.
+///
+/// Deliberately separate from [`SHUTDOWN_REQUESTED`]: that flag answers "should
+/// Glasshouse stop", which anything may set, and this counts "how many times
+/// has a *user or a kernel* asked", which only this handler may. Reading the
+/// first to answer the second is the defect described on
+/// [`install_signal_handler`].
+static SIGNALS_SEEN: AtomicUsize = AtomicUsize::new(0);
 
 /// Tear down what a skipped destructor would have, restore the terminal, and
 /// end the process.
@@ -253,6 +297,58 @@ impl Drop for RawModeGuard {
 mod tests {
     use super::*;
 
+    /// `TERMINAL_ENGAGED` is process-global and more than one test here reads
+    /// and writes it. Rust runs a crate's tests as threads of one process, so
+    /// they have to take turns — `restoring_an_unengaged_terminal_is_a_no_op`
+    /// asserts the flag is false, and the test below has to set it true. A
+    /// poisoned lock is not interesting here: a test that already failed
+    /// should not make its neighbours fail for a second reason.
+    static TERMINAL_STATE: Mutex<()> = Mutex::new(());
+
+    fn terminal_state_turn() -> std::sync::MutexGuard<'static, ()> {
+        TERMINAL_STATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A terminal that goes away is one event seen twice: `tui::event`'s own
+    /// `POLLHUP` detector requests shutdown, and the kernel delivers `SIGHUP`
+    /// at the same instant. Counting shutdown *requests* made the second
+    /// observation look like a second interrupt, and the process was forced
+    /// down without destructors — exit 130 where a clean 0 was available,
+    /// measured at ten of ten attempts inside a Linux container.
+    ///
+    /// Both halves live in one test on purpose: `SIGNALS_SEEN` and
+    /// `TERMINAL_ENGAGED` are process-global, and two tests racing them would
+    /// corrupt each other exactly as the existing cleanup test says.
+    #[test]
+    fn a_shutdown_already_requested_elsewhere_is_not_a_second_interrupt() {
+        let _turn = terminal_state_turn();
+        let engaged_before = TERMINAL_ENGAGED.swap(true, Ordering::SeqCst);
+        let requested_before = SHUTDOWN_REQUESTED.swap(true, Ordering::SeqCst);
+        SIGNALS_SEEN.store(0, Ordering::SeqCst);
+
+        // Shutdown is already requested — by the hangup detector, not by a
+        // signal. The first signal to arrive is still the *first* signal.
+        assert_eq!(
+            interpret_signal(),
+            SignalMeaning::AskToStop,
+            "a shutdown requested by something other than a signal was counted as \
+             a signal, so one hangup forced the process down without destructors"
+        );
+
+        // A real second signal still forces the process down; the impatient
+        // second Ctrl-C this policy exists for must keep working.
+        assert_eq!(interpret_signal(), SignalMeaning::StopWaiting);
+
+        // With no terminal engaged there is nothing to wind down, whatever
+        // has been counted.
+        TERMINAL_ENGAGED.store(false, Ordering::SeqCst);
+        assert_eq!(interpret_signal(), SignalMeaning::LeaveImmediately);
+
+        SIGNALS_SEEN.store(0, Ordering::SeqCst);
+        TERMINAL_ENGAGED.store(engaged_before, Ordering::SeqCst);
+        SHUTDOWN_REQUESTED.store(requested_before, Ordering::SeqCst);
+    }
+
     /// The forced-exit path skips destructors, so whatever a session
     /// registered has to be what actually runs — and it has to stop running
     /// once that session is gone, or a later forced exit would reach into a
@@ -352,6 +448,7 @@ mod tests {
 
     #[test]
     fn restoring_an_unengaged_terminal_is_a_no_op() {
+        let _turn = terminal_state_turn();
         // Must not touch the terminal or panic when the TUI never started.
         restore_terminal();
         restore_terminal();

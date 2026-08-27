@@ -1242,3 +1242,64 @@ five-minute detour at best and a swept-in commit at worst.
   rather than discovering the need each time.
 - The residual `SIGABRT` at 1 in 37 is still unowned. It did not appear in
   either of this round's gate runs.
+
+### Batch 26, addendum: `hangup-followup`, and a defect the previous batch's fix created
+
+`hangup-followup` (Sonnet) fixed one of its two defects with a mutation-proofed
+test, could not prove the other, said so, and found a third that neither packet
+anticipated. All three outcomes are the right ones.
+
+**Defect 1 (an attached session never learns its terminal died) has no test, on
+purpose.** The worker built the suggested acceptance test first, found it
+**passed with the fix fully reverted**, instrumented `supervise` to trace when
+the shutdown flag went true, and discovered that `ctrlc`'s `termination`
+feature already delivers `SIGHUP` to the same flag `supervise` polls every
+20ms. It reported: *"no, my first test would not have caught the original
+defect, because the signal path was never the thing missing."* It kept the fix
+as a second independent way to set the flag, and wrote no mutation table
+because mutating an inert fix would be §41's vacuous mutation exactly.
+
+**A Sonnet declining to produce a test that appears to prove more than it
+does** is the same behaviour `pairing` showed declining line 576, from a
+different tier and a different direction. Two of three workers this round chose
+an honest gap over a plausible artefact. That is what the packets are for.
+
+**Defect 3 was created by the batch-25 fix and found by the batch-26 worker.**
+`shutdown.rs` implemented "a second signal forces the process down" by reading
+`SHUTDOWN_REQUESTED` — correct for as long as a signal was the only thing that
+could set it. `wait_for_terminal` began setting it on hangup, and a hangup
+delivers `SIGHUP` and `POLLHUP` at the same instant, so one event observed
+twice read as two impatient interrupts and `force_exit` skipped every
+destructor. **Eight of ten on macOS, ten of ten in a Linux container.**
+
+The transferable part: **a fix that sets a shared flag inherits every meaning
+anything else attaches to that flag.** `request_shutdown()` looked like a pure
+addition and silently redefined the signal handler's second-signal test. Before
+setting process-global state, read every consumer of it — there were two, and
+the second was in a file the worker did not own.
+
+Fixed by the orchestrator rather than dispatched: five lines, Red-tier
+signal/lifecycle work that `worker-capabilities.md` puts at specialist level,
+and it was the previous integration's own regression. The policy is now a named
+function (`interpret_signal`, §36) so it can be tested at all; the old line was
+re-applied as the mutation and fails the new test with the message that
+describes the defect.
+
+**And then the orchestrator's own claim did not survive its own measurement.**
+"The spin is gone", written into batch 25's commit message on the strength of a
+passing acceptance test and three killed mutations, is wrong. A sixty-trial
+harness on the shipped tree caught the process alive at `Rs+ 100.0` twice.
+`terminal_loss.rs` is not testing the wrong thing — `portable-pty` does
+`setsid` and `TIOCSCTTY`, so it exercises the failing case — it runs it once
+against a defect that fires about one time in thirty. Recorded as practice
+**§60**: for a race, a one-shot pass is consistent with a residual rate of
+anything up to roughly 1 in 3, and mutation-proofing does not close that gap
+because mutations test the test, not the tail.
+
+**Cost of finding it: about fifteen minutes and two builds.** The first harness
+was itself wrong in the §59 way — `start_new_session=True` gives a child no
+controlling terminal, so no `SIGHUP` is delivered and it reported 10/10 clean
+exits both with and without the fix under test. It measured nothing, twice,
+before the harness was corrected. Kept at `.agent-runtime/diagnostics/` with
+that failure written down, because the next worker on this defect will
+otherwise build the same wrong harness.
