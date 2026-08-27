@@ -2500,3 +2500,73 @@ this round: it cleanly separated four real `InteractiveRouting` callers from six
 doc mentions, which is how `main.rs:1120`'s live `DisposableRouting` decision was
 found. **A tool fix that changes a tick once tends to change sizing every round
 after.**
+
+## Batch 37 — one worker, and the first round the Phase −1 gate shaped
+
+`bdb349f`, 631 → 644. **Half the map.** One Sonnet at high effort, ~$13,
+37 minutes, +904/−90, **thirteen boxes**.
+
+| | gateway-evidence |
+|---|---|
+| boxes closed | 13 of ~17 |
+| cost per box | **~$1.00** |
+| mutations | 5 attempted, 5 killed, 0 survived |
+| compute split (self-reported) | 60% implementation / 25% verification / 15% report |
+
+### The gate's first use refused two packets before either reached a worker
+
+Six commands, against the ~$30 the same class of mistake cost in batch 36.
+**One of the two it refused was the "cheapest next win" the previous handoff had
+recommended** — wiring the ledger reader into `DisposableRouting`. That
+recommendation was written by an orchestrator that had just spent a whole round
+learning the same lesson, and it was still wrong, because a recommendation is
+not a feasibility argument. The gate is the difference.
+
+### Cost per box, three rounds
+
+| batch | workers | boxes | worker cost | per box |
+|---|---|---|---|---|
+| 35 | 3 | 35 | ~$36.5 | $1.04 |
+| 36 | 3 | 27 | ~$36.2 | $1.34 |
+| 37 | 1 | 13 | ~$13.0 | **$1.00** |
+
+Batch 37 is the cheapest per box **and** ran one worker rather than three. The
+saving is not parallelism and not the tier — it is that **no compute went into a
+package that could not close its boxes.** Batch 36's ~$30 of impossible work is
+the whole difference, and it is exactly what Phase −1 removes.
+
+### The first Phase-1b report, measured
+
+Structured facts with flagged `decisive_claims` instead of a 200-line narrative.
+Review targeted the single claim that decided thirteen boxes — that the accept
+loop's wiring is load-bearing — and verified it with one independent mutation
+rather than unbounded rediscovery. **15% of the worker's own compute went to the
+report**, down from what a narrative package spends, and the orchestrator's
+review was bounded for the first time.
+
+### A kill by somebody else's test is stronger than a kill by your own
+
+`invert-condition` (`>` → `>=`) on the ranking comparator was killed by
+`routing_policy.rs::order_dependence::…`, a **pre-existing test from
+`lead-route`'s adversarial suite**, written months earlier by a different worker
+for a different package. Nothing in this round's diff put it there.
+
+**Worth building on deliberately:** when a package touches a policy another
+package already wrote adversarial tests for, run those first. A test the author
+could not have tuned to pass is the cheapest independent evidence available.
+
+### The negative result that took three rounds
+
+The pairing prior now has a production caller and **is structurally inert at
+it** — `classify` never reads `route`, so every same-model failover candidate
+scores identically. Batches 35, 36 and 37 each moved this forward and the answer
+is that the mechanism cannot decide the decision it was wired to.
+
+**That is a real finding and it was not cheap.** The cost is defensible because
+nothing short of building the caller could have produced it — but it is the
+second time in three rounds that a *type signature* decided a capability's fate
+(the first: `PairingQuery::harness` being required). **Phase −1 asks for the
+producing type and the caller's field; this suggests also asking what the
+producer's output actually *varies with*.** A value that exists but is constant
+across the candidates being compared is a caller-shaped gap the current four
+links do not catch.

@@ -6,6 +6,65 @@
 
 Last updated: 2026-08-28 (Europe/Berlin)
 
+## Checkpoint — 2026-08-28, batch 37 landed: 644 / 1280 (50%)
+
+**Half the map.** `gateway-evidence` closed thirteen — Phase 9J eight of eleven,
+Phase 33A's five aggregate lines — plus a Windows fix (`0898efa`) the round
+before it needed.
+
+### The three-round arc finished, and its conclusion is negative
+
+Batches 35–37 built the pairing prior, the evidence ledger, the explanation
+surface, and finally a caller for all three at `gateway/mod.rs`'s accept loop.
+The prior now runs in production, is mutation-proven, and **is structurally
+inert where it runs.**
+
+`harness/pairing.rs::classify` derives `PairingClass` from `(harness, model
+attribution, harness vendor)`. `route.provider` — the only thing that differs
+between two same-model failover candidates — feeds only `protocol_fit`, which
+`native_pairing_prior_contribution` never reads. **Every same-model candidate
+gets an identical prior magnitude**, so Phase 33A's local evidence is the only
+signal that can separate them. The prior varies across the `OfferMigration`
+group, but that group is only offered, never taken automatically.
+
+**Only building the caller could have found this**, and it is why map line 566
+stays open: it asks for a prior on a *fresh session*, and this caller is
+failover.
+
+### Two boxes with patches located exactly
+
+- **576** — the user's configured `PairingPreference` never reaches this caller;
+  everything scores against a hardcoded `Strong`. Thread an `EffectiveConfig`-derived
+  preference into `profile::apply_gateway` (`profile/mod.rs:1064`) and set it
+  alongside `gateway.routing().bind(...)` (`:1127`). **Check first whether
+  `Resolution<'_>` (`:856`) already carries it.**
+- **1293** — reserve inspectable in routing explanations. The explanation
+  surface now exists and is reached in production; wiring `ReserveDecision::reason()`
+  into it should be small.
+
+### The process changes landed and immediately paid
+
+`docs/process/assurance-economics.md` + `CLAUDE.md` + `validate_round.py`'s
+Phase −1 gate (`f25ba9e`). **It refused two packets on first use**, in six
+commands, before either reached a worker. Both were structurally impossible; one
+of them was the "cheapest next win" this very handoff had recommended a
+checkpoint earlier. **A recommendation in a handoff is not a feasibility
+argument.**
+
+Batch 37 also ran the first Phase-1b report: structured facts with flagged
+`decisive_claims` rather than a narrative. It worked — review targeted the one
+claim that mattered. Self-reported split: **60% implementation, 25%
+verification, 15% report.**
+
+### §65 — a change no test can observe may be doing something nothing is watching
+
+The Windows hang (`0898efa`) is the entry worth reading. The integrator opened a
+SQLite handle unconditionally on every launch; macOS never noticed, Windows hung
+six tests for 37 minutes with no output. Hours earlier the same wiring had
+survived a mutation with the whole suite green, and the conclusion drawn was
+"add a guard proving it exists" — the wrong lesson. **Presence was never in
+doubt; safety was.**
+
 ## Checkpoint — 2026-08-28, batch 36 landed: 631 / 1280 (49%)
 
 Three Sonnet workers, twenty-seven boxes. Phase 14 **eleven of eleven**, Phase 16

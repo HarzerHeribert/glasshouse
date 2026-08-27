@@ -94,6 +94,47 @@ catchable with two greps:
 Enforced by `scripts/validate_round.py`, which already runs before every
 dispatch, so the check costs nothing new.
 
+### Measured on first use, 2026-08-28
+
+**The gate refused two packets in six commands**, before either reached a worker:
+
+- *wire the ledger into `DisposableRouting`* — `EvidenceLedger::summarize`
+  matches `harness IS ?4`; every gateway-written row carries a harness; a
+  disposable candidate has none. Legal query, zero rows, forever.
+- *the API door observes lifecycle events* — the only `EventBus::new()` in
+  production is `main.rs:1620` / `shell/mod.rs:86`; `api/**` has no bus.
+
+**The first of those was the "cheapest next win" the previous checkpoint had
+recommended**, written by an orchestrator that had *just* spent a round learning
+this exact lesson. It was still wrong. **A recommendation in a handoff is not a
+feasibility argument**, and that is the whole reason this is a mechanical gate
+rather than a habit.
+
+Cost per box across the three rounds either side of it:
+
+| batch | workers | boxes | worker cost | per box |
+|---|---|---|---|---|
+| 35 | 3 | 35 | ~$36.5 | $1.04 |
+| 36 | 3 | 27 | ~$36.2 | $1.34 |
+| 37 (first gated round) | 1 | 13 | ~$13.0 | **$1.00** |
+
+Batch 37 is cheapest per box **and** ran one worker rather than three. The saving
+is neither parallelism nor tier: it is that **no compute went into a package that
+could not close its boxes.**
+
+### A fifth link worth adding, learned the expensive way
+
+Twice in three rounds a **type signature** decided a capability's fate:
+`PairingQuery::harness` being required, and then `classify` never reading
+`route` — which made the pairing prior *structurally inert* at the caller it was
+finally wired to, because every same-model candidate scores identically.
+
+The four links catch "this input cannot be produced here". They do not catch
+**"this input is constant across the candidates being compared."** Consider
+asking, for any input feeding a *ranking*: what does its value actually vary
+with, and is that thing different between the alternatives? A prior that exists
+and never differs is a caller-shaped gap wearing a working mechanism's clothes.
+
 **Metric this phase owns: compute cost per *closable* packet dispatched.** A
 worker executing an impossible premise dominates efficiency statistics even when
 the worker and the assurance system both behave correctly.
