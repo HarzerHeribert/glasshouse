@@ -31,6 +31,10 @@ REPORT="${3:?missing report path}"
 NAG="${4:-180}"
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Where this worker's worktree lives, for the growth signal below. Defaults to
+# this project's own convention -- `glasshouse-<name>` beside the main checkout,
+# the same derivation `scripts/hooks/worker-turn-ended.sh` already relies on.
+WORKTREE="${5:-$REPO/../glasshouse-$NAME}"
 IDLE_DIR="$REPO/.agent-runtime/idle"
 MARKER="$IDLE_DIR/$NAME"
 mkdir -p "$IDLE_DIR"
@@ -114,8 +118,37 @@ is_busy() {
   printf '%s' "$screen" | grep -qE "$BUSY_RE"
 }
 
+# §28's growth signal: a worktree that changed since the last read is being
+# worked in, whatever its pane is drawing.
+#
+# The case this exists for is a **team lead**, which spends much of its batch
+# waiting on subcontractors and is therefore legitimately quiet for long
+# stretches. On 2026-08-26 `lead-extract` was announced "idle with NO report"
+# forty minutes in, with five new files in `memory/extract/` and a
+# subcontractor's findings just relayed. Nothing was wrong, and acking a false
+# idle ENDS the watch -- so a false positive costs coverage rather than merely
+# being noise.
+#
+# `git status --porcelain` respects `.gitignore`, so `target/` cannot trigger
+# this: a background build is not mistaken for progress. `diff --shortstat` is
+# paired with it because porcelain alone sees a file appear or vanish but not a
+# file still being edited.
+#
+# This only ever DELAYS an announcement. A worker that has genuinely stopped
+# leaves its tree still, the fingerprint stops moving, and the next quiet read
+# announces as before.
+worktree_fingerprint() {
+  [ -d "$WORKTREE" ] || { printf 'no-worktree'; return; }
+  {
+    git -C "$WORKTREE" status --porcelain -uall 2>/dev/null
+    git -C "$WORKTREE" diff --shortstat 2>/dev/null
+  } | cksum
+}
+
 quiet=0
 announced=0
+growth_noted=0
+last_fingerprint="$(worktree_fingerprint)"
 
 while true; do
   sleep 20
@@ -153,8 +186,22 @@ while true; do
   # separates 'finished' from 'died before it ever spoke'.
   if is_busy; then
     quiet=0
+    last_fingerprint="$(worktree_fingerprint)"
     continue
   fi
+
+  # Quiet pane, but is the worktree moving? See worktree_fingerprint above.
+  fingerprint="$(worktree_fingerprint)"
+  if [ "$fingerprint" != "$last_fingerprint" ]; then
+    last_fingerprint="$fingerprint"
+    quiet=0
+    if [ "$growth_noted" -eq 0 ]; then
+      growth_noted=1
+      echo "NOTE  '$NAME' pane is quiet but its worktree is still changing — treating it as working (§28). This note fires once."
+    fi
+    continue
+  fi
+
   quiet=$(( quiet + 1 ))
 
   # Two consecutive quiet reads before believing it. One catches the gap
