@@ -280,9 +280,16 @@ fn one_worker_crashing_leaves_unrelated_sessions_running() {
 
     // Still steerable, not merely still listed. This is the half a weaker
     // test would miss.
+    //
+    // `\r`, not `\n`, and not because Windows likes carriage returns: it is
+    // what both production senders already append — `shell::run`'s
+    // `format!("{text}\r")` and `SessionApi::send_text` — because that is the
+    // byte a terminal's line editor treats as submit. A Windows console never
+    // completes a `set /p` on `\n`, so a test that writes its own terminator
+    // was exercising a line nothing in the binary sends.
     for id in [&alpha, &beta] {
         runtime
-            .send_text_from(id, "ping\n", MessageOrigin::Machine)
+            .send_text_from(id, "ping\r", MessageOrigin::Machine)
             .expect("an unrelated session must still accept input");
     }
     for id in [&alpha, &beta] {
@@ -343,9 +350,12 @@ fn a_stalled_event_consumer_does_not_stall_a_live_harness() {
 
     assert_eq!(stalled.pending(), 1, "the consumer's queue is full");
 
+    // `\r` for the reason `one_worker_crashing_leaves_unrelated_sessions_running`
+    // records: it is the terminator every production sender appends, and the
+    // only one a Windows console accepts as submit.
     for round in 0..40 {
         runtime
-            .send_text_from(&id, &format!("r{round}\n"), MessageOrigin::Machine)
+            .send_text_from(&id, &format!("r{round}\r"), MessageOrigin::Machine)
             .expect("the harness must still be writable");
     }
     drive(&mut runtime, "the harness to answer the last round", |rt| {

@@ -118,8 +118,13 @@ impl Fixture {
 /// `/bin/sh` is never run by these tests — `install_session_document` writes a
 /// file and composes arguments, and starts nothing.
 fn enabled_claude_code(extra: &str) -> String {
+    let executable = if cfg!(windows) {
+        "C:\\\\Windows\\\\System32\\\\cmd.exe"
+    } else {
+        "/bin/sh"
+    };
     format!(
-        "version = 1\n\n[integrations.claude-code]\nenabled = true\nexecutable = \"/bin/sh\"\n\n\
+        "version = 1\n\n[integrations.claude-code]\nenabled = true\nexecutable = \"{executable}\"\n\n\
          {extra}"
     )
 }

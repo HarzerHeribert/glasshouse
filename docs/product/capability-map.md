@@ -249,7 +249,7 @@ Fixed architectural requirements
 ☑ Forward user keystrokes from the active Glasshouse session to the active PTY.
 ☑ Forward terminal resize events from Glasshouse to the child PTY.
 ☑ Support sending text programmatically to a PTY session without requiring the user to focus it.
-☐ Support sending interrupt signals to a PTY session.
+☑ Support sending interrupt signals to a PTY session.
 ☑ Detect process exit independently from textual terminal output.
 ☑ Preserve a bounded terminal scrollback buffer for each live session.
 ☑ Keep inactive PTY sessions running while the user views another session.

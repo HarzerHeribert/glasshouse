@@ -21,8 +21,30 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 HOOK = REPO / "scripts" / "hooks" / "worker-turn-ended.sh"
-DONE = REPO / ".agent-runtime" / "done"
 SETTINGS = REPO / ".claude" / "settings.json"
+
+
+def _main_checkout() -> Path:
+    """Where the hook actually writes, which is not where this test runs.
+
+    The hook resolves the MAIN checkout through `git worktree list` on purpose
+    (§62): every worktree's marker has to land where the orchestrator's watch
+    looks. This test used `parents[2]` — the checkout it was invoked from — so
+    it wrote in one place and looked in another, and could only pass in main.
+    It failed `lint / script tests` in every worktree until a worker diagnosed
+    it. Two places that must agree, and only one of them had been told the rule.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(REPO), "worktree", "list"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        return Path(out.splitlines()[0].split()[0])
+    except Exception:
+        return REPO
+
+
+DONE = _main_checkout() / ".agent-runtime" / "done"
 
 
 def fire(project_dir: str) -> None:
@@ -65,12 +87,30 @@ def main() -> int:
             "will announce its own turn end and the watch falls back to reading panes"
         )
 
-    marker = DONE / "windows-session"
-    existed = marker.exists()
-    if not existed:
-        fire("/Users/eneas/projects/glasshouse-windows-session")
+    # Use a name no real worker has, so a leftover marker can never make this
+    # skip the one check it exists for — which it would have done, silently.
+    # The fixture directory must really exist and really be inside a git
+    # checkout, because the hook locates the main worktree by asking git from
+    # it. A subdirectory of this repo satisfies both and resolves to the same
+    # main checkout any real worktree would. Its name gives the marker's name:
+    # `glasshouse-signal-selftest` -> `signal-selftest`, which no real worker
+    # uses, so a leftover marker can never make this skip its own check.
+    fixture = REPO / "glasshouse-signal-selftest"
+    marker = DONE / "signal-selftest"
+    marker.unlink(missing_ok=True)
+    fixture.mkdir(exist_ok=True)
+    try:
+        fire(str(fixture))
+    finally:
+        fixture.rmdir()
+    if True:
+        pass
         if not marker.exists():
-            failures.append("a worker worktree did not produce a done signal")
+            failures.append(
+                "a worker worktree did not produce a done signal — the hook and this "
+                "test must resolve the same main checkout, or the test writes in one "
+                "place and looks in another and can only pass in main"
+            )
         else:
             body = marker.read_text()
             if "turn ended" not in body:

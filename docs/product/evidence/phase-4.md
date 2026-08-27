@@ -189,3 +189,66 @@ Platform/external evidence:
 
 Missing evidence:
 - none.
+
+### Phase 4 — Support sending interrupt signals to a PTY session
+
+Map line `docs/product/capability-map.md:252`.
+
+Contract: an interrupt sent through Glasshouse reaches a real child process as a
+**terminal interrupt** — something the child's own handler observes as an
+interrupt and may survive — rather than as a kill, on every platform Glasshouse
+supports.
+
+State: **VERIFIED, on Unix since Phase 4 and on Windows as of 2026-08-27.** The
+box stayed open for one reason and it was not the code: every interrupt test in
+the suite was `#[cfg(unix)]`, so `test (windows-latest)` compiled them and ran
+none. A green Windows job was the absence of evidence wearing the same colour as
+evidence. A Windows 11 ARM64 VM now runs the suite natively and the gap closed.
+
+**The mechanism, stated because the answer surprised the packet that asked.**
+`PtyProcess::interrupt` writes `ETX` (`0x03`) into the pseudo-console. It is the
+byte, not a `CTRL_C_EVENT` posted to a process group, and that is true on every
+platform. On Windows, conhost turns the byte into a genuine console control
+event: an early probe that sent `0x03` among other bytes killed a child with
+`0xC000013A`, `STATUS_CONTROL_C_EXIT`.
+
+**Why a `.cmd` fixture could not have proved this.** A batch harness can show
+only that the child died, which an ordinary kill shows equally well. The test
+child is therefore the test binary re-entered as a child
+(`windows_interrupt_trap_child`): it installs a real `SetConsoleCtrlHandler`,
+returns *handled* so no default action runs, announces itself, and keeps going.
+That is the Windows equivalent of the Unix sibling's `trap … INT`, and it is
+what separates "an interrupt arrived" from "something killed it".
+
+Production evidence, both tests now running on Windows and Unix:
+
+- `pty_smoke::interrupt_is_delivered_as_a_terminal_interrupt` — `interrupt`
+  writes `ETX`; the child's own control handler observes a real `CTRL_C_EVENT`;
+  **the child is still running afterwards**. A child that merely echoed the byte
+  fails it.
+- `pty_smoke::an_interrupt_reaches_an_unfocused_session_and_leaves_it_running` —
+  the same through `SessionRuntime::interrupt`, which is the call the shell and
+  the session overview actually make. The interrupt reaches a session that does
+  **not** have focus, focus does not move, the pid is unchanged, the process is
+  still alive after `poll_exits` asks the operating system, and the focused
+  session is untouched.
+
+Both readings of the mechanism are accounted for and neither was in doubt after
+this batch: a trap child without raw mode sees a console control event, while a
+real harness TUI turns off `ENABLE_PROCESSED_INPUT` and receives the same `0x03`
+as an input byte — which is what `PtyProcess::interrupt`'s doc comment says it
+wants, so a harness can cancel a turn without dying.
+
+Failure/isolation evidence: mutation-proofed on the VM — every mutation rebuilt
+and run there, because the tests cannot fail on macOS.
+
+Missing evidence, stated rather than implied:
+
+- `interrupting_a_headless_launch_does_not_leave_the_harness_behind` has **no
+  Windows equivalent**. The reason is in `shutdown.rs`, which was frozen for
+  this batch. A real gap, not a fixture gap.
+- `an_interrupt_sent_from_the_overview_reaches_a_real_child` needs a trap
+  fixture reachable through a `config.toml` `executable` path; a `.cmd` wrapper
+  cannot serve, because `cmd.exe` answers Ctrl-C with a prompt.
+
+---

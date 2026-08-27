@@ -3551,22 +3551,76 @@ fn format_free_resource_list(entries: &[FreeResourceRef]) -> String {
 /// decades, no ordinary key produces it, and it is exactly one chord rather
 /// than a prefix that would double the latency of escaping a runaway session.
 ///
-/// **It has two spellings, and both must be accepted.** The chord is really
-/// the byte `0x1D` (ASCII group separator), and Crossterm's Unix parser
-/// decodes the control range `0x1C..=0x1F` arithmetically, as
+/// **It has more than one spelling, and all of them must be accepted.** The
+/// chord is really the byte `0x1D` (ASCII group separator), and Crossterm's
+/// Unix parser decodes the control range `0x1C..=0x1F` arithmetically, as
 /// `Char((c - 0x1C + b'4'))` — so a real terminal's `Ctrl-]` arrives as
-/// `Ctrl` + `'5'`, never as `Ctrl` + `']'`. The `']'` spelling comes from
-/// Windows, where Crossterm reads virtual key codes instead.
+/// `Ctrl` + `'5'`, never as `Ctrl` + `']'`.
 ///
-/// Matching only `']'` is not a cosmetic bug: it leaves the user in session
+/// Matching too narrowly is not a cosmetic bug: it leaves the user in session
 /// mode with no way back, which is precisely the failure the single-chord
 /// escape exists to prevent. It survived unit testing because a synthetic
 /// `KeyEvent::new(KeyCode::Char(']'), CONTROL)` is not what any terminal
 /// sends; only driving the real binary through a real pseudo-terminal caught
-/// it.
+/// it — twice, once per platform.
+///
+/// # Windows delivers a character chosen by the keyboard layout
+///
+/// The `']'` spelling was written for Windows, where Crossterm reads console
+/// records rather than a byte stream. That is right only by accident of
+/// whoever wrote it having a US keyboard. Measured on the ARM64 CI machine,
+/// whose input locale is `0x04070409` — US English on a **German** physical
+/// layout — the byte `0x1D` arrives from ConPTY as this console record:
+///
+/// ```text
+/// vk=0xBB (VK_OEM_PLUS)  scan=0x1B  uChar=0x001D  ctrl=LEFT_CTRL_PRESSED
+/// ```
+///
+/// `uChar` is the right answer and Crossterm throws it away: its Windows
+/// parser treats any `uChar` in `0x00..=0x1f` as "some chord produced a
+/// control code, ask the layout which character that key really types" and
+/// calls `ToUnicodeEx` on the *virtual key*. Scan code `0x1B` is the physical
+/// key right of `P`; a US layout types `']'` there and a German one types
+/// `'+'`. So Glasshouse is handed `Ctrl` + `'+'` on this machine and
+/// `Ctrl` + `']'` on the machine the original spelling came from, for the
+/// same keypress.
+///
+/// **No fixed set of characters can be correct**, because the set is the set
+/// of layouts. So on Windows the test is the modifier and the *shape* of the
+/// character rather than its identity: any non-alphanumeric character with
+/// Control. Its failure mode is a spurious escape — a user typing some other
+/// `Ctrl`+punctuation chord lands back in control mode — which is the
+/// direction to fail in, because the other direction traps them with no way
+/// out. Nothing is lost by it either: [`encode`] has never translated
+/// `Ctrl`+punctuation to a control byte, so those chords reached the harness
+/// as bare punctuation, which is not what the user pressed.
+///
+/// **`AltGr` is excluded, and that is measured too.** Windows reports `AltGr`
+/// as `CONTROL | ALT`, so on a layout where `']'` itself needs `AltGr` — as
+/// it does on the German one — typing a literal `']'` arrived as
+/// `Ctrl` + `Alt` + `']'` and matched the old rule. Typing a bracket into a
+/// harness would have thrown the user out of the session. The real chord
+/// never carries `ALT`: the record above has `LEFT_CTRL_PRESSED` alone.
+///
+/// The durable fix is upstream of here, in whatever reads the console
+/// records: `uChar` already carries `0x1D` exactly. See the report for the
+/// shape that would take.
 fn is_session_escape(key: &KeyEvent) -> bool {
-    key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char(']') | KeyCode::Char('5'))
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    // See the doc comment: `AltGr` is `CONTROL | ALT` on Windows, and the
+    // chord itself never carries `ALT`, so this only ever excludes a
+    // character the user meant to type.
+    #[cfg(windows)]
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        return false;
+    }
+    #[cfg(windows)]
+    if matches!(key.code, KeyCode::Char(c) if !c.is_ascii_alphanumeric()) {
+        return true;
+    }
+    matches!(key.code, KeyCode::Char(']') | KeyCode::Char('5'))
 }
 
 /// Turn one key event into the bytes a PTY expects.
@@ -4140,6 +4194,71 @@ mod escape_chord_tests {
     fn the_bare_characters_are_not_an_escape() {
         for code in [KeyCode::Char(']'), KeyCode::Char('5')] {
             assert!(!is_session_escape(&KeyEvent::new(code, KeyModifiers::NONE)));
+        }
+    }
+
+    /// The spelling the CI machine actually delivers, and the reason the
+    /// Windows arm cannot be a list of characters.
+    ///
+    /// `'+'` is what a German physical layout puts on the key a US layout
+    /// calls `']'`, and Crossterm reports the layout's character rather than
+    /// the `0x1D` the console record carries. `'#'`, `'ü'` and `'$'` are the
+    /// same key on three more layouts; none of them could have been guessed,
+    /// and the rule has to hold for all of them.
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_spelling_is_whatever_the_layout_puts_on_that_key() {
+        for code in [
+            KeyCode::Char('+'),
+            KeyCode::Char('#'),
+            KeyCode::Char('ü'),
+            KeyCode::Char('$'),
+        ] {
+            assert!(
+                is_session_escape(&KeyEvent::new(code, KeyModifiers::CONTROL)),
+                "{code:?} with CONTROL must escape session mode on Windows"
+            );
+        }
+    }
+
+    /// A bracket typed with `AltGr` is a bracket, not an escape.
+    ///
+    /// Windows reports `AltGr` as `CONTROL | ALT`, and on every layout where
+    /// `']'` needs `AltGr` this is how a user types one into a harness. The
+    /// chord itself never carries `ALT`.
+    #[cfg(windows)]
+    #[test]
+    fn a_character_typed_with_altgr_is_not_an_escape() {
+        for code in [KeyCode::Char(']'), KeyCode::Char('+'), KeyCode::Char('}')] {
+            assert!(
+                !is_session_escape(&KeyEvent::new(
+                    code,
+                    KeyModifiers::CONTROL | KeyModifiers::ALT
+                )),
+                "{code:?} with AltGr is a character the harness must receive"
+            );
+        }
+    }
+
+    /// The widened Windows rule must not eat the chords a harness lives on.
+    ///
+    /// `Ctrl-C` cancelling a turn is the one that would hurt, and it is the
+    /// reason the rule tests for a non-alphanumeric character rather than for
+    /// "not `']'`".
+    #[cfg(windows)]
+    #[test]
+    fn a_control_letter_or_digit_still_reaches_the_harness() {
+        for code in [
+            KeyCode::Char('c'),
+            KeyCode::Char('C'),
+            KeyCode::Char('d'),
+            KeyCode::Char('z'),
+            KeyCode::Char('0'),
+        ] {
+            assert!(
+                !is_session_escape(&KeyEvent::new(code, KeyModifiers::CONTROL)),
+                "{code:?} with CONTROL belongs to the harness"
+            );
         }
     }
 }

@@ -26,6 +26,8 @@ use std::collections::VecDeque;
 use std::io::Read;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
+#[cfg(windows)]
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 
@@ -85,13 +87,22 @@ impl OutputEnd {
         }
     }
 
-    /// Called by the reader thread, once, when the pseudo-terminal is done.
-    fn finish(&self) {
-        match self.ended.lock() {
-            Ok(mut ended) => *ended = true,
-            Err(poisoned) => *poisoned.into_inner() = true,
-        }
+    /// Mark the output finished, and report whether this call is what
+    /// finished it.
+    ///
+    /// Two threads can reach this for the same session and only one of them
+    /// may publish [`LifecycleEvent::OutputEnded`]: the reader thread, when
+    /// the pseudo-terminal reports end-of-file, and — on Windows, where that
+    /// report never comes — `poll_exits` once the process has been observed
+    /// to end and the drain grace has elapsed. Deciding inside the lock is
+    /// what makes "exactly once" true rather than likely.
+    fn finish(&self) -> bool {
+        let first = match self.ended.lock() {
+            Ok(mut ended) => !std::mem::replace(&mut *ended, true),
+            Err(poisoned) => !std::mem::replace(&mut *poisoned.into_inner(), true),
+        };
         self.changed.notify_all();
+        first
     }
 
     /// Block until the reader is done or `timeout` elapses; report which.
@@ -313,6 +324,13 @@ pub struct LiveSession {
     /// remark, it is the race [`SessionRuntime::crash_report`] exists to
     /// close.
     output_ended: Arc<OutputEnd>,
+    /// When `poll_exits` first observed this session's process to have ended.
+    ///
+    /// Windows only, because it exists to answer a question only Windows
+    /// asks: *when may output be called finished if end-of-file will never
+    /// arrive?* See [`SessionRuntime::poll_exits`].
+    #[cfg(windows)]
+    exit_seen: Option<Instant>,
     presentation: SessionPresentation,
     exit: Option<ExitStatus>,
 }
@@ -544,6 +562,8 @@ impl SessionRuntime {
             screen,
             pending_queries,
             output_ended,
+            #[cfg(windows)]
+            exit_seen: None,
             presentation,
             exit: None,
         });
@@ -736,6 +756,42 @@ impl SessionRuntime {
     /// death is the classic way a session manager kills work in progress.
     /// Each exit is reported exactly once; the session stays in the runtime
     /// afterwards so its final output remains readable.
+    ///
+    /// # Windows: this is also where output is declared to have ended
+    ///
+    /// [`crate::pty`] wrote down, before the reader thread existed, that a
+    /// reader "must not treat *no more bytes* as its stop condition, because
+    /// on Windows that may never come while the pty is still held open", and
+    /// prescribed observing the process instead. The prescription is right
+    /// about the diagnosis and **cannot be carried out where it points**: by
+    /// the time there are no more bytes, `pump` is parked inside a blocking
+    /// `read` that will not return, so it can neither call `try_wait` nor
+    /// notice a flag someone set for it. A stop condition is no use to a
+    /// thread that has already stopped.
+    ///
+    /// So the thread that *does* observe the exit says so. When a session's
+    /// process has been seen to end and `OUTPUT_DRAIN_WAIT` has passed
+    /// since, this marks the session's output finished and publishes
+    /// [`LifecycleEvent::OutputEnded`]. `pump` still publishes it on every
+    /// platform that produces an end-of-file, and
+    /// `OutputEnd::finish` decides which of the two got there first, so the
+    /// event fires exactly once either way.
+    ///
+    /// **Nothing is truncated by this.** The reader is not stopped and not
+    /// interrupted; it keeps draining into the scrollback for as long as the
+    /// session is held. The grace is what keeps the *event* honest — a
+    /// child's death outruns its last words by a millisecond or two, measured
+    /// at 1.1–2.2ms on Linux — and a byte that somehow arrives after it is
+    /// still recorded, only after the announcement.
+    ///
+    /// **Windows only, deliberately.** On Unix "the output ended" is a
+    /// statement about a file descriptor and the descriptor can make it, so
+    /// nothing here should redefine it — including the case this would
+    /// otherwise change, a crashed harness whose grandchild still holds the
+    /// pty slave open, where the strict meaning is the true one and *no*
+    /// output-end really has happened. On Windows that descriptor cannot
+    /// speak at all, so the honest meaning there is the weaker one:
+    /// **the process exited and its output stopped arriving.**
     pub fn poll_exits(&mut self) -> Vec<(SessionId, ExitStatus)> {
         let mut ended = Vec::new();
         for session in &mut self.sessions {
@@ -745,6 +801,10 @@ impl SessionRuntime {
             match session.process.try_wait() {
                 Ok(Some(status)) => {
                     session.exit = Some(status.clone());
+                    #[cfg(windows)]
+                    {
+                        session.exit_seen = Some(Instant::now());
+                    }
                     ended.push((session.id.clone(), status));
                 }
                 Ok(None) => {}
@@ -768,6 +828,29 @@ impl SessionRuntime {
                     exit: ProcessExit::from_status(status),
                 },
             );
+        }
+
+        // On Windows, this is also where a session's output is declared
+        // finished — see the `# Windows` section of this method's doc
+        // comment. Collected first and published after the loop for the same
+        // reason `ended` is: `self.events` cannot be borrowed while the
+        // sessions are.
+        #[cfg(windows)]
+        {
+            let finished: Vec<SessionId> = self
+                .sessions
+                .iter()
+                .filter(|session| {
+                    session
+                        .exit_seen
+                        .is_some_and(|seen| seen.elapsed() >= OUTPUT_DRAIN_WAIT)
+                })
+                .filter(|session| session.output_ended.finish())
+                .map(|session| session.id.clone())
+                .collect();
+            for id in finished {
+                self.events.publish(&id, LifecycleEvent::OutputEnded);
+            }
         }
 
         // Focus must not stay on something that is over, or the keyboard would
@@ -1008,12 +1091,19 @@ fn pump(
             }
         }
     }
-    ended.finish();
     // A statement about a file descriptor, and nothing more. Publishing it as
     // its own event — rather than folding it into an exit, or letting a
     // consumer time the silence — is what keeps "the output stopped" from
     // ever being read as "the work finished".
-    events.publish(session, LifecycleEvent::OutputEnded);
+    //
+    // On Windows this line is unreachable while the pty is open: the read
+    // above never returns `Ok(0)` and never errors, because nothing closes
+    // the write end until the master is dropped. `SessionRuntime::poll_exits`
+    // is the one that gets there, and `finish` decides which of the two
+    // publishes. See `crate::pty`'s note on the dropped slave handle.
+    if ended.finish() {
+        events.publish(session, LifecycleEvent::OutputEnded);
+    }
 }
 
 fn short(id: &SessionId) -> String {

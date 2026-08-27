@@ -57,6 +57,17 @@ const POLL: Duration = Duration::from_millis(25);
 /// order of magnitude more time asleep than the thing it is waiting for.
 const DRAIN_POLL: Duration = Duration::from_millis(1);
 
+/// How long [`Session::wait_for_exit`] waits for a dead child's output to
+/// finish arriving before giving up on it ever ending.
+///
+/// The same 250ms `SessionRuntime`'s `OUTPUT_DRAIN_WAIT` allows, chosen for
+/// the same two reasons: a child's death outruns its last words by a
+/// millisecond or two, and on Windows no end-of-file ever arrives, so
+/// something other than the pty has to end the wait. Two orders of magnitude
+/// more than the 1.1–2.2ms gap [`DRAIN_POLL`] was sized against, and four
+/// fewer than the [`TIMEOUT`] this used to spend on every Windows call.
+const DRAIN_GRACE: Duration = Duration::from_millis(250);
+
 /// How long [`Session::spawn`] waits for a freshly spawned child's startup
 /// Device Status Report query before giving up on one arriving.
 ///
@@ -409,16 +420,28 @@ impl Session {
     /// full workspace suite on Linux. The missing bytes were never lost; they
     /// landed about a millisecond later.
     ///
-    /// The drain is bounded by the same [`TIMEOUT`] and does *not* fail the
-    /// test when it expires: output need not ever end — anything the child
-    /// left holding the pty keeps the reader alive — and a caller waiting on
-    /// the exit status has already got what it asked for.
+    /// The drain does *not* fail the test when it expires: output need not
+    /// ever end — anything the child left holding the pty keeps the reader
+    /// alive — and a caller waiting on the exit status has already got what
+    /// it asked for.
+    ///
+    /// It is bounded by [`DRAIN_GRACE`] rather than by the remaining
+    /// [`TIMEOUT`], and on Windows that is the difference between a suite and
+    /// a coffee break. [`Collector`]'s reader stops on `Ok(0)` or an error,
+    /// and ConPTY produces neither while this `Session` still holds the
+    /// master — the same platform fact `glasshouse::pty` records about the
+    /// dropped slave handle. So `ended()` is never true there, and every call
+    /// to this function used to spend the **whole twenty-second `TIMEOUT`**
+    /// waiting for an end-of-file that cannot arrive. Measured: this test
+    /// binary took 141.8s on Windows and 20.2s of it was one test doing
+    /// nothing.
     fn wait_for_exit(&mut self) -> glasshouse::pty::ExitStatus {
         let deadline = Instant::now() + TIMEOUT;
         while Instant::now() < deadline {
             self.answer_pending_queries();
             if let Some(status) = self.process.try_wait().expect("try_wait") {
-                while !self.collector.ended() && Instant::now() < deadline {
+                let drained = Instant::now() + DRAIN_GRACE;
+                while !self.collector.ended() && Instant::now() < drained {
                     self.answer_pending_queries();
                     std::thread::sleep(DRAIN_POLL);
                 }
@@ -547,16 +570,149 @@ fn a_resize_is_visible_to_the_child_process() {
     session.wait_for_exit();
 }
 
-// Windows is deliberately not covered here. portable-pty creates the
-// pseudoconsole with `PSEUDOCONSOLE_WIN32_INPUT_MODE`, under which conhost is
-// documented to translate an incoming `0x03` byte into a Ctrl+C key event --
-// so in principle `PtyProcess::interrupt` should work there too. But there is
-// no cmd.exe (or portable `cmd /C` script) equivalent of "install a trap and
-// prove it fired through the terminal, not some other path" the way a shell
-// SIGINT trap does on Unix, and no Windows runner available here to check a
-// candidate script actually behaves as expected. A test that cannot fail on
-// a real regression is worse than no test, so this is left unverified rather
-// than given a version that would pass vacuously.
+/// Set by [`note_console_interrupt`] when a real `CTRL_C_EVENT` arrives.
+///
+/// A handler runs on a thread the operating system makes for it, so it does
+/// the one thing that is safe from there and lets the main loop do the
+/// printing.
+#[cfg(windows)]
+static CAUGHT_CONSOLE_INTERRUPT: AtomicBool = AtomicBool::new(false);
+
+/// The Windows equivalent of a shell's `trap ... INT`.
+///
+/// Returning non-zero means *handled*, which is what stops the default action
+/// — ending the process — and is the whole point: interrupting is not
+/// killing, and a harness that handles the interrupt must still be running
+/// afterwards.
+#[cfg(windows)]
+unsafe extern "system" fn note_console_interrupt(event: u32) -> i32 {
+    const CTRL_C_EVENT: u32 = 0;
+    if event == CTRL_C_EVENT {
+        CAUGHT_CONSOLE_INTERRUPT.store(true, Ordering::SeqCst);
+        1
+    } else {
+        0
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" {
+    fn SetConsoleCtrlHandler(
+        handler: Option<unsafe extern "system" fn(u32) -> i32>,
+        add: i32,
+    ) -> i32;
+}
+
+/// The harness the two Windows interrupt tests below drive: this same test
+/// binary, re-entered as a child.
+///
+/// It exists because the thing that had to be proved is *how* the interrupt
+/// arrives, and no `cmd.exe` script can report that. A batch file has no way
+/// to install a control handler, so a `.cmd` harness could only ever show
+/// that the child died — which an ordinary kill would also show. This one
+/// installs a real `SetConsoleCtrlHandler`, says so, and keeps running,
+/// which is exactly what a shell's `trap 'echo …' INT` does on Unix.
+///
+/// Inert unless `GLASSHOUSE_INTERRUPT_TRAP` is set, so it costs the ordinary
+/// suite one skipped test.
+#[cfg(windows)]
+#[test]
+fn windows_interrupt_trap_child() {
+    use std::io::Write as _;
+
+    if std::env::var_os("GLASSHOUSE_INTERRUPT_TRAP").is_none() {
+        return;
+    }
+    assert_ne!(
+        unsafe { SetConsoleCtrlHandler(Some(note_console_interrupt), 1) },
+        0,
+        "could not install a console control handler"
+    );
+
+    // Written before the marker is printed, so a caller running several of
+    // these can tell the handler is installed rather than merely that the
+    // process started -- the same window the Unix trap harness records.
+    if let Some(ready) = std::env::var_os("GLASSHOUSE_INTERRUPT_READY") {
+        std::fs::write(&ready, b"ready").expect("write the trap-ready file");
+    }
+    println!("TRAP-READY");
+    std::io::stdout().flush().expect("flush");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut announced = false;
+    while Instant::now() < deadline {
+        if !announced && CAUGHT_CONSOLE_INTERRUPT.load(Ordering::SeqCst) {
+            println!("CAUGHT-INTERRUPT");
+            std::io::stdout().flush().expect("flush");
+            announced = true;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// Build a launch of [`windows_interrupt_trap_child`] as a harness.
+#[cfg(windows)]
+fn windows_trap_child_args() -> [String; 4] {
+    [
+        "--exact".to_owned(),
+        "windows_interrupt_trap_child".to_owned(),
+        "--nocapture".to_owned(),
+        "--test-threads=1".to_owned(),
+    ]
+}
+
+/// **Phase 4: "Support sending interrupt signals to a PTY session", on
+/// Windows.**
+///
+/// This used to say Windows was "deliberately not covered", for two reasons:
+/// no `cmd.exe` equivalent of a shell's `trap ... INT`, and no Windows runner
+/// to check a candidate against. The runner exists now, and
+/// [`windows_interrupt_trap_child`] is the missing trap.
+///
+/// What it proves is the same property the Unix sibling proves, and it is not
+/// "the child died": `PtyProcess::interrupt` writes `ETX` into the
+/// pseudo-console, conhost turns that byte into a genuine `CTRL_C_EVENT` for
+/// the process attached to that console, and the child's own control handler
+/// observes it **as an interrupt**. A child that merely echoed the byte it
+/// read would fail this.
+///
+/// It also proves the half that makes an interrupt an interrupt: the handler
+/// returns *handled*, so no default action runs, and the child is still
+/// running when it is over.
+///
+/// The trap child does not put its console in raw mode, and that is the case
+/// under test. A harness TUI that does — which the real ones do — turns off
+/// `ENABLE_PROCESSED_INPUT` and receives the same `0x03` as a byte in its
+/// input instead, which is what `PtyProcess::interrupt`'s doc comment says it
+/// wants. Both readings of the byte are correct; this is the one no other
+/// test could observe.
+#[cfg(windows)]
+#[test]
+fn interrupt_is_delivered_as_a_terminal_interrupt() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let exe = std::env::current_exe().expect("current exe");
+    let mut session = Session::spawn(
+        TerminalCommand::new(&exe, tmp.path())
+            .args(windows_trap_child_args())
+            .env("GLASSHOUSE_INTERRUPT_TRAP", "1"),
+    );
+
+    // The handler has to be installed before the interrupt arrives, or the
+    // default action ends the process and this would prove the opposite of
+    // what it claims.
+    session.expect("TRAP-READY");
+    session.process().interrupt().expect("interrupt");
+    session.expect("CAUGHT-INTERRUPT");
+
+    assert!(
+        session.process().try_wait().expect("try_wait").is_none(),
+        "a harness that handled the interrupt must still be running"
+    );
+
+    session.process().signal(ProcessSignal::Kill).expect("kill");
+    session.wait_for_exit();
+}
+
 #[cfg(unix)]
 #[test]
 fn interrupt_is_delivered_as_a_terminal_interrupt() {
@@ -4960,6 +5116,103 @@ fn an_interrupt_reaches_an_unfocused_session_and_leaves_it_running() {
     // default action kills the shell and this test would prove the opposite
     // of what it claims.
     wait_for_text(&mut runtime, &id_target, &mut dsr, "TRAP-READY");
+
+    runtime.focus(&id_holder).expect("focus the holder");
+    assert_eq!(runtime.focused(), Some(&id_holder));
+    let pid_before = runtime.get(&id_target).and_then(LiveSession::process_id);
+
+    runtime
+        .interrupt(&id_target)
+        .expect("interrupt the unfocused session");
+
+    wait_for_text(&mut runtime, &id_target, &mut dsr, "CAUGHT-INTERRUPT");
+
+    assert_eq!(
+        runtime.focused(),
+        Some(&id_holder),
+        "interrupting another session must not move focus"
+    );
+
+    // Ask the operating system before believing anything about liveness.
+    runtime.poll_exits();
+    let target = runtime.get(&id_target).expect("the target is still held");
+    assert!(
+        target.is_running(),
+        "a harness that handled the interrupt must still be running"
+    );
+    assert!(target.exit().is_none(), "and must have no exit status");
+    assert_eq!(
+        runtime.get(&id_target).and_then(LiveSession::process_id),
+        pid_before,
+        "it must be the same process, not a restarted one"
+    );
+
+    // And the session that did have focus was never touched.
+    let holder = runtime.get(&id_holder).expect("the holder is still held");
+    assert!(holder.is_running());
+
+    runtime.close(&id_holder).expect("close holder");
+    runtime.close(&id_target).expect("close target");
+}
+
+/// The same three properties as the Unix test of this name, through the same
+/// production seam, against a real Windows child.
+///
+/// Kept as its own function rather than un-`cfg`ing the one above because the
+/// two differ in the one place that matters: the trap. On Unix a `sh` script
+/// installs a `SIGINT` trap; here the harness is
+/// [`windows_interrupt_trap_child`], which installs a real console control
+/// handler and can therefore report that a `CTRL_C_EVENT` — not a byte —
+/// arrived. See that function for why no `cmd.exe` script can stand in.
+///
+/// This is the one that speaks to Phase 4's line, because it goes through
+/// [`SessionRuntime::interrupt`] rather than [`PtyProcess::interrupt`]: it is
+/// the call the shell and the overview make.
+#[cfg(windows)]
+#[test]
+fn an_interrupt_reaches_an_unfocused_session_and_leaves_it_running() {
+    let fixture = RuntimeFixture::new();
+    let holder_harness = install_sleep_harness(&fixture.bin_dir, "interrupt-holder", 30);
+    let exe = std::env::current_exe().expect("current exe");
+    let ready = fixture.bin_dir.join("trap.ready");
+
+    let holder_launch = fixture.launch(&holder_harness);
+    let trap_launch = fixture
+        .launch(&exe)
+        .args(windows_trap_child_args())
+        .env("GLASSHOUSE_INTERRUPT_TRAP", "1")
+        .env("GLASSHOUSE_INTERRUPT_READY", ready.display().to_string());
+
+    let mut runtime = SessionRuntime::new();
+    let id_holder = SessionId::new("interrupt-holder");
+    let id_target = SessionId::new("interrupt-target");
+    runtime
+        .start(
+            id_holder.clone(),
+            SessionPresentation::Embedded,
+            &holder_launch,
+        )
+        .expect("start holder");
+    runtime
+        .start(
+            id_target.clone(),
+            SessionPresentation::Embedded,
+            &trap_launch,
+        )
+        .expect("start target");
+
+    let mut dsr = DsrTracker::default();
+    settle(&mut runtime, &id_holder, &mut dsr);
+    // The handler has to be installed before the interrupt arrives, or the
+    // default action ends the process and this would prove the opposite of
+    // what it claims. The file is written before the marker is printed, so
+    // this waits on the handler rather than on the output reaching the
+    // scrollback.
+    wait_for_text(&mut runtime, &id_target, &mut dsr, "TRAP-READY");
+    assert!(
+        ready.is_file(),
+        "the trap child never installed its handler"
+    );
 
     runtime.focus(&id_holder).expect("focus the holder");
     assert_eq!(runtime.focused(), Some(&id_holder));

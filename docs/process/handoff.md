@@ -210,7 +210,19 @@ outside that partition and belong to a follow-up package:
 interrupt box below can finally be tested rather than compiled. Expect several
 jobs to fail at once on the first run; reconcile them in one sweep.
 
-**`scripts/ci-local.sh --windows-vm` is expected RED, and that is the point.**
+**`scripts/ci-local.sh --windows-vm` is GREEN**, all three steps, as of
+2026-08-27 — the first time in this project's history. The paragraph below is
+kept because the number in it is the one that matters going forward.
+
+**281 of 1401 tests had never executed on Windows.** `cargo test` stops after
+the first failing **binary**, and the gate stopped at `events_lifecycle` — so
+behind it sat two more red binaries, including **five `response_profiles`
+failures from a phase that landed the same morning**. All nine failures are now
+fixed. **`C:\ci\run-glasshouse-ci.cmd`'s `:test` line still does not pass
+`--no-fail-fast`**, which is one word, and until it does the next red binary
+hides everything behind it again.
+
+**Superseded — kept for the reasoning:**
 On the current tree it reports `PASS test (windows) / build`,
 `FAIL test (windows) / test`, `PASS msrv (windows) 1.88`. The library suite is
 **1084 of 1084** (it was 1069 with one failure hiding three whole suites), and
