@@ -35,8 +35,15 @@ IDLE_DIR="$REPO/.agent-runtime/idle"
 MARKER="$IDLE_DIR/$NAME"
 mkdir -p "$IDLE_DIR"
 
-# A pane is BUSY when its screen shows a spinner, an interrupt hint, or a
-# running token counter. Anything else is idle.
+# A pane is BUSY when its screen shows a spinner, an interrupt hint, a running
+# token counter, or a **retry countdown**. Anything else is idle.
+#
+# The retry case was paid for on 2026-08-27. A worker mid-package hit
+# `Waiting for API response · will retry in 2m 8s`, which draws no spinner and
+# no counter, and this watch announced "went idle with NO report". It had not
+# finished, it had not stopped, and it had not asked anything — it was waiting.
+# A watch that reports a state it has not established is the same defect as a
+# report nobody reads (practice §57's addendum), pointing the other way.
 #
 # Read the SURFACE, never the workspace: a workspace ref can resolve to a
 # sibling pane, and an empty ref silently resolves to the caller's own pane —
@@ -44,7 +51,7 @@ mkdir -p "$IDLE_DIR"
 is_busy() {
   local screen
   screen="$(cmux read-screen --surface "$SURFACE" 2>/dev/null)" || return 1
-  printf '%s' "$screen" | grep -qE 'esc to interrupt|esc to cancel|[0-9]+s · ↓|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]'
+  printf '%s' "$screen" | grep -qE 'esc to interrupt|esc to cancel|[0-9]+s · ↓|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|will retry in|Retrying|Waiting for API response|API Error.*retry'
 }
 
 quiet=0

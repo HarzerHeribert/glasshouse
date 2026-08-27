@@ -2090,3 +2090,31 @@ Nothing else catches it. Intra-doc links are resolved by rustdoc and by nothing
 in the compile path, so a link to a private item is invisible to every other
 job and to every test. Run it before starting the gate, the way you would check
 `git status` before committing.
+
+### §57, second addendum — a watch must not report a state it has not established
+
+`worker-watch.sh` decides a pane is busy by looking for a spinner, an interrupt
+hint, or a running token counter, and calls everything else idle. A worker
+ten minutes into a package hit
+
+    ✻ Waiting for API response · will retry in 2m 8s · check your network
+
+which draws none of those three, so the watch announced **"went idle with NO
+report"**. The worker had not finished, had not stopped, and had not asked
+anything. It was waiting, and it resumed on its own two minutes later.
+
+"Anything else is idle" is the bug, and it is the mirror of §57's first
+addendum: there, a mechanism reported success it had not achieved; here, one
+reported an ending it had not observed. Both come from treating the absence of
+a known signal as evidence for a specific conclusion.
+
+The retry strings are now matched as busy. The general form is worth keeping in
+mind whenever a watch is written: **enumerate the states you can recognise, and
+make the unrecognised state its own answer** rather than folding it into the
+interesting one. A watch that said "cannot tell — pane shows something I do not
+recognise, here are its last lines" would have been right without needing this
+particular string added.
+
+Cost when it misfires: an orchestrator interrupting itself mid-round to inspect
+a pane, and — worse if unnoticed — an `ack` that ends the watch on a worker
+that has not finished, leaving nothing armed for when it actually does.
