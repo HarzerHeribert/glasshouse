@@ -381,13 +381,10 @@ pub fn templates() -> Vec<Provider> {
                  GET https://openrouter.ai/api/v1/models, read 2026-08-25; that request \
                  answered 200 with 417 entries when made, 2026-08-26",
             ),
-            // Phase 32B. **The route exists and gates on authentication**;
-            // what it *answers with* has not been read here, because reading
-            // it needs the user's own key and no worker holds one. So this
-            // declares that there is a usage endpoint worth querying, which
-            // is the decision `glasshouse resources` needs, and it does not
-            // declare a response schema — see `provider::telemetry`, which
-            // ships no parser for one.
+            // Phase 32B established the route; Phase QUOTA-FOLLOWUP read an
+            // authenticated response from it. **The route exists, gates on
+            // authentication, and answers with a body this crate now
+            // parses** — `provider::telemetry::read_provider_usage`.
             //
             // The control was run against this host, not borrowed from
             // another: `/api/v1/glasshouse-nonexistent-control` answers
@@ -400,7 +397,7 @@ pub fn templates() -> Vec<Provider> {
             // string names the control and not only the probe.
             usage_telemetry: Declared::verified(
                 true,
-                "GET https://openrouter.ai/api/v1/key and /api/v1/credits each answered 401                  with a JSON error envelope, unauthenticated, while the sibling path                  /api/v1/glasshouse-nonexistent-control answered 404 on the same host in the                  same minute, 2026-08-27; the routes exist and require a credential. No                  authenticated response body has been read, so no schema is declared",
+                "GET https://openrouter.ai/api/v1/key and /api/v1/credits each answered 401                  with a JSON error envelope, unauthenticated, while the sibling path                  /api/v1/glasshouse-nonexistent-control answered 404 on the same host in the                  same minute, 2026-08-27; the routes exist and require a credential. An                  authenticated GET to /api/v1/key, run by the orchestrator (no worker holds a                  key), answered 200 with a body whose field names and types were recorded —                  data.limit, data.limit_remaining and data.limit_reset are each nullable                  integers and were null on the probed account — never a value, 2026-08-27",
             ),
             credential_env: vec!["OPENROUTER_API_KEY".to_owned()],
             headers: vec![],
@@ -596,6 +593,36 @@ pub fn templates() -> Vec<Provider> {
 /// The built-in template named `name`, or `None`.
 pub fn template(name: &str) -> Option<Provider> {
     templates().into_iter().find(|p| p.name == name)
+}
+
+/// Where a provider's own usage endpoint lives, relative to its base URL —
+/// capability map line 1230.
+///
+/// # A lookup table, not a [`Provider`] field
+///
+/// [`Provider`] is constructed by struct literal at every call site that
+/// builds one, including `crate::secret` and `tests/pty_smoke.rs`'s fixture
+/// providers — both outside this package's partition. A new required field
+/// would need every one of those literals updated to compile, which is
+/// exactly the ripple [`resources::harness_status_args`] already avoids for
+/// harness status commands with the same shape of table. Only one template
+/// has an established route, so a table earns its keep more than a field
+/// nothing but this one entry would ever populate.
+///
+/// `/key`, not `/credits` — OpenRouter documents both, and `/key` is the one
+/// whose authenticated response was actually read (see the `usage_telemetry`
+/// evidence string on the `openrouter` template). Relative to this
+/// protocol's own base URL, which already ends in `/v1`.
+const USAGE_ENDPOINTS: &[(&str, &str)] = &[("openrouter", "/key")];
+
+/// The path `provider_name`'s own usage endpoint lives at, if one is
+/// established — `None` for every provider but the ones named in this
+/// module's own usage-endpoint table.
+pub fn usage_endpoint(provider_name: &str) -> Option<&'static str> {
+    USAGE_ENDPOINTS
+        .iter()
+        .find(|(name, _)| *name == provider_name)
+        .map(|(_, path)| *path)
 }
 
 /// The two templates whose base URL is the user's to supply, not a service's

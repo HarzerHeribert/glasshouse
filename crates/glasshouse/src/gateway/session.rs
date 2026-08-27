@@ -29,6 +29,7 @@
 use std::sync::Mutex;
 use std::time::Instant;
 
+use crate::provider::telemetry::RateLimitHeaders;
 use crate::routing::free::{FreePool, FreeResource, WorkloadOutcome};
 use crate::routing::interactive::{
     Assignment, AssignmentChange, ChangeCause, FailureResponse, InteractiveRouting,
@@ -54,6 +55,12 @@ struct State {
     assignment: Option<Assignment>,
     record: RoutingRecord,
     free: FreePool,
+    /// The most recent rate-limit headers a forwarded response carried, and
+    /// when — capability map line 1229's gateway half. `None` until at least
+    /// one exchange has produced one. Not `Exchange`'s business — see
+    /// `ingress`'s own doc comment on why that type stays incapable of
+    /// carrying a header value; this is a second, separate observation.
+    quota: Option<(RateLimitHeaders, i64)>,
 }
 
 /// What one finished exchange said about the backend that served it.
@@ -174,6 +181,26 @@ impl SessionRouting {
     /// What has been learned about each free resource, from real work only.
     pub fn free_pool(&self) -> FreePool {
         self.lock().free.clone()
+    }
+
+    /// Record what a forwarded response's headers said — capability map line
+    /// 1229's gateway half, called once per exchange from the accept loop.
+    ///
+    /// A no-op when `headers` is empty, which is the ordinary case: most
+    /// exchanges forward a response that carries no rate-limit header this
+    /// reader understands, and a no-op leaves whatever the last real reading
+    /// was in place rather than clearing it.
+    pub(super) fn observe_quota_headers(&self, headers: RateLimitHeaders, observed_at_unix: i64) {
+        if headers.is_empty() {
+            return;
+        }
+        self.lock().quota = Some((headers, observed_at_unix));
+    }
+
+    /// The most recent rate-limit headers observed, and when — capability map
+    /// line 1229's gateway half, read by [`super::Gateway::quota_headers`].
+    pub fn quota_headers(&self) -> Option<(RateLimitHeaders, i64)> {
+        self.lock().quota.clone()
     }
 
     /// Fold in one finished exchange: update the resource's health, and, when
@@ -348,11 +375,13 @@ fn classify(exchange: &Exchange) -> Option<Observation> {
             },
             429 => Observation {
                 workload: WorkloadOutcome::RateLimited {
-                    // The provider's own `retry-after` is not read here: the
-                    // gateway forwards headers without parsing them, and
-                    // adding a parser to this path would make it a reader of
-                    // the response it exists to pass through. Without one,
-                    // the free pool's own bounded backoff applies.
+                    // Left `None` here, not because headers are unreadable —
+                    // `ingress::forward` now reads this allowlist for
+                    // capability map line 1229's gateway half — but because
+                    // wiring `retry-after` into a routing decision is Phase
+                    // 9H/9I's own scope and outside this package's
+                    // partition. Without one, the free pool's own bounded
+                    // backoff applies.
                     retry_after: None,
                 },
                 failure: ProviderFailure::from_status(429),

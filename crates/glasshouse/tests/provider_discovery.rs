@@ -852,6 +852,22 @@ period = "calendar-month"
     assert!(stdout.contains("provider limit 120s"), "{stdout}");
 }
 
+/// Capability map lines 1210 and 1211, through the binary: `render_windows`
+/// — added this package, and previously nothing in `provider::resources`
+/// rendered a window's start or reset time at all, however a reader filled
+/// one in — is reachable from `main.rs`'s unmodified `Command::Resources`
+/// arm, and with nothing measured it says so honestly rather than
+/// showing nothing.
+#[test]
+fn the_shipped_binary_shows_every_windows_start_and_reset_state_when_verbose() {
+    let fixture = BinaryFixture::new();
+    let stdout = fixture.run(&["resources", "--no-harness", "--verbose"]);
+    assert!(stdout.contains("rolling window"), "{stdout}");
+    assert!(stdout.contains("calendar window"), "{stdout}");
+    assert!(stdout.contains("starts unmeasured (unknown)"), "{stdout}");
+    assert!(stdout.contains("resets unmeasured (unknown)"), "{stdout}");
+}
+
 /// The note that tells a user the override exists, when they have set none.
 /// A screen full of `unknown` with no way out of it is the failure this
 /// guards against.

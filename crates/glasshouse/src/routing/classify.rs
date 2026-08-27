@@ -548,6 +548,96 @@ pub fn classify(
     model_output.unwrap_or_else(|| classify_heuristically(request_text))
 }
 
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+/// What `glasshouse classify` prints — the production caller of [`classify`],
+/// and the function `main.rs`'s `classify` arm calls.
+///
+/// No cheap model is wired up in this build, so this always calls
+/// `classify(request_text, None)`: Phase 35's "fall back to deterministic
+/// heuristics when no cheap model is available" is not a fallback for this
+/// caller, it is the only path available, and the report's `source` line
+/// says so on every run rather than implying a model was consulted.
+pub fn report(request_text: &str) -> String {
+    use std::fmt::Write as _;
+
+    let result = classify(request_text, None);
+    let mut out = String::new();
+
+    let _ = writeln!(out, "Glasshouse task classification");
+    let _ = writeln!(out, "===============================");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "request                 {request_text:?}");
+    let _ = writeln!(out, "source                  {}", result.source());
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "Signals");
+    let _ = writeln!(
+        out,
+        "  repository context      {}",
+        yes_no(result.needs_repo_context())
+    );
+    let _ = writeln!(
+        out,
+        "  code modification       {}",
+        yes_no(result.needs_code_modification())
+    );
+    let _ = writeln!(
+        out,
+        "  shell execution         {}",
+        yes_no(result.needs_shell_execution())
+    );
+    let _ = writeln!(
+        out,
+        "  browser interaction     {}",
+        yes_no(result.needs_browser_interaction())
+    );
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "Estimates");
+    let _ = writeln!(out, "  complexity              {}", result.complexity());
+    let _ = writeln!(
+        out,
+        "  likely multi-turn       {}",
+        yes_no(result.likely_multi_turn())
+    );
+    let _ = writeln!(out, "  warm context            {}", result.warm_context());
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "Routing");
+    let _ = writeln!(out, "  confidence              {}", result.confidence());
+    let _ = writeln!(
+        out,
+        "  workload tier           {} (conservative: {})",
+        result.workload_tier(),
+        result.conservative_workload_tier()
+    );
+    let _ = writeln!(
+        out,
+        "  safe for disposable     {} (conservative: {})",
+        yes_no(result.safe_for_disposable_model()),
+        yes_no(result.conservative_safe_for_disposable_model())
+    );
+    let caps = result.hard_capabilities();
+    let _ = writeln!(
+        out,
+        "  hard capabilities       {}",
+        if caps.is_empty() {
+            "none".to_owned()
+        } else {
+            caps.iter()
+                .copied()
+                .map(HardCapability::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    );
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,6 +791,18 @@ mod tests {
         let result = classify("run cargo test", None);
         assert!(result.source().is_heuristic());
         assert_eq!(result, classify_heuristically("run cargo test"));
+    }
+
+    #[test]
+    fn report_says_no_model_was_consulted_and_shows_the_signals() {
+        let text = report("run cargo test and fix whatever fails");
+        assert!(
+            text.contains("deterministic heuristics"),
+            "no cheap model is wired up in this build, so the report must say so, not imply a \
+             model answered:\n{text}"
+        );
+        assert!(text.contains("shell execution         yes"), "{text}");
+        assert!(text.contains("workload tier           heavy"), "{text}");
     }
 
     #[test]

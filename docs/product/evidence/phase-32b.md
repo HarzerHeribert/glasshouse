@@ -60,8 +60,8 @@ Glasshouse can describe' to a user"* — and what Phase 32A's said one layer
 down. Every telemetry reader this phase builds is reached from that one arm.
 
 State: **COMPLETE** for lines 1227, 1228, 1231, 1232, 1233, 1234, 1235,
-1236, 1237, 1238 and 1240, and for map line 1761. **OPEN** for lines 1229, 1230
-and 1239 — see the per-line breakdown, which names what each is waiting on.
+1236, 1237, 1238 and 1240, and for map line 1761. **1229 and 1230 closed by QUOTA-FOLLOWUP** —
+see the appended section. **OPEN** for line 1239 alone — see the per-line breakdown, which names what each is waiting on.
 
 **Line 1229 was moved to OPEN by the orchestrator, over this package's own
 COMPLETE, and the package asked for that decision rather than taking it.** The
@@ -447,3 +447,195 @@ supplied one. 1202 additionally remains blocked on
 which is outside this package's partition exactly as it was outside 32A's —
 **the same file has now blocked the same box for two consecutive packages**,
 which is worth a round's attention on its own.
+
+---
+
+## Appended by QUOTA-FOLLOWUP, 2026-08-27 — the readings arrive; three more
+close, and 1202 turns out to have closed itself
+
+Applying 32A's and 32B's own criterion throughout — *a structural guarantee
+is not a closed box; it closes when a reading actually reaches a caller in
+the shipped binary.* This package's brief was `.agent-runtime/packet-quota-
+followup.md`, working from a live probe
+(`.agent-runtime/probe-quota-headers-2026-08-27.md`) neither prior package
+had: Groq's real `POST /chat/completions` response, and OpenRouter's real
+`GET /api/v1/key` response (field names and types only, never values).
+
+**1202 was found already closed, by neither this package nor a patch.**
+Twice-deferred as blocked on `profile/mod.rs`'s `BackendResource::Native`
+arm, outside two consecutive packages' partitions. It is inside this one's,
+and the fix was to go read the file rather than apply the verbatim patch the
+prior report wrote — which assumed a `BackendResource::Native { harness }`
+shape the arm no longer has. Some commit between `phase-32b`'s package and
+this one's start (the freshness note this packet itself carried named
+`60f8c9f` as the commit that gave the arm a resource kind) already added
+the three-line fix, and
+`profile::tests::resolving_a_native_profile_records_it_as_a_subscription_resource`
+already proves it reaches `resolve`. Nothing was changed; the box was
+re-verified against the live file rather than assumed still blocked.
+
+**Closed this package, three lines:**
+
+- **1229's gateway half.** D1 (this packet's own design note) reverses the
+  packet-phase-32b D2 exclusion: reading a response *header* is not reading
+  the *payload* a pass-through gateway must not parse. `gateway::ingress::
+  forward` now reads `RATE_LIMIT_HEADERS` off every response it forwards,
+  before relaying it, never a byte of the body; the reading reaches
+  `SessionRouting::observe_quota_headers` and is exposed as
+  `Gateway::quota_headers()`. Proven through a real `Gateway`, a real TCP
+  exchange, and the accept loop's own unmodified call —
+  `gateway::conformance::a_real_forwarded_exchanges_rate_limit_headers_reach_the_gateway`
+  — and mutation-killed by disabling the accept loop's call to
+  `observe_quota_headers`. **The line's own wording asks for both API and
+  gateway responses; both now have a working, reached reader.** Line 1229 is
+  therefore CLOSED, superseding phase-32b's "closed for API responses,
+  one provider" note above — the gateway half was the only piece missing.
+- **1200 — request-limited resources, evidenced.** `RateLimitHeaders::apply_to`
+  now evidences `LimitingUnit::Requests` whenever a request pool reading
+  actually lands, via `LimitingUnits::with_evidenced`. AnyRouter's real,
+  `--probe`-reachable header (`ratelimit-limit: 300`, unchanged from
+  phase-32b's own probe) is enough: `describe_limits`'s "limited by" line for
+  `anyrouter` reads `credits` before a probe and `requests, credits` after
+  one, proven at the report level
+  (`a_request_ceiling_a_reader_measured_reaches_the_limited_by_line`) through
+  `report`, which `main.rs::resources_report` calls unmodified.
+- **1230 — a provider's own usage endpoint, read.** `crate::provider::
+  usage_endpoint` names OpenRouter's `/key`;
+  `discovery::read_response_body` fetches it (a second request, behind
+  `--probe`, never on the no-flag path — D2 respected);
+  `telemetry::ProviderUsage::read` parses `data.limit`, `data.limit_remaining`
+  and `data.limit_reset`, each as **present-and-null → `Inapplicable`,
+  present-and-a-number → `Measured`, absent → left alone** — D3 in code, not
+  merely stated. Tested against the *exact* real body shape this account
+  answered with (all three fields null). Wired into `probe_provider` (which
+  now makes the connectivity request **and** the usage request when one is
+  declared) and `render_probe`, both called by `main.rs` unmodified;
+  mutation-killed by disabling the usage fold and watching
+  `probe_provider_makes_both_the_connectivity_request_and_the_usage_request`
+  fail. `usage`, `usage_daily/weekly/monthly` and `rate_limit.interval` are
+  read into `ProviderUsage`'s own fields and deliberately **not** folded into
+  `CapacityState` — see the type's own doc comment for why folding a
+  cumulative spend counter into "remaining capacity" would assert a
+  relationship the endpoint never stated, and why `interval`'s format was
+  never observed as a value, only a type.
+
+**Extended, not closed — 1199, 1217, 1218.** Groq's real inference response
+gives the token pool's own headers
+(`x-ratelimit-{limit,remaining,reset}-tokens`) — the first and only seam
+observed anywhere with both halves of a token pool in one unit — and
+`RateLimitHeaders` now reads them, including the `12.342s`/`90ms`
+duration-suffixed reset format neither AnyRouter's plain-integer style nor
+this parser's old shape could read (`parse_reset_seconds`). Fed through the
+model directly, this produces a real `Percentage::Exact(99)` for both the
+token and request pools —
+`telemetry::tests::groqs_reading_produces_a_real_exact_percentage_from_the_model_alone`
+— which is 32A's and 32B's own standing test for whether the antecedent of
+1217/1218 has ever fired.
+
+**It has not fired in the shipped binary, and the reason is precise rather
+than the old "nothing computes one" of phase-32b.** Groq's headers arrive on
+exactly one path — real inference, which only the gateway forwards, since
+Glasshouse must not spend a token to check a quota. The gateway now captures
+them (`Gateway::quota_headers()`, this package's own 1229 closure) — but
+nothing in the shipped binary asks a percentage question of a
+gateway-captured reading: `main.rs`, `cli.rs` and `shell/**` are this
+package's `FORBIDDEN FILES`, and every existing caller of `Pool::normalized`
+enters through `glasshouse resources`'s registry loop, which a live gateway
+session's readings never reach. So **1199 stays open** — the token pool can
+be filled and `LimitingUnit::Tokens` evidenced (proven at the model level,
+`a_reading_of_both_pools_evidences_both_limiting_units_at_once`), but no
+`--probe`-reachable host has ever sent a token header, so no caller in
+`glasshouse resources` constructs one for real. **1217 and 1218 stay open**
+for the matching reason on the percentage side: the usage-endpoint path
+*does* have a real caller (`render_usage_probe`, above), but the one live
+account this project has ever read has a `null` limit, so no percentage
+fires there either. Two working, reached parsers; zero live accounts that
+happen to supply both halves at once. Recorded rather than closed on the
+strength of a synthetic test, per practice §5's own rule about a packet's
+own claims.
+
+**1210 and 1211 gained the caller they were missing, and stay open on their
+own honest terms.** `WindowCapacity::started_at_unix` and `::resets_at_unix`
+were tracked and tested since 32A and **never rendered** —
+`provider::resources::render_resource` had no line for either. `render_windows`
+is that line now, reached from the same unmodified `main.rs` arm and proven
+through the binary
+(`the_shipped_binary_shows_every_windows_start_and_reset_state_when_verbose`).
+1210 stays open because no host anywhere — including Groq — has ever
+published a window *start*, only resets. 1211 stays open because the one
+real reset any `--probe`-reachable host has sent (AnyRouter's, if it ever
+sends one — it has not) has not arrived; Groq's own request-pool reset
+*would* reach `render_windows` through the rolling window the same way
+AnyRouter's would, but only via the gateway, which — as with 1199/1217/1218
+— has no bridge into `glasshouse resources`. Groq's *token*-pool reset
+specifically is read (`RateLimitHeaders::token_reset_seconds`) but
+deliberately **not** folded into `CapacityState` at all: `Windows` is
+one-per-*resource* in 32A's model, already spoken for by the request pool's
+reset, and folding a second, different reset into the same field would
+silently pick a winner between two real numbers. Flagged rather than
+patched — widening `Windows` to be per-pool is an architecture change this
+package's tier is not authorized to make unilaterally.
+
+**Unchanged:** 1205, 1206, 1208, 1212, 1213, 1215 — no provider anywhere has
+ever published a separate input/output split, a cached-input figure, a raw
+credit balance, more than one window at once, a concurrent-request cap, or a
+tokens-per-minute window (Groq's token ceiling arrives with no window at
+all, so filing it as a per-minute rate would be inventing the period).
+
+Production evidence, beyond what is cited per-line above:
+- `crates/glasshouse/src/gateway/ingress.rs::forward` — the header capture,
+  headers only, never the body.
+- `crates/glasshouse/src/gateway/session.rs::SessionRouting::{observe_quota_headers,
+  quota_headers}` and `crates/glasshouse/src/gateway/mod.rs::Gateway::quota_headers`
+  — the accessor.
+- `crates/glasshouse/src/provider/discovery.rs::{BodyFetch, read_response_body}`
+  — the second kind of probe capability map line 1230 needed, generic over
+  any future provider-specific body read.
+- `crates/glasshouse/src/provider/telemetry.rs::{ProviderUsage, apply_provider_usage,
+  UsageField}` — D3 in code.
+- `crates/glasshouse/src/provider/quota.rs::LimitingUnits::with_evidenced` —
+  1199/1200's own seam.
+- `crates/glasshouse/src/provider/resources.rs::{usage_probe, render_windows,
+  describe_timestamp}`.
+
+Mutation evidence (practice §41, §35 for the call rather than the callee),
+each `ok` before, `FAILED` mutated, `ok` after restore:
+- `gateway::mod.rs`'s `routing.observe_quota_headers(...)` call in the accept
+  loop, disabled → `FAILED` at
+  `a_real_forwarded_exchanges_rate_limit_headers_reach_the_gateway`.
+- `provider::telemetry.rs`'s `apply_to`'s final `.limited_by(limits)`,
+  disabled → `FAILED` at
+  `a_reading_of_both_pools_evidences_both_limiting_units_at_once`.
+- `provider::resources.rs`'s `probe_provider`'s usage-endpoint fold,
+  disabled → `FAILED` at
+  `probe_provider_makes_both_the_connectivity_request_and_the_usage_request`.
+- `provider::resources.rs`'s `render_resource`'s call to `render_windows`,
+  disabled → `FAILED` at
+  `a_window_reset_a_reader_supplied_reaches_the_report`.
+
+Platform/external evidence:
+- `cargo test -p glasshouse` (macOS, this worktree, run alone per practice
+  §40): every target green — `--lib` 1273/0, `provider_discovery` 30/0,
+  `pty_smoke` 71/0, every other integration target unchanged and green.
+- `cargo clippy -p glasshouse --all-targets -- -D warnings`: clean (one
+  `large_enum_variant` finding fixed by boxing `ProbeReading::Answered`'s new
+  field rather than its existing `headers` field, which `main.rs` already
+  destructures by value and this package may not edit).
+- `cargo doc -p glasshouse --no-deps`: clean (seven private-intra-doc-link
+  warnings fixed — linking to a private `mod`, a private constant and a
+  private enum's variants from public doc comments).
+- `rustfmt` on this package's own ten files only, never `cargo fmt --all`
+  (§37).
+- **Not run:** the local gate (`scripts/ci-local.sh`) — another worker was
+  live this round (§40) — so the Linux and Windows legs and the MSRV job are
+  unproven for this change. Nothing here is platform-conditional (no `cfg`,
+  no new process spawn, no path handling), which is an argument and not a
+  run.
+- **No provider key was used anywhere in this package.** Every live number
+  cited (Groq's headers, OpenRouter's null fields) was copied verbatim from
+  `.agent-runtime/probe-quota-headers-2026-08-27.md`, itself run by the
+  orchestrator; every test using a non-null number is labelled as
+  synthetic in its own doc comment.
+
+See `.agent-runtime/report-QUOTA-FOLLOWUP.md` for the full audit table,
+probes still needed, and what this packet got wrong.

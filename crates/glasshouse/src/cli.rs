@@ -187,6 +187,23 @@ pub enum Command {
         #[arg(long)]
         no_harness: bool,
     },
+    /// Report what Glasshouse believes a request needs, without acting on it.
+    ///
+    /// Reads the words as free-form request text — not a query language —
+    /// and answers whether it needs repository context, code modification, a
+    /// shell, or browser interaction; a coarse complexity and workload tier;
+    /// whether it looks safe to hand to a disposable free or local model; and
+    /// how confident the classification is, so an uncertain answer can be
+    /// escalated rather than trusted outright.
+    ///
+    /// No cheap model is wired up in this build, so this always runs the
+    /// deterministic heuristic path — the report says so on every run, the
+    /// same way `glasshouse memory extract --reply-from` always says no model
+    /// was called.
+    Classify {
+        /// The request text to classify.
+        text: Vec<String>,
+    },
     /// List the sessions Glasshouse has recorded for this project, or act on
     /// one of them.
     ///

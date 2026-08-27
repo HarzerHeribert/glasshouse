@@ -1197,9 +1197,9 @@ Phase 32A — Unified quota and capacity model
 
 ☑ Define a provider-independent CapacityState model for describing how much usable capacity a resource has left.
 ☐ Allow CapacityState to represent token-limited resources.
-☐ Allow CapacityState to represent request-limited resources.
+☑ Allow CapacityState to represent request-limited resources.
 ☑ Allow CapacityState to represent credit-limited resources.
-☐ Allow CapacityState to represent subscription resources with opaque provider-defined limits.
+☑ Allow CapacityState to represent subscription resources with opaque provider-defined limits.
 ☐ Allow CapacityState to represent user-defined monetary budgets for metered APIs.
 ☑ Allow CapacityState to represent effectively unlimited local inference separately from remote quota.
 ☐ Track input-token budget independently from output-token budget when the provider exposes separate limits.
@@ -1226,8 +1226,8 @@ Fixed architectural requirements
 
 ☑ Define quota telemetry sources as authoritative, observed, estimated, manual, or unknown.
 ☑ Prefer authoritative provider or harness usage telemetry when it is available.
-☐ Read rate-limit and usage headers from API and gateway responses when the provider exposes them.
-☐ Read provider usage endpoints when they are documented and can be queried without excessive request cost.
+☑ Read rate-limit and usage headers from API and gateway responses when the provider exposes them.
+☑ Read provider usage endpoints when they are documented and can be queried without excessive request cost.
 ☑ Read native harness usage or status information when a stable machine-readable interface exists.
 ☑ Allow harness adapters to expose subscription-usage telemetry independently from API-provider telemetry.
 ☑ Allow a user to enter a known plan or manual budget when the provider exposes no usable telemetry.
@@ -1486,20 +1486,20 @@ Phase 34F — Model capability and tier calibration
 
 Phase 35 — Lightweight task classification
 
-☐ Add a lightweight task classifier that can run on a cheap, free, or local model.
-☐ Classify whether a request requires repository context.
-☐ Classify whether a request requires code modification.
-☐ Classify whether a request requires shell execution.
-☐ Classify whether a request requires browser interaction.
-☐ Estimate task complexity on a coarse scale.
-☐ Estimate whether the task is likely to require multiple turns.
-☐ Assign a required workload tier to the task.
-☐ Identify hard capability requirements that cannot be satisfied merely by choosing a stronger text model.
-☐ Estimate whether the task is safe for a disposable free or local model.
-☐ Estimate whether existing warm context is likely more valuable than a stronger cold model.
-☐ Return classification confidence so uncertain tier assignments can be escalated conservatively.
-☐ Allow classification to fall back to deterministic heuristics when no cheap model is available.
-☐ Keep classification output structured and small.
+☑ Add a lightweight task classifier that can run on a cheap, free, or local model.
+☑ Classify whether a request requires repository context.
+☑ Classify whether a request requires code modification.
+☑ Classify whether a request requires shell execution.
+☑ Classify whether a request requires browser interaction.
+☑ Estimate task complexity on a coarse scale.
+☑ Estimate whether the task is likely to require multiple turns.
+☑ Assign a required workload tier to the task.
+☑ Identify hard capability requirements that cannot be satisfied merely by choosing a stronger text model.
+☑ Estimate whether the task is safe for a disposable free or local model.
+☑ Estimate whether existing warm context is likely more valuable than a stronger cold model.
+☑ Return classification confidence so uncertain tier assignments can be escalated conservatively.
+☑ Allow classification to fall back to deterministic heuristics when no cheap model is available.
+☑ Keep classification output structured and small.
 
 Phase 35A — Candidate generation
 

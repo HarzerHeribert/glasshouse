@@ -88,10 +88,53 @@
 //! of any name on the same route on the same day. That is recorded in the
 //! evidence ledger as the reason line 1229 closes on one provider rather than
 //! on a family of them.
+//!
+//! # A second seam, on a different route: the provider named its own units
+//!
+//! **Groq, `POST /chat/completions`, 2026-08-26** — a real (free-model,
+//! one-token) inference response, the only kind of request that carries this
+//! seam at all — answered `200` with both halves of *two* pools, not one:
+//!
+//! ```text
+//! x-ratelimit-limit-requests: 7000
+//! x-ratelimit-limit-tokens: 6000
+//! x-ratelimit-remaining-requests: 6999
+//! x-ratelimit-remaining-tokens: 5991
+//! x-ratelimit-reset-requests: 12.342s
+//! x-ratelimit-reset-tokens: 90ms
+//! ```
+//!
+//! Two things distinguish this from AnyRouter's set. First, the header names
+//! themselves say which resource they bound — `-requests` and `-tokens` are
+//! separate suffixes rather than one ambiguous `x-ratelimit-limit` — so
+//! [`RateLimitHeaders`] reads the `-requests` pair into the same fields
+//! AnyRouter's unsuffixed spelling fills, and the `-tokens` pair into fields
+//! of their own, landing in [`crate::provider::quota::TokenBudget::combined`]
+//! rather than the request [`Pool`]. Second, the reset fields are not bare
+//! integers: `12.342s` and `90ms` are a duration with its unit attached, which
+//! this module's own duration parser reads apart from the plain-integer-seconds
+//! [`RateLimitHeaders::reset`] AnyRouter's field uses.
+//!
+//! **This route is the gateway's own forwarding path**, and nowhere else:
+//! `crate::provider::discovery` makes catalogue and base-URL reads only, on
+//! purpose, because Glasshouse must not spend a token to check a quota — see
+//! `crate::gateway::ingress`'s own header capture, which reads exactly this
+//! allowlist from a response the gateway was already forwarding.
+//!
+//! # The gateway may read a response header now — this reverses a decision
+//!
+//! Phase 9I line 528 held that the gateway must not parse anything in a
+//! response it exists to pass through, and an earlier packet for this phase
+//! read that as forbidding the header block along with the body. **That
+//! overreached.** The gateway already parses the status line and header block
+//! in order to forward them; the body is what it streams untouched. Reading a
+//! header is not reading the payload, so `crate::gateway::ingress` now reads
+//! this module's allowlist — headers only, never a byte of the body — from
+//! every response it forwards. See that module for where.
 
 use crate::provider::quota::{
-    Capacity, CapacityState, KnownPlan, LongWindowRequests, NativeAmount, Pool, RateCeilings,
-    Reading, ReadingSource,
+    Capacity, CapacityState, KnownPlan, LimitingUnit, LongWindowRequests, NativeAmount, Pool,
+    RateCeilings, Reading, ReadingSource,
 };
 
 /// Every response-header name this module will read, lowercased.
@@ -126,6 +169,17 @@ pub const RATE_LIMIT_HEADERS: &[&str] = &[
     "x-ratelimit-window",
     // How long to wait, sent with a refusal rather than with a success.
     "retry-after",
+    // Groq's own spellings, which name the resource in the header itself
+    // rather than leaving it to be inferred — see the module documentation's
+    // "a second seam" entry. The `-requests` pair lands in the same fields as
+    // the unsuffixed spellings above; the `-tokens` pair is the only header
+    // seam observed anywhere that fills the token pool.
+    "x-ratelimit-limit-requests",
+    "x-ratelimit-remaining-requests",
+    "x-ratelimit-reset-requests",
+    "x-ratelimit-limit-tokens",
+    "x-ratelimit-remaining-tokens",
+    "x-ratelimit-reset-tokens",
 ];
 
 /// Whether `name` is a header this module is willing to read.
@@ -163,6 +217,15 @@ pub fn retain_rate_limit_headers<'a>(
 /// know whether it is per minute or per day, and
 /// [`RateLimitHeaders::apply_to`] files it into a different field depending
 /// on the answer.
+///
+/// `limit`/`remaining`/`reset`/`window_seconds` are the **request** pool —
+/// AnyRouter's unsuffixed spelling and Groq's `-requests` spelling both land
+/// here, because both name the same resource. `token_*` is a second, separate
+/// pool that only Groq's `-tokens` spelling has ever been observed to fill —
+/// see the module documentation's "a second seam" entry. There is
+/// deliberately no `token_window_seconds`: no host observed anywhere states a
+/// window for its token ceiling, and inventing one would be guessing at a
+/// period nobody published.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RateLimitHeaders {
     limit: Option<i64>,
@@ -170,6 +233,9 @@ pub struct RateLimitHeaders {
     reset: Option<i64>,
     window_seconds: Option<i64>,
     retry_after_seconds: Option<i64>,
+    token_limit: Option<i64>,
+    token_remaining: Option<i64>,
+    token_reset: Option<i64>,
     /// The names, from [`RATE_LIMIT_HEADERS`], that actually supplied the
     /// numbers above — never the values, never anything else.
     read_from: Vec<&'static str>,
@@ -207,16 +273,32 @@ impl RateLimitHeaders {
             };
             let parsed = match *known {
                 "ratelimit-policy" => parse_policy_window(value),
+                // Groq's reset fields carry a unit suffix (`"12.342s"`,
+                // `"90ms"`) rather than the bare integer seconds AnyRouter's
+                // `ratelimit-reset` uses; `parse_reset_seconds` reads both.
+                "ratelimit-reset"
+                | "x-ratelimit-reset"
+                | "x-ratelimit-reset-requests"
+                | "x-ratelimit-reset-tokens" => parse_reset_seconds(value),
                 _ => parse_count(value),
             };
             let Some(parsed) = parsed else { continue };
 
             let slot = match *known {
-                "ratelimit-limit" | "x-ratelimit-limit" => &mut out.limit,
-                "ratelimit-remaining" | "x-ratelimit-remaining" => &mut out.remaining,
-                "ratelimit-reset" | "x-ratelimit-reset" => &mut out.reset,
+                "ratelimit-limit" | "x-ratelimit-limit" | "x-ratelimit-limit-requests" => {
+                    &mut out.limit
+                }
+                "ratelimit-remaining"
+                | "x-ratelimit-remaining"
+                | "x-ratelimit-remaining-requests" => &mut out.remaining,
+                "ratelimit-reset" | "x-ratelimit-reset" | "x-ratelimit-reset-requests" => {
+                    &mut out.reset
+                }
                 "ratelimit-policy" | "x-ratelimit-window" => &mut out.window_seconds,
                 "retry-after" => &mut out.retry_after_seconds,
+                "x-ratelimit-limit-tokens" => &mut out.token_limit,
+                "x-ratelimit-remaining-tokens" => &mut out.token_remaining,
+                "x-ratelimit-reset-tokens" => &mut out.token_reset,
                 // Unreachable: `known` is an element of `RATE_LIMIT_HEADERS`
                 // and every one is matched above. A new entry added there
                 // without a home here is caught by
@@ -263,6 +345,27 @@ impl RateLimitHeaders {
     /// How long the provider asked the caller to wait, if it refused.
     pub fn retry_after_seconds(&self) -> Option<i64> {
         self.retry_after_seconds
+    }
+
+    /// The token pool's ceiling, if the provider stated one — Groq's
+    /// `x-ratelimit-limit-tokens`, the only header seam observed anywhere
+    /// that names a token limit.
+    pub fn token_limit(&self) -> Option<i64> {
+        self.token_limit
+    }
+
+    /// What the provider said is left of the token pool, if it said.
+    pub fn token_remaining(&self) -> Option<i64> {
+        self.token_remaining
+    }
+
+    /// The token pool's own reset field, in seconds, if the provider sent
+    /// one. Read but — see [`RateLimitHeaders::apply_to`] — not folded into
+    /// [`CapacityState`], because [`crate::provider::quota::Windows`] holds
+    /// one rolling window per *resource*, not one per pool, and Groq's
+    /// request and token pools reset on different schedules.
+    pub fn token_reset_seconds(&self) -> Option<i64> {
+        self.token_reset
     }
 
     /// Which of [`RATE_LIMIT_HEADERS`] supplied a number. Names only.
@@ -330,7 +433,11 @@ impl RateLimitHeaders {
         }
 
         let source = |name: &'static str| ReadingSource::ResponseHeader(name.to_owned());
-        let requests_source = source(self.name_for(&["ratelimit-limit", "x-ratelimit-limit"]));
+        let requests_source = source(self.name_for(&[
+            "ratelimit-limit",
+            "x-ratelimit-limit",
+            "x-ratelimit-limit-requests",
+        ]));
 
         let mut requests = state.requests().clone();
         if requests.limit().is_readable()
@@ -348,8 +455,52 @@ impl RateLimitHeaders {
             requests = requests.with_remaining(Capacity::Measured(Reading::new(
                 NativeAmount::whole(remaining, "requests"),
                 observed_at_unix,
-                source(self.name_for(&["ratelimit-remaining", "x-ratelimit-remaining"])),
+                source(self.name_for(&[
+                    "ratelimit-remaining",
+                    "x-ratelimit-remaining",
+                    "x-ratelimit-remaining-requests",
+                ])),
             )));
+        }
+
+        // The token pool — capability map line 1199. Only ever filled by
+        // Groq's `-tokens` spelling; every other host measured here sends
+        // nothing that names a token ceiling at all, so this is a no-op for
+        // them rather than a guess dressed as a reading.
+        let mut tokens = state.tokens().clone();
+        let mut combined = tokens.combined().clone();
+        if combined.limit().is_readable()
+            && let Some(limit) = self.token_limit
+        {
+            combined = combined.with_limit(Capacity::Measured(Reading::new(
+                NativeAmount::whole(limit, "tokens"),
+                observed_at_unix,
+                source(self.name_for(&["x-ratelimit-limit-tokens"])),
+            )));
+        }
+        if combined.remaining().is_readable()
+            && let Some(remaining) = self.token_remaining
+        {
+            combined = combined.with_remaining(Capacity::Measured(Reading::new(
+                NativeAmount::whole(remaining, "tokens"),
+                observed_at_unix,
+                source(self.name_for(&["x-ratelimit-remaining-tokens"])),
+            )));
+        }
+        tokens = tokens.with_combined(combined);
+
+        // Capability map lines 1199 and 1200: a resource that has just been
+        // seen to publish a request or a token ceiling is evidenced to be
+        // limited by that unit, whether or not it was already known to be.
+        // `with_evidenced` is a no-op for `LimitingUnits::None` and
+        // `::Delegated`, so this cannot turn local inference or the gateway
+        // into something they are not.
+        let mut limits = state.limiting_units().clone();
+        if requests.limit().is_measured() || requests.remaining().is_measured() {
+            limits = limits.with_evidenced(LimitingUnit::Requests);
+        }
+        if tokens.combined().limit().is_measured() || tokens.combined().remaining().is_measured() {
+            limits = limits.with_evidenced(LimitingUnit::Tokens);
         }
 
         let mut rates = state.rate_ceilings().clone();
@@ -384,15 +535,21 @@ impl RateLimitHeaders {
                     .with_resets_at(Capacity::Measured(Reading::new(
                         resets_at,
                         observed_at_unix,
-                        source(self.name_for(&["ratelimit-reset", "x-ratelimit-reset"])),
+                        source(self.name_for(&[
+                            "ratelimit-reset",
+                            "x-ratelimit-reset",
+                            "x-ratelimit-reset-requests",
+                        ])),
                     )));
             windows = windows.with_rolling(rolling);
         }
 
         state
             .with_requests(requests)
+            .with_tokens(tokens)
             .with_rate_ceilings(rates)
             .with_windows(windows)
+            .limited_by(limits)
     }
 
     /// Which of `candidates` actually supplied a number, for naming a
@@ -420,6 +577,36 @@ fn parse_count(value: &str) -> Option<i64> {
     (parsed >= 0).then_some(parsed)
 }
 
+/// A reset delta in seconds, in either shape Glasshouse has observed on the
+/// wire.
+///
+/// AnyRouter's `ratelimit-reset` is a bare integer — [`parse_count`] alone
+/// would have been enough for it. Groq's `x-ratelimit-reset-requests` and
+/// `x-ratelimit-reset-tokens` carry a unit suffix instead — `"12.342s"`,
+/// `"90ms"` — so this tries the bare-integer reading first and falls back to
+/// a `s`/`ms`-suffixed decimal. A sub-second delta rounds to the nearest
+/// whole second rather than truncating to zero: `CapacityState` has nowhere
+/// to keep sub-second precision, and "resets in under a second" is a
+/// different fact from "has already reset".
+fn parse_reset_seconds(value: &str) -> Option<i64> {
+    let trimmed = value.trim();
+    if let Some(count) = parse_count(trimmed) {
+        return Some(count);
+    }
+    // Checked before `s`, because `"90ms"` also ends in `s`.
+    let (number, seconds_per_unit) = if let Some(prefix) = trimmed.strip_suffix("ms") {
+        (prefix, 0.001_f64)
+    } else {
+        let prefix = trimmed.strip_suffix('s')?;
+        (prefix, 1.0_f64)
+    };
+    let magnitude: f64 = number.trim().parse().ok()?;
+    if !magnitude.is_finite() || magnitude < 0.0 {
+        return None;
+    }
+    Some((magnitude * seconds_per_unit).round() as i64)
+}
+
 /// The window out of an IETF `RateLimit-Policy` value — `"300;w=60"` is a
 /// limit of 300 over 60 seconds, and 60 is what this returns.
 ///
@@ -432,6 +619,192 @@ fn parse_policy_window(value: &str) -> Option<i64> {
         .skip(1)
         .filter_map(|part| part.trim().strip_prefix("w="))
         .find_map(parse_count)
+}
+
+/// One of a provider usage endpoint's own nullable fields — design decision
+/// D3.
+///
+/// Three states because the wire distinguishes three facts: the field is
+/// **absent** (nobody has read this provider's opinion, or this build of
+/// Glasshouse does not know the field), **present and `null`** (the provider
+/// has an opinion and it is "no ceiling"), and **present and a number** (a
+/// measurement). Collapsing `null` and absent into one `Option` — which is
+/// what a derived deserializer would do — would lose exactly the distinction
+/// OpenRouter's own account needed: `GET /api/v1/key`'s `data.limit` was
+/// read `null`, authenticated, 2026-08-27, and that is a real answer, not a
+/// field nobody sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum UsageField {
+    #[default]
+    Absent,
+    Null,
+    Number(i64),
+}
+
+impl UsageField {
+    /// Read `key` out of a JSON object the way every reader in this module
+    /// does: a value that is not a non-negative integer is treated the same
+    /// as one that was never sent, rather than as an error — capability map
+    /// line 1238.
+    fn of(object: &serde_json::Map<String, serde_json::Value>, key: &str) -> Self {
+        match object.get(key) {
+            None => UsageField::Absent,
+            Some(serde_json::Value::Null) => UsageField::Null,
+            Some(value) => value
+                .as_i64()
+                .filter(|number| *number >= 0)
+                .map_or(UsageField::Absent, UsageField::Number),
+        }
+    }
+}
+
+/// What a provider's own usage endpoint answered — capability map line 1230.
+///
+/// # Established for exactly one provider, and one route
+///
+/// `crate::provider::usage_endpoint` names which providers this can even be
+/// asked of. Today that is OpenRouter's `GET /api/v1/key` alone — the route
+/// [`crate::provider::discovery::read_response_body`] fetches, behind
+/// `--probe`, never on a path that runs without one.
+///
+/// # What this reader folds into [`CapacityState`], and what it deliberately
+/// does not
+///
+/// `limit`, `limit_remaining` and `limit_reset` map onto the **credits**
+/// pool's limit, the credits pool's remaining half, and the **calendar**
+/// window's reset time respectively — the calendar window, not the rolling
+/// one [`RateLimitHeaders`] fills, because an account-level usage ceiling
+/// resets on the provider's own billing cycle rather than a short rolling
+/// window. A field present and `null` becomes [`Capacity::Inapplicable`] and
+/// a field present and a number becomes [`Capacity::Measured`] — D3's own
+/// rule in code.
+///
+/// The response also carries `usage`, `usage_daily`, `usage_weekly`,
+/// `usage_monthly` and `rate_limit.{requests,interval}`, none of which this
+/// reader applies to [`CapacityState`]. `usage*` is a **cumulative all-time
+/// spend counter**, a different quantity from "how much of a ceiling
+/// remains" — the only shape [`Pool::remaining`] has — and folding one into
+/// the other would assert a relationship the endpoint never stated,
+/// especially on an account whose `limit` is `null`. `rate_limit.interval`'s
+/// format was recorded only as a type (`str`), never a real value, so
+/// parsing it would be guessing at units nobody confirmed. Both are a
+/// decision for whoever holds a live account and a real response body to
+/// make, not this package's to invent — see the report's `PROBES I NEED RUN`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderUsage {
+    limit: UsageField,
+    limit_remaining: UsageField,
+    limit_reset: UsageField,
+}
+
+impl ProviderUsage {
+    /// Read `body` the way [`read_harness_plan`] reads a harness status body:
+    /// a shape this parser does not recognise produces the same
+    /// [`ProviderUsage::default`] an absent field would, never an error.
+    ///
+    /// Only `data.limit`, `data.limit_remaining` and `data.limit_reset` are
+    /// read — see the type documentation for why the rest of the documented
+    /// shape is deliberately left unread.
+    pub fn read(body: &str) -> Self {
+        let Ok(serde_json::Value::Object(root)) = serde_json::from_str::<serde_json::Value>(body)
+        else {
+            return Self::default();
+        };
+        let Some(serde_json::Value::Object(data)) = root.get("data") else {
+            return Self::default();
+        };
+        Self {
+            limit: UsageField::of(data, "limit"),
+            limit_remaining: UsageField::of(data, "limit_remaining"),
+            limit_reset: UsageField::of(data, "limit_reset"),
+        }
+    }
+
+    /// Whether any of the three fields this reader understands was present
+    /// at all, `null` or a number.
+    pub fn is_empty(&self) -> bool {
+        matches!(self.limit, UsageField::Absent)
+            && matches!(self.limit_remaining, UsageField::Absent)
+            && matches!(self.limit_reset, UsageField::Absent)
+    }
+
+    fn reading(
+        &self,
+        field: UsageField,
+        unit: &str,
+        observed_at_unix: i64,
+    ) -> Option<Capacity<NativeAmount>> {
+        match field {
+            UsageField::Absent => None,
+            UsageField::Null => Some(Capacity::Inapplicable),
+            UsageField::Number(amount) => Some(Capacity::Measured(Reading::new(
+                NativeAmount::whole(amount, unit),
+                observed_at_unix,
+                ReadingSource::ProviderEndpoint("GET /key".to_owned()),
+            ))),
+        }
+    }
+
+    /// Fold this reading into `state` — capability map line 1230's seam.
+    ///
+    /// Guarded by [`Capacity::is_readable`] exactly like
+    /// [`RateLimitHeaders::apply_to`]: a subscription's opaque pools and a
+    /// gateway's delegated ones are left alone however this endpoint
+    /// answered.
+    pub fn apply_to(&self, state: CapacityState, observed_at_unix: i64) -> CapacityState {
+        if self.is_empty() {
+            return state;
+        }
+
+        let mut credits = state.credits().clone();
+        if credits.limit().is_readable()
+            && let Some(reading) = self.reading(self.limit, "USD", observed_at_unix)
+        {
+            credits = credits.with_limit(reading);
+        }
+        if credits.remaining().is_readable()
+            && let Some(reading) = self.reading(self.limit_remaining, "USD", observed_at_unix)
+        {
+            credits = credits.with_remaining(reading);
+        }
+
+        let mut windows = state.windows().clone();
+        if windows.calendar().resets_at_unix().is_readable() {
+            let resets_at = match self.limit_reset {
+                UsageField::Absent => None,
+                UsageField::Null => Some(Capacity::Inapplicable),
+                UsageField::Number(value) => {
+                    let at = if value >= observed_at_unix {
+                        value
+                    } else {
+                        observed_at_unix.saturating_add(value)
+                    };
+                    Some(Capacity::Measured(Reading::new(
+                        at,
+                        observed_at_unix,
+                        ReadingSource::ProviderEndpoint("GET /key".to_owned()),
+                    )))
+                }
+            };
+            if let Some(resets_at) = resets_at {
+                let calendar = windows.calendar().clone().with_resets_at(resets_at);
+                windows = windows.with_calendar(calendar);
+            }
+        }
+
+        state.with_credits(credits).with_windows(windows)
+    }
+}
+
+/// Fold a provider's usage-endpoint response into a resource's capacity —
+/// the public name of line 1230's seam, beside [`apply_provider_headers`]
+/// and [`apply_harness_report`] for the same reason those two sit together.
+pub fn apply_provider_usage(
+    state: CapacityState,
+    usage: &ProviderUsage,
+    observed_at_unix: i64,
+) -> CapacityState {
+    usage.apply_to(state, observed_at_unix)
 }
 
 /// What a harness said about its own first-party subscription — capability
@@ -921,6 +1294,113 @@ mod tests {
         );
     }
 
+    // --- line 1230: a provider's own usage endpoint -----------------------
+
+    /// The exact shape `GET https://openrouter.ai/api/v1/key` answered with,
+    /// authenticated, 2026-08-27, field names and *types* recorded in
+    /// `.agent-runtime/probe-quota-headers-2026-08-27.md` — never a value.
+    /// `data.limit`, `data.limit_remaining` and `data.limit_reset` really
+    /// were `null` on the probed account; `9` below stands in for `usage`'s
+    /// real figure, which was never recorded, and is not asserted on for
+    /// exactly that reason — this reader does not apply `usage` to anything.
+    const OPENROUTER_KEY_BODY: &str = r#"{
+        "data": {
+            "limit": null,
+            "limit_remaining": null,
+            "limit_reset": null,
+            "usage": 9,
+            "usage_daily": 9,
+            "usage_weekly": 9,
+            "usage_monthly": 9,
+            "is_free_tier": false,
+            "include_byok_in_limit": false,
+            "rate_limit": { "requests": 9, "interval": "10s" }
+        }
+    }"#;
+
+    #[test]
+    fn a_null_limit_is_read_as_present_and_inapplicable_not_as_absent() {
+        let usage = ProviderUsage::read(OPENROUTER_KEY_BODY);
+        assert!(
+            !usage.is_empty(),
+            "a body carrying three null fields is not nothing"
+        );
+
+        let state = usage.apply_to(CapacityState::metered_balance(), OBSERVED);
+        assert_eq!(state.credits().limit(), &Capacity::Inapplicable);
+        assert_eq!(state.credits().remaining(), &Capacity::Inapplicable);
+        assert_eq!(
+            state.windows().calendar().resets_at_unix(),
+            &Capacity::Inapplicable
+        );
+        // And the rolling window — what `RateLimitHeaders` fills — is
+        // untouched: this endpoint's reset is an account-level one, not a
+        // short rolling ceiling's.
+        assert!(!state.windows().rolling().resets_at_unix().is_measured());
+    }
+
+    /// D3's other half: an endpoint an account never answered at all reads
+    /// as nothing, the same as `RateLimitHeaders` on a header-free response.
+    #[test]
+    fn a_body_with_no_data_object_reads_as_nothing() {
+        for body in ["", "not json", "{}", r#"{"data": []}"#, r#"{"data": {}}"#] {
+            let usage = ProviderUsage::read(body);
+            assert!(usage.is_empty(), "`{body}` must not yield a reading");
+            let state = usage.apply_to(CapacityState::metered_balance(), OBSERVED);
+            assert!(!state.credits().limit().is_measured());
+            assert_eq!(
+                state.credits().limit(),
+                CapacityState::metered_balance().credits().limit()
+            );
+        }
+    }
+
+    /// The numeric branch, exercised with a value shaped like the field's
+    /// documented type rather than a live observation — **no authenticated
+    /// account this project has read has ever answered a non-null `limit`**,
+    /// so this proves the parser's arithmetic, not a provider's behaviour.
+    #[test]
+    fn a_numeric_limit_becomes_a_measured_credits_ceiling() {
+        let usage = ProviderUsage::read(
+            r#"{"data": {"limit": 25, "limit_remaining": 10, "limit_reset": 30}}"#,
+        );
+        let state = usage.apply_to(CapacityState::metered_balance(), OBSERVED);
+        assert_eq!(
+            state.credits().limit().value().map(NativeAmount::value),
+            Some(25)
+        );
+        assert_eq!(
+            state.credits().remaining().value().map(NativeAmount::value),
+            Some(10)
+        );
+        assert_eq!(
+            state.windows().calendar().resets_at_unix().value(),
+            Some(&(OBSERVED + 30))
+        );
+        assert!(
+            state
+                .credits()
+                .limit()
+                .describe_source()
+                .contains("GET /key")
+        );
+    }
+
+    /// A subscription has no credit balance at all — `Pool::inapplicable`,
+    /// per `CapacityState::opaque_subscription`'s own documentation — and
+    /// `is_readable` refuses it exactly as it refuses a genuinely opaque
+    /// pool. This reader must respect that exactly as `RateLimitHeaders`
+    /// does.
+    #[test]
+    fn a_reader_cannot_fill_in_a_subscriptions_inapplicable_credits_pool() {
+        let usage = ProviderUsage::read(r#"{"data": {"limit": 25, "limit_remaining": 10}}"#);
+        let subscription = CapacityState::opaque_subscription();
+        assert!(!subscription.credits().limit().is_readable());
+        let after = usage.apply_to(subscription, OBSERVED);
+        assert!(!after.credits().limit().is_measured());
+        assert_eq!(after.credits().limit(), &Capacity::Inapplicable);
+    }
+
     // --- line 1233: what the user can enter ------------------------------
 
     #[test]
@@ -1135,5 +1615,154 @@ mod tests {
             Some(&(OBSERVED + 30))
         );
         assert!(!state.windows().calendar().resets_at_unix().is_measured());
+    }
+
+    // --- Groq's real inference-response headers, capability map lines
+    // 1199, 1200, 1207, 1215, 1217 and 1218 -------------------------------
+
+    /// The exact header set `POST /chat/completions` answered with, against a
+    /// free model with `max_tokens: 1`, read 2026-08-26 and recorded in
+    /// `.agent-runtime/probe-quota-headers-2026-08-27.md`. Field for field,
+    /// not composed — the same discipline `anyrouter_models_headers` follows.
+    fn groq_inference_headers() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("x-ratelimit-limit-requests", "7000"),
+            ("x-ratelimit-limit-tokens", "6000"),
+            ("x-ratelimit-remaining-requests", "6999"),
+            ("x-ratelimit-remaining-tokens", "5991"),
+            ("x-ratelimit-reset-requests", "12.342s"),
+            ("x-ratelimit-reset-tokens", "90ms"),
+        ]
+    }
+
+    #[test]
+    fn groqs_named_headers_split_into_a_request_pool_and_a_token_pool() {
+        let read = RateLimitHeaders::read(groq_inference_headers());
+        // The `-requests` pair lands in the same fields AnyRouter's unsuffixed
+        // spelling fills.
+        assert_eq!(read.limit(), Some(7000));
+        assert_eq!(read.remaining(), Some(6999));
+        // The `-tokens` pair is a pool of its own.
+        assert_eq!(read.token_limit(), Some(6000));
+        assert_eq!(read.token_remaining(), Some(5991));
+    }
+
+    /// `"12.342s"` and `"90ms"` are not the bare integers every other host
+    /// measured here sends — this is the duration-suffixed shape only Groq
+    /// has been observed to use.
+    #[test]
+    fn a_duration_suffixed_reset_is_read_in_whole_seconds() {
+        assert_eq!(parse_reset_seconds("12.342s"), Some(12));
+        assert_eq!(parse_reset_seconds("90ms"), Some(0));
+        assert_eq!(parse_reset_seconds("1500ms"), Some(2));
+        // The plain-integer shape still works: this function replaces
+        // `parse_count` for reset fields, not adds to it.
+        assert_eq!(parse_reset_seconds("30"), Some(30));
+        // Nonsense is nothing, not a panic and not a guess.
+        for junk in ["", "s", "ms", "-3s", "abcs", "3.4.5s"] {
+            assert_eq!(parse_reset_seconds(junk), None, "`{junk}`");
+        }
+    }
+
+    #[test]
+    fn groqs_headers_reach_the_token_pool_as_a_reading_never_read_from_anywhere_else() {
+        let state = RateLimitHeaders::read(groq_inference_headers()).apply_to(
+            ResourceKind::from_direct_provider("groq").capacity(),
+            OBSERVED,
+        );
+        let tokens = state.tokens().combined();
+        assert_eq!(tokens.limit().value().map(NativeAmount::value), Some(6000));
+        assert_eq!(
+            tokens.limit().value().map(NativeAmount::unit),
+            Some("tokens")
+        );
+        assert_eq!(
+            tokens.remaining().value().map(NativeAmount::value),
+            Some(5991)
+        );
+        assert!(
+            tokens
+                .limit()
+                .describe_source()
+                .contains("x-ratelimit-limit-tokens")
+        );
+
+        // And the request pool independently, from the `-requests` spelling.
+        assert_eq!(
+            state.requests().limit().value().map(NativeAmount::value),
+            Some(7000)
+        );
+    }
+
+    /// Capability map lines 1199 and 1200: a resource that has just
+    /// published both a request and a token ceiling is now evidenced to be
+    /// limited by both units at once, not only by the shape's default
+    /// (credits, for a metered account — Phase 32A's `metered_balance`).
+    #[test]
+    fn a_reading_of_both_pools_evidences_both_limiting_units_at_once() {
+        let state = RateLimitHeaders::read(groq_inference_headers()).apply_to(
+            ResourceKind::from_direct_provider("groq").capacity(),
+            OBSERVED,
+        );
+        assert!(state.limiting_units().includes(LimitingUnit::Requests));
+        assert!(state.limiting_units().includes(LimitingUnit::Tokens));
+        // The shape's own default is not lost — a metered account is still
+        // credit-limited even once its request and token pools are read.
+        assert!(state.limiting_units().includes(LimitingUnit::Credits));
+    }
+
+    /// A resource this reader is not allowed to fill in stays that way: local
+    /// inference cannot receive headers in the first place, but the guard is
+    /// asserted directly against `LimitingUnits::None` and `::Delegated`
+    /// rather than relied on implicitly.
+    #[test]
+    fn evidencing_a_unit_is_a_no_op_for_none_and_delegated() {
+        use crate::provider::quota::LimitingUnits;
+        assert_eq!(
+            LimitingUnits::None.with_evidenced(LimitingUnit::Tokens),
+            LimitingUnits::None
+        );
+        assert_eq!(
+            LimitingUnits::Delegated.with_evidenced(LimitingUnit::Requests),
+            LimitingUnits::Delegated
+        );
+    }
+
+    /// Capability map lines 1217 and 1218, at the point this package can
+    /// actually reach: Groq's headers are the first and only seam observed
+    /// anywhere that gives both halves of a pool in one unit, so
+    /// `Pool::normalized` produces a real `Percentage::Exact` from them — the
+    /// structural guarantee Phase 32A built, exercised for the first time by
+    /// a live reading rather than by hand-built test data.
+    ///
+    /// **This does not close either line.** Nothing in the shipped binary
+    /// calls `.normalized()` on a state built from these headers: they only
+    /// ever arrive on the gateway's forwarding path (`crate::gateway::
+    /// ingress`), and bridging a gateway-captured reading into
+    /// `glasshouse resources` — the one caller that renders a percentage —
+    /// needs either a shell-side surface or a persisted cache, both outside
+    /// this package's partition. Recorded here as proof the model is ready
+    /// the day a caller exists, per practice §36: a reading arriving is not
+    /// the same question as something asking for a percentage.
+    #[test]
+    fn groqs_reading_produces_a_real_exact_percentage_from_the_model_alone() {
+        let state = RateLimitHeaders::read(groq_inference_headers()).apply_to(
+            ResourceKind::from_direct_provider("groq").capacity(),
+            OBSERVED,
+        );
+
+        let requests_score = state
+            .requests()
+            .normalized()
+            .expect("both halves of the request pool were read");
+        assert_eq!(requests_score.percent().exact(), Some(99));
+
+        let tokens_score = state
+            .tokens()
+            .combined()
+            .normalized()
+            .expect("both halves of the token pool were read");
+        assert_eq!(tokens_score.percent().exact(), Some(99));
+        assert!(!tokens_score.percent().render().contains("estimated"));
     }
 }

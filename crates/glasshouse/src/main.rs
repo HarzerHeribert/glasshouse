@@ -137,6 +137,9 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 resources_report(&runtime, *verbose, probe, *no_harness)?
             );
         }
+        Some(Command::Classify { text }) => {
+            print!("{}", glasshouse::routing::classify::report(&text.join(" ")));
+        }
         Some(Command::Sessions { command }) => match command {
             // The bare command still lists, which is what every existing
             // caller and every printed identifier assumes.

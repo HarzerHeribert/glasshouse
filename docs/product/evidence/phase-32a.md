@@ -75,7 +75,9 @@ no production caller.
 (`QuotaModel::as_str` and `ResourceKind::label` are untouched), which the
 unchanged `profile::tests` assertions on that note's string confirm.
 
-State: **COMPLETE** for lines 1198, 1201 and 1204. **OPEN** for the other
+State: **COMPLETE** for lines 1198, 1200, 1201, 1202, 1204, 1207 and 1214
+(1207 and 1214 added by PHASE-32B, 1200 and 1202 by QUOTA-FOLLOWUP — see the
+appended sections below, which carry each one's production caller). **OPEN** for the other
 eighteen — see the per-line breakdown below; sixteen of them wait on Phase
 32B, and two are blocked on files outside this package's partition.
 
@@ -332,3 +334,29 @@ outside its partition. That file was outside Phase 32B's partition too, so the
 same box has been blocked by the same three lines in the same file for two
 consecutive packages. See `.agent-runtime/report-PHASE-32B.md` for the exact
 patch.
+
+---
+
+## Appended by QUOTA-FOLLOWUP, 2026-08-27 — three more close, and 1202 was
+already fixed by the time this package started
+
+See `docs/product/evidence/phase-32b.md`'s own "Appended by QUOTA-FOLLOWUP"
+section for the full account. Summarised against this file's own sixteen
+lines: **1200 closed** (AnyRouter's real request header now evidences
+`LimitingUnit::Requests` at the report's "limited by" line, capability map
+line 1200's own text). **1202 was found already closed** — a commit between
+`phase-32b`'s package and this one (`60f8c9f`, per this packet's own
+freshness note) added the three-line fix to `BackendResource::Native`
+independently; `profile::tests::resolving_a_native_profile_records_it_as_a_
+subscription_resource` already proves it. **1216 is unchanged** — still no
+host has sent a long-window request pool. **1217 gained real live data and
+still does not fire in the shipped binary**: Groq's real inference response
+(the one path `provider::discovery` cannot reach without spending a token)
+gives both halves of a token pool in one unit for the first time anywhere,
+proven producing a real `Percentage::Exact(99)` at the model level — but
+nothing in the shipped binary asks that question of a gateway-captured
+reading, so the antecedent still does not fire for a real user. 1199, 1205,
+1206, 1208, 1210 (a caller now exists — `render_windows` — and still no host
+publishes a start), 1212, 1213, 1215 and 1218 are unchanged for the original
+reason: nothing publishes the number to a caller this package's partition
+can reach.

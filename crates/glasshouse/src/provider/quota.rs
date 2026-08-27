@@ -1260,6 +1260,25 @@ impl LimitingUnits {
     pub fn includes(&self, unit: LimitingUnit) -> bool {
         self.named().is_some_and(|units| units.contains(&unit))
     }
+
+    /// Add `unit` to the set of things that can exhaust this resource, now
+    /// that a reading has actually evidenced it — capability map lines 1199
+    /// and 1200.
+    ///
+    /// A no-op for [`LimitingUnits::None`] and [`LimitingUnits::Delegated`]:
+    /// neither is a set a unit can be added to, and both are answers about
+    /// the resource itself — "nothing can exhaust this" and "whatever limits
+    /// its upstream" — that a telemetry reading does not get to overrule. Only
+    /// [`LimitingUnits::These`] grows.
+    pub fn with_evidenced(self, unit: LimitingUnit) -> Self {
+        match self {
+            LimitingUnits::These(mut units) => {
+                units.insert(unit);
+                LimitingUnits::These(units)
+            }
+            other => other,
+        }
+    }
 }
 
 /// A provider- or harness-defined plan name — capability map line 1233.

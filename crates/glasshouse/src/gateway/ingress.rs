@@ -44,6 +44,23 @@
 //! forbidden to do and which is a stop condition for the whole slice. The
 //! status is recorded; the body is forwarded to the harness, which is the
 //! thing that actually needed to read it.
+//!
+//! # A second thing may now be recorded: a response *header*, never a body
+//!
+//! Capability map line 1229's gateway half. [`forward`] reads
+//! [`crate::provider::telemetry::RATE_LIMIT_HEADERS`] — the same allowlist
+//! [`crate::provider::discovery`] reads on the catalogue path — off every
+//! response before relaying it, and hands the result to [`serve`]'s caller
+//! alongside [`Exchange`]. This is not [`Exchange`] growing a body-shaped
+//! field: [`RateLimitHeaders`] is structurally the same kind of thing this
+//! module already forwards unread, a handful of integers and the fixed set of
+//! header *names* Glasshouse chose, never a header value stored as text and
+//! never a byte of the response body. See [`mod@crate::provider::telemetry`]
+//! for why a header is not the payload this module exists to be unable to
+//! read, and [`mod@crate::provider::discovery`] for the seam this one
+//! completes — a real inference response is the only kind of request that
+//! has ever been observed to carry a token pool's own headers, and
+//! `discovery` is forbidden from making one.
 
 use std::io::{BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -51,6 +68,8 @@ use std::time::Duration;
 
 use ureq::http::{HeaderValue, Request, StatusCode, header};
 use ureq::{Agent, SendBody};
+
+use crate::provider::telemetry::RateLimitHeaders;
 
 use super::GatewayToken;
 use super::http::{self, HeadError};
@@ -195,14 +214,14 @@ pub(super) fn serve(
     token: &GatewayToken,
     upstream: &Upstream,
     agent: &Agent,
-) -> Exchange {
+) -> (Exchange, RateLimitHeaders) {
     // **Not optional, and not tidiness.** The listener is non-blocking so
     // that shutdown cannot hang on `accept` — and on macOS, the BSDs and
     // Windows an accepted socket inherits that flag from its listener, while
     // on Linux it does not. A non-blocking stream would turn every read here
     // into `WouldBlock` on two of the three platforms Glasshouse supports.
     if stream.set_nonblocking(false).is_err() {
-        return exchange(Outcome::ClientGone, 0, upstream, None);
+        return (exchange(Outcome::ClientGone, 0, upstream, None), no_quota());
     }
     let _ = stream.set_read_timeout(Some(HEAD_TIMEOUT));
     // Nagle's algorithm coalesces small writes and waits for an
@@ -216,14 +235,18 @@ pub(super) fn serve(
     let _ = stream.set_nodelay(true);
 
     let Ok(mut out) = stream.try_clone() else {
-        return exchange(Outcome::ClientGone, 0, upstream, None);
+        return (exchange(Outcome::ClientGone, 0, upstream, None), no_quota());
     };
     let mut reader = BufReader::new(stream);
 
     let head = match http::read_head(&mut reader) {
         Ok(head) => head,
-        Err(HeadError::Empty) => return exchange(Outcome::Idle, 0, upstream, None),
-        Err(HeadError::Io) => return exchange(Outcome::ClientGone, 0, upstream, None),
+        Err(HeadError::Empty) => {
+            return (exchange(Outcome::Idle, 0, upstream, None), no_quota());
+        }
+        Err(HeadError::Io) => {
+            return (exchange(Outcome::ClientGone, 0, upstream, None), no_quota());
+        }
         Err(error) => {
             let (status, kind, message) = decline(&error);
             refuse(&mut out, status, kind, message, None);
@@ -232,7 +255,10 @@ pub(super) fn serve(
             // now would reset the connection and the client would see a
             // network error instead of the status explaining what was wrong.
             settle(&mut reader, &mut out, None);
-            return exchange(Outcome::Declined, status.as_u16(), upstream, None);
+            return (
+                exchange(Outcome::Declined, status.as_u16(), upstream, None),
+                no_quota(),
+            );
         }
     };
 
@@ -249,7 +275,10 @@ pub(super) fn serve(
             Some(&head.method),
         );
         settle(&mut reader, &mut out, head.content_length);
-        return exchange(Outcome::Unauthenticated, 401, upstream, None);
+        return (
+            exchange(Outcome::Unauthenticated, 401, upstream, None),
+            no_quota(),
+        );
     }
 
     forward(head, reader, &mut out, upstream, agent)
@@ -331,7 +360,7 @@ fn forward(
     out: &mut TcpStream,
     upstream: &Upstream,
     agent: &Agent,
-) -> Exchange {
+) -> (Exchange, RateLimitHeaders) {
     // The serving backend is read **once**, here, and used for the whole of
     // this exchange. Phase 9H's failover moves which backend serves from
     // another thread; reading it twice would let one request take its route
@@ -351,7 +380,7 @@ fn forward(
         // path drains: a client still writing a body would get a connection
         // reset instead of the status that explains what was wrong.
         settle(&mut reader, out, head.content_length);
-        return exchange(Outcome::Unrouted, 404, upstream, None);
+        return (exchange(Outcome::Unrouted, 404, upstream, None), no_quota());
     };
 
     let Some(uri) = route.uri_for(&head.target) else {
@@ -362,7 +391,10 @@ fn forward(
             "the request target could not be appended to the configured provider's base URL",
             Some(&head.method),
         );
-        return exchange(Outcome::Declined, 400, upstream, Some(route));
+        return (
+            exchange(Outcome::Declined, 400, upstream, Some(route)),
+            no_quota(),
+        );
     };
 
     let mut request = Request::builder().method(head.method.clone()).uri(uri);
@@ -394,7 +426,10 @@ fn forward(
             "the request could not be rebuilt for the configured provider",
             Some(&head.method),
         );
-        return exchange(Outcome::Declined, 400, upstream, Some(route));
+        return (
+            exchange(Outcome::Declined, 400, upstream, Some(route)),
+            no_quota(),
+        );
     };
 
     let response = match agent.run(request) {
@@ -408,13 +443,26 @@ fn forward(
                 "the Glasshouse gateway could not reach the configured provider",
                 Some(&head.method),
             );
-            return exchange(Outcome::Unreachable { detail }, 502, upstream, Some(route));
+            return (
+                exchange(Outcome::Unreachable { detail }, 502, upstream, Some(route)),
+                no_quota(),
+            );
         }
     };
 
     let (parts, mut body) = response.into_parts();
     let status = parts.status;
     let declared_length = body.content_length();
+    // Capability map line 1229's gateway half. Headers only, read before
+    // anything below rewrites or filters them for relay — never the body,
+    // which stays a byte stream this function never parses. See the module
+    // documentation's "a second thing may now be recorded" entry.
+    let quota = RateLimitHeaders::read(
+        parts
+            .headers
+            .iter()
+            .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?))),
+    );
     // A `HEAD` response carries no body however ordinary its status is, and
     // writing one would be read by the client as the start of the *next*
     // response. No harness in scope sends `HEAD`; the method is forwarded
@@ -449,29 +497,51 @@ fn forward(
     headers.push(("connection".to_owned(), b"close".to_vec()));
 
     if http::write_head(out, status, &headers).is_err() {
-        return exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route));
+        // The provider did answer — its headers were captured above — even
+        // though the harness never saw them: the client going away here is a
+        // fact about the inbound hop, not about whether the outbound one
+        // produced a reading.
+        return (
+            exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route)),
+            quota,
+        );
     }
 
     let mut moved = 0;
     if carries_body {
         match http::pump(body.as_reader(), out, chunked) {
             Ok(bytes) => moved = bytes,
-            Err(_) => return exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route)),
+            Err(_) => {
+                return (
+                    exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route)),
+                    quota,
+                );
+            }
         }
     } else {
         let _ = out.flush();
     }
     let _ = out.shutdown(Shutdown::Both);
 
-    exchange(
-        Outcome::Forwarded {
-            upstream_status: status.as_u16(),
-            bytes: moved,
-        },
-        status.as_u16(),
-        upstream,
-        Some(route),
+    (
+        exchange(
+            Outcome::Forwarded {
+                upstream_status: status.as_u16(),
+                bytes: moved,
+            },
+            status.as_u16(),
+            upstream,
+            Some(route),
+        ),
+        quota,
     )
+}
+
+/// No response was received, so there is nothing a quota reading could have
+/// come from — every early-return path in [`serve`] and [`forward`] before a
+/// provider answers.
+fn no_quota() -> RateLimitHeaders {
+    RateLimitHeaders::default()
 }
 
 /// Whether the presented bearer token is this instance's own.

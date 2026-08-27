@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`████████████████░░░░░░░░░░░░░░░░░░░░░░░░` 539 / 1280 mandatory capabilities (42%)
+`█████████████████░░░░░░░░░░░░░░░░░░░░░░░` 557 / 1280 mandatory capabilities (43%)
 
 <details>
-<summary>Per-phase breakdown (17 of 104 phases complete)</summary>
+<summary>Per-phase breakdown (18 of 104 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -86,8 +86,8 @@ the authoritative specification and tracks what is done.
 | Phase 30 — Session context metadata | 0/8 |
 | Phase 31 — Compaction-aware behavior | 0/7 |
 | Phase 32 — Resource registry | 11/12 |
-| Phase 32A — Unified quota and capacity model | 5/21 |
-| Phase 32B — Quota telemetry sources | 11/14 |
+| Phase 32A — Unified quota and capacity model | 7/21 |
+| Phase 32B — Quota telemetry sources | 13/14 |
 | Phase 32C — Subscription capacity estimation | 0/12 |
 | Phase 32D — Normalized remaining-capacity score | 0/12 |
 | Phase 32E — Burn rate and exhaustion forecasting | 0/10 |
@@ -104,7 +104,7 @@ the authoritative specification and tracks what is done.
 | Phase 34D — Router request schema | 0/13 |
 | Phase 34E — Router economics | 0/9 |
 | Phase 34F — Model capability and tier calibration | 0/11 |
-| Phase 35 — Lightweight task classification | 0/14 |
+| Phase 35 — Lightweight task classification | 14/14 ✅ |
 | Phase 35A — Candidate generation | 0/11 |
 | Phase 35B — Candidate scoring | 0/25 |
 | Phase 35C — Capacity-aware tier escalation and downgrade | 0/9 |

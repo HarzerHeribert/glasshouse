@@ -445,6 +445,68 @@ fn render_resource(
     }
 
     render_rate_ceilings(out, state, options);
+    render_windows(out, state, age_limit, options);
+}
+
+/// Capability map lines 1210 and 1211: when this resource's quota window
+/// started and when it resets, for the rolling window headers fill and the
+/// calendar window a usage endpoint fills.
+///
+/// This is the caller those two lines were missing even after Phase 32B
+/// built a working reader for the reset half: `WindowCapacity::started_at_unix`
+/// and `::resets_at_unix` were tracked and tested but never rendered, so a
+/// reading landing there would have had nowhere to show. Skipped in the quiet
+/// view when nothing is known, the same rule every other line here follows.
+fn render_windows(
+    out: &mut String,
+    state: &CapacityState,
+    age_limit: QuotaStaleAfterSeconds,
+    options: ReportOptions,
+) {
+    for (label, window) in [
+        ("rolling window", state.windows().rolling()),
+        ("calendar window", state.windows().calendar()),
+    ] {
+        let started = window.started_at_unix();
+        let resets = window.resets_at_unix();
+        if !options.verbose && !started.is_measured() && !resets.is_measured() {
+            continue;
+        }
+        let _ = writeln!(
+            out,
+            "  {label:<15} starts {}, resets {}",
+            describe_timestamp(started, age_limit, options),
+            describe_timestamp(resets, age_limit, options)
+        );
+    }
+}
+
+/// A unix-second quantity, rendered the way [`describe_amount`] renders a
+/// [`NativeAmount`] — what kind of claim it is, where it came from, and how
+/// old it is. Kept separate from [`describe_amount`] rather than made
+/// generic over it: a window boundary is a point in time, not an amount in a
+/// provider's own unit, and the two must never be interchangeable at the
+/// type level either.
+fn describe_timestamp(
+    capacity: &Capacity<i64>,
+    age_limit: QuotaStaleAfterSeconds,
+    options: ReportOptions,
+) -> String {
+    let Some(reading) = capacity.reading() else {
+        return format!("{} ({})", capacity.as_str(), capacity.telemetry_class_str());
+    };
+    let freshness = reading.freshness(options.now_unix, age_limit.seconds());
+    let stale = if freshness.is_stale() {
+        format!(", {}", freshness.describe())
+    } else {
+        String::new()
+    };
+    format!(
+        "unix {} [{}] from {}{stale}",
+        reading.value(),
+        reading.class().as_str(),
+        reading.source().describe()
+    )
 }
 
 fn render_pool(
@@ -713,6 +775,37 @@ pub fn telemetry_probe(
     ))
 }
 
+/// Build the one extra request `--probe` makes when `provider` declares a
+/// usage endpoint — capability map line 1230's production path.
+///
+/// `crate::provider::usage_endpoint` is the lookup table naming which
+/// providers have one; today that is OpenRouter alone. `None` here is the
+/// ordinary answer for every other provider and is not an error — the same
+/// shape [`telemetry_probe`] already uses for "nowhere to send a request".
+pub fn usage_probe(
+    provider: &crate::provider::Provider,
+    secrets: &dyn crate::secret::SecretStore,
+) -> Option<crate::provider::discovery::ProbeRequest> {
+    let path = crate::provider::usage_endpoint(&provider.name)?;
+    let support = provider
+        .protocols
+        .iter()
+        .find(|support| !support.base_url.trim().is_empty())?;
+    let url = format!("{}{}", support.base_url.trim_end_matches('/'), path);
+    let credential = provider
+        .secret_refs()
+        .iter()
+        .find_map(|reference| secrets.resolve(reference));
+    Some(crate::provider::discovery::ProbeRequest::new(
+        provider.name.clone(),
+        support.protocol,
+        url,
+        crate::provider::discovery::ProbeTarget::BaseUrl,
+        provider.headers.clone(),
+        credential,
+    ))
+}
+
 /// What one `--probe` produced, for a caller to report.
 ///
 /// A named type rather than a tuple because the *absence* of headers is the
@@ -730,11 +823,18 @@ pub enum ProbeReading {
         outcome: crate::provider::discovery::ProbeOutcome,
         headers: RateLimitHeaders,
         observed_at_unix: i64,
+        /// A second, separate request to `provider`'s own usage endpoint —
+        /// capability map line 1230 — when
+        /// [`crate::provider::usage_endpoint`] names one for it. `None` for
+        /// every other provider, and for one that declares an endpoint but
+        /// answered something this reader could not read a body from.
+        usage: Option<Box<crate::provider::telemetry::ProviderUsage>>,
     },
 }
 
 /// Probe one configured provider and read its rate-limit headers —
-/// capability map line 1229.
+/// capability map line 1229 — and, when it declares one, its own usage
+/// endpoint — capability map line 1230.
 ///
 /// # It cannot fail the caller
 ///
@@ -764,10 +864,28 @@ pub fn probe_provider(
         &request,
         crate::provider::discovery::ProbeTimeouts::default(),
     );
+
+    let usage = usage_probe(&provider.value, secrets).and_then(|request| {
+        match crate::provider::discovery::read_response_body(
+            &request,
+            crate::provider::discovery::ProbeTimeouts::default(),
+        ) {
+            crate::provider::discovery::BodyFetch::Answered { body, .. } => Some(Box::new(
+                crate::provider::telemetry::ProviderUsage::read(&body),
+            )),
+            // Refused, unreachable, timed out, or answered with a body this
+            // reader could not get whole: a fact about this account or this
+            // moment, not a reading to invent.
+            crate::provider::discovery::BodyFetch::NotRead { .. }
+            | crate::provider::discovery::BodyFetch::Probe(_) => None,
+        }
+    });
+
     ProbeReading::Answered {
         outcome: response.outcome().clone(),
         headers: response.rate_limits(),
         observed_at_unix: now_unix,
+        usage,
     }
 }
 
@@ -782,7 +900,10 @@ pub fn render_probe(out: &mut String, name: &str, reading: &ProbeReading) {
             let _ = writeln!(out, "  {name}: not probed — {reason}");
         }
         ProbeReading::Answered {
-            outcome, headers, ..
+            outcome,
+            headers,
+            observed_at_unix,
+            usage,
         } => {
             let _ = writeln!(
                 out,
@@ -804,7 +925,62 @@ pub fn render_probe(out: &mut String, name: &str, reading: &ProbeReading) {
                     headers.read_from().join(", ")
                 );
             }
+            if let Some(usage) = usage {
+                render_usage_probe(out, usage, *observed_at_unix);
+            }
         }
+    }
+}
+
+/// Capability map line 1230's own line of a `--probe` report.
+fn render_usage_probe(
+    out: &mut String,
+    usage: &crate::provider::telemetry::ProviderUsage,
+    observed_at_unix: i64,
+) {
+    if usage.is_empty() {
+        let _ = writeln!(
+            out,
+            "    usage endpoint: answered, but this reader found none of `data.limit`, \
+             `data.limit_remaining` or `data.limit_reset` in the body"
+        );
+        return;
+    }
+    let state = crate::provider::telemetry::apply_provider_usage(
+        CapacityState::metered_balance(),
+        usage,
+        observed_at_unix,
+    );
+    let _ = writeln!(
+        out,
+        "    usage endpoint: limit {}, remaining {}",
+        describe_amount(
+            state.credits().limit(),
+            QuotaStaleAfterSeconds::DEFAULT,
+            ReportOptions {
+                verbose: false,
+                now_unix: observed_at_unix,
+            }
+        ),
+        describe_amount(
+            state.credits().remaining(),
+            QuotaStaleAfterSeconds::DEFAULT,
+            ReportOptions {
+                verbose: false,
+                now_unix: observed_at_unix,
+            }
+        )
+    );
+    // Line 1217/1218: if this account's own credits pool ever answers with
+    // both halves — a real, non-null ceiling and a remaining figure, which
+    // no account probed for this package has — this is what a live
+    // `Percentage::Exact` from a usage endpoint looks like.
+    if let Some(score) = state.credits().normalized() {
+        let _ = writeln!(
+            out,
+            "    usage endpoint capacity: {}",
+            score.percent().render()
+        );
     }
 }
 
@@ -877,6 +1053,29 @@ mod tests {
         assert!(row.contains(&format!("unix {OBSERVED}")), "{row}");
     }
 
+    /// Capability map line 1200, at the report level: AnyRouter's own real
+    /// header — measured, not invented — evidences that this resource really
+    /// is request-limited, and `describe_limits`' "limited by" line now says
+    /// so instead of only naming the shape's default (credits).
+    #[test]
+    fn a_request_ceiling_a_reader_measured_reaches_the_limited_by_line() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let before = anyrouter_row(&report(&effective, &GatheredTelemetry::new(), options()));
+        assert_eq!(before.lines().nth(3), Some("  limited by      credits"));
+
+        let telemetry = GatheredTelemetry::new().with_provider_headers(
+            "anyrouter",
+            anyrouter_headers(),
+            OBSERVED,
+        );
+        let after = anyrouter_row(&report(&effective, &telemetry, options()));
+        assert_eq!(
+            after.lines().nth(3),
+            Some("  limited by      requests, credits")
+        );
+    }
+
     /// The half of line 1229 that is about restraint. AnyRouter advertises
     /// `RateLimit-Remaining` and does not send it; a report that showed a
     /// remaining count anyway would be inventing one.
@@ -894,6 +1093,53 @@ mod tests {
         assert!(row.contains("remaining unmeasured (unknown)"), "{row}");
         // And with no both-halves reading there is no percentage at all.
         assert!(row.contains("capacity        unknown"), "{row}");
+    }
+
+    /// Capability map lines 1210 and 1211: the caller `render_windows` gives
+    /// them. A reset field reads into `windows().rolling()` — proven at the
+    /// model level by `provider::telemetry`'s own tests — and this is the
+    /// production rendering path finally reading that field back out, which
+    /// nothing did before this package.
+    #[test]
+    fn a_window_reset_a_reader_supplied_reaches_the_report() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let headers = RateLimitHeaders::read(vec![("ratelimit-reset", "30")]);
+        let telemetry =
+            GatheredTelemetry::new().with_provider_headers("anyrouter", headers, OBSERVED);
+        let row = anyrouter_row(&report(&effective, &telemetry, options()));
+
+        assert!(row.contains("rolling window"), "{row}");
+        assert!(
+            row.contains(&format!("resets unix {}", OBSERVED + 30)),
+            "{row}"
+        );
+        // No window *start* has ever been observed anywhere — line 1210
+        // stays open on its own honest terms, and the report says so rather
+        // than inventing one.
+        assert!(row.contains("starts unmeasured (unknown)"), "{row}");
+    }
+
+    /// The quiet view's own rule, extended to windows: nothing measured means
+    /// nothing shown, and `--verbose` is what surfaces the unmeasured rows.
+    #[test]
+    fn a_resource_with_no_window_reading_shows_no_window_row_unless_verbose() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let quiet = anyrouter_row(&report(&effective, &GatheredTelemetry::new(), options()));
+        assert!(!quiet.contains("rolling window"), "{quiet}");
+        assert!(!quiet.contains("calendar window"), "{quiet}");
+
+        let verbose = anyrouter_row(&report(
+            &effective,
+            &GatheredTelemetry::new(),
+            ReportOptions {
+                verbose: true,
+                now_unix: NOW,
+            },
+        ));
+        assert!(verbose.contains("rolling window"), "{verbose}");
+        assert!(verbose.contains("calendar window"), "{verbose}");
     }
 
     // --- lines 1233 and 1203: what the user entered ------------------------
@@ -1241,6 +1487,133 @@ mod tests {
         assert!(rendered.starts_with("~25%"), "{rendered}");
         assert!(rendered.contains("estimated"), "{rendered}");
         assert_eq!(score.percent().exact(), None);
+    }
+
+    // --- line 1230: a provider's own usage endpoint -------------------------
+
+    /// No credential in memory and none resolved — every `resolve` and
+    /// `is_present` answers empty. Deliberately not
+    /// `crate::secret::EnvironmentSecretStore`: a test process's own
+    /// environment must never leak into what a probe request is built with.
+    struct NoSecrets;
+    impl crate::secret::SecretStore for NoSecrets {
+        fn resolve(&self, _reference: &crate::secret::SecretRef) -> Option<crate::secret::Secret> {
+            None
+        }
+        fn is_present(&self, _reference: &crate::secret::SecretRef) -> bool {
+            false
+        }
+        fn describe(&self) -> &'static str {
+            "no-secrets (test)"
+        }
+    }
+
+    #[test]
+    fn usage_probe_builds_a_request_against_the_declared_path_for_openrouter() {
+        let openrouter = crate::provider::template("openrouter").expect("a built-in template");
+        let request = usage_probe(&openrouter, &NoSecrets).expect("openrouter declares one");
+        assert_eq!(request.url(), "https://openrouter.ai/api/v1/key");
+    }
+
+    /// Every other built-in template declares no usage endpoint, so
+    /// `--probe`ing one makes exactly the one request it always did.
+    #[test]
+    fn a_provider_with_no_declared_usage_endpoint_is_not_probed_a_second_time() {
+        let anyrouter = crate::provider::template("anyrouter").expect("a built-in template");
+        assert!(usage_probe(&anyrouter, &NoSecrets).is_none());
+    }
+
+    /// `render_probe`, fed a reading exactly as `probe_provider` would build
+    /// one from OpenRouter's real recorded response — the production path a
+    /// `--probe openrouter` run actually renders through, driven here without
+    /// a socket the way `a_providers_own_rate_limit_header_reaches_the_report_as_authoritative`
+    /// drives `report` without one.
+    #[test]
+    fn a_null_usage_endpoint_limit_renders_as_not_applicable_and_no_percentage() {
+        let reading = ProbeReading::Answered {
+            outcome: crate::provider::discovery::ProbeOutcome::Reached { status: 200 },
+            headers: RateLimitHeaders::read(Vec::new()),
+            observed_at_unix: OBSERVED,
+            usage: Some(Box::new(crate::provider::telemetry::ProviderUsage::read(
+                r#"{"data": {"limit": null, "limit_remaining": null, "limit_reset": null}}"#,
+            ))),
+        };
+        let mut rendered = String::new();
+        render_probe(&mut rendered, "openrouter", &reading);
+        assert!(
+            rendered.contains("usage endpoint: limit not applicable"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("usage endpoint capacity:"),
+            "no percentage is computable from a null limit: {rendered}"
+        );
+    }
+
+    /// The positive half: a hypothetical numeric reading — no live account
+    /// has ever answered one — renders a real percentage line, proving the
+    /// caller `main.rs` unconditionally invokes actually asks the question
+    /// capability map lines 1217/1218 need answered.
+    #[test]
+    fn a_numeric_usage_endpoint_reading_renders_a_real_percentage() {
+        let reading = ProbeReading::Answered {
+            outcome: crate::provider::discovery::ProbeOutcome::Reached { status: 200 },
+            headers: RateLimitHeaders::read(Vec::new()),
+            observed_at_unix: OBSERVED,
+            usage: Some(Box::new(crate::provider::telemetry::ProviderUsage::read(
+                r#"{"data": {"limit": 20, "limit_remaining": 5}}"#,
+            ))),
+        };
+        let mut rendered = String::new();
+        render_probe(&mut rendered, "openrouter", &reading);
+        assert!(
+            rendered.contains("usage endpoint capacity: 25%"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("estimated"), "{rendered}");
+    }
+
+    /// The two tests above drive `render_probe` with a hand-built
+    /// [`ProbeReading`], which proves the rendering path but not that
+    /// `probe_provider` — the function `main.rs` actually calls — makes the
+    /// second request at all. Practice §35: a caller every test bypasses is
+    /// not a caller. This one goes through a real socket and a real
+    /// `EffectiveConfig`, over both requests `--probe openrouter` makes.
+    #[test]
+    fn probe_provider_makes_both_the_connectivity_request_and_the_usage_request() {
+        let fixture = crate::provider::fixture::FixtureProvider::answering(
+            "HTTP/1.1 200 OK",
+            "content-type: application/json\r\nratelimit-limit: 300\r\n",
+            r#"{"data":{"limit":null,"limit_remaining":null,"limit_reset":null}}"#,
+        );
+        let mut user = UserConfig::default();
+        let mut provider = ProviderConfig::new("openrouter");
+        provider.set_base_url(Some(fixture.base_url()));
+        user.providers_mut().set("openrouter", provider);
+        let effective = EffectiveConfig::new(&user, None);
+        let secrets = NoSecrets;
+
+        let reading = probe_provider(&effective, &secrets, "openrouter", OBSERVED);
+        match reading {
+            ProbeReading::Answered { headers, usage, .. } => {
+                assert_eq!(
+                    headers.limit(),
+                    Some(300),
+                    "the connectivity request's own headers did not reach the reading"
+                );
+                let usage = usage.expect(
+                    "openrouter declares a usage endpoint, so probe_provider must have queried it",
+                );
+                assert!(
+                    !usage.is_empty(),
+                    "the usage endpoint's real body was not read"
+                );
+            }
+            other => panic!("expected an answered probe, got {other:?}"),
+        }
+        // Two requests: the model-list connectivity probe and the usage
+        // endpoint, both against the same fixture.
+        assert_eq!(fixture.connections(), 2, "expected exactly two requests");
     }
 
     // --- the harness status command ----------------------------------------

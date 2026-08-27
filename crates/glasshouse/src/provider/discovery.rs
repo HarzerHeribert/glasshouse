@@ -342,20 +342,30 @@ pub fn connectivity(request: &ProbeRequest, timeouts: ProbeTimeouts) -> ProbeOut
 }
 
 /// [`connectivity`], keeping the rate-limit headers the response carried —
-/// capability map line 1229, and the only place in Glasshouse that reads a
-/// quota number off a response.
+/// capability map line 1229's API half, and the first of two places in
+/// Glasshouse that read a quota number off a response.
 ///
-/// # Why here and not on the gateway's forwarding path
+/// # This is not the only seam any more, and the other one had to earn it
 ///
-/// The gateway is deliberately excluded. Phase 9I line 528 settled that *the
-/// gateway forwards headers without reading them, and a parser there would
-/// make it a reader of the payload it exists to pass through*. This module is
-/// the opposite kind of thing: it already makes a request **because a
-/// keystroke asked it to**, it already holds the response, and until now it
-/// discarded the headers. Reading them costs no extra request — which is the
-/// other half of why this is the right seam, since capability map line 1230's
-/// "without excessive request cost" applies to the whole telemetry story and
-/// a probe that already ran is free.
+/// This module already makes a request **because a keystroke asked it to**,
+/// it already holds the response, and until this phase it discarded the
+/// headers. Reading them costs no extra request, which is capability map
+/// line 1230's "without excessive request cost" applied to the whole
+/// telemetry story: a probe that already ran is free.
+///
+/// The gateway's forwarding path is the *second* seam, and getting there took
+/// a correction rather than a design from the start: an earlier packet held
+/// that Phase 9I line 528 — *"the gateway forwards headers without reading
+/// them, and a parser there would make it a reader of the payload it exists
+/// to pass through"* — forbade the gateway's response path outright. That
+/// overreached. Reading a response *header* is not reading the *payload*: the
+/// gateway already parses the status line and header block to forward them,
+/// and only the body is what it is forbidden to look inside. So
+/// `crate::gateway::ingress` now reads this same allowlist, headers only,
+/// from every response it forwards — see that module and
+/// [`mod@crate::provider::telemetry`]'s "a second seam" for why that route
+/// carries a reading — `POST /chat/completions` — this module can never
+/// produce, since Glasshouse must not spend a token to check a quota.
 pub fn connectivity_with_headers(request: &ProbeRequest, timeouts: ProbeTimeouts) -> ProbeResponse {
     let started = Instant::now();
     match send(request, timeouts) {
@@ -380,6 +390,67 @@ fn rate_limit_headers_of(response: &ureq::http::Response<ureq::Body>) -> Vec<(St
         .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?)))
         .collect();
     crate::provider::telemetry::retain_rate_limit_headers(named)
+}
+
+/// What a request made for its response **body** produced — capability map
+/// line 1230.
+///
+/// Distinct from [`ModelFetch`] only in what it carries on success: the raw
+/// body text rather than a parsed catalogue, because a usage endpoint's
+/// schema is provider-specific and this module does not decide what a
+/// provider's response means, only fetches what it said.
+/// [`crate::provider::telemetry::ProviderUsage::read`] is the one parser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BodyFetch {
+    /// A `2xx` whose body was read whole.
+    Answered { status: u16, body: String },
+    /// A `2xx` whose body could not be read — a stalled connection mid-body,
+    /// most likely. Distinct from a non-2xx status: the route answered, the
+    /// *read* is what failed.
+    NotRead { status: u16, reason: String },
+    /// Everything a connectivity probe can report, reported the same way —
+    /// including a non-2xx status, which is not a failure of this function
+    /// but a fact about the account (see design decision D3: an endpoint
+    /// that refuses is not the same finding as one that answers `null`).
+    Probe(ProbeOutcome),
+}
+
+/// Make one request to `request`'s URL and read its body whole, without
+/// deciding what the body means.
+///
+/// Bounded by the same body-size limit and [`ProbeTimeouts`] every other
+/// probe in this module is. Built for capability map line 1230's usage
+/// endpoint, and generic enough that any future provider-specific body read
+/// can reuse it rather than growing a second copy of [`model_catalogue`]'s
+/// own request/timeout/body-limit plumbing.
+pub fn read_response_body(request: &ProbeRequest, timeouts: ProbeTimeouts) -> BodyFetch {
+    let started = Instant::now();
+    let mut response = match send(request, timeouts) {
+        Ok(response) => response,
+        Err(err) => return BodyFetch::Probe(transport_outcome(&err, started)),
+    };
+
+    let status = response.status().as_u16();
+    let outcome = classify(status);
+    if !matches!(outcome, ProbeOutcome::Reached { .. }) {
+        return BodyFetch::Probe(outcome);
+    }
+
+    match response
+        .body_mut()
+        .with_config()
+        .limit(MAX_BODY_BYTES)
+        .read_to_string()
+    {
+        Ok(body) => BodyFetch::Answered { status, body },
+        Err(ureq::Error::Timeout(_)) => BodyFetch::Probe(ProbeOutcome::TimedOut {
+            waited_ms: elapsed_ms(started),
+        }),
+        Err(_) => BodyFetch::NotRead {
+            status,
+            reason: "the response body could not be read".to_owned(),
+        },
+    }
 }
 
 /// Make one request to the provider's model list and read it.
@@ -1017,6 +1088,42 @@ mod tests {
                 );
             }
             other => panic!("expected a catalogue, got {other:?}"),
+        }
+    }
+
+    // --- line 1230: a body read whole, and handed to a caller unread -------
+
+    /// `GET https://openrouter.ai/api/v1/key`'s real shape, authenticated,
+    /// 2026-08-27 — the same body `provider::telemetry`'s own fixture uses,
+    /// proving the two modules agree on what the wire actually said.
+    #[test]
+    fn read_response_body_hands_back_the_whole_body_unparsed() {
+        let fixture = FixtureProvider::answering(
+            "HTTP/1.1 200 OK",
+            "content-type: application/json\r\n",
+            r#"{"data":{"limit":null,"limit_remaining":null,"limit_reset":null}}"#,
+        );
+        let request = request_at(&fixture.base_url(), ProbeTarget::BaseUrl);
+        match read_response_body(&request, quick()) {
+            BodyFetch::Answered { status, body } => {
+                assert_eq!(status, 200);
+                assert!(body.contains("\"limit\":null"), "{body}");
+            }
+            other => panic!("expected an answered body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_refused_usage_endpoint_is_reported_as_a_probe_outcome_not_a_body() {
+        let fixture = FixtureProvider::answering(
+            "HTTP/1.1 401 Unauthorized",
+            "content-type: application/json\r\n",
+            r#"{"error":{"message":"No auth credentials found","code":401}}"#,
+        );
+        let request = request_at(&fixture.base_url(), ProbeTarget::BaseUrl);
+        match read_response_body(&request, quick()) {
+            BodyFetch::Probe(ProbeOutcome::Rejected { status: 401 }) => {}
+            other => panic!("expected a 401 rejection, got {other:?}"),
         }
     }
 

@@ -82,6 +82,7 @@ use super::fixture::{FixtureUpstream, RecordedRequest};
 use super::ingress::{Exchange, Outcome, serve};
 use super::upstream::{Route, Upstream, UpstreamBackend, agent};
 use super::{Gateway, GatewayToken};
+use crate::provider::telemetry::RateLimitHeaders;
 use crate::secret::{REDACTED, Secret, redact};
 
 /// The three protocols the ingress can serve, spelled as `crate::profile`
@@ -350,7 +351,7 @@ fn serve_one(
     });
 
     let (accepted, _peer) = listener.accept().expect("the client above connects");
-    let exchange = serve(accepted, token, upstream, agent);
+    let (exchange, _quota) = serve(accepted, token, upstream, agent);
     let received = client.join().expect("the client thread does not panic");
     (exchange, received)
 }
@@ -464,6 +465,84 @@ fn a_request_body_arrives_byte_for_byte_including_a_tool_call_and_non_ascii() {
         request.header("content-length"),
         Some(declared.as_str()),
         "the content-length the provider received is not the body's byte length"
+    );
+}
+
+// --- capability map line 1229's gateway half --------------------------------
+
+/// A real forwarded exchange, driven through a real [`Gateway`] rather than
+/// through [`serve`] directly — this is the production accept loop, and
+/// mutating away its call to `SessionRouting::observe_quota_headers` (see
+/// `mod.rs`) fails this test rather than a helper's.
+///
+/// The header values are Groq's own, read from a real `POST
+/// /chat/completions` response and recorded in
+/// `.agent-runtime/probe-quota-headers-2026-08-27.md` — not composed, the
+/// same discipline `provider::telemetry`'s own fixtures follow.
+#[test]
+fn a_real_forwarded_exchanges_rate_limit_headers_reach_the_gateway() {
+    let fixture = FixtureUpstream::answering(
+        "HTTP/1.1 200 OK",
+        "content-type: application/json\r\n\
+         x-ratelimit-limit-requests: 7000\r\n\
+         x-ratelimit-limit-tokens: 6000\r\n\
+         x-ratelimit-remaining-requests: 6999\r\n\
+         x-ratelimit-remaining-tokens: 5991\r\n\
+         x-ratelimit-reset-requests: 12.342s\r\n\
+         x-ratelimit-reset-tokens: 90ms\r\n",
+        "{\"ok\":true}",
+    );
+    let gateway = gateway_to(&fixture);
+    assert!(
+        gateway.quota_headers().is_none(),
+        "a gateway that has forwarded nothing yet must not already have a reading"
+    );
+
+    let response = as_text(&send_and_read(
+        gateway.address(),
+        &messages_request(gateway.token().expose(), "{}"),
+    ));
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK"),
+        "the exchange did not complete: {response}"
+    );
+
+    let (headers, observed_at) = gateway
+        .quota_headers()
+        .expect("a forwarded response carrying rate-limit headers must reach the gateway");
+    assert_eq!(headers.limit(), Some(7000));
+    assert_eq!(headers.remaining(), Some(6999));
+    assert_eq!(headers.token_limit(), Some(6000));
+    assert_eq!(headers.token_remaining(), Some(5991));
+    assert!(observed_at > 0, "the observation must be dated");
+}
+
+/// The negative half of the same property, at the seam that actually decides
+/// it: [`super::session::SessionRouting::observe_quota_headers`] is a no-op
+/// on an empty read rather than an overwrite with nothing, so an ordinary
+/// exchange that carries no rate-limit header cannot erase a real reading a
+/// previous one left behind. `RateLimitHeaders::read` producing "nothing" for
+/// a header-free response is `provider::telemetry`'s own property
+/// (`a_response_with_no_rate_limit_header_reads_as_nothing_rather_than_as_zero`);
+/// this is the gateway's half — what happens to *state* when that empty
+/// reading arrives.
+#[test]
+fn an_empty_reading_does_not_clear_a_previous_one() {
+    let routing = super::session::SessionRouting::new();
+    routing.observe_quota_headers(
+        RateLimitHeaders::read(vec![("x-ratelimit-limit-requests", "300")]),
+        1_787_800_000,
+    );
+    assert_eq!(
+        routing.quota_headers().and_then(|(h, _)| h.limit()),
+        Some(300)
+    );
+
+    routing.observe_quota_headers(RateLimitHeaders::read(Vec::new()), 1_787_800_100);
+    assert_eq!(
+        routing.quota_headers().and_then(|(h, _)| h.limit()),
+        Some(300),
+        "an exchange that carried no rate-limit header cleared a real reading"
     );
 }
 

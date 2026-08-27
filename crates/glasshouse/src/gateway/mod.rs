@@ -353,6 +353,21 @@ impl Gateway {
         &self.routing
     }
 
+    /// The most recent rate-limit headers a real forwarded response carried,
+    /// and when they were observed — capability map line 1229's gateway
+    /// half, the `ingress` module's own reading, passed through unread
+    /// except for the allowlist [`crate::provider::telemetry`] already
+    /// parses.
+    ///
+    /// `None` until this gateway has forwarded at least one request whose
+    /// response carried a rate-limit header this reader understands. A
+    /// passive reader: nothing here makes a request of its own, ever — see
+    /// the module documentation's "the gateway forwards headers without
+    /// reading them" history, now narrowed to the body.
+    pub fn quota_headers(&self) -> Option<(crate::provider::telemetry::RateLimitHeaders, i64)> {
+        self.routing.quota_headers()
+    }
+
     /// The upstream this gateway forwards through, for a caller that needs to
     /// name one of its backends — a migration, or a settings screen listing
     /// what a session could move to.
@@ -406,13 +421,24 @@ fn accept_loop(
                 let spawned = std::thread::Builder::new()
                     .name("glasshouse-gateway-exchange".to_owned())
                     .spawn(move || {
-                        let exchange = ingress::serve(stream, &token, &upstream, &agent);
+                        let (exchange, quota) = ingress::serve(stream, &token, &upstream, &agent);
                         // Phase 9H and 9I's production feed. After the
                         // exchange, so the routing lock is never held across
                         // the provider hop, and before the log line, so a
                         // failover the exchange caused is already recorded
                         // when its own record is read.
                         routing.observe_exchange(&upstream, &exchange, std::time::Instant::now());
+                        // Capability map line 1229's gateway half — a passive
+                        // reader, not a prober: this fires only when a real
+                        // session actually forwards a request through this
+                        // gateway, and `observe_quota_headers` itself is the
+                        // one place `is_empty()` is checked, so an ordinary
+                        // exchange that carried no rate-limit header is a
+                        // silent no-op rather than a cleared reading.
+                        routing.observe_quota_headers(
+                            quota,
+                            crate::provider::cache::now_unix_seconds(),
+                        );
                         exchange.record();
                     });
                 if spawned.is_err() {

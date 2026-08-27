@@ -886,3 +886,93 @@ mod classification {
         assert_ne!(result.workload_tier(), heuristic_only.workload_tier());
     }
 }
+
+/// The one module in this file that goes through the shipped binary rather
+/// than a library call. Every test above proves `classify`/`classify_heuristically`
+/// behave correctly as functions; none of them proves anything calls those
+/// functions in the binary a person actually runs. Per §35, a test written
+/// against `classify_heuristically` directly would keep passing even if
+/// `main.rs`'s `Classify` arm were deleted outright — nothing would call the
+/// module and nothing would fail. This spawns the real executable
+/// (`CARGO_BIN_EXE_glasshouse`, the same idiom `launch_overlay.rs` and
+/// `pty_smoke.rs` already use) and reads its real stdout, so deleting that
+/// arm's body is the one mutation these two tests exist to catch.
+mod command_dispatch {
+    use std::process::Command;
+
+    fn glasshouse(workspace: &std::path::Path, data: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+            .arg("--scope")
+            .arg(workspace)
+            .arg("--data-dir")
+            .arg(data)
+            .arg("--config-dir")
+            .arg(data)
+            .args(args)
+            .output()
+            .expect("the glasshouse binary must be runnable");
+        assert!(
+            output.status.success(),
+            "glasshouse {args:?} exited with {:?}\nstderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("stdout must be UTF-8")
+    }
+
+    fn workspace_and_data() -> (tempfile::TempDir, tempfile::TempDir) {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join(".git")).unwrap();
+        let data = tempfile::tempdir().unwrap();
+        (workspace, data)
+    }
+
+    /// `glasshouse classify` on shell-shaped text must report heavy, no
+    /// model, and shell execution needed — through real argument parsing and
+    /// real command dispatch, not a function call this test wrote itself.
+    #[test]
+    fn glasshouse_classify_reaches_the_heuristic_through_the_real_command_dispatch() {
+        let (workspace, data) = workspace_and_data();
+        let stdout = glasshouse(
+            workspace.path(),
+            data.path(),
+            &[
+                "classify", "run", "cargo", "test", "and", "fix", "whatever", "fails",
+            ],
+        );
+
+        assert!(
+            stdout.contains("deterministic heuristics"),
+            "no model is wired up in this build, so the source line must say so:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("shell execution         yes"),
+            "a shell-shaped request must be reported as needing shell execution:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("workload tier           heavy"),
+            "shell + code modification must reach heavy through the real dispatch:\n{stdout}"
+        );
+    }
+
+    /// The other end of the scale, through the same real dispatch: a plain
+    /// question reads as leaf tier and safe for a disposable model.
+    #[test]
+    fn glasshouse_classify_on_a_generic_question_is_leaf_tier_and_safe_for_disposable() {
+        let (workspace, data) = workspace_and_data();
+        let stdout = glasshouse(
+            workspace.path(),
+            data.path(),
+            &["classify", "what", "is", "a", "mutex?"],
+        );
+
+        assert!(
+            stdout.contains("workload tier           leaf"),
+            "a plain question must reach leaf tier through the real dispatch:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("safe for disposable     yes"),
+            "a plain question must be reported safe for a disposable model:\n{stdout}"
+        );
+    }
+}
