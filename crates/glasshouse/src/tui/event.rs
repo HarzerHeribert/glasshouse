@@ -111,6 +111,39 @@ pub struct EventSource {
     /// still does its own job, which is not this one: it is what keeps an idle
     /// process out of `crossterm::event::poll`, where a hangup wedges it.
     quiet_ticks: std::cell::Cell<u32>,
+    /// Whether crossterm may still be holding an event it has already read
+    /// off the descriptor.
+    ///
+    /// **This is what stops typing being throttled to one key per tick.**
+    /// Crossterm does not read one byte at a time: it drains whatever the
+    /// descriptor had into a parse buffer of its own and hands back one event
+    /// per call. So after the first key of a burst is delivered, the rest of
+    /// the burst is *inside the library* and the descriptor is **empty** —
+    /// and `wait_for_terminal`'s `poll(2)` is level-triggered, so it
+    /// correctly reports nothing and sleeps out the entire remaining tick
+    /// before the loop asks crossterm for the key it has been holding all
+    /// along.
+    ///
+    /// Measured on this tree rather than argued, with a probe logging
+    /// `FIONREAD` on the descriptor beside `event::poll(Duration::ZERO)` on
+    /// every pass of the wait loop: through a twenty-key burst, **every**
+    /// sample read `fionread=0`, and nineteen consecutive samples had
+    /// crossterm answering that an event was ready on a descriptor the kernel
+    /// called empty. One key per 16ms tick, which is what the shipped binary
+    /// delivered: **16.8ms per key, a 200-character paste in 3.38s**.
+    ///
+    /// So while this is set, [`EventSource::next`] asks crossterm *before*
+    /// waiting instead of after, and the burst comes out at the speed of the
+    /// loop. It is set by [`EventSource::take_from_crossterm`] whenever a read
+    /// succeeds, and cleared the first time that early ask says no — one extra
+    /// `event::poll` per burst, and none at all on a terminal nobody is typing
+    /// at.
+    ///
+    /// **It is not an optimisation of the idle path and must not become one.**
+    /// `quiet_ticks` exists to keep an *idle* process out of
+    /// `crossterm::event::poll`, where a hangup wedges it; this flag is false
+    /// on every one of those ticks, so the two never overlap.
+    crossterm_may_hold_more: std::cell::Cell<bool>,
 }
 
 impl EventSource {
@@ -123,6 +156,7 @@ impl EventSource {
             receiver,
             last_size: std::cell::Cell::new(None),
             quiet_ticks: std::cell::Cell::new(0),
+            crossterm_may_hold_more: std::cell::Cell::new(false),
         }
     }
 
@@ -185,6 +219,43 @@ impl EventSource {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Ok(Event::Tick);
+            }
+            // **Crossterm is asked first while it may still be holding a
+            // burst.** Waiting on a descriptor for keystrokes that are already
+            // inside the library is what throttled typing to one key per tick;
+            // see `crossterm_may_hold_more` for the measurement.
+            if self.crossterm_may_hold_more.get() {
+                // Nothing may be handed to crossterm without this answer
+                // first — a terminal that has gone away walks it into the
+                // unbounded read `wait_for_terminal` exists to keep it out of.
+                //
+                // **The exposure this leaves is the one that is already
+                // there, not a new one.** The ask further down is preceded by
+                // a `wait_for_terminal` whose `poll(2)` reports `POLLHUP` the
+                // instant the far end closes, so it too is only ever reached
+                // microseconds after a hangup answer; this is the same
+                // instrument, at the same distance, subscribing to nothing so
+                // it cannot wait and cannot consume a keystroke. And it is one
+                // call per tick either way: when this branch delivers, the ask
+                // below never runs, and when it does not, this one has cleared
+                // the flag.
+                if wait_for_terminal(Duration::ZERO, Watch::HangUp)? == Wait::HangUp {
+                    crate::shutdown::request_shutdown();
+                    return Ok(Event::Shutdown);
+                }
+                if event::poll(Duration::ZERO).context("could not poll for terminal input")? {
+                    match self.take_from_crossterm()? {
+                        Some(ev) => return Ok(ev),
+                        // An event this interface does not act on. Crossterm
+                        // may still be holding the one behind it, so ask
+                        // again rather than spending the tick on a wait.
+                        None => continue,
+                    }
+                }
+                // Crossterm has nothing left. This is the one extra ask a
+                // burst costs, and the tick goes back to waiting on the
+                // descriptor exactly as it always did.
+                self.crossterm_may_hold_more.set(false);
             }
             // The wait happens here rather than inside crossterm, so that a
             // terminal which has gone away is recognised as one. See
@@ -289,24 +360,43 @@ impl EventSource {
                 }
                 continue;
             }
-            let raw = event::read().context("could not read terminal input")?;
-            match translate(raw) {
+            match self.take_from_crossterm()? {
                 // Events Glasshouse does not act on (key releases, focus
                 // changes) must not be reported as input, but must also not
                 // consume the whole tick — keep waiting out the remainder.
                 None => continue,
-                Some(ev) => {
-                    self.quiet_ticks.set(0);
-                    // Crossterm still reports resizes whenever it is consulted
-                    // at all. Agreeing with it here is what stops the watch
-                    // above from reporting the same resize a second time.
-                    if let Event::Resize(cols, rows) = ev {
-                        self.last_size.set(Some((cols, rows)));
-                    }
-                    return Ok(ev);
-                }
+                Some(ev) => return Ok(ev),
             }
         }
+    }
+
+    /// Take the event crossterm has ready, and remember that it may have more.
+    ///
+    /// `None` is an event Glasshouse does not act on — a key release, a focus
+    /// change. It is not input and must not be reported as any, and it must
+    /// not end the tick either; the caller keeps going.
+    ///
+    /// Only ever called where a poll has just said there is an event, so the
+    /// read cannot block.
+    fn take_from_crossterm(&self) -> Result<Option<Event>> {
+        let raw = event::read().context("could not read terminal input")?;
+        // A read that succeeded came out of crossterm's parse buffer, and that
+        // buffer may hold the rest of a burst. Remembering so is what lets the
+        // next pass ask before it waits — see `crossterm_may_hold_more`. Set
+        // for an event that translates to nothing too: what matters is what
+        // crossterm is holding, not what this interface makes of it.
+        self.crossterm_may_hold_more.set(true);
+        let Some(ev) = translate(raw) else {
+            return Ok(None);
+        };
+        self.quiet_ticks.set(0);
+        // Crossterm still reports resizes whenever it is consulted at all.
+        // Agreeing with it here is what stops `terminal_was_resized`'s watch
+        // reporting the same resize a second time.
+        if let Event::Resize(cols, rows) = ev {
+            self.last_size.set(Some((cols, rows)));
+        }
+        Ok(Some(ev))
     }
 }
 
