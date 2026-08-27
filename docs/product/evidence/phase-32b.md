@@ -694,3 +694,29 @@ does ship a template for has never been observed sending a token header at
 all. The wiring removes the structural blocker; it does not manufacture the
 evidence, and this package did not invent any to compensate, per D1 and
 practice §23.
+
+---
+
+## Appended by PACKET-QUOTA-LIVE, 2026-08-27 — the missing template landed beside the wiring
+
+The gap this file's own BRIDGE-QUOTA section left was named precisely: Groq
+had no registry template, so `report()`'s registry loop would never look up a
+`GatewayQuotaCache` entry keyed `"groq"` even once `main.rs` called both new
+entry points. This package's packet was exactly that — a `groq` template in
+`provider::templates()` plus the three `main.rs` edits, landed together
+because "template without wiring shows nothing; wiring without template shows
+nothing; both together produce a real `Percentage::Exact` in the shipped
+binary."
+
+Both landed. `tests/provider_discovery.rs::groqs_own_real_headers_reach_the_shipped_binarys_report_as_groq`
+plants Groq's own real inference-response header values (not invented ones)
+at `GatewayQuotaCache`'s real path and drives the compiled binary as a
+subprocess, rendering a real `capacity 99% of tokens` line for the `groq`
+resource `glasshouse resources` now lists. See `phase-32a.md`'s own appended
+section for the full per-line account against 1199/1211/1217/1218, the
+mutation proof at the read-side call, and the two honest limits this package
+did not close: an automated write-side production-reach proof through
+`main.rs` specifically (the packet scoped its own §35 requirement to the read
+side only), and whether today's routing machinery (phases 33–37, outside this
+partition) actually assigns a live gateway session to Groq. See
+`.agent-runtime/report-QUOTA-LIVE.md` for the full account.

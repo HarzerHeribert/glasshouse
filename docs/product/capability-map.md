@@ -1196,7 +1196,7 @@ Fixed architectural requirements
 Phase 32A — Unified quota and capacity model
 
 ☑ Define a provider-independent CapacityState model for describing how much usable capacity a resource has left.
-☐ Allow CapacityState to represent token-limited resources.
+☑ Allow CapacityState to represent token-limited resources.
 ☑ Allow CapacityState to represent request-limited resources.
 ☑ Allow CapacityState to represent credit-limited resources.
 ☑ Allow CapacityState to represent subscription resources with opaque provider-defined limits.
@@ -1208,14 +1208,14 @@ Phase 32A — Unified quota and capacity model
 ☐ Track provider credits independently from raw tokens when credits are the actual limiting unit.
 ☐ Track remaining monetary budget independently from provider quota when the user has configured a spending ceiling.
 ☐ Track the current quota window start when known.
-☐ Track the current quota reset time when known.
+☑ Track the current quota reset time when known.
 ☐ Track rolling-window capacity separately from fixed calendar-window capacity.
 ☐ Track concurrent-request limits when they materially affect routability.
 ☑ Track requests-per-minute limits when known.
 ☐ Track tokens-per-minute limits when known.
 ☐ Track requests-per-day or equivalent long-window request pools when known.
-☐ Preserve the provider-native quota units alongside any normalized percentage.
-☐ Never discard raw telemetry merely because Glasshouse also computes a normalized capacity score.
+☑ Preserve the provider-native quota units alongside any normalized percentage.
+☑ Never discard raw telemetry merely because Glasshouse also computes a normalized capacity score.
 
 Phase 32B — Quota telemetry sources
 

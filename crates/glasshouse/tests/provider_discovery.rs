@@ -44,6 +44,7 @@ const EXPECTED_DISCOVERY_MATRIX: &[(&str, bool)] = &[
     ("ollama", false),
     ("llama-cpp", false),
     ("nvidia", false),
+    ("groq", true),
     ("litellm", true),
     ("openai-compatible", false),
     ("anthropic-compatible", false),
@@ -163,7 +164,7 @@ fn every_template_offering_model_discovery_cites_evidence_naming_a_url_or_docume
 /// The count of templates offering discovery is pinned as a single numeric assertion
 /// so that any silent addition, removal, or capability toggle fails loudly.
 #[test]
-fn the_number_of_built_in_templates_offering_model_discovery_is_exactly_six() {
+fn the_number_of_built_in_templates_offering_model_discovery_is_exactly_seven() {
     let all_templates = templates();
     let discovery_offering_count = all_templates
         .iter()
@@ -172,17 +173,16 @@ fn the_number_of_built_in_templates_offering_model_discovery_is_exactly_six() {
 
     assert_eq!(
         all_templates.len(),
-        13,
-        "total built-in templates count changed from 13 to {}; update EXPECTED_DISCOVERY_MATRIX intentionally",
+        14,
+        "total built-in templates count changed from 14 to {}; update EXPECTED_DISCOVERY_MATRIX intentionally",
         all_templates.len()
     );
 
     assert_eq!(
-        discovery_offering_count, 6,
-        "exactly 6 built-in templates must offer model discovery; found \
-         {discovery_offering_count}. This was 7 until z.ai's promotion was withdrawn — its \
-         unauthenticated 401 turned out to be what that host answers for every path under \
-         its API prefix, so it established nothing about the model list."
+        discovery_offering_count, 7,
+        "exactly 7 built-in templates must offer model discovery; found \
+         {discovery_offering_count}. This was 6 until PACKET-QUOTA-LIVE added the `groq` \
+         template, whose GET /models was measured live, 200, a real catalogue, 2026-08-27."
     );
 }
 
@@ -868,31 +868,30 @@ fn the_shipped_binary_shows_every_windows_start_and_reset_state_when_verbose() {
     assert!(stdout.contains("resets unmeasured (unknown)"), "{stdout}");
 }
 
-/// **BRIDGE-QUOTA's own §35 negative, and the sharpest evidence in this
-/// package's report.**
+/// **PACKET-QUOTA-LIVE's flip of BRIDGE-QUOTA's own §35 negative — the
+/// bridge's binary-level proof, positive this time.**
 ///
-/// A reading planted exactly where `GatewayQuotaCache::new` would put it —
-/// under the same `--data-dir` this fixture already points the binary at —
-/// must NOT reach the shipped binary's report, because
-/// `main.rs::resources_report` never calls
-/// `GatheredTelemetry::gather_gateway_quota`. If this test ever starts
-/// failing on its own — the planted reading showing up — it means someone
-/// added the missing line without updating this test to expect it, which is
-/// exactly backwards: update this test's expectation *first*, deliberately,
-/// the day that line lands.
+/// BRIDGE-QUOTA planted a reading exactly where `GatewayQuotaCache::new`
+/// would put it and asserted the shipped binary did NOT show it, because
+/// `main.rs::resources_report` never called
+/// `GatheredTelemetry::gather_gateway_quota`. That line now exists (this
+/// package's own HALF TWO), so the honest assertion is the opposite one:
+/// the planted reading — an invented remaining count on AnyRouter's real
+/// provider slug, exactly `provider::resources`'s own
+/// `a_persisted_gateway_reading_reaches_the_rendered_report` synthetic —
+/// must now reach the real `Command::Resources` arm and render as a real
+/// percentage, not `unknown`.
 ///
-/// This is the one test in this package that goes through the real
-/// `Command::Resources` arm the way
-/// `the_shipped_binary_reports_every_resource_it_can_describe` does, so it is
-/// the test that would actually prove the bridge complete — and it proves
-/// the opposite today, on purpose.
+/// This is still the one test in this package that goes through the real
+/// binary the way `the_shipped_binary_reports_every_resource_it_can_describe`
+/// does, so it is what actually proves the bridge complete rather than only
+/// modelled.
 #[test]
-fn a_planted_gateway_reading_does_not_yet_reach_the_shipped_binarys_report() {
+fn a_planted_gateway_reading_now_reaches_the_shipped_binarys_report() {
     let fixture = BinaryFixture::new();
     // `BinaryFixture::run` points both `--data-dir` and `--config-dir` at
     // `fixture.config`, so this is the exact directory
-    // `GatewayQuotaCache::new` would resolve from `runtime.paths().data_dir()`
-    // once the missing `main.rs` line exists.
+    // `GatewayQuotaCache::new` resolves from `runtime.paths().data_dir()`.
     let quota_cache_dir = fixture.config.path().join("gateway-quota");
     let cache = glasshouse::provider::telemetry::GatewayQuotaCache::at(&quota_cache_dir);
     cache.store(
@@ -917,9 +916,62 @@ fn a_planted_gateway_reading_does_not_yet_reach_the_shipped_binarys_report() {
         .find(|block| block.starts_with("anyrouter"))
         .unwrap_or_else(|| panic!("no anyrouter block in:\n{stdout}"));
     assert!(
-        row.contains("capacity        unknown"),
-        "the shipped binary must not show a percentage from a planted reading until \
-         main.rs calls `gather_gateway_quota` — see this package's report:\n{row}"
+        row.contains("capacity        99%"),
+        "the shipped binary must show the real percentage a planted gateway reading \
+         carries, now that main.rs calls `gather_gateway_quota`:\n{row}"
+    );
+    assert!(
+        !row.contains("capacity        unknown"),
+        "the planted reading must have reached the report:\n{row}"
+    );
+}
+
+/// **The hypothesis PACKET-QUOTA-LIVE rests on, proven together rather than
+/// separately.** Neither HALF ONE (the `groq` template, this package's own
+/// addition to `provider::templates`) nor HALF TWO (the three `main.rs`
+/// edits, proven above with a synthetic AnyRouter reading) closes anything
+/// alone — see the packet's own "WHY BOTH HALVES, AND WHY NEITHER ALONE".
+/// This test plants Groq's own real header set — the exact values
+/// `.agent-runtime/probe-quota-headers-2026-08-27.md` recorded from a real
+/// `POST https://api.groq.com/openai/v1/chat/completions`, 2026-08-27 — at
+/// `GatewayQuotaCache`'s real path, keyed `"groq"`, and drives the real
+/// `Command::Resources` arm the way every other binary-level test here does.
+/// If the template and the cache key ever disagreed (the packet's own
+/// falsification check #1), or if a real, both-halves-in-one-response
+/// reading could not render as a percentage (check #2), this test is where
+/// either would show up — it is the first test anywhere to reach a real
+/// `Percentage::Exact` for a provider `glasshouse resources` actually ships.
+#[test]
+fn groqs_own_real_headers_reach_the_shipped_binarys_report_as_groq() {
+    let fixture = BinaryFixture::new();
+    let quota_cache_dir = fixture.config.path().join("gateway-quota");
+    let cache = glasshouse::provider::telemetry::GatewayQuotaCache::at(&quota_cache_dir);
+    cache.store(
+        "groq",
+        &RateLimitHeaders::read(vec![
+            ("x-ratelimit-limit-requests", "7000"),
+            ("x-ratelimit-limit-tokens", "6000"),
+            ("x-ratelimit-remaining-requests", "6999"),
+            ("x-ratelimit-remaining-tokens", "5991"),
+            ("x-ratelimit-reset-requests", "12.342s"),
+            ("x-ratelimit-reset-tokens", "90ms"),
+        ]),
+        TELEMETRY_OBSERVED,
+    );
+
+    let stdout = fixture.run(&["resources", "--no-harness"]);
+    let row = stdout
+        .split("\n\n")
+        .find(|block| block.starts_with("groq"))
+        .unwrap_or_else(|| panic!("no groq block in:\n{stdout}"));
+    assert!(
+        row.contains("capacity        99%"),
+        "Groq's own real header set, both halves in one response, must render a real \
+         percentage for the `groq` template the shipped binary now ships:\n{row}"
+    );
+    assert!(
+        !row.contains("capacity        unknown"),
+        "the planted Groq reading must have reached the report:\n{row}"
     );
 }
 

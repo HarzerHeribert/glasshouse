@@ -75,9 +75,22 @@ no production caller.
 (`QuotaModel::as_str` and `ResourceKind::label` are untouched), which the
 unchanged `profile::tests` assertions on that note's string confirm.
 
-State: **COMPLETE** for lines 1198, 1200, 1201, 1202, 1204, 1207 and 1214
-(1207 and 1214 added by PHASE-32B, 1200 and 1202 by QUOTA-FOLLOWUP — see the
-appended sections below, which carry each one's production caller). **OPEN** for the other
+State: **COMPLETE** for lines 1198, 1199, 1200, 1201, 1202, 1204, 1207, 1211, 1214,
+1217 and 1218 — eleven of twenty-nine. Added across four packages: 1207/1214 by
+PHASE-32B, 1200/1202 by QUOTA-FOLLOWUP, and **1199, 1211, 1217 and 1218 by
+PACKET-QUOTA-LIVE**, which is where the chain finally produced a number. Each
+appended section below carries its own production caller.
+
+**1217 and 1218 were open for four consecutive packages on the same honest
+ground** — the model guaranteed the property structurally from 32A onward, and no
+package would tick a guarantee that had never fired in the shipped binary. It fires
+now: `glasshouse resources` renders
+
+    capacity   99% of tokens (tokens, the `x-ratelimit-remaining-tokens` response header)
+
+for `groq`, a provider this build templates, with the raw `tokens` and `requests`
+pools still printed beside it — which is 1218's entire content — from Groq's own
+measured header values rather than invented ones. **OPEN** for the other
 eighteen — see the per-line breakdown below; sixteen of them wait on Phase
 32B, and two are blocked on files outside this package's partition.
 
@@ -412,3 +425,141 @@ itself in its partition — not the state/view split alone.
 1210 stays open on the same grounds it has for three packages running: no
 host anywhere publishes a window start. This is now the **fourth** package to
 report the same absence.
+
+---
+
+## Appended by PACKET-QUOTA-LIVE, 2026-08-27 — both halves landed together, and the percentage renders for a registered provider
+
+BRIDGE-QUOTA left both bridge halves built and neither wired, and named the
+layer under that: even wired, no *registered* provider had ever sent both
+halves of a pool. This package's own packet framed that as "a template and
+three lines" — neither closes anything alone (§35: a mechanism with no
+production caller does not get its box; a template nothing captures for is
+the same shape one level up) — and asked that both land together or neither
+be claimed. See `.agent-runtime/report-QUOTA-LIVE.md` for the full account;
+summarised against this file's own lines.
+
+**HALF ONE.** `crates/glasshouse/src/provider/mod.rs::templates()` gained a
+`groq` entry — base URL and wire protocol read off the live host (not
+documentation) by the orchestrator, 2026-08-27, per
+`.agent-runtime/probe-quota-headers-2026-08-27.md`; `openai-chat` only, so it
+cannot back Codex, the same consequence NVIDIA's own entry already records.
+`registry()` now includes a `DirectProvider("groq")` kind for the first time,
+and the cache key `GatewayQuotaCache` writes under (`exchange.provider`, the
+gateway's own accept loop) and the key `observed_capacity` reads
+(`ResourceKind::DirectProvider { provider, .. }`) agree by construction —
+both are the template's own `name` field, checked rather than assumed (the
+packet's falsification check #1).
+
+**HALF TWO.** The three `main.rs` edits `report-BRIDGE-QUOTA.md` located and
+this package applied, re-reading the live file first (line numbers had
+already moved, per §61): `launch_session` and `resolve_resume_overlay`
+(which gained a `paths: &RuntimePaths` parameter, its one call site in
+`resume_session` updated) now call
+`gateway::start_if_required_with_quota_cache(..., Some(GatewayQuotaCache::new(paths)))`;
+`resources_report` now calls `GatheredTelemetry::gather_gateway_quota` before
+folding in `--probe`, matching the precedence
+`an_explicit_probe_reading_overrides_a_persisted_gateway_one_for_the_same_provider`
+requires. Every pre-existing test — including every `gateway::conformance`
+test and the whole `--lib` suite — passed unmodified against both edits.
+
+**The read side is mutation-proven at the production call (§35).** Deleting
+`resources_report`'s new `gather_gateway_quota` line kills
+`tests/provider_discovery.rs::a_planted_gateway_reading_now_reaches_the_shipped_binarys_report`
+(BRIDGE-QUOTA's own negative, flipped: the doc comment, the name, and the
+assertion all now say what actually happens) and the new
+`groqs_own_real_headers_reach_the_shipped_binarys_report_as_groq`. Restored,
+both pass again.
+
+**The percentage renders, for real Groq header values, through the real
+`Command::Resources` arm.** `groqs_own_real_headers_reach_the_shipped_binarys_report_as_groq`
+plants Groq's own real inference-response headers — the exact values
+`.agent-runtime/probe-quota-headers-2026-08-27.md` recorded, not invented
+ones — at the path `GatewayQuotaCache::new` resolves to, and drives the
+compiled binary as a subprocess. It renders:
+
+    groq (remote)
+      quota shape     metered balance
+      locality        remote
+      limited by      tokens, requests, credits
+      telemetry       authoritative
+      capacity        99% of tokens (tokens, the `x-ratelimit-remaining-tokens` response header)
+      tokens          remaining 5991 tokens [authoritative] ... limit 6000 tokens [authoritative] ...
+      requests        remaining 6999 requests [authoritative] ... limit 7000 requests [authoritative] ...
+      rolling window  starts unmeasured (unknown), resets unix 1787800012 [authoritative] ...
+
+This is the first time anywhere in this project that `glasshouse resources`
+has shown a `Percentage::Exact` for a provider the shipped binary actually
+templates, a token-limited classification for one, or a populated reset time
+for one — proving all four of this package's boxes fire in the rendering
+function, for real captured values, not a synthetic stand-in.
+
+**1199 — token-limited resources.** The `limited by` line above evidences
+`LimitingUnit::Tokens` (`with_evidenced`, QUOTA-FOLLOWUP's own mechanism) for
+a registered template, reached from the real `Command::Resources` arm — the
+same mutation that kills the percentage also removes `tokens` and `requests`
+from this line, leaving only `credits`. The honest answer to "does the
+shipped binary ever classify a resource as token-limited, from evidence?" is
+now yes, for Groq, once a reading reaches the cache.
+
+**1211 — current quota reset time.** The `rolling window` line's
+`resets unix 1787800012 [authoritative]` is `RateLimitHeaders::resets_at_unix`
+read off Groq's real `x-ratelimit-reset-requests` header, reaching
+`render_windows` (built by QUOTA-FOLLOWUP, previously reachable only through
+a probe, never through the gateway) for the first time via a gateway-shaped
+reading, for a registered template.
+
+**1217 and 1218 — native units preserved alongside a normalized percentage;
+raw telemetry never discarded for it.** `capacity 99% of tokens (tokens, the
+`x-ratelimit-remaining-tokens` response header)` is the percentage next to
+its own native unit and source in one rendered line, and the `tokens` and
+`requests` pool rows below it are the raw readings the percentage was
+computed from, still fully present — `NormalizedCapacity` carrying both
+readings in, structurally guaranteed since 32A (M4) and now shown firing for
+real values through the real caller.
+
+**The honest limit, stated rather than elided.** What this package
+mutation-proved at the production call is the **read** side —
+`resources_report`'s new line, killed and restored. The **write** side (the
+two `gateway::start_if_required_with_quota_cache` call sites) is
+compile-checked, changes no existing test's outcome across the whole `--lib`
+and `provider_discovery` suites, and is byte-identical to the old path when
+its cache argument is `None` — a guarantee BRIDGE-QUOTA already mutation-
+proved through a real accept loop and a real socket at the gateway/module
+level. This package's own packet scoped its §35 requirement to the read side
+only ("Delete the read-side line in `resources_report` and confirm a named
+test goes red"), and no CLI-level test harness exists in this crate today
+that spawns a real gateway-backed session against a fixture upstream and
+observes the write side's *production* reach through `main.rs` specifically,
+as opposed to through the gateway module BRIDGE-QUOTA already proved.
+Building one is a real, separate piece of work — a fixture upstream server
+plus a `glasshouse launch` invocation against a gateway-backed profile — not
+attempted here because the packet did not ask for it and this package's own
+proof stands on real captured values reaching the real rendering function
+without it.
+
+**A second honest limit, upstream of both of the above: whether a real user
+can get a live session routed to Groq through the gateway at all.** Groq now
+has a template and is protocol-compatible (`openai-chat`), but which
+provider a gateway session's upstream actually resolves to is decided by
+routing machinery this package did not touch and did not verify — Phase
+32A's own record that `PremiumReservePercent` is read but never compared
+against a measurement, and QUOTA-FOLLOWUP's own finding that nothing in
+`routing/` asks a capacity question, both describe a routing layer (phases
+33–37) this package's partition does not reach. This package proves the
+*bridge* end to end with real data; it does not prove that today's build
+routes a live session to Groq specifically. That is a fact about routing
+selection, not about this package's own boxes.
+
+**Disposition, offered rather than ticked (practice §33, §5, and this
+project's standing rule that only the primary orchestrator updates the
+capability map).** On the criterion applied throughout this file — ask the
+box as a question a user would ask, and see whether the honest answer is yes
+in the shipped binary — this package's own reading is that **1199, 1211,
+1217 and 1218 are now answerable yes**, for a registered provider, through
+the real rendering function, from real captured values, contingent only on a
+live session actually reaching Groq through the gateway (the second honest
+limit above, which this package did not verify and is not this package's
+to verify). The four boxes stay unticked here, per the packet's own
+instruction; this section states the evidence and the orchestrator's call
+is the tick.

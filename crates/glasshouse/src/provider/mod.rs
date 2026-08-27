@@ -542,6 +542,39 @@ pub fn templates() -> Vec<Provider> {
             headers: vec![],
         },
         Provider {
+            name: "groq".to_owned(),
+            // Base URL and wire protocol read off the live service itself,
+            // not documentation — the orchestrator measured both against
+            // the real host with the user's own credential, 2026-08-27
+            // (`.agent-runtime/probe-quota-headers-2026-08-27.md`):
+            // `GET https://api.groq.com/openai/v1/models` answered 200 with
+            // a real catalogue, and `POST .../chat/completions` answered
+            // 200 too. `openai-chat` only — no Responses endpoint was
+            // established, so this template cannot back Codex, which needs
+            // `openai-responses`, the same consequence NVIDIA's entry above
+            // records.
+            protocols: vec![unverified_support(
+                WireProtocol::OpenAiChat,
+                "https://api.groq.com/openai/v1",
+            )],
+            model_list_endpoint: Declared::verified(
+                true,
+                "GET https://api.groq.com/openai/v1/models answered 200 with a real \
+                 catalogue, measured by the orchestrator against the live host with the \
+                 user's own credential, 2026-08-27",
+            ),
+            // The inference response carries a full rate-limit header set
+            // (limit/remaining/reset for both requests and tokens), but
+            // that seam is the gateway's own forwarding path
+            // (`crate::provider::telemetry::GatewayQuotaCache`), not a
+            // dedicated usage endpoint this crate queries directly — no
+            // such endpoint was established for Groq, so this stays
+            // Unverified rather than conflating the two seams.
+            usage_telemetry: Declared::Unverified,
+            credential_env: vec!["GROQ_API_KEY".to_owned()],
+            headers: vec![],
+        },
+        Provider {
             name: "litellm".to_owned(),
             // LiteLLM's quick-start and `proxy/user_keys` pages both use
             // exactly `http://0.0.0.0:4000` as the client `base_url`. Written
@@ -1009,6 +1042,9 @@ mod tests {
                 "anyrouter.model_list_endpoint".to_owned(),
                 "kilo.model_list_endpoint".to_owned(),
                 "nous.model_list_endpoint".to_owned(),
+                // PACKET-QUOTA-LIVE: measured live by the orchestrator,
+                // 2026-08-27 — see the `groq` template's own comment.
+                "groq.model_list_endpoint".to_owned(),
                 "litellm.model_list_endpoint".to_owned(),
             ],
             "only a capability someone actually probed may be Verified, and every other one \
@@ -1069,6 +1105,46 @@ mod tests {
         );
         assert_eq!(nvidia.credential_env, vec!["NVIDIA_API_KEY".to_owned()]);
         assert!(nvidia.headers.is_empty());
+    }
+
+    // --- Groq (PACKET-QUOTA-LIVE) -----------------------------------------
+
+    #[test]
+    fn groq_serves_chat_only_at_the_live_base_url() {
+        let groq = template("groq").expect("groq is a built-in template");
+        let chat = groq
+            .serves(WireProtocol::OpenAiChat)
+            .expect("groq serves openai-chat");
+        assert_eq!(chat.base_url, "https://api.groq.com/openai/v1");
+        assert!(
+            groq.serves(WireProtocol::OpenAiResponses).is_none(),
+            "no Responses endpoint was established for Groq — a provider serving only \
+             openai-chat must not answer for openai-responses"
+        );
+        assert!(
+            groq.model_list_endpoint.is_verified(),
+            "GET /models was measured live, 200, a real catalogue — this must be Verified"
+        );
+        assert_eq!(groq.credential_env, vec!["GROQ_API_KEY".to_owned()]);
+        assert!(groq.headers.is_empty());
+    }
+
+    /// A provider serving only `openai-chat` cannot back Codex, whose
+    /// `wire_api` dropped `"chat"` in 0.149.1 — the module documentation's
+    /// own rule, and NVIDIA's template records the identical consequence.
+    /// Groq is exactly that shape, so the honest proof is that the routing
+    /// constraint itself refuses it, not a configuration that would compose
+    /// today and only fail once Codex started rejecting it.
+    #[test]
+    fn groq_alone_cannot_satisfy_a_codex_routed_session() {
+        let providers = vec![template("groq").expect("groq is a built-in template")];
+        let candidates =
+            ProtocolCompatibleProviders::for_protocol(&providers, WireProtocol::OpenAiResponses);
+        assert!(
+            candidates.is_empty(),
+            "Groq declares no openai-responses support, so it must not survive a \
+             Codex-shaped (openai-responses) routing filter"
+        );
     }
 
     // --- line 416: LiteLLM -------------------------------------------------

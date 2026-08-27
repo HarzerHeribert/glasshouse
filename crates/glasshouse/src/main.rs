@@ -480,16 +480,19 @@ fn launch_session(
     // upstream is a closure, called only after the predicate says yes.
     // The guard lives to the end of this function, so the listener goes away
     // with the instance on every path out.
-    let gateway =
-        match glasshouse::gateway::start_if_required(std::slice::from_ref(&launch_profile), || {
-            gateway_upstream(&user, project.as_ref(), &effective, &secrets)
-        }) {
-            Ok(gateway) => gateway,
-            Err(err) => {
-                eprintln!("glasshouse: {err}");
-                return Ok(ExitCode::FAILURE);
-            }
-        };
+    let gateway = match glasshouse::gateway::start_if_required_with_quota_cache(
+        std::slice::from_ref(&launch_profile),
+        || gateway_upstream(&user, project.as_ref(), &effective, &secrets),
+        Some(glasshouse::provider::telemetry::GatewayQuotaCache::new(
+            runtime.paths(),
+        )),
+    ) {
+        Ok(gateway) => gateway,
+        Err(err) => {
+            eprintln!("glasshouse: {err}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
 
     let resolution = glasshouse::profile::Resolution {
         adapter: selection.adapter(),
@@ -925,6 +928,7 @@ fn resolve_resume_overlay(
     project: Option<&ProjectConfig>,
     selection: &session::HarnessSelection,
     profile_name: &str,
+    paths: &glasshouse::paths::RuntimePaths,
 ) -> anyhow::Result<(
     glasshouse::profile::LaunchProfile,
     glasshouse::profile::LaunchOverlay,
@@ -944,10 +948,13 @@ fn resolve_resume_overlay(
     // credential is never carried across processes, let alone across the gap
     // between the original launch and this resume.
     let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
-    let gateway =
-        glasshouse::gateway::start_if_required(std::slice::from_ref(&launch_profile), || {
-            gateway_upstream(user, project, effective, &secrets)
-        })?;
+    let gateway = glasshouse::gateway::start_if_required_with_quota_cache(
+        std::slice::from_ref(&launch_profile),
+        || gateway_upstream(user, project, effective, &secrets),
+        Some(glasshouse::provider::telemetry::GatewayQuotaCache::new(
+            paths,
+        )),
+    )?;
     let resolution = glasshouse::profile::Resolution {
         adapter: selection.adapter(),
         acknowledged_bypass,
@@ -1855,7 +1862,14 @@ fn resume_session(
     // plain native resume and a line on stderr explaining why, not a session
     // that no longer opens at all.
     let overlay_resolution = record.launch_profile.as_deref().and_then(|name| {
-        match resolve_resume_overlay(&effective, &user, project.as_ref(), &selection, name) {
+        match resolve_resume_overlay(
+            &effective,
+            &user,
+            project.as_ref(),
+            &selection,
+            name,
+            runtime.paths(),
+        ) {
             Ok(resolved) => Some(resolved),
             Err(err) => {
                 eprintln!(
@@ -2010,6 +2024,9 @@ fn resources_report(
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
 
     let mut telemetry = glasshouse::provider::resources::GatheredTelemetry::new();
+    telemetry = telemetry.gather_gateway_quota(
+        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths()),
+    );
     if !no_harness {
         telemetry = telemetry.gather_harness_status(now_unix);
     }

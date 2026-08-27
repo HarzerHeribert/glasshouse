@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████░░░░░░░░░░░░░░░░░░░░░░░` 565 / 1280 mandatory capabilities (44%)
+`█████████████████░░░░░░░░░░░░░░░░░░░░░░░` 569 / 1280 mandatory capabilities (44%)
 
 <details>
 <summary>Per-phase breakdown (19 of 104 phases complete)</summary>
@@ -86,7 +86,7 @@ the authoritative specification and tracks what is done.
 | Phase 30 — Session context metadata | 0/8 |
 | Phase 31 — Compaction-aware behavior | 0/7 |
 | Phase 32 — Resource registry | 11/12 |
-| Phase 32A — Unified quota and capacity model | 7/21 |
+| Phase 32A — Unified quota and capacity model | 11/21 |
 | Phase 32B — Quota telemetry sources | 13/14 |
 | Phase 32C — Subscription capacity estimation | 0/12 |
 | Phase 32D — Normalized remaining-capacity score | 0/12 |
