@@ -62,7 +62,7 @@ use std::path::Path;
 use super::{
     ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, Declared,
     HarnessAdapter, HarnessDescription, Invocation, ModelOverride, NativeSessionSource,
-    SandboxSelector, SessionIds, SharedIndexSource, Vendor,
+    SandboxSelector, SessionIds, SharedIndexSource, Vendor, pairing::OfficialModelSupport,
 };
 use crate::integrations::IntegrationId;
 
@@ -80,6 +80,19 @@ const BACKEND_SELECTION: &[BackendSelection] = &[BackendSelection::CommandLineAr
 /// communication-style mechanism, so Glasshouse deliberately records no
 /// inferred support.
 const COMMUNICATION_STYLE: Declared<super::CommunicationStyle> = Declared::Unverified;
+
+/// The model family Google produces for Antigravity's own coding
+/// environment.
+const NATIVE_FAMILIES: &[&str] = &["gemini"];
+
+/// The models Antigravity offers that Google did not develop. Ids rather
+/// than families, because this is a concrete list its own `models`
+/// subcommand prints.
+const SUPPORTED_MODELS: &[&str] = &[
+    "claude-sonnet-4-6",
+    "claude-opus-4-6-thinking",
+    "gpt-oss-120b-medium",
+];
 
 impl HarnessAdapter for Antigravity {
     fn id(&self) -> IntegrationId {
@@ -133,6 +146,23 @@ impl HarnessAdapter for Antigravity {
 
     fn read_index_entry(&self, index: &str, project_root: &Path) -> Option<String> {
         Self::read_last_conversation(index, project_root)
+    }
+
+    fn official_model_support(&self) -> OfficialModelSupport {
+        OfficialModelSupport {
+            native_families: Declared::verified(
+                NATIVE_FAMILIES,
+                "`agy models` (Antigravity CLI 1.1.21, run 2026-08-27) lists eleven \
+                 `gemini-*` entries under Google's own CLI, ahead of the models it labels \
+                 as other vendors'",
+            ),
+            supported_models: Declared::verified(
+                SUPPORTED_MODELS,
+                "`agy models` (Antigravity CLI 1.1.21, run 2026-08-27) lists `claude-sonnet-4-6`, \
+                 `claude-opus-4-6-thinking` and `gpt-oss-120b-medium` alongside its own \
+                 `gemini-*` entries",
+            ),
+        }
     }
 
     fn describe(&self) -> HarnessDescription {

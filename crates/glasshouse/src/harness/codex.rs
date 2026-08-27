@@ -12,7 +12,7 @@ use super::{
     Declared, DirectProviderPlan, DirectProviderRequest, HarnessAdapter, HarnessDescription,
     HookCommand, HookDestination, HookInstallation, Hooks, Invocation, ModelOverride,
     NativeSessionKind, NativeSessionRecord, NativeSessionSource, RecordPerSessionSource,
-    SandboxSelector, SessionIds, Vendor, WireProtocol,
+    SandboxSelector, SessionIds, Vendor, WireProtocol, pairing::OfficialModelSupport,
 };
 use crate::integrations::IntegrationId;
 
@@ -133,6 +133,14 @@ fn http_headers_table(headers: &[(String, String)]) -> Option<String> {
     table.push_str(" }");
     Some(table)
 }
+
+/// The model family OpenAI produces for Codex, as Codex's own availability
+/// record spells it.
+const NATIVE_FAMILIES: &[&str] = &["gpt-5"];
+
+/// A model Codex's own help documents as a value for `model`, outside the
+/// family it ships as its default line.
+const SUPPORTED_MODELS: &[&str] = &["o3"];
 
 impl HarnessAdapter for Codex {
     fn id(&self) -> IntegrationId {
@@ -333,6 +341,22 @@ impl HarnessAdapter for Codex {
             started_at,
             kind,
         })
+    }
+
+    fn official_model_support(&self) -> OfficialModelSupport {
+        OfficialModelSupport {
+            native_families: Declared::verified(
+                NATIVE_FAMILIES,
+                "Codex 0.149.1 wrote `\"gpt-5.5\"` and `\"gpt-5.6-sol\"` into the \
+                 `[tui.model_availability_nux]` table of its own `~/.codex/config.toml`, \
+                 read 2026-08-27 — the harness's own record of which models it offered",
+            ),
+            supported_models: Declared::verified(
+                SUPPORTED_MODELS,
+                "`codex --help` (codex-cli 0.149.1, read 2026-08-27) gives `-c model=\"o3\"` \
+                 as its own configuration-override example",
+            ),
+        }
     }
 
     fn describe(&self) -> HarnessDescription {

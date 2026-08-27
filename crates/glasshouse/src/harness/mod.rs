@@ -44,6 +44,7 @@ pub mod codex;
 pub mod cursor;
 pub mod hermes;
 pub mod opencode;
+pub mod pairing;
 pub mod pi;
 
 use std::ffi::OsString;
@@ -1035,6 +1036,25 @@ pub trait HarnessAdapter: std::fmt::Debug + Send + Sync {
 
     /// Everything this adapter declares about its harness.
     fn describe(&self) -> HarnessDescription;
+
+    /// Which models this harness's own vendor says it operates — Phase 9J
+    /// lines 557, 558 and 562.
+    ///
+    /// A *declaration*, exactly like everything in
+    /// [`HarnessAdapter::describe`], and kept off [`HarnessDescription`] on
+    /// purpose: a harness adding or dropping official support for a model
+    /// must be an edit to one array in one adapter, and widening the struct
+    /// every reader of a description already destructures would make it an
+    /// edit to all of them.
+    ///
+    /// The default is [`pairing::OfficialModelSupport::UNVERIFIED`] — "nobody read
+    /// this harness's model list" — which is what an adapter that has not
+    /// been asked the question should say. It is never "this harness
+    /// supports nothing": see [`pairing::classify`] for the difference that
+    /// makes.
+    fn official_model_support(&self) -> pairing::OfficialModelSupport {
+        pairing::OfficialModelSupport::UNVERIFIED
+    }
 
     /// The arguments that select `mode` on this harness, or `None` when this
     /// harness declares no such mode.

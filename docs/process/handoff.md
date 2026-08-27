@@ -8,6 +8,28 @@ Last updated: 2026-08-27 (Europe/Berlin)
 
 ## Current capability / phase
 
+**Phase 9J is nine of twenty and the other eleven are blocked, which is the
+round's real finding.** Group 1 (pairing identity) is closed and proven end to
+end: `glasshouse pairing` reports a class per configured profile, and a
+`[pairing.models."<id>"]` table in the user's configuration changes what the
+binary prints with no router code touched. Group 2 (the prior and its evidence)
+is **0 of 11, none of them blocked on each other**: seven wait on a routing
+prior existing at all (Phase 35B, 0 of 25), two more also on Phase 33A (0 of
+15), one *is* Phase 33A's tenth line almost verbatim and arguably belongs in
+that phase, and two have a partial answer already shipped. There is no scoring
+function anywhere in the crate — `grep -rn 'fn score\|Score' src/` is empty —
+so a prior would have nothing to be a term of.
+
+**Line 576 was deliberately left open rather than faked.** Four preference
+values are half an hour of configuration plumbing and would be a field parsed
+and never consulted, because a preference over a prior that does not exist
+consults nothing.
+
+**Two Phase 0 boxes were unticked** when its evidence entry was finally
+written — see the next-action list. `check-evidence-coverage.py --strict` is now
+in the gate, so a box ticked without a ledger entry fails it.
+
+
 **Phase 9G, 2C, 9B, 9C and 9D are COMPLETE.** 9E eleven of thirteen; 2D six of
 nineteen; Phase 9 five of seven; 9F eleven of thirteen; 9A nineteen of
 twenty-six; **392 checked boxes (30%).** Local suite **1300+ passing**.
@@ -68,7 +90,33 @@ outside that partition and belong to a follow-up package:
 interrupt box below can finally be tested rather than compiled. Expect several
 jobs to fail at once on the first run; reconcile them in one sweep.
 
-**1. The residual `SIGABRT`, 1 in 37 runs.**
+**1. Two Phase 0 boxes are unticked and one needs the user.** Writing Phase 0's
+evidence entry — the last phase with ticked boxes and none behind them — cost
+two of its own boxes. Box 2 ("keep the initial dependency set limited to
+libraries required for async execution, terminal UI, PTYs, serialization,
+SQLite, and basic process control") is **false as worded and cannot be made
+true**: eleven of twenty-two direct dependencies fall outside those six
+categories, and `clap`, `tracing` and `directories` are required by Phase 0's
+own boxes 5/6, 7 and 4. It is a specification defect, not a code defect; the
+question is parked with `scripts/ask-user.sh` under the slug `phase0-box2`.
+Box 8's "panic" clause was reproducibly false at 3 of 12 pty trials and is
+being fixed; re-tick it with that worker's evidence.
+
+**Also found there: there is no async runtime anywhere in the tree.** Threads
+and `mpsc` throughout, so "async execution" is a granted-but-unused category.
+Recorded in design-decisions because two facts already there are facts about a
+synchronous threaded program.
+
+**2. Phase 9J line 572 is probably in the wrong phase.** "Keep evidence for the
+same nominal model distinct across different harnesses, gateways,
+quantizations, model revisions, or protocol translations" is an
+evidence-*storage* requirement and is nearly word-for-word Phase 33A's *"Keep
+metrics distinct for materially different model versions, quantizations,
+routes, or changing stealth-model identities"*. Whoever builds 33A closes both
+or neither. Leaving it in 9J makes that phase read one line further from done
+than it is. **A map edit, so it needs the user.**
+
+**3. The residual `SIGABRT`, 1 in 37 runs.**
 `pty_smoke::a_direct_provider_profile_reaches_a_real_child_and_only_that_child`
 fails with the child killed by signal 6. It is **not** the drain race that was
 just fixed. Four hypotheses are already ruled out with data — the `EIO` theory
@@ -76,7 +124,7 @@ just fixed. Four hypotheses are already ruled out with data — the `EIO` theory
 (2400 spawns), and mislabelling — and `report-PTY-FLAKE.md` §6 ranks where to
 look next, starting with `std::env::set_var` in a threaded test binary.
 
-**2. Phase 9I line 528** is the last free-pool line: `Allowance` separates
+**4. Phase 9I line 528** is the last free-pool line: `Allowance` separates
 request pools from token-priced allowances and only the request-pool half has a
 production feed. It needs a source for "this credential is priced per token".
 Deliberately not solved by parsing rate-limit headers on the forwarding path —

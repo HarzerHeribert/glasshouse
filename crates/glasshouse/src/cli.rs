@@ -74,6 +74,28 @@ pub enum Command {
     /// Setup runs by itself the first time Glasshouse is used in an
     /// interactive terminal; this is how to revisit those choices later.
     Setup,
+    /// Report what Glasshouse believes about each harness-and-model pairing.
+    ///
+    /// Who publishes a harness, who developed a model, and who serves that
+    /// model are three different questions, and a router that ran them
+    /// together would treat a reseller as an author. This prints them apart,
+    /// with the class each pairing falls into and the evidence behind it.
+    ///
+    /// Anything Glasshouse has not read stays `unknown` — a model named
+    /// after a company is not evidence it was made there. Correct one with a
+    /// `[pairing.models."<model id>"]` table in the configuration file; the
+    /// next run reflects it, and no router code changes.
+    Pairing {
+        /// Ask about one model by its exact id, whether or not any launch
+        /// profile names it.
+        #[arg(long, value_name = "ID")]
+        model: Option<String>,
+
+        /// Narrow `--model` to one harness, by its identifier — for example
+        /// `claude-code`.
+        #[arg(long, value_name = "ID")]
+        harness: Option<String>,
+    },
     /// List the sessions Glasshouse has recorded for this project.
     ///
     /// Glasshouse keeps its own record of every session it starts, separate

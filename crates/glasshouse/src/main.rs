@@ -83,6 +83,15 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 return Ok(ExitCode::FAILURE);
             }
         }
+        Some(Command::Pairing { model, harness }) => {
+            let user = UserConfig::load(runtime.paths())?;
+            let project = config::load_project_config(runtime.project())?;
+            let effective = EffectiveConfig::new(&user, project.as_ref());
+            print!(
+                "{}",
+                config::pairing::report(&effective, model.as_deref(), harness.as_deref())
+            );
+        }
         Some(Command::Sessions) => {
             print!("{}", session_report(&runtime)?);
         }

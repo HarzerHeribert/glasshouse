@@ -44,6 +44,8 @@
 //! `tests::serialized_form_has_no_secret_capable_field` for a structural
 //! guard, not just a string search.
 
+pub mod pairing;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -1590,6 +1592,11 @@ pub struct UserConfig {
     /// step writes no `[routing]` table at all — see [`RoutingConfig::model`].
     #[serde(default, skip_serializing_if = "RoutingConfig::is_unset")]
     routing: RoutingConfig,
+    /// Pairing metadata corrections — Phase 9J line 561. Skipped when empty
+    /// for the same reason `routing` is: a user who never corrected a
+    /// pairing has no `[pairing]` table in their file at all.
+    #[serde(default, skip_serializing_if = "pairing::PairingConfig::is_unset")]
+    pairing: pairing::PairingConfig,
 }
 
 impl Default for UserConfig {
@@ -1601,6 +1608,7 @@ impl Default for UserConfig {
             profiles: ProfileTable::default(),
             providers: ProviderTable::default(),
             routing: RoutingConfig::default(),
+            pairing: pairing::PairingConfig::default(),
         }
     }
 }
@@ -1648,6 +1656,14 @@ impl UserConfig {
 
     pub fn routing_mut(&mut self) -> &mut RoutingConfig {
         &mut self.routing
+    }
+
+    pub fn pairing(&self) -> &pairing::PairingConfig {
+        &self.pairing
+    }
+
+    pub fn pairing_mut(&mut self) -> &mut pairing::PairingConfig {
+        &mut self.pairing
     }
 
     /// Load the user-level configuration file named by `paths`.
@@ -1704,6 +1720,11 @@ pub struct ProjectConfig {
     /// that one is not.
     #[serde(default, skip_serializing_if = "RoutingConfig::is_unset")]
     routing: RoutingConfig,
+    /// A project may correct pairing metadata for the models its own work
+    /// uses, and its corrections win per key over the user's — see
+    /// [`EffectiveConfig::pairing_overrides`].
+    #[serde(default, skip_serializing_if = "pairing::PairingConfig::is_unset")]
+    pairing: pairing::PairingConfig,
 }
 
 impl Default for ProjectConfig {
@@ -1714,6 +1735,7 @@ impl Default for ProjectConfig {
             profiles: ProfileTable::default(),
             providers: ProviderTable::default(),
             routing: RoutingConfig::default(),
+            pairing: pairing::PairingConfig::default(),
         }
     }
 }
@@ -1753,6 +1775,14 @@ impl ProjectConfig {
 
     pub fn routing_mut(&mut self) -> &mut RoutingConfig {
         &mut self.routing
+    }
+
+    pub fn pairing(&self) -> &pairing::PairingConfig {
+        &self.pairing
+    }
+
+    pub fn pairing_mut(&mut self) -> &mut pairing::PairingConfig {
+        &mut self.pairing
     }
 }
 
@@ -2173,6 +2203,22 @@ impl<'a> EffectiveConfig<'a> {
             *reason = RoutingFallback::NotConfigured;
         }
         Layered::new(resolution, layer)
+    }
+
+    /// Each layer's `[pairing]` table, in the order corrections are applied
+    /// — user first, project second, so a report reads in the order
+    /// [`EffectiveConfig::pairing_overrides`] merges them.
+    ///
+    /// The [`EffectiveConfig`] fields are private and this type is `Copy`,
+    /// so a caller outside this module cannot reach a layer's table any
+    /// other way; a report that wants to show *which file* a correction came
+    /// from needs exactly this.
+    pub fn pairing_layers(&self) -> Vec<(Layer, &pairing::PairingConfig)> {
+        let mut layers = vec![(Layer::User, self.user.pairing())];
+        if let Some(project) = self.project {
+            layers.push((Layer::Project, project.pairing()));
+        }
+        layers
     }
 
     /// Resolve `name` to a [`crate::provider::Provider`], reporting which

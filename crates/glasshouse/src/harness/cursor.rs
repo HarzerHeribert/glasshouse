@@ -7,7 +7,7 @@
 use super::{
     ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, Declared,
     HarnessAdapter, HarnessDescription, Invocation, ModelOverride, SandboxSelector, SessionIds,
-    Vendor,
+    Vendor, pairing::OfficialModelSupport,
 };
 use crate::integrations::IntegrationId;
 
@@ -30,6 +30,9 @@ const BACKEND_SELECTION: &[BackendSelection] = &[
 /// No native output-style mechanism was documented, so support remains
 /// unknown.
 const COMMUNICATION_STYLE: Declared<super::CommunicationStyle> = Declared::Unverified;
+
+/// The models Cursor CLI's own help documents as values for `--model`.
+const SUPPORTED_MODELS: &[&str] = &["gpt-5", "sonnet-4-thinking", "claude-opus-4-8"];
 
 impl HarnessAdapter for Cursor {
     fn id(&self) -> IntegrationId {
@@ -56,6 +59,23 @@ impl HarnessAdapter for Cursor {
         // resume`. With an identifier it resumes that chat rather than
         // opening the picker.
         Some(Invocation::of(["--resume", native_session]))
+    }
+
+    fn official_model_support(&self) -> OfficialModelSupport {
+        OfficialModelSupport {
+            // Cursor CLI's help names no model Cursor itself developed. An
+            // `Unverified` rather than an empty list: nothing was read, and
+            // a harness that can never be vendor-native because nobody
+            // looked is a different claim from one that has no model line.
+            native_families: Declared::Unverified,
+            supported_models: Declared::verified(
+                SUPPORTED_MODELS,
+                "`cursor-agent --help` (Cursor CLI 2026.08.11, read 2026-08-27): \
+                 `--model <model>  Model to use (e.g., gpt-5, sonnet-4-thinking)`, and \
+                 `'claude-opus-4-8[context=1m,effort=high,fast=false]'` as its \
+                 parameterized-model example",
+            ),
+        }
     }
 
     fn describe(&self) -> HarnessDescription {

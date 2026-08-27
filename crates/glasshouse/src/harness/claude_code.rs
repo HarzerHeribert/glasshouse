@@ -11,7 +11,7 @@ use super::{
     ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, CommunicationStyle,
     CredentialPlacement, Declared, DirectProviderPlan, DirectProviderRequest, HarnessAdapter,
     HarnessDescription, HookCommand, HookDestination, HookInstallation, Hooks, Invocation,
-    ModelOverride, SessionIds, StyleChange, Vendor, WireProtocol,
+    ModelOverride, SessionIds, StyleChange, Vendor, WireProtocol, pairing::OfficialModelSupport,
 };
 use crate::integrations::IntegrationId;
 
@@ -130,6 +130,12 @@ const COMMUNICATION_STYLE: Declared<CommunicationStyle> = Declared::verified(
     "a Claude Code 2.1.245 session's status-line payload reports its output style; Claude Code \
      2.1.246 `claude --help` documents `--settings <file-or-json>` as a launch option",
 );
+
+/// The model families Anthropic produces for Claude Code, as `claude --help`
+/// spells them. Families rather than ids: the help text presents these as
+/// aliases for "the latest model" of each line, which is exactly what a
+/// family is.
+const NATIVE_FAMILIES: &[&str] = &["opus", "sonnet", "fable"];
 
 impl HarnessAdapter for ClaudeCode {
     fn id(&self) -> IntegrationId {
@@ -253,6 +259,24 @@ impl HarnessAdapter for ClaudeCode {
         // is passed as its own argument rather than glued on with `=`, so a
         // value that begins with a dash cannot be re-read as a flag.
         Some(Invocation::of(["--resume", native_session]))
+    }
+
+    fn official_model_support(&self) -> OfficialModelSupport {
+        OfficialModelSupport {
+            native_families: Declared::verified(
+                NATIVE_FAMILIES,
+                "`claude --help`: `--model <model>` — \"Provide an alias for the latest model \
+                 (e.g. 'fable', 'opus', or 'sonnet') or a model's full name (e.g. \
+                 'claude-fable-5')\", read from Claude Code 2.1.246 on 2026-08-27",
+            ),
+            // Claude Code's own help names no model developed by anyone
+            // else. That is not the same as Anthropic supporting none, and
+            // it must not be recorded as one — an `Unverified` here means a
+            // cross-vendor model reaching Claude Code is classified by its
+            // wire protocol rather than being refused a class it might
+            // deserve.
+            supported_models: Declared::Unverified,
+        }
     }
 
     fn describe(&self) -> HarnessDescription {

@@ -1560,3 +1560,122 @@ An async rewrite would not inherit those observations.
 
 Found while writing Phase 0's evidence entry, which is the first time anyone
 enumerated the dependency tree against what the map permits.
+
+## Harness-model pairing — `unknown` is an answer, and vendor alignment is only ever a prior
+
+### The conflict
+
+Phase 9J asks Glasshouse to say what the relationship between a harness and a
+model *is*, and the map's first fixed architectural requirement immediately
+takes the obvious use away from the answer: *"Vendor alignment is an
+inspectable positive initial soft prior, never proof of quality or a hard
+routing requirement."* So the taxonomy has to be precise enough for a router to
+lean on and weak enough that leaning on it is never conclusive.
+
+The failure mode is already documented one level up. `harness::Vendor`'s own
+comment says that collapsing "who publishes the harness", "who developed the
+model" and "who serves it" into one field "is how a router ends up believing a
+harness and a model are first-party partners because their names rhyme." Phase
+9J is the same failure one level down: a model called `claude-something` on a
+provider called `anthropic` is two names, and neither is an attribution.
+
+### The decision: the developer is a different type from the vendor, and they meet in one table
+
+`ModelDeveloper` is not `Vendor` and there is no conversion between them, so a
+value of one cannot be assigned to the other by accident. They are compared in
+exactly one function, `pairing::vendor_organisation`, which is a declared table
+with a citation per entry and returns `None` for four of the seven harness
+publishers — Cursor, OpenCode, Pi and Hermes — because nothing their
+installations expose names a model that vendor developed. Those four can
+therefore never produce a vendor-native pairing, which is a missing capability
+rather than an invented one.
+
+`ModelDeveloper::Named` carries a slug rather than a variant per company. An
+enum of organisations would have made "a user can correct pairing metadata
+without changing router code" false for any developer Glasshouse had not
+anticipated, and it would have meant this module inventing a list of companies
+from recollection — the one thing the rest of `harness/` refuses to do.
+
+### The decision: `unknown` is a first-class answer, reachable from the front of the ladder
+
+`PairingClass::Unknown` is what a stealth or insufficiently attributed model
+gets *even when its wire protocol is perfectly ordinary*. A model nothing
+attributes, reached over Claude Code's own Anthropic Messages endpoint, reports
+`class: unknown` and `protocol fit: native` — two lines, two answers, neither
+lying. The attribution comes from an exact-id lookup and nothing else: a
+`vendor/model` routing prefix is not stripped, a family is not inferred from a
+common stem, and the serving provider is never consulted, because every one of
+those is reading a developer out of a name.
+
+The same rule catches the quietest case, which is a launch profile that names
+no model at all. Glasshouse assigned none, so it knows none — and the fact that
+the harness is Anthropic's program is not evidence about the model Anthropic's
+program will pick.
+
+### The decision: vendor-supported does not require a known developer
+
+Vendor-native needs both halves — the vendor declares the family as one of its
+own **and** the developer is that vendor's organisation. Vendor-supported needs
+only the vendor's own list, because it is a claim by the harness vendor and
+stands whether or not anyone can say who wrote the weights. Antigravity's own
+`agy models` lists `gpt-oss-120b-medium`; Glasshouse reports that pairing as
+`vendor-supported` with `developer: unknown`, and the two answers are
+independent on purpose.
+
+### The decision: three compatibility axes, three types
+
+Protocol compatibility, model-behaviour compatibility and tool-semantic
+compatibility are three separate fields of three types that cannot substitute
+for one another — `ProtocolFit`, `ModelBehaviourFit`, and the existing
+`routing::ToolSemantics`. They disagree in practice: every built-in provider
+template declares tool calls `Unverified`, so a pairing on a harness's own wire
+is `native` on one axis and unestablished on the other two. A single
+"compatible" verdict could not say that, and a build in which a native protocol
+quietly verified the other two is killed by
+`the_three_compatibility_axes_are_answered_separately`.
+
+`ModelBehaviourFit` is `Unverified` for every catalogued model, and that is not
+an oversight: nothing in Glasshouse observes whether a model behaves the way a
+harness needs. Phase 33A's evidence ledger is what would feed it; until then the
+only thing that moves it is a person who has run the pairing and found out.
+
+### The decision: the metadata is declarative on both sides
+
+A harness adding official support for a model is one string in one array inside
+the adapter that already owns every other fact about that harness, and every
+such array cites the artifact it was read from — `agy models` for Antigravity,
+`claude --help` for Claude Code, the `[tui.model_availability_nux]` table Codex
+wrote into its own configuration. A *user* correcting metadata writes a
+`[pairing.models."<id>"]` table in their own configuration file, layered
+project-over-user like every other lookup, and `glasshouse pairing` names the
+layer each correction came from so a surprising verdict can be traced to the
+file that caused it. Neither path is code a router reads.
+
+A correction may set the developer, the family and the observed behaviour. It
+may **not** set the class. The class is always derived, so "why does this say
+vendor-native" always has an answer made of things somebody declared — which is
+the whole point of a taxonomy whose top rung is a claim about a first-party
+relationship.
+
+### The unreachable rung, and why it is there
+
+`ProtocolTranslated` is representable and cannot be produced today, because
+`provider::translation_available` answers `false` for every pair and V1 prefers
+pass-through. The classifier still *asks* that seam rather than assuming the
+answer, and `the_classifier_asks_the_one_function_that_owns_translation` fails
+on a build that stops asking — so the first concrete translation adapter anyone
+adds is reflected in the taxonomy without a second edit.
+
+### Invariants a test must hold to
+
+1. A model nothing attributes is `unknown`, whatever its name, its provider's
+   name, or the wire it travels over.
+2. The serving provider never answers "who developed this".
+3. Vendor-native requires the declared family *and* the vendor's own
+   organisation; a family name alone is not enough.
+4. Vendor-supported stands without a known developer.
+5. Protocol fit, model behaviour and tool semantics are three answers, and one
+   never sets another.
+6. A correction in a configuration file changes what the binary prints, and
+   nothing in a router changes with it.
+

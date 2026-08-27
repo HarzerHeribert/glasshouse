@@ -1152,3 +1152,93 @@ partition (§32).
 - The Windows host exists now. The first `--windows-vm` run is expected to fail
   in several places at once; is that one reconciliation package, or one worker
   per failing job?
+
+## Batch 26 — three parallel workers, and the round where a worker's best output was a refusal
+
+Three workers, disjoint partitions, validated by `validate_round.py` before
+dispatch (the first round where that gate ran on real packets rather than on
+itself). Two closed work; the third closed none and was the most valuable.
+
+| worker | tier | outcome |
+|---|---|---|
+| `pairing` | Opus, high | **9 of 20** Phase 9J boxes; 11 assessed as blocked, with the phase each waits on |
+| `hangup-followup` | Sonnet | two defects found by the previous batch (reported separately) |
+| `phase0-evidence` | Sonnet, verifier | 8 boxes examined, **2 unticked**, the evidence backlog closed |
+
+### A verifier that unticks two boxes is doing the job, not failing it
+
+`phase0-evidence` wrote no production code and produced the round's two hardest
+findings. Phase 0's box 2 is **unsatisfiable by any tree that satisfies its own
+phase** — `clap` is what boxes 5 and 6 are built on, `tracing` is what box 7
+*is*, `directories` is what box 4 needs, and none of the three is in the six
+categories box 2 permits. That is a specification defect, and a worker with no
+authority to edit the map found it by enumerating a dependency tree nobody had
+enumerated before.
+
+Its box 8 finding was reproduced **first-hand and independently** of the worker
+that was fixing the same defect in a neighbouring worktree, before that worker
+reported. Two independent observations of one defect is worth more than one
+observation repeated, and the packet is what produced it: it named the sibling
+worker's report as something to *check for*, not something to wait on or trust.
+
+**The transferable rule: give a verifier the authority to recommend an untick
+and it will use it.** Both recommendations came with the reasoning and neither
+touched the map. That is the right division — the worker establishes, the
+orchestrator edits, and the user decides anything that is a product question.
+
+### 0 of 11, refused rather than faked
+
+`pairing`'s group 2 assessment is the deliverable the packet asked for and the
+answer was total. `grep -rn 'fn score\|Score' src/` is empty: the binary has two
+routing callers and neither ranks anything, so a "positive initial routing
+prior" has nothing to be a term of. Eleven boxes, each mapped to the phase it
+waits on, two of them noted as partly built so the next worker does not start
+from zero.
+
+Line 576 (four native-pairing preference values) is explicitly called out as
+half an hour of plumbing that would have looked like a tenth closed box and
+been a field parsed and never consulted. **A worker declining to close a box it
+could trivially fake is the behaviour this process is trying to buy**, and it
+is worth more than the box.
+
+### Cost of the mid-flight packet error
+
+None this round. `validate_round.py` refused nothing after the packets were
+reshaped to its `**YOURS**` / `**FORBIDDEN**` block format — worth knowing that
+the tool requires bold headings, not `##` headings, which cost three minutes and
+one confused re-read.
+
+**One orchestrator error, caught before dispatch.** `git -C <repo> worktree add
+-b <branch> <relative-path>` creates the worktree **inside** the repository,
+because `-C` resolves the relative path from the repo rather than the shell. All
+three landed in `crates/`'s parent as untracked directories. Removed and
+recreated with absolute paths before any worker started, so nothing was lost —
+but a `git status` that suddenly shows three untracked worktrees is a
+five-minute detour at best and a swept-in commit at worst.
+
+### Verification the orchestrator ran itself (§23)
+
+- `pairing` M1 (an unattributed model answering `VendorNative` instead of
+  `Unknown`) reproduced independently: **4 unit tests and 2 integration tests
+  failed**, which is stronger than the report claimed — the production path
+  catches it, so §35 is satisfied rather than asserted. Restored byte-identical.
+- The §33 end-to-end claim re-run on the built binary: a `[pairing.models."<id>"]`
+  table added to a throwaway config moved the class from `unknown` to
+  `protocol-native` and the report named the layer the correction came from.
+- `phase0-evidence`'s dependency finding re-run with `cargo tree --depth 1`:
+  22 direct dependencies, 11 outside the six categories, and **no async runtime
+  at any depth**.
+- The mutation table cited ten test names that do not appear in
+  `tests/pairing.rs`. They are unit tests inside `src/harness/pairing.rs` — all
+  ten exist. Worth checking every time: a citation that does not resolve is the
+  cheapest possible tell, and this one resolved.
+
+### Open questions for the next round
+
+- Phase 9J line 572 duplicates Phase 33A's tenth line almost verbatim. Does a
+  requirement ever belong in two phases, or should the map move it?
+- Two rounds now have produced their best output from a worker that closed no
+  box. The round template should probably reserve a verifier slot outright
+  rather than discovering the need each time.
+- The residual `SIGABRT` at 1 in 37 is still unowned. It did not appear in
+  either of this round's gate runs.

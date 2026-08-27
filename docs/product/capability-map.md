@@ -551,15 +551,15 @@ Fixed architectural requirements
 
 Pairing identity
 
-☐ Store harness vendor independently from model developer, model family, serving provider, gateway, and wire protocol.
-☐ Avoid treating the serving provider or reseller as the model developer when they are different entities.
-☐ Represent pairing classes at least as vendor-native, vendor-supported, protocol-native, protocol-compatible, protocol-translated, or unknown.
-☐ Treat vendor-native as the harness operating a model family produced for that harness vendor’s own coding environment.
-☐ Treat vendor-supported as a pairing the harness vendor explicitly supports even when model and harness developers differ.
-☐ Treat protocol compatibility separately from model-behavior compatibility and tool-semantic compatibility.
-☐ Keep model developer and pairing class unknown for stealth or insufficiently attributed models rather than guessing from behavior or branding.
-☐ Allow users to correct or override pairing metadata without changing router code.
-☐ Keep pairing metadata declarative and independently updateable as harnesses add or remove official model support.
+☑ Store harness vendor independently from model developer, model family, serving provider, gateway, and wire protocol.
+☑ Avoid treating the serving provider or reseller as the model developer when they are different entities.
+☑ Represent pairing classes at least as vendor-native, vendor-supported, protocol-native, protocol-compatible, protocol-translated, or unknown.
+☑ Treat vendor-native as the harness operating a model family produced for that harness vendor’s own coding environment.
+☑ Treat vendor-supported as a pairing the harness vendor explicitly supports even when model and harness developers differ.
+☑ Treat protocol compatibility separately from model-behavior compatibility and tool-semantic compatibility.
+☑ Keep model developer and pairing class unknown for stealth or insufficiently attributed models rather than guessing from behavior or branding.
+☑ Allow users to correct or override pairing metadata without changing router code.
+☑ Keep pairing metadata declarative and independently updateable as harnesses add or remove official model support.
 
 Pairing prior and evidence
 
