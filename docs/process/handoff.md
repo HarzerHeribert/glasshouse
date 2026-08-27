@@ -6,80 +6,58 @@
 
 Last updated: 2026-08-27 (Europe/Berlin)
 
-## ⚠ (resolved — kept for the reasoning)
+## Checkpoint — 2026-08-27, round closed and the next one prepared
 
-HEAD was committed ungated because the gate refused to start beside a running
-worker. `mio-spin` has since landed, the machine went quiet, and the gate ran on
-the combined tree. The rule that produced the pause is the one worth keeping:
-**a gate that runs beside a build is not a gate**, and waiting was cheaper than
-attributing a false red.
+**`7325a9b` is pushed, the tree is clean, and the gate is green on both
+platforms on this exact tree** — 13/13 Unix, 3/3 Windows. **441 / 1280 mandatory
+(34%)**, README in sync, no worker waiting to be acknowledged.
 
-## Superseded — HEAD IS COMMITTED BUT NOT GATED, AND NOT PUSHED
+The previous round's four workers — `windows-defects`, `mio-spin`,
+`provider-probe`, `launch-overlay` — are all integrated. Phase 0 closed at eight
+of eight, Phase 10 at fourteen of fourteen, Phase 9K groups 1–2, Phase 9J group
+1, and Phase 4's interrupt box, which had been open since Phase 4 for no reason
+except that no Windows machine existed to test it.
 
-The `launch-overlay` integration is committed locally and **has not passed
-`scripts/ci-local.sh`**. The gate refused to start, correctly: `mio-spin` was
-running `cargo` at the time and §40 says the gate runs alone. What *was* run on
-that tree: `cargo doc -p glasshouse --no-deps` clean, and
-`cargo test --test launch_overlay` 6 of 6.
+**The Windows VM changed the evidence base more than any single fix did.** It
+turned "1,069 passed, 1 failed" into the discovery that **281 tests had never
+executed there at all**: `cargo test` stops after the first failing test
+*binary*, and behind that one failure sat two more red binaries.
 
-**Do this before pushing:** wait for `mio-spin` to finish, integrate it, then
-run `scripts/ci-local.sh` **once** on the combined tree, and
-`--windows-vm` after it. Two commits then go up together. If the gate finds
-something, it belongs to whichever change caused it — attribute before fixing
-(§34).
+## The next round is prepared and not dispatched
 
-## Live round — four workers out as of 2026-08-27 ~10:00
+`.agent-runtime/ROUND-BRIEF.md` is the incoming orchestrator's first read. Four
+packets are written, four worktrees exist at `7325a9b`, and
+`scripts/validate_round.py` passes on the set — the file partitions are provably
+disjoint and every quoted box line matches the map verbatim.
 
-**A successor integrating these should read each report before touching the
-tree**, and should expect to run the gate once on the combined result rather
-than four times.
-
-| worker | owns | expect |
+| worker | tier | kind |
 |---|---|---|
-| ~~`windows-defects`~~ | **integrated** | 9 failures fixed, **line 252 closed**, Windows green 3/3 |
-| `mio-spin` | `tui/**`, `tests/terminal_loss.rs` | the edge-triggered readiness spin that eats keystrokes; a **rate**, not a pass (§60) |
-| ~~`provider-probe`~~ | **integrated** | 15 reachable, 3 unsettleable without a key, 0 wrong; practice §63 |
-| ~~`launch-overlay`~~ | **integrated** | 4 of 7 closed; **353 and 368 open with the gap located**, 372 blocked on 35B |
+| `typing-throttle` | Opus specialist | **defect** — one keystroke per 16ms tick |
+| `windows-truth` | Sonnet | **defect** — four ways Windows coverage overstates itself |
+| `phase-10a` | Opus lead | **forward** — session supervision, 13 boxes |
+| `phase-9a-facts` | Sonnet | **forward** — lines 353 and 368, gaps located |
 
-**TYPING IS THROTTLED TO ~59 KEYS A SECOND, AND IT IS A REGRESSION THIS
-PROJECT SHIPPED.** Measured by `mio-spin`: since batch 26's quiet-tick short
-cut, the shell takes **one keystroke per 16ms tick** — a 200-character paste
-takes 3.4 seconds. Same loop, different defect, deliberately not fixed in that
-diff so the race fix could be measured on its own. **This is the most
-user-visible thing on the board** and it should go out before any new phase.
+Two defects and two forward packages, deliberately. `shell/state.rs` and
+`shell/view.rs` are left unassigned so **Phase 11's display half is free the
+moment this round lands.**
 
-**Two Phase 9A boxes are open with their gaps already located** — this is the
-cheapest work left on the board and needs no investigation:
+**TYPING IS THROTTLED TO ~59 KEYS A SECOND AND IT IS A REGRESSION THIS PROJECT
+SHIPPED.** Since batch 26's quiet-tick short cut, a 200-character paste takes
+3.4 seconds. `EventSource::next` waits on the *descriptor* before it consults
+*crossterm*, and crossterm buffers — so after the first key of a burst the rest
+are inside crossterm while the descriptor is empty, and the loop sleeps out the
+whole tick before asking. That is a hypothesis with the right arithmetic, and
+the packet requires it to be tested before it is fixed (§58).
 
-- **353** ("a launch profile is harness + backend + model + protocol + overlay
-  + response profile") is **five of six**: the response profile is handed to the
-  launch separately rather than named by `LaunchProfile`.
-- **368** ("record the six resolved facts for **every** session") fails at two
-  doors: `shell::start_session` (the TUI's `n`) records none of them, and a
-  **resumed** session displays facts it was not given — `resume_session` builds
-  its launch from `resume_args` alone, with no overlay and no response profile.
-  Phase 10's report found the same thing independently and called
-  `resume_session` "one function".
+**The three things not in anyone's packet, and why:** the 1-in-37 `SIGABRT`
+lives in `tests/pty_smoke.rs`, which `windows-truth` holds; the residual
+terminal-loss spin (~2 in 60) is `typing-throttle`'s to *re-measure*, not to
+fix; and whether Phase 9J line 572 belongs in Phase 33A is a map edit and the
+user's call.
 
-**372 is confirmed blocked**, not deferred: `grep -rn 'fn score\|Score' src/`
-is still empty, so a router has nothing to select with. It waits on Phase 35B
-exactly as Phase 9J's eleven do.
-
-**What frees up when `windows-defects` lands:** Phase 10A (session supervision,
-13 boxes) wants `session/runtime.rs`; the 1-in-37 `SIGABRT` wants
-`tests/pty_smoke.rs`. Both are blocked by file, not by design.
-
-**Phase 11 (session overview, 10 boxes) is the next map-order package.** Six of
-its ten are "show X" where X is a column Phase 10 created; lines 687–689 (focus,
-resume, interrupt *from* the overview) need `shell/state.rs`, so it splits
-cleanly into a display half that is free now and an action half that is not.
-
-**Genuinely blocked on phases that do not exist:** Phase 9J's eleven prior boxes
-and Phase 9A line 372 both wait on Phase 35B — `grep -rn 'fn score\|Score' src/`
-is empty, so a routing prior has nothing to be a term of. Phase 9K's four
-measurement boxes wait on Phase 47 and Phase 51. Phase 21's 809/817 wait on
-Phase 39.
-
+**Fifteen provider API keys** are in `.agent-runtime/provider-keys.env`, mode
+600, gitignored, and not given to any worker in this round. The brief carries
+the redaction rule that travels with two of them.
 ## Current capability / phase
 
 **Phase 10 is fourteen of fourteen** and **Windows is real evidence now.** A
