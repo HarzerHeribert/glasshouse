@@ -1911,3 +1911,127 @@ verified this way and the first that was already alive.
    requirements?** Three of `phase-47`'s six are *absence* claims — no spend
    totals, no non-optional diagnostics, no animation — and §17 says this project
    has already shipped one absence test that passed for the wrong reason.
+
+## Batch 31 outcomes — three workers, 25 boxes, and open question 1 answered
+
+Integrated as `8b4c982` (514 → 539) with `c25448b` behind it. Local gate 13/13 on
+the tree that carries all three.
+
+| worker | tier | effort | wall | cost | in play | closed | $/box |
+|---|---|---|---|---|---|---|---|
+| `phase-32b` | Opus | high | 50m49s | $25.48 | 33 | **16** | **$1.59** |
+| `phase-47` | Sonnet | high | 21m41s | $6.06 | 6 | **4** | **$1.52** |
+| `phase-46` | Sonnet | high | 19m01s | $7.94 | 8 | **5** | **$1.59** |
+
+### Open question 1 — answered, and the answer is "yes, at this size"
+
+> *Does the Sonnet tier close boxes at Opus's rate on amber work? If cost per box
+> is comparable, red-risk routing is the only reason to spend Opus.*
+
+**Cost per box was $1.52–$1.59 across both tiers, in one round, on the same day.**
+Three packages, two tiers, a fifteen-fold spread in package size, and the three
+numbers land within four cents of each other.
+
+**Read it with three caveats, none of which dissolves it.**
+
+1. **The packages were not equally hard.** Opus took 33 boxes across a partition
+   spanning `provider/**`, `cli.rs`, `main.rs` and `config/mod.rs`, and closed
+   48%. The Sonnets took 6 and 8 in single-module partitions and closed 67% and
+   63%. Equal cost per box at unequal difficulty is *better* for Sonnet than the
+   raw number says, not worse.
+2. **Sonnet was run at `high` effort deliberately**, on the user's standing
+   instruction that it handles substantial chunks there. This is not a datum about
+   Sonnet at default effort.
+3. **It is one round.** Three points, one day, one orchestrator. Question 1 stays
+   open for a second round; what it no longer needs is a *first* measurement.
+
+**What it changes operationally:** size a Sonnet package up rather than splitting
+it, and spend Opus on partition width and red risk rather than on box count. The
+Opus package here earned its tier on the first count — its partition crossed four
+modules and it had to settle a classification the map fixes architecturally — not
+because 33 boxes are beyond Sonnet.
+
+### The seam query paid on its first use
+
+Batch 31's entry above predicted it would. `discover.py --seam ResourceRegistry`
+answered ZERO before dispatch, the partition was widened to include `cli.rs` and
+`main.rs`, and `glasshouse resources` — the caller that query demanded — is what
+carried 16 boxes. **Without it the package was `phase-35` again: good work,
+zero closures.**
+
+Cost of the detector: one command. Recommend it as a standing pre-dispatch step
+rather than an optional one.
+
+### The Windows leg caught the PREVIOUS round's defect, not this one
+
+`--windows-vm` failed with four dead-code errors under `-D warnings` — and
+`msrv (windows)` passed on the same run, which is the tell that the tree really
+was replaced and this was a compile error rather than the stranded-VM-process
+failure that reports identically as `FAIL build`.
+
+**Attributed, not assumed:** `api/` was introduced by `60f8c9f`, the round before;
+this round's three packages touched it zero times. It shipped because
+`--windows-vm` was not run after that commit.
+
+**So the rule this buys: run `--windows-vm` on every round that lands, not on
+every round that feels risky.** The local gate was 13/13 on `60f8c9f` and 13/13
+here; neither says anything about Windows. That is now the **fifth** time a
+Windows-only defect survived a green local gate in this project.
+
+Fixed without a second VM round trip using §18's cfg flip, proved in both
+directions — the pre-fix file flipped to the Windows shape reproduces the
+identical four errors.
+
+### Workers were right against their packets for the sixth and seventh time
+
+- `phase-47` — the packet named `EventLog::recent_for_session` as line 1758's
+  seam. Wrong: `EventLog`'s query methods are never called from `shell/**`; the
+  real seam is `ShellState::activity`, populated in production at
+  `shell/mod.rs:445`. The orchestrator checked that the methods *existed* and not
+  that anything *called* them, which is §36's rule, and one grep would have caught
+  it.
+- `phase-32b` — asked the orchestrator to decide line 1229 rather than deciding
+  it, and refused to reverse a design decision it disagreed with. Both correct.
+
+**And two corrections belong to the orchestrator rather than to any worker**, both
+recorded in `probe-quota-headers-2026-08-27.md`: design note D2 overreached (a
+response *header* is not the *payload*), and "H1 is dead" generalised six sampled
+hosts to a population — the worker's wider unauthenticated probe found the
+counterexample the orchestrator's narrower authenticated one had missed.
+
+### `asserted-never-checked` count: still six
+
+No new instances this round. Every claim spot-checked in the three reports
+reconciled against the artefact: the AnyRouter headers reproduced, the `§36`
+zero-call-site result reproduced, the mutation ledger's §35 entries verified by an
+independent orchestrator mutation that was killed by a binary-level test.
+
+### A Windows flake, attributed by §40's stronger test rather than assumed
+
+After the cfg fix, two `--windows-vm` runs on the **identical tree**:
+
+    run 2   1240 passed, 1 failed   session::api::tests::
+                                    interrupting_through_the_api_is_recorded_as_machine_initiated
+    run 3   1241 passed, 0 failed   PASS build / PASS test / PASS msrv
+
+**Same tree, two runs, two answers — which is the proof of nondeterminism**, and
+§40's addendum says to prefer it over the `main`-comparison because it needs no
+assumption that the two trees are otherwise comparable.
+
+Attribution, established before the re-run rather than after: batch 31 touched
+`session/api.rs` **zero** times, `60f8c9f` touched **no** `session/` files at all,
+and the file's last change was `d35fe6a` — the commit that *hardened* these tests
+after finding they passed against a child that never started. So the code under
+test is unchanged since the last green Windows run, and this is not a regression
+from anything in this round or the one before it.
+
+**Reported as a rate, not a pass (§60): 1 failure in 2 observations.** That is a
+high rate for a test nobody owns, and it is an *interrupt* test spawning a real
+Windows child — precisely the area the handoff already records as "proven by
+nothing". It joins the standing flake debt beside the 1-in-37 `pty_smoke`
+`SIGABRT` rather than being waved through because a re-run was green.
+
+**The trap this avoided:** run 3 alone would have read as "the fix worked, Windows
+is green". It did work — `build` went from four dead-code errors to PASS — but a
+single green run cannot distinguish a fixed defect from a flake that happened to
+win its coin flip, which is the whole content of §60.

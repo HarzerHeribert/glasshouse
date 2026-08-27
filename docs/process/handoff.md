@@ -4,9 +4,101 @@
 > here is a product requirement. Capability requirements live only in
 > `docs/product/capability-map.md`.
 
-Last updated: 2026-08-27 (Europe/Berlin)
+Last updated: 2026-08-27 evening (Europe/Berlin)
 
-## Checkpoint — 2026-08-27, round closed and the next one prepared
+## Checkpoint — 2026-08-27 evening, batch 31 landed: 539 / 1280 (42%)
+
+`c25448b` is pushed, the tree is clean, and the gate is green on **all three
+platforms on this exact tree** — local 13/13 (macOS + Linux) and `--windows-vm`
+3/3 on the ARM64 VM.
+
+Two commits: `8b4c982` (three workers, 25 boxes, 514 → 539) and `c25448b`, a
+Windows build fix for a defect the **previous** round shipped.
+
+### What landed
+
+| package | tier | closed | left open |
+|---|---|---|---|
+| `phase-32b` | Opus, high | **16** — 11 of Phase 32B, 2 of 32A, both Phase 49 quota-config lines, map line 1761 | 1229, 1230, 1239 |
+| `phase-47` | Sonnet, high | **4** | 1763, 1769 |
+| `phase-46` | Sonnet, high | **5** | 1745, 1746, 1748 |
+
+**`glasshouse resources` is the round's real deliverable.** `discover.py --seam
+ResourceRegistry` answered ZERO before dispatch: Phase 32 and 32A — about 2,000
+lines — were reachable from nothing in the shipped binary, which is why 32A closed
+3 of 21. The package owned `cli.rs` and `main.rs` for that reason alone, and the
+command it built is what carries the other fifteen boxes. Run against the real
+machine it reports the harness's own plan as authoritative and prints
+`capacity unknown` wherever nothing was read.
+
+### Four boxes were left open against their worker's own COMPLETE
+
+Reasoning is in each ledger entry, not just here.
+
+- **1229** names *"API **and** gateway responses"*. The API half is built and
+  proven; the gateway half is not. A ticked box stops being scheduled.
+- **1748** wants tests that a deletion touches one project. **No deletion exists**
+  — `remove_dir_all` is absent from `src/`, no CLI subcommand deletes anything.
+- **1763, 1769** stop at partition edges their packet predicted.
+
+### The orchestrator was wrong twice, and both corrections are recorded
+
+- **Design note D2 is withdrawn.** It forbade `phase-32b` the gateway response
+  path, citing Phase 9I's *"a parser there would make it a reader of the payload
+  it exists to pass through."* **Reading a response header is not reading the
+  payload** — the gateway already parses the header block to forward it. The
+  worker declined to reverse a decision it was told not to reverse, correctly.
+- **"H1 is dead" generalised six sampled hosts to a population.** Six hosts send
+  no rate-limit header on `/models`; the worker probed **eight** unauthenticated
+  and found AnyRouter sends five. Reproduced independently, cache-buster and all.
+  That is §63's error committed by the orchestrator who quoted §63 in the packet.
+
+Full probe record, including all three probes the worker requested and their
+answers, is in `.agent-runtime/probe-quota-headers-2026-08-27.md`.
+
+### Two Windows findings, and only one of them is fixed
+
+**1. `60f8c9f` shipped a Windows build break, now fixed in `c25448b`.**
+`api/mod.rs` gated `mod unix;` but left `mod protocol;` ungated; `unix.rs` is
+protocol's only consumer, so on Windows the whole module was dead code and
+`-D warnings` made it a hard error. Four errors, no tests ran at all. Reproduced
+and fixed locally with §18's cfg flip — **the pre-fix file flipped to the Windows
+shape gives the identical four errors** — so no second VM round trip was needed.
+
+**It shipped because `--windows-vm` was not run after `60f8c9f`.** The rule this
+buys: **run it on every round that lands, not every round that feels risky.** The
+local gate was 13/13 on that commit and 13/13 on this one, and neither says
+anything about Windows. Fifth Windows-only defect here to survive a green local
+gate.
+
+**2. An unowned Windows flake, attributed and left open.**
+`session::api::tests::interrupting_through_the_api_is_recorded_as_machine_initiated`
+failed once and passed once on the **identical tree** (1240/1 then 1241/0). Same
+tree, two runs, two answers is §40's proof of nondeterminism. Batch 31 touched
+`session/api.rs` zero times and `60f8c9f` touched no `session/` files, so it is
+nobody's regression. **Rate: 1 in 2** — high, on an *interrupt* test spawning a
+real Windows child, which the handoff already records as proven by nothing. It
+joins the standing flake debt beside the 1-in-37 `pty_smoke` `SIGABRT`.
+
+### Next, in the order that actually unblocks things
+
+1. **Line 1229's gateway half**, now unblocked by D2's withdrawal. Read the
+   response header block on the gateway path, never the body. Small.
+2. **Line 1230 is ready to close.** OpenRouter's `GET /api/v1/key` was probed:
+   `200`, with `usage`, `usage_daily/weekly/monthly` and
+   `rate_limit.{requests,interval}` — and **`limit`, `limit_remaining` and
+   `limit_reset` are all `null` on this account**, which is exactly the trap a
+   parser assuming a number would hit. Schema is in the probe record.
+3. **`profile/mod.rs`'s three lines, now twice deferred.** Phase 32A was blocked
+   on it, `phase-32b` was blocked on it, and the patch is written verbatim in
+   `report-PHASE-32B.md`. **Put that file in someone's partition next round.**
+4. **A pty harness for the interactive TUI.** No such harness exists, so *every*
+   TUI contract in the map rests on render tests alone. Red tier, and it would
+   serve far more than the one line that exposed it.
+5. **`glasshouse classify <text>`** still closes most of Phase 35's fourteen —
+   blocked this round only because `phase-32b` held `cli.rs` and `main.rs`.
+
+## Checkpoint — 2026-08-27 midday, round closed and the next one prepared
 
 **`7325a9b` is pushed, the tree is clean, and the gate is green on both
 platforms on this exact tree** — 13/13 Unix, 3/3 Windows. **441 / 1280 mandatory
