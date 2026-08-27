@@ -6,6 +6,34 @@
 
 Last updated: 2026-08-27 (Europe/Berlin)
 
+## Live round — four workers out as of 2026-08-27 ~10:00
+
+**A successor integrating these should read each report before touching the
+tree**, and should expect to run the gate once on the combined result rather
+than four times.
+
+| worker | owns | expect |
+|---|---|---|
+| `windows-defects` | `session/runtime.rs`, `pty/**`, `shell/state.rs`, `tests/pty_smoke.rs`, `tests/events_lifecycle.rs` | two Windows product defects; may close **line 252** (interrupt), open since Phase 4 for want of a machine |
+| `mio-spin` | `tui/**`, `tests/terminal_loss.rs` | the edge-triggered readiness spin that eats keystrokes; a **rate**, not a pass (§60) |
+| `provider-probe` | `.agent-runtime/**` only — no source | reachability of 22 endpoints **with a control per host**, plus an API-key acquisition guide for the user |
+| `launch-overlay` | `profile/**`, `harness/**`, `session/select.rs`, `config/**` | Phase 9A's last seven; three may already be closed by Phase 10 and 9K |
+
+**What frees up when `windows-defects` lands:** Phase 10A (session supervision,
+13 boxes) wants `session/runtime.rs`; the 1-in-37 `SIGABRT` wants
+`tests/pty_smoke.rs`. Both are blocked by file, not by design.
+
+**Phase 11 (session overview, 10 boxes) is the next map-order package.** Six of
+its ten are "show X" where X is a column Phase 10 created; lines 687–689 (focus,
+resume, interrupt *from* the overview) need `shell/state.rs`, so it splits
+cleanly into a display half that is free now and an action half that is not.
+
+**Genuinely blocked on phases that do not exist:** Phase 9J's eleven prior boxes
+and Phase 9A line 372 both wait on Phase 35B — `grep -rn 'fn score\|Score' src/`
+is empty, so a routing prior has nothing to be a term of. Phase 9K's four
+measurement boxes wait on Phase 47 and Phase 51. Phase 21's 809/817 wait on
+Phase 39.
+
 ## Current capability / phase
 
 **Phase 10 is fourteen of fourteen** and **Windows is real evidence now.** A
