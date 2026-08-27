@@ -450,7 +450,7 @@ fn launch_session(
         provider: provider.as_ref(),
         secrets: &secrets,
     };
-    let overlay = match glasshouse::profile::resolve_with_gateway(
+    let mut overlay = match glasshouse::profile::resolve_with_gateway(
         &launch_profile,
         &resolution,
         gateway.as_ref(),
@@ -534,6 +534,17 @@ fn launch_session(
         presentation = %presentation,
         "opening a harness session"
     );
+
+    // Phase 9A line 362. The generated configuration documents this profile
+    // needs are written now — the session directory exists only once the
+    // record does — into the directory Glasshouse owns for this session, and
+    // removed when `_generated` drops at the end of this function, which is
+    // after `session::attach` has returned. Fatal rather than best effort: a
+    // harness pointed at a configuration document that was not written would
+    // start on the user's own account instead of the backend they asked for.
+    let session_dir = runtime.session_dir(record.id.as_str());
+    let _generated =
+        overlay.install(glasshouse::harness::GeneratedConfigSite::new(&session_dir))?;
 
     // Adapter args (and, for a harness that lets Glasshouse assign one, its
     // session identifier) first — no user arguments yet, so the overlay's

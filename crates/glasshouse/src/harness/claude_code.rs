@@ -400,6 +400,10 @@ impl HarnessAdapter for ClaudeCode {
             args: Vec::new(),
             env,
             credential,
+            // Claude Code reads a base URL, a model and a credential out of
+            // its own environment, so nothing has to be written down for it
+            // — see `BACKEND_SELECTION`, which declares exactly that.
+            config: None,
             // Variable names only. The value that fills `CREDENTIAL_ENV` is
             // never in this string, and never in this type.
             mechanism: format!("child environment: {}", names.join(", ")),

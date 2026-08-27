@@ -61,6 +61,34 @@
 //! wedged crossterm exactly as before. It now makes no such call once the
 //! terminal has been quiet — 0 samples of 6185, against 268 of 6210.
 //!
+//! # A second defect in the same loop, with its own rate
+//!
+//! `a_resize_does_not_swallow_the_keystroke_that_follows_it` is about a
+//! different failure of the same event source, found while the one above was
+//! being fixed and present on every tree before this one. Crossterm watches
+//! the terminal and `SIGWINCH` through a single edge-triggered `mio`
+//! registration and returns on the first of the two it looks at, throwing the
+//! other's readiness away unread. A keystroke arriving while a resize is
+//! waiting to be collected is therefore *discarded* — it stays on the
+//! descriptor, invisible to crossterm until the user presses something else,
+//! while the loop asks a level-triggered `poll` and an edge-triggered library
+//! the same question forever and burns processor time doing it.
+//!
+//! Measured by hand with a harness that resizes the terminal and then types
+//! into it, one process per trial, `--gap-ms` apart:
+//!
+//! | gap | before | after |
+//! |---|---|---|
+//! | 4ms | 27 in 60 | 0 in 60 |
+//! | 50µs | — | 0 in 60 |
+//! | back to back | 15 in 60 | 11 in 60 |
+//!
+//! So the window narrowed from about one tick to under fifty microseconds,
+//! and what is left is the case where the two genuinely arrive together —
+//! crossterm's to fix, and unreachable from this side of it. A process that
+//! does hit it now costs 0.3% of a core rather than 23.9%, which is the other
+//! half of the fix and is measured in `tui::event::Watch`'s own comment.
+//!
 //! # A related exit-code defect proved elsewhere, on purpose
 //!
 //! `Screen::drop` (`tui::mod`) can still panic on the way out here — Ratatui's
@@ -144,10 +172,102 @@ const SETTLE: Duration = Duration::from_millis(1500);
 /// own comment.
 const TRIALS: usize = 15;
 
+/// How long the interface is left alone before a resize is aimed at it in
+/// `a_resize_does_not_swallow_the_keystroke_that_follows_it`.
+///
+/// Deliberately **shorter** than [`SETTLE`], and for the opposite reason.
+/// That test wants the state a closed window leaves behind, which is silence.
+/// This one wants the state a user is in — drawn, interactive, and about to
+/// type — so it waits only long enough for startup to be over. Both reproduce
+/// the same collision, because the window it needs is one tick wide either
+/// way; this is the cheaper of the two and the one a person would recognise.
+const TYPING_SETTLE: Duration = Duration::from_millis(400);
+
+/// How long the keystroke gets to reach the interface after the resize.
+///
+/// An honest budget is one tick. This is three hundred of them, because a
+/// stranded keystroke is stranded *until the next one* — no amount of waiting
+/// turns a failure into a pass here, so the slack costs nothing but patience
+/// on a loaded runner.
+const KEYSTROKE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// How long after the resize the keystroke is sent, cycled trial by trial.
+///
+/// **Measured, not chosen for roundness.** The collision needs the `SIGWINCH`
+/// to be sitting in crossterm's pipe when the keystroke lands, so the gap has
+/// to be long enough for the signal to have been delivered and short enough
+/// that the interface has not yet drained it. Against the unfixed tree the
+/// stall rate by gap was 2 in 20 at no gap, 13 in 20 at 2ms, 15 in 20 at 4ms,
+/// 8 in 20 at 8ms and 0 in 20 at 16ms — one tick, after which the pipe has
+/// always been drained. The first of these sits on that peak.
+///
+/// **The second is here because a whole line of the fix is invisible at the
+/// first, and it is also where the residual lives.** `wait_for_terminal`
+/// passes an exactly-zero timeout straight through to `poll` instead of
+/// rounding it up to a millisecond; rounding it up again reopens a
+/// millisecond-wide window that a keystroke four milliseconds behind the
+/// resize sails straight past. Measured: with that line reverted the harness
+/// stalls **20 in 20** at half a millisecond and 2 in 20 at one.
+///
+/// But half a millisecond is also inside what is left of the defect, because
+/// what is left is however long this process takes to be scheduled between the
+/// signal and the poll — which on a loaded runner is not microseconds. Hence
+/// [`MAX_STALLS`], and hence the two gaps being judged separately rather than
+/// pooled.
+const RESIZE_TO_KEYSTROKE: [Duration; 2] = [Duration::from_millis(4), Duration::from_micros(500)];
+
+/// How many swallowed keystrokes each of [`RESIZE_TO_KEYSTROKE`]'s gaps
+/// tolerates, index for index.
+///
+/// **Both numbers are measurements, and they differ because the two gaps ask
+/// different questions.**
+///
+/// At 4ms the question is whether the fix is present at all, and the answer is
+/// not supposed to be probabilistic: **0 stalls in 60 trials on a quiet
+/// machine, and 0 in 48 with the rest of this file's tests running beside
+/// them**. The 1 is slack for a runner slower than any seen here, not an
+/// expectation.
+///
+/// At 500µs the question is whether one rounding line is still there, and the
+/// answer has to be read past a residual this test cannot remove: 1 stall in
+/// 96 trials of that gap under the same load, plus one in a full gate run.
+/// Three is comfortably above that and far below the **8 in 8** the reverted
+/// line produces, so the line stays proved without the residual failing a
+/// gate.
+const MAX_STALLS: [usize; 2] = [1, 3];
+
+/// How many resize-then-type trials `a_resize_does_not_swallow_the_keystroke_
+/// that_follows_it` runs.
+///
+/// **The number is the proof, not the loop.** The defect is a race and a
+/// single trial cannot tell "fixed" from "fixed most of the time" (practice
+/// §60). It fired in 27 of 60 trials on the unfixed tree at the first of
+/// [`RESIZE_TO_KEYSTROKE`]'s gaps, so the eight trials that use that gap catch
+/// a reverted fix about **94%** of the time on their own — `1 - 0.55^8 -
+/// 8 * 0.45 * 0.55^7` — before the eight at the shorter gap add anything, and
+/// the gate runs the suite four times. Even, so each gap gets half.
+///
+/// The by-hand rate, too many trials to afford here, is in this file's own
+/// documentation above.
+const RESIZE_TRIALS: usize = 16;
+
 /// The size the terminal is changed to in the resize test, chosen only to be
 /// different in both directions from the 40x120 it starts at.
 const RESIZED_ROWS: u16 = 50;
 const RESIZED_COLS: u16 = 100;
+
+/// A column header the session overview draws and no other screen does.
+///
+/// Matched against the drawn text rather than an echoed byte: the interface is
+/// in raw mode and echoes nothing, so the only evidence a key arrived is what
+/// it made the interface do.
+const OVERVIEW_HEADER: &str = "HARNESS";
+
+/// How long `Shell::kill` keeps draining and reaping before it gives up.
+///
+/// See that method: the drain is the load-bearing half and this only stops it
+/// being infinite.
+const KILL_DEADLINE: Duration = Duration::from_secs(10);
 
 const EXIT_POLL: Duration = Duration::from_millis(25);
 const READ_POLL: Duration = Duration::from_millis(10);
@@ -288,7 +408,7 @@ fn a_resize_still_arrives_on_a_terminal_that_has_been_silent() {
         child.drain();
         std::thread::sleep(READ_POLL);
     }
-    let drawn_before = child.output().len();
+    let drawn_before = child.drawn_so_far();
 
     child.resize(RESIZED_ROWS, RESIZED_COLS);
 
@@ -301,12 +421,15 @@ fn a_resize_still_arrives_on_a_terminal_that_has_been_silent() {
     let deadline = Instant::now() + HANGUP_DEADLINE;
     while Instant::now() < deadline {
         child.drain();
-        if child.output()[drawn_before..].contains(&moved_to_new_bottom_row) {
+        if child
+            .drawn_since(drawn_before)
+            .contains(&moved_to_new_bottom_row)
+        {
             return;
         }
         std::thread::sleep(READ_POLL);
     }
-    let after = child.output()[drawn_before..].to_owned();
+    let after = child.drawn_since(drawn_before);
     child.kill();
     panic!(
         "the terminal was made {RESIZED_COLS}x{RESIZED_ROWS} and {HANGUP_DEADLINE:?} later the \
@@ -314,6 +437,108 @@ fn a_resize_still_arrives_on_a_terminal_that_has_been_silent() {
          an interface drawing itself at a size its terminal no longer is.\n--- drawn since the \
          resize ---\n{after}\n--- end ---"
     );
+}
+
+/// A resize must not eat the key pressed just after it.
+///
+/// # The defect
+///
+/// Crossterm learns about the terminal and about `SIGWINCH` through one
+/// edge-triggered `mio` registration, and its reader returns on the first of
+/// the two it looks at — abandoning, unread, whatever readiness arrived in the
+/// same batch. Look at the signal first and the keystroke that arrived with it
+/// is discarded: the bytes stay on the descriptor, crossterm cannot see them
+/// again until new input creates a new edge, and the interface meanwhile has a
+/// descriptor its own `poll` calls readable and a library that says there is
+/// nothing on it. It burns processor time in that state for as long as it
+/// lasts — 23.9% of a core here against 0.3% idle, and a whole one on a tree
+/// that consults crossterm less often — with the user's command sitting unread
+/// in front of it. `tui::event`'s `Watch` carries the
+/// mechanism and the numbers.
+///
+/// # Why it is written this way
+///
+/// The keystroke is `o`, which opens the session overview, because the
+/// overview draws a header row no other screen does — so the assertion is
+/// about what the interface *did*, not about what it echoed. The gaps between
+/// the resize and the key are [`RESIZE_TO_KEYSTROKE`], two of them because one
+/// line of the fix is only visible at the shorter; the trial count is
+/// [`RESIZE_TRIALS`] and what each gap tolerates is [`MAX_STALLS`]. All three
+/// carry their measurements in their own comments.
+///
+/// **It counts rather than stopping at the first stall**, because what it is
+/// measuring is a rate (practice §60) and a residual it cannot remove lives at
+/// the shorter gap. A test that failed on any single stall would be right
+/// about the mechanism and wrong about this tree about one gate run in six —
+/// measured, by running it eight times: one stall in 96 trials, at 500µs.
+///
+/// It runs against the real binary on a real pty for the same reason the test
+/// above does: the collision is a property of the kernel's readiness
+/// reporting, and no double has one.
+#[test]
+fn a_resize_does_not_swallow_the_keystroke_that_follows_it() {
+    let mut stalls: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
+    let mut last_screen = String::new();
+    for trial in 1..=RESIZE_TRIALS {
+        let which = trial % RESIZE_TO_KEYSTROKE.len();
+        if let Some(drawn) = one_resize_then_keystroke(trial, RESIZE_TO_KEYSTROKE[which]) {
+            stalls[which].push(trial);
+            last_screen = drawn;
+        }
+    }
+    // Judged gap by gap rather than pooled: see `MAX_STALLS` for why one of
+    // them asks about the fix and the other about a single line of it.
+    for (which, swallowed) in stalls.iter().enumerate() {
+        assert!(
+            swallowed.len() <= MAX_STALLS[which],
+            "{} of the {} keystrokes sent {:?} after a resize were swallowed by it, which is \
+             more than the {} that gap tolerates — trials {swallowed:?}. A keystroke that \
+             reaches nothing is a command the user typed and lost.\n--- what the last \
+             swallowed trial had drawn since its resize ---\n{last_screen}\n--- end ---",
+            swallowed.len(),
+            RESIZE_TRIALS / RESIZE_TO_KEYSTROKE.len(),
+            RESIZE_TO_KEYSTROKE[which],
+            MAX_STALLS[which],
+        );
+    }
+}
+
+/// One trial. `None` when the keystroke arrived; the screen drawn since the
+/// resize when it did not.
+fn one_resize_then_keystroke(trial: usize, gap: Duration) -> Option<String> {
+    let fixture = Fixture::new();
+    let mut child = fixture.start_shell();
+    child.wait_for_first_frame();
+
+    let settled = Instant::now() + TYPING_SETTLE;
+    while Instant::now() < settled {
+        child.drain();
+        std::thread::sleep(READ_POLL);
+    }
+    let drawn_before = child.drawn_so_far();
+
+    // Exactly what a window manager dragging a corner does, and then exactly
+    // what a person does next.
+    child.resize(RESIZED_ROWS, RESIZED_COLS);
+    std::thread::sleep(gap);
+    child.type_key(b"o");
+
+    let deadline = Instant::now() + KEYSTROKE_DEADLINE;
+    while Instant::now() < deadline {
+        child.drain();
+        if child.drawn_since(drawn_before).contains(OVERVIEW_HEADER) {
+            return None;
+        }
+        assert!(
+            child.try_wait().is_none(),
+            "trial {trial}: glasshouse exited instead of answering the keystroke, so this run \
+             proves nothing about a keystroke arriving\n--- drawn since the resize ---\n{}\n\
+             --- end ---",
+            child.drawn_since(drawn_before)
+        );
+        std::thread::sleep(READ_POLL);
+    }
+    Some(child.drawn_since(drawn_before))
 }
 
 /// A project, a state directory and a user configuration, all thrown away
@@ -460,6 +685,25 @@ impl Shell {
         );
     }
 
+    /// Type at the terminal, exactly as a person does: the bytes go in at the
+    /// master and come out of the child's standard input.
+    fn type_key(&mut self, keys: &[u8]) {
+        assert!(
+            self.master.is_some(),
+            "the terminal has been taken away; there is nothing to type at"
+        );
+        // SAFETY: `keys` is a live slice and its length is passed alongside
+        // it. The descriptor is owned by the `MasterPty` this struct holds,
+        // which is still alive (asserted above).
+        let written =
+            unsafe { libc::write(self.fd, keys.as_ptr().cast::<libc::c_void>(), keys.len()) };
+        assert_eq!(
+            usize::try_from(written).unwrap_or(0),
+            keys.len(),
+            "could not put {keys:?} into the terminal"
+        );
+    }
+
     /// Change the size of the terminal, exactly as a window manager dragging
     /// its corner does: the kernel records the new size and sends `SIGWINCH`.
     fn resize(&mut self, rows: u16, cols: u16) {
@@ -494,8 +738,8 @@ impl Shell {
     /// End the child now, and do not come back until it is reaped.
     ///
     /// **`SIGKILL`, and not `portable_pty::Child::kill`, which sends
-    /// `SIGHUP`.** Every caller of this is on a failure path, and a failure
-    /// path that hangs is worse than no failure path at all — a gate waiting
+    /// `SIGHUP`.** Every caller of this is on a failure path or a scope exit,
+    /// and a path that hangs is worse than no path at all — a gate waiting
     /// forever reports nothing, where a failed assertion reports a defect.
     /// Two ways `SIGHUP` hangs here, both observed:
     ///
@@ -504,11 +748,21 @@ impl Shell {
     ///   shutdown the signal requested, so it keeps spinning and `wait` never
     ///   returns;
     /// * a Glasshouse that *is* winding down blocks writing its last frame to
-    ///   a pty whose master nobody is draining any more, because this thread
-    ///   is the drainer and it is sitting in `wait`. Seen for eleven minutes,
-    ///   in state `E`, before it was killed by hand.
+    ///   a pty whose master nobody is draining any more.
     ///
-    /// `SIGKILL` is answerable by neither.
+    /// **And the second of those is not answered by `SIGKILL` either**, which
+    /// is what the drain below is for. A process already blocked in a write to
+    /// a full pty cannot finish dying until somebody reads the other end, and
+    /// this thread is the only reader there is — so a bare `wait()` here
+    /// deadlocks the pair. Seen twice: once for eleven minutes in state `E`
+    /// before `SIGKILL` was reached for at all, and again with `SIGKILL`
+    /// already sent, by a trial that left an interface running and simply
+    /// stopped reading it.
+    ///
+    /// The bound is belt and braces. A process that has not answered
+    /// `SIGKILL` within it is an operating-system anomaly rather than
+    /// anything this file can assert about, and returning lets the test say
+    /// what it found instead of hanging the gate on it.
     fn kill(&mut self) {
         if let Some(pid) = self.child.process_id() {
             // SAFETY: `kill` takes no pointers. A pid that has already been
@@ -517,11 +771,37 @@ impl Shell {
                 libc::kill(pid.cast_signed(), libc::SIGKILL);
             }
         }
-        let _ = self.child.wait();
+        let deadline = Instant::now() + KILL_DEADLINE;
+        while Instant::now() < deadline {
+            if self.try_wait().is_some() {
+                return;
+            }
+            self.drain();
+            std::thread::sleep(READ_POLL);
+        }
     }
 
     fn output(&self) -> String {
         String::from_utf8_lossy(&self.output).into_owned()
+    }
+
+    /// How much has been drawn so far, as a mark to pass to [`Shell::drawn_since`].
+    fn drawn_so_far(&self) -> usize {
+        self.output.len()
+    }
+
+    /// Everything drawn since `mark`.
+    ///
+    /// **Counted in bytes and sliced in bytes**, which is why this exists at
+    /// all rather than the caller indexing `output()`. That is a lossy UTF-8
+    /// conversion of a stream this test reads in 4096-byte pieces: a piece
+    /// that ends in the middle of one of the box-drawing characters the
+    /// interface draws by the hundred becomes a replacement character, and the
+    /// next read moves every byte offset after it. Slicing the converted
+    /// string at an offset taken before that happened is a panic waiting for a
+    /// badly-timed read.
+    fn drawn_since(&self, mark: usize) -> String {
+        String::from_utf8_lossy(&self.output[mark.min(self.output.len())..]).into_owned()
     }
 
     /// Processor time the child has used so far, in seconds, or `None` where

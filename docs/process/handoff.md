@@ -6,6 +6,20 @@
 
 Last updated: 2026-08-27 (Europe/Berlin)
 
+## ⚠ HEAD IS COMMITTED BUT NOT GATED, AND NOT PUSHED
+
+The `launch-overlay` integration is committed locally and **has not passed
+`scripts/ci-local.sh`**. The gate refused to start, correctly: `mio-spin` was
+running `cargo` at the time and §40 says the gate runs alone. What *was* run on
+that tree: `cargo doc -p glasshouse --no-deps` clean, and
+`cargo test --test launch_overlay` 6 of 6.
+
+**Do this before pushing:** wait for `mio-spin` to finish, integrate it, then
+run `scripts/ci-local.sh` **once** on the combined tree, and
+`--windows-vm` after it. Two commits then go up together. If the gate finds
+something, it belongs to whichever change caused it — attribute before fixing
+(§34).
+
 ## Live round — four workers out as of 2026-08-27 ~10:00
 
 **A successor integrating these should read each report before touching the
@@ -14,10 +28,27 @@ than four times.
 
 | worker | owns | expect |
 |---|---|---|
-| `windows-defects` | `session/runtime.rs`, `pty/**`, `shell/state.rs`, `tests/pty_smoke.rs`, `tests/events_lifecycle.rs` | two Windows product defects; may close **line 252** (interrupt), open since Phase 4 for want of a machine |
+| ~~`windows-defects`~~ | **integrated** | 9 failures fixed, **line 252 closed**, Windows green 3/3 |
 | `mio-spin` | `tui/**`, `tests/terminal_loss.rs` | the edge-triggered readiness spin that eats keystrokes; a **rate**, not a pass (§60) |
-| `provider-probe` | `.agent-runtime/**` only — no source | reachability of 22 endpoints **with a control per host**, plus an API-key acquisition guide for the user |
-| `launch-overlay` | `profile/**`, `harness/**`, `session/select.rs`, `config/**` | Phase 9A's last seven; three may already be closed by Phase 10 and 9K |
+| ~~`provider-probe`~~ | **integrated** | 15 reachable, 3 unsettleable without a key, 0 wrong; practice §63 |
+| ~~`launch-overlay`~~ | **integrated** | 4 of 7 closed; **353 and 368 open with the gap located**, 372 blocked on 35B |
+
+**Two Phase 9A boxes are open with their gaps already located** — this is the
+cheapest work left on the board and needs no investigation:
+
+- **353** ("a launch profile is harness + backend + model + protocol + overlay
+  + response profile") is **five of six**: the response profile is handed to the
+  launch separately rather than named by `LaunchProfile`.
+- **368** ("record the six resolved facts for **every** session") fails at two
+  doors: `shell::start_session` (the TUI's `n`) records none of them, and a
+  **resumed** session displays facts it was not given — `resume_session` builds
+  its launch from `resume_args` alone, with no overlay and no response profile.
+  Phase 10's report found the same thing independently and called
+  `resume_session` "one function".
+
+**372 is confirmed blocked**, not deferred: `grep -rn 'fn score\|Score' src/`
+is still empty, so a router has nothing to select with. It waits on Phase 35B
+exactly as Phase 9J's eleven do.
 
 **What frees up when `windows-defects` lands:** Phase 10A (session supervision,
 13 boxes) wants `session/runtime.rs`; the 1-in-37 `SIGABRT` wants

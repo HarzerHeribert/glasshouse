@@ -246,6 +246,10 @@ impl HarnessAdapter for Codex {
             credential: request
                 .credential_var
                 .map(|var| CredentialPlacement::Environment(var.to_owned())),
+            // Nothing is written at all — see this method's own doc comment.
+            // Codex is the harness that shows a generated configuration file
+            // is a *last* resort rather than the shape of the mechanism.
+            config: None,
             // Override *keys* and the provider's name only — never a base
             // URL, never a model, and never the value behind `env_key`.
             mechanism: format!("-c overrides: {}", keys.join(", ")),

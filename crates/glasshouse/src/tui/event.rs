@@ -90,10 +90,11 @@ pub struct EventSource {
     /// [`QUIET_TICKS`], and **that threshold is the whole reason the short cut
     /// is safe.** Crossterm multiplexes the terminal and `SIGWINCH` through
     /// one edge-triggered `mio` registration, and its reader returns the first
-    /// of the two it looks at — dropping, unread and unrecoverable, whatever
-    /// readiness arrived in the same batch. Polling it less often makes two
-    /// sources coincide more often, which is measurable: skipping it on every
-    /// idle tick turned `pty_smoke::resizing_the_shell_reaches_the_harness_
+    /// of the two it looks at — dropping, unread, whatever readiness arrived
+    /// in the same batch (see [`Watch`]). Polling it less often leaves a
+    /// `SIGWINCH` sitting in its pipe for longer, and a `SIGWINCH` sitting in
+    /// its pipe is what a keystroke collides with: skipping it on every idle
+    /// tick turned `pty_smoke::resizing_the_shell_reaches_the_harness_
     /// terminal` from 0 failures in 12 into 1 to 2, every one of them a shell
     /// whose keystrokes had been swallowed.
     ///
@@ -101,6 +102,14 @@ pub struct EventSource {
     /// where it is needed and gives up nothing where it is not: a terminal
     /// that has not made a sound for a second has no input to collide with,
     /// and the field processes had been silent for nineteen hours.
+    ///
+    /// **This threshold is no longer the only thing holding that collision
+    /// off, and the two do not fight.** [`EventSource::next`] now drains
+    /// crossterm's pipe as soon as a signal interrupts a wait, whatever this
+    /// counter says — the `after_signal` override in the idle arm is there
+    /// precisely so a long silence cannot keep a `SIGWINCH` held. The counter
+    /// still does its own job, which is not this one: it is what keeps an idle
+    /// process out of `crossterm::event::poll`, where a hangup wedges it.
     quiet_ticks: std::cell::Cell<u32>,
 }
 
@@ -181,7 +190,28 @@ impl EventSource {
             // terminal which has gone away is recognised as one. See
             // `wait_for_terminal` for why that distinction cannot be left to
             // the library.
-            let waited = wait_for_terminal(remaining)?;
+            let mut waited = wait_for_terminal(remaining, Watch::Input)?;
+            // **A signal cut the wait short, and one signal in particular is
+            // also an event crossterm is holding.** `SIGWINCH` reaches
+            // crossterm as a byte on a pipe of its own, and a pipe crossterm
+            // has been told about but has not drained is a second readiness
+            // waiting to collide with the terminal's — see `Watch` for what
+            // that collision costs. So the wait is not simply resumed: the
+            // terminal is looked at again at once, and crossterm is consulted
+            // on this pass, while the descriptor is still empty and there is
+            // nothing for a resize to be picked ahead of.
+            //
+            // Looked at, never assumed. The hangup and the `SIGHUP`
+            // announcing it arrive together, and handing crossterm a terminal
+            // that has gone away walks straight into the unbounded read
+            // `wait_for_terminal` exists to keep it out of. A second
+            // interruption before that look completes leaves the terminal
+            // still unexamined, which is the one case that goes back to
+            // waiting.
+            let after_signal = waited == Wait::Interrupted;
+            if after_signal {
+                waited = wait_for_terminal(Duration::ZERO, Watch::Input)?;
+            }
             match waited {
                 Wait::HangUp => {
                     // Nothing will ever arrive on this terminal again, and
@@ -194,11 +224,8 @@ impl EventSource {
                     crate::shutdown::request_shutdown();
                     return Ok(Event::Shutdown);
                 }
-                // A signal cut the wait short, so it answered nothing about
-                // the terminal. Look again rather than handing crossterm a
-                // terminal nobody has just examined — the hangup and the
-                // `SIGHUP` announcing it arrive together, and taking the
-                // signal as an answer walked straight back into the spin.
+                // Interrupted again while checking on an interruption: still
+                // nothing said about the terminal, so look once more.
                 Wait::Interrupted => continue,
                 // **This arm is the residual-spin fix**, and what it fixes
                 // is a rate rather than a bug. Every call into crossterm is a
@@ -224,7 +251,11 @@ impl EventSource {
                 // anything it had is long since drained.
                 Wait::Idle => {
                     let quiet = self.quiet_ticks.get();
-                    if quiet >= QUIET_TICKS && !self.terminal_was_resized() {
+                    // `after_signal` overrides the short cut, and that is the
+                    // whole point of taking it on this pass: the signal that
+                    // interrupted the wait may be the `SIGWINCH` crossterm is
+                    // holding, and skipping the poll here would leave it held.
+                    if !after_signal && quiet >= QUIET_TICKS && !self.terminal_was_resized() {
                         continue;
                     }
                     self.quiet_ticks.set(quiet.saturating_add(1));
@@ -241,6 +272,21 @@ impl EventSource {
                 Duration::ZERO
             };
             if !event::poll(poll_for).context("could not poll for terminal input")? {
+                if waited == Wait::Ready {
+                    // The kernel says this descriptor has bytes on it and
+                    // crossterm says it has nothing — and those two answers
+                    // can only disagree when crossterm has thrown the
+                    // descriptor's readiness away — see `Watch`. Asking it
+                    // again before something new arrives can only produce the
+                    // same answer, so the rest of the tick goes to the one
+                    // question whose answer could still change.
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if !left.is_zero() && wait_for_terminal(left, Watch::HangUp)? == Wait::HangUp {
+                        crate::shutdown::request_shutdown();
+                        return Ok(Event::Shutdown);
+                    }
+                    return Ok(Event::Tick);
+                }
                 continue;
             }
             let raw = event::read().context("could not read terminal input")?;
@@ -264,6 +310,83 @@ impl EventSource {
     }
 }
 
+/// Which of the terminal's answers one wait is interested in.
+///
+/// # The collision both variants exist for
+///
+/// Crossterm watches two things through one `mio` registration: the terminal,
+/// and a pipe of its own that a `SIGWINCH` handler writes a byte to. Both are
+/// registered edge-triggered — `EPOLLET` on Linux, `EV_CLEAR` on the BSDs,
+/// confirmed in mio 1.2.2's selectors — so each readiness is reported exactly
+/// once and is gone whether or not anything acted on it.
+///
+/// `try_read` walks the batch one poll returned and **returns from inside that
+/// walk**, on the first token that yields an event. When a `SIGWINCH` and
+/// terminal input arrive in the same batch and the signal is looked at first,
+/// crossterm returns the resize and the terminal's readiness is discarded
+/// unread. The bytes stay on the descriptor, invisible to crossterm until new
+/// input creates a new edge — which, for a user who has just pressed Return,
+/// means until they press something else.
+///
+/// Measured on this tree rather than argued. A terminal resized and then typed
+/// into four milliseconds later stranded the keystroke in **27 of 60** trials,
+/// with `FIONREAD` reporting the byte still on the descriptor, `POLLIN` set,
+/// no `POLLHUP`, and crossterm reporting nothing. All 27 came out the instant
+/// one further key was pressed, which is the edge-triggered signature and
+/// nothing else's. The same process, sampled: 1839 of 1851 main-thread samples
+/// inside `crossterm::event::poll`, and 23.9% of a core against 0.3% idle.
+///
+/// # What [`EventSource::next`] does about it, and what is left
+///
+/// The window is the time a `SIGWINCH` spends sitting in crossterm's pipe
+/// unread, because any keystroke arriving during it lands in the same batch.
+/// That used to be a whole tick: the loop went back to waiting on the
+/// descriptor and would not consult crossterm again until something happened.
+/// It now consults crossterm the moment a signal interrupts a wait, while the
+/// descriptor is still empty, which leaves only the case where the keystroke
+/// and the signal genuinely arrive together.
+///
+/// | gap between the resize and the keystroke | before | after |
+/// |---|---|---|
+/// | 4ms | 27 in 60 | **0 in 60** |
+/// | 50µs | — | **0 in 60** |
+/// | none — both issued back to back | 15 in 60 | 11 in 60 |
+///
+/// So the window went from about 16ms to under 50µs, and what is left needs
+/// the two to land in the same handful of microseconds. That last case is
+/// crossterm's to fix and cannot be fixed here: once a readiness has been
+/// reported and dropped, no call this side of the library can ask for it
+/// again.
+///
+/// # Why the loop cannot simply ask again — [`Watch::HangUp`]
+///
+/// A descriptor with unread bytes stays readable, so this module's own
+/// `poll(2)` — which is level-triggered — goes on answering [`Wait::Ready`]
+/// while crossterm goes on answering "nothing". Asking either again changes
+/// neither answer, and the loop that did ask again spent every remaining
+/// microsecond of every tick doing it: **380,987 of 381,501 waits** in one
+/// such process, at a whole core, with the keystrokes still not delivered.
+///
+/// So the loop stops asking for the rest of the tick and waits on
+/// [`Watch::HangUp`] instead. `POLLHUP`, `POLLERR` and `POLLNVAL` are reported
+/// whatever is subscribed to, so subscribing to nothing at all leaves exactly
+/// one answer available: the terminal going away, which is the only thing that
+/// could still need acting on before the next tick asks again. New input needs
+/// no wakeup here — it will be there on the next tick, and it is the next
+/// tick's edge that lets crossterm see it at last. Measured with the
+/// prevention above deliberately disabled, so that stalls still happen: a
+/// stalled process costs **0.3% of a core** with this, against **23.9%**
+/// without.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Watch {
+    /// Input, and a hangup — the ordinary wait.
+    Input,
+    /// A hangup and nothing else. `POLLHUP`, `POLLERR` and `POLLNVAL` are
+    /// reported whatever is subscribed to, so subscribing to nothing leaves
+    /// exactly one answer available.
+    HangUp,
+}
+
 /// What one wait on the terminal produced.
 ///
 /// A platform with no hangup answer never constructs [`Wait::HangUp`] or
@@ -278,7 +401,8 @@ impl EventSource {
 enum Wait {
     /// Input is there to be read.
     Ready,
-    /// Nothing arrived before the deadline.
+    /// Nothing arrived before the deadline — or, under [`Watch::HangUp`],
+    /// nothing that was being watched for.
     Idle,
     /// A signal arrived instead, so the wait says nothing either way.
     Interrupted,
@@ -291,6 +415,10 @@ enum Wait {
 }
 
 /// Wait up to `timeout` for the terminal, distinguishing input from a hangup.
+///
+/// `watch` chooses which of those two answers is wanted; see [`Watch`],
+/// which is also where the reason for wanting only the second is written
+/// down.
 ///
 /// # Why this is not left to crossterm
 ///
@@ -314,9 +442,20 @@ enum Wait {
 /// treats a zero-byte read as neither a `break`, a `continue`, nor a `return`,
 /// so the inner loop cannot end and no timeout is consulted inside it. The
 /// other source, behind crossterm's `use-dev-tty` feature, does `break` on a
-/// zero-byte read and would not hang this way. Turning that feature on would
-/// therefore change what this function is defending against, which is worth
-/// knowing before anyone does.
+/// zero-byte read and would not hang this way — and it polls level-triggered,
+/// so it could not drop a readiness either (see [`Watch`]). On paper it makes
+/// both of this module's defects impossible.
+///
+/// **It was built and measured, and it does not work here.** That source ends
+/// its loop on `while timeout.leftover().map_or(true, |t| !t.is_zero())`, so a
+/// `Duration::ZERO` timeout runs the body zero times and
+/// `crossterm::event::poll(Duration::ZERO)` can never return `true` — which is
+/// the call this loop makes on every pass. Measured on a build with the
+/// feature on: no input delivered at all, ever, and 2.03s of processor time in
+/// 2.0s of wall clock on a freshly drawn interface. Adopting it would mean
+/// giving crossterm a non-zero timeout as well, which is a different design
+/// and a workspace dependency change. Recorded so the next reader does not
+/// spend the afternoon finding it out.
 ///
 /// So the wait is taken over here, and crossterm is only ever handed a
 /// terminal that has bytes waiting. `poll(2)` reports `POLLHUP` the moment
@@ -366,20 +505,35 @@ enum Wait {
 /// exactly, and this comment is the record of what is missing: a Windows
 /// hangup path, and the native terminal needed to prove it.
 #[cfg(unix)]
-fn wait_for_terminal(timeout: Duration) -> Result<Wait> {
+fn wait_for_terminal(timeout: Duration, watch: Watch) -> Result<Wait> {
     let Some(fd) = terminal_fd() else {
         return Ok(Wait::Unavailable);
     };
 
     let mut watched = libc::pollfd {
         fd,
-        events: libc::POLLIN,
+        events: match watch {
+            Watch::Input => libc::POLLIN,
+            // Subscribing to nothing is the point: see `Watch::HangUp`.
+            Watch::HangUp => 0,
+        },
         revents: 0,
     };
     // `poll` counts whole milliseconds. Round a sub-millisecond remainder up
-    // rather than down: a zero timeout here would turn the last fraction of
+    // rather than down: a zero timeout there would turn the last fraction of
     // every tick into a spin, which is the defect this exists to remove.
-    let millis = i32::try_from(timeout.as_millis().max(1)).unwrap_or(i32::MAX);
+    //
+    // An *exactly* zero timeout is a different request and is passed through
+    // as one: it is the look-don't-wait `EventSource::next` makes after a
+    // signal, and rounding that up to a millisecond would hand the keystroke
+    // it is racing a millisecond to arrive in. Measured — rounded up, the
+    // harness stalls 20 in 20 at a half-millisecond gap where this tree
+    // stalls 0 in 40.
+    let millis = if timeout.is_zero() {
+        0
+    } else {
+        i32::try_from(timeout.as_millis().max(1)).unwrap_or(i32::MAX)
+    };
 
     // SAFETY: `watched` is one initialised `pollfd` and the count says so.
     // `poll` reads `fd`/`events` and writes only `revents`.
@@ -405,7 +559,12 @@ fn wait_for_terminal(timeout: Duration) -> Result<Wait> {
     if watched.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
         return Ok(Wait::HangUp);
     }
-    Ok(Wait::Ready)
+    Ok(match watch {
+        Watch::Input => Wait::Ready,
+        // Nothing was subscribed to, so a wakeup that is not a hangup is not
+        // an answer about anything and the caller only wanted the time spent.
+        Watch::HangUp => Wait::Idle,
+    })
 }
 
 /// The descriptor crossterm reads terminal input from.
@@ -476,7 +635,7 @@ fn terminal_size() -> Option<(u16, u16)> {
 /// See the Unix implementation: this platform has no hangup answer yet, so
 /// the wait stays where it always was.
 #[cfg(not(unix))]
-fn wait_for_terminal(_timeout: Duration) -> Result<Wait> {
+fn wait_for_terminal(_timeout: Duration, _watch: Watch) -> Result<Wait> {
     Ok(Wait::Unavailable)
 }
 

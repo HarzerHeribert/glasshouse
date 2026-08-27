@@ -42,16 +42,18 @@
 //! either — an adapter is handed variable *names* and never a value, so the
 //! boundary is structural rather than a habit.
 
+pub mod generated;
 pub mod response;
 
+pub use generated::EphemeralConfigs;
 use std::ffi::OsString;
 use std::fmt;
 
 use crate::gateway::upstream::UpstreamBackend;
 use crate::gateway::{Gateway, Route, Upstream};
 use crate::harness::{
-    ApprovalKind, ApprovalMode, CredentialPlacement, CredentialVarProblem, Declared,
-    DirectProviderRequest, HarnessAdapter, WireProtocol,
+    ApprovalKind, ApprovalMode, ConfigFileNameProblem, CredentialPlacement, CredentialVarProblem,
+    Declared, DirectProviderRequest, GeneratedConfigSite, HarnessAdapter, WireProtocol,
 };
 use crate::integrations::IntegrationId;
 use crate::launch::HarnessLaunch;
@@ -274,7 +276,54 @@ pub struct MechanismNote {
 pub struct LaunchOverlay {
     args: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
+    configs: Vec<PendingConfig>,
     mechanisms: Vec<MechanismNote>,
+}
+
+/// One generated configuration document this overlay still has to have
+/// written before its child process starts.
+///
+/// A *description*, not a write. [`resolve`] composes these and touches no
+/// filesystem — `resolving_a_launch_profile_touches_no_files` is unchanged
+/// and still enforces it — and [`LaunchOverlay::install`] is the only writer.
+///
+/// No `Debug` derive that could print `contents`: a document is composed from
+/// a base URL, header values and variable *names*, none of which is a
+/// credential today, but this is the one field in the overlay that carries a
+/// whole harness configuration and it should not be rendered wholesale into
+/// a log or a panic message.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PendingConfig {
+    file_name: &'static str,
+    contents: String,
+    placement: crate::harness::ConfigPathPlacement,
+}
+
+impl PendingConfig {
+    /// What it will be called, inside whichever directory Glasshouse owns
+    /// for the session it belongs to. Never a path: see
+    /// [`LaunchOverlay::install`].
+    pub fn file_name(&self) -> &'static str {
+        self.file_name
+    }
+
+    /// The document itself. `pub(crate)` rather than `pub`: the only reader
+    /// is [`mod@generated`], which writes it; nothing outside this crate has
+    /// a reason to hold a whole harness configuration, and a public accessor
+    /// is how one would end up in a log.
+    pub(crate) fn contents(&self) -> &str {
+        &self.contents
+    }
+}
+
+impl fmt::Debug for PendingConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingConfig")
+            .field("file_name", &self.file_name)
+            .field("byte_count", &self.contents.len())
+            .field("placement", &self.placement)
+            .finish()
+    }
 }
 
 impl LaunchOverlay {
@@ -282,6 +331,7 @@ impl LaunchOverlay {
         Self {
             args: Vec::new(),
             env: Vec::new(),
+            configs: Vec::new(),
             mechanisms: Vec::new(),
         }
     }
@@ -294,8 +344,95 @@ impl LaunchOverlay {
         &self.env
     }
 
+    /// The generated configuration documents this overlay still needs
+    /// written — see [`LaunchOverlay::install`].
+    pub fn configs(&self) -> &[PendingConfig] {
+        &self.configs
+    }
+
     pub fn mechanisms(&self) -> &[MechanismNote] {
         &self.mechanisms
+    }
+
+    /// Write this overlay's generated configuration documents into `site`,
+    /// point the child at them, and return the guard that removes them again.
+    ///
+    /// # Why this is separate from [`resolve`] and from [`LaunchOverlay::apply`]
+    ///
+    /// Resolution happens **before** a session record exists, because a
+    /// refusal must cost nothing — no row, no process. So at resolution time
+    /// there is no session directory and no path to put in an environment
+    /// variable. The adapter therefore declares a
+    /// [`crate::harness::ConfigPathPlacement`] instead of a path, and this
+    /// step fills it in once the caller knows where the session lives.
+    ///
+    /// `apply` cannot do it: it is infallible, and a write that failed there
+    /// would have to be swallowed, leaving the child pointed at a document
+    /// that does not exist.
+    ///
+    /// # Forgetting to call this fails loudly, by construction
+    ///
+    /// The mechanism note and the *selection* arguments — OpenCode's
+    /// `--model <provider>/<model>` — are added during resolution; only the
+    /// document and the variable naming it are added here. An overlay that
+    /// was applied without being installed therefore starts a harness that
+    /// has been told to use a provider it has never heard of, which OpenCode
+    /// refuses outright ("Model not found: …") rather than silently falling
+    /// back to the user's own paid account. That ordering is deliberate: the
+    /// two halves are split so that the loud failure is the one that
+    /// survives a mistake.
+    ///
+    /// # Ephemeral means ephemeral, and this is what makes it true
+    ///
+    /// The returned [`EphemeralConfigs`] removes every file it wrote when it
+    /// drops, so a caller holding it across `session::attach` gets a document
+    /// that exists for exactly the life of the child process. Dropping it
+    /// early would delete a file the running harness may still re-read;
+    /// dropping it late — or never — is the surprise file in somebody's
+    /// state directory that the map's "temporary or Glasshouse-owned" line
+    /// exists to prevent. It also registers a
+    /// [`crate::shutdown::on_forced_exit`] cleanup, because the forced path
+    /// calls [`std::process::exit`] and runs no destructor.
+    ///
+    /// An overlay with nothing to write returns a guard that owns nothing, so
+    /// a caller never has to ask whether it has any.
+    pub fn install(&mut self, site: GeneratedConfigSite<'_>) -> std::io::Result<EphemeralConfigs> {
+        use crate::harness::ConfigPathPlacement;
+
+        let mut paths = Vec::with_capacity(self.configs.len());
+        for config in &self.configs {
+            // The second of the two file-name checks, and the one that
+            // matters: this is the step that turns a name into a path. An
+            // adapter that got past `accept_generated_config` with a name
+            // that could leave the site would be stopped here, before
+            // anything is opened.
+            let Some(path) = site.file(config.file_name) else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "`{}` is not a name a generated configuration may be written under",
+                        config.file_name
+                    ),
+                ));
+            };
+            paths.push(path);
+        }
+
+        let installed = generated::write_all(&self.configs, &paths)?;
+
+        for (config, path) in self.configs.iter().zip(&paths) {
+            match config.placement {
+                ConfigPathPlacement::Environment(var) => {
+                    self.env
+                        .push((OsString::from(var), path.clone().into_os_string()));
+                }
+                ConfigPathPlacement::Argument(flag) => {
+                    self.args.push(OsString::from(flag));
+                    self.args.push(path.clone().into_os_string());
+                }
+            }
+        }
+        Ok(installed)
     }
 
     /// Apply this overlay to `launch`: its arguments, then its environment
@@ -495,6 +632,48 @@ pub enum Refusal {
     NoBypass {
         profile: String,
         harness: IntegrationId,
+    },
+
+    #[error(
+        "launch profile `{profile}` asks {} to use the provider `{provider}`, but {} selects a \
+         provider through the model it is given and this profile names none; add a `model` to \
+         the profile",
+        .harness.display_name(),
+        .harness.display_name(),
+    )]
+    DirectProviderNeedsModel {
+        profile: String,
+        harness: IntegrationId,
+        provider: String,
+    },
+
+    #[error(
+        "refusing launch profile `{profile}`: {} asked for a generated configuration called \
+         `{file_name}`, but {problem}",
+        .harness.display_name(),
+    )]
+    UnsafeGeneratedConfigName {
+        profile: String,
+        harness: IntegrationId,
+        file_name: String,
+        problem: ConfigFileNameProblem,
+    },
+
+    #[error(
+        "refusing launch profile `{profile}`: the provider `{provider}` declares a {field} \
+         containing `{sequence}`, and {} substitutes that sequence inside the configuration \
+         document Glasshouse generates for it — the value would be replaced by something else \
+         before the harness ever read it. Remove it from your provider configuration",
+        .harness.display_name(),
+    )]
+    UnsafeGeneratedConfigValue {
+        profile: String,
+        harness: IntegrationId,
+        provider: String,
+        /// Which configured value carried it — "base URL" or "header value".
+        /// A name, never the value itself.
+        field: &'static str,
+        sequence: &'static str,
     },
 
     #[error(
@@ -846,6 +1025,11 @@ fn apply_gateway(
     adapter: &dyn HarnessAdapter,
     overlay: &mut LaunchOverlay,
 ) -> Result<(), Refusal> {
+    // A harness that selects its provider through the model needs one here
+    // exactly as it does on the direct path — the gateway is a provider to
+    // the child, not an exemption. Asked before anything is bound, so a
+    // refusal binds no assignment.
+    require_model_if_the_harness_selects_through_it(profile, adapter, GATEWAY_PROVIDER_NAME)?;
     let harness_protocols: &[WireProtocol] = adapter
         .describe()
         .backends
@@ -937,6 +1121,15 @@ fn apply_gateway(
         });
     };
 
+    accept_generated_config(
+        profile,
+        GATEWAY_PROVIDER_NAME,
+        &base_url,
+        &[],
+        &plan,
+        overlay,
+    )?;
+
     let Some(CredentialPlacement::Environment(destination)) = plan.credential else {
         return Err(Refusal::GatewayTokenUnplaceable {
             profile: profile.name.clone(),
@@ -944,6 +1137,10 @@ fn apply_gateway(
         });
     };
 
+    // The base URL here is Glasshouse's own loopback address and there are no
+    // provider headers at all, so neither can carry an interpolation
+    // sequence. The check is made anyway, in the one place both paths go
+    // through, so a future gateway address format cannot quietly acquire one.
     overlay.args.extend(plan.args);
     overlay.env.extend(plan.env);
     // The gateway's token, not a provider key. This is the only value that
@@ -1301,6 +1498,12 @@ fn apply_direct_provider(
         });
     }
 
+    // Step 0 in the list above, and it comes before the protocol choice
+    // because it is a fact about the harness rather than about this
+    // provider: a harness that is pointed at a backend *through* its model
+    // cannot be pointed at one without a model, whatever the provider serves.
+    require_model_if_the_harness_selects_through_it(profile, cx.adapter, &provider.name)?;
+
     let protocol = choose_protocol(profile, cx.adapter, provider)?;
     let base_url = declared_base_url(provider, protocol)
         .expect("the protocol was chosen from protocol-compatible candidates");
@@ -1356,6 +1559,15 @@ fn apply_direct_provider(
         });
     };
 
+    accept_generated_config(
+        profile,
+        &provider.name,
+        base_url,
+        &provider.headers,
+        &plan,
+        overlay,
+    )?;
+
     overlay.args.extend(plan.args);
     overlay.env.extend(plan.env);
 
@@ -1394,6 +1606,127 @@ fn apply_direct_provider(
         detail: format!("`{}` over {} — {}", provider.name, protocol, plan.mechanism),
     });
 
+    Ok(())
+}
+
+/// The sequences a harness substitutes inside a configuration document
+/// before parsing it.
+///
+/// OpenCode 1.18.22 replaces `{env:NAME}` from the child's environment and
+/// `{file:PATH}` with a file's contents, anywhere in the document's text,
+/// before it is parsed. That is the mechanism Glasshouse *uses* to keep a
+/// credential out of a generated document — and it is therefore a mechanism a
+/// configured value could smuggle itself into, which is why the two are
+/// refused wherever they arrive from configuration.
+///
+/// The list is here rather than in the adapter because the rule is about the
+/// class of mechanism, not about one harness: any harness that interpolates
+/// its own configuration document has the same hazard, and a check written
+/// once protects the adapters that have not been written yet — the same
+/// reason [`crate::harness::unsafe_provider_name_char`] lives outside the
+/// adapters.
+const SUBSTITUTION_SEQUENCES: &[&str] = &["{env:", "{file:"];
+
+/// Refuse before the adapter is asked, when this harness selects its
+/// provider through a model and the profile names none.
+///
+/// Checked *before* [`crate::harness::HarnessAdapter::direct_provider_launch`]
+/// so that a missing model is a message naming it. Asking the adapter first
+/// would produce a `None`, which means "this harness declares no such
+/// mechanism" — a different and, here, false statement.
+fn require_model_if_the_harness_selects_through_it(
+    profile: &LaunchProfile,
+    adapter: &dyn HarnessAdapter,
+    provider_name: &str,
+) -> Result<(), Refusal> {
+    if adapter.direct_provider_requires_model() && profile.model.is_none() {
+        return Err(Refusal::DirectProviderNeedsModel {
+            profile: profile.name.clone(),
+            harness: profile.harness,
+            provider: provider_name.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Accept a plan's generated configuration document onto `overlay`, or
+/// refuse it.
+///
+/// Two things are checked here, and each is a way the mechanism could stop
+/// being "isolated, Glasshouse-owned, and carrying no secret":
+///
+/// 1. **What it is called.** An adapter never returns a path — only a name —
+///    and a name that is not a plain file name is refused here rather than
+///    joined onto the directory Glasshouse owns.
+///    [`LaunchOverlay::install`] checks the same thing again at the moment it
+///    joins, because that is the step that could actually write somewhere
+///    else.
+/// 2. **What the user's own configuration can smuggle into it.** See
+///    [`SUBSTITUTION_SEQUENCES`].
+///
+/// Nothing is written, and no path is decided. The document goes onto the
+/// overlay as a [`PendingConfig`]; [`LaunchOverlay::install`] is the only
+/// writer, and the only thing that knows where the session's directory is.
+fn accept_generated_config(
+    profile: &LaunchProfile,
+    provider_name: &str,
+    base_url: &str,
+    headers: &[(String, String)],
+    plan: &crate::harness::DirectProviderPlan,
+    overlay: &mut LaunchOverlay,
+) -> Result<(), Refusal> {
+    let Some(config) = &plan.config else {
+        return Ok(());
+    };
+
+    for sequence in SUBSTITUTION_SEQUENCES {
+        let carrier = if base_url.contains(sequence) {
+            Some("base URL")
+        } else if headers.iter().any(|(_, value)| value.contains(sequence)) {
+            Some("header value")
+        } else {
+            None
+        };
+        if let Some(field) = carrier {
+            return Err(Refusal::UnsafeGeneratedConfigValue {
+                profile: profile.name.clone(),
+                harness: profile.harness,
+                provider: provider_name.to_owned(),
+                field,
+                sequence,
+            });
+        }
+    }
+
+    if let Some(problem) = crate::harness::unsafe_config_file_name(config.file_name) {
+        return Err(Refusal::UnsafeGeneratedConfigName {
+            profile: profile.name.clone(),
+            harness: profile.harness,
+            file_name: config.file_name.to_owned(),
+            problem,
+        });
+    }
+
+    // The file name and how the child will be told where it is. Not the
+    // document, and not one byte of its contents — the same rule every other
+    // mechanism note follows.
+    overlay.mechanisms.push(MechanismNote {
+        category: "generated configuration",
+        detail: format!(
+            "`{}` written in the directory Glasshouse owns for this session and removed with \
+             it, named to the child by {}",
+            config.file_name,
+            match config.path_placement {
+                crate::harness::ConfigPathPlacement::Environment(var) => var.to_owned(),
+                crate::harness::ConfigPathPlacement::Argument(flag) => format!("`{flag}`"),
+            }
+        ),
+    });
+    overlay.configs.push(PendingConfig {
+        file_name: config.file_name,
+        contents: config.contents.clone(),
+        placement: config.path_placement,
+    });
     Ok(())
 }
 
@@ -2709,6 +3042,7 @@ mod tests {
                 OsString::from("GLASSHOUSE_TEST_OVERLAY_KEY"),
                 OsString::from("unmistakable-secret-shaped-value"),
             )],
+            configs: Vec::new(),
             mechanisms: vec![MechanismNote {
                 category: "approval mode",
                 detail: "automatic review (--overlay-flag)".to_owned(),
@@ -2808,7 +3142,10 @@ mod tests {
         // back either.
         let opencode = adapter_for(IntegrationId::OpenCode).expect("a harness");
         let mut refused_profile = profile_for(IntegrationId::OpenCode);
-        refused_profile.expected_protocol = Some(WireProtocol::OpenAiChat);
+        // Anthropic messages, not OpenAI chat: since Phase 9A's generated-
+        // configuration work OpenCode *does* declare `openai-chat`, so
+        // asking for that one would now resolve rather than refuse.
+        refused_profile.expected_protocol = Some(WireProtocol::AnthropicMessages);
         let err = resolve(
             &refused_profile,
             &native_cx(opencode, false, &FakeSecrets::empty()),
@@ -2818,6 +3155,158 @@ mod tests {
     }
 
     // --- Phase 9F: direct provider launch profiles -----------------------
+
+    /// The second file-name check — the one at the moment a name becomes a
+    /// path — refuses, opens nothing, and leaves the overlay pointing at
+    /// nothing.
+    ///
+    /// Unreachable through [`resolve`], which refuses such a name first, so
+    /// the document is built here by hand. That is deliberate and is the
+    /// same shape Phase 10's M7 used: this check guards against the adapter
+    /// that has not been written yet, and a test that could only reach it
+    /// through today's adapters would be asserting a property today's code
+    /// cannot violate.
+    #[test]
+    fn installing_a_name_that_could_leave_the_site_refuses_and_writes_nothing() {
+        let mut overlay = LaunchOverlay::empty();
+        overlay.configs.push(PendingConfig {
+            file_name: "../escaped.json",
+            contents: "{}\n".to_owned(),
+            placement: crate::harness::ConfigPathPlacement::Environment("GLASSHOUSE_TEST_CONFIG"),
+        });
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let site = tmp.path().join("session");
+        let err = overlay
+            .install(GeneratedConfigSite::new(&site))
+            .expect_err("a name that could leave the site must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+
+        assert!(!site.exists(), "nothing may be created for a refused name");
+        assert!(
+            !tmp.path().join("escaped.json").exists(),
+            "and certainly not outside the site"
+        );
+        assert!(
+            overlay.env().is_empty() && overlay.args().is_empty(),
+            "a child must not be pointed at a document that was never written"
+        );
+    }
+
+    /// Phase 9A lines 362 and 370, at the one place a credential could newly
+    /// escape: a generated configuration document.
+    ///
+    /// The temptation this exists to kill is the obvious shortcut — writing
+    /// the key into the file, because the harness would accept it there.
+    /// OpenCode substitutes `{env:NAME}` inside a configuration document
+    /// before parsing it, so the document names the variable and the value
+    /// travels the way every other harness's credential already does.
+    ///
+    /// Asserted on the **document's own bytes**, composed by the adapter, so
+    /// no arrangement of writing or of diagnostics can make this pass while
+    /// the key is in the file.
+    #[test]
+    fn a_generated_configuration_names_the_credential_variable_and_never_its_value() {
+        let opencode = adapter_for(IntegrationId::OpenCode).expect("a harness");
+        let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
+        let mut provider = provider_serving(
+            "probe-router",
+            WireProtocol::OpenAiChat,
+            "https://probe.example/v1",
+        );
+        provider.credential_env = vec![CREDENTIAL_VAR.to_owned()];
+        provider
+            .headers
+            .push(("X-Probe".to_owned(), "probe-header-value".to_owned()));
+
+        let mut profile = direct_profile(IntegrationId::OpenCode, "probe-router");
+        profile.model = Some("probe-model-x".to_owned());
+
+        let overlay = resolve(&profile, &direct_cx(opencode, &provider, &secrets))
+            .expect("OpenCode takes an OpenAI-chat provider");
+
+        let document = overlay.configs()[0].contents();
+        assert!(
+            !document.contains(PLANTED_CREDENTIAL),
+            "the credential must never be written into a generated configuration:\n{document}"
+        );
+        assert!(
+            document.contains(&format!("{{env:{CREDENTIAL_VAR}}}")),
+            "the document must name the variable the harness reads the value from:\n{document}"
+        );
+        // Everything else the harness needs really is in there, so this is
+        // not passing because the document is empty.
+        assert!(document.contains("https://probe.example/v1"));
+        assert!(document.contains("probe-model-x"));
+        assert!(document.contains("probe-header-value"));
+
+        // And the value is in the child's environment, under the provider's
+        // own declared variable — the mechanism that was already closed.
+        assert_eq!(
+            env_value(&overlay, CREDENTIAL_VAR),
+            Some(std::ffi::OsStr::new(PLANTED_CREDENTIAL))
+        );
+
+        // No diagnostic carries the value, the document, or the base URL.
+        for note in overlay.mechanisms() {
+            assert!(!note.detail.contains(PLANTED_CREDENTIAL), "{}", note.detail);
+            assert!(!note.detail.contains("probe.example"), "{}", note.detail);
+        }
+        let debug = format!("{overlay:?}");
+        assert!(!debug.contains(PLANTED_CREDENTIAL), "{debug}");
+        assert!(
+            !format!("{:?}", overlay.configs()).contains(PLANTED_CREDENTIAL),
+            "a pending document must not render its own contents"
+        );
+    }
+
+    /// The mechanism note for a generated configuration says what a person
+    /// needs in order to find the file and know it is Glasshouse's — and
+    /// nothing else.
+    #[test]
+    fn the_generated_configuration_diagnostic_shows_names_only() {
+        let opencode = adapter_for(IntegrationId::OpenCode).expect("a harness");
+        let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
+        let mut provider = provider_serving(
+            "probe-router",
+            WireProtocol::OpenAiChat,
+            "https://probe.example/v1",
+        );
+        provider.credential_env = vec![CREDENTIAL_VAR.to_owned()];
+        let mut profile = direct_profile(IntegrationId::OpenCode, "probe-router");
+        profile.model = Some("probe-model-x".to_owned());
+
+        let overlay = resolve(&profile, &direct_cx(opencode, &provider, &secrets)).expect("ok");
+        let note = overlay
+            .mechanisms()
+            .iter()
+            .find(|note| note.category == "generated configuration")
+            .expect("a generated configuration is a mechanism, and is reported as one");
+        assert!(
+            note.detail.contains("opencode-provider.json"),
+            "{}",
+            note.detail
+        );
+        assert!(note.detail.contains("OPENCODE_CONFIG"), "{}", note.detail);
+        assert!(
+            note.detail.contains("removed with it"),
+            "the diagnostic should say the document is ephemeral: {}",
+            note.detail
+        );
+
+        // And nothing else. A diagnostic that rendered the document itself
+        // would be carrying a whole harness configuration — today that is a
+        // base URL and a set of headers, and tomorrow it is whatever an
+        // adapter decides a provider entry needs. Line 370's rule is names
+        // only, and this is where a generated document would break it.
+        for forbidden in ["probe.example", "$schema", "npm", "baseURL", "apiKey"] {
+            assert!(
+                !note.detail.contains(forbidden),
+                "the diagnostic carried `{forbidden}` from the document itself: {}",
+                note.detail
+            );
+        }
+    }
 
     /// The credential every test below plants in its store. Distinctive on
     /// purpose: a `!contains` assertion is only worth as much as the
@@ -3297,6 +3786,7 @@ mod tests {
                 args: Vec::new(),
                 env: Vec::new(),
                 credential: None,
+                config: None,
                 mechanism: "a test double that forgets the credential".to_owned(),
             })
         }
@@ -3337,6 +3827,73 @@ mod tests {
                 approvals: crate::harness::ApprovalModes::UNVERIFIED,
                 communication_style: crate::harness::Declared::Unverified,
             }
+        }
+    }
+
+    /// An adapter that asks for a generated configuration under a name that
+    /// would leave the directory Glasshouse owns.
+    ///
+    /// It exists because no real adapter can do this — every one of them
+    /// gets its path from [`GeneratedConfigSite::file`], which refuses such
+    /// a name — so the production check in `accept_generated_config` would
+    /// otherwise be asserting a property today's code cannot violate. This
+    /// is the same deliberately synthetic shape Phase 10's M7 used, and for
+    /// the same reason: the check is a guard against the adapter that has
+    /// not been written yet.
+    #[derive(Debug)]
+    struct EscapingGeneratedConfig;
+
+    impl HarnessAdapter for EscapingGeneratedConfig {
+        fn id(&self) -> IntegrationId {
+            IntegrationId::ClaudeCode
+        }
+        fn executable_candidates(&self) -> &'static [&'static str] {
+            &["pretend"]
+        }
+        fn start(&self) -> crate::harness::Invocation {
+            crate::harness::Invocation::bare()
+        }
+        fn resume(&self, _native_session: &str) -> Option<crate::harness::Invocation> {
+            None
+        }
+        fn describe(&self) -> crate::harness::HarnessDescription {
+            crate::harness::HarnessDescription {
+                vendor: crate::harness::Declared::Unverified,
+                hooks: crate::harness::Declared::Unverified,
+                session_ids: crate::harness::Declared::Unverified,
+                capabilities: crate::harness::Capabilities::UNVERIFIED,
+                backends: crate::harness::Backends {
+                    protocols: Declared::verified(
+                        &[WireProtocol::OpenAiChat],
+                        "a test double, declaring exactly one protocol",
+                    ),
+                    model_override: Declared::verified(
+                        &[crate::harness::ModelOverride::CommandLine("--model")],
+                        "a test double",
+                    ),
+                    selection: Declared::Unverified,
+                },
+                approvals: crate::harness::ApprovalModes::UNVERIFIED,
+                communication_style: crate::harness::Declared::Unverified,
+            }
+        }
+        fn direct_provider_launch(
+            &self,
+            _request: &DirectProviderRequest<'_>,
+        ) -> Option<crate::harness::DirectProviderPlan> {
+            Some(crate::harness::DirectProviderPlan {
+                args: Vec::new(),
+                env: Vec::new(),
+                credential: None,
+                config: Some(crate::harness::GeneratedConfig {
+                    file_name: "../../the-users-own-config.json",
+                    contents: "{}\n".to_owned(),
+                    path_placement: crate::harness::ConfigPathPlacement::Environment(
+                        "GLASSHOUSE_TEST_CONFIG",
+                    ),
+                }),
+                mechanism: "a test double that names a path instead of a file".to_owned(),
+            })
         }
     }
 
@@ -3458,6 +4015,20 @@ mod tests {
             "https://a.example",
         );
         bad_var.credential_env = vec!["9NOPE".to_owned()];
+        let mut oc_provider = provider_serving(
+            "oc-provider",
+            WireProtocol::OpenAiChat,
+            "https://a.example/v1",
+        );
+        oc_provider.credential_env = vec![CREDENTIAL_VAR.to_owned()];
+        // A base URL carrying a sequence the harness would substitute inside
+        // the document Glasshouse generates for it.
+        let mut oc_inject = provider_serving(
+            "oc-inject",
+            WireProtocol::OpenAiChat,
+            "https://a.example/{env:HOME}/v1",
+        );
+        oc_inject.credential_env = vec![CREDENTIAL_VAR.to_owned()];
 
         let scenarios: Vec<(&str, Refusal)> = vec![
             ("harness executable unavailable", {
@@ -3555,6 +4126,26 @@ mod tests {
                 p.approval = ApprovalSelection::AutomaticReview;
                 resolve(&p, &direct_cx(claude, &anthropic_provider(), &secrets)).unwrap_err()
             }),
+            ("direct provider needs a model", {
+                let opencode = adapter_for(IntegrationId::OpenCode).expect("a harness");
+                let p = direct_profile(IntegrationId::OpenCode, "oc-provider");
+                resolve(&p, &direct_cx(opencode, &oc_provider, &secrets)).unwrap_err()
+            }),
+            ("unsafe generated config name", {
+                let mut p = direct_profile(IntegrationId::ClaudeCode, "oc-provider");
+                p.model = Some("a-model".to_owned());
+                resolve(
+                    &p,
+                    &direct_cx(&EscapingGeneratedConfig, &oc_provider, &secrets),
+                )
+                .unwrap_err()
+            }),
+            ("unsafe generated config value", {
+                let opencode = adapter_for(IntegrationId::OpenCode).expect("a harness");
+                let mut p = direct_profile(IntegrationId::OpenCode, "oc-inject");
+                p.model = Some("a-model".to_owned());
+                resolve(&p, &direct_cx(opencode, &oc_inject, &secrets)).unwrap_err()
+            }),
         ];
 
         for (label, refusal) in &scenarios {
@@ -3595,11 +4186,14 @@ mod tests {
                     "AutomaticReviewNeedsNativeBackend"
                 }
                 Refusal::HarnessExecutableUnavailable { .. } => "HarnessExecutableUnavailable",
+                Refusal::DirectProviderNeedsModel { .. } => "DirectProviderNeedsModel",
+                Refusal::UnsafeGeneratedConfigName { .. } => "UnsafeGeneratedConfigName",
+                Refusal::UnsafeGeneratedConfigValue { .. } => "UnsafeGeneratedConfigValue",
             });
         }
         assert_eq!(
             seen.len(),
-            17,
+            20,
             "every Refusal variant must be exercised here: {seen:?}"
         );
     }

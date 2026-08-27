@@ -249,6 +249,134 @@ pub enum CredentialPlacement {
     Environment(String),
 }
 
+/// The Glasshouse-owned directory a generated configuration document may be
+/// written into, offered to an adapter so it can name the resulting file in
+/// its own arguments and environment.
+///
+/// The same shape, and for the same reason, as [`HookCommand::file`]: the
+/// adapter needs the absolute path to *point* the harness at, while core
+/// needs to be the only thing that decides *where* the file may land. So the
+/// adapter is handed a site and asks it for a path, rather than being handed
+/// a free hand with a [`PathBuf`].
+///
+/// A site is only ever the directory Glasshouse owns for one session —
+/// `Runtime::session_dir` — and [`GeneratedConfigSite::file`] refuses a name
+/// that is not a plain file name, so no adapter can walk out of it with
+/// `..` or an absolute path. That refusal is checked again by
+/// [`crate::profile::resolve`] against the name the plan comes back with,
+/// because the two are separate answers and only the second one is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GeneratedConfigSite<'a> {
+    directory: &'a Path,
+}
+
+impl<'a> GeneratedConfigSite<'a> {
+    /// `directory` must be a directory Glasshouse owns. It is created, if it
+    /// does not exist, only when something is actually written into it — see
+    /// [`crate::profile::LaunchOverlay::install`].
+    pub fn new(directory: &'a Path) -> Self {
+        Self { directory }
+    }
+
+    pub fn directory(&self) -> &Path {
+        self.directory
+    }
+
+    /// Where a document called `file_name` will be written, or `None` when
+    /// `file_name` is not a plain file name.
+    pub fn file(&self, file_name: &str) -> Option<PathBuf> {
+        unsafe_config_file_name(file_name)
+            .is_none()
+            .then(|| self.directory.join(file_name))
+    }
+}
+
+/// Why `name` may not be used as a generated configuration file name, or
+/// `None` when it is a plain one.
+///
+/// The rule is deliberately blunt — a non-empty name of letters, digits,
+/// `.`, `-` and `_` that is neither `.` nor `..` — because the only thing
+/// this name may ever do is sit inside the directory Glasshouse owns. An
+/// adapter has no legitimate reason to name a path, and a mechanism that
+/// writes into someone else's configuration directory is precisely what the
+/// capability map forbids.
+pub fn unsafe_config_file_name(name: &str) -> Option<ConfigFileNameProblem> {
+    if name.is_empty() {
+        return Some(ConfigFileNameProblem::Empty);
+    }
+    if name == "." || name == ".." {
+        return Some(ConfigFileNameProblem::Traversal);
+    }
+    if let Some(offending) = name
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')))
+    {
+        return Some(ConfigFileNameProblem::Character(offending));
+    }
+    None
+}
+
+/// What is wrong with a generated configuration file *name*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ConfigFileNameProblem {
+    #[error("it is empty")]
+    Empty,
+    #[error("it names a directory rather than a file")]
+    Traversal,
+    #[error("it contains `{0}`, which could leave the directory Glasshouse owns")]
+    Character(char),
+}
+
+/// An isolated configuration document a harness needs written before it can
+/// be pointed at a backend at all.
+///
+/// The document's *shape* is the harness's own business — exactly as for
+/// [`HookInstallation`] — so the adapter composes it and core only writes it
+/// down, inside the directory Glasshouse owns, and removes it when the
+/// session ends.
+///
+/// **It must never carry a credential value.** An adapter is handed variable
+/// *names* and never a value (see [`DirectProviderRequest`]), so the only
+/// thing it can put in a document is a name; where a harness can read a
+/// value out of its own environment from inside a configuration document,
+/// that is the mechanism to use. OpenCode's `{env:NAME}` substitution is the
+/// first such case and `crate::harness::opencode` documents the probe that
+/// established it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedConfig {
+    /// What to call the file Glasshouse writes, inside the directory it
+    /// owns. A plain file name — see [`unsafe_config_file_name`]. **Never a
+    /// path**: an adapter says what the document is called, and
+    /// [`GeneratedConfigSite`] is the only thing that says where it may live.
+    pub file_name: &'static str,
+    /// Its contents.
+    pub contents: String,
+    /// How the child is told where the document ended up.
+    pub path_placement: ConfigPathPlacement,
+}
+
+/// How a harness is told the path of a document Glasshouse generated for it.
+///
+/// The same shape as [`CredentialPlacement`], and for the same reason: the
+/// adapter says *where a value goes* and core is the only thing that knows
+/// the value — here, the path, which does not exist until the session
+/// directory is known.
+///
+/// That split is what lets an adapter declare a generated configuration
+/// during resolution, which happens before a session record exists, and have
+/// it written afterwards into the directory that record owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigPathPlacement {
+    /// Into this environment variable of the child process. OpenCode's
+    /// `OPENCODE_CONFIG` is this.
+    Environment(&'static str),
+    /// After this command-line flag, as its own argument. Claude Code's
+    /// `--settings <file>` is this shape, although its settings document
+    /// reaches the child through `session::select` rather than through a
+    /// launch overlay.
+    Argument(&'static str),
+}
+
 /// What a harness needs in order to talk to a direct provider — handed to an
 /// adapter deliberately WITHOUT the credential value.
 ///
@@ -284,6 +412,15 @@ pub struct DirectProviderPlan {
     /// Where [`crate::profile::resolve`] must put the credential value, if
     /// any.
     pub credential: Option<CredentialPlacement>,
+    /// An isolated configuration document that has to exist before the child
+    /// starts, for a harness whose provider configuration is file-shaped.
+    ///
+    /// The adapter composes it and has already pointed itself at
+    /// [`GeneratedConfigSite::file`]'s answer through its own `args` or
+    /// `env`. Nothing is written while a profile is being resolved — see
+    /// [`crate::profile::LaunchOverlay::install`], which is the only writer
+    /// and hands back the guard that removes it again.
+    pub config: Option<GeneratedConfig>,
     /// Names and mechanism only, for diagnostics. Never a value.
     pub mechanism: String,
 }
@@ -1092,6 +1229,31 @@ pub trait HarnessAdapter: std::fmt::Debug + Send + Sync {
     ) -> Option<DirectProviderPlan> {
         let _ = request;
         None
+    }
+
+    /// Whether this harness's direct-provider mechanism is unusable without a
+    /// model named for it.
+    ///
+    /// Default `false`, which is what every harness answered before this
+    /// existed: pointing it at a provider is enough and the harness picks a
+    /// model itself.
+    ///
+    /// `true` is for a harness that selects the *provider* through the
+    /// model. OpenCode's `--model <provider>/<model>` is the case this
+    /// exists for: a profile that configures a provider and names no model
+    /// leaves the harness configured and unused, starting on whatever
+    /// backend it defaulted to. For a user who asked to be pointed somewhere
+    /// else that is the silent, billable failure
+    /// [`crate::profile::resolve`]'s credential step already refuses, so it
+    /// is refused too — and never guessed at, because a model identifier
+    /// invented by Glasshouse is exactly the invention that module exists to
+    /// refuse.
+    ///
+    /// Read **before** [`HarnessAdapter::direct_provider_launch`] is called,
+    /// so a missing model is a refusal that says so rather than a `None`
+    /// that reads as "this harness declares no mechanism".
+    fn direct_provider_requires_model(&self) -> bool {
+        false
     }
 
     /// This harness's own communication-style mechanism, set to whatever it
@@ -2231,12 +2393,17 @@ mod tests {
     /// Phase 9A: "Never modify the user's normal global Claude Code or Codex
     /// configuration merely to launch a Glasshouse profile."
     ///
-    /// Resolution turns a declaration into arguments and environment for one
-    /// child process. It has no business touching the filesystem or the
-    /// ambient environment at all — and a module that never opens a file
-    /// cannot modify a user's global harness configuration. That is a
-    /// stronger guarantee than enumerating the paths it must avoid, and a
-    /// much cheaper one to keep true.
+    /// Resolution turns a declaration into arguments, environment and
+    /// *described* documents for one child process. It has no business
+    /// touching the filesystem or the ambient environment at all — and a
+    /// module that never opens a file cannot modify a user's global harness
+    /// configuration. That is a stronger guarantee than enumerating the paths
+    /// it must avoid, and a much cheaper one to keep true.
+    ///
+    /// **Line 362 gave Glasshouse a reason to write a file, and this test did
+    /// not get weaker for it.** `profile/generated.rs` is the one place that
+    /// writes, it is checked separately below, and the module that decides
+    /// *what* a launch is still opens nothing.
     #[test]
     fn resolving_a_launch_profile_touches_no_files() {
         let code = production_code(include_str!("../profile/mod.rs"));
@@ -2247,6 +2414,58 @@ mod tests {
                  profile must not touch the filesystem or the ambient environment, because \
                  that is what keeps it structurally unable to modify the user's global \
                  harness configuration"
+            );
+        }
+    }
+
+    /// Phase 9A lines 362 and 366: an isolated *generated* configuration
+    /// file, never an edit to a third-party one.
+    ///
+    /// The one module in `profile/` that opens a file may not decide **which**
+    /// file. It is handed paths that came from
+    /// [`GeneratedConfigSite::file`] — the only thing allowed to say where a
+    /// generated document may live — so it must name no directory of its own
+    /// and must not read the ambient environment to find one.
+    ///
+    /// The forbidden list is what a module would have to name in order to
+    /// arrive at somebody else's configuration: the environment (`HOME`,
+    /// `CODEX_HOME`, `APPDATA` are all read that way), this crate's own
+    /// directory resolver, and the two dot-directories a harness keeps its
+    /// configuration in.
+    #[test]
+    fn the_only_writer_in_profile_takes_its_paths_from_its_caller() {
+        let code = production_code(include_str!("../profile/generated.rs"));
+        for forbidden in [
+            "std::env",
+            "env::",
+            "home_dir",
+            "dirs::",
+            "RuntimePaths",
+            "crate::paths",
+            ".claude",
+            ".codex",
+            ".config",
+        ] {
+            assert!(
+                !code.contains(forbidden),
+                "profile/generated.rs names `{forbidden}` in production code: the one writer \
+                 in this module must take every path from its caller, so that a generated \
+                 configuration can only ever land where `GeneratedConfigSite` said"
+            );
+        }
+        // And it really is the only one: nothing else under `profile/` opens
+        // a file, so a second writer cannot appear without failing a test.
+        for (name, source) in [
+            ("profile/mod.rs", include_str!("../profile/mod.rs")),
+            (
+                "profile/response.rs",
+                include_str!("../profile/response.rs"),
+            ),
+        ] {
+            let code = production_code(source);
+            assert!(
+                !code.contains("OpenOptions") && !code.contains("std::fs::write"),
+                "{name} has become a second writer in `profile/`"
             );
         }
     }
