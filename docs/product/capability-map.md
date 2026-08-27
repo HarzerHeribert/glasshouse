@@ -610,11 +610,11 @@ Harness-native application
 
 Additive fallback and cache behavior
 
-☐ Define a small stable additive response contract for harnesses that lack an adequate native communication-style mechanism.
-☐ Keep the fallback focused on user-facing communication and explicitly state that concision must not reduce analysis, verification, diagnostics, error reporting, or checkpoint completeness.
-☐ Inject the fallback through the safest adapter-supported session-start, append-system, instruction-message, hook-context, or equivalent mechanism.
+☑ Define a small stable additive response contract for harnesses that lack an adequate native communication-style mechanism.
+☑ Keep the fallback focused on user-facing communication and explicitly state that concision must not reduce analysis, verification, diagnostics, error reporting, or checkpoint completeness.
+☑ Inject the fallback through the safest adapter-supported session-start, append-system, instruction-message, hook-context, or equivalent mechanism.
 ☐ Avoid repeatedly injecting an unchanged response contract on every turn when the harness already retains it.
-☐ Prefer selecting a response profile when a session is created so the session’s system-prefix and prompt-cache behavior remain stable.
+☑ Prefer selecting a response profile when a session is created so the session’s system-prefix and prompt-cache behavior remain stable.
 ☐ Let adapters declare whether a live profile change is supported, delayed until a new session, or likely to invalidate prompt caching.
 ☐ Warn before a profile change that requires clearing or recreating a valuable warm session.
 ☐ Allow a lightweight in-session communication instruction for a one-turn override when supported without rewriting the system prefix.
@@ -628,7 +628,7 @@ Evaluation and safeguards
 ☐ Measure whether concise profiles hide relevant caveats, unresolved risks, verification failures, or required user decisions.
 ☐ Measure whether elaborate profiles add useful explanation or merely increase token volume and reading time.
 ☐ Measure profile behavior separately for each harness-model pairing because the same instruction can produce different effects across models.
-☐ Allow the user to disable Glasshouse response-profile injection and use the untouched harness default.
+☑ Allow the user to disable Glasshouse response-profile injection and use the untouched harness default.
 ☑ Keep the active response profile and application mechanism inspectable from session details.
 
 Phase 10 — Unified session model

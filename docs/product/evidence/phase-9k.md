@@ -399,3 +399,123 @@ path records no response profile — kills it.
 was already complete; what was missing was somewhere to keep the answer, and
 that belonged to the session model. This is a box closed by the phase after it,
 which is why it was worth writing down as blocked rather than as done.
+
+## Update — 613, 614, 615 decided; 627–632 re-audited; 631 found already closed
+
+Package `phase-9k` (this round) was asked to decide the three lines the
+previous pass left open, and to re-check the rest before building anything.
+No production code in `profile/**` or `harness/**` changed — the audit found
+nothing absent that this package's file ownership could close, and §5's rule
+against manufacturing a caller applied to every remaining gap.
+
+**613 — decided CLOSED.** `ResponseProfile::directives`/`instruction`
+(`crates/glasshouse/src/profile/response.rs`) *is* "a small stable additive
+response contract": six sentences, composed in one function, reached by
+`harness::response::apply`'s additive branch and covered by
+`every_profile_reports_changed_files_verification_risks_and_blockers` (324
+combinations) and `harness::response::tests::no_instruction_glasshouse_writes_omits_the_floor`.
+The counter-reading in the previous entry — a contract shared across harnesses
+and versioned — is not what line 613 says; it says "small" and "stable", and a
+one-function composition with no per-harness variant is exactly that.
+
+**614 — decided CLOSED**, confirming the previous entry's own strongest
+argument: `floor_directive()` states the prohibition in the line's own words
+and no axis or preset can omit it (`no_axis_can_reduce_the_required_reports`,
+`no_instruction_glasshouse_writes_omits_the_floor`).
+
+**615 — decided CLOSED, for what the binary can reach.** `apply` (line
+601) already *is* the safest-first selection line 615 asks for: native, then
+additive (Claude Code's is `--append-system-prompt`, an append-system
+mechanism), then a named refusal. Six of seven harnesses have no mechanism to
+select among — that is an honest absence in those adapters' declarations, not
+a defect in the selection logic this line describes, and it is the same
+"six declare none" fact 601 through 609 already record. Tested by
+`a_native_mechanism_is_preferred_over_an_additive_one`,
+`a_profile_no_native_style_represents_falls_through_to_the_additive_mechanism`,
+`an_adapter_that_declares_nothing_says_so_rather_than_inventing_a_mechanism`.
+
+**616, 617, 618, 619, 620, 621, 622, 623 — unchanged from the previous entry**,
+re-verified rather than re-argued:
+- 616 stays open (vacuously true, no per-turn injection path exists to avoid
+  repeating — §5's standard against ticking an absence).
+- 617 stays closed, on `main.rs::launch_session`, which this package does not
+  own or touch.
+- 618 stays open. `StyleChange` still has two of the line's three terms
+  (`InPlace`/`NewSession`) and grepping the whole crate
+  (`grep -rn 'communication_style\|StyleChange' crates/glasshouse/src`) still
+  finds no reader outside `harness/mod.rs` itself and test scaffolding
+  (`session/select.rs`'s and `profile/mod.rs`'s uses are all `Declared::Unverified`
+  fixtures). Adding a third variant here would be inert without a reader, and
+  a reader belongs in `config/response.rs` or `session/**`, neither of which
+  this package owns — §5 and the packet's own instruction against
+  manufacturing a caller both apply.
+- 619, 620 stay open/blocked: no surface exists to change a *running*
+  session's profile (session/**, not owned here).
+- 621 stays not-this-package's (`crate::tui`/`crate::shell`).
+- 622 stays closed, true by construction (no model-rewrite path exists at
+  all, which is what the line asks for — unlike 616, this line's requirement
+  *is* the absence).
+- 623 stays open. Re-checked for a free-text surface that might have been
+  added since: `grep -rn 'custom_prompt\|extra_prompt\|prompt_addition\|freeform\|custom_instruction' crates/glasshouse/src/config/response.rs crates/glasshouse/src/profile/response.rs`
+  finds nothing. `ResponseConfig` and `Preset` still have no field to hold an
+  arbitrary addition, so nothing exists yet for this line to keep separate
+  from. Any surface would live in `config/response.rs`, not owned here.
+
+**627–630 — still NOT STARTED, unchanged.** `grep -rn 'fn score\|Score'
+crates/glasshouse/src` still finds nothing; still waiting on Phase 47
+(measurement channel), Phase 51 (evaluation hooks), and — for 630 — Phase 33A
+(per-pairing storage).
+
+**631 — found ALREADY CLOSED, by a package this one does not own.**
+The previous entry recorded this as "not blocked, and not built... a
+`disabled = true` key on `ResponseConfig` plus one arm in `response_stack`,
+perhaps thirty lines." That work now exists:
+`crates/glasshouse/src/config/response.rs`'s `ResponseConfig::enabled` /
+`set_enabled`, `EffectiveConfig::response_injection_enabled` (project, then
+user, then default-enabled) and `EffectiveConfig::response_stack`'s
+`injection_enabled` gate on the `Role`, `Project` and `UserDefault` layers —
+an explicit task/session request still applies, matching the line's intent
+that disabling automatic injection is not the same as refusing an explicit
+one. Regression tests already exist and pass:
+`config::response::tests::disabling_injection_suppresses_configured_layers_but_not_an_explicit_request`,
+`injection_enabled_layers_project_over_user_over_default`,
+`the_three_automatic_behaviours_disable_independently`,
+`enabled_key_round_trips_and_absence_parses_to_never_decided` (`cargo test -p
+glasshouse --lib config::response:: `, 4 passed, 2026-08-27). This package did
+not write any of it — `config/**` is outside its file ownership this round —
+and does not tick the box; it is recorded here so the orchestrator does not
+re-open work that is already done, and does not credit this package for it.
+
+**632 — re-verified, still CLOSED as the earlier update recorded.**
+`database.rs` still carries the `response_profile`/`response_mechanism`
+columns from Phase 10's migration 8.
+
+**Verification run this round** (macOS, no other `cargo` running — checked
+with `ps aux` first, per §40): `cargo doc -p glasshouse --no-deps` clean;
+`cargo test -p glasshouse --test response_profiles` (19 passed); `cargo test -p
+glasshouse --lib profile::` (80 passed) and `--lib harness::` (95 passed);
+`cargo test -p glasshouse --lib config::response::` (4 passed, read-only
+confirmation of the 631 finding — that file is not this package's to change).
+The full workspace gate (`scripts/ci-local.sh`) was **not** run by this
+package: it is out of scope for a package that changed no code, and running
+it beside four other live workers would violate §40 regardless.
+
+### Orchestrator decision on 622 — conditional, NOT ticked
+
+*"Do not run a second language model to rewrite every final answer by default."*
+The audit argued this closed **by construction**: nothing in the crate calls a
+model, so there is no rewriting path to disable. The reading is sound and the
+property is real today.
+
+**It is not ticked, and the reason is about how the box decays rather than about
+today's code.** A prohibition satisfied by absence has nothing holding it: the
+day a post-processing path is added, this box stays `☑` and nothing notices. That
+is the opposite of every other closed box here, each of which has a test that
+fails if its behaviour is removed.
+
+This project already has the idiom — a source-scanning guard read by `str::lines`
+(§14, so a CRLF checkout cannot blind it), of the kind that proves a code path
+never opens the user's conversation databases. **One such guard closes 622**, and
+it belongs with whoever next holds `profile/**`.
+
+Ticking it without one would be recording a promise that no longer has a keeper.
