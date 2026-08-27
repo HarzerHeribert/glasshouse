@@ -24,6 +24,38 @@ for 745, 746, 747 and 748.
 > question about what a "real session the user can inspect" means for a session
 > nobody is looking at, and it is not a Sonnet's to settle.
 >
+> **Integrator's follow-up, and it makes the question bigger rather than
+> smaller.** Two facts, both checked rather than assumed:
+>
+> 1. **`glasshouse api serve` is a separate process from the TUI.** It is its
+>    own top-level command (`main.rs`'s `Command::Api` arm), and nothing in
+>    `shell/**` starts or reaches it. A worker spawned through the socket lives
+>    in the API server's `SessionRuntime`; the TUI is a different process and
+>    cannot render a pty it does not own.
+> 2. **`session/attach.rs` cannot be reused for this.** Its own module doc says
+>    so in as many words: *"Nothing here is reusable from inside a longer-lived
+>    interface; the session runtime that multiplexes several harnesses needs a
+>    different input path, not this one."* It is a whole-process transparent
+>    bridge that owns the terminal for the life of the process, deliberately.
+>
+> So the overview's refusal — *"there is no viewport to focus into"* — is not a
+> gate somebody forgot to relax. **It is an accurate statement about where the
+> worker's pty actually lives**, and neither option is small:
+>
+> - **(a) an orchestrated worker becomes `Embedded`** — which means the socket
+>   door must spawn into a runtime the TUI owns, i.e. the two processes become
+>   one, or learn to share;
+> - **(b) the TUI learns to attach to a running headless session** — which means
+>   a pty handed between processes, and `attach.rs` says the input path for that
+>   does not exist.
+>
+> **This is Red tier** (`worker-capabilities.md`: PTY lifecycle, process
+> ownership, cross-process state) and it is a product decision before it is an
+> implementation one: *what does "a real session the user can inspect" mean for
+> a session whose process nobody is attached to?* Recorded here rather than
+> guessed, because a Sonnet package sent at these four boxes would either invent
+> an architecture or stall, and both cost a round.
+>
 > Lines 749 and 750 close on audit — no LLM client is reachable from
 > `api::unix` or `session::api`; every request routes to a real
 > `SessionRuntime` and a real pty. Line 744 closes on the stronger evidence: a
