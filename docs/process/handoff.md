@@ -8,6 +8,10 @@ Last updated: 2026-08-28 (Europe/Berlin)
 
 ## Checkpoint — 2026-08-28, batch 37 landed: 644 / 1280 (50%)
 
+**Green on all three platforms on this exact tree** — local gate 13/13 including
+the ubuntu clippy leg, `--windows-vm` 3/3, 1335 lib tests, zero slow-test
+warnings. The standing flake did not fire this run.
+
 **Half the map.** `gateway-evidence` closed thirteen — Phase 9J eight of eleven,
 Phase 33A's five aggregate lines — plus a Windows fix (`0898efa`) the round
 before it needed.
