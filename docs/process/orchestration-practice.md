@@ -2271,3 +2271,44 @@ semantics.
 **The general rule: when you consume an event, write down what it asserts before
 you write down what you will do about it.** "A turn ended" and "the work is
 finished" are different claims, and only one of them was on offer.
+
+## §63 — one control axis is not enough, and a refusal-before-routing host needs a key
+
+§23 says a control has to be run against the host it is being used to justify.
+Probing twenty-two provider endpoints turned that into two sharper rules, and
+the first of them nearly deleted a correct URL.
+
+**A `404` from an API front end to a wholly unauthenticated caller is not
+evidence of absence.** Google AI Studio's OpenAI-compatible surface answers
+`404` on `/models` **and** `404` on a nonsense sibling. By §23 alone that is
+inconclusive; read naively it is absence, and the row gets filed as a wrong URL
+and thrown away. Send `Authorization: Bearer invalid` — the literal word, no
+credential — and the real path answers `400 "Please pass a valid API key"` while
+the control still answers `404`. The route exists. Reproduced by the
+orchestrator before this was written.
+
+**So: where a first control is identical, try a second axis before concluding
+anything.** An unauthenticated request and a deliberately-invalid-credential
+request are different questions, and a front end that will not route the first
+may answer the second.
+
+**And z.ai was not a quirk.** DeepSeek and Cohere refuse before they route in
+exactly the same way — `401` on `/models`, `401` on a path that does not exist,
+identical on both axes. Three of twenty-two hosts, not one. Any future
+`model_list_endpoint` promotion has to assume a host may do this until its own
+control proves otherwise, and for those three **only an authenticated request
+settles anything at all**.
+
+The corollary is worth stating because it changes what a probe is for: an
+unauthenticated probe establishes **reachability** — this host resolves, TLS
+completes, this path answers differently from one that does not exist. It never
+establishes **correctness**. Those are different claims and a table that mixes
+them is the z.ai correction waiting to happen again.
+
+**Two claims in the packet that dispatched this work did not survive being
+read**, which is the other half of why a worker is sent rather than a search:
+Cohere's trial keys are documented as *volume*-limited (1,000 calls a month),
+not non-commercial as the packet asserted; and Hugging Face's free inference
+allowance is **$0.10 a month**, which is not a routing target however reachable
+its endpoint is. Reachable is not the same as useful, and the ledger now says
+which is which.
