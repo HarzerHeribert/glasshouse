@@ -1184,6 +1184,17 @@ fn apply_gateway(
         detail: format!("{base_url} over {protocol} — {}", plan.mechanism),
     });
 
+    // Phase 32: the gateway is its own resource kind — a local router, not
+    // a capacity of its own — see `crate::provider::registry::QuotaModel`
+    // for why its quota is named as delegated rather than claimed as
+    // metered, which would be wrong for a gateway currently bound to an
+    // unmetered local upstream.
+    let kind = crate::provider::registry::ResourceKind::GlasshouseGateway;
+    overlay.mechanisms.push(MechanismNote {
+        category: "resource kind",
+        detail: format!("{} — {}", kind.label(), kind.quota().as_str()),
+    });
+
     // Phase 9H line 505, said out loud. `gateway_upstream`'s documentation
     // argues that choosing a backend is legitimate here *because* the choice
     // is announced, pinnable and reversible rather than silent; this is the
@@ -1629,6 +1640,16 @@ fn apply_direct_provider(
     overlay.mechanisms.push(MechanismNote {
         category: "direct provider",
         detail: format!("`{}` over {} — {}", provider.name, protocol, plan.mechanism),
+    });
+
+    // Phase 32: what kind of resource this actually is, so a session that
+    // resolved to Ollama is never indistinguishable in the launch log from
+    // one that resolved to a metered router — see
+    // `crate::provider::registry`, whose classification this is.
+    let kind = crate::provider::registry::ResourceKind::from_direct_provider(&provider.name);
+    overlay.mechanisms.push(MechanismNote {
+        category: "resource kind",
+        detail: format!("{} — {}", kind.label(), kind.quota().as_str()),
     });
 
     Ok(())
@@ -2385,6 +2406,61 @@ mod tests {
             !announced.detail.contains(PLANTED_CREDENTIAL),
             "a mechanism note must name a credential and never carry one: {announced:?}"
         );
+
+        // Phase 32: the gateway records its own resource kind too, and it is
+        // named as delegated rather than as a flat "metered" — the gateway
+        // is a router, and this session's own upstream is `ollama`-shaped
+        // fixtures elsewhere in this suite, which is exactly the case a
+        // blanket `MeteredBalance` would get wrong.
+        let kind = overlay
+            .mechanisms
+            .iter()
+            .find(|note| note.category == "resource kind")
+            .expect("a gateway-backed launch records its resource kind");
+        assert!(kind.detail.contains("glasshouse gateway"), "{kind:?}");
+        assert!(kind.detail.contains("delegated"), "{kind:?}");
+    }
+
+    /// Phase 32, line 1185: a direct-provider launch records whether it
+    /// resolved to local inference or a remote one, and the two say
+    /// different things about quota — this is the registry's classification
+    /// actually reaching the launch path, not merely existing as a type.
+    #[test]
+    fn resolving_a_direct_provider_profile_records_whether_it_is_local_or_remote() {
+        let adapter = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
+        let secrets = FakeSecrets::empty();
+
+        let local = provider_serving(
+            "ollama",
+            WireProtocol::AnthropicMessages,
+            "http://localhost:11434/v1",
+        );
+        let profile = direct_profile(IntegrationId::ClaudeCode, &local.name);
+        let overlay = resolve(&profile, &direct_cx(adapter, &local, &secrets))
+            .expect("a provider with no credential variable still resolves");
+        let kind = overlay
+            .mechanisms
+            .iter()
+            .find(|note| note.category == "resource kind")
+            .expect("a direct-provider launch records its resource kind");
+        assert!(kind.detail.contains("local"), "{kind:?}");
+        assert!(kind.detail.contains("unmetered"), "{kind:?}");
+
+        let remote = provider_serving(
+            "openrouter",
+            WireProtocol::AnthropicMessages,
+            "https://openrouter.ai/api",
+        );
+        let profile = direct_profile(IntegrationId::ClaudeCode, &remote.name);
+        let overlay = resolve(&profile, &direct_cx(adapter, &remote, &secrets))
+            .expect("a provider with no credential variable still resolves");
+        let kind = overlay
+            .mechanisms
+            .iter()
+            .find(|note| note.category == "resource kind")
+            .expect("a direct-provider launch records its resource kind");
+        assert!(kind.detail.contains("remote"), "{kind:?}");
+        assert!(kind.detail.contains("metered balance"), "{kind:?}");
     }
 
     /// A profile that names no model assigns none, and says so rather than
