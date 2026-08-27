@@ -347,6 +347,23 @@ fn launch_session(
     let effective = EffectiveConfig::new(&user, project.as_ref());
     let selection = session::select::select(harness, effective)?;
 
+    // Resolve the launch profile *before* anything is recorded or started.
+    // A refusal here must cost nothing: no session record, no process. See
+    // `glasshouse::profile::resolve`'s doc for why a refusal never falls back
+    // to a different mode.
+    //
+    // Resolved *before* the response profile below, on purpose: line 353's
+    // sixth axis lives on this profile, and the response request has to be
+    // able to read it.
+    let requested_profile = profile_name.unwrap_or(glasshouse::profile::NATIVE_PROFILE_NAME);
+    let launch_profile = match effective.launch_profile(requested_profile, selection.id()) {
+        Ok(resolved) => resolved.value,
+        Err(err) => {
+            eprintln!("glasshouse: {err}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+
     // Phase 9K: the response profile is resolved *here*, on the production
     // launch path, through the same `EffectiveConfig::response_profile`
     // `glasshouse response` prints — so what a user is shown and what a
@@ -354,7 +371,26 @@ fn launch_session(
     // creation rather than per turn: the instruction becomes part of the
     // session's system prefix, and moving it later would invalidate the
     // prompt cache on every turn.
-    let response_profile = effective.response_profile(response);
+    //
+    // Phase 9A line 353's sixth axis, given a production caller: a launch
+    // profile that names a response preset supplies it at the `Session`
+    // layer of `EffectiveConfig::response_stack` — the layer that doc already
+    // describes as "a preset named for this session", which is exactly what
+    // choosing this profile is. An explicit `--response-preset` (or
+    // `--response-role`'s own preset) on the command line is a stronger,
+    // one-time statement than a profile's standing default, so it is only
+    // consulted when the request came with none of its own. This is
+    // deliberately *not* a seventh `PrecedenceLayer`: the map's line 596
+    // fixes that chain at six named layers and the box for it is already
+    // closed, so a profile's answer has to arrive through one of the six
+    // rather than beside them.
+    let mut response_request = response.clone();
+    if response_request.session_preset.is_none()
+        && let Some(preset) = &launch_profile.response_preset
+    {
+        response_request.session_preset = Some(preset.clone());
+    }
+    let response_profile = effective.response_profile(&response_request);
     for problem in response_profile.problems() {
         // Reported, never guessed at — see `ResponseProfileEntry`.
         eprintln!("glasshouse: {problem}");
@@ -372,18 +408,6 @@ fn launch_session(
         "resolved the session's response profile"
     );
 
-    // Resolve the launch profile *before* anything is recorded or started.
-    // A refusal here must cost nothing: no session record, no process. See
-    // `glasshouse::profile::resolve`'s doc for why a refusal never falls back
-    // to a different mode.
-    let requested_profile = profile_name.unwrap_or(glasshouse::profile::NATIVE_PROFILE_NAME);
-    let launch_profile = match effective.launch_profile(requested_profile, selection.id()) {
-        Ok(resolved) => resolved.value,
-        Err(err) => {
-            eprintln!("glasshouse: {err}");
-            return Ok(ExitCode::FAILURE);
-        }
-    };
     // Resolved here, beside the profile, and for the same reason: a bad
     // identifier must cost nothing. No session record, no process — see
     // `glasshouse::profile::resolve`'s doc.
@@ -854,6 +878,62 @@ fn run_shim(
             Ok(ExitCode::FAILURE)
         }
     }
+}
+
+/// Re-resolve `profile_name`'s overlay for a resumed session — Phase 9A line
+/// 368's resume half, production caller of `resume_session`.
+///
+/// Exactly [`launch_session`]'s own resolution: the same lookup, the same
+/// secret store, the same gateway start. A resumed session's overlay is not a
+/// smaller thing than a fresh one's, so there is no separate, weaker path
+/// here for it to take.
+///
+/// # Errors here are never fatal to the resume
+///
+/// The caller treats any `Err` as "resume without the overlay, and say why" —
+/// never as a reason to refuse the resume outright. `open_for_resume` has
+/// already proven this session is safe to continue; a bypass acknowledgement
+/// withdrawn since the original launch, or a provider since removed from
+/// configuration, is a reason to fall back to a plain native resume, not a
+/// reason to make an otherwise-healthy session unresumable.
+fn resolve_resume_overlay(
+    effective: &EffectiveConfig<'_>,
+    user: &UserConfig,
+    project: Option<&ProjectConfig>,
+    selection: &session::HarnessSelection,
+    profile_name: &str,
+) -> anyhow::Result<(
+    glasshouse::profile::LaunchProfile,
+    glasshouse::profile::LaunchOverlay,
+    Option<glasshouse::gateway::Gateway>,
+)> {
+    let launch_profile = effective
+        .launch_profile(profile_name, selection.id())?
+        .value;
+    let acknowledged_bypass = effective.bypass_acknowledged(selection.id()).value;
+    let provider = match &launch_profile.backend {
+        glasshouse::profile::BackendResource::DirectProvider { provider } => {
+            Some(effective.configured_provider(provider)?.value)
+        }
+        _ => None,
+    };
+    // Phase 9E: the same store `launch_session` prefers, resolved fresh — a
+    // credential is never carried across processes, let alone across the gap
+    // between the original launch and this resume.
+    let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
+    let gateway =
+        glasshouse::gateway::start_if_required(std::slice::from_ref(&launch_profile), || {
+            gateway_upstream(user, project, effective, &secrets)
+        })?;
+    let resolution = glasshouse::profile::Resolution {
+        adapter: selection.adapter(),
+        acknowledged_bypass,
+        provider: provider.as_ref(),
+        secrets: &secrets,
+    };
+    let overlay =
+        glasshouse::profile::resolve_with_gateway(&launch_profile, &resolution, gateway.as_ref())?;
+    Ok((launch_profile, overlay, gateway))
 }
 
 /// A one-line summary of a resolved overlay's mechanisms, for the "opening a
@@ -1675,15 +1755,23 @@ fn resume_session(
     // candidates, and `open_for_resume` carries the project-isolation check.
     let id = store.resolve_id(session)?;
     let resumable = store.open_for_resume(&id)?;
+    // Phase 9A line 368's resume half. `ResumableSession` carries only what
+    // project isolation needs to check; the record's six facts — which
+    // profile, which backend, which response profile — live on the full
+    // `SessionRecord`, read with the store's existing `get`, not a new
+    // column. `open_for_resume` already proved this session exists in this
+    // project, so a `None` here would mean the store disagreed with itself
+    // between those two calls.
+    let record = store
+        .get(&resumable.id)?
+        .expect("open_for_resume already proved this session's record exists");
 
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
-    let selection = session::select::select(
-        Some(resumable.harness.as_str()),
-        EffectiveConfig::new(&user, project.as_ref()),
-    )?;
+    let effective = EffectiveConfig::new(&user, project.as_ref());
+    let selection = session::select::select(Some(resumable.harness.as_str()), effective)?;
 
-    let Some(args) = selection.resume_args(
+    let Some(mut args) = selection.resume_args(
         &resumable.native_session_id,
         harness_args.iter().map(String::as_str),
     ) else {
@@ -1707,7 +1795,87 @@ fn resume_session(
         "resuming a harness session"
     );
 
+    // Phase 9A line 368's resume half, the sharper part: re-resolve the
+    // launch profile the record names, so the overlay this resumed process
+    // actually receives — its environment, its arguments, any generated
+    // provider configuration — matches the profile `sessions show` still
+    // reports for it. Before this, a resume applied none of the six facts it
+    // displays.
+    //
+    // A profile that no longer resolves — deleted from configuration, its
+    // harness executable now missing, a bypass acknowledgement withdrawn
+    // since the original launch — is reported and skipped rather than
+    // refused: `open_for_resume` has already established this session is
+    // safe to continue, and a resume is not the moment to apply "refuse
+    // rather than invent" as though it were a fresh launch. The user gets a
+    // plain native resume and a line on stderr explaining why, not a session
+    // that no longer opens at all.
+    let overlay_resolution = record.launch_profile.as_deref().and_then(|name| {
+        match resolve_resume_overlay(&effective, &user, project.as_ref(), &selection, name) {
+            Ok(resolved) => Some(resolved),
+            Err(err) => {
+                eprintln!(
+                    "glasshouse: resuming session `{}` without launch profile `{name}`'s overlay: \
+                     {err:#}",
+                    short_id(&resumable.id)
+                );
+                None
+            }
+        }
+    });
+
+    // The response profile a fresh session opened under this record's role
+    // would get today. Not the five axes stored on the record — those are a
+    // `Copy` snapshot with no precedence chain attached, so replaying them
+    // verbatim could not tell a project's own configuration from a session
+    // preset — but the same layered resolution `launch_session` performs,
+    // asked with the role this session was recorded under.
+    let response_request = ResponseRequest {
+        role: Some(ResponseRequest::role_for(record.role)),
+        ..ResponseRequest::default()
+    };
+    let response_profile = effective.response_profile(&response_request);
+    for problem in response_profile.problems() {
+        eprintln!("glasshouse: {problem}");
+    }
+    let response_application =
+        glasshouse::harness::response::apply(selection.adapter(), response_profile.resolved());
+
+    let project_hooks_consent = effective.project_hooks(selection.id()).value;
+    args.splice(
+        0..0,
+        install_session_document(
+            runtime,
+            &selection,
+            &resumable.id,
+            project_hooks_consent,
+            &response_application,
+        ),
+    );
+
     let launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
+    // Both guards must outlive `session::attach` below — dropping either
+    // early would delete the generated configuration file, or close the
+    // gateway's loopback listener, out from under the harness that is about
+    // to be pointed at them. Never read again, only held: see
+    // `LaunchOverlay::install`'s own doc for why that is the whole contract.
+    let (launch, _generated_guard, _gateway_guard) = match overlay_resolution {
+        Some((_launch_profile, mut overlay, gateway)) => {
+            let session_dir = runtime.session_dir(resumable.id.as_str());
+            match overlay.install(glasshouse::harness::GeneratedConfigSite::new(&session_dir)) {
+                Ok(generated) => (overlay.apply(launch), Some(generated), gateway),
+                Err(err) => {
+                    eprintln!(
+                        "glasshouse: resuming session `{}` without its generated provider \
+                         configuration: {err}",
+                        short_id(&resumable.id)
+                    );
+                    (launch, None, None)
+                }
+            }
+        }
+        None => (launch, None, None),
+    };
 
     note_lifecycle(&store, &resumable.id, SessionLifecycle::Running);
 

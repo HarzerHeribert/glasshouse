@@ -350,7 +350,7 @@ Fixed architectural requirements
 
 ☑ Introduce a launch-profile abstraction that describes how Glasshouse starts a harness without changing the user’s global harness installation.
 ☑ Require every interactive Glasshouse session to be operated by a real installed coding harness.
-☐ Define a launch profile as the combination of harness, backend resource, model selection, protocol compatibility, child-process configuration overlay, and response profile.
+☑ Define a launch profile as the combination of harness, backend resource, model selection, protocol compatibility, child-process configuration overlay, and response profile.
 ☑ Treat a provider, direct API, router, or gateway as a backend resource for a harness rather than as an interactive coding harness by itself.
 ☑ Give every harness a Native launch profile that uses the harness’s normal first-party authentication and configuration.
 ☑ Allow additional launch profiles such as Claude / OpenRouter, Claude / NVIDIA, or Codex / Custom Provider.
@@ -365,7 +365,7 @@ Fixed architectural requirements
 ☑ Never modify the user’s normal global Claude Code or Codex configuration merely to launch a Glasshouse profile.
 ☑ Prefer temporary or Glasshouse-owned generated configuration over editing third-party config files in place.
 ☑ Record the launch profile used by every session.
-☐ Record the resolved harness, backend resource, model, protocol, pairing class, and response profile used by every session.
+☑ Record the resolved harness, backend resource, model, protocol, pairing class, and response profile used by every session.
 ☑ Show the active launch profile next to the harness in session details.
 ☑ Show the resolved launch mechanism and overridden key names for diagnostics while redacting secret values.
 ☑ Allow the user to select a launch profile when creating a session manually.

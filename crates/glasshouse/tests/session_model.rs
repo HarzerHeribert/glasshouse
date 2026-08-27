@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use clap::Parser;
+use glasshouse::pty::{PtyProcess, TerminalCommand};
 use glasshouse::session::{ProjectSessions, SessionId};
 use glasshouse::{Cli, Runtime};
 
@@ -194,6 +195,148 @@ fn install_fake_harness(bin_dir: &Path, history: &Path) -> PathBuf {
 /// A profile naming a model, so the pairing question has a real answer rather
 /// than the "nothing was assigned" one.
 const PROBE_PROFILE: &str = "[profiles.probe]\nharness = \"claude-code\"\nmodel = \"opus\"\n";
+
+/// The environment variable the resume fixture's provider names as its
+/// credential — read from this test process's own environment, never set to
+/// a real value, and never printed: only its *presence* under a fixed name
+/// is what the fake harness records.
+const RESUME_CREDENTIAL_VAR: &str = "GLASSHOUSE_RESUME_OVERLAY_TEST_KEY";
+
+/// A launch profile backed directly by a configured provider — Claude Code's
+/// own environment-variable mechanism, so a resumed session's overlay is
+/// observable without a generated configuration file in the way.
+const RESUME_PROFILE: &str = "[providers.resume-probe]\n\
+     template = \"anthropic-compatible\"\n\
+     base_url = \"https://resume-probe.example/v1\"\n\
+     credential_env = [\"GLASSHOUSE_RESUME_OVERLAY_TEST_KEY\"]\n\n\
+     [profiles.probe]\nharness = \"claude-code\"\n\n\
+     [profiles.probe.backend]\nkind = \"direct-provider\"\nprovider = \"resume-probe\"\n";
+
+/// A fake `claude-code` that overwrites `dump_path` with every direct-provider
+/// environment key it was launched with, on **every** invocation — so a
+/// dump read after a *second* invocation can only contain what that second
+/// invocation was actually given, never a value left over from the first.
+#[cfg(unix)]
+fn install_env_dumping_harness(bin_dir: &Path, dump_path: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join("fake-claude");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\n\
+             : > '{dump}'\n\
+             for name in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN; do\n\
+             eval \"val=\\$$name\"\n\
+             if [ -n \"$val\" ]; then echo \"$name=$val\" >> '{dump}'; fi\n\
+             done\n\
+             exit 0\n",
+            dump = dump_path.display()
+        ),
+    )
+    .expect("write fake harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+#[cfg(windows)]
+fn install_env_dumping_harness(bin_dir: &Path, dump_path: &Path) -> PathBuf {
+    let path = bin_dir.join("fake-claude.cmd");
+    std::fs::write(
+        &path,
+        format!(
+            "@echo off\r\n\
+             break > \"{dump}\"\r\n\
+             if defined ANTHROPIC_BASE_URL echo ANTHROPIC_BASE_URL=%ANTHROPIC_BASE_URL%>> \"{dump}\"\r\n\
+             if defined ANTHROPIC_AUTH_TOKEN echo ANTHROPIC_AUTH_TOKEN=%ANTHROPIC_AUTH_TOKEN%>> \"{dump}\"\r\n\
+             exit /b 0\r\n",
+            dump = dump_path.display()
+        ),
+    )
+    .expect("write fake harness");
+    path
+}
+
+/// A [`Fixture`] whose one harness dumps its direct-provider environment to
+/// `dump_path` on every invocation, backed by [`RESUME_PROFILE`].
+fn resume_fixture(dump_path: &Path) -> Fixture {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let base = tmp.path().to_path_buf();
+    let root = base.join("workspace");
+    std::fs::create_dir_all(root.join(".git")).expect("create project root");
+    let root = std::fs::canonicalize(&root).expect("canonicalize project root");
+
+    let bin_dir = base.join("bin");
+    let harness_history = base.join("harness-history");
+    std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+    std::fs::create_dir_all(&harness_history).expect("create harness history dir");
+    let harness = install_env_dumping_harness(&bin_dir, dump_path);
+
+    let config_dir = base.join("config");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+    let escaped = harness.display().to_string().replace('\\', "\\\\");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n\
+             [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\n\
+             {RESUME_PROFILE}"
+        ),
+    )
+    .expect("write user config");
+
+    Fixture {
+        _tmp: tmp,
+        base,
+        root,
+        harness_history,
+    }
+}
+
+/// Run `glasshouse resume <session>` against `fixture`'s project through a
+/// real pseudo-terminal — `session::attach` needs one, exactly as the harness
+/// it is attaching to would need one outside a test.
+///
+/// The output must be drained on its own thread while waiting, not read only
+/// after: `glasshouse resume` writes terminal control sequences (entering and
+/// leaving the alternate screen) to the pty as it runs, and if nothing reads
+/// them the kernel's pty buffer fills and the write blocks — which blocks the
+/// child's exit, which blocks this function's `wait()` forever. This is the
+/// same reason `tests/pty_smoke.rs`'s own harness never reads output only
+/// after waiting.
+fn resume_through_a_real_terminal(fixture: &Fixture, session: &str) {
+    let command = TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), fixture.root.clone())
+        .arg("--scope")
+        .arg(fixture.root.clone())
+        .arg("--data-dir")
+        .arg(fixture.base.join("data"))
+        .arg("--config-dir")
+        .arg(fixture.base.join("config"))
+        .arg("resume")
+        .arg(session)
+        // The fixture's provider credential is read from this test process's
+        // own environment; `TerminalCommand` snapshots exactly that
+        // environment for the child (see its own doc comment), so nothing
+        // further is needed here beyond `std::env::set_var` having already
+        // been called by the caller.
+        .size(glasshouse::pty::TerminalSize::new(24, 80));
+    let (mut process, mut output) = PtyProcess::spawn(command).expect("spawn `glasshouse resume`");
+    let drain = std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut sink = Vec::new();
+        let _ = output.read_to_end(&mut sink);
+        sink
+    });
+    let status = process.wait().expect("wait for `glasshouse resume`");
+    let drained = drain.join().expect("the drain thread must not panic");
+    assert!(
+        status.success(),
+        "`glasshouse resume {session}` reported {status}\n--- output ---\n{}\n--- end ---",
+        String::from_utf8_lossy(&drained)
+    );
+}
 
 /// The value of one labelled line of `glasshouse sessions show`.
 fn field<'a>(report: &'a str, label: &str) -> &'a str {
@@ -483,5 +626,109 @@ fn a_sessions_presentation_is_recorded_as_the_binary_started_it() {
             "presented"
         ),
         "headless"
+    );
+}
+
+/// Phase 9A line 368's resume half, against the shipped binary: a resumed
+/// session must actually run under the launch profile the record names, not
+/// merely display it.
+///
+/// The fake harness overwrites one fixed dump file with its direct-provider
+/// environment on **every** invocation. That is what makes the second read
+/// meaningful: if `resume_session` applied no overlay, the dump after
+/// `glasshouse resume` would be whatever that plain resume gave the harness
+/// — nothing at all — never a leftover from the original launch, because the
+/// file was truncated in between.
+#[test]
+fn resuming_a_session_reapplies_its_launch_profiles_overlay() {
+    let dump_dir = tempfile::tempdir().expect("tempdir for the env dump");
+    let dump_path = dump_dir.path().join("env-dump.txt");
+    let fixture = resume_fixture(&dump_path);
+
+    // Safety: this test does not run other tests' code concurrently with
+    // this variable set, and nothing else in this process reads it — it
+    // exists only to give the fixture's provider a credential to resolve.
+    unsafe {
+        std::env::set_var(RESUME_CREDENTIAL_VAR, "sk-resume-test-credential");
+    }
+
+    fixture.run(&["launch", "claude-code", "--profile", "probe", "--headless"]);
+    let id = fixture.only_session();
+
+    let after_launch = std::fs::read_to_string(&dump_path).expect("read the dump after launch");
+    assert!(
+        after_launch.contains("ANTHROPIC_BASE_URL=https://resume-probe.example/v1"),
+        "the original launch must have carried the direct-provider overlay: {after_launch:?}"
+    );
+    assert!(
+        after_launch.contains("ANTHROPIC_AUTH_TOKEN=sk-resume-test-credential"),
+        "{after_launch:?}"
+    );
+
+    // Truncate, so the next read can only be explained by the *resume*
+    // rewriting it — never by the launch above.
+    std::fs::write(&dump_path, "").expect("truncate the dump before resuming");
+
+    resume_through_a_real_terminal(&fixture, id.as_str());
+
+    let after_resume = std::fs::read_to_string(&dump_path).expect("read the dump after resume");
+    assert!(
+        after_resume.contains("ANTHROPIC_BASE_URL=https://resume-probe.example/v1"),
+        "a resumed session must carry the same overlay a fresh launch under this profile \
+         would — the harness saw: {after_resume:?}"
+    );
+    assert!(
+        after_resume.contains("ANTHROPIC_AUTH_TOKEN=sk-resume-test-credential"),
+        "{after_resume:?}"
+    );
+
+    unsafe {
+        std::env::remove_var(RESUME_CREDENTIAL_VAR);
+    }
+}
+
+/// Phase 9A line 353's sixth axis, against the shipped binary: a launch
+/// profile naming a response preset must actually change the session's
+/// response profile, with no `--response-profile` on the command line.
+#[test]
+fn a_launch_profiles_named_response_preset_is_the_sessions_response_profile() {
+    let fixture =
+        Fixture::new("[profiles.probe]\nharness = \"claude-code\"\nresponse_preset = \"brief\"\n");
+    fixture.run(&["launch", "claude-code", "--profile", "probe", "--headless"]);
+
+    let shown = fixture.run(&["sessions", "show", fixture.only_session().as_str()]);
+    let profile = field(&shown, "response profile");
+    assert!(
+        profile.contains("verbosity=terse")
+            && profile.contains("audience=executive")
+            && profile.contains("narration=silent")
+            && profile.contains("evidence=minimal")
+            && profile.contains("format=bullets"),
+        "the profile's `brief` preset must be the session's response profile: {profile}"
+    );
+}
+
+/// The other half of line 353: an explicit `--response-profile` on the
+/// command line is a stronger, one-time statement than a profile's standing
+/// default, so it wins rather than being silently overridden by it.
+#[test]
+fn an_explicit_response_profile_flag_overrides_the_launch_profiles_preset() {
+    let fixture =
+        Fixture::new("[profiles.probe]\nharness = \"claude-code\"\nresponse_preset = \"brief\"\n");
+    fixture.run(&[
+        "launch",
+        "claude-code",
+        "--profile",
+        "probe",
+        "--response-profile",
+        "audit",
+        "--headless",
+    ]);
+
+    let shown = fixture.run(&["sessions", "show", fixture.only_session().as_str()]);
+    let profile = field(&shown, "response profile");
+    assert!(
+        profile.contains("narration=detailed") && profile.contains("evidence=audit"),
+        "an explicit `--response-profile` must win over the profile's own preset: {profile}"
     );
 }

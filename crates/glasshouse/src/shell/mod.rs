@@ -893,6 +893,50 @@ fn start_session(
         .assigns_native_session_id()
         .then(|| store.new_native_session_id())
         .transpose()?;
+
+    // Phase 9A line 368. The shell's quick-open resolves no launch profile
+    // and no response request of its own — there is no surface here to ask
+    // for either, see `HarnessSelection::install_hooks`'s own doc comment —
+    // so both are the implied defaults a session gets when nobody asked for
+    // anything else: the `Native` profile, and the `Interactive` role. That
+    // is still six real facts, not four blanks: a session opened with `n`
+    // now records the same kind of answer `glasshouse launch` does for an
+    // unadorned `glasshouse launch <harness>`, rather than `-` for every
+    // column `main.rs::launch_session` fills in.
+    let launch_profile = crate::profile::LaunchProfile::native(selection.id());
+    let pairing = {
+        use crate::harness::Declared;
+        use crate::harness::pairing::{PairingQuery, ServingRoute, classify};
+        use crate::routing::AssignedModel;
+
+        // The same fallback `main.rs::session_pairing` builds for a `Native`
+        // profile: `pairing_queries` never lists it, so a configured-pairing
+        // lookup here would always miss anyway — see that function's own doc
+        // comment for why the implied profile needs no lookup at all.
+        let query = PairingQuery {
+            harness: launch_profile.harness,
+            model: AssignedModel::HarnessDefault,
+            route: ServingRoute {
+                provider: None,
+                gateway: None,
+                protocol: None,
+            },
+            tool_calls: Declared::Unverified,
+            provider_protocols: Vec::new(),
+        };
+        classify(&query, &effective.pairing_overrides())
+    };
+    let response_profile =
+        effective.response_profile(&config::response::ResponseRequest::default());
+    for problem in response_profile.problems() {
+        // `eprintln!` would corrupt the alternate-screen viewport this
+        // process owns while the shell is running — this is the diagnostic
+        // channel every other shell warning already uses.
+        tracing::warn!(problem, "could not read part of the response profile");
+    }
+    let response_application =
+        crate::harness::response::apply(selection.adapter(), response_profile.resolved());
+
     // The presentation is recorded before the process exists and is then the
     // single source of truth for it: `live.start` below is handed
     // `record.presentation`, so a session's stored presentation and its
@@ -900,7 +944,16 @@ fn start_session(
     let record = store.create(
         NewSession::embedded(selection.id().slug())
             .with_presentation(presentation)
-            .with_native_session_id(native.clone()),
+            .with_native_session_id(native.clone())
+            .with_launch_profile(Some(launch_profile.name.clone()))
+            .with_backend_resource(Some(launch_profile.backend.slug()))
+            .with_model(Some(pairing.model().clone()))
+            .with_pairing_class(Some(session::session_pairing_class(pairing.class())))
+            .with_protocol(Some(session::session_protocol(pairing.route().protocol)))
+            .with_response_profile(Some(response_profile.resolved().profile()))
+            .with_response_mechanism(Some(session::session_response_mechanism(
+                response_application.mechanism(),
+            ))),
     )?;
 
     // Before the harness runs — see the declaration of `index_snapshots` in
@@ -924,7 +977,12 @@ fn start_session(
     // Best effort: a session that reports nothing is still a session, and is
     // a far smaller loss than refusing to start one the user asked for.
     let project_hooks_consent = effective.project_hooks(selection.id()).value;
-    let hook_args = std::env::current_exe()
+    // `install_session_document` rather than `install_hooks`: the latter is
+    // the narrower mechanism that exists precisely because this call site
+    // used to resolve no response profile — see its own doc comment, which
+    // this is the fix for. Hooks and the response profile now share one
+    // document exactly as `main.rs::launch_session`'s already does.
+    let document_args = std::env::current_exe()
         .map_err(anyhow::Error::from)
         .and_then(|program| {
             let report = crate::harness::HookCommand::new(
@@ -935,13 +993,16 @@ fn start_session(
                 app_runtime.paths().data_dir(),
                 app_runtime.paths().config_dir(),
             );
-            selection.install_hooks(&report, project_hooks_consent)
+            selection.install_session_document(
+                &report,
+                project_hooks_consent,
+                &response_application,
+            )
         });
-    match hook_args {
-        Ok(Some(hook_args)) => {
-            args.splice(0..0, hook_args);
+    match document_args {
+        Ok(document) => {
+            args.splice(0..0, document.args);
         }
-        Ok(None) => {}
         Err(err) => {
             tracing::warn!(session = %record.id, error = %err, "could not install lifecycle hooks");
         }
@@ -2625,5 +2686,117 @@ mod settings_persistence_tests {
         let (_, _, providers, profiles, _) = build_settings(&runtime).unwrap();
         assert!(!providers[0].config.enabled());
         assert!(!profiles[0].config.enabled());
+    }
+}
+
+/// Phase 9A line 368's shell half: `start_session` — the TUI's `n` key — must
+/// record the same six facts `main.rs::launch_session` does, not `-` for
+/// every one of them.
+///
+/// These call [`start_session`] itself, the production function, against a
+/// real [`SessionRuntime`] and a fake installed harness — the same shape
+/// `tests/events_lifecycle.rs` already uses to drive `SessionRuntime` outside
+/// a real terminal. A test that resolved the six facts by hand instead would
+/// prove nothing about whether `start_session` actually calls the code that
+/// resolves them.
+#[cfg(test)]
+mod native_session_facts_tests {
+    use super::*;
+
+    /// A [`Runtime`] whose config directory already names one installed,
+    /// harmless harness — a shell script that exits immediately, exactly like
+    /// `tests/session_model.rs`'s fake `claude-code`.
+    fn runtime_with_fake_claude_code() -> (tempfile::TempDir, tempfile::TempDir, crate::Runtime) {
+        use clap::Parser;
+
+        let data = tempfile::tempdir().expect("tempdir");
+        let workspace = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(workspace.path().join(".git")).expect("create .git");
+        let workspace_root =
+            std::fs::canonicalize(workspace.path()).expect("canonicalize workspace root");
+
+        let bin_dir = data.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let harness = install_fake_claude_code(&bin_dir);
+        let escaped = harness.display().to_string().replace('\\', "\\\\");
+        std::fs::write(
+            data.path().join("config.toml"),
+            format!(
+                "version = 1\n\n\
+                 [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n"
+            ),
+        )
+        .expect("write user config");
+
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+            "--config-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, &workspace_root).unwrap();
+        (data, workspace, runtime)
+    }
+
+    #[cfg(unix)]
+    fn install_fake_claude_code(bin_dir: &std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = bin_dir.join("fake-claude");
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write fake harness");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    #[cfg(windows)]
+    fn install_fake_claude_code(bin_dir: &std::path::Path) -> std::path::PathBuf {
+        let path = bin_dir.join("fake-claude.cmd");
+        std::fs::write(&path, "@echo off\r\nexit /b 0\r\n").expect("write fake harness");
+        path
+    }
+
+    #[test]
+    fn starting_a_session_from_the_shell_records_all_six_facts() {
+        let (_data, _workspace, runtime) = runtime_with_fake_claude_code();
+        let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+        let mut live = SessionRuntime::new();
+        let mut index_snapshots = HashMap::new();
+
+        start_session(
+            &runtime,
+            &mut live,
+            &sessions,
+            SessionPresentation::Embedded,
+            TerminalSize::new(24, 80),
+            &mut index_snapshots,
+        )
+        .expect("starting a session from the shell must succeed");
+
+        let records = sessions.store().list().expect("list sessions");
+        assert_eq!(records.len(), 1, "exactly one session must be recorded");
+        let record = &records[0];
+
+        // Line 368's own words: "the resolved harness, backend resource,
+        // model, protocol, pairing class, and response profile" — six facts,
+        // and this used to record none of them.
+        assert_eq!(
+            record.launch_profile.as_deref(),
+            Some(crate::profile::NATIVE_PROFILE_NAME),
+            "the implied Native profile is still a profile, and must be named"
+        );
+        assert_eq!(
+            record.backend_resource.as_deref(),
+            Some("native"),
+            "record: {record:?}"
+        );
+        assert!(record.model.is_some(), "record: {record:?}");
+        assert!(record.pairing_class.is_some(), "record: {record:?}");
+        assert!(record.protocol.is_some(), "record: {record:?}");
+        assert!(record.response_profile.is_some(), "record: {record:?}");
+        assert!(record.response_mechanism.is_some(), "record: {record:?}");
     }
 }

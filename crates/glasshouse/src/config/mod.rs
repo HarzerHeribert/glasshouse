@@ -349,6 +349,17 @@ pub struct ProfileConfig {
     /// pinned" — which is the behaviour those files already had.
     #[serde(default, skip_serializing_if = "is_false")]
     pin_gateway_backend: bool,
+    /// Line 353's sixth axis: a named [`crate::profile::response::Preset`]
+    /// this profile asks for, or unset for a profile that says nothing about
+    /// communication policy and leaves the response profile to whatever the
+    /// session's other layers (role, project, user default) decide — see
+    /// [`crate::config::response::PrecedenceLayer`].
+    ///
+    /// `None` here, on a file written before this field existed, loads as
+    /// "this profile names no preset" — the behaviour those files already
+    /// had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    response_preset: Option<String>,
     /// Whether this launch profile is currently enabled. Disabling is not
     /// removal — see [`ProfileConfig::set_enabled`] and the "disable is not
     /// delete" rule Phase 2D's Settings behavioural contract requires: every
@@ -394,6 +405,12 @@ pub enum ProfileConfigError {
          fix or remove the profile's `expected_protocol` key"
     )]
     UnknownProtocol { name: String, protocol: String },
+    #[error(
+        "launch profile `{name}` names response preset `{preset}`, which this build does not \
+         know; the presets are: {}",
+        crate::profile::response::preset_names()
+    )]
+    UnknownResponsePreset { name: String, preset: String },
 }
 
 impl ProfileConfig {
@@ -405,6 +422,7 @@ impl ProfileConfig {
             expected_protocol: None,
             approval: ProfileApproval::default(),
             pin_gateway_backend: false,
+            response_preset: None,
             enabled: true,
         }
     }
@@ -474,6 +492,17 @@ impl ProfileConfig {
         self
     }
 
+    /// The named response preset this profile asks for — line 353's sixth
+    /// axis.
+    pub fn response_preset(&self) -> Option<&str> {
+        self.response_preset.as_deref()
+    }
+
+    pub fn set_response_preset(&mut self, preset: Option<String>) -> &mut Self {
+        self.response_preset = preset;
+        self
+    }
+
     /// Turn this stored configuration into the resolvable domain type,
     /// naming it `name` — the key this entry was stored under.
     pub fn to_launch_profile(
@@ -516,6 +545,18 @@ impl ProfileConfig {
             ProfileApproval::Bypass => crate::profile::ApprovalSelection::Bypass,
         };
 
+        // Validated against the real preset table now, the same way
+        // `expected_protocol` is validated against real protocols above,
+        // rather than waiting for a launch to discover a typo.
+        if let Some(preset) = &self.response_preset
+            && crate::profile::response::preset(preset).is_none()
+        {
+            return Err(ProfileConfigError::UnknownResponsePreset {
+                name: name.to_owned(),
+                preset: preset.clone(),
+            });
+        }
+
         Ok(crate::profile::LaunchProfile {
             name: name.to_owned(),
             harness,
@@ -524,6 +565,7 @@ impl ProfileConfig {
             expected_protocol,
             approval,
             pin_gateway_backend: self.pin_gateway_backend,
+            response_preset: self.response_preset.clone(),
         })
     }
 }

@@ -4,8 +4,9 @@
 //! Three things live here, and they are deliberately not the same type:
 //!
 //! - A [`LaunchProfile`] is **inert configuration** — a name, a harness, a
-//!   backend resource, an optional model, an optional expected protocol, and
-//!   an approval selection. Nothing about it has touched a real adapter yet.
+//!   backend resource, an optional model, an optional expected protocol, an
+//!   approval selection, and an optional named response preset. Nothing
+//!   about it has touched a real adapter yet.
 //! - A [`LaunchOverlay`] is the **ephemeral, per-launch result** of asking
 //!   one [`HarnessAdapter`] whether a profile can actually be honoured. It
 //!   applies to exactly one child process and is consumed by
@@ -232,6 +233,29 @@ pub struct LaunchProfile {
     /// Meaningless on a `Native` or `DirectProvider` backend, where there is
     /// no gateway to pin: `apply_gateway` is the only reader.
     pub pin_gateway_backend: bool,
+    /// Line 353's sixth axis: the named [`response::Preset`] this profile
+    /// asks for, or `None` for a profile that says nothing about
+    /// communication policy.
+    ///
+    /// A name, not a resolved [`response::ResponseProfile`] — the same reason
+    /// [`LaunchProfile::backend`]'s `DirectProvider` variant carries a
+    /// provider *name* rather than a looked-up [`crate::provider::Provider`]:
+    /// resolving a preset name against `response::presets()` is cheap and
+    /// total, so there is nothing to gain by asking the caller to resolve it
+    /// before handing the profile over, and something to lose — a
+    /// `LaunchProfile` that could hold an unresolvable preset would need a
+    /// second refusal path this module does not otherwise have.
+    ///
+    /// Consulted by `main.rs::launch_session`, which folds it into the
+    /// session's [`crate::config::response::ResponseRequest`] as the
+    /// `PrecedenceLayer::Session` layer when the command line named no
+    /// preset of its own — an explicit `--response-preset` always wins,
+    /// because a person typing one on the command line is a stronger request
+    /// than a profile's standing default. See that function's own comment
+    /// for why this could not become a seventh [`response::PrecedenceLayer`]:
+    /// the map's line 596 fixes the chain at exactly six named layers, and
+    /// that box is already closed.
+    pub response_preset: Option<String>,
 }
 
 impl LaunchProfile {
@@ -246,6 +270,7 @@ impl LaunchProfile {
             expected_protocol: None,
             approval: ApprovalSelection::Default,
             pin_gateway_backend: false,
+            response_preset: None,
         }
     }
 

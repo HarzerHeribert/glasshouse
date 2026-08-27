@@ -321,3 +321,196 @@ Missing evidence, stated plainly:
   which is the form that was run against the installed binary. A model
   identifier beginning with `-` would be ambiguous to the harness's own
   argument parser; nothing in `config` restricts one today.
+
+---
+
+### Phase 9A, third pass — line 353's sixth axis, and line 368's two doors
+
+Both boxes named by `.agent-runtime/packet-phase-9a-facts.md`. The gaps were
+already located by `report-LAUNCH-OVERLAY.md` (Phase 9A's second pass, above);
+this pass is the plumbing and the production callers.
+
+#### Line 353 — a launch profile is harness + backend + model + protocol +
+overlay + response profile
+
+State: **COMPLETE, with a production caller.**
+
+`LaunchProfile` gained a sixth field, `response_preset: Option<String>` — a
+named `crate::profile::response::Preset`, validated against the real preset
+table by `ProfileConfig::to_launch_profile` (`ProfileConfigError::UnknownResponsePreset`
+on a typo, the same rule `expected_protocol` already follows), and carried
+onto the domain type by `ProfileConfig::response_preset`/`set_response_preset`.
+A name rather than a resolved preset, for the same reason `BackendResource::DirectProvider`
+carries a provider *name*: resolving against `response::presets()` is cheap
+and total, so nothing is gained by asking every caller to resolve it first,
+and an unresolved name would need a second refusal path this module does not
+otherwise have.
+
+**The production caller:** `main.rs::launch_session`. The launch profile is
+now resolved *before* the response profile (previously the other order), and
+a launch profile naming a preset supplies it as `PrecedenceLayer::Session` —
+"a preset named for this session", which selecting this profile is — exactly
+when the command line named none of its own:
+
+```rust
+let mut response_request = response.clone();
+if response_request.session_preset.is_none()
+    && let Some(preset) = &launch_profile.response_preset
+{
+    response_request.session_preset = Some(preset.clone());
+}
+let response_profile = effective.response_profile(&response_request);
+```
+
+**Why this is not a seventh `PrecedenceLayer`.** The map's line 596 already
+reads *"Resolve response-profile precedence as task override, session, role,
+project, user default, then harness default"* and is ticked — six named
+layers, proven by `precedence_runs_task_session_role_project_user_then_harness`
+and friends in `profile/response.rs`. Inserting a seventh would touch a closed
+box's own contract. Folding the profile's answer into the `Session` layer
+keeps the six-layer chain exactly as proven, and an explicit
+`--response-profile` on the command line still wins, because it is only
+consulted when the CLI supplied none.
+
+Regression evidence, against the shipped binary
+(`crates/glasshouse/tests/session_model.rs`):
+- `a_launch_profiles_named_response_preset_is_the_sessions_response_profile` —
+  a profile naming `response_preset = "brief"`, launched with no
+  `--response-profile` flag, and `sessions show`'s "response profile" line
+  carries `brief`'s five axes.
+- `an_explicit_response_profile_flag_overrides_the_launch_profiles_preset` —
+  the same profile, launched with `--response-profile audit`, and the CLI's
+  choice is what shows.
+
+Mutation evidence, both against `main.rs::launch_session`'s merge — named
+`ok`, mutated, `FAILED`, restored, `ok`:
+- deleting the whole merge block (a profile's preset is never consulted) —
+  killed by the first test above;
+- deleting the `response_request.session_preset.is_none()` guard (the profile
+  always overrides, even over an explicit flag) — killed by the second.
+
+#### Line 368 — record the six resolved facts, for every session
+
+State: **COMPLETE for both doors named in the packet.**
+
+**Door one — `shell::start_session`.** It now resolves the implied `Native`
+profile it always effectively runs under, classifies its pairing through the
+same `crate::harness::pairing::classify` the launch path uses (with the same
+fallback query `main.rs::session_pairing` builds for a `Native` profile —
+`pairing_queries` never lists it, so the lookup would always miss), and
+resolves the response profile a fresh interactive session gets today. The
+record now carries all six:
+
+```rust
+.with_launch_profile(Some(launch_profile.name.clone()))
+.with_backend_resource(Some(launch_profile.backend.slug()))
+.with_model(Some(pairing.model().clone()))
+.with_pairing_class(Some(session::session_pairing_class(pairing.class())))
+.with_protocol(Some(session::session_protocol(pairing.route().protocol)))
+.with_response_profile(Some(response_profile.resolved().profile()))
+.with_response_mechanism(Some(session::session_response_mechanism(
+    response_application.mechanism(),
+))),
+```
+
+The response profile now also reaches the harness, not only the record:
+`shell::start_session` calls `HarnessSelection::install_session_document`
+instead of the narrower `install_hooks` — the latter's own doc comment names
+this exact call site as *"a real gap, kept visible rather than hidden … closing
+that means giving the shell a launch profile and a response request, which is
+a change to `mod@crate::shell` rather than to this file."* This is that
+change; `session/select.rs` was not touched.
+
+Regression evidence — `crates/glasshouse/src/shell/mod.rs`,
+`native_session_facts_tests::starting_a_session_from_the_shell_records_all_six_facts`.
+Calls `start_session` itself (the production function) against a real
+`SessionRuntime` and a fake installed `claude-code`, the same shape
+`tests/events_lifecycle.rs` already uses outside a real terminal — not a hand
+resolution of the six facts, which would prove nothing about whether
+`start_session` calls the code that resolves them.
+
+Mutation: reverting the `NewSession` builder to its pre-fix two fields
+(`ok`, `FAILED` — "the implied Native profile is still a profile, and must be
+named" — restored, `ok`).
+
+**Door two — `resume_session`, the sharper half.** Before this pass a
+resumed session applied no overlay and no response profile while its record
+kept reporting the *original* launch's backend, model and response profile —
+"a recorded fact that has stopped being true of the running session," per
+`report-LAUNCH-OVERLAY.md`. `resume_session` now re-resolves the launch
+profile the record names (`SessionStore::get`, not a new column — every field
+this needs already exists on `SessionRecord`) and reapplies its overlay and
+its response profile, through the same `resolve_resume_overlay` helper
+`main.rs` now carries: the same lookup, the same secret store, the same
+gateway start `launch_session` itself uses.
+
+**A resume never fails because its overlay could not be re-resolved.**
+`open_for_resume` has already proven the session is safe to continue; a
+bypass acknowledgement withdrawn since the original launch, a provider
+removed from configuration, or a harness executable gone missing falls back
+to a plain native resume with a line on stderr naming why, rather than
+turning an otherwise-healthy resume into a hard failure. This is a judgement
+call, in the spirit of practice §33 — the alternative (refuse the resume
+outright) is defensible and was not taken because "refuse rather than invent"
+is a rule about *starting* a session, and a resume is not the moment a
+session first has to prove itself safe.
+
+Regression evidence, end to end through the shipped binary, under a real
+pseudo-terminal (`glasshouse::pty::{PtyProcess, TerminalCommand}` — `session::attach`
+needs one, exactly as it would outside a test) —
+`crates/glasshouse/tests/session_model.rs::resuming_a_session_reapplies_its_launch_profiles_overlay`:
+a direct-provider Claude Code profile, a fake harness that overwrites one
+fixed dump file with its direct-provider environment on **every**
+invocation, launched once and the dump read (`ANTHROPIC_BASE_URL` and
+`ANTHROPIC_AUTH_TOKEN` both present), the dump truncated, then
+`glasshouse resume` run through a real pty and the dump read again — still
+present, which can only be explained by the resume itself having reapplied
+the overlay, never by a leftover from the launch.
+
+Mutation: short-circuiting `resume_session`'s overlay resolution to `None`
+unconditionally (`ok`, `FAILED` — "the harness saw: \"\"" — restored, `ok`).
+
+Local gate: `scripts/ci-local.sh`, run alone, all thirteen jobs PASS
+(`msrv`, `lint`, `test` on macOS and the ubuntu container; Windows is not
+exercised — the script says so itself). `cargo test -p glasshouse
+--all-targets` also run directly, alone: 1102 lib tests, 24 `main.rs` unit
+tests, and every integration test file, all green — including
+`tests/pty_smoke.rs`'s 69 tests, untouched by this package but sharing
+`main.rs` and `shell/mod.rs` with it.
+
+What this pass did not touch:
+- **Line 372** (the router selects among enabled profiles) — still blocked on
+  Phase 35B, per the packet; `grep -rn 'fn score\|Score' src/` is still empty.
+- **`shell/state.rs` and `shell/view.rs`** — nobody's this round, and this
+  pass did not need them: `start_session` resolves everything it now records
+  without touching either file.
+- **A wizard for a person to *pick* a response preset when authoring a
+  profile in `glasshouse setup`** — line 353 only asks that a profile be
+  able to *name* one, which it now can; authoring UI is a separate line.
+
+#### Orchestrator decision on the resume fallback — practice §33
+
+The worker asked whether `resume_session` should **refuse** or **degrade** when
+the launch profile a record names can no longer be resolved (profile deleted,
+bypass acknowledgement withdrawn, executable gone). It chose degrade — plain
+native resume, overlay skipped, reason on stderr — and referred the call up.
+
+**Decided: degrade. The worker's reading is accepted.** `open_for_resume` has
+already established the session is safe to continue, and *"refuse rather than
+invent"* governs **starting** a session, not reopening one the user already has
+a right to. Refusing would mean a deleted profile makes an existing conversation
+permanently unopenable, which is a worse product than a resume that degrades and
+says so.
+
+**The residual, recorded rather than absorbed.** After a fallback resume the
+record still names a launch profile whose overlay was **not** applied, and
+nothing durable says so — only a line on stderr, which is gone once the session
+scrolls. That is a narrow instance of the very defect class this pass closed: a
+session whose recorded facts do not describe the process that is running.
+
+It is **not** fixable in this partition. Recording the divergence needs either a
+`session/store.rs` column or a new lifecycle-event kind, both of which belonged
+to another worker this round. It is a follow-up package, not a defect in this
+one, and line 368 is closed on the write path it does control: every session
+Glasshouse starts, and every session it resumes whose profile still resolves,
+records all six facts.
