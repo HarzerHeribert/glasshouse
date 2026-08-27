@@ -3462,6 +3462,38 @@ fn a_direct_provider_profile_reaches_a_real_child_and_only_that_child() {
 ///
 /// Unix only: it needs `printf`/`head -c`, and a `.cmd` harness has no
 /// equivalent way to read a fixed byte count from its own terminal.
+///
+/// **Not portable to Windows by giving the harness a passive read instead**
+/// — this was tried and measured, not assumed. Two things independently rule
+/// it out:
+///
+/// - On real Windows console hosts, `conhost` answers a *child-emitted*
+///   `ESC[6n` (and `ESC[c`) itself, internally, before the byte sequence ever
+///   reaches Glasshouse's reader thread — confirmed on the ARM64 CI VM by a
+///   harness that echoes `ESC[6n` between two markers: the markers both
+///   appear in the session's scrollback, the query between them does not.
+///   `SessionRuntime::answer_terminal_queries` is therefore never even asked
+///   about a harness's own cursor-position query on Windows; only the
+///   *ConPTY startup handshake*'s `ESC[6n` — sent directly on the pty's own
+///   output before the child starts at all — ever reaches it, and that path
+///   is already exercised by every embedded session this suite starts.
+/// - Separately: a reply Glasshouse writes to a Windows session that is not
+///   actively reading its input is not echoed back into that session's own
+///   output the way a Unix pty's line discipline echoes unread input. Proven
+///   the same way, with a harness that queries `ESC[>0q]` (XTVERSION, which
+///   `conhost` does not self-answer) and waits eight seconds past its own
+///   idle window: the reply Glasshouse queued never appears anywhere in
+///   scrollback. `install_looping_echo_harness` in `session::api` sidesteps
+///   this correctly, by having the harness itself `set /p` the reply and
+///   print it back — passive echo is not a technique available here.
+///
+/// So this test's premise — a script that only echoes a query and reads
+/// nothing — cannot observe Glasshouse's answer on Windows even in
+/// principle, for either reason on its own. Porting it for real would need a
+/// harness that actively reads and re-prints what it receives (the
+/// `set /p`-and-echo idiom used elsewhere in this file) *and* a query type
+/// `conhost` does not already intercept — which rules out `ESC[6n` itself,
+/// the one thing this test is about.
 #[cfg(unix)]
 #[test]
 fn an_embedded_session_answers_the_cursor_position_query_itself() {
@@ -4834,6 +4866,24 @@ fn the_real_antigravity_interface_appears_in_the_viewport() {
 /// failures and, after two, turns its fullscreen renderer off *globally* by
 /// writing the decision into the user's own configuration — where it outlives
 /// Glasshouse. That is how this test came to exist.
+///
+/// **Not portable to Windows the way it is written here.** Tried, and
+/// measured rather than assumed — see the note on
+/// `an_embedded_session_answers_the_cursor_position_query_itself` for the
+/// full account. Two of the three questions this test asks (`ESC[6n`,
+/// `ESC[c`) are answered by `conhost` itself, internally, before they ever
+/// reach Glasshouse: a harness script that echoes them and stays alive
+/// proves nothing about `SessionRuntime::answer_terminal_queries` on
+/// Windows, because that code is never the one asked. The third (`ESC[>0q`,
+/// XTVERSION) does reach Glasshouse — `conhost` does not know it — but a
+/// script that only echoes it and never reads cannot observe the reply
+/// either: a Windows session does not echo unread input the way a Unix pty's
+/// line discipline does (confirmed on the ARM64 CI VM: the reply Glasshouse
+/// queued never appeared in scrollback even eight seconds past the script's
+/// own idle window). A working Windows port would need a harness that
+/// actively reads and re-prints the XTVERSION reply, the `set /p`-and-echo
+/// idiom used elsewhere in this file — and would only ever cover that one
+/// question, since the other two are structurally unreachable here.
 #[cfg(unix)]
 #[test]
 fn every_startup_question_a_harness_asks_is_answered() {

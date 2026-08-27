@@ -140,6 +140,21 @@ print "Packaging $ci_repo ..."
 
 print "Synchronizing source to Windows ARM64 ($ci_ip)..."
 scp "${ci_ssh_options[@]}" "$ci_archive" "${ci_endpoint}:glasshouse-source.tar.gz"
+
+# The VM-side runner and installer are versioned here, under
+# scripts/dev/windows/, not on the VM — see that directory's own history for
+# why. Ship the copy this checkout has on every run, so the VM never drifts
+# from a file nobody reviewed.
+ci_runner_dir="$ci_repo/scripts/dev/windows"
+if [[ ! -f "$ci_runner_dir/run-glasshouse-ci.cmd" || ! -f "$ci_runner_dir/install-source.ps1" ]]; then
+  print -u2 "Missing $ci_runner_dir/{run-glasshouse-ci.cmd,install-source.ps1}"
+  exit 2
+fi
+scp "${ci_ssh_options[@]}" \
+  "$ci_runner_dir/run-glasshouse-ci.cmd" \
+  "$ci_runner_dir/install-source.ps1" \
+  "${ci_endpoint}:C:/ci/"
+
 ssh "${ci_ssh_options[@]}" "$ci_endpoint" \
   'powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\ci\install-source.ps1'
 

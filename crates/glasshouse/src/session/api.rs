@@ -303,13 +303,29 @@ mod tests {
         path
     }
 
-    /// A harness that just stays alive, for tests that only need a live
-    /// process to write to or interrupt and do not care what it prints.
+    /// A harness that announces itself and then stays alive, for tests that
+    /// interrupt it or write to it.
+    ///
+    /// The `READY` line matters: on Windows the child does not start until
+    /// something answers ConPTY's `ESC[6n` query (see `drive`'s doc comment),
+    /// so a harness that produced no output could still be sitting unstarted
+    /// at the handshake when a test acts on it. `READY` in the scrollback is
+    /// proof the process the test is about to interrupt is the real one.
+    ///
+    /// The sleep is minutes, not seconds, and that is load-bearing, found by
+    /// a mutation that should have failed and did not: a shorter sleep can
+    /// finish **on its own** inside a test's own wait window, and a test
+    /// that only checks "is it dead yet" cannot tell that apart from a real
+    /// interrupt. Dropping the interrupt delivery entirely (see this
+    /// module's mutation record) still passed against a 30-second sleep,
+    /// because the process outlived the interrupt but not the test's own
+    /// patience. A sleep long enough to outlast any reasonable wait removes
+    /// that escape.
     #[cfg(unix)]
     fn install_sleepy_harness(bin_dir: &Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = bin_dir.join("sleepy-harness");
-        std::fs::write(&path, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::write(&path, "#!/bin/sh\necho READY\nsleep 300\n").unwrap();
         let mut perms = std::fs::metadata(&path).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&path, perms).unwrap();
@@ -319,7 +335,39 @@ mod tests {
     #[cfg(windows)]
     fn install_sleepy_harness(bin_dir: &Path) -> PathBuf {
         let path = bin_dir.join("sleepy-harness.cmd");
-        std::fs::write(&path, "@echo off\r\ntimeout /t 30 /nobreak >nul\r\n").unwrap();
+        std::fs::write(
+            &path,
+            "@echo off\r\necho READY\r\ntimeout /t 300 /nobreak >nul\r\n",
+        )
+        .unwrap();
+        path
+    }
+
+    /// A harness that echoes every line it reads, forever, so more than one
+    /// send can be observed reaching a real, still-running child.
+    #[cfg(unix)]
+    fn install_looping_echo_harness(bin_dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin_dir.join("looping-echo-harness");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nwhile IFS= read -r line; do echo \"got:$line\"; done\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    #[cfg(windows)]
+    fn install_looping_echo_harness(bin_dir: &Path) -> PathBuf {
+        let path = bin_dir.join("looping-echo-harness.cmd");
+        std::fs::write(
+            &path,
+            "@echo off\r\nsetlocal enabledelayedexpansion\r\n:loop\r\nset \"line=\"\r\nset /p line=\r\necho got:!line!\r\ngoto loop\r\n",
+        )
+        .unwrap();
         path
     }
 
@@ -465,14 +513,33 @@ mod tests {
             &mut live,
             record.id.clone(),
             &bin_dir,
-            install_sleepy_harness,
+            install_looping_echo_harness,
         );
 
         {
             let mut api = SessionApi::new(&store, &mut live);
             api.send_text(&record.id, "machine-line").unwrap();
         }
+        // A dead-at-handshake child (never past ConPTY's `ESC[6n`, see
+        // `drive`'s doc comment) would never echo this: this line is proof
+        // the machine send reached a real, running process, not just
+        // Glasshouse's own event log.
+        drive(&mut live, "the harness to echo the machine line", |live| {
+            live.get(&record.id)
+                .map(|session| session.scrollback().contains("got:machine-line"))
+                .unwrap_or(false)
+        });
+
         assert!(live.write_to_focused(b"keystroke-line\r").unwrap());
+        drive(
+            &mut live,
+            "the harness to echo the keystroke line",
+            |live| {
+                live.get(&record.id)
+                    .map(|session| session.scrollback().contains("got:keystroke-line"))
+                    .unwrap_or(false)
+            },
+        );
 
         let history = live.events().history_for(&record.id);
         let origins: Vec<MessageOrigin> = history
@@ -508,9 +575,74 @@ mod tests {
             install_sleepy_harness,
         );
 
+        // Wait for `READY`, not just for the runtime to say the session
+        // started: on Windows the child does not run until something
+        // answers ConPTY's handshake (see `drive`'s doc comment), so without
+        // this a dead-at-handshake child would still "pass" the interrupt
+        // below — nothing would be there to receive it, and nothing here
+        // would notice.
+        drive(&mut live, "the harness to announce itself", |live| {
+            live.get(&record.id)
+                .map(|session| session.scrollback().contains("READY"))
+                .unwrap_or(false)
+        });
+        assert!(
+            live.get(&record.id).unwrap().is_running(),
+            "the harness must be a real, still-running process before it is interrupted"
+        );
+
         {
             let mut api = SessionApi::new(&store, &mut live);
             api.interrupt(&record.id).unwrap();
+        }
+
+        // The sleeping child installs no handler, so a real interrupt has a
+        // real, platform-specific effect on it -- proof a dead child could
+        // never produce, as opposed to the event log entry alone, which the
+        // API writes whether or not anything was listening.
+        //
+        // On Unix the shell's `sleep` simply dies: no trap, default action.
+        // On Windows the sleeping harness is a `.cmd` script, and `cmd.exe`
+        // itself intercepts Ctrl-C rather than dying -- verified on the ARM64
+        // CI VM: the console's own `^C` echo appears immediately, but neither
+        // process death nor a "Terminate batch job (Y/N)?" prompt reliably
+        // follows within a test's timeout when the batch job is unattended
+        // (no one is there to answer Y or N). `^C` in the scrollback is proof
+        // enough on its own -- the console only prints it in response to a
+        // genuine console control event reaching a live process, and a dead
+        // child could not produce it either.
+        // A longer deadline than `drive`'s shared `TIMEOUT`, not a shorter
+        // one: this waits on a console's own reaction to a control event
+        // under whatever load the rest of the suite is putting on the same
+        // machine, and that reaction has been observed to take longer than
+        // 15s here specifically when many pty-heavy tests are running at
+        // once (§34/§40's standing timing debt, not a defect in the wait
+        // condition itself).
+        {
+            let deadline = Instant::now() + Duration::from_secs(45);
+            loop {
+                live.answer_terminal_queries();
+                live.poll_exits();
+                let reacted = live
+                    .get(&record.id)
+                    .map(|session| {
+                        if cfg!(windows) {
+                            session.scrollback().contains("^C")
+                        } else {
+                            !session.is_running()
+                        }
+                    })
+                    .unwrap_or(false);
+                if reacted {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for the interrupted harness to react to the interrupt; \
+                     sessions: {live:?}"
+                );
+                std::thread::sleep(POLL);
+            }
         }
 
         let history = live.events().history_for(&record.id);
