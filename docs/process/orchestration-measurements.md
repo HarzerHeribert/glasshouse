@@ -1641,3 +1641,51 @@ they imply and report any that resolve to a file in no list at all.
    might be cheaper to run.
 3. **What did the two defect packages cost against what they returned?** Neither
    moves the progress number at all, and both were ranked above a phase.
+
+### Batch 29's defect classes — four defects, four different failure modes
+
+The round produced four process defects in its first hour, none of them in
+product code, and they are worth separating because **they do not cost the
+same and they are not prevented by the same thing.** Split at the outgoing
+orchestrator's suggestion, which was right: a stale fact and an unchecked fact
+look identical in a packet and are caught by different habits.
+
+| # | defect | class | who caught it | cost |
+|---|---|---|---|---|
+| 1 | packet named `session/store.rs` as the home of the migration convention; migrations live only in `database.rs` | **asserted, never checked** — inferred from the handoff's prose without opening the file | the worker, before editing | one stop, one round trip |
+| 2 | "migration 7 is the most recent"; `SUPPORTED_SCHEMA_VERSION` is 8 | **stale** — true when written | the worker, same turn | folded into (1) |
+| 3 | dispatch template pointed at `.agent-runtime/packet-<name>.md`, a gitignored path absent from every worktree | **moved** — the rule changed and the second place that had to know was not told | the incoming orchestrator, before dispatch | none — caught pre-flight |
+| 4 | orchestrator told the peer its results file held an unredacted account id; the file had redacted it at write time | **asserted, never checked** — verified that NVIDIA echoes the id, then claimed something about *where it was written* | the peer, from its own file | one correction |
+
+**(1) and (4) are the same class and the class is the expensive one.** Both
+began with a true fact — a migration landed recently; NVIDIA echoes an account
+identifier — and ended in a false claim *adjacent* to it that nobody checked
+because the neighbouring fact was solid. §39 already names this ("I verified the
+fact and not the recommendation") and it has now happened twice more in one
+round, once in a packet and once in a message to a peer.
+
+**The cheap prevention is different for each class:**
+
+- **asserted-never-checked** → name the *symbol*, not just the file. A packet
+  saying "the convention is in `store.rs`" can only be trusted or stopped over;
+  one saying `MIGRATIONS` is greppable in five seconds. Applies to messages too:
+  quote the line you are claiming exists.
+- **stale** → cite by number *and* text, which batch 28 already established, and
+  let `discover.py` reprint both.
+- **moved** → the round validator proves `YOURS` lists are disjoint and cannot
+  prove a path resolves from where the worker stands. A packet path is not
+  checked by anything today.
+
+**What this says about who catches what.** Three of the four were caught by
+somebody other than their author, and the two most expensive were caught by a
+**worker refusing to act on its packet** rather than by any gate. That is the
+sixth consecutive round in which a worker was right against its brief, and it is
+the strongest argument in this ledger for the stop-condition wording — a worker
+told to report rather than choose caught the defect that a worker told to use
+its judgement would have absorbed silently by editing `database.rs` anyway.
+
+**Note the asymmetry in visibility.** Defect 3 cost nothing because it was
+caught before dispatch; defect 1 cost a stop because it was caught after. Same
+class of error, two orders of magnitude apart in cost, and the only difference
+is whether anyone looked before the work started. That is the argument for the
+pre-dispatch check, not the post-hoc one.
