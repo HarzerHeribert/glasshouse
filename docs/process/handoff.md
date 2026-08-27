@@ -8,6 +8,9 @@ Last updated: 2026-08-28 (Europe/Berlin)
 
 ## Checkpoint — 2026-08-28, batch 38 landed: 645 / 1280 (50%)
 
+**Green on all three platforms on this exact tree** — local 13/13 including the
+ubuntu clippy leg, `--windows-vm` 3/3, 1337 lib tests, zero slow-test warnings.
+
 One worker, one box — map line 576, the user's configured `PairingPreference`
 now reaching the scorer. Three mutations at three layers, all killed; the
 config-resolution one re-run independently by the integrator.
