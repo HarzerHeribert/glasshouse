@@ -745,6 +745,13 @@ mod tests {
             last_activity_at: 2,
             launch_profile: None,
             backend_resource: backend_resource.map(str::to_owned),
+            model: None,
+            pairing_class: None,
+            protocol: None,
+            response_profile: None,
+            response_mechanism: None,
+            display_name: None,
+            purpose: None,
         }
     }
 

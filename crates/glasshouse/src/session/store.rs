@@ -37,6 +37,10 @@ use std::sync::Arc;
 use rusqlite::{Connection, OptionalExtension, Row};
 
 use crate::database::PROJECT_ID_KEY;
+use crate::profile::response::{
+    AnswerFormat, Audience, Dimension, EvidenceDetail, Narration, ResponseProfile, Verbosity,
+};
+use crate::routing::AssignedModel;
 
 /// A Glasshouse session identifier.
 ///
@@ -129,6 +133,227 @@ pub enum SessionDisposition {
     Failed,
 }
 
+/// The wire protocol a session's route speaks, as it was **recorded**.
+///
+/// # Why this is not `crate::harness::WireProtocol`
+///
+/// Phase 6 line 294 — checked, and guarded by a source scan in
+/// `harness::tests::the_session_model_depends_on_no_adapter` — requires
+/// adapter-specific parsing to stay isolated from the core session model, and
+/// this module may not name `crate::harness` at all. That constraint turns
+/// out to describe something true rather than merely forbidding an import: a
+/// *stored* vocabulary and a *live* one have different lifetimes. A row
+/// written last month has to stay readable when `WireProtocol` gains a
+/// variant, and the schema's `CHECK` is what fixes the stored words. So the
+/// two vocabularies are separate types, and `session::wire_protocol` is the
+/// one total, exhaustive function between them — which makes a new
+/// `WireProtocol` a compile error there, at the one place somebody has to
+/// decide how it should be stored.
+///
+/// # `Unknown` is an answer and NULL is not
+///
+/// [`SessionProtocol::Unknown`] means Glasshouse established no wire protocol
+/// for this session, which is what a launch profile naming none against a
+/// harness declaring several produces. A NULL column means the build that
+/// wrote the row recorded nothing here. Two facts, two representations,
+/// because a single slot holding both is the collapse this phase's second
+/// architectural requirement exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionProtocol {
+    AnthropicMessages,
+    OpenAiResponses,
+    OpenAiChat,
+    Unknown,
+}
+
+/// What the harness-and-model relationship was, as it was **recorded**.
+///
+/// The stored counterpart of `crate::harness::pairing::PairingClass`, kept
+/// apart from it for [`SessionProtocol`]'s reason and converted by
+/// `session::pairing_class`, which is exhaustive over the live enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionPairingClass {
+    VendorNative,
+    VendorSupported,
+    ProtocolNative,
+    ProtocolCompatible,
+    ProtocolTranslated,
+    /// Nothing established a relationship. A recorded answer, not a gap.
+    Unknown,
+}
+
+/// Which mechanism carried this session's response profile.
+///
+/// The category of [`crate::harness::response::AppliedMechanism`], and
+/// deliberately *only* the
+/// category. `harness::response` owns what a mechanism is; a session record
+/// stores which of the three kinds answered, so that
+/// `glasshouse sessions show` can say it after the fact. Storing the
+/// mechanism's own free text here would put a second copy of one harness's
+/// vocabulary in the project database, which is what line 603 forbids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseMechanism {
+    /// The harness's own communication-style mechanism.
+    Native,
+    /// An instruction added alongside the harness's own system prompt.
+    Additive,
+    /// Nothing was applied.
+    NotApplied,
+}
+
+/// A name a person gave a session.
+///
+/// A distinct type from [`SessionPurpose`] rather than a second `String`, so
+/// that no call can hand a purpose to a rename or the other way round. Line
+/// 650's rule — a rename never changes the native session identifier — is
+/// enforced by [`SessionStore::rename`]'s SQL naming one column; this type is
+/// what makes the *argument* unmistakable.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SessionName(String);
+
+/// A lightweight purpose, such as `auth`, `tests`, or `research` — line 651.
+///
+/// Free text rather than an enumeration, because the map says "such as": a
+/// fixed list would refuse the fourth thing a person actually does. Bounded
+/// and single-line, because it is rendered in a fixed-width column beside
+/// every other session.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SessionPurpose(String);
+
+/// The longest name a session may be given.
+const MAX_SESSION_NAME: usize = 64;
+
+/// The longest purpose a session may be tagged with.
+const MAX_SESSION_PURPOSE: usize = 32;
+
+macro_rules! session_label {
+    ($ty:ident, $what:literal, $max:ident) => {
+        impl $ty {
+            /// Parse a label a person typed.
+            ///
+            /// Surrounding whitespace is trimmed, because a trailing space is
+            /// never what anyone meant and a stored label that differs from
+            /// the one on screen by an invisible character is worse than a
+            /// refusal. Everything else is refused rather than repaired:
+            /// silently truncating or stripping would store something the
+            /// user did not ask for.
+            pub fn parse(value: &str) -> Result<Self, LabelError> {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    return Err(LabelError::Empty { what: $what });
+                }
+                if trimmed.chars().count() > $max {
+                    return Err(LabelError::TooLong {
+                        what: $what,
+                        max: $max,
+                        found: trimmed.chars().count(),
+                    });
+                }
+                if trimmed.chars().any(char::is_control) {
+                    return Err(LabelError::Control { what: $what });
+                }
+                Ok(Self(trimmed.to_owned()))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.pad(&self.0)
+            }
+        }
+    };
+}
+
+session_label!(SessionName, "a session name", MAX_SESSION_NAME);
+session_label!(SessionPurpose, "a session purpose", MAX_SESSION_PURPOSE);
+
+/// Why a label a person typed was refused.
+#[derive(Debug, thiserror::Error)]
+pub enum LabelError {
+    #[error("{what} cannot be empty")]
+    Empty { what: &'static str },
+    #[error("{what} is at most {max} characters; that one is {found}")]
+    TooLong {
+        what: &'static str,
+        max: usize,
+        found: usize,
+    },
+    #[error("{what} cannot contain control characters")]
+    Control { what: &'static str },
+}
+
+/// The five axes of a response profile, encoded for one column.
+///
+/// `verbosity=<v>,audience=<a>,narration=<n>,evidence=<e>,format=<f>`, built
+/// from [`ResponseProfile::axes`] so the five names and the five slugs come
+/// from `profile::response` rather than from a second list here.
+fn encode_response_profile(profile: &ResponseProfile) -> String {
+    profile
+        .axes()
+        .iter()
+        .map(|(dimension, value)| format!("{}={value}", dimension.slug()))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The reverse of [`encode_response_profile`], or `None` for anything this
+/// build cannot read back exactly.
+///
+/// All five axes are required and every one has to parse. A profile decoded
+/// from four axes and a default would be a profile the session never ran
+/// under, reported as though it had.
+fn decode_response_profile(value: &str) -> Option<ResponseProfile> {
+    let mut verbosity = None;
+    let mut audience = None;
+    let mut narration = None;
+    let mut evidence = None;
+    let mut format = None;
+
+    for field in value.split(',') {
+        let (name, slug) = field.split_once('=')?;
+        match name {
+            _ if name == Dimension::Verbosity.slug() => verbosity = Verbosity::from_slug(slug),
+            _ if name == Dimension::Audience.slug() => audience = Audience::from_slug(slug),
+            _ if name == Dimension::Narration.slug() => narration = Narration::from_slug(slug),
+            _ if name == Dimension::Evidence.slug() => evidence = EvidenceDetail::from_slug(slug),
+            _ if name == Dimension::Format.slug() => format = AnswerFormat::from_slug(slug),
+            _ => return None,
+        }
+    }
+
+    Some(ResponseProfile::new(
+        verbosity?, audience?, narration?, evidence?, format?,
+    ))
+}
+
+/// The model Glasshouse assigned, encoded for one column.
+///
+/// `harness-default` or `named:<id>`. The prefix is what keeps the two apart
+/// however a model is named — a bare id column would have had one empty slot
+/// for "the harness chose" and another for "this build recorded nothing", and
+/// the two are different facts.
+fn encode_assigned_model(model: &AssignedModel) -> String {
+    match model {
+        AssignedModel::Named(id) => format!("named:{id}"),
+        AssignedModel::HarnessDefault => "harness-default".to_owned(),
+    }
+}
+
+fn decode_assigned_model(value: &str) -> Option<AssignedModel> {
+    if value == "harness-default" {
+        return Some(AssignedModel::HarnessDefault);
+    }
+    let id = value.strip_prefix("named:")?;
+    if id.is_empty() {
+        return None;
+    }
+    Some(AssignedModel::named(id))
+}
+
 macro_rules! sql_enum {
     ($ty:ty { $($variant:ident => $text:literal),+ $(,)? }) => {
         impl $ty {
@@ -171,6 +396,28 @@ sql_enum!(SessionPresentation {
     Embedded => "embedded",
     Headless => "headless",
     External => "external",
+});
+
+sql_enum!(SessionProtocol {
+    AnthropicMessages => "anthropic-messages",
+    OpenAiResponses => "openai-responses",
+    OpenAiChat => "openai-chat",
+    Unknown => "unknown",
+});
+
+sql_enum!(SessionPairingClass {
+    VendorNative => "vendor-native",
+    VendorSupported => "vendor-supported",
+    ProtocolNative => "protocol-native",
+    ProtocolCompatible => "protocol-compatible",
+    ProtocolTranslated => "protocol-translated",
+    Unknown => "unknown",
+});
+
+sql_enum!(ResponseMechanism {
+    Native => "native",
+    Additive => "additive",
+    NotApplied => "none",
 });
 
 sql_enum!(SessionLifecycle {
@@ -227,6 +474,34 @@ pub struct SessionRecord {
     /// recorded for the same reason and with the same `None` meaning as
     /// `launch_profile`.
     pub backend_resource: Option<String>,
+    /// The model Glasshouse assigned this session, if any — see
+    /// [`AssignedModel`]. `None` means the build that recorded this session
+    /// stored nothing here, which is a different fact from
+    /// `Some(AssignedModel::HarnessDefault)`, where Glasshouse deliberately
+    /// named none and the harness chose.
+    pub model: Option<AssignedModel>,
+    /// What the harness-and-model relationship *is* — see
+    /// [`crate::harness::pairing`]. Never derived from `harness`,
+    /// `launch_profile` or `model`: it is
+    /// [`crate::harness::pairing::classify`]'s answer, recorded.
+    /// `Some(PairingClass::Unknown)` is a recorded answer; `None` is not one.
+    pub pairing_class: Option<SessionPairingClass>,
+    /// The wire protocol this session's route speaks. See
+    /// [`SessionProtocol`] for why `Unknown` and `None` are not the same
+    /// thing.
+    pub protocol: Option<SessionProtocol>,
+    /// The response profile this session was started with — its five axes,
+    /// read back as the same type [`crate::profile::response`] resolves.
+    /// Communication policy only; it says nothing about which model ran or
+    /// what the session was allowed to do.
+    pub response_profile: Option<ResponseProfile>,
+    /// Which mechanism actually carried that profile to the harness.
+    pub response_mechanism: Option<ResponseMechanism>,
+    /// A name a person gave this session. Never the native session
+    /// identifier and never derived from one — line 650.
+    pub display_name: Option<SessionName>,
+    /// A lightweight purpose a person tagged this session with — line 651.
+    pub purpose: Option<SessionPurpose>,
 }
 
 impl SessionRecord {
@@ -281,6 +556,16 @@ pub struct NewSession {
     /// [`crate::profile::BackendResource::slug`]. See
     /// [`SessionRecord::backend_resource`] for what `None` means.
     pub backend_resource: Option<String>,
+    /// The model Glasshouse assigned. See [`SessionRecord::model`].
+    pub model: Option<AssignedModel>,
+    /// The pairing class this session's harness and model fall into.
+    pub pairing_class: Option<SessionPairingClass>,
+    /// The wire protocol its route speaks.
+    pub protocol: Option<SessionProtocol>,
+    /// The response profile it starts under.
+    pub response_profile: Option<ResponseProfile>,
+    /// Which mechanism carried that profile.
+    pub response_mechanism: Option<ResponseMechanism>,
 }
 
 impl NewSession {
@@ -294,6 +579,11 @@ impl NewSession {
             native_session_id: None,
             launch_profile: None,
             backend_resource: None,
+            model: None,
+            pairing_class: None,
+            protocol: None,
+            response_profile: None,
+            response_mechanism: None,
         }
     }
 
@@ -326,6 +616,48 @@ impl NewSession {
     /// Record the resolved backend resource this session is starting with.
     pub fn with_backend_resource(mut self, backend_resource: Option<String>) -> Self {
         self.backend_resource = backend_resource;
+        self
+    }
+
+    /// Record the model Glasshouse assigned.
+    ///
+    /// One setter per fact, and each takes exactly the type of the fact it
+    /// sets — the shape [`crate::profile::response::ResponseProfile`]'s five
+    /// axes already use, and for the same reason. There is deliberately no
+    /// constructor that fills several of these from one value: the phase's
+    /// second architectural requirement says they stay separately
+    /// represented, and a `with_pairing(...)` that set the class, the model
+    /// and the protocol together would be the collapse wearing a builder's
+    /// clothes.
+    pub fn with_model(mut self, model: Option<AssignedModel>) -> Self {
+        self.model = model;
+        self
+    }
+
+    /// Record the pairing class. Never derived from anything else here.
+    pub fn with_pairing_class(mut self, pairing_class: Option<SessionPairingClass>) -> Self {
+        self.pairing_class = pairing_class;
+        self
+    }
+
+    /// Record the wire protocol this session's route speaks.
+    pub fn with_protocol(mut self, protocol: Option<SessionProtocol>) -> Self {
+        self.protocol = protocol;
+        self
+    }
+
+    /// Record the response profile this session starts under.
+    pub fn with_response_profile(mut self, response_profile: Option<ResponseProfile>) -> Self {
+        self.response_profile = response_profile;
+        self
+    }
+
+    /// Record which mechanism carried that profile.
+    pub fn with_response_mechanism(
+        mut self,
+        response_mechanism: Option<ResponseMechanism>,
+    ) -> Self {
+        self.response_mechanism = response_mechanism;
         self
     }
 }
@@ -412,6 +744,25 @@ pub enum SessionStoreError {
         column: &'static str,
         value: String,
     },
+    #[error(
+        "`{harness}` is {what}, not a harness; an interactive Glasshouse \
+         session is always owned by a real harness, so there is no session \
+         to record for one"
+    )]
+    NotAHarness { harness: String, what: &'static str },
+    #[error(
+        "`{harness}` is not a harness this build knows; a direct provider or \
+         a gateway is a backend a harness talks to, never the owner of a \
+         session"
+    )]
+    UnknownHarness { harness: String },
+    #[error("session `{id}` is {lifecycle}, and a live session cannot be closed; stop it first")]
+    StillLive {
+        id: SessionId,
+        lifecycle: SessionLifecycle,
+    },
+    #[error(transparent)]
+    Label(#[from] LabelError),
     #[error("the project database has no project identifier bound")]
     UnboundDatabase,
     #[error("could not {action} in the project database")]
@@ -450,7 +801,9 @@ pub(crate) fn system_clock() -> i64 {
 
 const ALL_COLUMNS: &str = "id, project_id, harness, native_session_id, role, \
                            lifecycle, presentation, created_at, last_activity_at, \
-                           launch_profile, backend_resource";
+                           launch_profile, backend_resource, model, pairing_class, \
+                           protocol, response_profile, response_mechanism, \
+                           display_name, purpose";
 
 /// An open project database plus the sessions inside it.
 ///
@@ -574,6 +927,10 @@ impl<'a> SessionStore<'a> {
     /// derived from the clock, since sessions can be spawned in a burst.
     pub fn create(&self, new: NewSession) -> Result<SessionRecord, SessionStoreError> {
         let now = (self.clock)();
+        // Line 646, and it is enforced here because this is the only door.
+        // Refusing before an identifier is minted means a refused session
+        // leaves nothing behind at all.
+        require_owning_harness(&new.harness)?;
         let id = SessionId(self.generate_id()?);
 
         let record = SessionRecord {
@@ -588,14 +945,25 @@ impl<'a> SessionStore<'a> {
             last_activity_at: now,
             launch_profile: new.launch_profile,
             backend_resource: new.backend_resource,
+            model: new.model,
+            pairing_class: new.pairing_class,
+            protocol: new.protocol,
+            response_profile: new.response_profile,
+            response_mechanism: new.response_mechanism,
+            // Two labels a person applies afterwards, never at creation: a
+            // session Glasshouse named itself would be a name nobody chose.
+            display_name: None,
+            purpose: None,
         };
 
         self.conn
             .execute(
                 "INSERT INTO sessions (id, project_id, harness, native_session_id, \
                  role, lifecycle, presentation, created_at, last_activity_at, \
-                 launch_profile, backend_resource) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 launch_profile, backend_resource, model, pairing_class, protocol, \
+                 response_profile, response_mechanism) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
+                 ?14, ?15, ?16)",
                 rusqlite::params![
                     record.id.as_str(),
                     &record.project_id,
@@ -608,6 +976,14 @@ impl<'a> SessionStore<'a> {
                     record.last_activity_at,
                     &record.launch_profile,
                     &record.backend_resource,
+                    record.model.as_ref().map(encode_assigned_model),
+                    record.pairing_class.map(SessionPairingClass::as_str),
+                    record.protocol.map(SessionProtocol::as_str),
+                    record
+                        .response_profile
+                        .as_ref()
+                        .map(encode_response_profile),
+                    record.response_mechanism.map(ResponseMechanism::as_str),
                 ],
             )
             .map_err(|source| SessionStoreError::Sql {
@@ -786,6 +1162,120 @@ impl<'a> SessionStore<'a> {
         )
     }
 
+    /// Give a session a name of the user's own — line 650.
+    ///
+    /// # The native session identifier is not among the columns named here
+    ///
+    /// That is the whole of line 650: *"allow the user to rename a session
+    /// without changing its native session ID"*. The identifier is what a
+    /// harness is asked to continue from, so a rename that touched it would
+    /// silently break resume, and nothing about the failure would point back
+    /// at the rename. One `SET`, one column, and
+    /// `renaming_a_session_leaves_its_native_identifier_alone` reads the
+    /// identifier back afterwards rather than merely checking no error was
+    /// returned.
+    ///
+    /// # And `last_activity_at` is not among them either
+    ///
+    /// Naming a session is something the *user* did, not something the
+    /// session did. Stamping it as activity would move a finished session
+    /// back to the top of a list ordered by when it last ran, which is the
+    /// one question that list exists to answer.
+    pub fn rename(
+        &self,
+        id: &SessionId,
+        name: &SessionName,
+    ) -> Result<SessionRecord, SessionStoreError> {
+        self.update(
+            id,
+            "UPDATE sessions SET display_name = ?2 WHERE id = ?1",
+            rusqlite::params![id.as_str(), name.as_str()],
+            "rename a session",
+        )
+    }
+
+    /// Take a session's name away again, leaving it identified by nothing but
+    /// its identifiers.
+    pub fn clear_name(&self, id: &SessionId) -> Result<SessionRecord, SessionStoreError> {
+        self.update(
+            id,
+            "UPDATE sessions SET display_name = NULL WHERE id = ?1",
+            rusqlite::params![id.as_str()],
+            "clear a session's name",
+        )
+    }
+
+    /// Tag a session with a lightweight purpose — line 651.
+    ///
+    /// A separate column and a separate type from the display name, so that
+    /// tagging cannot rename and renaming cannot tag. Like a rename, it does
+    /// not count as session activity.
+    pub fn set_purpose(
+        &self,
+        id: &SessionId,
+        purpose: &SessionPurpose,
+    ) -> Result<SessionRecord, SessionStoreError> {
+        self.update(
+            id,
+            "UPDATE sessions SET purpose = ?2 WHERE id = ?1",
+            rusqlite::params![id.as_str(), purpose.as_str()],
+            "tag a session",
+        )
+    }
+
+    /// Remove a session's purpose tag.
+    pub fn clear_purpose(&self, id: &SessionId) -> Result<SessionRecord, SessionStoreError> {
+        self.update(
+            id,
+            "UPDATE sessions SET purpose = NULL WHERE id = ?1",
+            rusqlite::params![id.as_str()],
+            "clear a session's purpose",
+        )
+    }
+
+    /// Retire Glasshouse's record of a session — line 654.
+    ///
+    /// # What this deliberately does not do
+    ///
+    /// It writes one column. `native_session_id` is untouched, and so is
+    /// every harness file on disk: this module has never parsed or owned
+    /// those, and closing a Glasshouse record is not an occasion to start.
+    /// Line 654 says the record may be closed *"without deleting the native
+    /// provider history unless explicitly requested"*, and nothing here is a
+    /// request. `closing_a_session_keeps_the_harnesss_own_history` proves the
+    /// history is still there afterwards rather than proving no error came
+    /// back.
+    ///
+    /// # A live session is refused
+    ///
+    /// Closing is filing a record away, and a record whose process is still
+    /// running is not finished being written. Refusing names the state so the
+    /// user knows to stop the session first, rather than leaving a `closed`
+    /// row that a running harness keeps updating.
+    ///
+    /// # `last_activity_at` stays put, for [`SessionStore::rename`]'s reason
+    ///
+    /// When the session last did something is a fact about the session. When
+    /// somebody filed it away is a different fact, and this column is not the
+    /// place for it.
+    pub fn close(&self, id: &SessionId) -> Result<SessionRecord, SessionStoreError> {
+        let record = self
+            .get(id)?
+            .ok_or_else(|| SessionStoreError::NotFound { id: id.clone() })?;
+        if record.lifecycle.is_live() {
+            return Err(SessionStoreError::StillLive {
+                id: id.clone(),
+                lifecycle: record.lifecycle,
+            });
+        }
+        self.update(
+            id,
+            "UPDATE sessions SET lifecycle = ?2 WHERE id = ?1",
+            rusqlite::params![id.as_str(), SessionLifecycle::Closed.as_str()],
+            "close a session record",
+        )
+    }
+
     fn update(
         &self,
         id: &SessionId,
@@ -896,6 +1386,46 @@ fn read_record(row: &Row<'_>) -> Result<SessionRecord, SessionStoreError> {
         SessionPresentation::from_str(&presentation_text),
     )?;
 
+    // Each of these decodes through its own function and reports an
+    // unrecognised value by name rather than defaulting. A row written by a
+    // newer build is then a legible error naming the column and the value,
+    // which is what a person needs; a silent default would report a session
+    // as having run under something it did not.
+    let model = optional(&id, "model", row.get_unwrap(11), decode_assigned_model)?;
+    let pairing_class = optional(
+        &id,
+        "pairing_class",
+        row.get_unwrap(12),
+        SessionPairingClass::from_str,
+    )?;
+    let protocol = optional(
+        &id,
+        "protocol",
+        row.get_unwrap(13),
+        SessionProtocol::from_str,
+    )?;
+    let response_profile = optional(
+        &id,
+        "response_profile",
+        row.get_unwrap(14),
+        decode_response_profile,
+    )?;
+    let response_mechanism = optional(
+        &id,
+        "response_mechanism",
+        row.get_unwrap(15),
+        ResponseMechanism::from_str,
+    )?;
+    // The two labels are stored as the person typed them, so a stored value
+    // that no longer parses — a bound tightened in a later release — is
+    // reported rather than shown truncated.
+    let display_name = optional(&id, "display_name", row.get_unwrap(16), |value| {
+        SessionName::parse(value).ok()
+    })?;
+    let purpose = optional(&id, "purpose", row.get_unwrap(17), |value| {
+        SessionPurpose::parse(value).ok()
+    })?;
+
     Ok(SessionRecord {
         id,
         project_id: row.get_unwrap(1),
@@ -908,7 +1438,65 @@ fn read_record(row: &Row<'_>) -> Result<SessionRecord, SessionStoreError> {
         last_activity_at: row.get_unwrap(8),
         launch_profile: row.get_unwrap(9),
         backend_resource: row.get_unwrap(10),
+        model,
+        pairing_class,
+        protocol,
+        response_profile,
+        response_mechanism,
+        display_name,
+        purpose,
     })
+}
+
+/// Decode a nullable column, keeping NULL and "a value this build cannot read"
+/// apart.
+///
+/// NULL is `Ok(None)` — the build that wrote the row recorded nothing. A
+/// present value that does not decode is an error naming the column, never
+/// `None`, because the two mean opposite things and a caller that saw `None`
+/// for both would report a missing fact as a deliberate absence.
+fn optional<T>(
+    id: &SessionId,
+    column: &'static str,
+    stored: Option<String>,
+    decode: impl FnOnce(&str) -> Option<T>,
+) -> Result<Option<T>, SessionStoreError> {
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    match decode(&stored) {
+        Some(value) => Ok(Some(value)),
+        None => Err(SessionStoreError::UnknownValue {
+            id: id.clone(),
+            column,
+            value: stored,
+        }),
+    }
+}
+
+/// Refuse a session whose owner is not a real harness — line 646.
+///
+/// # The catalogue is asked, not held
+///
+/// The map's first fixed architectural requirement for this phase is that
+/// *every interactive Glasshouse session is owned by a real harness*, and
+/// line 646 names the failure it guards: a direct API provider or a gateway
+/// appearing in this table as though it were one.
+///
+/// The question is answered by [`super::owning_harness`], one module up,
+/// because Phase 6 line 294 keeps adapter knowledge out of the session store
+/// and `harness::tests::the_session_model_depends_on_no_adapter` enforces it
+/// by scanning this file. That separation is right on its own terms: this
+/// module owns *what is recorded about a session* and has no business
+/// holding a list of harnesses, which grows.
+///
+/// It is enforced **here** rather than at the caller because this is the only
+/// door. A guard in `main.rs` would be a guard `shell::start_session` does
+/// not have, and one any future caller could forget; a refusal in `create` is
+/// one no caller can bypass — the §35 shape, applied before the fact instead
+/// of after it.
+fn require_owning_harness(harness: &str) -> Result<(), SessionStoreError> {
+    super::owning_harness(harness)
 }
 
 #[cfg(test)]
@@ -1716,6 +2304,19 @@ mod tests {
                 "sessions.last_activity_at",
                 "sessions.launch_profile",
                 "sessions.backend_resource",
+                // Migration 8. Every one of these is a name, a slug or a
+                // label a person typed: a model id, a pairing class, a wire
+                // protocol, five response axes, a mechanism category, a
+                // session name and a purpose. None of them is a place a
+                // credential could be put, and there is still no column that
+                // could hold one.
+                "sessions.model",
+                "sessions.pairing_class",
+                "sessions.protocol",
+                "sessions.response_profile",
+                "sessions.response_mechanism",
+                "sessions.display_name",
+                "sessions.purpose",
             ],
             "the project database schema changed; confirm the new column cannot \
              hold a provider credential before updating this list"
@@ -1834,6 +2435,13 @@ mod tests {
             .execute_batch(
                 "ALTER TABLE sessions DROP COLUMN launch_profile;
                  ALTER TABLE sessions DROP COLUMN backend_resource;
+                 ALTER TABLE sessions DROP COLUMN model;
+                 ALTER TABLE sessions DROP COLUMN pairing_class;
+                 ALTER TABLE sessions DROP COLUMN protocol;
+                 ALTER TABLE sessions DROP COLUMN response_profile;
+                 ALTER TABLE sessions DROP COLUMN response_mechanism;
+                 ALTER TABLE sessions DROP COLUMN display_name;
+                 ALTER TABLE sessions DROP COLUMN purpose;
                  DROP TABLE IF EXISTS memories_fts;
                  DROP TABLE IF EXISTS memories;
                  DROP TABLE IF EXISTS lifecycle_events;
@@ -1849,8 +2457,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 7,
-            "the launch must have applied migrations 3, 4, 5, 6 and 7"
+            version, 8,
+            "the launch must have applied migrations 3, 4, 5, 6, 7 and 8"
         );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
@@ -2036,8 +2644,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 7,
-            "the launch must have applied migrations 2, 3, 4, 5, 6 and 7"
+            version, 8,
+            "the launch must have applied migrations 2, 3, 4, 5, 6, 7 and 8"
         );
 
         let store = SessionStore::new(&reopened).unwrap();
@@ -2293,6 +2901,662 @@ mod tests {
 
         let read_back = store.get(&record.id).unwrap().expect("the session");
         assert_eq!(read_back.native_session_id, Some(native));
+    }
+
+    mod phase_10 {
+        //! Phase 10 — the unified session model, at the storage layer.
+        //!
+        //! The production surfaces live in `main.rs` and are exercised against the
+        //! shipped binary in `tests/session_model.rs`. What is here is what only
+        //! the store can answer: that a session records nine separate facts in
+        //! nine separate places, that the two labels a person owns cannot reach
+        //! the identifier a resume depends on, and that migration 8 leaves a
+        //! version-7 database's rows exactly as it found them.
+
+        use super::*;
+
+        /// The seven kinds of thing a session records, all different, all read
+        /// back apart.
+        ///
+        /// Every value below is distinct from every other, on purpose: a build
+        /// that filled the pairing class in from the launch profile — or the
+        /// model from the backend resource, or either label from the other —
+        /// would put the same string in two columns, and this fails on it. That
+        /// is the failure line 645 and the phase's second architectural
+        /// requirement exist to prevent, and it is checked *after a reopen*, so
+        /// what is proved is what is on disk rather than what was in memory.
+        #[test]
+        fn a_session_records_seven_facts_and_no_two_of_them_share_a_column() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(tmp.path(), "alpha");
+            let store = fixture.store();
+
+            let profile = ResponseProfile::new(
+                Verbosity::Terse,
+                Audience::Executive,
+                Narration::Silent,
+                EvidenceDetail::Audit,
+                AnswerFormat::Bullets,
+            );
+            let record = store
+                .create(
+                    NewSession::embedded("claude-code")
+                        .with_launch_profile(Some("a-launch-profile".to_owned()))
+                        .with_backend_resource(Some("a-backend-resource".to_owned()))
+                        .with_model(Some(AssignedModel::named("a-model")))
+                        .with_pairing_class(Some(SessionPairingClass::ProtocolCompatible))
+                        .with_protocol(Some(SessionProtocol::OpenAiResponses))
+                        .with_response_profile(Some(profile))
+                        .with_response_mechanism(Some(ResponseMechanism::Additive)),
+                )
+                .unwrap();
+
+            let reopened = fixture.reopen();
+            let stored = SessionStore::new(&reopened)
+                .unwrap()
+                .get(&record.id)
+                .unwrap()
+                .expect("the session survived the reopen");
+
+            assert_eq!(stored.harness, "claude-code");
+            assert_eq!(stored.launch_profile.as_deref(), Some("a-launch-profile"));
+            assert_eq!(
+                stored.backend_resource.as_deref(),
+                Some("a-backend-resource")
+            );
+            assert_eq!(stored.model, Some(AssignedModel::named("a-model")));
+            assert_eq!(
+                stored.pairing_class,
+                Some(SessionPairingClass::ProtocolCompatible)
+            );
+            assert_eq!(stored.protocol, Some(SessionProtocol::OpenAiResponses));
+            assert_eq!(stored.response_profile, Some(profile));
+            assert_eq!(stored.response_mechanism, Some(ResponseMechanism::Additive));
+
+            // And the columns themselves hold seven different strings. Reading
+            // the row rather than the record, because a record built from one
+            // column read twice would satisfy every assertion above.
+            let raw: Vec<Option<String>> = reopened
+                .query_row(
+                    "SELECT harness, launch_profile, backend_resource, model, pairing_class, \
+                     protocol, response_profile, response_mechanism FROM sessions WHERE id = ?1",
+                    [record.id.as_str()],
+                    |row| {
+                        Ok((0..8)
+                            .map(|i| row.get::<_, Option<String>>(i).unwrap())
+                            .collect())
+                    },
+                )
+                .unwrap();
+            let mut seen = std::collections::BTreeSet::new();
+            for value in &raw {
+                let value = value.as_deref().expect("every column was written");
+                assert!(
+                    seen.insert(value.to_owned()),
+                    "two session columns hold `{value}`; the seven facts line 645 \
+                     keeps apart have started sharing a slot:\n{raw:?}"
+                );
+            }
+        }
+
+        /// Line 646, at the only door there is.
+        ///
+        /// A provider and the gateway are not integrations at all, so they cannot
+        /// even be named; `cmux`, `ollama` and `llama.cpp` are integrations and
+        /// still not harnesses. None of the five may own a session, and the
+        /// refusal happens before an identifier is minted, so nothing is left
+        /// behind.
+        #[test]
+        fn only_a_real_harness_may_own_a_session() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(tmp.path(), "alpha");
+            let store = fixture.store();
+
+            for owner in ["cmux", "ollama", "llama-cpp"] {
+                let err = store.create(NewSession::embedded(owner)).unwrap_err();
+                assert!(
+                    matches!(err, SessionStoreError::NotAHarness { .. }),
+                    "`{owner}` is not a harness and must be refused as one, got: {err}"
+                );
+            }
+            for backend in [
+                "openai",
+                "anthropic",
+                "openrouter",
+                "glasshouse-gateway",
+                "",
+            ] {
+                let err = store.create(NewSession::embedded(backend)).unwrap_err();
+                assert!(
+                    matches!(err, SessionStoreError::UnknownHarness { .. }),
+                    "`{backend}` is a backend, never a session owner, got: {err}"
+                );
+            }
+            assert!(
+                store.list().unwrap().is_empty(),
+                "a refused session must leave no row behind"
+            );
+
+            // And every real harness is still accepted, so the guard is a filter
+            // rather than a wall.
+            for harness in ["claude-code", "codex", "opencode", "cursor", "pi", "hermes"] {
+                store
+                    .create(NewSession::embedded(harness))
+                    .unwrap_or_else(|err| panic!("`{harness}` is a harness: {err}"));
+            }
+        }
+
+        /// Line 650. The rename writes one column; the identifier a resume
+        /// depends on is read back afterwards and is the one it was before.
+        #[test]
+        fn renaming_a_session_leaves_its_native_identifier_alone() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(tmp.path(), "alpha");
+            let store = fixture.store();
+
+            let record = store
+                .create(
+                    NewSession::embedded("claude-code").with_native_session_id(Some(
+                        "d4c3b2a1-0000-4000-8000-000000000001".to_owned(),
+                    )),
+                )
+                .unwrap();
+
+            let renamed = store
+                .rename(
+                    &record.id,
+                    &SessionName::parse("  the auth probe  ").unwrap(),
+                )
+                .unwrap();
+
+            assert_eq!(
+                renamed.display_name.as_ref().map(SessionName::as_str),
+                Some("the auth probe"),
+                "surrounding whitespace is trimmed rather than stored"
+            );
+            assert_eq!(
+                renamed.native_session_id.as_deref(),
+                Some("d4c3b2a1-0000-4000-8000-000000000001"),
+                "a rename must not touch the identifier a resume continues from"
+            );
+            assert_eq!(renamed.id, record.id, "nor the Glasshouse identifier");
+
+            // And it is still resumable afterwards, which is the consequence that
+            // would actually bite a user.
+            store
+                .set_lifecycle(&record.id, SessionLifecycle::Stopped)
+                .unwrap();
+            let resumable = store.open_for_resume(&record.id).unwrap();
+            assert_eq!(
+                resumable.native_session_id,
+                "d4c3b2a1-0000-4000-8000-000000000001"
+            );
+        }
+
+        /// Renaming and tagging are things the *user* did, not things the session
+        /// did, so neither counts as activity.
+        ///
+        /// The listing is ordered by `last_activity_at`. If a rename stamped it,
+        /// naming an old session would jump it to the top of a list whose whole
+        /// job is to say what ran most recently.
+        #[test]
+        fn naming_or_tagging_a_session_is_not_session_activity() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(tmp.path(), "alpha");
+            let store = fixture.store_with_ticking_clock(1_000, 100);
+
+            let record = store.create(NewSession::embedded("claude-code")).unwrap();
+            let created_activity = record.last_activity_at;
+
+            let renamed = store
+                .rename(&record.id, &SessionName::parse("old work").unwrap())
+                .unwrap();
+            assert_eq!(renamed.last_activity_at, created_activity);
+
+            let tagged = store
+                .set_purpose(&record.id, &SessionPurpose::parse("research").unwrap())
+                .unwrap();
+            assert_eq!(tagged.last_activity_at, created_activity);
+
+            store
+                .set_lifecycle(&record.id, SessionLifecycle::Stopped)
+                .unwrap();
+            let closed = store.close(&record.id).unwrap();
+            assert_eq!(
+                closed.last_activity_at,
+                store.get(&record.id).unwrap().unwrap().last_activity_at,
+            );
+            assert_ne!(
+                closed.last_activity_at, created_activity,
+                "the state change before it *was* activity, and did move the clock"
+            );
+        }
+
+        /// Line 651. A name and a purpose are two columns and two types, and
+        /// setting one leaves the other exactly as it was.
+        #[test]
+        fn a_name_and_a_purpose_are_two_different_things() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(tmp.path(), "alpha");
+            let store = fixture.store();
+
+            let record = store.create(NewSession::embedded("codex")).unwrap();
+            store
+                .rename(&record.id, &SessionName::parse("nightly").unwrap())
+                .unwrap();
+            let tagged = store
+                .set_purpose(&record.id, &SessionPurpose::parse("tests").unwrap())
+                .unwrap();
+
+            assert_eq!(
+                tagged.display_name.as_ref().map(SessionName::as_str),
+                Some("nightly")
+            );
+            assert_eq!(
+                tagged.purpose.as_ref().map(SessionPurpose::as_str),
+                Some("tests")
+            );
+
+            let cleared = store.clear_purpose(&record.id).unwrap();
+            assert_eq!(cleared.purpose, None);
+            assert_eq!(
+                cleared.display_name.as_ref().map(SessionName::as_str),
+                Some("nightly"),
+                "clearing a purpose must not clear a name"
+            );
+
+            let unnamed = store.clear_name(&record.id).unwrap();
+            assert_eq!(unnamed.display_name, None);
+            assert_eq!(unnamed.purpose, None);
+        }
+
+        /// A label a person typed is refused rather than repaired.
+        #[test]
+        fn an_unusable_label_is_refused_by_name() {
+            assert!(SessionName::parse("   ").is_err());
+            assert!(SessionPurpose::parse("").is_err());
+            assert!(SessionName::parse("two\nlines").is_err());
+            assert!(SessionPurpose::parse("a\tb").is_err());
+            assert!(SessionName::parse(&"x".repeat(MAX_SESSION_NAME)).is_ok());
+            assert!(SessionName::parse(&"x".repeat(MAX_SESSION_NAME + 1)).is_err());
+            assert!(SessionPurpose::parse(&"x".repeat(MAX_SESSION_PURPOSE)).is_ok());
+            assert!(SessionPurpose::parse(&"x".repeat(MAX_SESSION_PURPOSE + 1)).is_err());
+            // Counted in characters, not bytes: a name of thirty-two emoji is
+            // thirty-two characters and would be a hundred and twenty-eight bytes.
+            assert!(SessionPurpose::parse(&"é".repeat(MAX_SESSION_PURPOSE)).is_ok());
+        }
+
+        /// Line 654. Closing writes one column and leaves the pointer to the
+        /// harness's own history exactly where it was.
+        #[test]
+        fn closing_a_session_keeps_the_pointer_to_its_native_history() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(tmp.path(), "alpha");
+            let store = fixture.store();
+
+            let record = store
+                .create(
+                    NewSession::embedded("claude-code").with_native_session_id(Some(
+                        "11112222-3333-4444-8555-666677778888".to_owned(),
+                    )),
+                )
+                .unwrap();
+            store
+                .set_lifecycle(&record.id, SessionLifecycle::Stopped)
+                .unwrap();
+
+            let closed = store.close(&record.id).unwrap();
+            assert_eq!(closed.lifecycle, SessionLifecycle::Closed);
+            assert_eq!(
+                closed.native_session_id.as_deref(),
+                Some("11112222-3333-4444-8555-666677778888"),
+                "closing a Glasshouse record must not throw away the name of the \
+                 harness history it points at"
+            );
+
+            // Still there after a reopen, so what survived is the file rather
+            // than a value the closing call happened to return.
+            let reopened = fixture.reopen();
+            let after = SessionStore::new(&reopened)
+                .unwrap()
+                .get(&record.id)
+                .unwrap()
+                .expect("a closed record is retired, never deleted");
+            assert_eq!(
+                after.native_session_id.as_deref(),
+                Some("11112222-3333-4444-8555-666677778888")
+            );
+            assert_eq!(after.harness, "claude-code");
+        }
+
+        /// A record whose process is still running is not finished being written.
+        #[test]
+        fn a_live_session_cannot_be_closed() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(tmp.path(), "alpha");
+            let store = fixture.store();
+
+            let record = store.create(NewSession::embedded("claude-code")).unwrap();
+            for live in [
+                SessionLifecycle::Starting,
+                SessionLifecycle::Running,
+                SessionLifecycle::Idle,
+                SessionLifecycle::WaitingForUser,
+            ] {
+                store.set_lifecycle(&record.id, live).unwrap();
+                let err = store.close(&record.id).unwrap_err();
+                assert!(
+                    matches!(err, SessionStoreError::StillLive { .. }),
+                    "a {live} session must be stopped before its record is closed, got: {err}"
+                );
+                assert_eq!(store.get(&record.id).unwrap().unwrap().lifecycle, live);
+            }
+        }
+
+        /// Line 653. A stopped session with something to resume to is a different
+        /// row from a live one and from a closed one, and closing moves it out of
+        /// the resumable group without deleting it.
+        #[test]
+        fn a_resumable_session_stays_visible_and_apart_from_the_live_ones() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(tmp.path(), "alpha");
+            let store = fixture.store();
+
+            let live = store.create(NewSession::embedded("claude-code")).unwrap();
+            store
+                .set_lifecycle(&live.id, SessionLifecycle::Running)
+                .unwrap();
+
+            let stopped = store
+                .create(
+                    NewSession::embedded("codex")
+                        .with_native_session_id(Some("codex-native-1".to_owned())),
+                )
+                .unwrap();
+            store
+                .set_lifecycle(&stopped.id, SessionLifecycle::Stopped)
+                .unwrap();
+
+            let listed = store.list().unwrap();
+            assert_eq!(listed.len(), 2, "both are visible in one listing");
+            let by_id = |id: &SessionId| {
+                listed
+                    .iter()
+                    .find(|record| &record.id == id)
+                    .unwrap()
+                    .disposition()
+            };
+            assert_eq!(by_id(&live.id), SessionDisposition::Active);
+            assert_eq!(by_id(&stopped.id), SessionDisposition::Resumable);
+
+            store.close(&stopped.id).unwrap();
+            let after = store.list().unwrap();
+            assert_eq!(after.len(), 2, "a closed session is retired, not removed");
+            assert_eq!(
+                after
+                    .iter()
+                    .find(|record| record.id == stopped.id)
+                    .unwrap()
+                    .disposition(),
+                SessionDisposition::Closed
+            );
+        }
+
+        /// Every value the store can write is one the schema accepts.
+        ///
+        /// The `CHECK` constraints in migration 8 are second copies of three
+        /// vocabularies. This is what keeps the copies honest: each variant is
+        /// written through a real insert, so a slug that drifted from the schema
+        /// fails here rather than on a background writer where nobody is looking.
+        #[test]
+        fn every_stored_vocabulary_is_one_the_schema_accepts() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(tmp.path(), "alpha");
+            let store = fixture.store();
+
+            let classes = [
+                SessionPairingClass::VendorNative,
+                SessionPairingClass::VendorSupported,
+                SessionPairingClass::ProtocolNative,
+                SessionPairingClass::ProtocolCompatible,
+                SessionPairingClass::ProtocolTranslated,
+                SessionPairingClass::Unknown,
+            ];
+            let protocols = [
+                SessionProtocol::AnthropicMessages,
+                SessionProtocol::OpenAiResponses,
+                SessionProtocol::OpenAiChat,
+                SessionProtocol::Unknown,
+            ];
+            let mechanisms = [
+                ResponseMechanism::Native,
+                ResponseMechanism::Additive,
+                ResponseMechanism::NotApplied,
+            ];
+
+            for (i, class) in classes.iter().enumerate() {
+                let protocol = protocols[i % protocols.len()];
+                let mechanism = mechanisms[i % mechanisms.len()];
+                let record = store
+                    .create(
+                        NewSession::embedded("claude-code")
+                            .with_pairing_class(Some(*class))
+                            .with_protocol(Some(protocol))
+                            .with_response_mechanism(Some(mechanism))
+                            .with_model(Some(AssignedModel::HarnessDefault)),
+                    )
+                    .unwrap_or_else(|err| panic!("the schema rejected {class}/{protocol}: {err}"));
+                let read = store.get(&record.id).unwrap().unwrap();
+                assert_eq!(read.pairing_class, Some(*class));
+                assert_eq!(read.protocol, Some(protocol));
+                assert_eq!(read.response_mechanism, Some(mechanism));
+            }
+            // The two the loop above could not reach by index.
+            for protocol in protocols {
+                for mechanism in mechanisms {
+                    store
+                        .create(
+                            NewSession::embedded("codex")
+                                .with_protocol(Some(protocol))
+                                .with_response_mechanism(Some(mechanism)),
+                        )
+                        .unwrap_or_else(|err| panic!("the schema rejected {protocol}: {err}"));
+                }
+            }
+        }
+
+        /// "Glasshouse assigned no model" and "this build recorded no model" are
+        /// two facts, and the column keeps them apart.
+        #[test]
+        fn a_harness_default_is_not_the_same_stored_fact_as_nothing_recorded() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(tmp.path(), "alpha");
+            let store = fixture.store();
+
+            let defaulted = store
+                .create(
+                    NewSession::embedded("claude-code")
+                        .with_model(Some(AssignedModel::HarnessDefault)),
+                )
+                .unwrap();
+            let unrecorded = store.create(NewSession::embedded("claude-code")).unwrap();
+            let named = store
+                .create(
+                    NewSession::embedded("claude-code")
+                        .with_model(Some(AssignedModel::named("harness-default"))),
+                )
+                .unwrap();
+
+            assert_eq!(
+                store.get(&defaulted.id).unwrap().unwrap().model,
+                Some(AssignedModel::HarnessDefault)
+            );
+            assert_eq!(store.get(&unrecorded.id).unwrap().unwrap().model, None);
+            // A model whose id is literally the sentinel word still reads back as
+            // a named model, which is what the `named:` prefix is for.
+            assert_eq!(
+                store.get(&named.id).unwrap().unwrap().model,
+                Some(AssignedModel::named("harness-default"))
+            );
+        }
+
+        /// All 324 combinations of the five axes survive the round trip, so no
+        /// axis is dropped or defaulted on the way through the column.
+        #[test]
+        fn every_response_profile_round_trips_through_one_column() {
+            for verbosity in Verbosity::ALL {
+                for audience in Audience::ALL {
+                    for narration in Narration::ALL {
+                        for evidence in EvidenceDetail::ALL {
+                            for format in AnswerFormat::ALL {
+                                let profile = ResponseProfile::new(
+                                    *verbosity, *audience, *narration, *evidence, *format,
+                                );
+                                let encoded = encode_response_profile(&profile);
+                                assert_eq!(
+                                    decode_response_profile(&encoded),
+                                    Some(profile),
+                                    "`{encoded}` did not come back as the profile it was"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            // A partial encoding is refused rather than completed from defaults:
+            // a profile a session never ran under, reported as though it had, is
+            // worse than an error naming the column.
+            assert_eq!(
+                decode_response_profile("verbosity=terse,audience=plain"),
+                None
+            );
+            assert_eq!(decode_response_profile("verbosity=nonsense"), None);
+            assert_eq!(decode_response_profile(""), None);
+        }
+
+        /// A value this build cannot read is reported by column and value, never
+        /// silently turned into `None` — which would say "nothing was recorded"
+        /// about a row that recorded something.
+        #[test]
+        fn a_stored_value_this_build_cannot_read_is_reported_rather_than_erased() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(tmp.path(), "alpha");
+            let store = fixture.store();
+            let record = store.create(NewSession::embedded("claude-code")).unwrap();
+
+            // Written straight into the column, as a newer build's value would
+            // arrive: the schema's `CHECK` is what stops this build writing one.
+            fixture
+                .conn
+                .execute(
+                    "UPDATE sessions SET response_profile = 'verbosity=galactic' WHERE id = ?1",
+                    [record.id.as_str()],
+                )
+                .unwrap();
+
+            let err = store.get(&record.id).unwrap_err();
+            match err {
+                SessionStoreError::UnknownValue { column, value, .. } => {
+                    assert_eq!(column, "response_profile");
+                    assert_eq!(value, "verbosity=galactic");
+                }
+                other => panic!("expected the column and the value to be named, got: {other}"),
+            }
+        }
+
+        /// Migration 8 applies to a database created by the previous schema, and
+        /// every existing row survives it unchanged.
+        ///
+        /// The rollback is contiguous to the newest migration for the reason
+        /// `upgrading_a_version_2_database_preserves_every_existing_session`
+        /// records: the runner resumes from `MAX(version)`, so leaving a higher
+        /// row behind makes it believe there is nothing to do.
+        #[test]
+        fn upgrading_a_version_7_database_preserves_every_existing_session() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(tmp.path(), "alpha");
+            let store = fixture.store();
+
+            let record = store
+                .create(
+                    NewSession::embedded("codex")
+                        .with_role(SessionRole::Orchestrator)
+                        .with_presentation(SessionPresentation::Headless)
+                        .with_native_session_id(Some("codex-native-7".to_owned()))
+                        .with_launch_profile(Some("nightly".to_owned()))
+                        .with_backend_resource(Some("direct:openai".to_owned())),
+                )
+                .unwrap();
+            store
+                .set_lifecycle(&record.id, SessionLifecycle::Stopped)
+                .unwrap();
+            let before = store.get(&record.id).unwrap().unwrap();
+
+            fixture
+                .conn
+                .execute_batch(
+                    "ALTER TABLE sessions DROP COLUMN model;
+                     ALTER TABLE sessions DROP COLUMN pairing_class;
+                     ALTER TABLE sessions DROP COLUMN protocol;
+                     ALTER TABLE sessions DROP COLUMN response_profile;
+                     ALTER TABLE sessions DROP COLUMN response_mechanism;
+                     ALTER TABLE sessions DROP COLUMN display_name;
+                     ALTER TABLE sessions DROP COLUMN purpose;
+                     DELETE FROM schema_migrations WHERE version >= 8;",
+                )
+                .unwrap();
+
+            let reopened = fixture.reopen();
+            let version: i64 = reopened
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(version, 8, "the launch must have applied migration 8");
+
+            let after = SessionStore::new(&reopened)
+                .unwrap()
+                .get(&record.id)
+                .unwrap()
+                .expect("the pre-migration session must survive");
+
+            // Everything migration 7 knew about, byte for byte.
+            assert_eq!(after.id, before.id);
+            assert_eq!(after.project_id, before.project_id);
+            assert_eq!(after.harness, before.harness);
+            assert_eq!(after.native_session_id, before.native_session_id);
+            assert_eq!(after.role, before.role);
+            assert_eq!(after.lifecycle, before.lifecycle);
+            assert_eq!(after.presentation, before.presentation);
+            assert_eq!(after.created_at, before.created_at);
+            assert_eq!(after.last_activity_at, before.last_activity_at);
+            assert_eq!(after.launch_profile, before.launch_profile);
+            assert_eq!(after.backend_resource, before.backend_resource);
+
+            // And the seven new columns are NULL rather than guessed at: a
+            // session recorded before migration 8 ran under a response profile
+            // Glasshouse never wrote down, which is a different fact from having
+            // run the default one.
+            assert_eq!(after.model, None);
+            assert_eq!(after.pairing_class, None);
+            assert_eq!(after.protocol, None);
+            assert_eq!(after.response_profile, None);
+            assert_eq!(after.response_mechanism, None);
+            assert_eq!(after.display_name, None);
+            assert_eq!(after.purpose, None);
+
+            // The upgraded database is fully usable: the old row can still be
+            // renamed and tagged, and a new session records all seven.
+            let migrated_store = SessionStore::new(&reopened).unwrap();
+            let renamed = migrated_store
+                .rename(&record.id, &SessionName::parse("survivor").unwrap())
+                .unwrap();
+            assert_eq!(
+                renamed.display_name.as_ref().map(SessionName::as_str),
+                Some("survivor")
+            );
+            assert_eq!(renamed.native_session_id, before.native_session_id);
+        }
     }
 }
 

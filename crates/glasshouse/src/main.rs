@@ -21,11 +21,11 @@ use glasshouse::profile::response::{Dimension, Role as ResponseRole};
 use glasshouse::pty::ExitStatus;
 use glasshouse::session;
 use glasshouse::session::{
-    NewSession, ProjectSessions, SessionDisposition, SessionId, SessionLifecycle,
-    SessionPresentation, SessionRuntime,
+    NewSession, ProjectSessions, SessionDisposition, SessionId, SessionLifecycle, SessionName,
+    SessionPresentation, SessionProtocol, SessionPurpose, SessionRecord, SessionRuntime,
 };
 use glasshouse::shim::{self, ShimRequest};
-use glasshouse::{Cli, Command, MemoryCommand, Runtime, logging, shutdown};
+use glasshouse::{Cli, Command, MemoryCommand, Runtime, SessionCommand, logging, shutdown};
 
 use clap::Parser;
 
@@ -125,9 +125,43 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             };
             print!("{}", config::response::report(&effective, &request));
         }
-        Some(Command::Sessions) => {
-            print!("{}", session_report(&runtime)?);
-        }
+        Some(Command::Sessions { command }) => match command {
+            // The bare command still lists, which is what every existing
+            // caller and every printed identifier assumes.
+            None => print!("{}", session_report(&runtime)?),
+            Some(SessionCommand::Show { session }) => {
+                print!("{}", session_detail(&runtime, session)?);
+            }
+            Some(SessionCommand::Rename {
+                session,
+                name,
+                clear,
+            }) => match rename_session(&runtime, session, name.as_deref(), *clear) {
+                Ok(report) => print!("{report}"),
+                Err(err) => {
+                    eprintln!("glasshouse: {err}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            },
+            Some(SessionCommand::Tag {
+                session,
+                purpose,
+                clear,
+            }) => match tag_session(&runtime, session, purpose.as_deref(), *clear) {
+                Ok(report) => print!("{report}"),
+                Err(err) => {
+                    eprintln!("glasshouse: {err}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            },
+            Some(SessionCommand::Close { session }) => match close_session(&runtime, session) {
+                Ok(report) => print!("{report}"),
+                Err(err) => {
+                    eprintln!("glasshouse: {err}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            },
+        },
         // `run` and `launch` dispatch through this one arm on purpose — see
         // `Command::Run`'s doc. A change to how a launch is assembled can
         // only ever be made here, once, so the two can never diverge.
@@ -451,12 +485,29 @@ fn launch_session(
     } else {
         SessionPresentation::Embedded
     };
+    // Phase 10 line 645: the seven facts, recorded as seven facts.
+    //
+    // `pairing` is asked once and its three answers are read off separately —
+    // the model, the class and the wire protocol — because they are three
+    // different questions about the same session and a single "agent" string
+    // holding all of them is exactly what this phase's second architectural
+    // requirement forbids. The response profile beside them is communication
+    // policy and nothing else: it cannot say which model ran, and the model
+    // cannot say how the answer should read.
+    let pairing = session_pairing(&effective, &launch_profile);
     let record = store.create(
         NewSession::embedded(selection.id().slug())
             .with_presentation(presentation)
             .with_native_session_id(native.clone())
             .with_launch_profile(Some(launch_profile.name.clone()))
-            .with_backend_resource(Some(launch_profile.backend.slug())),
+            .with_backend_resource(Some(launch_profile.backend.slug()))
+            .with_model(Some(pairing.model().clone()))
+            .with_pairing_class(Some(session::session_pairing_class(pairing.class())))
+            .with_protocol(Some(session::session_protocol(pairing.route().protocol)))
+            .with_response_profile(Some(response_profile.resolved().profile()))
+            .with_response_mechanism(Some(session::session_response_mechanism(
+                response_application.mechanism(),
+            ))),
     )?;
 
     // Read before the harness runs, for a harness that keeps its identifiers
@@ -1993,6 +2044,59 @@ fn memory_extract(
     Ok(out)
 }
 
+/// The pairing this session's launch profile answers to — Phase 9J's
+/// question, asked on the launch path so a session can record the answer.
+///
+/// # It goes through `pairing_queries`, which is what `glasshouse pairing`
+/// prints from
+///
+/// A second construction of the same `PairingQuery` here would be a second
+/// place for the provider lookup, the protocol fallback and the tool-call
+/// declaration to be wrong, and the two would eventually disagree about the
+/// same profile — one of them on screen and the other in the database, where
+/// nobody would see it. So the configured profiles are asked by name.
+///
+/// # The one profile that is not in that list
+///
+/// The implied Native profile exists for every harness by construction rather
+/// than by configuration, so `pairing_queries` deliberately omits it — see
+/// its own doc comment. For that profile the question has one honest answer
+/// and it needs no lookup: it names no model and no provider, so nothing
+/// establishes a relationship, and the classifier is still the thing that
+/// says so rather than a constant written here.
+fn session_pairing(
+    effective: &EffectiveConfig<'_>,
+    profile: &glasshouse::profile::LaunchProfile,
+) -> glasshouse::harness::pairing::Pairing {
+    use glasshouse::harness::Declared;
+    use glasshouse::harness::pairing::{PairingQuery, ServingRoute, classify};
+    use glasshouse::routing::AssignedModel;
+
+    let overrides = effective.pairing_overrides();
+    let configured = effective
+        .pairing_queries()
+        .into_iter()
+        .find(|configured| configured.name() == profile.name)
+        .and_then(|configured| configured.query().cloned());
+
+    let query = configured.unwrap_or_else(|| PairingQuery {
+        harness: profile.harness,
+        model: match &profile.model {
+            Some(model) => AssignedModel::named(model),
+            None => AssignedModel::HarnessDefault,
+        },
+        route: ServingRoute {
+            provider: None,
+            gateway: None,
+            protocol: profile.expected_protocol,
+        },
+        tool_calls: Declared::Unverified,
+        provider_protocols: Vec::new(),
+    });
+
+    classify(&query, &overrides)
+}
+
 fn session_report(runtime: &Runtime) -> anyhow::Result<String> {
     use std::fmt::Write as _;
 
@@ -2012,6 +2116,8 @@ fn session_report(runtime: &Runtime) -> anyhow::Result<String> {
         "{}",
         session_row(
             "SESSION",
+            "NAME",
+            "PURPOSE",
             "HARNESS",
             "PROFILE",
             "STATE",
@@ -2021,24 +2127,29 @@ fn session_report(runtime: &Runtime) -> anyhow::Result<String> {
         )
     );
     for record in &records {
-        let state = match record.disposition() {
-            SessionDisposition::Active => "active",
-            SessionDisposition::Resumable => "resumable",
-            SessionDisposition::Closed => "closed",
-            SessionDisposition::Failed => "failed",
-        };
         let _ = writeln!(
             out,
             "{}",
             session_row(
                 &short_id(&record.id),
+                // A name and a purpose are the user's, and most sessions have
+                // neither. A dash rather than a blank: an empty cell in a
+                // fixed-width table reads as a rendering fault.
+                record
+                    .display_name
+                    .as_ref()
+                    .map_or("-", |name| name.as_str()),
+                record
+                    .purpose
+                    .as_ref()
+                    .map_or("-", |purpose| purpose.as_str()),
                 &record.harness,
                 // A dash, not the word "native": a session recorded before
                 // Phase 9A ran under no profile at all, and that is a
                 // different fact from having run the Native profile — see
                 // `SessionRecord::launch_profile`'s doc.
                 record.launch_profile.as_deref().unwrap_or("-"),
-                state,
+                disposition_word(record),
                 &record.role.to_string(),
                 &record.presentation.to_string(),
                 &format_age(record.last_activity_at),
@@ -2053,8 +2164,11 @@ fn session_report(runtime: &Runtime) -> anyhow::Result<String> {
 /// The header and the rows go through the same function so their columns
 /// cannot drift apart — the usual way a hand-aligned table stops lining up is
 /// someone widening a column in one of the two format strings.
+#[allow(clippy::too_many_arguments)]
 fn session_row(
     session: &str,
+    name: &str,
+    purpose: &str,
     harness: &str,
     profile: &str,
     state: &str,
@@ -2063,10 +2177,12 @@ fn session_row(
     activity: &str,
 ) -> String {
     // Widths fit the longest value each column can hold: `resumable`,
-    // `orchestrator`, `embedded`.
+    // `orchestrator`, `embedded`. `name` and `purpose` are the two the user
+    // controls, and they are truncated by the format rather than bounded
+    // here — the store already refuses anything longer than 64 and 32.
     format!(
-        "{session:<12}  {harness:<14}  {profile:<12}  {state:<9}  {role:<12}  {presented:<9}  \
-         {activity}"
+        "{session:<12}  {name:<16}  {purpose:<10}  {harness:<14}  {profile:<12}  {state:<9}  \
+         {role:<12}  {presented:<9}  {activity}"
     )
 }
 
@@ -2076,6 +2192,216 @@ fn session_row(
 /// command taking a session takes; this is only for the eye.
 fn short_id(id: &glasshouse::session::SessionId) -> String {
     id.as_str().chars().take(12).collect()
+}
+
+/// Everything one session recorded, one fact per line.
+///
+/// # Seven answers, not one
+///
+/// The harness, the launch profile, the backend resource, the model, the
+/// pairing class, the wire protocol and the response profile each get their
+/// own line, printed from their own column, with no line derived from
+/// another. That is the phase's second fixed architectural requirement made
+/// visible: a reader can see that Glasshouse holds them apart, and a build
+/// that started filling one in from another would show it here.
+///
+/// # A dash is not a value
+///
+/// `-` means *this build recorded nothing here*, which is what a session
+/// started before these columns existed leaves behind. It is deliberately
+/// different from `unknown` and from `the harness's own default`, both of
+/// which are answers Glasshouse recorded on purpose.
+fn session_detail(runtime: &Runtime, session: &str) -> anyhow::Result<String> {
+    use std::fmt::Write as _;
+
+    let sessions = ProjectSessions::open(runtime)?;
+    let store = sessions.store();
+    let id = store.resolve_id(session)?;
+    let record = store
+        .get(&id)?
+        .ok_or_else(|| anyhow::anyhow!("session `{id}` is not in this project"))?;
+
+    let mut out = String::new();
+    let mut line = |label: &str, value: &str| {
+        let _ = writeln!(out, "{label:<19}{value}");
+    };
+
+    line("session", record.id.as_str());
+    line(
+        "name",
+        record.display_name.as_ref().map_or("-", |n| n.as_str()),
+    );
+    line(
+        "purpose",
+        record.purpose.as_ref().map_or("-", |p| p.as_str()),
+    );
+    line("project", &record.project_id);
+    line("harness", &record.harness);
+    line(
+        "native session",
+        record.native_session_id.as_deref().unwrap_or("-"),
+    );
+    line("state", disposition_word(&record));
+    line("lifecycle", record.lifecycle.as_str());
+    line("role", record.role.as_str());
+    line("presented", record.presentation.as_str());
+    line(
+        "launch profile",
+        record.launch_profile.as_deref().unwrap_or("-"),
+    );
+    line(
+        "backend resource",
+        record.backend_resource.as_deref().unwrap_or("-"),
+    );
+    line("model", record.model.as_ref().map_or("-", |m| m.label()));
+    line(
+        "pairing class",
+        record
+            .pairing_class
+            .map_or("-", glasshouse::session::SessionPairingClass::as_str),
+    );
+    line(
+        "protocol",
+        record.protocol.map_or("-", SessionProtocol::as_str),
+    );
+    line("response profile", &response_profile_line(&record));
+    line(
+        "response mechanism",
+        record
+            .response_mechanism
+            .map_or("-", glasshouse::session::ResponseMechanism::as_str),
+    );
+    line("created", &format_age(record.created_at));
+    line("last activity", &format_age(record.last_activity_at));
+    Ok(out)
+}
+
+/// A session's five response axes on one line, or `-` when none was recorded.
+///
+/// Rendered from `ResponseProfile::axes`, so the five names and the five
+/// values come from `profile::response` rather than from a second list here.
+fn response_profile_line(record: &SessionRecord) -> String {
+    match &record.response_profile {
+        Some(profile) => profile
+            .axes()
+            .iter()
+            .map(|(dimension, value)| format!("{}={value}", dimension.slug()))
+            .collect::<Vec<_>>()
+            .join("  "),
+        None => "-".to_owned(),
+    }
+}
+
+/// Which of the four categories a session list has to separate.
+///
+/// One function, used by both the listing and the detail view, so the two can
+/// never disagree about whether a session is resumable.
+fn disposition_word(record: &SessionRecord) -> &'static str {
+    match record.disposition() {
+        SessionDisposition::Active => "active",
+        SessionDisposition::Resumable => "resumable",
+        SessionDisposition::Closed => "closed",
+        SessionDisposition::Failed => "failed",
+    }
+}
+
+/// Give a session a name, or take its name away — line 650.
+///
+/// The report says the native session identifier afterwards, and says it is
+/// unchanged. That is the capability's own promise, and a promise a user
+/// cannot see is one they have to take on trust.
+fn rename_session(
+    runtime: &Runtime,
+    session: &str,
+    name: Option<&str>,
+    clear: bool,
+) -> anyhow::Result<String> {
+    let sessions = ProjectSessions::open(runtime)?;
+    let store = sessions.store();
+    let id = store.resolve_id(session)?;
+    let before = store
+        .get(&id)?
+        .ok_or_else(|| anyhow::anyhow!("session `{id}` is not in this project"))?;
+
+    let record = if clear {
+        store.clear_name(&id)?
+    } else {
+        let name = name.expect("clap requires a name unless --clear was given");
+        store.rename(&id, &SessionName::parse(name)?)?
+    };
+
+    // Read back from the row rather than from what was asked for: the point
+    // of the line is that one column changed and another did not.
+    let native = record
+        .native_session_id
+        .as_deref()
+        .unwrap_or("none recorded");
+    debug_assert_eq!(before.native_session_id, record.native_session_id);
+    Ok(match &record.display_name {
+        Some(name) => format!(
+            "Session {} is now `{name}`.\nIts native session id is unchanged: {native}\n",
+            short_id(&record.id)
+        ),
+        None => format!(
+            "Session {} has no name.\nIts native session id is unchanged: {native}\n",
+            short_id(&record.id)
+        ),
+    })
+}
+
+/// Tag a session with a lightweight purpose, or clear the tag — line 651.
+fn tag_session(
+    runtime: &Runtime,
+    session: &str,
+    purpose: Option<&str>,
+    clear: bool,
+) -> anyhow::Result<String> {
+    let sessions = ProjectSessions::open(runtime)?;
+    let store = sessions.store();
+    let id = store.resolve_id(session)?;
+
+    let record = if clear {
+        store.clear_purpose(&id)?
+    } else {
+        let purpose = purpose.expect("clap requires a purpose unless --clear was given");
+        store.set_purpose(&id, &SessionPurpose::parse(purpose)?)?
+    };
+
+    Ok(match &record.purpose {
+        Some(purpose) => format!("Session {} is tagged `{purpose}`.\n", short_id(&record.id)),
+        None => format!("Session {} has no purpose tag.\n", short_id(&record.id)),
+    })
+}
+
+/// Retire Glasshouse's record of a session — line 654.
+///
+/// The second line is the whole of the capability's second half, said out
+/// loud: Glasshouse closed its own record and touched nothing the harness
+/// owns. The native session identifier is printed because it is what a person
+/// would use to find that history afterwards, and printing it is the proof
+/// that closing did not take it away.
+fn close_session(runtime: &Runtime, session: &str) -> anyhow::Result<String> {
+    let sessions = ProjectSessions::open(runtime)?;
+    let store = sessions.store();
+    let id = store.resolve_id(session)?;
+    let record = store.close(&id)?;
+
+    let mut out = format!(
+        "Closed Glasshouse's record of session {}.\n",
+        short_id(&record.id)
+    );
+    let kept = match &record.native_session_id {
+        Some(native) => format!(
+            "The {} session `{native}` was not touched: Glasshouse does not \
+             own that history and did not delete it.\n",
+            record.harness
+        ),
+        None => "No native session was ever recorded for it, so there was no \
+                 harness history to keep or lose.\n"
+            .to_owned(),
+    };
+    out.push_str(&kept);
+    Ok(out)
 }
 
 /// A rough "how long ago", which is what a session list is actually read for.
@@ -2599,6 +2925,8 @@ mod tests {
     fn listing_columns_line_up_between_the_header_and_a_row() {
         let header = session_row(
             "SESSION",
+            "NAME",
+            "PURPOSE",
             "HARNESS",
             "PROFILE",
             "STATE",
@@ -2608,6 +2936,8 @@ mod tests {
         );
         let row = session_row(
             "abc123",
+            "the auth probe",
+            "auth",
             "claude-code",
             "native",
             "resumable",

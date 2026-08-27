@@ -670,6 +670,17 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
                  VALUES (NEW.rowid, NEW.subject, NEW.body);
              END;
 
+             -- Migration 8's columns go with the row that records it: the
+             -- runner resumes from MAX(version), so leaving them behind
+             -- re-applies 8 against a table that already has them.
+             ALTER TABLE sessions DROP COLUMN model;
+             ALTER TABLE sessions DROP COLUMN pairing_class;
+             ALTER TABLE sessions DROP COLUMN protocol;
+             ALTER TABLE sessions DROP COLUMN response_profile;
+             ALTER TABLE sessions DROP COLUMN response_mechanism;
+             ALTER TABLE sessions DROP COLUMN display_name;
+             ALTER TABLE sessions DROP COLUMN purpose;
+
              DELETE FROM schema_migrations WHERE version >= 6;",
         )
         .unwrap();
@@ -701,8 +712,8 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
         })
         .unwrap();
     assert_eq!(
-        version, 7,
-        "the launch must have applied migrations 6 and 7"
+        version, 8,
+        "the launch must have applied migrations 6, 7 and 8"
     );
     drop(conn);
 
@@ -889,6 +900,17 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
                  SELECT RAISE(ABORT, 'the project event log is append-only');
              END;
 
+             -- Migration 8's columns go with the row that records it: the
+             -- runner resumes from MAX(version), so leaving them behind
+             -- re-applies 8 against a table that already has them.
+             ALTER TABLE sessions DROP COLUMN model;
+             ALTER TABLE sessions DROP COLUMN pairing_class;
+             ALTER TABLE sessions DROP COLUMN protocol;
+             ALTER TABLE sessions DROP COLUMN response_profile;
+             ALTER TABLE sessions DROP COLUMN response_mechanism;
+             ALTER TABLE sessions DROP COLUMN display_name;
+             ALTER TABLE sessions DROP COLUMN purpose;
+
              DELETE FROM schema_migrations WHERE version >= 7;",
         )
         .unwrap();
@@ -918,7 +940,10 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(version, 7, "the launch must have applied migration 7");
+    assert_eq!(
+        version, 8,
+        "the launch must have applied migrations 7 and 8"
+    );
     drop(conn);
 
     // The memory's own range is untouched by the migration...

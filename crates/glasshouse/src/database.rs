@@ -55,9 +55,12 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// to `lifecycle_events.kind` and adds the three columns that carry it,
 /// rebuilding the table rather than altering its `CHECK` — see the
 /// migration's own doc comment for why `seq` survives that rebuild unchanged.
-/// Later migrations are appended to [`MIGRATIONS`], and this constant moves
-/// with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 7;
+/// Version 8 adds the rest of what Phase 10 line 645 requires a session to
+/// record — `model`, `pairing_class`, `protocol`, `response_profile` and
+/// `response_mechanism` — plus the two labels a person owns, `display_name`
+/// and `purpose`. Later migrations are appended to [`MIGRATIONS`], and this
+/// constant moves with them.
+const SUPPORTED_SCHEMA_VERSION: i64 = 8;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -800,6 +803,96 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
     BEGIN
         SELECT RAISE(ABORT, 'the project event log is append-only');
     END;
+    ",
+    // 8: the rest of Phase 10 line 645 — *"store the harness, launch profile,
+    // backend resource, model, pairing class, protocol, and response profile
+    // as distinct session metadata"* — and the two labels lines 650 and 651
+    // give the user.
+    //
+    // # Seven columns, and why not fewer
+    //
+    // The phase's second fixed architectural requirement is that these things
+    // *"remain separately represented rather than collapsed into one
+    // ambiguous agent identifier"*. A column each is what that means at the
+    // storage layer, and the Rust side carries it further: each one reads
+    // back as its own type, so a build that assigned the pairing class from
+    // the launch profile would not compile. See `session::store`.
+    //
+    // # `ALTER TABLE ADD COLUMN`, never a rebuild
+    //
+    // Migration 3 is the shape: append a column, leave every existing row
+    // alone. A rewrite would be refused here for migration 7's reason —
+    // rebuilding a table risks the data that already lives in it — and none
+    // of these needs one, because none of them adds or drops a constraint on
+    // a column that already exists.
+    //
+    // # What NULL means, and what it must never be allowed to mean
+    //
+    // NULL is *"the build that wrote this row recorded nothing here"*, exactly
+    // as it is for `launch_profile`. That is why `model` does not simply hold
+    // a model id: *"Glasshouse assigned no model, so the harness chose"* is a
+    // real recorded answer and a different fact from *"this was never
+    // recorded"*, and a bare id column would have had one slot for both. So
+    // the column holds `harness-default` or `named:<id>`, which cannot
+    // collide however a model is named. `pairing_class` and `protocol` have
+    // the same problem and already have their own words for it: `unknown` is
+    // a recorded answer, NULL is not an answer at all.
+    //
+    // # The `CHECK`s copy three vocabularies, on purpose
+    //
+    // `pairing_class`, `protocol` and `response_mechanism` are owned by
+    // `harness::pairing`, `harness` and `harness::response` respectively, so
+    // the lists below are second copies and could drift. They are here for
+    // migration 2's reason — a future writer must not be able to store a
+    // value readers would have to guess about — and the drift is answered the
+    // way `LIFECYCLE_EVENT_KINDS` answers it: `session::store` encodes each
+    // one through an exhaustive `match` (so a new variant is a compile error
+    // there) and `every_stored_vocabulary_is_one_the_schema_accepts` inserts
+    // every variant through the schema.
+    //
+    // `response_profile` gets no `CHECK`. It is five axes joined, not one
+    // word, and pinning 4 x 3 x 3 x 3 x 3 combinations in SQL would be a
+    // vocabulary this file has no business holding. An encoding the reader
+    // does not recognise is reported as `SessionStoreError::UnknownValue`
+    // rather than guessed at, which is the same visible-degradation rule the
+    // enum columns follow when a row arrives from a newer build.
+    "
+    ALTER TABLE sessions ADD COLUMN model TEXT
+        CHECK (model IS NULL
+               OR model = 'harness-default'
+               OR (substr(model, 1, 6) = 'named:' AND length(model) > 6));
+
+    ALTER TABLE sessions ADD COLUMN pairing_class TEXT
+        CHECK (pairing_class IS NULL
+               OR pairing_class IN ('vendor-native', 'vendor-supported',
+                                    'protocol-native', 'protocol-compatible',
+                                    'protocol-translated', 'unknown'));
+
+    ALTER TABLE sessions ADD COLUMN protocol TEXT
+        CHECK (protocol IS NULL
+               OR protocol IN ('anthropic-messages', 'openai-responses',
+                               'openai-chat', 'unknown'));
+
+    ALTER TABLE sessions ADD COLUMN response_profile TEXT;
+
+    ALTER TABLE sessions ADD COLUMN response_mechanism TEXT
+        CHECK (response_mechanism IS NULL
+               OR response_mechanism IN ('native', 'additive', 'none'));
+
+    -- A name a person gave this session. Never the native session
+    -- identifier, which lives in its own column and which renaming does not
+    -- touch -- line 650.
+    ALTER TABLE sessions ADD COLUMN display_name TEXT
+        CHECK (display_name IS NULL
+               OR (display_name <> '' AND length(display_name) <= 64));
+
+    -- A lightweight purpose such as auth, tests, or research -- line 651.
+    -- Free text rather than an enumeration: the map says such as, so the
+    -- three it names are examples, and a fixed list would refuse the fourth
+    -- thing a user actually does.
+    ALTER TABLE sessions ADD COLUMN purpose TEXT
+        CHECK (purpose IS NULL
+               OR (purpose <> '' AND length(purpose) <= 32));
     ",
 ];
 

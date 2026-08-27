@@ -145,12 +145,21 @@ pub enum Command {
         #[arg(long, value_name = "VALUE")]
         format: Option<String>,
     },
-    /// List the sessions Glasshouse has recorded for this project.
+    /// List the sessions Glasshouse has recorded for this project, or act on
+    /// one of them.
     ///
     /// Glasshouse keeps its own record of every session it starts, separate
     /// from whatever session files the harness writes for itself, so the list
     /// is the same whether or not a harness kept its own history.
-    Sessions,
+    ///
+    /// With no subcommand this prints the list, which is what it has always
+    /// done. `show` prints everything one session recorded; `rename`, `tag`
+    /// and `close` are the three things a person can change about a record,
+    /// and none of them touches the harness's own history.
+    Sessions {
+        #[command(subcommand)]
+        command: Option<SessionCommand>,
+    },
     /// Search this project's durable memory.
     ///
     /// Memory is project-scoped: this reads the database belonging to the
@@ -758,6 +767,73 @@ pub enum CheckpointCommand {
 /// A subcommand rather than a bare `glasshouse memory <query>` because Phase
 /// 48 names the command `glasshouse memory search <query>`, and because
 /// memory will grow operations that are not searches.
+/// Things a person can do to one recorded session.
+///
+/// Three of the four change something, which is why they are subcommands
+/// rather than flags on the listing: renaming, tagging and closing are user
+/// actions on a record, and a report is not the place to hide one.
+#[derive(Debug, Subcommand)]
+pub enum SessionCommand {
+    /// Print everything Glasshouse recorded about one session.
+    ///
+    /// The harness, the launch profile, the backend resource, the model, the
+    /// pairing class, the wire protocol and the response profile are printed
+    /// as seven separate answers, because they are seven separate facts —
+    /// collapsing them into one "agent" line is what the session model exists
+    /// to prevent.
+    Show {
+        /// The session, or the leading part of its identifier.
+        session: String,
+    },
+
+    /// Give a session a name of your own.
+    ///
+    /// The name is Glasshouse's own label. It never changes the harness's
+    /// native session identifier, which is what a resume continues from, and
+    /// it never changes the Glasshouse session identifier either.
+    Rename {
+        /// The session, or the leading part of its identifier.
+        session: String,
+
+        /// The new name. Omit it with `--clear` to remove one.
+        #[arg(value_name = "NAME", required_unless_present = "clear")]
+        name: Option<String>,
+
+        /// Remove the session's name instead of setting one.
+        #[arg(long, conflicts_with = "name")]
+        clear: bool,
+    },
+
+    /// Tag a session with a lightweight purpose, such as `auth`, `tests`, or
+    /// `research`.
+    ///
+    /// Free text: the three above are examples, not a list to choose from.
+    Tag {
+        /// The session, or the leading part of its identifier.
+        session: String,
+
+        /// The purpose. Omit it with `--clear` to remove one.
+        #[arg(value_name = "PURPOSE", required_unless_present = "clear")]
+        purpose: Option<String>,
+
+        /// Remove the session's purpose instead of setting one.
+        #[arg(long, conflicts_with = "purpose")]
+        clear: bool,
+    },
+
+    /// Retire Glasshouse's record of a session.
+    ///
+    /// This closes Glasshouse's own record and nothing else. The harness's
+    /// session files are not read, not moved and not deleted — Glasshouse
+    /// does not own them — and the native session identifier stays recorded,
+    /// so the history remains findable afterwards. A session that is still
+    /// running is refused rather than closed underneath itself.
+    Close {
+        /// The session, or the leading part of its identifier.
+        session: String,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 pub enum MemoryCommand {
     /// Find memories matching free-form text.

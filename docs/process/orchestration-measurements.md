@@ -1458,3 +1458,92 @@ explained why nothing inside `next()` can close the window — once crossterm is
 wedged the main thread cannot observe the flag, a signal, or even a closed
 descriptor — and proposed the watchdog. A bare prohibition would have produced a
 quiet workaround instead.
+
+## Batch 28 — the VM's first honest run, and a lead that refused a trade
+
+Two Opus workers in parallel: `windows-session` (specialist) and
+`lead-session-model` (team lead, ran it itself). Both PASS.
+
+| | `windows-session` | `lead-session-model` |
+|---|---|---|
+| boxes | 0 — a defect package | **14 of 14**, 0 blocked |
+| mutations | 4 run, 4 killed, **on the VM** | 18 run, 18 killed |
+| gate | 13/13 plus Windows | 13/13, twice |
+| delivered | 36 lines of test fix, 134 in `ci-local.sh` | 2,019 lines across 13 files + 2 new |
+
+### "1069 passed, 1 failed" was a truncated run reported as a near-perfect one
+
+`cargo test` stops after the first failing test **binary**. One failing library
+test meant the three integration suites after it had **never executed on
+Windows at all**. Repairing that one test let the run reach them and found four
+more failures on an unmodified tree.
+
+**The transferable rule: a suite that stops at the first failing binary reports
+a floor, not a result.** Any "N passed, 1 failed" from a multi-binary suite is
+worth re-reading as "N passed, 1 failed, and an unknown number never ran."
+
+### A test defect that looked exactly like a product defect
+
+The orchestrator handed over five observations, all consistent with "the child
+runs and its output is lost" *and* with "the child never runs". Those prescribe
+different fixes, so the worker made the cause **predict something the symptom
+did not already say**: it gave a harness a side channel outside the pty. With
+nobody answering ConPTY's `ESC[6n`, the marker file did not exist after three
+seconds. **The child had not started.** ConPTY does not start it until the DSR
+query is answered, and Glasshouse *is* the terminal for an embedded session.
+
+All five orchestrator findings survived, explained by one cause, and the fix was
+in the **test** — which had modelled an owner of a `SessionRuntime` that cannot
+exist, since every real one answers terminal queries on every pass.
+
+### What a green Windows suite has been worth, measured
+
+Two `session::api` tests were shown, by the same side-channel technique, to hold
+their assertions **while the child never started and produced not one byte**.
+42 further tests are `#[cfg(unix)]`. Interrupt delivery to a real Windows child,
+resize reaching one, and session resume are proven by nothing.
+
+Sharpest of all: `an_embedded_session_answers_the_cursor_position_query_itself`
+is `#[cfg(unix)]` — the DSR mechanism is tested only where answering is
+**optional** and not where it is the difference between a session and a hang.
+
+### The lead refused to close a new box by breaking a shipped one
+
+`session/store.rs` may not name `crate::harness` — Phase 6 line 294, a
+**checked** box guarded by a source scan. The packet's central instruction was
+to store `PairingClass` there. Its first implementation did, that guard failed,
+and it redesigned rather than weakening the guard: the store has its own
+vocabulary and `session/mod.rs` holds three total conversions.
+
+**And the constraint turned out to be right for a reason neither of us had.** A
+stored vocabulary and a live one have different lifetimes: a row written last
+month must stay readable when `PairingClass` gains a seventh variant, and two
+types with an exhaustive function between them make that a compile error at the
+one place someone has to decide what it means on disk. A shared enum would have
+made it a silent constraint violation on a background write.
+
+### The packet's line numbers were stale, and that is the orchestrator's defect
+
+It cited nine box lines by number; the map had moved twice — partly from this
+same session's own tick edits — and the offsets were not uniform. The worker
+used `scripts/discover.py --phase 10` and lost nothing.
+
+**Cite a box by number *and* by text.** A packet that names a line only by
+number is one a worker cannot check, and this orchestrator has now shipped that
+defect twice in one day.
+
+### Subcontracting declined, with the reasoning
+
+Risk routing puts project/session isolation, migrations and durable state in
+Red, which is substantially the whole package; the one Amber slice (the CLI
+surface) prints exactly the columns the migration decides, so splitting it would
+have been two workers on one design. ~50 minutes wall clock, one Opus context,
+2,019 lines. Worth having as a data point against the team-lead batches: at this
+size, one specialist beat a lead-plus-subcontractor on overhead.
+
+### §40 violated by a worker, and reported
+
+It found one of its own backgrounded `cargo test` runs still going while it
+started the gate, killed it, and **declined to quote any timing from that
+window**. Nothing failed during the overlap. Reporting a contaminated
+measurement as contaminated is the behaviour the rule is for.

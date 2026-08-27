@@ -337,15 +337,41 @@ mod tests {
             .unwrap();
     }
 
-    fn wait_for(mut condition: impl FnMut() -> bool) {
+    /// Drive the runtime the way an owner of one does, until `done` is
+    /// satisfied, and fail with what was actually seen.
+    ///
+    /// `answer_terminal_queries` is in the loop because it is in every
+    /// production tick — `shell::run`'s and the headless launch loop in
+    /// `main.rs` both call it — and on Windows it is not a nicety. ConPTY
+    /// asks `ESC[6n` while bringing the pseudo-console up and **does not let
+    /// the child start** until something replies; Glasshouse is the terminal
+    /// for an embedded session, so nothing else can. Probed on the Windows
+    /// ARM64 CI VM: a harness whose first act was to write a file outside the
+    /// pty had still not written it three seconds after spawn, and the entire
+    /// scrollback was the one unanswered query. Answering produced the file,
+    /// the child's echo, and the buffered input, in that order.
+    ///
+    /// So a wait loop that only accumulates output is modelling an owner of a
+    /// [`SessionRuntime`] that cannot exist. This mirrors
+    /// `tests/events_lifecycle.rs`'s `drive` for the same reason.
+    fn drive(
+        live: &mut SessionRuntime,
+        what: &str,
+        mut done: impl FnMut(&mut SessionRuntime) -> bool,
+    ) {
         let deadline = Instant::now() + TIMEOUT;
-        while Instant::now() < deadline {
-            if condition() {
+        loop {
+            live.answer_terminal_queries();
+            live.poll_exits();
+            if done(live) {
                 return;
             }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what}; sessions: {live:?}"
+            );
             std::thread::sleep(POLL);
         }
-        panic!("timed out waiting for a condition to become true");
     }
 
     #[test]
@@ -414,7 +440,7 @@ mod tests {
             api.send_text(&record.id, "hello").unwrap();
         }
 
-        wait_for(|| {
+        drive(&mut live, "the harness to echo the line back", |live| {
             live.get(&record.id)
                 .map(|session| session.scrollback().contains("got:hello"))
                 .unwrap_or(false)

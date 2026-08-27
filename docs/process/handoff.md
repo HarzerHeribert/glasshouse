@@ -8,6 +8,32 @@ Last updated: 2026-08-27 (Europe/Berlin)
 
 ## Current capability / phase
 
+**Phase 10 is fourteen of fourteen** and **Windows is real evidence now.** A
+Windows 11 ARM64 VM runs this project's tests natively; `scripts/ci-local.sh
+--windows-vm` drives it through `glasshouse-windows-ci`, and the gate's
+`NOTE  Windows was not exercised at all` is now printed only when it is true.
+
+**The first Windows run found four defects that had never been seen**, and the
+reason they were invisible is worth more than any of them: `cargo test` stops
+after the first failing test binary, so a single failing library test meant
+**three integration suites had never executed on Windows at all.** "1069 passed,
+1 failed" was a truncated run reported as a near-perfect one.
+
+**Two are real product defects and neither is fixed** — see the next-action
+list. Two more are measured facts about what Windows coverage means here: two
+`session::api` tests **pass against a child that never started and produced not
+one byte**, and 42 tests are `#[cfg(unix)]` and never run on Windows at all.
+Interrupt delivery to a real Windows child, resize reaching one, and session
+resume are proven by **nothing**.
+
+**Phase 9K is twenty of thirty-seven; Phase 9J is nine of twenty**, and the
+eleven in 9J's second group are blocked with the phase each waits on named.
+
+**Phase 0 is closed, eight of eight**, after its dependency line was found to be
+unsatisfiable by any tree that also satisfied its own phase and the user
+reworded it.
+
+
 **Phase 9K is twenty of thirty-seven.** Groups 1 and 2 — the profile model and
 harness-native application — are closed and proven in the shipped binary:
 `glasshouse response` reports the resolved profile with the precedence layer
@@ -156,7 +182,67 @@ outside that partition and belong to a follow-up package:
 interrupt box below can finally be tested rather than compiled. Expect several
 jobs to fail at once on the first run; reconcile them in one sweep.
 
-**1. Three Phase 9K boxes are arguably closed and were left unticked.** The
+**`scripts/ci-local.sh --windows-vm` is expected RED, and that is the point.**
+On the current tree it reports `PASS test (windows) / build`,
+`FAIL test (windows) / test`, `PASS msrv (windows) 1.88`. The library suite is
+**1084 of 1084** (it was 1069 with one failure hiding three whole suites), and
+`events_lifecycle` then fails three — `a_stalled_event_consumer_does_not_stall_a_live_harness`,
+`a_quiet_harness_that_exits_cleanly_is_never_reported_as_having_finished` and
+`one_worker_crashing_leaves_unrelated_sessions_running`. `cargo test` stops
+there, so `pty_smoke`'s one failure is still behind them.
+
+**Do not chase that red by weakening a test.** It is the first accurate picture
+of Windows this project has ever had, and every one of those failures traces to
+the two product defects below. The gate's final line now distinguishes the
+cases: `Windows ran for real on the ARM64 VM. Those lines ARE evidence about
+Windows.`
+
+**1. Two Windows product defects, both found by the VM's first honest run.**
+
+**`OutputEnded` can never fire on Windows.** `runtime.rs`'s `pump()` uses
+`Ok(0) | Err(_) => break` as its only stop condition, and `pty/mod.rs:499-514`
+had **already written down** that Windows does not produce EOF there:
+
+> it must not treat "no more bytes" as its stop condition, because on Windows
+> that may never come while the pty is still held open. Treat "the process was
+> observed to have exited" as the authoritative stop condition on every
+> platform.
+
+A prediction recorded in the source and then not honoured. Consequence:
+`output_ended()` never becomes true, so `LifecycleEvent::OutputEnded` never
+reaches the event log, the shell's feed, or memory extraction's narrative.
+
+**On Windows you can enter a session and never get out.** `Ctrl-]` is not
+recognised — `pty_smoke::the_shell_enters_and_leaves_session_mode_in_a_real_terminal`
+fails 3 in 3, deterministic, not a flake. Isolated by a test in the same run:
+`q` exits cleanly, so the shell is fine and the escape chord is not. That is
+precisely the trap `is_session_escape`'s own doc comment says the single chord
+exists to prevent. `shell/state.rs:3554-3567`.
+
+Both are **Opus specialist**, both need the VM, and they belong together in one
+packet with the two `#[cfg(unix)]` tests that should have covered them —
+`an_embedded_session_answers_the_cursor_position_query_itself` and
+`every_startup_question_a_harness_asks_is_answered` test the DSR-answering
+mechanism **only on the platform where answering is optional**, and not on the
+one where it is the difference between a session and a hang.
+
+**2. `glasshouse-windows-ci` packages main, not your worktree.** It hardcodes
+`ci_repo="/Users/eneas/projects/glasshouse"`, so run from any worktree it
+tests **main** and reports the result as though it were about the tree you are
+standing in — the same wrong-green the Linux leg copies-instead-of-mounts to
+avoid. One line fixes it and **it is the user's file**, so it is a
+recommendation, not a change:
+
+    readonly ci_repo="${GLASSHOUSE_CI_REPO:-/Users/eneas/projects/glasshouse}"
+
+`ci-local.sh` handles both worlds already: it exports the worktree path if the
+helper honours the variable, and **skips with a reason rather than guessing** if
+it does not. Once that line is taken, the helper should move into
+`scripts/dev/` — a gate whose runner lives only in one person's `~/.local/bin`
+is a gate nobody else can run — but not before, and not with `ci_key` and
+`ci_lease_file` still absolute paths to a private key.
+
+**3. Three Phase 9K boxes are arguably closed and were left unticked.** The
 `response-profiles` worker built the additive `--append-system-prompt` path,
 which belongs to group 3, because its own line 604 requires recording that a
 native, **additive**, or fallback mechanism was applied — and with no additive
@@ -178,7 +264,7 @@ harness untouched in every respect. The packet's partition omitted
 patch. Whoever gives the shell's quick-open a launch profile should give it a
 response profile in the same change.
 
-**2. A second 100% CPU spin, pre-existing, and it loses keystrokes.** Found by
+**4. A second 100% CPU spin, pre-existing, and it loses keystrokes.** Found by
 `spin-residual` while attributing a resize regression; it is on `main` today and
 it needs **no hangup at all**.
 
@@ -214,7 +300,7 @@ watchdog thread blocked in `poll(fd, events: 0, -1)` — `POLLHUP`, `POLLERR` an
 and takes `shutdown::force_exit` if the loop has not ended within a tick or two.
 `force_exit` is private and `shutdown.rs` is Red tier (§61).
 
-**3. Phase 9J line 572 is probably in the wrong phase.** "Keep evidence for the
+**5. Phase 9J line 572 is probably in the wrong phase.** "Keep evidence for the
 same nominal model distinct across different harnesses, gateways,
 quantizations, model revisions, or protocol translations" is an
 evidence-*storage* requirement and is nearly word-for-word Phase 33A's *"Keep
@@ -223,7 +309,7 @@ routes, or changing stealth-model identities"*. Whoever builds 33A closes both
 or neither. Leaving it in 9J makes that phase read one line further from done
 than it is. **A map edit, so it needs the user.**
 
-**4. The residual `SIGABRT`, 1 in 37 runs.**
+**6. The residual `SIGABRT`, 1 in 37 runs.**
 `pty_smoke::a_direct_provider_profile_reaches_a_real_child_and_only_that_child`
 fails with the child killed by signal 6. It is **not** the drain race that was
 just fixed. Four hypotheses are already ruled out with data — the `EIO` theory
@@ -231,7 +317,7 @@ just fixed. Four hypotheses are already ruled out with data — the `EIO` theory
 (2400 spawns), and mislabelling — and `report-PTY-FLAKE.md` §6 ranks where to
 look next, starting with `std::env::set_var` in a threaded test binary.
 
-**5. Phase 9I line 528** is the last free-pool line: `Allowance` separates
+**7. Phase 9I line 528** is the last free-pool line: `Allowance` separates
 request pools from token-priced allowances and only the request-pool half has a
 production feed. It needs a source for "this credential is priced per token".
 Deliberately not solved by parsing rate-limit headers on the forwarding path —

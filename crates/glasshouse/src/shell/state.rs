@@ -3617,6 +3617,13 @@ mod tests {
             last_activity_at: 1_000,
             launch_profile: None,
             backend_resource: None,
+            model: None,
+            pairing_class: None,
+            protocol: None,
+            response_profile: None,
+            response_mechanism: None,
+            display_name: None,
+            purpose: None,
         }
     }
 
@@ -4157,6 +4164,13 @@ mod native_input_tests {
             last_activity_at: 0,
             launch_profile: None,
             backend_resource: None,
+            model: None,
+            pairing_class: None,
+            protocol: None,
+            response_profile: None,
+            response_mechanism: None,
+            display_name: None,
+            purpose: None,
         };
         let mut state = ShellState::new("p", "/p", "0.1.0", vec![record]);
         state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -4261,6 +4275,13 @@ mod settings_tests {
             last_activity_at: 0,
             launch_profile: None,
             backend_resource: None,
+            model: None,
+            pairing_class: None,
+            protocol: None,
+            response_profile: None,
+            response_mechanism: None,
+            display_name: None,
+            purpose: None,
         }
     }
 
@@ -5771,6 +5792,13 @@ mod overview_tests {
             last_activity_at: 0,
             launch_profile: None,
             backend_resource: None,
+            model: None,
+            pairing_class: None,
+            protocol: None,
+            response_profile: None,
+            response_mechanism: None,
+            display_name: None,
+            purpose: None,
         }
     }
 

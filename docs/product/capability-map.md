@@ -638,20 +638,20 @@ Fixed architectural requirements
 - Every interactive Glasshouse session is owned by a real harness.
 - Harness, launch profile, backend, provider, gateway, model, protocol, pairing class, and response profile remain separately represented rather than collapsed into one ambiguous agent identifier.
 
-☐ Represent every native harness execution as a first-class Glasshouse session.
-☐ Assign every Glasshouse session a unique Glasshouse session ID.
-☐ Store the harness type for every session.
-☐ Store the native session ID separately from the Glasshouse session ID.
-☐ Store the harness, launch profile, backend resource, model, pairing class, protocol, and response profile as distinct session metadata.
-☐ Never represent a direct API or gateway backend as an interactive Glasshouse session without an owning real harness.
-☐ Track session states including starting, running, idle, waiting for user, stopped, failed, and closed.
-☐ Track the last known activity timestamp for every session.
-☐ Track whether each session is embedded, headless, or externally presented.
-☐ Allow the user to rename a session without changing its native session ID.
-☐ Allow a session to be tagged with a lightweight purpose such as auth, tests, or research.
-☐ Prevent a session from belonging to more than one project.
-☐ Keep stopped but resumable sessions visible separately from live processes.
-☐ Allow the user to close a Glasshouse session record without deleting the native provider history unless explicitly requested.
+☑ Represent every native harness execution as a first-class Glasshouse session.
+☑ Assign every Glasshouse session a unique Glasshouse session ID.
+☑ Store the harness type for every session.
+☑ Store the native session ID separately from the Glasshouse session ID.
+☑ Store the harness, launch profile, backend resource, model, pairing class, protocol, and response profile as distinct session metadata.
+☑ Never represent a direct API or gateway backend as an interactive Glasshouse session without an owning real harness.
+☑ Track session states including starting, running, idle, waiting for user, stopped, failed, and closed.
+☑ Track the last known activity timestamp for every session.
+☑ Track whether each session is embedded, headless, or externally presented.
+☑ Allow the user to rename a session without changing its native session ID.
+☑ Allow a session to be tagged with a lightweight purpose such as auth, tests, or research.
+☑ Prevent a session from belonging to more than one project.
+☑ Keep stopped but resumable sessions visible separately from live processes.
+☑ Allow the user to close a Glasshouse session record without deleting the native provider history unless explicitly requested.
 
 Phase 10A — Session supervision
 

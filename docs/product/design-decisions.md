@@ -1788,3 +1788,66 @@ homes, a defect gets to live in the gap.
 6. No launch Glasshouse composes replaces a harness's own system prompt.
 7. Whenever Glasshouse writes instruction text of its own, that text carries
    the floor.
+
+## A stored vocabulary and a live one are two vocabularies
+
+`session::store` records a session's pairing class, its wire protocol and the
+mechanism that carried its response profile, and it records each as its own
+type — `SessionPairingClass`, `SessionProtocol`, `ResponseMechanism` — rather
+than as `harness::pairing::PairingClass`, `harness::WireProtocol` and
+`harness::response::AppliedMechanism`. The immediate reason is Phase 6 line
+294: the session model may not depend on a harness adapter, and a source scan
+enforces it by forbidding `crate::harness` in that file.
+
+The durable reason is better than the immediate one. A schema's `CHECK` fixes
+the words a row may hold, and a row written by an older build has to stay
+readable after the live enum grows. If the two were one type, adding a seventh
+`PairingClass` would compile everywhere and then fail as a constraint violation
+on whichever background write happened to carry it — the failure mode
+`LIFECYCLE_EVENT_KINDS` already exists to prevent one table over. Keeping them
+apart puts exactly one total, exhaustive function between them, in
+`session/mod.rs`, so a new variant is a compile error at the single place
+somebody has to decide what it means on disk. The cost is three small
+conversion functions; the thing bought is that the decision cannot be skipped.
+
+## NULL means "not recorded", so anything else needs its own word
+
+Every column migration 8 adds is nullable, and NULL means one thing throughout
+the `sessions` table: *the build that wrote this row recorded nothing here*.
+That is the rule `launch_profile` established in migration 3, where NULL is a
+session that ran before profiles existed and `'native'` is a session that ran
+the Native profile.
+
+Applying it consistently forced two designs. `pairing_class` and `protocol`
+both have a real answer meaning "Glasshouse established nothing", so both
+store the word `unknown` and NULL stays available for "not recorded". `model`
+is the harder one: *"Glasshouse assigned no model, so the harness chose"* is a
+recorded answer, and a column holding a bare model id would have had one empty
+slot for it and for "never recorded". So the column stores `harness-default` or
+`named:<id>`, and the prefix is what makes the two impossible to confuse
+however a model is named — including a model whose id is literally
+`harness-default`, which round-trips correctly and is tested.
+
+## Renaming a session is not something the session did
+
+`glasshouse sessions` is ordered by `last_activity_at`, and that column answers
+one question: when did this session last run. Renaming, tagging and closing a
+record are things the *user* did to Glasshouse's bookkeeping, so none of them
+touches it. The alternative — treating any write as activity, which is what
+`set_lifecycle` does and is right to do — would let naming a month-old session
+push it to the top of a list of what ran most recently, and the list would stop
+answering its question.
+
+## Closing a record is not deleting a conversation
+
+`glasshouse sessions close` writes one column and says out loud what it did not
+do: the harness's own session files are not read, not moved and not deleted,
+and the native session identifier stays recorded so the history remains
+findable. Glasshouse has never parsed or owned those files and retiring its own
+record is not an occasion to start. The map reserves the possibility of
+deleting them *"unless explicitly requested"*; nothing in this batch is such a
+request, and until something is, the reassurance is printed rather than
+implied. A live session is refused rather than closed underneath itself — a
+`closed` row that a running harness keeps updating is worse than an error
+telling the user to stop it first.
+

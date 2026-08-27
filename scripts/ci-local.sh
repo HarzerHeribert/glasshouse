@@ -18,15 +18,14 @@
 #   lint            ubuntu   -> Linux container
 #   test / msrv     ubuntu   -> Linux container
 #   test / msrv     macOS    -> this machine, natively
-#   test / msrv     WINDOWS  -> NOT COVERED. See below.
+#   test / msrv     WINDOWS  -> only with --windows-vm, and only if the VM is up.
 #
-# Five of the seven CI jobs. The two Windows jobs cannot be run on this
-# machine, and nothing here should be read as evidence about Windows. This
-# project has already shipped one Windows-only defect that only
-# `test (windows-latest)` caught, and Phase 4's interrupt box can be closed by
-# nothing else. `--windows` runs a cross-compile check, which proves the
+# The default run is five of the seven CI jobs, and nothing in it is evidence
+# about Windows. `--windows` adds a cross-compile check, which proves the
 # Windows code path still *compiles* and proves nothing whatever about whether
-# it works.
+# it works. `--windows-vm` is the only mode that runs Windows for real; it is
+# opt-in because the VM has to be booted by hand and costs this machine's CPU
+# and memory. The summary's closing NOTE says which of those three happened.
 #
 # USAGE
 #   scripts/ci-local.sh              # macOS + Linux  (the default gate)
@@ -34,7 +33,7 @@
 #   scripts/ci-local.sh --linux      # container jobs only
 #   scripts/ci-local.sh --windows    # add the compile-only cross check
 #   scripts/ci-local.sh --flake      # measure the pty flake rate (FLAKE_RUNS=10)
-#   scripts/ci-local.sh --windows-vm # real Windows, via GLASSHOUSE_WINDOWS_HOST
+#   scripts/ci-local.sh --windows-vm # real Windows on the ARM64 VM
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -59,6 +58,10 @@ MSRV="$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
 
 RESULTS=()
 FAILED=0
+# Whether Windows was actually exercised, and how. Both feed the closing NOTE,
+# which must never claim more or less than the run earned.
+WIN_VM_RAN=0
+WIN_CROSS_RAN=0
 
 step() {           # step <label> <command...>
   local label="$1"; shift
@@ -165,44 +168,83 @@ if [ "$DO_LINUX" -eq 1 ]; then
   fi
 fi
 
-# --- Windows, for real, when a VM is available -------------------------------
+# --- Windows, for real, on the ARM64 VM --------------------------------------
 #
 # The one gap nothing local could close: Windows containers need a Windows
-# kernel, and this host is linux/aarch64. A Windows VM is the only local route,
-# and it is the only thing that can close Phase 4's interrupt box — every
-# interrupt test in the suite is `#[cfg(unix)]`, so a green `test
-# (windows-latest)` has always been the absence of evidence wearing the same
-# colour.
+# kernel, and this host is linux/aarch64. A Windows 11 ARM64 VM is the only
+# local route, and it is the only thing that can close Phase 4's interrupt box
+# — every interrupt test in the suite is `#[cfg(unix)]`, so a green
+# `test (windows-latest)` has always been the absence of evidence wearing the
+# same colour.
 #
-# Set GLASSHOUSE_WINDOWS_HOST to an ssh destination for the VM and this becomes
-# a real gate job. Unset, it says so and skips — it never pretends.
+# This drives `glasshouse-windows-ci`, the host helper that owns everything
+# about reaching the VM: it finds the guest's DHCP address, packages the
+# working tree (tracked *and* untracked, so uncommitted work is what gets
+# tested), extracts it to C:\ci\glasshouse, keeps cargo artifacts in
+# C:\ci\target, and returns a CI exit code. This script deliberately knows
+# none of that. An earlier version here did its own rsync-and-ssh against a
+# GLASSHOUSE_WINDOWS_HOST that never existed; two ways to reach one VM is one
+# too many, and the one that had never run was the one to delete.
 #
-#   GLASSHOUSE_WINDOWS_HOST=eneas@win-vm scripts/ci-local.sh --windows-vm
-#
-# The VM needs: rustup with the msvc toolchain, git, and a checkout path given
-# by GLASSHOUSE_WINDOWS_PATH (default C:/glasshouse). The tree is pushed with
-# rsync-over-ssh rather than shared, for the same reason the Linux leg copies
-# instead of mounting: a shared source tree is a wrong-green waiting to happen.
+# The helper's exit codes are the whole contract:
+#   0  the Windows job passed
+#   2  the helper refused before running anything — no VM, no key, no lease
+#   *  the Windows job ran and failed
+# So a VM that is not booted SKIPs with the helper's own reason. It never
+# fails the gate for being absent, and it never passes for being absent
+# either.
 if [ "$DO_WINVM" -eq 1 ]; then
-  if [ -z "${GLASSHOUSE_WINDOWS_HOST:-}" ]; then
-    RESULTS+=("SKIP  windows VM — set GLASSHOUSE_WINDOWS_HOST=user@host")
+  WIN_HELPER="$(command -v glasshouse-windows-ci 2>/dev/null)"
+  WIN_UNAVAILABLE=""
+  if [ -z "$WIN_HELPER" ]; then
+    WIN_UNAVAILABLE="glasshouse-windows-ci is not on PATH"
+  elif grep -q 'GLASSHOUSE_CI_REPO' "$WIN_HELPER"; then
+    # The helper lets its caller choose the tree, so point it at this one.
+    export GLASSHOUSE_CI_REPO="$REPO"
   else
-    WINPATH="${GLASSHOUSE_WINDOWS_PATH:-C:/glasshouse}"
-    win_run() {
-      # shellcheck disable=SC2029
-      ssh "$GLASSHOUSE_WINDOWS_HOST" "cd $WINPATH && $1"
-    }
-    step "windows VM / sync" sh -c \
-      "rsync -az --delete --exclude target --exclude .git ./ '$GLASSHOUSE_WINDOWS_HOST:$WINPATH/'"
-    step "windows VM / build" win_run \
-      'set RUSTFLAGS=-D warnings && cargo build --locked --workspace --all-targets'
-    step "windows VM / test" win_run \
-      'set RUSTFLAGS=-D warnings && cargo test --locked --workspace'
-    # The reason the VM exists. These are `#[cfg(windows)]` paths that have
-    # never executed anywhere: ConPTY's input mode, and interrupt delivery.
-    step "windows VM / pty + interrupt" win_run \
-      'cargo test --locked -p glasshouse --test pty_smoke -- --nocapture'
+    # It does not, so it packages one hardcoded checkout. That is correct in
+    # that checkout and a wrong-green anywhere else: the run would report on
+    # a tree nobody asked about, which is the same trap the Linux leg copies
+    # instead of bind-mounting to avoid. Refuse rather than guess.
+    WIN_HELPER_REPO="$(sed -n 's/^readonly ci_repo="\(.*\)"$/\1/p' "$WIN_HELPER" | head -1)"
+    if [ "$WIN_HELPER_REPO" != "$REPO" ]; then
+      WIN_UNAVAILABLE="glasshouse-windows-ci packages ${WIN_HELPER_REPO:-a checkout it does not name}, not this worktree; make its ci_repo honour \$GLASSHOUSE_CI_REPO"
+    fi
   fi
+
+  # One Windows job per `step` line, matching ci.yml's own granularity, so a
+  # Windows failure reads the same way in the summary as any other job.
+  win_step() {          # win_step <label> <helper-mode>
+    local label="$1" mode="$2" status err
+    if [ -n "$WIN_UNAVAILABLE" ]; then
+      RESULTS+=("SKIP  $label — $WIN_UNAVAILABLE")
+      return
+    fi
+    printf '\n\033[1m=== %s\033[0m\n' "$label"
+    err="$(mktemp)"
+    glasshouse-windows-ci "$mode" 2>"$err"; status=$?
+    cat "$err" >&2
+    if [ "$status" -eq 0 ]; then
+      WIN_VM_RAN=1
+      RESULTS+=("PASS  $label")
+    elif [ "$status" -eq 2 ]; then
+      # Refused before running anything. Carry the helper's own last words
+      # into the summary and skip the remaining Windows jobs with it, rather
+      # than asking a VM that is not there three more times.
+      WIN_UNAVAILABLE="$(tail -n 1 "$err")"
+      [ -n "$WIN_UNAVAILABLE" ] || WIN_UNAVAILABLE="the VM is not reachable; start it in VMware Fusion"
+      RESULTS+=("SKIP  $label — $WIN_UNAVAILABLE")
+    else
+      WIN_VM_RAN=1
+      RESULTS+=("FAIL  $label")
+      FAILED=1
+    fi
+    rm -f "$err"
+  }
+
+  win_step "test (windows) / build" build
+  win_step "test (windows) / test" test
+  win_step "msrv (windows) $MSRV" msrv
 fi
 
 # --- flake rate: the standing debt needs a number, not a pass ----------------
@@ -233,6 +275,7 @@ fi
 if [ "$DO_WIN" -eq 1 ]; then
   TARGET=x86_64-pc-windows-gnu
   if rustup target list --installed | grep -q "$TARGET"; then
+    WIN_CROSS_RAN=1
     step "windows CROSS-CHECK (compiles only, proves nothing about behaviour)" \
       cargo check --locked --workspace --target "$TARGET"
   else
@@ -242,10 +285,17 @@ fi
 
 printf '\n\033[1m=== summary ===\033[0m\n'
 printf '%s\n' "${RESULTS[@]}"
-if [ "$DO_WIN" -eq 0 ]; then
-  printf '\n\033[33mNOTE\033[0m  Windows was not exercised at all. Nothing here is evidence about Windows.\n'
-else
+# Three different true statements, and the run picks the one it earned. The
+# old version keyed on `--windows` alone, so `--windows-vm` could run the
+# whole Windows suite on a real machine and still be told Windows was not
+# exercised at all — and a `--windows` whose target was not installed was
+# told the opposite.
+if [ "$WIN_VM_RAN" -eq 1 ]; then
+  printf '\n\033[33mNOTE\033[0m  Windows ran for real on the ARM64 VM. Those lines ARE evidence about Windows.\n'
+elif [ "$WIN_CROSS_RAN" -eq 1 ]; then
   printf '\n\033[33mNOTE\033[0m  The Windows check compiles the target; it does not run a single test there.\n'
+else
+  printf '\n\033[33mNOTE\033[0m  Windows was not exercised at all. Nothing here is evidence about Windows.\n'
 fi
 [ "$FAILED" -eq 0 ] || printf '\n\033[31mCI-LOCAL FAILED\033[0m\n'
 exit "$FAILED"

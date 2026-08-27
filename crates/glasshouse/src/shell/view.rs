@@ -1460,6 +1460,13 @@ mod tests {
             last_activity_at: 1_000,
             launch_profile: None,
             backend_resource: None,
+            model: None,
+            pairing_class: None,
+            protocol: None,
+            response_profile: None,
+            response_mechanism: None,
+            display_name: None,
+            purpose: None,
         }
     }
 

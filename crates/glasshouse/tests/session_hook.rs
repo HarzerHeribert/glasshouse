@@ -149,7 +149,7 @@ fn payload() -> String {
 #[test]
 fn a_reported_event_is_recorded_with_its_session_timestamp_and_raw_observation() {
     let fixture = Fixture::new();
-    let id = running_session(&fixture, "a-harness");
+    let id = running_session(&fixture, "codex");
 
     let before = fixture.log().len().unwrap();
     assert!(fixture.hook(id.as_str(), "Stop", &payload()).success());
@@ -182,7 +182,10 @@ fn a_reported_event_is_recorded_with_its_session_timestamp_and_raw_observation()
         .observed
         .as_ref()
         .expect("a translated harness report must carry the report it came from");
-    assert_eq!(observed.harness, "a-harness");
+    // Read out of the session's own record rather than from anything this
+    // hook invocation said: `glasshouse hook` is given a session identifier
+    // and an event name, never a harness.
+    assert_eq!(observed.harness, "codex");
     assert_eq!(
         observed.event, "Stop",
         "the harness's own spelling, not Glasshouse's"
@@ -200,7 +203,7 @@ fn a_reported_event_is_recorded_with_its_session_timestamp_and_raw_observation()
 #[test]
 fn no_field_of_a_hook_payload_reaches_the_project_database() {
     let fixture = Fixture::new();
-    let id = running_session(&fixture, "a-harness");
+    let id = running_session(&fixture, "codex");
 
     for event in [
         "UserPromptSubmit",
@@ -230,7 +233,7 @@ fn no_field_of_a_hook_payload_reaches_the_project_database() {
     // And the control: the scan can find something, so its silence above
     // means absence rather than a scan that reads nothing.
     assert!(
-        text.contains("a-harness"),
+        text.contains("codex"),
         "the scan found nothing at all, so it is proving nothing"
     );
 }
@@ -241,7 +244,7 @@ fn no_field_of_a_hook_payload_reaches_the_project_database() {
 #[test]
 fn an_unrecognised_event_records_nothing_and_still_exits_zero() {
     let fixture = Fixture::new();
-    let id = running_session(&fixture, "a-harness");
+    let id = running_session(&fixture, "codex");
     let before = fixture.log().len().unwrap();
 
     for unknown in ["PreCompact", "PreToolUse", "Notification"] {
@@ -275,7 +278,7 @@ fn an_unrecognised_event_records_nothing_and_still_exits_zero() {
 #[test]
 fn a_late_hook_is_recorded_without_reviving_a_finished_session() {
     let fixture = Fixture::new();
-    let id = running_session(&fixture, "a-harness");
+    let id = running_session(&fixture, "codex");
     let sessions = ProjectSessions::open(&fixture.runtime).unwrap();
     sessions
         .store()
@@ -335,7 +338,7 @@ fn a_hook_for_an_unknown_session_costs_the_user_nothing() {
 #[test]
 fn the_debug_log_preserves_the_raw_observation_and_none_of_the_payload() {
     let fixture = Fixture::new();
-    let id = running_session(&fixture, "a-harness");
+    let id = running_session(&fixture, "codex");
     let log_file = fixture.base.join("hook.log");
 
     for event in ["Stop", "SomethingThisBuildHasNeverHeardOf"] {
@@ -350,7 +353,7 @@ fn the_debug_log_preserves_the_raw_observation_and_none_of_the_payload() {
 
     for expected in [
         "raw harness observation",
-        "harness=\"a-harness\"",
+        "harness=\"codex\"",
         "event=\"Stop\"",
         // Written whether or not the event is recognised — the whole point.
         "event=\"SomethingThisBuildHasNeverHeardOf\"",
@@ -390,7 +393,7 @@ fn the_debug_log_preserves_the_raw_observation_and_none_of_the_payload() {
 #[test]
 fn the_tail_returns_harness_reports_and_not_the_interfaces_own_events() {
     let fixture = Fixture::new();
-    let id = running_session(&fixture, "a-harness");
+    let id = running_session(&fixture, "codex");
 
     // An event Glasshouse observed itself, written exactly as the shell's
     // sink writes one: no observation.
