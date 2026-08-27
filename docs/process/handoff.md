@@ -6,6 +6,38 @@
 
 Last updated: 2026-08-27 late evening (Europe/Berlin)
 
+## Checkpoint — 2026-08-27 night, batch 33 landed: 565 / 1280 (44%)
+
+`c40194e` pushed, tree clean. Local gate 13/13; `--windows-vm` build+msrv pass with
+one **pre-existing** flake (below). Phase 48 closed eight of eight — six were
+already shipped, and two of those six had a caller with no test entering through it
+(§35). `glasshouse status` is the one new command.
+
+**`bridge-quota` closed zero boxes and is the round's real output.** The gateway→
+registry bridge needs a durable store (built: `GatewayQuotaCache`) plus three
+`main.rs` edits (located exactly, in `report-BRIDGE-QUOTA.md`) — **and even then
+the four boxes would not close**, because Groq is the only host observed sending
+both halves of a pool and Glasshouse ships no registry template for it. **The
+blocker moved from "no bridge" to "no host with both a template and both halves."**
+
+### The next package, and it is well specified
+
+**Ship a Groq registry template *and* land the three `main.rs` edits together.**
+Either alone closes nothing. That package closes map lines 1199, 1211, 1217 and
+1218 — including the first live percentage this product would ever compute.
+
+### Settled, stop re-checking
+
+**Map line 1210 (quota window *start*).** Four consecutive packages — 32A, 32B,
+QUOTA-FOLLOWUP, BRIDGE-QUOTA — have now reported that no host anywhere publishes
+one, only resets. Treat it as blocked on evidence that may never arrive.
+
+### Standing debt with a measured rate
+
+`session::api::tests::interrupting_through_the_api_is_recorded_as_machine_initiated`
+— **2 failures in 5 Windows runs (~40%)**, unchanged code since `d35fe6a`, nobody's
+regression and nobody's job. Beside the 1-in-37 `pty_smoke` `SIGABRT`.
+
 ## Checkpoint — 2026-08-27 late, batch 32 landed: 557 / 1280 (43%)
 
 Pushed, clean, **green on all three platforms on this exact tree** — local 13/13,

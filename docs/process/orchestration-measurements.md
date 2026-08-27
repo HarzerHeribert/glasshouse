@@ -2138,3 +2138,64 @@ binary bridges a gateway-captured reading into the resource registry.
 That is §5 and §36 applied by a worker to its own output, unprompted, against its
 own interest. It is the third round running where the most valuable paragraph in a
 report is the one explaining why a box stays open.
+
+## Batch 33 — the zero-box package was the valuable one, and the numbers say the opposite
+
+Integrated as `c40194e`, 557 → 565.
+
+| worker | tier | wall | cost | in play | closed | $/box |
+|---|---|---|---|---|---|---|
+| `phase-48-cli` | Sonnet, high | 12m | $3.68 | 8 | **8** | $0.46 |
+| `bridge-quota` | Sonnet, high | 34m | $10.75 | 4 (+2) | **0** | — |
+
+**This is batch 32's lesson again, sharper.** `bridge-quota` cost $10.75 and closed
+nothing, and it is the package this round will be remembered for: it killed the
+packet's hypothesis with evidence, proved the process boundary is real, built the
+durable store, located three wiring edits exactly, **and then established that the
+wiring would not have closed the boxes anyway** because no host has both a shipped
+template and both halves of a pool.
+
+Any metric that ranks these two by boxes or by cost per box gets this round exactly
+backwards. **Recording it here because the temptation to build that metric is
+real** — it would be easy to compute and actively harmful.
+
+### The orchestrator's packet was wrong about the partition, again
+
+`packet-bridge-quota.md` named `shell/**` as a bridge candidate. One grep would
+have shown `shell::run`'s quick-open always launches a native profile and never
+resolves a gateway-backed one, so there was nothing live there to read. **That is
+§36's rule, quoted in that very packet, broken by the person quoting it** — the
+second time this session (the first was propagating a stale patch into
+`packet-quota-followup.md` without checking it against the file).
+
+**The pattern in both: I asserted a fact about the code from a report or from
+memory instead of from the file.** The workers checked. The cheap prevention is
+already written down — *check a declaration against the use, not the claim* — and
+it applies to packets as much as to evidence.
+
+### Windows caught this round's own work for the first time
+
+Previous Windows finds were inherited (`60f8c9f`'s dead code). This time a test
+written **this round** passed on macOS and failed on Windows: a new dispatch test
+compared `doctor`'s output against an un-normalised fixture root while Windows
+prints the canonical one.
+
+**The fix deliberately does not depend on diagnosing the normalisation.** The
+hypothesis was the 8.3 short form of `TEMP`, unconfirmed; §58 says a wrong cause
+predicting the right symptom still produces a wrong fix. So the assertion stopped
+comparing paths at all and identifies the project by name, which no normalisation
+can touch — and the §35 property was re-verified afterwards by emptying the
+dispatch arm.
+
+**Five rounds of Windows runs, five findings.** Run it every round.
+
+### The `session::api` flake now has a rate
+
+    batch 31 run 2  FAIL      batch 33 first   PASS
+    batch 31 run 3  PASS      batch 33 final   FAIL
+    batch 32        PASS
+
+**2 in 5, ~40%**, on an interrupt test spawning a real Windows child, on code
+unchanged since `d35fe6a` and touched by none of this session's five packages. High
+enough to deserve an owner. Recorded as a rate, not buried under a green re-run
+(§60).
