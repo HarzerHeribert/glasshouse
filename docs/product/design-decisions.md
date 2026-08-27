@@ -1931,9 +1931,51 @@ So the rule the table states has to hold in both directions, and the 2xx
 direction needs one addition: **compare the body's *schema* against the one that
 host documents for success.** A `200` carrying `success: false`, or an envelope
 that does not match the shape a successful call returns, is a failure regardless
-of its status line. Status is a claim by whichever layer answered, and an
-unrecognised path may be answered by a different layer than the one whose
-contract you read.
+of its status line.
+
+### The rule that governs all of the above
+
+**A status code is a claim by whichever layer answered, and an unrecognised path
+may be answered by a different layer than the one whose contract you read.**
+
+That one sentence explains every row in this section, which is why it belongs
+above the others rather than beside them:
+
+- **z.ai** — an unrecognised version prefix falls through to older middleware
+  with its own error vocabulary, so two paths on one host disagree about how to
+  spell the same failure;
+- **NVIDIA** — the `404` comes from a per-account function router that resolved
+  the model to an internal id this account cannot reach, not from a path that
+  does not exist;
+- **Nous** — the same `404` is emitted by two different checks, catalogue
+  lookup and billing, which is why the status separates nothing.
+
+The actionable form is the schema comparison above: **a response whose envelope
+does not match the shape the host documents for success is the tell that you are
+talking to a layer you did not mean to reach.**
+
+### A prediction, labelled as one: this is gateway behaviour, not host behaviour
+
+`open.bigmodel.cn` — Zhipu AI's China platform, a different host from the
+`api.z.ai` international brand — answers the same three probes with the same
+status pattern, the same error number `1001`, and the same pair of envelope
+schemas, differing only in the language of the message. Measured, both hosts,
+2026-08-27.
+
+**Two independently addressed hosts behaving identically is evidence the
+behaviour belongs to the shared gateway rather than to either deployment.** That
+is an *inference and not a measurement*, and it is recorded as one because it is
+useful and falsifiable: any other endpoint fronted by the same gateway — a
+regional host, a partner deployment, a future base URL a user configures — should
+be expected to answer `200` to an authentication failure on an unrecognised path
+prefix.
+
+This matters to Glasshouse specifically because providers are templated by base
+URL. **A z.ai-templated provider pointed at a sibling host inherits the
+prediction, not a fresh unknown**, so a probe that establishes reachability
+against one of these hosts should not be assumed to have established it against
+another. The falsifier is cheap and named: the `{code, msg, success}` envelope
+where the documented success shape is `{object, data}`.
 
 ### And a `200` with empty content is not a dead provider either
 
