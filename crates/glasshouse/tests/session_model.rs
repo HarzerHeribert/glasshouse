@@ -18,6 +18,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use clap::Parser;
+// Only the `cfg(unix)` resume-through-a-real-terminal cluster below uses these,
+// so on Windows they are unused imports and `-D warnings` refuses them.
+#[cfg(unix)]
 use glasshouse::pty::{PtyProcess, TerminalCommand};
 use glasshouse::session::{ProjectSessions, SessionId};
 use glasshouse::{Cli, Runtime};
