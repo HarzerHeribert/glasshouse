@@ -629,7 +629,7 @@ Evaluation and safeguards
 ☐ Measure whether elaborate profiles add useful explanation or merely increase token volume and reading time.
 ☐ Measure profile behavior separately for each harness-model pairing because the same instruction can produce different effects across models.
 ☐ Allow the user to disable Glasshouse response-profile injection and use the untouched harness default.
-☐ Keep the active response profile and application mechanism inspectable from session details.
+☑ Keep the active response profile and application mechanism inspectable from session details.
 
 Phase 10 — Unified session model
 

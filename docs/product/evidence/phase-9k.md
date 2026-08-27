@@ -358,7 +358,11 @@ repository today.**
   `ResponseConfig` plus one arm in `response_stack`, perhaps thirty lines. It
   was left because it is group 4's, not because it is hard.
 - **632** ("keep the active response profile and application mechanism
-  inspectable from session details") — **blocked on a schema migration.**
+  inspectable from session details") — **CLOSED, by Phase 10's migration 8.**
+  See the update at the end of this entry. The account below is why it was
+  blocked when this was written, and it named exactly what unblocked it.
+
+  Original state: **blocked on a schema migration.**
   `glasshouse response` shows the profile a session *would* get and the launch
   log records what one *did* get, but `sessions` has no column for either, so
   `glasshouse sessions` cannot show it after the fact. Adding
@@ -372,3 +376,26 @@ Missing evidence:
 - Phase 51: evaluation hooks.
 - Phase 33A: per-pairing observation storage, for 630.
 - `crates/glasshouse/src/database.rs` migration 8, for 632.
+
+
+## Update — 632 closed by Phase 10
+
+This entry said 632 was blocked on *"an append-only migration 8 in
+`crates/glasshouse/src/database.rs`, in the shape migration 3 already used for
+`launch_profile` and `backend_resource`"*, and that the file was outside that
+package's ownership. Phase 10 wrote exactly that migration, with seven columns
+rather than two, and `sessions.response_profile` and
+`sessions.response_mechanism` are two of them.
+
+`glasshouse sessions show` now prints both, read back from the session record
+rather than re-resolved. Verified by the orchestrator against the shipped
+binary: `a_launched_session_records_seven_facts_and_the_binary_shows_them_apart`
+launches headless through `CARGO_BIN_EXE_glasshouse`, runs `sessions show`, and
+requires the `response profile` line to name **all five axes** and the
+`response mechanism` line to name the mechanism. Phase 10's M16 — the launch
+path records no response profile — kills it.
+
+**Nothing about the response-profile package changed.** The capability it built
+was already complete; what was missing was somewhere to keep the answer, and
+that belonged to the session model. This is a box closed by the phase after it,
+which is why it was worth writing down as blocked rather than as done.

@@ -26,7 +26,7 @@ one byte**, and 42 tests are `#[cfg(unix)]` and never run on Windows at all.
 Interrupt delivery to a real Windows child, resize reaching one, and session
 resume are proven by **nothing**.
 
-**Phase 9K is twenty of thirty-seven; Phase 9J is nine of twenty**, and the
+**Phase 9K is twenty-one of thirty-seven; Phase 9J is nine of twenty**, and the
 eleven in 9J's second group are blocked with the phase each waits on named.
 
 **Phase 0 is closed, eight of eight**, after its dependency line was found to be
