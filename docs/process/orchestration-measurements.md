@@ -2199,3 +2199,40 @@ dispatch arm.
 unchanged since `d35fe6a` and touched by none of this session's five packages. High
 enough to deserve an owner. Recorded as a rate, not buried under a green re-run
 (§60).
+
+## Acking a false idle makes a live worker invisible to the heartbeat
+
+Batch 34's worker armed **its own Monitor** on a background `cargo test` and then
+sat waiting for it. `worker-watch.sh` read that as two false idles in a row — the
+`Stop` hook fires at every turn boundary, and a worker waiting on its own job draws
+no spinner. Each cost the orchestrator a turn to diagnose and re-arm.
+
+**Then the fix made it worse.** Switching to a plain background wait on the report
+file — the right signal, per §62 — meant no `worker-watch.sh` process was running
+any more. `orchestrator-heartbeat.sh` asks exactly two questions (§47): *is a worker
+waiting for review* (a marker in `.agent-runtime/idle/`) and *is one still running*
+(a live `worker-watch.sh` process). Both answered no. Measured:
+
+    pgrep -f worker-watch.sh   -> 0
+    ls .agent-runtime/idle/    -> 0 markers
+    the worker                 -> alive, "1 shell, 1 monitor still running"
+
+So the heartbeat announced **"ORCHESTRATOR IDLE — nothing running"** with a worker
+mid-mutation. Fixed here by re-arming a long-delayed `worker-watch.sh` purely so
+the process exists for the heartbeat to see — a presence beacon, not a watch.
+
+### Two transferable points
+
+**1. A watch is load-bearing for something other than itself.** `worker-watch.sh`'s
+*process* is the heartbeat's liveness signal, and nothing says so at either end.
+Replacing a watch with a better watch silently removed a second mechanism's input.
+**Before retiring a mechanism, ask what else reads it** — this project has now
+built three write-with-no-read defects (§57) and this is the mirror: a read with an
+undeclared writer.
+
+**2. §28's unbuilt fix would have prevented the whole sequence.** It proposed:
+*a pane whose worktree has grown since the last read is working, whatever its
+screen shows.* `quota-live`'s worktree sat at exactly `+141/-45` across both false
+idles — one `git -C <worktree> diff --shortstat` would have answered it, and the
+same signal would give the heartbeat a liveness input that does not depend on
+another watch being armed. **Proposed in §28, now wanted by two mechanisms.**
