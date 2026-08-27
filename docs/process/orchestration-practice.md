@@ -2019,3 +2019,25 @@ the test means something different there.
 
 The settle is a named constant whose doc comment carries both measurements, so
 the next person to find it slow knows what deleting it costs.
+
+### §57, addendum — and it must fail when it fails
+
+The same script broke again the next time it was used, in the neighbouring way.
+Its first argument is a slug that becomes a filename; the question was passed
+there by mistake, because both are prose and nothing said otherwise. Three
+writes failed with `File name too long` — and the script then printed
+
+    parked question '<the entire question>' with a Haiku session;
+    answer will appear at <a path that could not be created>
+
+**It announced a parked question that was not parked.** A watch was armed and
+correct, and it would have waited forever on a file no one could write.
+
+A write with no read is §57. A write that reports success it did not achieve is
+the same failure wearing the opposite face: the loop looks closed from both
+ends and is open in the middle. The script now rejects anything that is not a
+slug, names the mistake, and exits non-zero if the question file cannot be
+written.
+
+**Check the exit status of the thing you are relying on**, and when you build a
+mechanism that reports, make the report conditional on the work.

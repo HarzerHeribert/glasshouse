@@ -80,7 +80,7 @@ if [ "$DO_MAC" -eq 1 ]; then
   # Free-because-local checks. These never ran on GitHub Actions; they exist
   # because a local gate can afford questions a metered one could not.
   step "lint / doc boundary" scripts/check-doc-boundary.sh
-  step "lint / evidence coverage" python3 scripts/check-evidence-coverage.py
+  step "lint / evidence coverage" python3 scripts/check-evidence-coverage.py --strict
   step "test (macos) / build" env RUSTFLAGS='-D warnings' cargo build --locked --workspace --all-targets
   step "test (macos) / test"  env RUSTFLAGS='-D warnings' sh -c 'cargo test --locked --workspace -- --nocapture < /dev/null'
   # Call the project's own script rather than `cargo +$MSRV`: its header

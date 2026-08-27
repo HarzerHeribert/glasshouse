@@ -83,10 +83,26 @@ shift 2
 OPTIONS=("$@")
 [ ${#OPTIONS[@]} -ge 2 ] || { echo "give at least two options" >&2; exit 2; }
 
+# The slug becomes a filename, so it must actually be one. Passing the question
+# text here — easy to do, since both are prose — used to produce three
+# "File name too long" errors and then a cheerful line saying the answer would
+# appear at a path that could not be created. A question this script says it
+# parked must really be parked.
+if ! printf '%s' "$SLUG" | grep -Eq '^[a-z0-9][a-z0-9-]{0,47}$'; then
+  echo "ask-user.sh: '$SLUG' is not a slug." >&2
+  echo "  A slug is lower-case letters, digits and hyphens, 48 characters or fewer." >&2
+  echo "  The QUESTION is the second argument, not the first:" >&2
+  echo "    ask-user.sh phase0-box2 \"Which reading do you want?\" \"option a\" \"option b\"" >&2
+  exit 2
+fi
+
 ANSWER_FILE="$ANS_DIR/$SLUG.txt"
 rm -f "$ANSWER_FILE"
-printf '%s\n' "$QUESTION" > "$ANS_DIR/$SLUG.question"
-printf '%s\n' "${OPTIONS[@]}" >> "$ANS_DIR/$SLUG.question"
+if ! { printf '%s\n' "$QUESTION" > "$ANS_DIR/$SLUG.question" &&
+       printf '%s\n' "${OPTIONS[@]}" >> "$ANS_DIR/$SLUG.question"; }; then
+  echo "ask-user.sh: could not write $ANS_DIR/$SLUG.question — question NOT parked." >&2
+  exit 1
+fi
 
 # Options are passed through a file, never interpolated into the prompt string:
 # a question containing a quote would otherwise rewrite the command.

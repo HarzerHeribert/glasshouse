@@ -6,10 +6,14 @@ COMPLETE`. Nothing enforced that, so this does — at the phase level, which is
 the granularity the ledger actually writes at (entries cover a group of related
 lines, not one box each).
 
-Warn-only by default, and deliberately so: run today it names six phases with
-ticked boxes and no evidence file, most of them predating the ledger discipline.
-A gate that starts red teaches everyone to override it. Reconcile the backlog,
-then turn on --strict and wire it into ci-local.sh.
+**Now enforced.** It was warn-only while a backlog existed — a gate that starts
+red teaches everyone to override it — and the backlog is gone: Phase 0 was the
+last uncovered phase, and writing its entry cost two of its own ticked boxes,
+which is exactly what the check is for. `ci-local.sh` runs it with `--strict`,
+so a box ticked without an evidence entry now fails the gate.
+
+Phase-level granularity is deliberate: the ledger writes entries covering a
+group of related lines, not one per box.
 """
 import argparse, glob, os, re, sys
 

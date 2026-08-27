@@ -1542,3 +1542,21 @@ the reader is handed everything that was written and *then* told the far end has
 gone. The defect was in reporting the output as absent when asked inside the
 window, which is a smaller thing than it looked and worth stating so nobody
 "fixes" the drain path again.
+
+## Glasshouse has no async runtime, and the capability map has not noticed
+
+Phase 0's dependency box grants "async execution" as a permitted category.
+Nothing in the tree uses it: there is no `tokio`, `async-std` or `smol` at any
+depth. Concurrency is threads and `mpsc` channels — the provider probe, the pty
+reader, and the event source are all plain threads, and the local gateway is a
+synchronous listener on an ephemeral port tied to one process's lifetime.
+
+This is worth stating because it is invisible from the map, which reads as
+though an async runtime were expected, and because it is load-bearing for
+several other decisions already recorded here: a pseudo-terminal child's exit
+being observable before its output is, and a terminal hangup being detectable
+with a blocking `poll(2)`, are both facts about a threaded synchronous program.
+An async rewrite would not inherit those observations.
+
+Found while writing Phase 0's evidence entry, which is the first time anyone
+enumerated the dependency tree against what the map permits.
