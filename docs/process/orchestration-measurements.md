@@ -2619,7 +2619,23 @@ at 4 — in a shared private `CARGO_TARGET_DIR` while other cargo processes exis
 Killing and re-running with a **narrower test filter** succeeded immediately both
 times.
 
-Not diagnosed further, and recorded rather than explained: if a `cargo` invocation
-shows elapsed minutes against ~zero CPU, it is not slow, it is stuck. **Kill it,
-narrow the filter, and re-run** — and check first whether it left a source file
-mid-mutation, because one of these did.
+**That heuristic as first written was too broad, and the orchestrator nearly
+acted on it wrongly minutes later.** A third run showed the same "elapsed
+minutes, zero CPU on the `cargo` process" and was **healthy** — the parent
+`cargo` idles between test binaries, so zero CPU *on it alone* means nothing.
+
+The distinction that actually separates the two:
+
+| | stuck | healthy |
+|---|---|---|
+| CPU across the whole `cargo` **+ `rustc`** tree | sustained ~0 | non-zero, moving |
+| live `rustc` children | none | at least one |
+| load average | flat | moving |
+
+So: **sum CPU across cargo *and* rustc, and check for live `rustc` children,
+before concluding anything.** Two genuine hangs looked like that for many
+minutes; the healthy run did not.
+
+When it *is* stuck: kill it, narrow the test filter, re-run — and **check first
+whether it left a source file mid-mutation**, because one of these did, and the
+restore is the urgent part, not the re-run.
