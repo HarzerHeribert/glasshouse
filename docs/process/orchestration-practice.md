@@ -1528,6 +1528,16 @@ the real cause before deciding what the fix proved.
 
 ## §45 — the orchestrator's pane is never closed, and every session is remote-controllable
 
+> **Corrected by the user, 2026-08-28.** The section below ties the wake lock to
+> *the orchestrator's own session*. It is not: **any Claude Code session keeps the
+> host awake as long as one is running.** So the rule is not "never close the
+> orchestrator's pane" but **"never close the last running session"** — and at a
+> handoff, once the successor is up, the predecessor's pane can be closed safely.
+> `scripts/close-worker.sh`'s refusal to close its own workspace is still a
+> reasonable guard against closing the pane you are standing in, but its stated
+> reason is wrong. The stronger, still-true half of this section is the second
+> one: start every session with `--remote-control <name>`.
+
 Two operating facts that are not preferences, recorded because closing the
 wrong pane silently stops the whole fleet.
 
