@@ -518,8 +518,19 @@ fn accept_loop(
                         // exchange, so the routing lock is never held across
                         // the provider hop, and before the log line, so a
                         // failover the exchange caused is already recorded
-                        // when its own record is read.
-                        routing.observe_exchange(&upstream, &exchange, std::time::Instant::now());
+                        // when its own record is read. `evidence_ledger` and
+                        // `completed_at` are the same values
+                        // `record_routing_observation` below is given —
+                        // Phase 9J and Phase 33A's one production consumer
+                        // reads the very observations this loop's own writes
+                        // produce.
+                        routing.observe_exchange(
+                            &upstream,
+                            &exchange,
+                            std::time::Instant::now(),
+                            evidence_ledger.as_deref(),
+                            completed_at,
+                        );
                         // Phase 33A's production producer — see
                         // `crate::gateway::session::SessionRouting::record_routing_observation`
                         // for exactly what this can and cannot supply.

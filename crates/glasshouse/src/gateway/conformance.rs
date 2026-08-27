@@ -2173,6 +2173,143 @@ fn a_real_provider_failure_moves_a_live_session_and_the_next_request_reaches_the
     );
 }
 
+// --- Phase 9J and Phase 33A: ranking a real failover's survivors -----------
+
+/// [`two_provider_upstream`], widened to three backends so a real provider
+/// failure leaves **two** same-model survivors to rank between — the shape
+/// [`InteractiveRouting::on_provider_failure`]'s "first compatible candidate"
+/// history could never distinguish from genuine ranking.
+fn three_provider_upstream(
+    first: &FixtureUpstream,
+    second: &FixtureUpstream,
+    third: &FixtureUpstream,
+) -> Upstream {
+    let backend = |name: &str, base_url: String| {
+        UpstreamBackend::new(
+            name.to_owned(),
+            vec![Route::new(
+                ANTHROPIC_MESSAGES.to_owned(),
+                targets_for(ANTHROPIC_MESSAGES),
+                &base_url,
+            )],
+            Secret::mint_for_test(PROVIDER_CREDENTIAL),
+            crate::routing::CredentialId::new(
+                name,
+                crate::secret::SecretRef::Environment {
+                    var: format!("{}_API_KEY", name.to_uppercase().replace('-', "_")),
+                },
+            ),
+            crate::routing::Cost::Metered,
+        )
+        .expect("a loopback http URL is absolute and this credential is header-safe")
+    };
+    Upstream::with_failover(vec![
+        backend("first-provider", first.base_url()),
+        backend("poor-evidence-provider", second.base_url()),
+        backend("good-evidence-provider", third.base_url()),
+    ])
+    .expect("three backends is not none")
+}
+
+/// [`routed_gateway`], widened to three backends and given a real
+/// [`crate::routing::evidence::EvidenceLedger`].
+fn routed_gateway_with_evidence(
+    first: &FixtureUpstream,
+    second: &FixtureUpstream,
+    third: &FixtureUpstream,
+    ledger: Arc<crate::routing::evidence::EvidenceLedger>,
+) -> Gateway {
+    let gateway = Gateway::start_with_telemetry(
+        three_provider_upstream(first, second, third),
+        None,
+        Some(ledger),
+    )
+    .expect("loopback is bindable");
+    gateway.routing().bind(
+        ROUTED_HARNESS,
+        ANTHROPIC_MESSAGES,
+        crate::routing::AssignedModel::named(ROUTED_MODEL),
+        gateway.upstream(),
+    );
+    gateway
+}
+
+/// Phase 9J and Phase 33A, end to end, through a real socket and a real
+/// accept loop: a real provider failure with two surviving same-model
+/// candidates moves the session to the one with strong recorded local
+/// evidence, not to `poor-evidence-provider`, which is configured first among
+/// the two survivors. Mutating `routing::interactive::best` back to
+/// `candidates.remove(0)` fails this test the same way it fails
+/// `routing::interactive::tests::on_provider_failure_ranks_same_model_survivors_by_local_evidence_not_order`
+/// — here through the full production path, socket included.
+#[test]
+fn a_real_provider_failure_with_recorded_evidence_prefers_the_stronger_candidate_over_order() {
+    use crate::routing::evidence::{NewObservation, Outcome as RoutingOutcome};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ledger = evidence_ledger_fixture(tmp.path());
+    let seeded_at = crate::provider::cache::now_unix_seconds();
+    for _ in 0..5 {
+        ledger
+            .record(
+                NewObservation::new("poor-evidence-provider", ROUTED_MODEL)
+                    .with_route(Some(ANTHROPIC_MESSAGES))
+                    .with_harness(Some(ROUTED_HARNESS))
+                    .with_outcome(RoutingOutcome::Failed),
+                seeded_at,
+            )
+            .unwrap();
+        ledger
+            .record(
+                NewObservation::new("good-evidence-provider", ROUTED_MODEL)
+                    .with_route(Some(ANTHROPIC_MESSAGES))
+                    .with_harness(Some(ROUTED_HARNESS))
+                    .with_outcome(RoutingOutcome::Succeeded),
+                seeded_at,
+            )
+            .unwrap();
+    }
+
+    let failing = FixtureUpstream::answering(
+        "HTTP/1.1 503 Service Unavailable",
+        "content-type: application/json\r\n",
+        r#"{"type":"error","error":{"type":"overloaded_error"}}"#,
+    );
+    let ok_response = || {
+        FixtureUpstream::answering(
+            "HTTP/1.1 200 OK",
+            "content-type: application/json\r\n",
+            "{\"ok\":true}",
+        )
+    };
+    let poor = ok_response();
+    let good = ok_response();
+
+    let gateway = routed_gateway_with_evidence(&failing, &poor, &good, Arc::clone(&ledger));
+    let token = gateway.token().expose().to_owned();
+
+    let first = send_and_read(gateway.address(), &messages_request(&token, "{}"));
+    assert!(
+        as_text(&first).starts_with("HTTP/1.1 503"),
+        "the provider's own error must still reach the harness: {}",
+        as_text(&first)
+    );
+
+    wait_until("the failed provider's exchange to be observed", || {
+        gateway
+            .routing()
+            .assignment()
+            .is_some_and(|current| current.provider() != "first-provider")
+    });
+
+    assert_eq!(
+        gateway.routing().assignment().unwrap().provider(),
+        "good-evidence-provider",
+        "the candidate with strong recorded local evidence must win a real failover, not \
+         `poor-evidence-provider`, which is configured first among the two survivors"
+    );
+}
+
 /// Phase 9H line 518, end to end: a pinned session stays where it is, even
 /// when the backend it is on is failing and a perfectly good one is
 /// configured beside it.

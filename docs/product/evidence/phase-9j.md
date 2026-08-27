@@ -307,3 +307,74 @@ through first.
 lines 1540 and 1541 as closable at the disposable caller. They were not, and the
 worker was asked to check rather than assume — which is why this is recorded as
 a finding instead of shipped as a wrong tick.
+
+### Phase 9J after batch 37 — eight of eleven, at the caller that exists
+
+State: **COMPLETE** for map lines 567, 568, 570, 571, 572, 573, 574 and 575.
+**NOT STARTED, blocked** for 566, 569 and 576.
+
+Production evidence:
+- `gateway/mod.rs`'s accept loop → `gateway/session.rs::observe_exchange`
+  (builds `ObservedEvidenceSource`, or `NoObservations` without a ledger) →
+  `routing/interactive.rs::on_provider_failure`, which now **ranks** every
+  same-model survivor and then every different-model one, instead of returning
+  the first found.
+- `gateway::conformance::a_real_provider_failure_with_recorded_evidence_prefers_the_stronger_candidate_over_order`
+  — a real `Gateway`, a real accept loop, three loopback sockets and a real
+  SQLite ledger. Seeds five failed observations for one candidate and five
+  succeeded for another, sends one request that gets a real `503`, and asserts
+  the session lands on the evidence-favoured candidate rather than the one
+  configured first.
+
+Failure/isolation evidence — five mutations, five killed, zero survivors, with
+the semantic vocabulary `assurance-economics.md` defines:
+- `bypass-fallback` on `best` (ignore every score) — killed.
+- `remove-guard` on the prior's call — killed at **four** layers.
+- `invert-condition` (`>` → `>=`) — killed by
+  `routing_policy.rs::order_dependence::…`, a **pre-existing, author-independent**
+  test from `lead-route`'s adversarial suite. Stronger than a self-written kill.
+- `accept-stale-state` on `resolve_harness` — killed.
+- `bypass-fallback` on the accept loop's own wiring — killed, and **re-run
+  independently by the integrator**: replacing `evidence_ledger.as_deref()` with
+  `None` turns the real-socket test red.
+
+**The finding is worth more than the three boxes it costs, and it is the reason
+566 stays open.** Within same-model failover survivors — the only group this
+caller moves a session between automatically — **the native-pairing prior can
+never be the differentiator, and that is a fact about `classify`, not a wiring
+gap.** `harness/pairing.rs::classify` derives `PairingClass` from
+`(harness, model attribution, harness vendor)`; `route.provider`, the one thing
+that varies between two same-model candidates, feeds only `protocol_fit`, which
+`native_pairing_prior_contribution` never reads. Every same-model candidate
+therefore gets an identical prior magnitude, and **Phase 33A's local evidence is
+the only signal this caller has that can separate them.**
+
+The prior still varies across the `OfferMigration` group — different models can
+hold different classes against one harness — but that group is only *offered*,
+never taken automatically. So today the prior contributes a real, correct,
+inspectable number to every explanation and **never once decides a real
+failover**.
+
+Missing evidence:
+- **566** asks for a positive prior *for a fresh session with little local
+  evidence*. This caller is failover, not session start, and the finding above
+  shows the prior cannot differentiate there. It needs `next_turn` or a session
+  start, not more work here.
+- **569** (warm session continuity) — not attempted.
+- **576** — the user's configured `PairingPreference` and corrections **do not
+  reach this caller**. Every candidate is scored against a hardcoded
+  `PairingPreference::Strong` and `PairingOverrides::default()`. The patch is
+  located exactly: thread an `EffectiveConfig`-derived preference into
+  `profile::apply_gateway` (`profile/mod.rs:1064`) and set it alongside
+  `gateway.routing().bind(...)` at `profile/mod.rs:1127`. The worker did not
+  write it because `profile/mod.rs` was outside its partition, and could not
+  tell whether `Resolution<'_>` already carries what is needed.
+
+**Two judgement calls the worker referred up, and how they went.**
+`FAILOVER_EVIDENCE_WINDOW_SECONDS = 7 days` is its own choice with no map
+guidance — accepted as reasonable for a cadence far slower than a disposable
+job's, and recorded here as provisional rather than derived. And its
+`EligibleCandidate` built through a trivially-true closure is acceptable: the
+real hard constraints (`compatible()`) already ran on the `Backend` before
+`score_candidate` is reached, so the type is documenting an order that genuinely
+held rather than manufacturing one.

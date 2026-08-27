@@ -347,3 +347,24 @@ function exists at all in this package, so there is no implicit path for an
 observation to leave a project either — the requirement is satisfied by
 absence rather than by a built, deliberately-named export operation, which
 is the honest state to report rather than invent a mechanism nothing calls.
+
+### Phase 33A after batch 37 — the five aggregate lines close
+
+State: **COMPLETE** for 1335, 1336, 1339, 1340 and 1341, in addition to the six
+already closed. **Nine of fifteen.**
+
+All five were open for exactly one reason: `summarize` had no production
+consumer. It has one now. `gateway/session.rs::observe_exchange` builds an
+`ObservedEvidenceSource` over the ledger and hands it to
+`InteractiveRouting::on_provider_failure`, reached from the accept loop —
+mutation-proven by replacing `evidence_ledger.as_deref()` with `None`, which
+turns `a_real_provider_failure_with_recorded_evidence_prefers_the_stronger_candidate_over_order`
+red. Re-run independently by the integrator.
+
+That test exercises the whole set at once: rolling summaries over real rows
+(1336), sample counts above `MIN_SAMPLE_FOR_SUMMARY` deciding whether an
+aggregate is usable at all (1339, 1340), raw observations preserved beside the
+summary that reads them (1335), and a bounded observation window (1341).
+
+**Still open: 1331–1334**, because the gateway cannot read a response body by
+design — unchanged by this round, and unreachable from `gateway/**` at all.

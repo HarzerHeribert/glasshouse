@@ -564,15 +564,15 @@ Pairing identity
 Pairing prior and evidence
 
 ☐ Give a compatible vendor-native harness-model pairing a positive initial routing prior for a fresh session with little local evidence.
-☐ Treat the native-pairing preference as a soft prior rather than a hard routing rule or proof of superior performance.
-☐ Apply hard protocol, tool, capability, privacy, and user constraints before applying the pairing prior.
+☑ Treat the native-pairing preference as a soft prior rather than a hard routing rule or proof of superior performance.
+☑ Apply hard protocol, tool, capability, privacy, and user constraints before applying the pairing prior.
 ☐ Allow the value of a relevant warm session to outweigh the native-pairing prior when continuity evidence is stronger.
-☐ Reduce the influence of the pairing prior as reliable local observations accumulate for the exact harness, launch profile, model, and backend combination.
-☐ Allow observed task success, usable tool calls, repair rate, effective TTFC, reliability, and user overrides to outweigh the initial pairing prior.
-☐ Keep evidence for the same nominal model distinct across different harnesses, gateways, quantizations, model revisions, or protocol translations.
-☐ Avoid concluding that a cross-vendor pairing is poor solely because it is cross-vendor.
-☐ Avoid concluding that a native pairing is superior when current project evidence contradicts the prior.
-☐ Surface the pairing class, current evidence strength, and contribution of the pairing prior in routing explanations.
+☑ Reduce the influence of the pairing prior as reliable local observations accumulate for the exact harness, launch profile, model, and backend combination.
+☑ Allow observed task success, usable tool calls, repair rate, effective TTFC, reliability, and user overrides to outweigh the initial pairing prior.
+☑ Keep evidence for the same nominal model distinct across different harnesses, gateways, quantizations, model revisions, or protocol translations.
+☑ Avoid concluding that a cross-vendor pairing is poor solely because it is cross-vendor.
+☑ Avoid concluding that a native pairing is superior when current project evidence contradicts the prior.
+☑ Surface the pairing class, current evidence strength, and contribution of the pairing prior in routing explanations.
 ☐ Allow users to prefer native pairing strongly, weakly, not at all, or as a hard pin for explicitly chosen sessions.
 
 Phase 9K — Harness-aware response profiles
@@ -1332,13 +1332,13 @@ Phase 33A — Routing evidence ledger
 ☐ Do not treat whitespace padding, transport keepalives, or reasoning-only deltas as the first generated token.
 ☐ Record input tokens, output tokens, cached-input tokens, and monetary cost only when they are actually exposed or can be estimated with an explicit confidence label.
 ☐ Record successful tool rounds, retries, repairs, failovers, and the final user-visible outcome separately.
-☐ Preserve raw observations alongside rolling aggregates so a routing decision can be audited and aggregation logic can be recalibrated.
-☐ Compute robust rolling summaries such as median, tail latency, exponentially weighted averages, failure rates, and sample counts where useful.
+☑ Preserve raw observations alongside rolling aggregates so a routing decision can be audited and aggregation logic can be recalibrated.
+☑ Compute robust rolling summaries such as median, tail latency, exponentially weighted averages, failure rates, and sample counts where useful.
 ☑ Separate warm-context, cold-context, and unknown-context observations instead of averaging away cache effects.
 ☑ Keep metrics distinct for materially different model versions, quantizations, routes, or changing stealth-model identities.
-☐ Attach source, observation window, sample size, freshness, and confidence to every aggregate used for routing.
-☐ Apply conservative priors or keep a metric unknown when the sample is too small to support a routing decision.
-☐ Decay or expire stale operational evidence without deleting durable raw observations prematurely.
+☑ Attach source, observation window, sample size, freshness, and confidence to every aggregate used for routing.
+☑ Apply conservative priors or keep a metric unknown when the sample is too small to support a routing decision.
+☑ Decay or expire stale operational evidence without deleting durable raw observations prematurely.
 ☑ Treat token volume, request count, context size, and spend as resource telemetry rather than evidence of quality or progress.
 ☑ Keep the evidence ledger physically project-scoped and require explicit export before observations leave the project.
 

@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████░░░░░░░░░░░░░░░░░░░░░` 631 / 1280 mandatory capabilities (49%)
+`████████████████████░░░░░░░░░░░░░░░░░░░░` 644 / 1280 mandatory capabilities (50%)
 
 <details>
 <summary>Per-phase breakdown (23 of 104 phases complete)</summary>
@@ -49,7 +49,7 @@ the authoritative specification and tracks what is done.
 | Phase 9G — Glasshouse local gateway process | 19/19 ✅ |
 | Phase 9H — Sticky gateway routing for harness-backed interactive sessions | 13/14 |
 | Phase 9I — Free-pool routing | 13/14 |
-| Phase 9J — Harness-model pairing model | 9/20 |
+| Phase 9J — Harness-model pairing model | 17/20 |
 | Phase 9K — Harness-aware response profiles | 26/37 |
 | Phase 10 — Unified session model | 14/14 ✅ |
 | Phase 10A — Session supervision | 13/13 ✅ |
@@ -94,7 +94,7 @@ the authoritative specification and tracks what is done.
 | Phase 32F — Protected quota reserve | 1/8 |
 | Phase 32G — Provider-aware request-cost estimation | 0/10 |
 | Phase 33 — Resource health | 0/15 |
-| Phase 33A — Routing evidence ledger | 6/15 |
+| Phase 33A — Routing evidence ledger | 11/15 |
 | Phase 33B — Reliability-adjusted agent performance | 0/14 |
 | Phase 33C — Failure, quota, and route correlation | 0/15 |
 | Phase 34 — Capability registry | 0/10 |

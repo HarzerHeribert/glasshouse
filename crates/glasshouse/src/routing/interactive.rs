@@ -28,8 +28,6 @@
 //!
 //! Lines 513 and 514 ask for same-family failover to be preferred and a
 //! *material* model-family change to be treated as a migration decision.
-//! Glasshouse has no model-family metadata — Phase 9J is where model
-//! developer, family and pairing class are modelled, and none of it is built.
 //! Rather than invent a taxonomy by pattern-matching model names, this module
 //! uses the conservative rule the available facts support:
 //!
@@ -42,10 +40,33 @@
 //!
 //! Erring this way costs an automatic recovery that a family table would have
 //! allowed. Erring the other way silently changes the model under a live
-//! coding session, which is exactly what line 514 forbids. When Phase 9J
-//! lands, this is the one function that has to learn about it.
+//! coding session, which is exactly what line 514 forbids.
+//!
+//! # Phase 9J and Phase 33A rank the survivors; they do not choose the group
+//!
+//! [`InteractiveRouting::on_provider_failure`] used to take the first
+//! candidate in each group (same-model, then different-model) and return
+//! immediately — the ordering above is unaffected by anything below this
+//! paragraph. What changed is *which* candidate wins **within** a group,
+//! once more than one survives `compatible`: `score_candidate` classifies
+//! each one against the harness the failing session was serving
+//! ([`pairing::classify`], Phase 9J) and weighs it against local observed
+//! evidence for that exact `(provider, model, route, harness)` combination
+//! (`crate::routing::evidence::ObservedEvidenceSource`, Phase 33A), and
+//! `best` picks the highest-scoring survivor, the caller's own order
+//! breaking a tie. A candidate can never be *excluded* this way — only
+//! `compatible` refuses one — so this is design decision 1's "additive,
+//! never a filter" made literal for this policy's own decision.
 
-use super::{Backend, CacheLocality, ToolSemantics};
+use crate::config::pairing::{
+    ObservationSource, PairingPreference, native_pairing_prior_contribution,
+};
+use crate::harness::Declared;
+use crate::harness::pairing;
+use crate::integrations::IntegrationId;
+use crate::routing::apply_hard_constraints;
+
+use super::{Backend, CacheLocality, Contribution, RoutingExplanation, ToolSemantics};
 
 /// The backend serving one live gateway-backed session, and the harness it is
 /// serving.
@@ -273,7 +294,12 @@ impl TurnRouting {
 }
 
 /// What a real provider failure does to a live session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` only, not `Eq`: [`RoutingExplanation`] carries `f64`
+/// magnitudes, which cannot be `Eq`, and this type composes it rather than
+/// dropping it for the sake of a derive it does not otherwise need — nothing
+/// here compares a `FailureResponse` for a `HashSet`/`BTreeSet` key.
+#[derive(Debug, Clone, PartialEq)]
 pub enum FailureResponse {
     /// Nothing moves; the harness sees the provider's own error.
     Stay { reason: StayReason },
@@ -281,6 +307,12 @@ pub enum FailureResponse {
     FailOver {
         to: Assignment,
         cache: CacheLocality,
+        /// Line 575: why `to` won among every same-model survivor — the
+        /// native-pairing prior and local evidence `score_candidate`
+        /// computed for it, in the same shape
+        /// [`crate::routing::disposable::DisposableChoice::explanation`]
+        /// already surfaces for the other policy class.
+        explanation: RoutingExplanation,
     },
     /// A compatible backend exists, but it serves a **different model**, so
     /// taking it would be a migration rather than a transparent failover.
@@ -288,6 +320,8 @@ pub enum FailureResponse {
     OfferMigration {
         to: Assignment,
         cache: CacheLocality,
+        /// The same explanation [`Self::FailOver`]'s own field carries.
+        explanation: RoutingExplanation,
     },
 }
 
@@ -398,16 +432,29 @@ impl InteractiveRouting {
     /// Lines 512, 513, 514, 517 and 518: what a real provider failure does.
     ///
     /// `candidates` are the other backends configured for this session's
-    /// protocol. The order is the caller's — the user's own ordering wins,
-    /// exactly as it does in the free pool — and this function takes the
-    /// first candidate that survives every constraint rather than ranking
-    /// them, because ranking backends on quality is Phase 9J's job and not
-    /// this one's.
+    /// protocol. The order is the caller's — the user's own ordering is the
+    /// tiebreaker, exactly as it is in the free pool — but every candidate
+    /// that survives `compatible` is now scored by Phase 9J's native-pairing
+    /// prior and Phase 33A's local evidence (`score_candidate`), and the
+    /// best-scoring one wins rather than simply the first one found. With no
+    /// evidence at all (`evidence` answers `None` for everything, as
+    /// [`crate::config::pairing::NoObservations`] always does) every
+    /// candidate scores `0.0` and this reproduces "first compatible
+    /// candidate" exactly, which is what every test in this module that
+    /// passes `NoObservations` is checking.
+    ///
+    /// `evidence` is [`crate::config::pairing::ObservationSource`] rather
+    /// than a concrete store for the same reason
+    /// `native_pairing_prior_contribution` itself takes one: this function
+    /// stays a pure function of its arguments (see this module's own header)
+    /// with no knowledge of `crate::routing::evidence::EvidenceLedger` or how
+    /// its caller reached it.
     pub fn on_provider_failure(
         &self,
         current: &Assignment,
         failure: ProviderFailure,
         candidates: &[Backend],
+        evidence: &dyn ObservationSource,
     ) -> FailureResponse {
         let _ = failure;
 
@@ -419,8 +466,10 @@ impl InteractiveRouting {
             };
         }
 
+        let harness = resolve_harness(current.harness());
         let mut rejected = Vec::new();
-        let mut migration: Option<Assignment> = None;
+        let mut same_model: Vec<(Assignment, RoutingExplanation)> = Vec::new();
+        let mut migration: Vec<(Assignment, RoutingExplanation)> = Vec::new();
 
         for candidate in candidates {
             if candidate.provider() == current.provider()
@@ -435,23 +484,55 @@ impl InteractiveRouting {
                 Err(why) => rejected.push(why),
                 Ok(()) => {
                     let to = Assignment::new(current.harness(), candidate.clone());
+                    let explanation = match harness {
+                        Some(harness) => score_candidate(harness, candidate, evidence),
+                        None => {
+                            let mut explanation = RoutingExplanation::new();
+                            explanation.push(Contribution::new(
+                                "native-pairing prior",
+                                0.0,
+                                format!(
+                                    "`{}` is not a harness this build recognises, so no pairing \
+                                     could be classified for it",
+                                    current.harness()
+                                ),
+                            ));
+                            explanation
+                        }
+                    };
                     if candidate.model() == current.backend().model() {
-                        // Line 513: the same model, served elsewhere. A
-                        // failover, and it is preferred over anything below
-                        // by being returned the moment it is found.
-                        let cache = CacheLocality::between(current.backend(), candidate);
-                        return FailureResponse::FailOver { to, cache };
+                        // Line 513: the same model, served elsewhere. Every
+                        // one found is kept; the best-scoring one is what
+                        // gets returned below.
+                        same_model.push((to, explanation));
+                    } else {
+                        // Line 514: a different model is material. Every one
+                        // found is kept, and the best-scoring one is what
+                        // gets offered — never taken transparently.
+                        migration.push((to, explanation));
                     }
-                    // Line 514: a different model is material. Remember the
-                    // first one and keep looking for a same-model move.
-                    migration.get_or_insert(to);
                 }
             }
         }
 
-        if let Some(to) = migration {
+        if !same_model.is_empty() {
+            let (to, explanation) = best(same_model);
             let cache = CacheLocality::between(current.backend(), to.backend());
-            return FailureResponse::OfferMigration { to, cache };
+            return FailureResponse::FailOver {
+                to,
+                cache,
+                explanation,
+            };
+        }
+
+        if !migration.is_empty() {
+            let (to, explanation) = best(migration);
+            let cache = CacheLocality::between(current.backend(), to.backend());
+            return FailureResponse::OfferMigration {
+                to,
+                cache,
+                explanation,
+            };
         }
 
         FailureResponse::Stay {
@@ -486,6 +567,118 @@ impl InteractiveRouting {
         compatible(current.backend(), &to).map_err(MigrationRefusal::Incompatible)?;
         Ok(Assignment::new(current.harness(), to))
     }
+}
+
+/// The evidence window [`InteractiveRouting::on_provider_failure`] reads
+/// local observations from — wide enough that a session which only fails
+/// over occasionally still has something to compare a fresh pairing prior
+/// against, and bounded so a very old incident cannot outweigh how a pairing
+/// has behaved lately.
+pub const FAILOVER_EVIDENCE_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
+
+/// [`Assignment::harness`], resolved to the strongly-typed identifier
+/// [`pairing::classify`] needs. [`Assignment`] carries it as a slug rather
+/// than an [`IntegrationId`] — see that type's own doc comment — so this is
+/// the same reverse lookup [`crate::config::pairing::report`] already does
+/// for a `--harness` argument, not a new mechanism. `None` for a slug this
+/// build does not know, which only this function's own caller degrades for
+/// (see [`InteractiveRouting::on_provider_failure`]).
+fn resolve_harness(slug: &str) -> Option<IntegrationId> {
+    IntegrationId::ALL
+        .iter()
+        .copied()
+        .find(|id| id.slug() == slug)
+}
+
+/// Phase 9J and Phase 33A's one production consumer: what the native-pairing
+/// prior and local observed evidence contribute to routing `candidate`,
+/// given the harness the failing session was serving.
+///
+/// Two things this consumer does not have, and degrades honestly rather than
+/// inventing:
+///
+/// - **Configured pairing corrections and the user's native-pairing
+///   preference**, both of which live in configuration `crate::profile`'s
+///   gateway path resolves once and which never reaches
+///   [`crate::gateway::session::SessionRouting::bind`] today — see this
+///   package's report for the exact patch. Until that is threaded
+///   through, every candidate is scored against
+///   [`crate::harness::pairing::PairingOverrides::default`] (no corrections
+///   applied) and [`PairingPreference::Strong`] — the same out-of-the-box
+///   default `EffectiveConfig::native_pairing_preference` itself falls back
+///   to when nothing is configured.
+/// - **The candidate's protocol as a [`crate::harness::WireProtocol`]** —
+///   [`Backend::protocol`] is deliberately kept as an opaque slug (see that
+///   method's own doc comment); [`pairing::wire_protocol_from_slug`] is the
+///   reverse lookup, and it answers `None` for a slug it does not recognise
+///   rather than guessing, which only weakens `Pairing::protocol_fit`, a
+///   field `native_pairing_prior_contribution` never reads.
+fn score_candidate(
+    harness: IntegrationId,
+    candidate: &Backend,
+    evidence: &dyn ObservationSource,
+) -> RoutingExplanation {
+    let route = pairing::ServingRoute {
+        provider: Some(candidate.provider().to_owned()),
+        gateway: None,
+        protocol: pairing::wire_protocol_from_slug(candidate.protocol()),
+    };
+    let query = pairing::PairingQuery {
+        harness,
+        model: candidate.model().clone(),
+        route: route.clone(),
+        // Not the `Declared<bool>` evidence string `crate::routing::Backend`
+        // was built from — `routing` never keeps it, see `Backend::tools`'
+        // own doc comment — and `classify` uses this only for
+        // `Pairing::tool_semantics`, which `native_pairing_prior_contribution`
+        // never reads either.
+        tool_calls: Declared::Unverified,
+        provider_protocols: Vec::new(),
+    };
+    let overrides = pairing::PairingOverrides::default();
+    let pairing_value = pairing::classify(&query, &overrides);
+
+    // `compatible()` already ran `candidate` through every hard constraint
+    // `on_provider_failure` enforces (protocol, tool semantics) before this
+    // function is ever called. This is that check's type-level receipt
+    // (design decision 2), not a second, independent gate — the closure
+    // always succeeds because the gate already ran.
+    let (eligible, _) = apply_hard_constraints(vec![pairing_value], |_| Ok(()));
+    let Some(eligible) = eligible.into_iter().next() else {
+        unreachable!(
+            "apply_hard_constraints keeps every input its own check accepts, and this check \
+             accepts everything"
+        );
+    };
+
+    // `EvidenceKey::launch_profile` is not part of this query:
+    // `ObservedEvidenceSource` never reads it (see `routing::evidence`'s own
+    // header for why), and a bound gateway assignment does not carry a
+    // launch profile name to supply one honestly.
+    let key = pairing::EvidenceKey::new(harness, String::new(), candidate.model().clone(), route);
+
+    native_pairing_prior_contribution(&eligible, &key, PairingPreference::Strong, evidence)
+}
+
+/// The best-scoring `(Assignment, RoutingExplanation)` in `candidates`,
+/// preferring the first one seen on a tie — the caller's own order. A build
+/// with no evidence source reproduces the pre-batch-46 "first compatible
+/// candidate" behaviour exactly this way: every contribution is `0.0` with
+/// nothing to weigh, so every candidate ties and the first stands.
+///
+/// Panics on an empty `candidates` — both call sites only reach this after
+/// checking `!candidates.is_empty()`.
+fn best(mut candidates: Vec<(Assignment, RoutingExplanation)>) -> (Assignment, RoutingExplanation) {
+    let mut best_index = 0;
+    let mut best_total = candidates[0].1.total();
+    for (index, (_, explanation)) in candidates.iter().enumerate().skip(1) {
+        let total = explanation.total();
+        if total > best_total {
+            best_total = total;
+            best_index = index;
+        }
+    }
+    candidates.swap_remove(best_index)
 }
 
 /// Line 517, in one function: may `candidate` take over from `current`?
@@ -614,6 +807,7 @@ impl RoutingRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::pairing::NoObservations;
     use crate::routing::{AssignedModel, Cost, CredentialId};
     use crate::secret::SecretRef;
 
@@ -715,10 +909,11 @@ mod tests {
             &current,
             ProviderFailure::Unreachable,
             &[other_model_first, same_model],
+            &NoObservations,
         );
 
         match response {
-            FailureResponse::FailOver { to, cache } => {
+            FailureResponse::FailOver { to, cache, .. } => {
                 assert_eq!(to.provider(), "nous");
                 assert_eq!(to.backend().model(), &AssignedModel::named("the-model"));
                 assert_eq!(
@@ -739,6 +934,7 @@ mod tests {
             &current,
             ProviderFailure::Refused { status: 503 },
             &[backend("kilo", "a-different-model")],
+            &NoObservations,
         );
         match response {
             FailureResponse::OfferMigration { to, .. } => {
@@ -763,8 +959,12 @@ mod tests {
             ToolSemantics::Unverified,
         );
 
-        let response =
-            routing.on_provider_failure(&current, ProviderFailure::Unreachable, &[wrong_protocol]);
+        let response = routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            &[wrong_protocol],
+            &NoObservations,
+        );
 
         match response {
             FailureResponse::Stay {
@@ -807,6 +1007,7 @@ mod tests {
             &current,
             ProviderFailure::Unreachable,
             &[known_absent, unverified],
+            &NoObservations,
         );
 
         match response {
@@ -831,8 +1032,12 @@ mod tests {
         let current = session();
         let perfect = backend("nous", "the-model");
 
-        let response =
-            routing.on_provider_failure(&current, ProviderFailure::Unreachable, &[perfect]);
+        let response = routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            &[perfect],
+            &NoObservations,
+        );
 
         assert_eq!(
             response,
@@ -842,6 +1047,130 @@ mod tests {
                 }
             }
         );
+    }
+
+    /// A fixed [`ObservationSource`] test double that answers strong evidence
+    /// for one named provider and poor evidence for every other, so a test
+    /// can assert *which* candidate a ranking picked rather than only that
+    /// ranking ran at all.
+    struct FakeEvidence {
+        good_provider: &'static str,
+    }
+
+    impl ObservationSource for FakeEvidence {
+        fn observed(
+            &self,
+            key: &pairing::EvidenceKey,
+        ) -> Option<crate::config::pairing::ObservedEvidence> {
+            let provider = key.route().provider.as_deref()?;
+            let mut evidence = crate::config::pairing::ObservedEvidence::none();
+            evidence.reliable_observation_count = 20;
+            if provider == self.good_provider {
+                evidence.task_success_rate = Some(1.0);
+                evidence.reliability = Some(1.0);
+            } else {
+                evidence.task_success_rate = Some(0.0);
+                evidence.reliability = Some(0.0);
+            }
+            Some(evidence)
+        }
+    }
+
+    /// Phase 33A's own consumer, proven decisively: the candidate with real
+    /// local evidence behind it wins even though it is not first in the
+    /// caller's order — the §35 proof that ranking, not merely "first
+    /// compatible candidate", drives this decision. Mutating [`best`] to
+    /// return `candidates.remove(0)` unconditionally fails this test.
+    #[test]
+    fn on_provider_failure_ranks_same_model_survivors_by_local_evidence_not_order() {
+        let routing = InteractiveRouting::new();
+        let current = session();
+        let poor_evidence_first = backend("kilo", "the-model");
+        let good_evidence_second = backend("nous", "the-model");
+
+        let response = routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            &[poor_evidence_first, good_evidence_second],
+            &FakeEvidence {
+                good_provider: "nous",
+            },
+        );
+
+        match response {
+            FailureResponse::FailOver { to, .. } => {
+                assert_eq!(
+                    to.provider(),
+                    "nous",
+                    "the candidate with strong local evidence must win even though it was not \
+                     first in the caller's own order"
+                );
+            }
+            other => panic!("expected a same-model failover: {other:?}"),
+        }
+    }
+
+    /// Line 575: a failover's explanation actually names the pairing class
+    /// and cites the evidence behind it — not merely a value nobody reads.
+    #[test]
+    fn a_failover_explanation_names_the_pairing_class_it_scored() {
+        let routing = InteractiveRouting::new();
+        let current = Assignment::new("claude-code", backend("openrouter", "claude-fable-5"));
+        let candidate = backend("nous", "claude-fable-5");
+
+        let response = routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            &[candidate],
+            &NoObservations,
+        );
+
+        match response {
+            FailureResponse::FailOver { explanation, .. } => {
+                let rendered = explanation.render();
+                assert!(
+                    rendered.contains("vendor-native"),
+                    "claude-code serving claude-fable-5 is a real vendor-native pairing and the \
+                     explanation must say so: {rendered}"
+                );
+            }
+            other => panic!("expected a failover: {other:?}"),
+        }
+    }
+
+    /// A harness slug this build does not recognise degrades to a `0.0`
+    /// contribution rather than panicking or silently dropping the
+    /// candidate — the failover itself still happens.
+    #[test]
+    fn on_provider_failure_degrades_when_the_harness_slug_is_not_recognised() {
+        let routing = InteractiveRouting::new();
+        let current = Assignment::new("some-future-harness", backend("openrouter", "the-model"));
+        let candidate = backend("nous", "the-model");
+
+        let response = routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            &[candidate],
+            &NoObservations,
+        );
+
+        match response {
+            FailureResponse::FailOver {
+                to, explanation, ..
+            } => {
+                assert_eq!(to.provider(), "nous");
+                assert!(
+                    explanation
+                        .render()
+                        .contains("not a harness this build recognises"),
+                    "{}",
+                    explanation.render()
+                );
+            }
+            other => panic!(
+                "expected a same-model failover even with an unrecognised harness: {other:?}"
+            ),
+        }
     }
 
     /// Line 512: only a provider's own failure may move a session.

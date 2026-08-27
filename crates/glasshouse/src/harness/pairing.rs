@@ -387,6 +387,27 @@ pub struct ServingRoute {
     pub protocol: Option<WireProtocol>,
 }
 
+/// The reverse of [`WireProtocol::slug`], for a caller that only has the
+/// slug a [`crate::routing::Backend`] carries — that type's own doc comment
+/// explains why `routing` keeps the protocol as a string and never parses it
+/// back; this is that parse, for the one caller (Phase 9J's routing consumer)
+/// that already depends on this module and needs a [`ServingRoute::protocol`]
+/// to classify a candidate.
+///
+/// `None` for a slug none of the three known variants produced — a
+/// [`Pairing`]'s vendor-native status never depends on it (see
+/// [`crate::config::pairing::native_pairing_prior_contribution`]'s own doc),
+/// so this only ever weakens [`Pairing::protocol_fit`], never invents one.
+pub fn wire_protocol_from_slug(slug: &str) -> Option<WireProtocol> {
+    [
+        WireProtocol::AnthropicMessages,
+        WireProtocol::OpenAiResponses,
+        WireProtocol::OpenAiChat,
+    ]
+    .into_iter()
+    .find(|protocol| protocol.slug() == slug)
+}
+
 /// One correction a person made to a model's pairing metadata.
 ///
 /// Every field is optional and corrects exactly what it names; anything left
@@ -1066,6 +1087,21 @@ mod tests {
 
     fn none() -> PairingOverrides {
         PairingOverrides::default()
+    }
+
+    /// [`wire_protocol_from_slug`] round-trips every slug [`WireProtocol`]
+    /// actually produces, and refuses one none of them did rather than
+    /// guessing.
+    #[test]
+    fn wire_protocol_from_slug_round_trips_every_known_slug_and_refuses_an_unknown_one() {
+        for protocol in [
+            WireProtocol::AnthropicMessages,
+            WireProtocol::OpenAiResponses,
+            WireProtocol::OpenAiChat,
+        ] {
+            assert_eq!(wire_protocol_from_slug(protocol.slug()), Some(protocol));
+        }
+        assert_eq!(wire_protocol_from_slug("google-gemini"), None);
     }
 
     /// Line 557: both halves, and the second half is the one that matters.

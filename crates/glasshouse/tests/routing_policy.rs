@@ -16,6 +16,7 @@
 
 use std::time::{Duration, Instant};
 
+use glasshouse::config::pairing::NoObservations;
 use glasshouse::routing::classify::{
     self, ClassificationSource, Complexity, Confidence, TaskClassification, WarmContextValue,
     WorkloadTier,
@@ -255,11 +256,13 @@ mod order_dependence {
             &current,
             ProviderFailure::Unreachable,
             &[other_model.clone(), same_model.clone()],
+            &NoObservations,
         );
         let reversed = routing.on_provider_failure(
             &current,
             ProviderFailure::Unreachable,
             &[same_model.clone(), other_model.clone()],
+            &NoObservations,
         );
 
         for (label, response) in [
@@ -296,6 +299,7 @@ mod order_dependence {
             &current,
             ProviderFailure::Unreachable,
             &[candidate_a.clone(), candidate_b.clone()],
+            &NoObservations,
         );
         match a_first {
             FailureResponse::FailOver { to, .. } => assert_eq!(to.provider(), "kilo"),
@@ -306,6 +310,7 @@ mod order_dependence {
             &current,
             ProviderFailure::Unreachable,
             &[candidate_b, candidate_a],
+            &NoObservations,
         );
         match b_first {
             FailureResponse::FailOver { to, .. } => assert_eq!(
@@ -383,6 +388,7 @@ mod identity {
             &current,
             ProviderFailure::Unreachable,
             &[prefixed_provider],
+            &NoObservations,
         );
 
         match response {
@@ -408,8 +414,12 @@ mod identity {
         let current = session_on("openrouter", "gpt-4");
         let prefixed_model = backend("nous", "gpt-4-turbo");
 
-        let response =
-            routing.on_provider_failure(&current, ProviderFailure::Unreachable, &[prefixed_model]);
+        let response = routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            &[prefixed_model],
+            &NoObservations,
+        );
 
         match response {
             FailureResponse::OfferMigration { to, .. } => {

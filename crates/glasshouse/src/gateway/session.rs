@@ -29,12 +29,16 @@
 use std::sync::Mutex;
 use std::time::Instant;
 
+use crate::config::pairing::{NoObservations, ObservationSource};
 use crate::provider::telemetry::RateLimitHeaders;
-use crate::routing::evidence::{EvidenceLedger, NewObservation, Outcome as RoutingOutcome};
+use crate::routing::evidence::{
+    EvidenceLedger, NewObservation, ObservedEvidenceSource, Outcome as RoutingOutcome,
+};
 use crate::routing::free::{FreePool, FreeResource, WorkloadOutcome};
 use crate::routing::interactive::{
-    Assignment, AssignmentChange, ChangeCause, FailureResponse, InteractiveRouting,
-    MigrationRefusal, Pin, ProviderFailure, RoutingRecord, SessionActivity, StayReason,
+    Assignment, AssignmentChange, ChangeCause, FAILOVER_EVIDENCE_WINDOW_SECONDS, FailureResponse,
+    InteractiveRouting, MigrationRefusal, Pin, ProviderFailure, RoutingRecord, SessionActivity,
+    StayReason,
 };
 use crate::routing::{AssignedModel, Backend, CacheLocality};
 
@@ -281,7 +285,25 @@ impl SessionRouting {
     /// This is the production feed for Phase 9H lines 512 to 517 and Phase 9I
     /// lines 529, 534, 535, 537 and 538. It is called once per connection,
     /// after the exchange is over.
-    pub(super) fn observe_exchange(&self, upstream: &Upstream, exchange: &Exchange, now: Instant) {
+    ///
+    /// `ledger` and `now_unix` feed Phase 9J's native-pairing prior and Phase
+    /// 33A's local evidence into the one ranking decision this build makes
+    /// (`InteractiveRouting::on_provider_failure`) — the same
+    /// [`EvidenceLedger`] and completion timestamp
+    /// [`Self::record_routing_observation`] is given, so a failover reads the
+    /// very observations this gateway's own accept loop wrote. `None`
+    /// reproduces this policy's pre-batch-46 behaviour exactly (see
+    /// [`crate::routing::interactive::InteractiveRouting::on_provider_failure`]'s
+    /// own doc): with nothing to weigh, every survivor ties and the first one
+    /// found wins, the same as before this package.
+    pub(super) fn observe_exchange(
+        &self,
+        upstream: &Upstream,
+        exchange: &Exchange,
+        now: Instant,
+        ledger: Option<&EvidenceLedger>,
+        now_unix: i64,
+    ) {
         let Some(observation) = classify(exchange) else {
             // Nothing reached the provider — an unauthenticated caller, a
             // malformed head, a target belonging to no protocol. Recording
@@ -337,12 +359,41 @@ impl SessionRouting {
 
         let candidates =
             upstream.failover_candidates(current.protocol(), current.backend().model());
+
+        // Phase 9J and Phase 33A's one production consumer. `NoObservations`
+        // when no durable ledger was ever handed to this gateway — the same
+        // additive shape `record_routing_observation`'s own `ledger: &
+        // EvidenceLedger` parameter follows, so a build with no telemetry
+        // configured behaves exactly as it did before this package.
+        let no_observations = NoObservations;
+        let observed_source;
+        let evidence: &dyn ObservationSource = match ledger {
+            Some(ledger) => {
+                observed_source =
+                    ObservedEvidenceSource::new(ledger, now_unix, FAILOVER_EVIDENCE_WINDOW_SECONDS);
+                &observed_source
+            }
+            None => &no_observations,
+        };
+
         match state
             .policy
-            .on_provider_failure(&current, failure, &candidates)
+            .on_provider_failure(&current, failure, &candidates, evidence)
         {
-            FailureResponse::FailOver { to, cache } => {
+            FailureResponse::FailOver {
+                to,
+                cache,
+                explanation,
+            } => {
                 if upstream.switch_to(to.backend().credential()) {
+                    tracing::debug!(
+                        harness = %current.harness(),
+                        from = %current.label(),
+                        to = %to.label(),
+                        explanation = %explanation.render(),
+                        "the native-pairing prior and local evidence behind a Glasshouse gateway \
+                         failover"
+                    );
                     state.record.note(AssignmentChange {
                         from: current,
                         to: to.clone(),
@@ -352,7 +403,11 @@ impl SessionRouting {
                     state.assignment = Some(to);
                 }
             }
-            FailureResponse::OfferMigration { to, cache } => {
+            FailureResponse::OfferMigration {
+                to,
+                cache,
+                explanation,
+            } => {
                 // Phase 9H line 514: a material model change is not taken.
                 // Said out loud, because an offer nobody hears is a decision
                 // made by silence.
@@ -361,6 +416,7 @@ impl SessionRouting {
                     from = %current.label(),
                     offered = %to.label(),
                     cache = %cache,
+                    explanation = %explanation.render(),
                     "a Glasshouse gateway backend failed and the only compatible replacement \
                      serves a different model, which is a migration rather than a failover"
                 );
@@ -486,5 +542,171 @@ fn classify(exchange: &Exchange) -> Option<Observation> {
         | Outcome::Unrouted
         | Outcome::ClientGone
         | Outcome::Idle => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gateway::upstream::{Route, UpstreamBackend};
+    use crate::routing::evidence::NewObservation;
+    use crate::routing::{Cost, CredentialId};
+    use crate::secret::{Secret, SecretRef};
+    use crate::{Cli, Runtime};
+    use clap::Parser;
+
+    /// A real project database plus an [`EvidenceLedger`] opened on it — the
+    /// same [`crate::bootstrap`] door every other store's own tests use, so a
+    /// read here is proven against the real schema rather than a stand-in.
+    fn ledger_fixture(base: &std::path::Path) -> EvidenceLedger {
+        let root = base.join("workspace").join("proj");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let cli = Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            base.join("data").to_str().unwrap(),
+            "--config-dir",
+            base.join("config").to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime: Runtime = crate::bootstrap(&cli, &root).unwrap();
+        EvidenceLedger::open(&runtime).unwrap()
+    }
+
+    fn upstream_backend(name: &str) -> UpstreamBackend {
+        UpstreamBackend::new(
+            name.to_owned(),
+            vec![Route::new(
+                "anthropic-messages".to_owned(),
+                &["/messages"],
+                "http://127.0.0.1:1",
+            )],
+            Secret::mint_for_test("test-secret"),
+            CredentialId::new(
+                name,
+                SecretRef::Environment {
+                    var: format!("{}_API_KEY", name.to_uppercase()),
+                },
+            ),
+            Cost::Metered,
+        )
+        .expect("a loopback http URL is absolute and this credential is header-safe")
+    }
+
+    fn unreachable_exchange(provider: &str) -> Exchange {
+        Exchange {
+            outcome: Outcome::Unreachable {
+                detail: "connection refused",
+            },
+            status: 502,
+            provider: provider.to_owned(),
+            protocol: Some("anthropic-messages".to_owned()),
+            host: String::new(),
+        }
+    }
+
+    /// The §36 proof for this package's own wiring, not
+    /// `InteractiveRouting::on_provider_failure`'s (see
+    /// `routing::interactive::tests` for that one): this drives a **real**
+    /// [`EvidenceLedger`] through [`SessionRouting::observe_exchange`] itself,
+    /// the function `gateway/mod.rs`'s accept loop actually calls, rather than
+    /// through the pure policy function directly. Mutating this method's
+    /// `Some(ledger) => ...` arm back to always using `NoObservations` fails
+    /// this test, because it is the only one that supplies a ledger here at
+    /// all.
+    #[test]
+    fn observe_exchange_ranks_a_real_failover_by_the_ledger_it_was_given() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = ledger_fixture(tmp.path());
+        let now_unix = 1_800_000_000_i64;
+
+        for _ in 0..5 {
+            ledger
+                .record(
+                    NewObservation::new("poor-evidence", "the-routed-model")
+                        .with_route(Some("anthropic-messages"))
+                        .with_harness(Some("claude-code"))
+                        .with_outcome(RoutingOutcome::Failed),
+                    now_unix,
+                )
+                .unwrap();
+            ledger
+                .record(
+                    NewObservation::new("good-evidence", "the-routed-model")
+                        .with_route(Some("anthropic-messages"))
+                        .with_harness(Some("claude-code"))
+                        .with_outcome(RoutingOutcome::Succeeded),
+                    now_unix,
+                )
+                .unwrap();
+        }
+
+        let upstream = Upstream::with_failover(vec![
+            upstream_backend("first"),
+            upstream_backend("poor-evidence"),
+            upstream_backend("good-evidence"),
+        ])
+        .expect("three backends is not none");
+
+        let routing = SessionRouting::new();
+        routing.bind(
+            "claude-code",
+            "anthropic-messages",
+            AssignedModel::named("the-routed-model"),
+            &upstream,
+        );
+        assert_eq!(
+            routing.assignment().map(|a| a.provider().to_owned()),
+            Some("first".to_owned())
+        );
+
+        routing.observe_exchange(
+            &upstream,
+            &unreachable_exchange("first"),
+            Instant::now(),
+            Some(&ledger),
+            now_unix,
+        );
+
+        assert_eq!(
+            routing.assignment().map(|a| a.provider().to_owned()),
+            Some("good-evidence".to_owned()),
+            "the candidate with strong recorded evidence must win the real failover, not \
+             `poor-evidence`, which is configured first among the two survivors"
+        );
+    }
+
+    /// The same failover with no ledger at all reproduces the pre-batch-46
+    /// behaviour: the first compatible survivor in configuration order wins.
+    #[test]
+    fn observe_exchange_falls_back_to_configuration_order_with_no_ledger() {
+        let upstream = Upstream::with_failover(vec![
+            upstream_backend("first"),
+            upstream_backend("second"),
+            upstream_backend("third"),
+        ])
+        .expect("three backends is not none");
+
+        let routing = SessionRouting::new();
+        routing.bind(
+            "claude-code",
+            "anthropic-messages",
+            AssignedModel::named("the-routed-model"),
+            &upstream,
+        );
+
+        routing.observe_exchange(
+            &upstream,
+            &unreachable_exchange("first"),
+            Instant::now(),
+            None,
+            0,
+        );
+
+        assert_eq!(
+            routing.assignment().map(|a| a.provider().to_owned()),
+            Some("second".to_owned())
+        );
     }
 }

@@ -1,18 +1,19 @@
-//! Phase 9J's pairing *prior*, lines 566–576 and Phase 49 line 1797 —
-//! proved against no production caller, because none exists.
+//! Phase 9J's pairing *prior*, lines 566–576 and Phase 49 line 1797.
 //!
-//! `docs/product/evidence/phase-9j.md` records why: there are exactly two
-//! routing callers in the shipped binary, `InteractiveRouting` and
-//! `DisposableRouting`, and neither ranks candidates — one keeps a session on
-//! its assigned backend and fails over, the other picks a free resource for a
-//! disposable job. `grep -rn 'fn score\|Score' crates/glasshouse/src` finds no
-//! match. Phase 35B (candidate scoring) is 0 of 25 and Phase 33A (the routing
-//! evidence ledger) is 0 of 15; both are what would give
-//! `config::pairing::native_pairing_prior_contribution` a caller, and neither
-//! exists in this repository today. So every test here enters through the
-//! policy function directly, which is honest given there is nothing else to
-//! enter through — this file's own existence is part of the report, not a
-//! substitute for the missing caller.
+//! `docs/product/evidence/phase-9j.md` recorded, before this package, that
+//! there were exactly two routing callers in the shipped binary and neither
+//! ranked candidates. That is now half true: `DisposableRouting` still
+//! cannot reach this function at all (`DisposableCandidate` carries no
+//! harness — see that phase's own entry for why), but
+//! `InteractiveRouting::on_provider_failure` now calls it for real, through
+//! `routing::interactive::score_candidate`, to rank same-model failover
+//! survivors — see this crate's own `routing::interactive` module tests for
+//! that production path. What is still not wired through that caller is the
+//! user's *configured* preference and pairing corrections (it scores every
+//! candidate against `PairingPreference::Strong` and no corrections — see
+//! `score_candidate`'s own doc comment for exactly why), so every test below
+//! still enters through this policy function directly to exercise the full
+//! range this one production caller does not yet reach.
 //!
 //! The `native_pairing_preference` tests are the one part of this package
 //! with a real, if unwired, path: they load actual TOML through
