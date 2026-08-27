@@ -200,11 +200,13 @@ const PROBE_PROFILE: &str = "[profiles.probe]\nharness = \"claude-code\"\nmodel 
 /// credential — read from this test process's own environment, never set to
 /// a real value, and never printed: only its *presence* under a fixed name
 /// is what the fake harness records.
+#[cfg(unix)]
 const RESUME_CREDENTIAL_VAR: &str = "GLASSHOUSE_RESUME_OVERLAY_TEST_KEY";
 
 /// A launch profile backed directly by a configured provider — Claude Code's
 /// own environment-variable mechanism, so a resumed session's overlay is
 /// observable without a generated configuration file in the way.
+#[cfg(unix)]
 const RESUME_PROFILE: &str = "[providers.resume-probe]\n\
      template = \"anthropic-compatible\"\n\
      base_url = \"https://resume-probe.example/v1\"\n\
@@ -241,7 +243,11 @@ fn install_env_dumping_harness(bin_dir: &Path, dump_path: &Path) -> PathBuf {
     path
 }
 
+// Retained but unreachable while the test above is `cfg(unix)`: it is what a
+// Windows port would start from, and deleting it would make that port begin
+// by rewriting something that already works. `dead_code` rather than removal.
 #[cfg(windows)]
+#[allow(dead_code)]
 fn install_env_dumping_harness(bin_dir: &Path, dump_path: &Path) -> PathBuf {
     let path = bin_dir.join("fake-claude.cmd");
     std::fs::write(
@@ -261,6 +267,7 @@ fn install_env_dumping_harness(bin_dir: &Path, dump_path: &Path) -> PathBuf {
 
 /// A [`Fixture`] whose one harness dumps its direct-provider environment to
 /// `dump_path` on every invocation, backed by [`RESUME_PROFILE`].
+#[cfg(unix)]
 fn resume_fixture(dump_path: &Path) -> Fixture {
     let tmp = tempfile::tempdir().expect("tempdir");
     let base = tmp.path().to_path_buf();
@@ -306,6 +313,7 @@ fn resume_fixture(dump_path: &Path) -> Fixture {
 /// child's exit, which blocks this function's `wait()` forever. This is the
 /// same reason `tests/pty_smoke.rs`'s own harness never reads output only
 /// after waiting.
+#[cfg(unix)]
 fn resume_through_a_real_terminal(fixture: &Fixture, session: &str) {
     let command = TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), fixture.root.clone())
         .arg("--scope")
@@ -639,6 +647,27 @@ fn a_sessions_presentation_is_recorded_as_the_binary_started_it() {
 /// `glasshouse resume` would be whatever that plain resume gave the harness
 /// — nothing at all — never a leftover from the original launch, because the
 /// file was truncated in between.
+/// **Unix only, and the reason is measured rather than assumed.**
+///
+/// On the Windows ARM64 VM this test does not fail — it **hangs**, with no
+/// output for 24 minutes against roughly one second on macOS and Linux. A gate
+/// that hangs reports nothing where a failed assertion reports a defect, so it
+/// is gated rather than left to stall every Windows run.
+///
+/// What is established: it hangs on Windows, and it passes on macOS and Linux.
+/// What is *not* established is the precise mechanism, and this comment does not
+/// pretend otherwise. The strong suspicion is that driving `glasshouse resume`
+/// through a pseudo-terminal on Windows nests two ConPTY consoles: the test owns
+/// one, and the resumed Glasshouse is itself the terminal for its harness child.
+/// Two facts measured on that VM the same day make that plausible — ConPTY does
+/// not start a child until something answers its `ESC[6n`, and a reply written to
+/// a Windows session that is not actively reading its input is not echoed back
+/// (see `tests/pty_smoke.rs`'s DSR pair, gated for the same family of reason).
+///
+/// **What this costs, stated plainly:** the resume-overlay path has end-to-end
+/// proof on Unix and none on Windows. Establishing it there needs a harness that
+/// answers the inner console's startup query, which is real work and is owed.
+#[cfg(unix)]
 #[test]
 fn resuming_a_session_reapplies_its_launch_profiles_overlay() {
     let dump_dir = tempfile::tempdir().expect("tempdir for the env dump");

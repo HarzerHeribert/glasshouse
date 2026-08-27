@@ -1735,3 +1735,92 @@ syntax, and prove it by running the gate against **this round's own
 
 A gate that has never been run against a packet known to be broken is §20's
 question waiting to be asked. This round supplies the broken packet.
+
+## Batch 29 outcomes — four workers, three integrated, one parked on a platform divergence
+
+| worker | tier | cost | outcome |
+|---|---|---|---|
+| `typing-throttle` | Opus specialist | ~$6.5, 52 min | **integrated** — 0 boxes, the round's most user-visible fix |
+| `windows-truth` | Sonnet | ~$11.4, 48 min | **integrated** — 0 boxes, 3 of 4 items + 1 disproved |
+| `phase-9a-facts` | Sonnet | ~$13.8, 41 min | **integrated** — 2 boxes (441 → 443) |
+| `phase-10a` | Opus lead | ~$37, 1h43 | **parked** — 11 boxes built, 0 ticked |
+
+**Four disjoint partitions produced zero merge conflicts**, against a `main` that
+had moved four commits ahead of every worker's branch point. `git apply -3`
+applied all four cleanly. The partition discipline works at four; that question
+is answered.
+
+### The round's question was wrong, and the real ceiling was elsewhere
+
+It was opened asking whether four concurrent workers collide **at review**, on
+the theory that §9's ceiling of three is really about how many box-closing
+packages one orchestrator can record. **Nothing collided at review.** All four
+reports were read and verdicted without contention.
+
+**Integration is where it bound, and for a reason no one had written down: one
+batch's platform failure stalls the whole combined tree.** The gate runs once on
+everything, so `phase-10a`'s Linux regression made a single FAIL that said
+nothing about which of four batches caused it. Separating that cost a second
+full gate run — and the separation only worked because the partitions were
+disjoint enough to reverse one batch cleanly.
+
+**The transferable rule: partition disjointness is not only a concurrency
+property, it is a *bisection* property.** Four batches that cannot be applied and
+reversed independently would have left one red gate and no cheap way to attribute
+it. Keep `git apply -R` reversibility in mind when sizing a round, not just
+"two workers must not edit one file".
+
+### The parked batch is the round's most valuable measurement
+
+`phase-10a` was the largest package, the most expensive worker, produced the
+best report, and **ticked nothing.** Its work is intact and its follow-up is
+cheap. What stopped it:
+
+    events_lifecycle.rs on one tree, one gate run
+      macOS   5 passed, 0 failed
+      Linux   3 passed, 2 failed
+
+A new readiness bound whose outcome is a race, landing on opposite sides on the
+two platforms — so whether a session *exists* depends on the operating system —
+and breaking `capability-map.md:1730`, a **ticked** box.
+
+**Three things this says, none of which is "the worker did badly":**
+
+1. **The worker predicted it.** Its report said the bound was best-effort, that
+   it "does not always win", and that Linux and Windows were unrun and that
+   *"matters more here than usual"*. It was right, and it said so before anyone
+   asked. A report that names its own weakest claim is worth more than one that
+   does not, and this is the second round running where the most valuable
+   paragraph was a worker's own caveat.
+2. **A one-platform gate is not evidence for a cross-platform claim**, and this
+   is the first time in this project that a *local* Linux leg — not a CI runner —
+   caught a regression before it shipped. §27 built that leg as a substitute for
+   billed CI; it has now paid for itself in a way CI could not have, because CI
+   would have caught it *after* the push.
+3. **Cost per box is the wrong denominator for a parked batch.** $37 bought
+   eleven implemented boxes, two real pre-existing defects found
+   (`SessionStore::close`'s out-of-transaction liveness read, and
+   `answer_terminal_queries` as a second writer), seventeen killed mutations, and
+   a platform-divergence proof the follow-up now inherits. Recording it as
+   "$37, zero boxes" would be arithmetically true and analytically useless.
+
+### The `asserted-never-checked` count is now five, and one was caught by tallying
+
+Two more instances since the entry above, both in reports from workers whose
+underlying work was sound:
+
+| # | verified thing | unchecked claim beside it | caught by |
+|---|---|---|---|
+| 5 | 48 gates read and classified into a table | the **summary** of that table | tallying the table mechanically |
+| 6 | no FORBIDDEN file touched | no file **outside `YOURS`** touched | `git status` |
+
+Number 5 is the instructive one: the report's headline said 15/9/23/1 and its own
+table says 12/10/25/1. **Both total 48**, which is exactly why it survived being
+read — a wrong breakdown that reconciles to the right total is the hardest kind
+to catch by eye, and it would have become the handoff's number, replacing one
+unverified count with another in the very package commissioned to end that.
+
+Still **not a rate** — six instances, one round, no denominator for how many
+claims were made in total. Batches 30–32 still owe the answer. But the prevention
+has now been validated twice: **check the artefact, not its description.** Both
+catches cost one command.
