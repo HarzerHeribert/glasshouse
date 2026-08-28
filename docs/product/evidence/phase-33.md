@@ -206,3 +206,61 @@ Missing evidence, restated precisely:
   `retry_after` for its own cooldown length, which is adjacent but is not the
   scheduling authority the line names.)
 - **1323** — settled as open by the user's decision above.
+
+### Correction, same session: the surface is NOT a migration, and the precedent is already shipped
+
+The paragraph above concluded that persisting health means *"a migration, Red
+tier."* **That is wrong, and the correction changes the tier and the cost of the
+package.**
+
+`provider::telemetry::GatewayQuotaCache` already solves this exact problem for
+quota, and its own module comment states the problem in the same words this entry
+reached for independently (`telemetry.rs:1071-1080`):
+
+> *"…both only ever run inside a `glasshouse run`/`glasshouse launch` process
+> that is blocked on the harness it started. `glasshouse resources` — the one
+> caller that turns a reading into a rendered line — is a separate invocation of
+> the binary, and nothing in memory connects the two. **This is that connection:**
+> the gateway process writes what it captured, and a later `glasshouse resources`
+> process reads it back."*
+
+It is **not** SQLite and **not** a migration. It is a versioned JSON file per
+provider under `paths.data_dir().join("gateway-quota")` (`:1165`, `:1175`),
+written atomically by rename (`:1129`), and fail-soft on every read path —
+absent, truncated, wrong version and wrong provider all mean *"no reading here"*
+rather than a failed command (`:1191`).
+
+**So the five links for a health surface are all citable today:**
+
+| link | evidence |
+|---|---|
+| producer | `routing/free.rs:236` `ResourceHealth`, written per exchange at `gateway/session.rs:371` |
+| caller has it | `Gateway` already holds `quota_cache: Option<GatewayQuotaCache>` — `gateway/mod.rs:301, 331, 483, 634, 655`. A sibling health cache follows the identical construction path. |
+| propagation | the on-disk cache pattern, built at `main.rs:537` and `main.rs:1079`, exactly where the quota cache already is |
+| consumer | `resources_report` via `gather_gateway_quota`'s sibling (`provider/resources.rs:278`, called from `main.rs:2246`) **and** the API door at `api/unix.rs:530`, which already reads quota this way |
+| fifth | the health values genuinely vary — `consecutive_failures`, cooldown and credential rejection differ per `(credential, model)` and already drive credential rotation at `gateway/session.rs:385` |
+
+`provider/cache.rs:318` even records that *"`GatewayQuotaCache` keys a second
+per-provider directory the same way"* — the keying convention is established and
+a third user of it is expected.
+
+**And the acceptance test has a precedent to copy**, which is what makes this
+closable rather than merely buildable:
+`provider_discovery.rs:890::a_planted_gateway_reading_now_reaches_the_shipped_binarys_report`
+plants a reading in the cache and asserts the **shipped binary's** report renders
+it. The health version is the same test with a different payload, and it is
+non-vacuous by construction because deleting the write makes it fail.
+
+**Revised assessment: an Amber (Sonnet) package, not Red.** Partition
+`provider/telemetry.rs` + `provider/resources.rs` + `gateway/**` + `main.rs`'s two
+construction sites, with `api/unix.rs` following the quota precedent. It plausibly
+closes **1311, 1321, 1322 and 1324** together, and is the best-specified open work
+in this phase.
+
+**Why this was missed for four checkpoints, which is the transferable part:** every
+prior assessment asked *"can anything outside the gateway observe `ResourceHealth`?"*
+and correctly answered no. None asked *"has this codebase already carried a
+gateway-only observation across the same process boundary?"* — and it had, once,
+in the module the consumer already calls. **When a propagation link fails, look for
+a sibling signal that already crosses the same boundary before concluding the
+boundary is the problem.**
