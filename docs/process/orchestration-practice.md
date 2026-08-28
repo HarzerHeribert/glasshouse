@@ -3005,3 +3005,58 @@ capability 327's *durable* half still needs a decision, because compaction moves
 no `SessionLifecycle` state — it is a fact to record, not a transition, and
 recording it means either a new event kind behind a `CHECK`-rebuilding migration
 or somewhere else to put it.
+
+## §76 — I wrote §75 and then broke it again ninety minutes later, in the same round
+
+§75 records that I promoted a recon's *decisive claim* into a packet's producer
+link without re-checking it, and that one `discover.py --seam` would have caught
+it. **I then did the same thing again, in the next packet I wrote.**
+
+`proof-router`'s packet cited `EffectiveConfig::routing_model_resolution()`
+(`config/mod.rs:2806`) as the production evidence for map line 1424. The worker
+checked:
+
+    discover.py: ZERO non-test call sites of `routing_model_resolution`.
+    It is DEFINED in production and called from nowhere but tests — the shape
+    that cost two packages eighteen boxes in batch 35.
+
+**A function with no production caller, cited as proof that behaviour reaches
+production.** The exact defect §5 exists to catch, in a packet written by the
+orchestrator who had just finished writing §75 about the same mistake.
+
+The behaviour is real, through a different path the worker found and used:
+`RoutingModelChoice::resolve()` is called from `WizardState::routing_selection()`
+(`onboarding/state.rs:1037`), which the onboarding wizard renders every frame —
+**five** non-test call sites, confirmed. It closed 1424 through that path and
+**flagged the substitution as a packet error rather than making it silently**,
+which is the behaviour to reward.
+
+### Why a written rule was not enough, and what to do instead
+
+§75's remedy was *"remember to check a recon's claims too."* That is a habit, and
+habits fail under load — this round had eight workers, and the packet citing a
+dead symbol was written between two other packets.
+
+**The fix is mechanical, and this project already owns the tool.**
+`scripts/discover.py --seam <symbol>` answers exactly this question, prints
+`ZERO non-test call sites` in as many words, and takes two seconds.
+
+**Rule: every symbol a packet cites as a producer or caller link gets a
+`--seam` run before dispatch.** Not "when it seems doubtful" — always, because
+the two that failed both *seemed* fine and both came from a source that had
+already checked something adjacent.
+
+**And the stronger version, unbuilt:** `validate_round.py` could extract the
+symbols named in a packet's FEASIBILITY block and refuse the round when one has
+zero non-test call sites. That is the same move batch 44 made for evidence
+self-consistency — turn the round's own finding into a check, so the next
+orchestrator cannot forget it under load. **Recorded as a wave-3 candidate.**
+
+### The measurement, because it is the argument for the gate
+
+Two packets in one round cited dead or mis-scoped evidence. **Both were caught by
+workers, neither by me**, and the cost was one refused dispatch
+(`compaction-events`, no code) and one silently-substituted citation that a less
+careful worker would have accepted. **Ten consecutive rounds a worker has
+corrected its packet and been right** — that streak is not luck, and it is also
+not a substitute for the gate.
