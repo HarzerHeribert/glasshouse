@@ -537,16 +537,93 @@ fn resource_capacity(runtime: &Runtime) -> Response {
     ))
 }
 
-/// Search this project's durable memory — box 10.
+/// Search this project's durable memory — box 10, and Phase 21F lines
+/// 935/936: the machine door carries each result's authority, validity
+/// state, and — for a memory that may constrain implementation — its
+/// rationale and invalidation conditions, as structured fields rather than
+/// only inside a rendered string.
 ///
-/// Delegates to `main.rs`'s own `memory_report`, the exact function
-/// `glasshouse memory search` prints from, so this door and that command can
-/// never disagree about what a query finds.
+/// `invariants_and_constraints`/`other` is `main.rs`'s own
+/// `memory_search_grouped` (line 929), the exact search
+/// `glasshouse memory search` runs; `report` is `render_memory_report`'s
+/// exact text over the same result, so this door and that command can never
+/// disagree about what a query finds. One search, not two: the CLI's report
+/// text is rendered from the already-fetched grouping rather than searched
+/// for a second time.
 fn query_memory(runtime: &Runtime, query: &str, history: bool, limit: usize) -> Response {
-    match crate::memory_report(runtime, query, history, limit) {
-        Ok(report) => Response::ok(serde_json::json!({ "report": report })),
-        Err(err) => Response::err(err),
-    }
+    let grouped = match crate::memory_search_grouped(runtime, query, history, limit) {
+        Ok(grouped) => grouped,
+        Err(err) => return Response::err(err),
+    };
+    let report = match crate::render_memory_report(&grouped, query, history) {
+        Ok(report) => report,
+        Err(err) => return Response::err(err),
+    };
+
+    Response::ok(serde_json::json!({
+        "invariants_and_constraints": grouped
+            .invariants_and_constraints
+            .iter()
+            .map(memory_result_json)
+            .collect::<Vec<_>>(),
+        "other": grouped.other.iter().map(memory_result_json).collect::<Vec<_>>(),
+        "report": report,
+    }))
+}
+
+/// One memory, as JSON for the machine door — Phase 21F lines 935/936.
+///
+/// `may_constrain_implementation` is `MemoryAuthority::is_binding` made
+/// explicit as its own field rather than left for a caller to infer from
+/// which of `validity_conditions`/`invalidation_conditions` happen to be
+/// non-null: those two are deliberately `null` for a memory that is not
+/// binding even if the row somehow carries text in them, for the same
+/// reason `main.rs`'s `constraint_lines` gates on it rather than on
+/// presence.
+///
+/// `review` is `null` unless `status` is currently `needs_review`: 21C's
+/// `review_reason` is not cleared when a review is resolved back to another
+/// status (`MemoryStore::set_status` never touches it), so it is stale
+/// information once the status has moved on, and only `status` says whether
+/// a challenge is still open.
+fn memory_result_json(record: &glasshouse::memory::MemoryRecord) -> serde_json::Value {
+    use glasshouse::memory::{MemoryAuthority, MemoryStatus};
+
+    let may_constrain_implementation = record.authority.is_some_and(MemoryAuthority::is_binding);
+    let review = (record.status == MemoryStatus::NeedsReview)
+        .then_some(record.review_reason)
+        .flatten()
+        .map(|reason| {
+            serde_json::json!({
+                "reason": reason.as_str(),
+                "marked_at": record.review_marked_at,
+            })
+        });
+
+    serde_json::json!({
+        "id": record.id.as_str(),
+        "kind": record.kind.as_str(),
+        "authority": record.authority.map(MemoryAuthority::as_str),
+        "status": record.status.as_str(),
+        "current": record.is_current(),
+        "subject": record.subject,
+        "body": record.body,
+        "may_constrain_implementation": may_constrain_implementation,
+        "rationale": record.provenance.rationale,
+        "validity_conditions": if may_constrain_implementation {
+            record.validity_conditions.clone()
+        } else {
+            None
+        },
+        "invalidation_conditions": if may_constrain_implementation {
+            record.invalidation_conditions.clone()
+        } else {
+            None
+        },
+        "review": review,
+        "last_validated_at": record.last_validated_at,
+        "created_at": record.created_at,
+    })
 }
 
 /// Take a checkpoint — box 11.

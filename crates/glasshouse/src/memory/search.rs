@@ -63,6 +63,39 @@ pub enum SearchScope {
 /// its own limit — but it exists so no caller has to invent a number.
 pub const DEFAULT_SEARCH_LIMIT: usize = 20;
 
+/// A memory search's matches, split by whether they are currently active
+/// invariants and constraints or not — Phase 21F line 929's *"retrieve
+/// current active invariants and constraints separately from historical
+/// decisions."*
+///
+/// Produced by [`MemoryStore::search_grouped`]. Narrower than
+/// [`MemoryAuthority::is_binding`], which also counts an ordinary
+/// [`MemoryAuthority::Decision`]: line 929 names exactly the two classes
+/// Glasshouse treats as rules nobody may quietly work around, not every
+/// class capable of directing current work.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetrievalResult {
+    /// Currently active invariants and constraints, in the relevance/decay
+    /// order [`MemoryStore::search`] produced them.
+    pub invariants_and_constraints: Vec<MemoryRecord>,
+    /// Everything else the search matched — ordinary current memories, and,
+    /// under [`SearchScope::Historical`], history — including a memory whose
+    /// authority is invariant or constraint but that is no longer active,
+    /// which is history rather than a current rule.
+    pub other: Vec<MemoryRecord>,
+}
+
+/// Whether a memory is a *currently binding* invariant or constraint — see
+/// [`RetrievalResult`] for why this is narrower than
+/// [`MemoryAuthority::is_binding`].
+fn is_current_invariant_or_constraint(record: &MemoryRecord) -> bool {
+    record.is_current()
+        && matches!(
+            record.authority,
+            Some(MemoryAuthority::Invariant) | Some(MemoryAuthority::Constraint)
+        )
+}
+
 /// Every column of `memories`, qualified by table name.
 ///
 /// [`super::store::ALL_COLUMNS`] cannot be reused here unqualified: this
@@ -240,8 +273,20 @@ impl<'a> MemoryStore<'a> {
 
         let now = self.now();
         scored.sort_by(|(a, a_relevance), (b, b_relevance)| {
-            let a_weight = retrieval_weight(a.authority, now, a.created_at, a.last_validated_at);
-            let b_weight = retrieval_weight(b.authority, now, b.created_at, b.last_validated_at);
+            let a_weight = retrieval_weight(
+                a.authority,
+                now,
+                a.created_at,
+                a.last_validated_at,
+                a.provenance.project_phase,
+            );
+            let b_weight = retrieval_weight(
+                b.authority,
+                now,
+                b.created_at,
+                b.last_validated_at,
+                b.provenance.project_phase,
+            );
             let a_score = *a_relevance * a_weight;
             let b_score = *b_relevance * b_weight;
             a_score
@@ -253,6 +298,38 @@ impl<'a> MemoryStore<'a> {
         demote_thin_decisions(&mut records);
         records.truncate(limit);
         Ok(records)
+    }
+
+    /// [`MemoryStore::search`], grouped the way Phase 21F line 929 asks:
+    /// currently active invariants and constraints apart from everything
+    /// else the search matched. Both groups keep `search`'s own relevance
+    /// and decay order.
+    ///
+    /// A type, not a sort a caller has to notice: two memories can both be
+    /// [`SearchScope::Current`] while one is a binding
+    /// [`MemoryAuthority::Invariant`] or [`MemoryAuthority::Constraint`] and
+    /// the other an ordinary [`MemoryAuthority::Decision`], and a reader
+    /// must be able to tell those apart without re-deriving it from a
+    /// rendered string. This is the shared core `main.rs`'s `memory_report`
+    /// (the CLI's `glasshouse memory search`) and the control API's
+    /// `query_memory` both render from — see that door's own doc comment for
+    /// why the two must never disagree.
+    pub fn search_grouped(
+        &self,
+        text: &str,
+        scope: SearchScope,
+        limit: usize,
+    ) -> Result<RetrievalResult, MemoryStoreError> {
+        let records = self.search(text, scope, limit)?;
+        let mut grouped = RetrievalResult::default();
+        for record in records {
+            if is_current_invariant_or_constraint(&record) {
+                grouped.invariants_and_constraints.push(record);
+            } else {
+                grouped.other.push(record);
+            }
+        }
+        Ok(grouped)
     }
 
     /// Phase 22 line 1063: detect mutually contradictory current memories

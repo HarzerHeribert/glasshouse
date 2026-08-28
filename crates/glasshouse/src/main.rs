@@ -239,6 +239,9 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             MemoryCommand::Promote { id, authority } => {
                 print!("{}", memory_promote(&runtime, id, authority)?);
             }
+            MemoryCommand::Challenge { id, reason } => {
+                print!("{}", memory_challenge(&runtime, id, reason)?);
+            }
             MemoryCommand::Extract {
                 session,
                 activity,
@@ -2219,6 +2222,30 @@ fn resources_report(
     ))
 }
 
+/// The one search this project's memory retrieval goes through — Phase 21F
+/// line 929's grouping, and the shared core `memory_report` (the CLI's
+/// `glasshouse memory search`) and `api::unix::query_memory` (the machine
+/// door) both render from, so the two can never disagree about what a query
+/// finds or how it is grouped.
+fn memory_search_grouped(
+    runtime: &Runtime,
+    query: &str,
+    history: bool,
+    limit: usize,
+) -> anyhow::Result<glasshouse::memory::search::RetrievalResult> {
+    use glasshouse::memory::ProjectMemory;
+    use glasshouse::memory::search::SearchScope;
+
+    let scope = if history {
+        SearchScope::Historical
+    } else {
+        SearchScope::Current
+    };
+
+    let memory = ProjectMemory::open(runtime)?;
+    Ok(memory.store().search_grouped(query, scope, limit)?)
+}
+
 /// Render a memory search the way `session_report` renders sessions: the
 /// provenance is part of the answer, because a memory a reader cannot trace
 /// back to a session or a commit is one they have to take on trust.
@@ -2233,22 +2260,23 @@ fn memory_report(
     history: bool,
     limit: usize,
 ) -> anyhow::Result<String> {
+    let grouped = memory_search_grouped(runtime, query, history, limit)?;
+    render_memory_report(&grouped, query, history)
+}
+
+/// Pure formatting half of [`memory_report`], separated so
+/// `api::unix::query_memory` can render the identical text from a
+/// [`glasshouse::memory::search::RetrievalResult`] it already has, without a
+/// second trip through the database.
+fn render_memory_report(
+    grouped: &glasshouse::memory::search::RetrievalResult,
+    query: &str,
+    history: bool,
+) -> anyhow::Result<String> {
     use std::fmt::Write as _;
 
-    use glasshouse::memory::ProjectMemory;
-    use glasshouse::memory::search::SearchScope;
-
-    let scope = if history {
-        SearchScope::Historical
-    } else {
-        SearchScope::Current
-    };
-
-    let memory = ProjectMemory::open(runtime)?;
-    let records = memory.store().search(query, scope, limit)?;
-
     let mut out = String::new();
-    if records.is_empty() {
+    if grouped.invariants_and_constraints.is_empty() && grouped.other.is_empty() {
         // Say which of the two questions was asked. "No memories" after a
         // default search would otherwise read as "this project remembers
         // nothing", when the history was simply not looked at.
@@ -2264,41 +2292,120 @@ fn memory_report(
         return Ok(out);
     }
 
-    for record in &records {
-        let subject = record.subject.as_deref().unwrap_or("(no subject)");
-        // Phase 21A: retrieval must preserve the authority distinction rather
-        // than flattening every memory into equally authoritative text. An
-        // unclassified memory says so; it does not borrow a class.
-        let authority = record.authority.map_or("unclassified", |a| a.as_str());
-        // Phase 21B: *"treat a decision with missing rationale and missing
-        // assumptions as lower-confidence."* The ranking already does it —
-        // `memory::search::demote_thin_decisions` puts such a decision behind
-        // a better-proven one of its own class. Saying so here is the other
-        // half: a reader who cannot see *why* a decision sank has been given
-        // a reordering and no reason for it.
-        let confidence = if record.is_lower_confidence_decision() {
-            "  lower-confidence"
-        } else {
-            ""
-        };
-        writeln!(
-            out,
-            "{}  {}  {authority}{confidence}  {subject}",
-            record.kind, record.status
-        )?;
-        writeln!(out, "    {}", record.body)?;
-        let provenance = provenance_lines(record);
-        if !provenance.is_empty() {
-            writeln!(out, "{provenance}")?;
+    // Phase 21F line 929: current invariants and constraints are printed as
+    // their own group, ahead of and apart from everything else a search
+    // matched, rather than left for a reader to tell apart from a rendered
+    // string.
+    if !grouped.invariants_and_constraints.is_empty() {
+        writeln!(out, "-- current invariants & constraints --")?;
+        for record in &grouped.invariants_and_constraints {
+            write_memory_record(&mut out, record)?;
         }
-        let session = record.source_session_id.as_deref().unwrap_or("unknown");
-        let commit = record.source_commit.as_deref().unwrap_or("unknown");
-        let events = record
-            .source_events
-            .map_or_else(|| "no event range".to_owned(), |events| events.to_string());
-        writeln!(out, "    from session {session}, commit {commit}, {events}")?;
+    }
+    if !grouped.other.is_empty() {
+        if !grouped.invariants_and_constraints.is_empty() {
+            writeln!(out, "-- other results --")?;
+        }
+        for record in &grouped.other {
+            write_memory_record(&mut out, record)?;
+        }
     }
     Ok(out)
+}
+
+/// One memory, rendered the way [`memory_report`] prints every result.
+fn write_memory_record(
+    out: &mut String,
+    record: &glasshouse::memory::MemoryRecord,
+) -> anyhow::Result<()> {
+    use std::fmt::Write as _;
+
+    let subject = record.subject.as_deref().unwrap_or("(no subject)");
+    // Phase 21A: retrieval must preserve the authority distinction rather
+    // than flattening every memory into equally authoritative text. An
+    // unclassified memory says so; it does not borrow a class.
+    let authority = record.authority.map_or("unclassified", |a| a.as_str());
+    // Phase 21B: *"treat a decision with missing rationale and missing
+    // assumptions as lower-confidence."* The ranking already does it —
+    // `memory::search::demote_thin_decisions` puts such a decision behind
+    // a better-proven one of its own class. Saying so here is the other
+    // half: a reader who cannot see *why* a decision sank has been given
+    // a reordering and no reason for it.
+    let confidence = if record.is_lower_confidence_decision() {
+        "  lower-confidence"
+    } else {
+        ""
+    };
+    writeln!(
+        out,
+        "{}  {}  {authority}{confidence}  {subject}",
+        record.kind, record.status
+    )?;
+    writeln!(out, "    {}", record.body)?;
+    let provenance = provenance_lines(record);
+    if !provenance.is_empty() {
+        writeln!(out, "{provenance}")?;
+    }
+    // Phase 21F line 936: when this memory's authority means it may
+    // constrain implementation, carry its validity and invalidation
+    // conditions into the answer as well as its rationale — already printed
+    // above, as `provenance_lines`'s "why" field.
+    let constraint = constraint_lines(record);
+    if !constraint.is_empty() {
+        writeln!(out, "{constraint}")?;
+    }
+    // Phase 21F lines 937/938: a challenged memory must not read as settled.
+    // Gated on `status`, not on `review_reason` alone, because a memory whose
+    // review was resolved keeps its last `review_reason` on the record —
+    // `MemoryStore::set_status` never clears it — so status is the only
+    // field that says whether the challenge is still open.
+    if record.status == glasshouse::memory::MemoryStatus::NeedsReview
+        && let Some(reason) = record.review_reason
+    {
+        writeln!(
+            out,
+            "    challenged    {reason} — not returned as settled until resolved"
+        )?;
+    }
+    let session = record.source_session_id.as_deref().unwrap_or("unknown");
+    let commit = record.source_commit.as_deref().unwrap_or("unknown");
+    let events = record
+        .source_events
+        .map_or_else(|| "no event range".to_owned(), |events| events.to_string());
+    writeln!(out, "    from session {session}, commit {commit}, {events}")?;
+    Ok(())
+}
+
+/// Phase 21F line 936's conditional half: a memory's validity and
+/// invalidation conditions are worth carrying only when its authority means
+/// it may constrain implementation — an [`glasshouse::memory::MemoryAuthority::Invariant`],
+/// a [`glasshouse::memory::MemoryAuthority::Constraint`], or an accepted
+/// [`glasshouse::memory::MemoryAuthority::Decision`] (exactly
+/// [`glasshouse::memory::MemoryAuthority::is_binding`]).
+///
+/// Explicit on `is_binding()` rather than "whichever fields happen to be
+/// populated": an idea that recorded an invalidation condition anyway —
+/// nothing in the schema stops it — must not read as though it could still
+/// constrain anything.
+fn constraint_lines(record: &glasshouse::memory::MemoryRecord) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    if !record
+        .authority
+        .is_some_and(glasshouse::memory::MemoryAuthority::is_binding)
+    {
+        return out;
+    }
+    if let Some(validity) = record.validity_conditions.as_deref() {
+        let _ = writeln!(out, "    valid while  {validity}");
+    }
+    if let Some(invalidation) = record.invalidation_conditions.as_deref() {
+        let _ = writeln!(out, "    invalid if   {invalidation}");
+    }
+    // The caller adds its own trailing newline, matching `provenance_lines`.
+    out.pop();
+    out
 }
 
 /// The Phase 21B provenance a search result carries, one labelled line per
@@ -2377,6 +2484,56 @@ fn memory_promote(runtime: &Runtime, id: &str, authority: &str) -> anyhow::Resul
             record.authority.map_or("unclassified", |a| a.as_str())
         ),
     })
+}
+
+/// `glasshouse memory challenge <id> <reason>` — Phase 21F lines 937/938:
+/// let the receiving agent say, explicitly, that current evidence
+/// contradicts a memory, rather than silently distrusting it in a way
+/// nothing records.
+///
+/// Reuses Phase 21C's `mark_for_review` and its six reasons rather than
+/// inventing a seventh state: a challenge *is* "something changed that may
+/// invalidate this; a person or a stronger agent has to look" — the review
+/// mechanism already built for that. The retrieval half of 937/938 is true
+/// the moment this returns: `SearchScope::Current` only ever returns
+/// `Active` memories (see `memory/search.rs`'s own documentation), so the
+/// challenged memory drops out of every default search immediately and
+/// stays reachable only as history — `glasshouse memory search --history`.
+///
+/// 938's "before further automatic injection into the same task" has no
+/// consumer in this build: Phase 27 (automatic injection) does not exist, so
+/// there is nothing that injects a memory for this to gate. Closed on the
+/// retrieval half only — see the packet's own reasoning, echoing §33's rule
+/// of asking the capability as a question a user would ask: *can Glasshouse
+/// stop presenting a challenged memory as settled?* Yes. *Can it stop an
+/// automatic injection from using it?* There is no automatic injection to
+/// stop.
+fn memory_challenge(runtime: &Runtime, id: &str, reason: &str) -> anyhow::Result<String> {
+    use glasshouse::memory::{ProjectMemory, ReviewReason};
+
+    let parsed = ReviewReason::from_stored(reason).ok_or_else(|| {
+        anyhow::anyhow!(
+            "`{reason}` is not a review reason; use one of {}",
+            ReviewReason::ALL
+                .iter()
+                .map(|r| r.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+
+    let memory = ProjectMemory::open(runtime)?;
+    let store = memory.store();
+    let resolved = store.resolve_id(id)?;
+    let record = store.mark_for_review(&resolved, parsed)?;
+
+    Ok(format!(
+        "{} is now {} ({}); it will not be returned as current until the challenge is \
+         resolved. It remains searchable as history with --history.\n",
+        record.id,
+        glasshouse::memory::MemoryStatus::NeedsReview,
+        parsed.as_str()
+    ))
 }
 
 /// A model's reply read from a file, for `glasshouse memory extract`.
@@ -3711,6 +3868,114 @@ mod tests {
         // silently storing nothing.
         let refused = memory_promote(&fixture.runtime, id.as_str(), "extremely-important");
         assert!(refused.is_err());
+    }
+
+    /// Phase 21F lines 937/938, acceptance test 5: a challenged memory is
+    /// not returned as settled, and its reason is recorded and readable.
+    /// Enters through `memory_challenge` and `memory_report`, exactly what
+    /// `glasshouse memory challenge` and `glasshouse memory search` run.
+    #[test]
+    fn a_challenged_memory_drops_out_of_current_search_and_names_why() {
+        use glasshouse::memory::{MemoryAuthority, MemoryKind, NewMemory, ProjectMemory};
+
+        let fixture = CliFixture::new();
+        let project = ProjectMemory::open(&fixture.runtime).unwrap();
+        let id = project
+            .store()
+            .record(
+                NewMemory::new(
+                    MemoryKind::Decision,
+                    "The egret worker retries indefinitely.",
+                )
+                .with_authority(Some(MemoryAuthority::Decision)),
+            )
+            .unwrap()
+            .id;
+
+        const BODY: &str = "retries indefinitely";
+
+        let before = memory_report(&fixture.runtime, "egret", false, 10).unwrap();
+        assert!(before.contains(BODY), "{before}");
+
+        let challenged =
+            memory_challenge(&fixture.runtime, id.as_str(), "production_incident").unwrap();
+        assert!(challenged.contains("needs_review"), "{challenged}");
+        assert!(challenged.contains("production_incident"), "{challenged}");
+
+        // No longer returned as current, settled knowledge.
+        let after = memory_report(&fixture.runtime, "egret", false, 10).unwrap();
+        assert!(
+            !after.contains(BODY),
+            "a challenged memory must not appear in a default search:\n{after}"
+        );
+
+        // Still reachable as history, with the reason recorded and readable.
+        let history = memory_report(&fixture.runtime, "egret", true, 10).unwrap();
+        assert!(history.contains(BODY), "{history}");
+        assert!(history.contains("needs_review"), "{history}");
+        assert!(
+            history.contains("production_incident"),
+            "the challenge reason must be readable in the history report:\n{history}"
+        );
+
+        // A reason that is not one of the six is refused, and nothing is
+        // written.
+        let refused = memory_challenge(&fixture.runtime, id.as_str(), "vibes");
+        assert!(refused.is_err());
+    }
+
+    /// Phase 21F line 936, on the CLI's own text report — the machine door's
+    /// half is `tests/memory_query_api.rs`, and this is the surface a person
+    /// reads. A binding memory's validity and invalidation conditions are
+    /// printed; a non-binding one's are not, even when the row carries them.
+    #[test]
+    fn the_report_prints_validity_and_invalidation_conditions_only_for_binding_memories() {
+        use glasshouse::memory::{
+            DecisionProvenance, MemoryAuthority, MemoryKind, NewMemory, ProjectMemory,
+        };
+
+        let fixture = CliFixture::new();
+        let project = ProjectMemory::open(&fixture.runtime).unwrap();
+        let store = project.store();
+        store
+            .record(
+                NewMemory::new(
+                    MemoryKind::Constraint,
+                    "The kite export must be single-writer.",
+                )
+                .with_authority(Some(MemoryAuthority::Constraint))
+                .with_provenance(DecisionProvenance {
+                    rationale: Some("a partial file broke a downstream job".to_owned()),
+                    ..DecisionProvenance::default()
+                })
+                .with_validity_conditions(Some("the export stays single-writer"))
+                .with_invalidation_conditions(Some("the export gains concurrent writers")),
+            )
+            .unwrap();
+        store
+            .record(
+                NewMemory::new(
+                    MemoryKind::Finding,
+                    "The kite export could maybe batch writes.",
+                )
+                .with_authority(Some(MemoryAuthority::Idea))
+                .with_validity_conditions(Some("nobody has decided this yet")),
+            )
+            .unwrap();
+
+        let report = memory_report(&fixture.runtime, "kite", false, 10).unwrap();
+        assert!(
+            report.contains("valid while  the export stays single-writer"),
+            "{report}"
+        );
+        assert!(
+            report.contains("invalid if   the export gains concurrent writers"),
+            "{report}"
+        );
+        assert!(
+            !report.contains("nobody has decided this yet"),
+            "a non-binding memory's validity condition must not be printed:\n{report}"
+        );
     }
 
     // ---------------------------------------------------------------------

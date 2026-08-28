@@ -5,10 +5,15 @@
 //! `glasshouse::memory::ProjectMemory::open`, never through anything private
 //! to the crate.
 
+use std::sync::{Arc, Mutex};
+
 use clap::Parser;
 
 use glasshouse::memory::search::SearchScope;
-use glasshouse::memory::{MemoryKind, MemoryStatus, NewMemory, ProjectMemory};
+use glasshouse::memory::{
+    DecisionProvenance, MemoryAuthority, MemoryKind, MemoryStatus, NewMemory, ProjectMemory,
+    ProjectPhase,
+};
 use glasshouse::{Cli, Runtime, bootstrap};
 
 /// A bootstrapped project, with its temp directories kept alive for the
@@ -262,4 +267,222 @@ fn the_result_count_honours_the_requested_limit() {
 
     let unbounded = store.search("turnip", SearchScope::Current, 10).unwrap();
     assert_eq!(unbounded.len(), 5);
+}
+
+// -------------------------------------------------------------------------
+// Phase 21F — memory retrieval quality.
+// -------------------------------------------------------------------------
+
+/// Line 929 — current invariants and constraints come back distinguishably
+/// from everything else a search matched, through the exact grouping
+/// `main.rs`'s `memory_report` and the control API's `query_memory` both
+/// render from.
+#[test]
+fn search_grouped_separates_current_invariants_and_constraints_from_everything_else() {
+    let fixture = Fixture::new();
+    let project = fixture.open();
+    let store = project.store();
+
+    let invariant = store
+        .record(
+            NewMemory::new(MemoryKind::Constraint, "sparrow tokens are never logged")
+                .with_subject(Some("sparrow token handling"))
+                .with_authority(Some(MemoryAuthority::Invariant)),
+        )
+        .unwrap();
+    let constraint = store
+        .record(
+            NewMemory::new(MemoryKind::Constraint, "sparrow requests time out at 30s")
+                .with_subject(Some("sparrow timeout"))
+                .with_authority(Some(MemoryAuthority::Constraint)),
+        )
+        .unwrap();
+    let decision = store
+        .record(
+            NewMemory::new(MemoryKind::Decision, "sparrow retries three times")
+                .with_subject(Some("sparrow retries"))
+                .with_authority(Some(MemoryAuthority::Decision)),
+        )
+        .unwrap();
+    let idea = store
+        .record(
+            NewMemory::new(MemoryKind::Finding, "sparrow could maybe batch requests")
+                .with_subject(Some("sparrow batching idea"))
+                .with_authority(Some(MemoryAuthority::Idea)),
+        )
+        .unwrap();
+
+    let grouped = store
+        .search_grouped("sparrow", SearchScope::Current, 10)
+        .unwrap();
+
+    let rule_ids: Vec<_> = grouped
+        .invariants_and_constraints
+        .iter()
+        .map(|r| r.id.clone())
+        .collect();
+    assert!(
+        rule_ids.contains(&invariant.id),
+        "an active invariant must land in the rules group: {rule_ids:?}"
+    );
+    assert!(
+        rule_ids.contains(&constraint.id),
+        "an active constraint must land in the rules group: {rule_ids:?}"
+    );
+    assert!(
+        !rule_ids.contains(&decision.id),
+        "an ordinary decision must not land in the rules group: {rule_ids:?}"
+    );
+    assert!(
+        !rule_ids.contains(&idea.id),
+        "an idea must not land in the rules group: {rule_ids:?}"
+    );
+
+    let other_ids: Vec<_> = grouped.other.iter().map(|r| r.id.clone()).collect();
+    assert!(other_ids.contains(&decision.id));
+    assert!(other_ids.contains(&idea.id));
+    assert!(!other_ids.contains(&invariant.id));
+    assert!(!other_ids.contains(&constraint.id));
+}
+
+/// Line 929 — a memory whose authority is invariant or constraint but that
+/// is no longer active is history, not a current rule, even when
+/// `SearchScope::Historical` returns it at all.
+#[test]
+fn search_grouped_excludes_an_invalidated_invariant_from_the_rules_group_even_under_history() {
+    let fixture = Fixture::new();
+    let project = fixture.open();
+    let store = project.store();
+
+    let invariant = store
+        .record(
+            NewMemory::new(MemoryKind::Constraint, "kiwi backups run nightly")
+                .with_authority(Some(MemoryAuthority::Invariant)),
+        )
+        .unwrap();
+    store
+        .set_status(&invariant.id, MemoryStatus::Invalidated)
+        .unwrap();
+
+    let grouped = store
+        .search_grouped("kiwi", SearchScope::Historical, 10)
+        .unwrap();
+
+    assert!(
+        !grouped
+            .invariants_and_constraints
+            .iter()
+            .any(|r| r.id == invariant.id),
+        "an invalidated invariant must not be presented as a current rule"
+    );
+    assert!(
+        grouped.other.iter().any(|r| r.id == invariant.id),
+        "an invalidated invariant must still be reachable as history"
+    );
+}
+
+/// Line 931 — acceptance test 2, load-bearing: two memories of equal
+/// relevance and authority, the one that has been validated ranks above the
+/// one that has not.
+#[test]
+fn a_validated_memory_outranks_an_equally_relevant_equally_authoritative_unvalidated_one() {
+    let fixture = Fixture::new();
+    let ticks = Arc::new(Mutex::new(1_000_000i64));
+    let clock = Arc::clone(&ticks);
+    let project =
+        ProjectMemory::open_with_clock(&fixture.runtime, Arc::new(move || *clock.lock().unwrap()))
+            .unwrap();
+    let store = project.store();
+
+    let unvalidated = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Decision,
+                "the wombat cache holds one entry per key",
+            )
+            .with_authority(Some(MemoryAuthority::Decision)),
+        )
+        .unwrap();
+    let validated = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Decision,
+                "the wombat cache holds one entry per key indeed",
+            )
+            .with_authority(Some(MemoryAuthority::Decision)),
+        )
+        .unwrap();
+
+    // Both age a hundred days with neither reaffirmed...
+    *ticks.lock().unwrap() += 100 * 86_400;
+    // ...then one is validated, and another day passes.
+    store.reaffirm(&validated.id).unwrap();
+    *ticks.lock().unwrap() += 86_400;
+
+    let results = store.search("wombat", SearchScope::Current, 10).unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results[0].id, validated.id,
+        "the validated memory must outrank its equally relevant, equally authoritative, \
+         unvalidated twin:\n{results:#?}"
+    );
+    assert_eq!(results[1].id, unvalidated.id);
+}
+
+/// Line 933, and its exception — Phase 21D line 901 already requires that
+/// reaffirming restores weight, and this must not contradict it: a
+/// prototype-phase decision that is never reaffirmed is penalised; the same
+/// decision reaffirmed is not.
+#[test]
+fn a_prototype_phase_decision_is_penalized_until_it_is_reaffirmed() {
+    let fixture = Fixture::new();
+    let ticks = Arc::new(Mutex::new(1_000_000i64));
+    let clock = Arc::clone(&ticks);
+    let project =
+        ProjectMemory::open_with_clock(&fixture.runtime, Arc::new(move || *clock.lock().unwrap()))
+            .unwrap();
+    let store = project.store();
+
+    let exploratory = store
+        .record(
+            NewMemory::new(MemoryKind::Decision, "the toucan queue polls every second")
+                .with_authority(Some(MemoryAuthority::Decision))
+                .with_provenance(DecisionProvenance {
+                    project_phase: Some(ProjectPhase::Prototype),
+                    ..DecisionProvenance::default()
+                }),
+        )
+        .unwrap();
+    let production = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Decision,
+                "the toucan queue polls every second too",
+            )
+            .with_authority(Some(MemoryAuthority::Decision))
+            .with_provenance(DecisionProvenance {
+                project_phase: Some(ProjectPhase::Production),
+                ..DecisionProvenance::default()
+            }),
+        )
+        .unwrap();
+
+    let before = store.search("toucan", SearchScope::Current, 10).unwrap();
+    assert_eq!(before.len(), 2);
+    assert_eq!(
+        before[0].id, production.id,
+        "an exploratory, never-reaffirmed decision must rank below an equally fresh \
+         production-phase one:\n{before:#?}"
+    );
+    assert_eq!(before[1].id, exploratory.id);
+
+    // Reaffirming the exploratory decision lifts the penalty entirely.
+    store.reaffirm(&exploratory.id).unwrap();
+    *ticks.lock().unwrap() += 1;
+
+    let after = store.search("toucan", SearchScope::Current, 10).unwrap();
+    assert_eq!(
+        after[0].id, exploratory.id,
+        "reaffirming a prototype-phase decision must lift the penalty:\n{after:#?}"
+    );
 }

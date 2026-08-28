@@ -8,13 +8,15 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use rusqlite::Connection;
+
 use glasshouse::memory::extract::authority::{self, EXTRACTOR_CEILING, Lowering};
 use glasshouse::memory::extract::schema::{Confidence, Disposition};
 use glasshouse::memory::search::SearchScope;
 use glasshouse::memory::snapshot::{self, SnapshotBudget};
 use glasshouse::memory::{
     AuthorityChange, Classifier, MemoryAuthority, MemoryId, MemoryKind, MemoryStatus,
-    MemoryStoreError, NewMemory, ProjectMemory,
+    MemoryStoreError, NewMemory, ProjectMemory, ReviewReason,
 };
 use glasshouse::{Cli, Runtime};
 
@@ -59,6 +61,49 @@ impl Fixture {
         ProjectMemory::open_with_clock(&self.runtime, Arc::new(move || *ticks.lock().unwrap()))
             .unwrap()
     }
+
+    fn project_id(&self) -> &str {
+        self.runtime.project().id().as_str()
+    }
+
+    /// A second, independent connection to this project's own database
+    /// file — the same one `database::open` would open, reached the only
+    /// way an external test can: through the path `Runtime` already makes
+    /// public. Copied from `tests/project_isolation.rs`'s own fixture.
+    fn raw_connection(&self) -> Connection {
+        Connection::open(self.runtime.database_path()).unwrap()
+    }
+}
+
+/// Insert a memory row directly, bypassing `MemoryStore` and the project-id
+/// trigger entirely — the only way to plant a row belonging to another
+/// project, which is exactly what the trigger exists to prevent. Models a
+/// row that reached the file by some route the trigger never saw: a restored
+/// backup, a hand-edited file, a build whose schema predates the guard.
+/// Copied from `tests/project_isolation.rs`'s own helper of the same name —
+/// duplicated rather than shared because that file is not this packet's to
+/// edit.
+fn plant_foreign_memory(conn: &Connection, id: &str, project_id: &str, body: &str) {
+    conn.execute_batch("DROP TRIGGER memories_reject_foreign_project_insert;")
+        .unwrap();
+    conn.execute(
+        "INSERT INTO memories (id, project_id, kind, status, body, created_at, updated_at) \
+         VALUES (?1, ?2, 'finding', 'active', ?3, 0, 0)",
+        rusqlite::params![id, project_id, body],
+    )
+    .unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER memories_reject_foreign_project_insert
+         BEFORE INSERT ON memories
+         FOR EACH ROW
+         WHEN NEW.project_id IS NOT (
+             SELECT value FROM project_metadata WHERE key = 'project_id'
+         )
+         BEGIN
+             SELECT RAISE(ABORT, 'memory belongs to a different project');
+         END;",
+    )
+    .unwrap();
 }
 
 fn tempdir() -> tempfile::TempDir {
@@ -901,5 +946,65 @@ fn authority_is_isolated_between_two_projects_sharing_one_data_root() {
             .unwrap()
             .authority,
         Some(MemoryAuthority::Invariant)
+    );
+}
+
+// -------------------------------------------------------------------------
+// F. Phase 21F acceptance test 6 — a challenge is project-scoped exactly
+//    like every other memory write.
+// -------------------------------------------------------------------------
+
+/// `mark_for_review` (the mechanism `glasshouse memory challenge` runs on)
+/// refuses a row physically planted in this project's own database file but
+/// stamped with another project's identifier — the defence-in-depth case
+/// `tests/project_isolation.rs` establishes for `get`, applied to a write.
+///
+/// The honest case (an id from a real sibling project) is covered by
+/// `authority_is_isolated_between_two_projects_sharing_one_data_root` above:
+/// two separate SQLite files mean beta's store has simply never heard of
+/// alpha's identifier. This test proves the second, independent layer: even
+/// a row that reached beta's own file is refused when beta's own project
+/// identifier does not match it, and — the part a bare error return cannot
+/// show — the row is left untouched rather than corrupted on the way to
+/// that refusal.
+#[test]
+fn a_challenge_refuses_a_memory_planted_from_another_project_and_writes_nothing() {
+    let tmp = tempdir();
+    let alpha = Fixture::new(tmp.path(), "alpha");
+    let beta = Fixture::new(tmp.path(), "beta");
+
+    let conn = beta.raw_connection();
+    plant_foreign_memory(
+        &conn,
+        "planted-memory",
+        alpha.project_id(),
+        "must never be challengeable from beta",
+    );
+    drop(conn);
+
+    let beta_memory = beta.memory();
+    let beta_store = beta_memory.store();
+    let error = beta_store
+        .mark_for_review(&MemoryId::new("planted-memory"), ReviewReason::ProjectState)
+        .expect_err("a foreign row must never be writable through this project's store");
+    assert!(
+        matches!(error, MemoryStoreError::ForeignProject { .. }),
+        "unexpected error: {error}"
+    );
+
+    // The refusal must be a refusal to write, not a write followed by a
+    // reported error — read the row back at the raw connection level, the
+    // only way to see it at all, since `MemoryStore` itself refuses it.
+    let conn = beta.raw_connection();
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM memories WHERE id = 'planted-memory'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        status, "active",
+        "a refused challenge must not have written anything to the planted row"
     );
 }

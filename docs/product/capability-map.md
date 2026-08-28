@@ -926,16 +926,16 @@ Fixed architectural requirements
 
 Phase 21F — Memory retrieval quality
 
-☐ Retrieve current active invariants and constraints separately from historical decisions.
+☑ Retrieve current active invariants and constraints separately from historical decisions.
 ☐ Inject only memories whose scope overlaps the current task.
-☐ Prefer memories validated against the current architecture or project phase.
+☑ Prefer memories validated against the current architecture or project phase.
 ☐ Penalize memories whose assumptions conflict with current repository state.
-☐ Penalize memories that were created during exploratory sessions and never reaffirmed.
+☑ Penalize memories that were created during exploratory sessions and never reaffirmed.
 ☐ Avoid injecting old ideas merely because they mention the same subsystem.
-☐ Include memory authority and validity state in machine-facing retrieval results.
-☐ Include rationale and invalidation conditions when a remembered decision may constrain implementation.
-☐ Allow the receiving agent to challenge a memory explicitly when current evidence contradicts it.
-☐ Treat a challenged memory as requiring validation before further automatic injection into the same task.
+☑ Include memory authority and validity state in machine-facing retrieval results.
+☑ Include rationale and invalidation conditions when a remembered decision may constrain implementation.
+☑ Allow the receiving agent to challenge a memory explicitly when current evidence contradicts it.
+☑ Treat a challenged memory as requiring validation before further automatic injection into the same task.
 ☐ Record false-positive or harmful memory retrievals so the retrieval policy can be evaluated.
 
 Phase 21G — Memory revalidation

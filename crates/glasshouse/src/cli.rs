@@ -971,6 +971,26 @@ pub enum MemoryCommand {
         authority: String,
     },
 
+    /// Flag a memory as requiring review because current evidence
+    /// contradicts it — Phase 21F lines 937/938.
+    ///
+    /// The memory moves to `needs-review` (Phase 21C's existing status, not
+    /// a new one) and drops out of every default search immediately; it
+    /// stays reachable as history with `--history`, and the reason given
+    /// here is printed beside it there. Resolving the challenge — deciding
+    /// the memory is fine after all, invalidating it, or superseding it — is
+    /// a review action this command does not perform; it only raises the
+    /// flag.
+    Challenge {
+        /// The memory, or the leading part of its identifier.
+        id: String,
+
+        /// Why current evidence contradicts it — one of Phase 21C's six
+        /// review reasons.
+        #[arg(value_name = "REASON")]
+        reason: String,
+    },
+
     /// Run memory extraction over a session's recorded activity.
     ///
     /// `--reply-from` supplies a model's reply from a file, which is what
