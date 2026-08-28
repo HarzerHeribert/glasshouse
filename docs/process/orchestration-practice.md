@@ -2686,3 +2686,57 @@ was moved onto a **single ladder rung** where the ladder is neutral and the thin
 rule is once again the only thing that could reorder them. Same assertion, same
 thing proven, no requirement lost. **A test that a new feature breaks is a
 question about which requirement wins, not a chore.**
+
+## §70 — do not re-ask an answered question as multiple choice with your own option marked (Recommended)
+
+The user had already answered the metered-quota question in their own words, and
+it was committed to `docs/product/design-decisions.md`:
+
+> *"yes a background job may use quota. But this has to be not much in contrast
+> to the actual task."*
+
+A later orchestrator, reconciling at session start, put the same question to the
+user as an `AskUserQuestion` with three options — and labelled its own preferred
+one, *"setting, default off"*, as **(Recommended)**. The user picked it.
+
+The orchestrator then recorded this in the checkpoint as **"the quota answer
+exists twice and the two differ"**, and designed a package to satisfy both:
+metered wiring behind a switch defaulting to off.
+
+**Every step of that is wrong, and they compound.**
+
+1. **The question was already answered.** Re-asking it produced no new
+   information — the reconciliation step should have found the committed decision
+   and stopped there.
+2. **A menu you wrote is not independent evidence of what the user wants.** Offer
+   three options with one marked *(Recommended)* and you will frequently get your
+   recommendation back. Treating that as a second, rival user position is
+   circular: the orchestrator cited itself.
+3. **It attributed the contradiction to the user.** *"The two differ"* went into
+   the checkpoint as a fact about the user's wishes. It was a fact about the
+   orchestrator's framing.
+4. **The hedge silently picked the invented side.** A switch defaulting to *off*
+   ships *"never spend metered quota"* — the **opposite** of *"yes a background
+   job may use quota"* — while the packet claimed it *"satisfies both readings"*.
+
+The user's correction: **"you can't just build something conflicting."**
+
+### The rules
+
+- **Reconcile before asking.** If `design-decisions.md` or the map already
+  answers it, that is the answer. Ask only what is genuinely open.
+- **When you must ask about something already decided**, quote the existing
+  decision in the question and ask whether it still holds — do not re-open it as
+  a fresh menu of your own alternatives.
+- **`(Recommended)` is for questions with no recorded answer.** On a decided
+  question it manufactures the reply you wanted.
+- **A hedge between a real instruction and your own alternative is not neutral.**
+  Whichever side the *default* lands on is the side you shipped. If two readings
+  genuinely conflict, say so plainly and ask — do not average them.
+
+### The general shape, which this file has now recorded four times
+
+A default that stands in for a missing answer must be distinguishable from a real
+one: `blind` not zero (§54), `unknown` not a real session id (§67), *"0 tests
+matched"* not *"the tests passed"* (§68), and now **your own recommendation not
+the user's decision.** The costume changes; the defect is the same.
