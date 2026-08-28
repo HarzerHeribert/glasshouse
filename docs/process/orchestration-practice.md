@@ -2636,3 +2636,53 @@ and it keeps arriving somewhere nobody was looking.
 suspiciously clean: `grep -c` exits 1 on zero matches and silently ends a `&&`
 chain (§4), and `discover.py`'s seam verdict counts doc-comment lines as call
 sites unless you read them (§49).
+
+## §69 — scope a packet's verification by blast radius, not by name match
+
+Batch 41's `mem-ladder` package added a decision ladder that sorts search results
+by authority rung before relevance weight. Its packet listed these verification
+targets:
+
+    --test memory_search   --test memory_store   --test memory_validity
+    --test project_isolation   --lib memory
+
+All five passed. The integration gate then failed on **both** macOS and Ubuntu,
+in `tests/memory_provenance.rs` — a target the packet never named.
+
+The broken test was
+`thin_and_well_proven_decisions_of_different_authority_classes_keep_bm25_order`,
+a Phase 21B contract asserting that two decisions of different authority classes
+keep whatever order BM25 gave them. The ladder reorders exactly that pair, and
+**map line 918 requires it to** (*"place ordinary current decisions above stale
+preferences, hypotheses, and ideas"*). The old assertion and the new requirement
+could not both hold.
+
+**The packet's test list was chosen by name match** — the feature was about
+memory retrieval, so the targets with `memory_` in the name whose subject
+*sounded* related went in. `memory_provenance` sounded like provenance storage.
+It is, and it also asserts a search **order**.
+
+**The rule:** when a change alters an *ordering*, a *filter*, or anything else
+global to a query path, its blast radius is **every test that asserts a result
+order or membership**, not the tests whose filenames match the feature. Name the
+whole family, or run the whole target set and accept the cost.
+
+Cheap ways to find the family before dispatch:
+
+    grep -rln 'hits\[0\]\|hits\[1\]\|\.first()\|assert_eq!(.*\.id,' crates/glasshouse/tests/
+    grep -rln 'search(' crates/glasshouse/tests/
+
+**The failure landed in the right net** — the integration gate is exactly where a
+cross-package regression should surface, and it did so on two platforms, which
+told the integrator immediately that it was real rather than load (§40). But it
+cost an orchestrator-side diagnosis and a second full gate run, where a wider
+packet would have cost the worker one extra test target.
+
+**And when it fires, read it before fixing it.** The reflex — update the failing
+assertion until it is green — would have silently deleted a Phase 21B contract.
+The honest fix kept both: the old test's real subject is the *thin-decision
+demotion* rule and its scoping, which the ladder does not contradict, so its pair
+was moved onto a **single ladder rung** where the ladder is neutral and the thin
+rule is once again the only thing that could reorder them. Same assertion, same
+thing proven, no requirement lost. **A test that a new feature breaks is a
+question about which requirement wins, not a chore.**

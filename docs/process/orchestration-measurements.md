@@ -2903,3 +2903,75 @@ worker ran it literally, noticed, and used `--test project_isolation` (7 passed)
 right.** The general form is §54's again: a command that silently matches nothing
 looks identical to a command that passed. Whole-target verification commands must
 be `--test <name>`.
+
+## Batch 41 — three workers in parallel, and the first prospectively-caught inert input
+
+Dispatched from `a08432c`/`b71b6e3`, integrated as `ae12e31`. **Three Sonnet
+workers, started in one turn**, on provably disjoint partitions. Seventeen boxes.
+
+| package | boxes claimed | closed | partition | cost |
+|---|---|---|---|---|
+| `mem-ladder` | 21E 914-918, 924 | **6** | `memory/policy.rs`, `memory/search.rs` + 2 tests | ~$7.75 |
+| `route-evidence` | 35B 1541, 1542, 1548 (+1545) | **2** | `routing/**`, `config/pairing.rs` | ~$6.81 |
+| `knowledge-view` | 25 1098-1104, 1106, 1107 | **9** | `shell/**` | ~$9.85 |
+| `gate-recon` | none — read-only Phase −1 recon | n/a | writes one file outside the repo | ~$3.90 |
+
+**~$28.31 of worker compute for 17 boxes — $1.67 each — and that number is still
+the wrong one to optimise.** The orchestrator turn that gated all three, reviewed
+all three, ran the gate three times and wrote the evidence is the fixed cost, and
+it was paid **once** instead of three times. That is the entire finding.
+
+### Gating three took one turn, which is the answer to the objection
+
+Batch 40's recorded reasoning was that careful gating argues for fewer workers.
+It does not. `discover.py --seam` plus reading what it prints settled three
+packages in a single orchestrator turn, and `validate_round.py` proved the
+partitions disjoint mechanically. **The gate is cheap; the round's overhead is
+not.** What is expensive is spending a round's fixed cost on one package.
+
+### The recon worker is the finding worth generalising
+
+Only two implementation packages were gateable on disjoint partitions. The third
+slot went to a **read-only** worker running the five-link check across five
+unassessed phases. It cannot be premise-invalid by construction, and at ~$3.90 it:
+
+1. **Refuted a claim two checkpoints carried.** Phase 47's debug views were
+   recorded as blocked by a cross-process boundary; the gateway is a direct call
+   in the *same* process (`main.rs:534`). The real blocker — a guard that is
+   never read, and an explanation discarded into a `tracing` field — is fixable.
+2. **Caught an inert input inside a live worker's packet.** `ContextState` is
+   `Unknown` on 100% of real rows, so map line 1545 fails the fifth link. Relayed
+   mid-round after independent verification.
+3. Produced the next package (Phase 25), which became the third implementer.
+
+**This is the first time the fifth-link failure was caught *before* the code was
+written.** Phase 9J's prior cost three rounds and ~$39 to discover the same way
+after the fact. **When only two implementation packages are gated, the third
+worker should be gating the next round**, not idle.
+
+### Two boxes declined for the same reason, in the same round — that is the test
+
+`35B 1542` names *"observed success **and** reliability"* and
+`ObservedEvidence::reliability` is `None` on every real row. `35B 1545` names
+cache affinity and `ContextState` is `Unknown` on every real row. **Refusing one
+and accepting the other would have been the inconsistency worth catching.** An
+input absent or constant across all real data cannot support a box that names it,
+whoever proposes it and however good the surrounding code is.
+
+### A change to global ordering has a blast radius the packet did not scope
+
+`mem-ladder`'s ladder broke a Phase 21B test in `memory_provenance.rs` — a target
+the packet's verification list did not name, because the list was scoped to test
+files whose names matched the feature. It failed on **both** macOS and Ubuntu in
+the integration gate, which is the right net but the expensive one.
+
+**Rule: scope a packet's verification by blast radius, not by name match.** A
+change to search *ordering* can break any test that asserts an order, anywhere.
+
+### A survived mutation, reported rather than buried
+
+`knowledge-view` found that removing `OpenProjectKnowledge`'s `Err` arm kills no
+test, because it lives in `shell::run()` — the real event loop, which nothing in
+this codebase unit-tests. **It reported this against its own package.** Phase 41
+has the structurally identical untested arm, so it is a pre-existing shape, and
+the honest disposition is recorded debt rather than a weakened test.

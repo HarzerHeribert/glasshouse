@@ -6,6 +6,92 @@
 
 Last updated: 2026-08-28 (Europe/Berlin)
 
+## Checkpoint — 2026-08-28, batch 41 landed: 680 / 1280 (53%)
+
+**Three Sonnet workers in parallel on provably disjoint partitions. Seventeen
+boxes** — Phase 21E 914-918/924, Phase 35B 1541/1548, Phase 25 1098-1104/1106/1107.
+Local gate **13/13**, 3789 passed / 0 failed.
+
+### The round exists because the user corrected the cost model
+
+Batch 40 ran one worker and justified it by the weekly window. The user's
+correction: *"sonnet workers are incredibly cheap, use two or even three — you
+are the expensive part."* The numbers were already here — a Sonnet package
+~$7.53, this orchestrator ~$17.50 by integration, a long predecessor pane ~$62 —
+and **every cost-per-box figure in the measurements ledger counted worker compute
+and omitted the orchestrator**, which is both the larger term and the *fixed* one.
+Gating, packets, review, mutation re-runs, evidence, map, commits and the platform
+gate are paid once per **round**, not once per package.
+
+**Gating three packages took one orchestrator turn.** That is the whole answer to
+"but the gate is expensive".
+
+### The third worker was not an implementer, and it paid for itself twice
+
+Only two implementation packages were gateable on disjoint partitions. Rather
+than drop to two, the third was **read-only recon**: run the Phase −1 five-link
+check across five unassessed phases and report verdicts. 14 minutes, **~$3.90**.
+
+- **It refuted a claim two checkpoints carried.** Phase 47's routing debug views
+  were recorded as blocked by a cross-process boundary. `gateway::start_if_required_with_telemetry`
+  is a direct call from `main.rs:534` — **same OS process**. They are blocked on
+  something fixable instead: `_gateway_guard` is *"never read again, only held"*,
+  and the `RoutingExplanation` goes only into a `tracing` field.
+- **It caught an inert input in a live worker's packet.** `ContextState` is
+  `Unknown` on 100% of real rows, so map line 1545 fails the fifth link. Verified
+  independently and **relayed mid-round** — the Phase 9J failure caught
+  prospectively for the first time rather than after three rounds and ~$39.
+- Its recommendation (Phase 25) became the third implementation worker.
+
+**When only two implementation packages are gated, make the third a recon
+worker.** It cannot be premise-invalid by construction.
+
+### Three boxes were proposed COMPLETE and declined
+
+- **35B 1542** — names *"observed success **and** reliability"*, and
+  `ObservedEvidence::reliability` is `None` on 100% of real rows. **The identical
+  standard by which 1545 was refused the same round**, where `ContextState` is
+  always `Unknown`. Consistency is the point: an input absent across all real
+  data cannot support a box that names it.
+- **1541** — closed, with its narrowing recorded rather than hidden: the line
+  names a launch-profile dimension `ObservedEvidenceSource` states plainly the
+  ledger stores nothing for.
+- **Phase 25's 1105** — not attempted by instruction; a second interaction shape.
+
+### The ladder changed shipped ordering and broke a Phase 21B test
+
+`thin_and_well_proven_decisions_of_different_authority_classes_keep_bm25_order`
+asserted two decisions of different authority classes keep BM25 order. **Map line
+918 requires exactly that reordering.** Both cannot hold.
+
+Neither was discarded. The old test's real subject is the *thin-decision demotion*
+rule and its scoping, which the ladder does not contradict — it just could no
+longer isolate it, because its pair straddled two rungs. The pair now sits on one
+rung (`Preference` and `Idea`) where the ladder is neutral and the thin rule is
+again the only thing that could reorder them.
+
+**Found by the integration gate on both platforms, not by the worker, and that is
+a packet defect**: the packet's test list omitted `memory_provenance`. **A change
+to global search ordering can break any test that asserts an order** — scope its
+verification by blast radius, not by which target names match the feature.
+
+### A mutation survived, and it is recorded rather than worked around
+
+Removing `Action::OpenProjectKnowledge`'s `Err` arm kills no test: it lives in
+`shell::run()`, the real event loop with a live terminal, which **nothing in this
+codebase unit-tests**. Phase 41 has the structurally identical untested arm. The
+state layer *is* covered; only the run-loop wiring is not. Closing it needs a way
+to force `ProjectMemory::open` to `Err` — new test infrastructure that would close
+Phase 41's gap at the same time.
+
+### Also found: a Phase 9J mechanism that has been inert since it shipped
+
+`CONFIDENT_AT_OBSERVATIONS = 5` scales confidence continuously, but
+`MIN_SAMPLE_FOR_SUMMARY = 5` means the ledger never returns a count below 5 — so
+**5 real samples and 5000 score identically**, and that curve is reachable only
+through a test double. Recorded, not repaired: fixing it means choosing which
+constant moves, which is a policy call.
+
 ## Checkpoint — 2026-08-28, batch 40 landed: 663 / 1280 (52%)
 
 **Green on all three platforms on this exact tree** — local gate **13/13**
