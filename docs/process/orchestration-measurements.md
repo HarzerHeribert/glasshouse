@@ -3130,3 +3130,79 @@ and it has never been written down there.
 **Cost of the two refusals: roughly fifteen minutes of one Opus turn, before any
 worker compute.** The alternative, at batch 36's measured rate, was ~$30 of
 packages that could not close their boxes.
+
+### Batch 44 outcomes — no boxes closed, one box *re-opened*, and that is the result
+
+| package | tier | wall-clock | worker cost | output | boxes | verdict |
+|---|---|---|---|---|---|---|
+| `p51-eventlog` | Sonnet · high | ~8 min | ~$2.27 | 571-line report, 0 repo edits | 0 (read-only) | PASS |
+| `ledger-audit` | Sonnet · high | ~6 min | ~$1.44 | 201-line report, 0 repo edits | **−1** | PASS |
+
+**Two read-only packages cost ~$3.71 together** — half what one implementation
+package costs — and both returned findings that change what the next round builds.
+Neither edited a file; `git status --porcelain` was empty at both closes, which
+was an explicit acceptance condition.
+
+**`ledger-audit` confirmed the 1330 lead and found the general shape behind it.**
+It audited all 27 ticked lines in Phases 33A, 33C and 35B and returned **24
+SOUND, 3 PARTIAL**. The one that was un-ticked, 1330, was ticked from its
+evidence entry's *summary* line while that same entry's *per-line disposition*
+read `PARTIAL — open on purpose alone`. Both sentences had been in the file the
+whole time.
+
+**The systemic finding, which is worth more than the box:** in all three PARTIAL
+cases **the evidence file was honest and the map tick was more generous than the
+entry it rested on.** Nobody overclaimed in the ledger; the gap is between an
+entry's summary and its own body. `check-evidence-coverage.py` verifies an entry
+*exists* for a phase — nothing verifies it agrees with itself. **That is a cheap
+gate nobody has written**, and it is the same family as every other check this
+project has found reporting success while measuring nothing (§20, §31, §54, §68,
+and batch 43's dead check inside `validate_round.py`).
+
+**The two it flagged were deliberately not reversed**, and the distinction is the
+ruling: 1377 and 1541 were closed *knowingly*, with the narrowing recorded at the
+time. Reversing a weighed judgement needs more than one audit at the end of a
+spent window; 1330 needed only agreement with itself. The sharper evidence is
+attached to both for the next round.
+
+**`p51-eventlog` turned the user's "scope the migration deliberately" into a
+brief, and found four lines that need no migration at all.** `GatewayUnhealthy`
+and `GatewayBackendChanged` already exist as `lifecycle_events` kinds with a real
+production writer, so map lines 1836/1837/1851/1852 need an aggregate read method
+and nothing else. It then argued the packet's decisive question both ways and came
+down on a **split**: extend `lifecycle_events` only for facts already in its
+vocabulary, new table for the memory- and routing-decision clusters — extending
+the recorded design decision, which had named only the memory cluster.
+
+It also found two lines blocked on an **absent feature** rather than on counting:
+`Guardrail` has zero matches in `crates/glasshouse/src`, so 1842/1843 have nothing
+to instrument.
+
+### The orchestrator's own gating was the round's most valuable output, and it was free
+
+Three findings came from the orchestrator reading source before writing packets,
+at a cost of roughly one turn:
+
+1. the `ResourceHealth` package's propagation failure (two refusals above);
+2. the 1330 lead, which `ledger-audit` then confirmed and generalised;
+3. **and a correction of finding (1) an hour later.** Having written *"persist
+   health — a migration, Red tier"* into a commit, the orchestrator found
+   `GatewayQuotaCache`: a versioned JSON file cache that already carries a
+   gateway-only observation across the identical process boundary, whose own
+   module comment states the problem in the same words. **Not a migration, not
+   Red — an Amber Sonnet package with a shipped precedent and a copyable
+   acceptance test.**
+
+**The transferable rule from (3), and it is new:** when a propagation link fails,
+**look for a sibling signal that already crosses the same boundary before
+concluding the boundary is the problem.** Four checkpoints asked *"can anything
+outside the gateway observe `ResourceHealth`?"* and correctly answered no. None
+asked whether this codebase had already solved that exact crossing — and it had,
+once, in the module the intended consumer already calls.
+
+### Seventh consecutive round a worker corrected its packet and was right
+
+`ledger-audit`'s packet named `docs/product/evidence/phase-35.md` for the Phase
+35B audit; the correct file is `phase-35b.md`, and both exist. It read the right
+one, said so in `PACKET ERRORS`, and confirmed every other citation in the packet
+matched the tree *"exactly, down to the line numbers."*
