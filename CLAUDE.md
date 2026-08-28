@@ -54,6 +54,15 @@ those batches by the map, and name the other live workers' files in each
 packet's `FORBIDDEN FILES`. Map order is a priority, not a mutex — one worker
 at a time has already cost this project a session.
 
+**Since the 2026-08-29 move to a 20x plan, quota is no longer the reason to stop
+at three.** Dispatch four or five when the partitions are genuinely disjoint. But
+the ceiling did not disappear, it changed shape: practice §9 measured the real
+limit as **review collision** — reviews are serial and worker wall-clock is not —
+and the orchestrator's own context is still the scarcest thing here. Past three
+concurrent editing workers, use a **team lead** (§10) so review is paid out of
+the lead's context rather than yours. Measured 2026-08-29: the main checkout
+produced more output tokens than the next seven worker directories combined.
+
 `docs/process/orchestration-measurements.md` is a standing inherited experiment
 measuring which model tier closes capability boxes at what cost. Add every
 batch to its ledger and answer one of its open questions when you can.

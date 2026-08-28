@@ -2899,3 +2899,41 @@ anything inside the repository, find what copies the repository.**
 `scripts/close-worker.sh` and `scripts/worker-watch.sh` now default to
 `$REPO/.worktrees/$NAME` and fall back to the old sibling path when one still
 exists, so an inherited worktree is still found rather than silently missed.
+
+## §74 — the 20x plan removes the quota ceiling and not the review ceiling
+
+The account moved from 5x to 20x on 2026-08-29 to buy more parallel workers. Two
+things follow, and only the first is the obvious one.
+
+**The quota argument for stopping at three workers is gone.** It was real:
+batch 40 ran a single worker and justified it by the weekly window, and the user
+corrected it — *"sonnet workers are incredibly cheap, use two or even three — you
+are the expensive part."* On 5x the window genuinely ran out, 92% on the fourth
+working day of a cycle with three days left. **Dispatch four or five now, when
+the partitions are genuinely disjoint and `validate_round.py` says so.**
+
+**The ceiling that remains is review, and it is the orchestrator's own context.**
+§9 measured it: *"Three editing workers is the point where reviews start to
+collide, because reviews are serial and worker wall-clock is not."* No plan
+changes that — it is one integrator's attention, and it is also the thing that
+catches the defects a green gate hides.
+
+**The measurement makes this concrete rather than a matter of taste.** Summing
+the raw session logs for every Glasshouse project directory over 2026-08-24..28
+(`scripts/usage-snapshot.py --glasshouse`): **37.1M output tokens, of which 13.7M
+came from the main checkout alone — the orchestrator — against 3.5M for the next
+seven worker directories combined.** The single largest consumer in this project
+is not any worker; it is the session writing this sentence.
+
+**So more workers does not fix the expensive part, and can make it worse.** Five
+workers returning at once is five reviews queued against the one context that
+cannot be parallelised. The instrument that does help is the **team lead** (§10):
+a lead reviews its own subcontractors and reports one result, so review cost is
+paid out of the lead's context. That is the shape to reach for past three, and it
+is now worth reaching for more often than it was.
+
+**A second-order effect worth watching, not yet measured.** Four or five
+concurrent workers means four or five `target/` directories and more contention
+for one machine — and §40 records that the local gate reports the machine's own
+load as a Linux pty failure. **Never run `ci-local.sh` beside a live batch**, and
+expect that rule to bite more often now than it did at two workers.

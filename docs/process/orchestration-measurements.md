@@ -3245,3 +3245,110 @@ under it today.
 while measuring nothing** (the MSRV gate, `ci-local.sh`'s Linux leg,
 `validate_round.py`'s box check). This is the first one written with that
 failure mode assumed from the start.
+
+---
+
+## The 5x → 20x plan upgrade, 2026-08-29 — the baseline, and what it has to prove
+
+> **This is implementation cost, not product design, and the two must not merge.**
+> What it measures is *what building Glasshouse costs us* — an account, a plan, a
+> weekly window, tokens spent by our own workers. It says nothing about what
+> Glasshouse does, and none of it is a requirement.
+>
+> **It is specifically NOT Phase 51.** Phase 51 (Evaluation hooks) is a *product*
+> capability: Glasshouse measuring whether its own features are useful to the
+> person running it, for the user's alpha A/B work. That needs an event-log table
+> inside the product. This needs `ccusage` and a shell script, and lives in
+> `scripts/`. **A packet that reaches for `usage-snapshot.py` to satisfy a Phase 51
+> line has crossed the boundary `docs/process/orchestration-practice.md` §50
+> exists to keep**, and the reverse — building plan-usage tracking into the
+> product because we happen to want it — is the same error mirrored.
+
+
+The account moved from a **5x to a 20x Max plan** on **2026-08-29**, to buy more
+parallel workers. This section is the before-half of that measurement, frozen
+while it is still readable.
+
+**How the moment was observed, since it decides which cycle is contaminated.**
+At roughly 00:30 local this session's status line read `RL5=9, RL7=98`; at 00:54
+it read `RL5=0, RL7=0`, with `RL7_RESET` **unchanged** at 2026-09-01 00:00. Both
+counters reset without the window moving. The 5x weekly allowance had been
+effectively spent hours earlier — the previous checkpoint recorded 92%, and this
+session opened at 97%.
+
+### The frozen baseline
+
+`ccusage daily --json` is captured at `.agent-runtime/usage-baseline/pre-upgrade-2026-08-29.json`
+— **42 days, 2026-06-02 to 2026-08-29, $9,278 API-equivalent, 16.0B tokens**.
+It is frozen deliberately: ccusage can only read as far back as the agent logs
+are retained, and those rotate.
+
+Cycles on the account's real boundary (Tue 00:00, which is what `RL7_RESET` lands
+on), via `scripts/usage-snapshot.py --report`:
+
+| Tue→Mon cycle | active days | API-equivalent | tokens | |
+|---|---|---|---|---|
+| 2026-08-11..17 | 6 | $774 | 1.22B | |
+| 2026-08-18..24 | 7 | $2,681 | 4.59B | last clean pre-upgrade cycle |
+| 2026-08-25..31 | 5 | $3,009 | 6.01B | **both plans — do not judge from this** |
+
+### Three things that would have made this comparison wrong
+
+**1. `ccusage` is account-wide, and this project is five days old.** Its output
+carries no project path — `daily` groups by date, `session` by session UUID.
+`~/.claude/projects` holds **151 project directories, 114 of them Glasshouse**.
+Since Glasshouse's first commit is **2026-08-24** and ccusage's history starts
+2026-06-02, **most of that $9,278 is other repositories.**
+
+So `scripts/usage-snapshot.py --glasshouse` reads the raw session logs directly
+and sums only the Glasshouse directories. Glasshouse's own consumption:
+
+| day | output | cache-create | cache-read | messages |
+|---|---|---|---|---|
+| 08-24 | 0.63M | 1.2M | 0.25B | 706 |
+| 08-25 | 8.99M | 21.4M | 2.77B | 8,690 |
+| 08-26 | 9.38M | 25.4M | 2.43B | 9,901 |
+| 08-27 | 13.62M | 34.8M | 4.12B | 14,737 |
+| 08-28 | 4.51M | 14.4M | 1.31B | 5,211 |
+| **total** | **37.1M** | **97.2M** | **10.9B** | **39,245** |
+
+**2. The logs are UTC and ccusage is local.** Around midnight Europe/Berlin the
+two disagree by a day. **Compare whole cycles, never single days.**
+
+**3. There is only one pre-upgrade cycle of box-closing to compare against, and
+it is the contaminated one.** Boxes at each day's last commit: 58 (08-24) → 209
+→ 392 → 631 → 688 (08-28). **All of this project's delivery happened inside the
+cycle the upgrade landed in.** So "boxes per cycle, before vs after" cannot be
+answered from history, and any claim that it can is reading the 08-18 cycle's
+$2,681 as Glasshouse work when the repository did not yet exist.
+
+### So what the upgrade actually has to prove
+
+Not "did we use more" — that is guaranteed. The honest question is whether the
+**ceiling stops being the binding constraint.**
+
+On 5x, the measured shape was: **~630 boxes closed in four days, and then the
+weekly window ran out** — 92% on day 4, 97-98% by day 5, with three days of the
+cycle left. Work did not slow down because the map got harder; it stopped
+because the allowance was gone.
+
+**The test, then:** in the first clean post-upgrade cycle (**2026-09-01..09-07**),
+does the window survive seven working days? If it does, the gain is the days that
+were previously unavailable, and it is measurable as boxes closed in a cycle that
+never capped. If the window still empties, the constraint was never the plan.
+
+**And the second question the data already half-answers.** Of 37.1M Glasshouse
+output tokens, **13.7M came from the main checkout — the orchestrator — more than
+the next seven worker directories combined (3.5M).** The user's standing
+correction (*"you are the expensive part"*) is not a hunch; it is the largest
+single line in the account. **More parallel workers do not touch it.** What
+touches it is team leads (§10), which move review out of the orchestrator's own
+context — and review capacity, not quota, is what §9 measured as the real ceiling
+at three concurrent workers.
+
+**Record the post-upgrade half the same way**, or the comparison is two different
+measurements:
+
+    scripts/usage-snapshot.py --capture post-upgrade
+    scripts/usage-snapshot.py --report
+    scripts/usage-snapshot.py --glasshouse --since 2026-09-01
