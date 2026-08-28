@@ -3050,7 +3050,27 @@ already checked something adjacent.
 symbols named in a packet's FEASIBILITY block and refuse the round when one has
 zero non-test call sites. That is the same move batch 44 made for evidence
 self-consistency — turn the round's own finding into a check, so the next
-orchestrator cannot forget it under load. **Recorded as a wave-3 candidate.**
+orchestrator cannot forget it under load. **Built the same hour, rather than recorded as a candidate.**
+`validate_round.py` now runs `check_cited_seams`: it extracts every snake-case
+symbol a packet cites with call parens and reports any with zero non-test call
+sites, reusing `discover.py`'s own `find_call_sites` so the round gate and a
+worker's `--seam` cannot drift apart.
+
+**It caught the real defect on its first run** — `routing_model_resolution()`,
+from the actual packet, flagged with the §5/§76 reasoning.
+
+**And running it immediately exposed its own false-positive mode, which is why
+it warns rather than refuses.** It also flagged `free_pool()` in the
+`health-cache` packet — where the citation is *correct*, because that symbol
+having no caller is precisely the gap the package exists to close. Both readings
+produce zero call sites and only a reader can tell them apart, so the message
+names both and asks the packet to say which. A gate that refused the second
+would be red on a correct packet, which is how gates get overridden (§20, §51).
+`--strict-seams` exists for a round where every citation should be live, and is
+deliberately **not** wired into `ci-local.sh`.
+
+Six regression tests in `scripts/tests/test_round_tools.py`; the load-bearing one
+is `test_a_symbol_that_is_the_gap_is_still_flagged`.
 
 ### The measurement, because it is the argument for the gate
 

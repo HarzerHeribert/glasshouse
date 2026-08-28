@@ -584,5 +584,51 @@ class RealAcceptanceTests(unittest.TestCase):
         self.assertIn("complete", result.stdout)
 
 
+
+class CitedSeams(unittest.TestCase):
+    """The cited-seam check, added after batch 45 made the same mistake twice.
+
+    A packet's FEASIBILITY block names the symbols its premise rests on. Twice in
+    one round one of those had ZERO non-test call sites — a function called from
+    nowhere but tests, cited as proof that behaviour reaches production. Practice
+    §76 records that writing the rule down did not stop it recurring ninety
+    minutes later, which is why it is mechanical.
+
+    `test_a_symbol_that_is_the_gap_is_still_flagged` is the load-bearing one and
+    the reason this is REVIEW rather than a refusal: a package whose whole job is
+    to give a symbol its first caller legitimately cites a zero-call-site symbol,
+    and a gate that refused it would be red on a correct packet.
+    """
+
+    def symbols(self, text):
+        return vr.feasibility_symbols(text)
+
+    def test_snake_case_call_is_extracted(self):
+        self.assertEqual(self.symbols("cites `Foo::bar_baz()` here"), ["Foo::bar_baz"])
+
+    def test_a_bare_function_is_extracted(self):
+        self.assertEqual(self.symbols("`observe_exchange()`"), ["observe_exchange"])
+
+    def test_a_type_is_not_extracted(self):
+        """A struct has no call sites; flagging one would be pure noise."""
+        self.assertEqual(self.symbols("`ResourceHealth()` and `Foo::Bar()`"), [])
+
+    def test_prose_without_parens_is_not_extracted(self):
+        """Only an explicit call form counts, so ordinary mentions stay quiet."""
+        self.assertEqual(self.symbols("`free_pool` is mentioned"), [])
+
+    def test_duplicates_are_reported_once(self):
+        self.assertEqual(self.symbols("`a_b()` and again `a_b()`"), ["a_b"])
+
+    def test_a_symbol_that_is_the_gap_is_still_flagged(self):
+        """Both readings are zero-call-site; only a reader can tell them apart.
+
+        `health-cache` cites `free_pool()` precisely because nothing calls it —
+        adding the caller is the package. The check must still surface it, and
+        must not refuse it.
+        """
+        self.assertEqual(self.symbols("propagation: `free_pool()` is the gap"),
+                         ["free_pool"])
+
 if __name__ == "__main__":
     unittest.main()

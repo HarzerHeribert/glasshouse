@@ -33,6 +33,7 @@ Exits 0, printing a clean summary, only when every packet passes every check.
 """
 from __future__ import annotations
 
+import os
 import argparse
 import difflib
 import fnmatch
@@ -242,6 +243,83 @@ class Packet:
 # ------------------------------------------------------------------ checks --
 
 
+# A packet's FEASIBILITY block names the symbols its premise rests on. Twice in
+# batch 45 one of those symbols had ZERO non-test call sites — a function called
+# from nowhere but tests, cited as proof that behaviour reaches production. That
+# is practice §5's defect, and §76 records that a written rule did not stop it
+# recurring ninety minutes later in the same round. So it is mechanical now.
+#
+# WARN-ONLY BY DESIGN, and the reason was found by running it. On its first run
+# against this round's real packets it flagged two symbols: `routing_model_resolution()`,
+# which was genuinely dead evidence and the defect §76 records — and `free_pool()`,
+# which the `health-cache` packet cites *because* it has no caller, since adding
+# one is that package's entire job. Both are zero-call-site symbols and only a
+# reader can tell them apart. A gate that refused the second would be red on a
+# correct packet, which is how gates get overridden (§20, §51).
+#
+# Conservative by construction: only snake_case symbols are checked, because a
+# type or a struct legitimately has no "call sites" and flagging one would be
+# noise. `discover.py`'s own `find_call_sites` does the work, so the verdict here
+# and the verdict a worker gets from `--seam` cannot drift.
+SEAM_TOKEN = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)\(\)`")
+
+
+def _load_discover():
+    """Import discover.py as a module; it sits beside this script."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "discover.py")
+    spec = importlib.util.spec_from_file_location("discover", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def feasibility_symbols(packet_text: str) -> list[str]:
+    """Snake-case symbols a packet cites with explicit call parens."""
+    found = []
+    for m in SEAM_TOKEN.finditer(packet_text):
+        sym = m.group(1)
+        last = sym.rsplit("::", 1)[-1]
+        if last and last[0].islower() and last not in ("fn", "self"):
+            if sym not in found:
+                found.append(sym)
+    return found
+
+
+def check_cited_seams(packets, findings, src_root, strict):
+    """Refuse a packet whose cited symbol has no production caller."""
+    try:
+        discover = _load_discover()
+    except Exception as exc:                      # pragma: no cover
+        print(f"  [cited-seams] skipped — could not load discover.py ({exc})")
+        return
+    checked = dead = 0
+    for p in packets:
+        try:
+            text = open(p.path, encoding="utf-8").read()
+        except OSError:
+            continue
+        for sym in feasibility_symbols(text):
+            checked += 1
+            sites = discover.find_call_sites(sym, src_root)
+            if not sites["literal"] and not sites["method"]:
+                dead += 1
+                msg = (f"{p.path} cites `{sym}()` and it has ZERO non-test "
+                       f"call sites in {src_root}. Two readings, and the packet "
+                       f"must say which: (a) it is dead evidence — a symbol "
+                       f"called from nowhere but tests cannot show behaviour "
+                       f"reaches production (§5, §76); or (b) it IS the gap this "
+                       f"package closes, which is legitimate and should be "
+                       f"stated in the FEASIBILITY block")
+                if strict:
+                    findings.append(Finding("cited-seams", msg))
+                else:
+                    print(f"  [cited-seams] REVIEW: {msg}")
+    if checked:
+        verdict = "clean" if not dead else f"{dead} with no production caller"
+        print(f"  [cited-seams] {checked} cited symbol(s) checked — {verdict}")
+
+
 def check_partitions_disjoint(packets: list[Packet], findings: list[Finding]) -> None:
     """Two packets both listing a path in YOURS is the real failure (the same
     file handed to two live workers). A path in A's YOURS also appearing in
@@ -404,11 +482,14 @@ def check_yours_non_empty(packets: list[Packet], findings: list[Finding]) -> Non
             )
 
 
-def validate(packet_paths: list[str], map_path: str) -> list[Finding]:
+def validate(packet_paths: list[str], map_path: str,
+             src_root: str = "crates/glasshouse/src",
+             strict_seams: bool = False) -> list[Finding]:
     packets = [Packet(path) for path in packet_paths]
     findings: list[Finding] = []
     check_yours_non_empty(packets, findings)
     check_feasibility_block(packets, findings)
+    check_cited_seams(packets, findings, src_root, strict_seams)
     check_partitions_disjoint(packets, findings)
     check_no_self_contradiction(packets, findings)
     check_yours_paths_exist(packets, findings)
@@ -424,6 +505,16 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_MAP,
         help=f"capability map path (default: {DEFAULT_MAP})",
     )
+    parser.add_argument(
+        "--src",
+        default="crates/glasshouse/src",
+        help="source root for the cited-seam check",
+    )
+    parser.add_argument(
+        "--strict-seams",
+        action="store_true",
+        help="refuse a packet citing a symbol with no production caller",
+    )
     args = parser.parse_args(argv)
 
     for path in args.packets:
@@ -434,7 +525,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"validate_round.py: map {args.map} does not exist", file=sys.stderr)
         return 2
 
-    findings = validate(args.packets, args.map)
+    findings = validate(args.packets, args.map, args.src, args.strict_seams)
     if findings:
         print(f"validate_round.py: REFUSED — {len(findings)} problem(s):", file=sys.stderr)
         for f in findings:
