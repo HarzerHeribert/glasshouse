@@ -2740,3 +2740,56 @@ A default that stands in for a missing answer must be distinguishable from a rea
 one: `blind` not zero (§54), `unknown` not a real session id (§67), *"0 tests
 matched"* not *"the tests passed"* (§68), and now **your own recommendation not
 the user's decision.** The costume changes; the defect is the same.
+
+## §71 — a lookup is not a listing: the five links do not ask whether data can be ENUMERATED
+
+Batch 42's `route-view` packet asked for *"one row per observed (provider, model,
+route) identity"* from the routing evidence ledger. Its Phase −1 block named all
+five links and every one of them held:
+
+    producer     routing/evidence.rs  AggregateReading / RoutingSummary
+    caller       gateway/session.rs:321  ledger.record(..)
+    propagation  durable SQLite, same process as the shell
+    consumer     the overlay to be built
+    fifth        sample_count and window genuinely vary per identity
+
+**And the package was still impossible.** `EvidenceLedger`'s entire public
+surface is `record`, `recent` and `summarize`; both readers take an
+`ObservationQuery` whose `provider` and `model` are **required `&str`**, and its
+own doc says a `None` route *"matches rows recorded with no route, not 'any
+route.'"* **There is no wildcard and no listing operation.** You can ask the
+ledger about an identity you already know. You cannot ask it which identities
+exist.
+
+**The five links describe a LOOKUP.** A table, a list, a picker, a dashboard, a
+"show me all X" view — each needs the **set**, and the set is a different
+producer. Every link can hold for one row while the collection has no source at
+all.
+
+### The sixth question, for any package that renders a collection
+
+> **Where does the *set* come from?** Name the call that returns it — not the
+> call that returns one member given its key.
+
+Cheap to check, and it is the same two-grep discipline as the rest of the gate:
+
+    grep -n 'pub fn ' <the store or ledger>     # is there a list/iter/all/distinct?
+    grep -n -A8 'pub struct .*Query'            # are its key fields Option, or required?
+
+**Required key fields are the tell.** `provider: &'a str` cannot express "any
+provider". A query type whose keys are non-optional is a lookup API wearing a
+query API's name.
+
+### The part that makes this worth a section
+
+**The worker could have shipped it anyway.** The identities were reconstructible
+from session and provider configuration, and a table built that way would have
+rendered — and would have shown *configured* routes beside *observed* ones as if
+both were measurements. In a phase called *observability without spectacle*, that
+is the exact defect the phase exists to prevent.
+
+It stopped and returned the packet instead. **A worker refusing to fabricate a
+plausible-looking dataset is the outcome to reward**, and the cost of the refusal
+was one package; the cost of the alternative would have been a view nobody could
+trust and no test would have caught, because a fabricated row and a real row
+render identically.
