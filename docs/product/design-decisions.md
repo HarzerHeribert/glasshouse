@@ -2298,3 +2298,103 @@ A background prober may not land until it carries, in the same change:
 - the request-pool accounting that shows what each probe costs.
 
 Until then 1323 stays open, and its openness is the record that this is owed.
+
+## Scoping the Phase 51 event log: a split verdict, and most of it is not a migration
+
+### The decision to scope it at all
+
+The previous section records that Phase 51's 37 lines are blocked on one missing
+primitive — Glasshouse cannot count occurrences over time — and that the memory
+cluster needs a new event-log table. Asked how to handle that, the user chose,
+2026-08-29: **scope the migration deliberately**, as a written design before any
+code, rather than let a package discover it mid-flight.
+
+This section is that scoping. It is **the brief, not the design**: it fixes the
+shape and the constraints so the design is written inside them. It rests on a
+read-only survey of `database.rs` end to end, `lifecycle_events`' full schema and
+every writer and reader of it, and all 37 lines checked for whether their event is
+observable in the shipped binary today.
+
+### The verdict is a split, and the cheap half is genuinely cheap
+
+**Do not fold Phase 51 into `lifecycle_events`, except where it is already there.**
+
+- **Extend `lifecycle_events` with an aggregate read method — no schema change at
+  all — for the gateway-health cluster** (map lines 1836, 1837, 1851, 1852).
+  `GatewayUnhealthy` and `GatewayBackendChanged` already exist as `kind` values
+  and are already written by a real production caller in `gateway/session.rs`.
+  What is missing is only a counting *read*: today the only readers are
+  `EventLog::all()` and `for_session()`, both full scans. **Four lines, a Rust
+  read helper, zero migration.**
+- **A new table for the memory-evaluation cluster** (1820-1826, 1831) **and — an
+  extension of the earlier finding — the routing-decision cluster** (1834, 1835,
+  1845-1850). These are events about *Glasshouse's own decisions*, not about a
+  harness's process.
+
+### Why not simply widen `lifecycle_events`, in three parts
+
+1. **Vocabulary mismatch.** All eleven existing `kind` values are things that
+   happened to a session's process or its harness — a turn, a keystroke, a
+   process exit, a backend going unhealthy. Nearly every Phase 51 line is a
+   decision *Glasshouse* made or evaluated: a memory retrieved, a route preferred,
+   a tier assigned. Folding them in means either one `CHECK` holding two unrelated
+   vocabularies, or enough columns that one table carries two schemas.
+2. **It is the argument migration 11 already made, one level up.** `database.rs:1042-1052`
+   explains why `routing_observations` is its own table rather than columns on
+   `sessions`: *"A dedicated table with its own `seq` is migration 4's own argument
+   for `lifecycle_events` over a column on `sessions`, applied here for the same
+   reason."* The same reasoning applies again — `lifecycle_events` is the wrong
+   shape for a second, unrelated kind of counted fact.
+3. **The rebuild is not free and the risk is specific.** SQLite cannot `ALTER` a
+   `CHECK`, so widening `kind` means a third table rebuild after migrations 6 and
+   7 — on the one table `memories.source_event_first`/`_last` reference by `seq`.
+   That is precisely the hazard a worker declined to take on in an earlier batch,
+   and its reasoning was right then and is right now.
+
+`crate::events`' own module doc scopes the stream to process/harness lifecycle and
+says *"nothing downstream ever learns which harness produced one"*, with two tests
+(`no_harness_is_named_in_the_core_event_stream`,
+`turn_completion_is_minted_in_exactly_one_place`) existing specifically to keep it
+narrow. A memory-usefulness event does not belong in it.
+
+### What the design must NOT duplicate
+
+- **`routing_observations` already has the columns for six of these lines.** Cost,
+  tool rounds, retries, repairs, failovers and purpose are declared in the schema
+  and simply never set by the one producer. **Those are caller-side wiring, not a
+  new schema**, and a Phase 51 table that invents its own "routing turn cost"
+  column would be a second source of truth for a fact the ledger already models.
+  (Note that `purpose` among them is now map line 1330's re-opening — see
+  `docs/product/evidence/phase-33a.md`.)
+- **`GatewayQuotaCache` is a snapshot, not a history.** It is one JSON file per
+  provider holding only the most recent reading, overwritten each time. The
+  quota-history lines must route through the new table rather than growing the
+  cache a second, competing history mechanism.
+- **`EvidenceLedger` covers gateway-forwarded turns only.** Its sole writer is
+  inside `gateway/session.rs`, reached only from the accept loop, so a native
+  subscription session produces zero rows. It structurally cannot record memory
+  operations or session-lifecycle decisions — which is exactly why a new table
+  does not overlap it for most of the phase.
+
+### Two lines are blocked on an absent feature, not on counting
+
+Worth knowing before anyone scopes work for them: **`Guardrail` has zero matches
+anywhere in `crates/glasshouse/src`**, so map lines 1842 and 1843 have no feature
+to instrument — Phase 21K is unbuilt. And `session::recovery` has no production
+caller outside its own file, which blocks the cross-harness-resume lines
+independently of any event log. **Counting is not their blocker and a Phase 51
+table will not unblock them.**
+
+### The order this implies
+
+1. **The four gateway-health lines first** — a read helper over existing rows,
+   no migration, and it proves the counting *shape* against real data before any
+   schema is committed to.
+2. **Then the caller-side wiring** for the fields `routing_observations` already
+   declares, which is where map line 1330 also lands.
+3. **Then the new table**, designed against what the first two taught, for the
+   memory-evaluation and routing-decision clusters.
+
+**Doing 3 first is the expensive mistake this scoping exists to prevent**, because
+a table designed before anything counts anything is a table designed against
+guesses.
