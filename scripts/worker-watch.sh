@@ -34,7 +34,8 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Where this worker's worktree lives, for the growth signal below. Defaults to
 # this project's own convention -- `glasshouse-<name>` beside the main checkout,
 # the same derivation `scripts/hooks/worker-turn-ended.sh` already relies on.
-WORKTREE="${5:-$REPO/../glasshouse-$NAME}"
+WORKTREE="${5:-$REPO/.worktrees/$NAME}"
+[ -e "$WORKTREE" ] || [ ! -e "$REPO/../glasshouse-$NAME" ] || WORKTREE="$REPO/../glasshouse-$NAME"
 IDLE_DIR="$REPO/.agent-runtime/idle"
 MARKER="$IDLE_DIR/$NAME"
 mkdir -p "$IDLE_DIR"

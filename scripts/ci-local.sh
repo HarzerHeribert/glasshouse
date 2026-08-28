@@ -142,7 +142,7 @@ if [ "$DO_LINUX" -eq 1 ]; then
           # /home/ci/target is deliberately NOT wiped: it is the build cache.
           rm -rf /home/ci/repo
           mkdir -p /home/ci/repo
-          tar -C /src --exclude=./target -cf - . | tar -C /home/ci/repo -xf -
+          tar -C /src --exclude=./target --exclude=./.worktrees -cf - . | tar -C /home/ci/repo -xf -
           chown -R ci:ci /home/ci
           # rustup/cargo homes are root-owned in the image; the msrv step
           # installs a toolchain and must be able to write them.

@@ -119,7 +119,8 @@ CMUX_QUIET=1 cmux close-workspace --workspace "$WS" >/dev/null 2>&1 \
 # another branch — a shared *source* tree is a wrong-green waiting to happen, and
 # sharing a `target/` between two trees is the same hazard one layer down. The
 # answer is not to share it; it is to delete it when the worker is done.
-WT="${3:-$REPO/../glasshouse-$NAME}"
+WT="${3:-$REPO/.worktrees/$NAME}"
+[ -e "$WT" ] || [ ! -e "$REPO/../glasshouse-$NAME" ] || WT="$REPO/../glasshouse-$NAME"
 if [ -d "$WT/.git" ] || [ -f "$WT/.git" ]; then
   if [ -d "$WT/target" ]; then
     sz="$(du -sh "$WT/target" 2>/dev/null | cut -f1)"

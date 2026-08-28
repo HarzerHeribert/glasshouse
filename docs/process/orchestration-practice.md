@@ -2846,3 +2846,56 @@ in flight, because it checks worker watches and the idle directory and knows
 nothing about the orchestrator's own background tasks. It is not wrong to fire —
 it is measuring "no *workers* running" — but do not read it as "nothing is
 happening". Check your own background work before acting on it.
+
+## §73 — worker worktrees live in `.worktrees/`, and the trap is the gate's own tar
+
+**Sixty-one worker worktrees accumulated as siblings of the checkout** —
+`~/projects/glasshouse-<name>`, one per worker, going back to batch 9 — before the
+user pointed out that this is not a layout anyone chose. It is what
+`git worktree add ../glasshouse-<name>` does if nobody decides otherwise, and
+every packet inherited it from the last.
+
+**They are worth less than the checkpoints kept claiming, and it was checkable.**
+Measured 2026-08-29: **every one of the 61 branches was already merged into
+`main`**, so no committed work was unique to any of them. What they held was each
+worker's *uncommitted* diff — which is the deliverable, since workers never commit
+— but each of those had already been reviewed and integrated by the orchestrator
+of its round, and the findings live in `.agent-runtime/report-*.md` and the
+measurements ledger. **Total on disk: 309MB, not the 44GB §53 records** — that
+figure predates `reap-worktrees.sh` reclaiming the `target/` directories, and no
+checkpoint since had re-measured it.
+
+**The value is the diff, so archive the diff and delete the directory.** All 61
+uncommitted states — tracked patch, untracked files, and a manifest naming the
+branch and base commit — compress to **1.8MB** in
+`.agent-runtime/worktree-archive/`. Three were spot-checked by applying the patch
+onto its own base commit in a scratch worktree; all three applied cleanly. That is
+the whole audit value at 0.6% of the disk.
+
+### The new layout, and the one thing that breaks
+
+Worktrees now go in **`.worktrees/<name>` inside the repository**, gitignored.
+Checked rather than assumed:
+
+- **git allows a worktree inside the main worktree** — verified with a probe.
+- **cargo does not pick up nested crates**: `Cargo.toml`'s `members` is the
+  explicit list `["crates/glasshouse"]`, not a glob.
+- **the doc-boundary and discover scans are scoped** to `crates/` and
+  `crates/glasshouse/src`, so neither descends into it.
+- **`rg` and `git status` respect `.gitignore`**, so it is invisible to both.
+
+**The one real breakage is `scripts/ci-local.sh`**, and it would have been quiet
+and expensive. Line 145 ships the tree to the Linux container with
+`tar -C /src --exclude=./target -cf - .` — **`./target` is the only exclusion**, so
+a nested `.worktrees/` would have tar'd sixty source trees, and their own
+`target/` directories, through a pipe on every gate run. It now excludes
+`./.worktrees` as well.
+
+That is §31's failure in a new costume: *"the container tree was a union of every
+worktree that ever ran the script."* This project has already paid once for a
+build tree that quietly contained more than the branch under test. **Before moving
+anything inside the repository, find what copies the repository.**
+
+`scripts/close-worker.sh` and `scripts/worker-watch.sh` now default to
+`$REPO/.worktrees/$NAME` and fall back to the old sibling path when one still
+exists, so an inherited worktree is still found rather than silently missed.

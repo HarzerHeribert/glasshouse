@@ -78,7 +78,11 @@ unattended. Use them instead of re-deriving the workaround or asking the user
 to intervene — practice §19 explains why they are not the product's shims.
 
 Keep Claude Code, OpenCode/Ox, and other native harness workers visible in cmux.
-Use isolated worktrees for editors. Start Ox with the normal `ox` TUI—never
+**Every editing worker gets an isolated worktree, and it goes in `.worktrees/<name>`
+inside this repository** — gitignored, excluded from the gate's container copy, and
+removed by `scripts/close-worker.sh`. Do not create sibling directories next to the
+checkout; sixty-one of those accumulated before anyone noticed. Practice §73 has the
+reasoning and the one trap. Start Ox with the normal `ox` TUI—never
 `ox run` or a headless loop. Follow the worker do/don't rules and the safe hook
 protocol rather than personal global routing configuration.
 
