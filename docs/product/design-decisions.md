@@ -2215,3 +2215,86 @@ decision's requirement, and the observability half currently bottoms out in a
 primitive the product lacks — so a packet claiming a feature is "built with A/B
 in mind" today can honestly promise a clean off state and legible per-decision
 output, and cannot yet promise a count.
+
+## Probing costs a request budget, so the cheapest probe is the one nobody runs
+
+### The conflict
+
+Map line 1323 — *"Avoid background probing at an aggressive rate that wastes
+free-request pools"* — was proposed for closure on a source-scanning test and
+declined twice. The reason it kept failing is that the property holds today for
+the wrong reason: **nothing probes automatically at all.** Every probe path in
+`src/` is user-invoked — the CLI `--probe <name>` flag (`main.rs:2236-2271`,
+opt-in by its own doc) and the settings-screen `t` key
+(`shell/state.rs:1100 begin_provider_test`). There is no periodic trigger, no
+timer, and no rate guard, because there is nothing to guard.
+
+So the line could be read two ways, and the two want different code: *"no
+automatic probing exists"* (true, and closable by rewording, which is what line
+1748 did) or *"probing is rate-limited when it happens"* (nothing enforces it).
+That is a map decision, not an engineering one, so it went to the user.
+
+### The decision: the line stays open, and the reason is a budget
+
+The user's answer, 2026-08-29, recorded because the reasoning is the substance:
+
+> *"If there ever happens any probing and it would hit a free endpoint like
+> openrouter it would use a request budget — so best is to not probe at all if
+> not necessary and if necessary only sporadically. And if we want model data
+> maybe the providers have data endpoints and measured availability for us
+> instead of doing it ourselves."*
+
+**This is not the rewording answer, and it is deliberately not.** Line 1748 was
+reworded because its property was genuinely structural — physical state
+separation holds whoever deletes what. This one is not structural: it holds only
+because a feature is absent, and the moment a background prober is written the
+guarantee evaporates silently. Leaving the line open keeps the requirement
+pointed at the code that will need it.
+
+### What the decision actually says, in three parts
+
+1. **A probe against a free endpoint spends a request from a scarce pool.** That
+   is the cost, and it is the reason the line exists. `FreePool`'s `Allowance`
+   already models a per-credential request pool, so the budget being spent is one
+   Glasshouse can already name — it simply has no probe consuming it yet.
+2. **Do not probe unless necessary; if necessary, only sporadically.** The
+   ordering is a preference with a default: *not at all* is the default, *rarely*
+   is the fallback, and *at a cadence* is not on offer. Any future prober owes a
+   justification for existing before it owes a rate.
+3. **Prefer the provider's own data over measuring it ourselves.** Where a
+   provider publishes model metadata, usage, or availability, read that instead
+   of inferring it from traffic Glasshouse generates. This is not a new
+   capability — map line 1230 already says *"Read provider usage endpoints when
+   they are documented and can be queried without excessive request cost"*, and
+   it is ☑. **1323's answer is to route through 1230's path**, and a prober built
+   without first checking whether the provider will simply tell us is the defect
+   this decision names.
+
+### How this composes with what is already checked
+
+- **Line 537** (☑) — *"Avoid consuming scarce free requests on health probes when
+  actual workload can provide health signals"* — is the same principle from the
+  other side, and it is already implemented: `FreePool::observe` learns health
+  *entirely from work that was going to happen anyway*, and recovery too
+  (`WorkloadOutcome::Served` clears the cooldown). **Glasshouse already gets its
+  health signal for free.** That is the strongest argument that a prober is
+  unnecessary, and it is shipped code rather than an intention.
+- **Line 1369** — *"Reduce or suppress active probes when probing would consume a
+  material fraction of a scarce request pool"* — is 1323's enforcement half and
+  stays open with it. They should close together, against the same prober.
+- **Line 1853** — *"Measure how much scarce capacity is consumed by probes and
+  whether passive observations can replace them"* — is Phase 51's evaluation of
+  exactly this question, and is blocked on the counting primitive.
+
+### What a future package owes
+
+A background prober may not land until it carries, in the same change:
+
+- a stated reason why passive observation from real workload (line 537's
+  mechanism, already shipped) is insufficient for the thing being probed;
+- a check for a provider-published endpoint first (line 1230);
+- a rate or interval guard with a test that **fails when the guard is removed** —
+  not a source scan, which proves the scan and not the behaviour;
+- the request-pool accounting that shows what each probe costs.
+
+Until then 1323 stays open, and its openness is the record that this is owed.

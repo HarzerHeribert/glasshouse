@@ -109,3 +109,100 @@ Missing evidence:
   that unblocks 1311/1321/1322/1324.
 - A consumer treating provider-declared `Retry-After` as authoritative — 1319.
 - The mutation check for 1320 and 1323 before either is ticked.
+
+---
+
+### 1323 settled by the user: the line stays open, and why that is the answer
+
+Asked directly on 2026-08-29 whether the line means *"no automatic probing
+exists"* or *"probing is rate-limited when it happens"*, the user chose neither
+reading as a closure and gave the reason:
+
+> *"If there ever happens any probing and it would hit a free endpoint like
+> openrouter it would use a request budget — so best is to not probe at all if
+> not necessary and if necessary only sporadically. And if we want model data
+> maybe the providers have data endpoints and measured availability for us
+> instead of doing it ourselves."*
+
+**1323 stays open.** Recorded in full, with what a future prober owes, in
+`docs/product/design-decisions.md` — *"Probing costs a request budget, so the
+cheapest probe is the one nobody runs"*.
+
+The part that matters for this ledger: the line is **not** line 1748's shape
+after all, and the earlier note here suggesting it might be is superseded. 1748
+was reworded because its property is structural — physical separation holds
+against any deleter. 1323's property holds only because a feature is **absent**,
+so it would evaporate silently the first time anyone writes a prober. Keeping the
+box open is what keeps the requirement pointed at the code that will need it.
+
+Note also that **line 537 is already ☑ and already implements the principle from
+the other side**: `FreePool::observe` learns health *entirely from work that was
+going to happen anyway*, and `WorkloadOutcome::Served` clears a cooldown, so
+recovery is learned from real traffic too. Glasshouse already gets its health
+signal without spending a request. That is the strongest existing argument that
+no prober is needed, and it is shipped code rather than an intention.
+
+### The recommended "one consumer unblocks four" package is PREMISE-INVALID as written
+
+Two checkpoints have recommended, as the cheapest next step, *"give
+`ResourceHealth` an externally-readable surface — one consumer unblocks 1311,
+1321, 1322 and 1324."* **Checked against current source before writing a packet,
+and it does not connect.** Recorded here so the next orchestrator does not
+re-derive it.
+
+**What is genuinely already there, and it is more than the checkpoints credited.**
+`ResourceHealth` (`routing/free.rs:236-263`) is not a stub — it already
+implements the whole state machine those four lines describe:
+
+- `consecutive_failures` + `cooling_down_until`, with a bounded doubling from
+  `BASE_COOLDOWN` and the provider's own `retry_after` preferred when given —
+  that is **1321's** degradation.
+- `WorkloadOutcome::Served` resets `consecutive_failures` to 0 and clears the
+  cooldown — that is **1322's** recovery, learned from work.
+- `is_available(now)` — that is **1311's** availability.
+- `FreePool::is_available` is `health.is_available(now) && !allowance.is_exhausted(now)`,
+  so health, schedulability and quota are already three separate concepts —
+  that is **1324's** separation.
+- `FreePool::observed()` (`:449`) returns every observed resource in a stable
+  order and its own doc says it is *"for a settings or diagnostic view"* — so
+  even §71's sixth question (*where does the set come from?*) is answered.
+
+**The link that fails is propagation, and it fails twice.**
+
+1. **The rendering path has no gateway.** `resources_report` is called at
+   `main.rs:140`, inside the **CLI command dispatch**, whose only argument is
+   `&runtime`. The gateway is started at `main.rs:534`, on the **session-launch**
+   path — a different branch of a different function. `glasshouse resources` never
+   has a `Gateway` in scope, so a health section added there would render an
+   empty pool on every run, forever. That is the identical always-empty-pool
+   defect this entry already records for the router's caller, reproduced one
+   surface further out.
+2. **The pool is never persisted.** `free_pool()` (`gateway/session.rs:234`)
+   returns `self.lock().free.clone()` — a clone of in-memory state owned by one
+   `Gateway` instance. Nothing writes it to SQLite. `api/unix.rs:331` already says
+   so in its own doc: health *"lives in whichever process's `Gateway` last
+   computed a route, in memory."* So there is no durable artifact for any second
+   surface to read.
+
+The only process holding a live pool is the one that launched a session, where
+the handle is bound to `_gateway_guard` (`main.rs:2138`) and deliberately never
+read again.
+
+**So the real package is one of two, and neither is small:** persist health
+(a migration, Red tier), or thread the `Gateway` into the shell and add a TUI
+overlay that shows only the current process's own pool. **It is not "one small
+consumer", and a packet claiming so would have been the fifth dispatch-gate
+casualty in five rounds** — each one the previous checkpoint's own recommended
+next step, which is the pattern `docs/process/assurance-economics.md` exists to
+catch.
+
+Missing evidence, restated precisely:
+
+- **1311/1321/1322/1324** — the behaviour is built and exercised on every
+  exchange; what is missing is a *durable or in-process* surface that can observe
+  it. Decide persistence versus a shell overlay **before** writing a packet.
+- **1319** — still no producer: nothing treats a provider-declared `Retry-After`
+  as authoritative for scheduling. (`ResourceHealth::observe` does use
+  `retry_after` for its own cooldown length, which is adjacent but is not the
+  scheduling authority the line names.)
+- **1323** — settled as open by the user's decision above.
