@@ -2593,3 +2593,46 @@ mistake wearing a third costume. `blind`, not zero; refuse, not `unknown`.
 **Note for whoever rebuilds this script:** `.agent-runtime/` is gitignored, so
 `self-continue.sh` is **not in the repository** and neither fix travels with a
 clone. That is why both are written down here rather than only in the file.
+
+## §68 — `cargo test <name>` filters test names, and a filter that matches nothing looks exactly like a pass
+
+Batch 40's packet told its worker to verify with:
+
+    cargo test -p glasshouse --all-features project_isolation
+
+That command runs **zero tests**. `cargo test`'s trailing argument is a
+substring filter on test *names*, not a target selector, and no test inside
+`tests/project_isolation.rs` has `project_isolation` in its name. Every target
+in the workspace reports:
+
+    running 0 tests
+    test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 87 filtered out
+
+**`test result: ok` and a zero exit code.** Nothing anywhere says "your filter
+selected nothing." A packet carrying this command, or an orchestrator running it
+to confirm a worker's claim, gets a green result that establishes nothing at all
+— and the more targets the workspace has, the more reassuring the wall of `ok`
+lines looks.
+
+The worker ran it literally, noticed the zero, and substituted:
+
+    cargo test -p glasshouse --all-features --test project_isolation
+
+which runs the whole target (7 passed). It reported the correction in
+`packet_errors`, which is the sixth consecutive round a worker has corrected its
+packet and been right.
+
+**The rule:** to run a whole test file, use `--test <target>`. Use a bare
+substring only when you mean to select by test name, and when you do, check the
+count is non-zero before believing the result.
+
+**This is §54's family, third costume.** `blind` must not read as zero (the
+watchdog), `unknown` must not read as a real session id (§67), and *"0 tests
+matched"* must not read as *"the tests passed."* A default or an empty result
+that is indistinguishable from success is the recurring defect on this project,
+and it keeps arriving somewhere nobody was looking.
+
+**Where else this shape already exists here**, worth checking when a gate looks
+suspiciously clean: `grep -c` exits 1 on zero matches and silently ends a `&&`
+chain (§4), and `discover.py`'s seam verdict counts doc-comment lines as call
+sites unless you read them (§49).

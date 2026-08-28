@@ -6,6 +6,113 @@
 
 Last updated: 2026-08-28 (Europe/Berlin)
 
+## Checkpoint — 2026-08-28, batch 40 landed: 663 / 1280 (52%)
+
+**Green on all three platforms on this exact tree** — local gate **13/13**
+including the ubuntu clippy leg, `--windows-vm` **3/3 for real on the ARM64 VM**,
+3723 tests passed / 0 failed, zero slow-test warnings, and the standing 33%
+`session::api` flake did **not** fire.
+
+One Sonnet, three boxes, two commits. `3492459` reworded map line 1748 and closed
+it; `35fb3ac` closed Phase 21G 948/949/950 and hardened five SQL statements.
+
+### The round began by discovering a second orchestrator in the same checkout
+
+`CONTINUATION.md` said `main` was `696b368`, clean, no workers live. It was
+`1233ed9` by the time the round was gated: a **predecessor Opus session was still
+alive in this same working directory** and pushed two commits mid-round. Both
+were docs-only and additive, so nothing conflicted — but that was luck, not
+design. Its own heartbeat watch exists precisely to nudge an idle orchestrator
+back into work, which in a shared checkout means a second integrator.
+
+**Verify `git log`, not just `git status`, against the checkpoint's stated
+commit.** The predecessor had finished its handoff and gone idle; it was closed
+(`cmux workspace close`), which the user's recorded correction authorises once a
+successor is running.
+
+### `glasshouse memory revalidate` — the loop the binary advertised and could not close
+
+`memory challenge` has always printed *"it will not be returned as current until
+the challenge is resolved"*, and nothing could resolve it. `MemoryStore::reaffirm`,
+`::supersede`, `::set_status` and `::with_status` had **zero non-test callers**.
+Phase 21F created `NeedsReview` memories and gave them no exit.
+
+949 (the four outcomes), 948 (an automatic reviewer refused on a high-impact
+**or unclassified** memory, reusing Phase 22's own gate) and 950 (`--list
+[--limit N]`, `with_status`'s first production caller) are closed. No migration —
+every outcome was already a `MemoryStatus` variant.
+
+### The hardening, and why it took two mutation runs rather than one
+
+Five `UPDATE memories … WHERE id = ?1` statements carried no `project_id`,
+protected only by a leading `self.get(id)?`. **All five guards were present —
+there was no live defect** (the previous checkpoint said six statements; it is
+five, checked one by one). Each now also carries `AND project_id = ?N`, guards
+kept.
+
+The integrator re-ran the decisive mutation **both ways**, and only the pair
+proves anything:
+
+- guard removed, hardening kept → isolation test **passes** — the scoped `WHERE`
+  now carries the protection alone. That is what the change bought.
+- guard **and** hardening removed → isolation test **FAILS** — so the test is not
+  vacuous and would have caught the original shape.
+
+**A hardening change that makes a mutation survivable needs two runs, not one.**
+One run showing "still passes" is indistinguishable from a test that cannot fail.
+
+### A box was proposed closed and declined
+
+**951** (*"avoid automatic revalidation work when the memory is not about to
+affect any current task"*). The worker's only evidence was that no sweep code
+exists — its own report called that *"a structural/negative check, confirmed by
+reading the diff rather than a runtime test."* The SDLC's rule decides it:
+regression evidence must **fail if the behaviour were removed**, and nothing
+would. Same shape as line 1748, un-ticked once for exactly that reason.
+
+### Two corrections the integrator made to the worker's diff
+
+- `MemoryStoreError::ReviewRequired` read *"so its **conflict** may not be
+  resolved automatically"* — right for Phase 22, misleading for a revalidation
+  where no conflict exists. The worker reused the variant as instructed and
+  **escalated the wording instead of redesigning it**, which was the right call.
+  Generalised to *"so it may not be settled automatically"*, correct for both
+  callers, confirmed in the running binary.
+- The packet's own `cargo test … project_isolation` matches **zero tests** and
+  still prints `test result: ok`. The worker caught it and used `--test`.
+  **Sixth consecutive round a worker corrected its packet and was right.**
+  Recorded as practice **§68**.
+
+### Line 1748 was reworded, not forced
+
+The user chose rewording over building a deletion command. It now names what its
+test actually guards — physical separation in
+`paths.rs::RuntimePaths::project_state_dir`, which holds against a deletion by
+anyone. The old §33 argument is preserved in `phase-46.md` rather than deleted,
+and a future deletion *command* still owes its own test through that caller.
+
+### Next, and one of them is a lead that needs checking before it is trusted
+
+1. **The metered-quota package.** The user's decision is recorded in
+   `docs/product/design-decisions.md` (`1233ed9`): a background job may spend
+   metered quota, bounded by **proportion** to the task. `main.rs::disposable_candidates`
+   builds only `Cost::Free`, which is why 1293 and 1550 cannot close.
+   **Gated this round:** `DisposableRouting::for_support_work` **is** called
+   (`main.rs:1233`), so `MeteredUse::Permitted` is live in production — the gap
+   is candidate *generation*, not the policy. It must not fake the proportion
+   (Phase 32G is 0/10; line 1305 says treat unknown pricing as unknown).
+2. **⚠ Check before trusting item 1's constraint.** `DisposableRouting::for_glasshouses_own_run`
+   has **ZERO non-test callers**, and no evidence file mentions it. Map line 542
+   (*"never a metered resource without an explicit opt-in"* for Glasshouse's own
+   runs) is **ticked** and may be resting on a constructor nothing calls. Read
+   its evidence before wiring metered use — the thing the new package must not
+   regress may not be exercised today.
+3. **Phase 21E line 924** (stronger review before superseding invariants) is the
+   cheapest remaining memory box: `supersede` now has its first production caller,
+   and `require_reviewed_for_high_impact` is the gate to extend to it.
+   **Line 925 needs a migration** — there is `superseded_by` but no reason column.
+   Red tier.
+
 ## Checkpoint — 2026-08-28, batch 39 landed: 658 / 1280 (51%)
 
 **Green on all three platforms on this exact tree** — local gate 13/13 including

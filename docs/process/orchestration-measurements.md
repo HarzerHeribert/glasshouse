@@ -2799,3 +2799,78 @@ unreachable. The dispatched one closed six boxes with a contribution that
 makes the pair tie, and `best()` prefers the first, which the test lists as the
 wrong answer. Contrast Phase 9J's prior at the same caller: built, wired,
 mutation-proven, inert. One check, two opposite outcomes, both correct.
+
+## Batch 40 — one Sonnet, three boxes, and a defence-in-depth change proven both ways
+
+Dispatched from `696b368`; integrated onto `3492459`. **One** Sonnet implementer,
+26 minutes, ~$7.53, +918/−48 across five files. Boxes 948, 949, 950 closed;
+`951` proposed closed and **declined by the integrator**.
+
+| package | boxes claimed | boxes closed | partition |
+|---|---|---|---|
+| `mem-revalidate` | 21G 948/949/950/951 (+944/945/946 argued) | 3 | `memory/store.rs`, `main.rs`, `cli.rs`, 3 test files |
+
+**~$2.51 per box** at the worker, against batch 39's $1.44 and batch 37's $1.00.
+The number is honest and the reason is visible: this package wrote its own
+mechanism from nothing (four store wrappers, a reviewer gate, a CLI verb, a
+listing command) rather than wiring one that already existed, and it spent a
+quarter of its turn on a hardening change that closed **no box at all**. Cost
+per box measures how much was already built — batch 32 established that — and
+this round is another instance, not a tier signal.
+
+### One worker, deliberately, and the reason is the weekly window
+
+`CLAUDE.md` says run workers in parallel, and that is right. This round did not,
+and the trade should be recorded rather than look like an oversight: the weekly
+rate-limit window was at **91%** when the round was gated. A second package would
+have needed a partition disjoint from `memory/**` + `main.rs` + `cli.rs`, which
+the only other gated candidate (21E line 924) does not have, so the realistic
+second worker was an **ungated** package on an unexamined phase. Four of the last
+five packages considered on this project were refused at the Phase −1 gate. The
+expected value of speculatively dispatching one, at ~$15 of unrecoverable worker
+compute per miss, was negative against finishing and integrating one gated round.
+
+**Parallelism is a priority, not a mandate to dispatch an ungated package.**
+
+### The integrator's own mutation was worth more than the worker's five
+
+The worker ran all five required mutations and killed all five. The integrator
+then re-ran the decisive one **in both directions**, which is the part that
+actually established the claim:
+
+- guard removed, hardening kept → isolation test **passes** (the scoped `WHERE`
+  carries the protection on its own — this is what the change bought)
+- guard removed **and** hardening removed → isolation test **FAILS** (so the test
+  is not vacuous and would have caught the original shape)
+
+Only the second run proves the first means anything. A single mutation showing
+"still passes" is indistinguishable from a test that cannot fail. **When a
+hardening change is meant to make a mutation survivable, the evidence is two
+runs, not one** — the same shape as §40's rule that a FAIL needs two runs.
+
+### A box was proposed closed and declined, and the rule it turns on
+
+`951` — *"avoid automatic revalidation work when the memory is not about to
+affect any current task."* The worker's evidence was that no sweep code exists,
+which its own report described as *"a structural/negative check, confirmed by
+reading the diff rather than a runtime test."*
+
+The SDLC's rule decides it: a regression test counts only when it **would fail if
+the required behaviour were removed**, and nothing here would. The line also
+presupposes automatic revalidation, which does not exist — the same shape as map
+line 1748, un-ticked once for exactly that reason. **A worker being right about
+the code and wrong about the box is the normal case**, and it is why the
+integrator rules rather than the report.
+
+### The packet was wrong in a way that would have cost a rerun, and the worker caught it
+
+`cargo test -p glasshouse --all-features project_isolation` matches **zero
+tests** — cargo's trailing argument is a substring filter on test *names*, and no
+test in `tests/project_isolation.rs` contains that substring. Every target
+reports `0 passed … N filtered out`, which reads exactly like a clean run. The
+worker ran it literally, noticed, and used `--test project_isolation` (7 passed).
+
+**Sixth consecutive round in which the worker corrected its packet and was
+right.** The general form is §54's again: a command that silently matches nothing
+looks identical to a command that passed. Whole-target verification commands must
+be `--test <name>`.
