@@ -2538,3 +2538,58 @@ re-dispatching are the ones where the *diff* is bad, not the ones where the
 up" after an error may reasonably re-verify everything, which is the expensive
 half of its budget (measured this session at 25% of a package's compute — see
 `assurance-economics.md`). Naming what you want costs one clause.
+
+## §67 — the handoff relaunched the Opus orchestrator as Sonnet, and said "Opus" while doing it
+
+`.agent-runtime/self-continue.sh` is the mechanism that keeps this project going
+across context boundaries: it snapshots the tree and opens a fresh orchestrator
+pane. On 2026-08-28 it was invoked deliberately at ~50% context, with a clean
+tree and nothing in flight — the good case, not an emergency.
+
+**The successor came up as Sonnet 5.**
+
+The command was `claude <prompt>` with no `--model`, so it took the account's
+default. Meanwhile the workspace it creates is named **"Glasshouse Opus
+(cont.)"** and the notification it fires says **"New Opus pane started"**. Both
+asserted a tier the command never requested.
+
+That is not cosmetic. `docs/process/worker-capabilities.md` reserves
+integrating, committing and updating project-status records to the Opus
+orchestrator, and `CLAUDE.md` repeats it. A Sonnet successor would have done all
+three, correctly believing it was entitled to — the prompt it receives opens
+*"Resume as the primary Opus orchestrator"*, so nothing in its own context would
+have told it otherwise.
+
+**It was caught only because the relaunched pane was read rather than trusted.**
+`cmux read-screen` on the new surface, once, before walking away. That is §64's
+rule applied to the one mechanism whose whole job is to run when nobody is
+watching: *establish what a safety net actually did.*
+
+Fixed by passing `--model opus` explicitly, and verified in both directions —
+the same standard §19 sets for the dev shims: before the change the successor is
+`Sonnet 5`, after it is `Opus 5 with xhigh effort`.
+
+### And the per-session lock degrades to a shared one when nobody exports the id
+
+§30 fixed a shared `.relaunch.lock` by scoping it per session and per trigger:
+`.relaunch-<session>-<mode>.lock`. The session id comes from `$CCSL_SESSID`,
+which is **not set in an ordinary shell** — only the Monitor commands export it.
+Invoke the script by hand and `SESSID` falls back to the literal string
+`unknown`, so the lock becomes `.relaunch-unknown-context.lock`: shared by every
+session that ever invokes it by hand, which is precisely the failure §30 removed.
+
+It degrades silently and in the unsafe direction — a second hand-invoked
+handoff, from any session, finds the lock and reports *"already relaunched;
+nothing to do"*. Invoke it as:
+
+    CCSL_SESSID=<this session's id> .agent-runtime/self-continue.sh context
+
+**The general rule, and it is the third time this file has recorded it:** a
+default that stands in for a missing identity must be distinguishable from a
+real one. `unknown` as a session id is `|| echo 0` as a box count (§54) and
+`Unknown` scored as `Independent` (§33C's failure-domain type) — the same
+mistake wearing a third costume. `blind`, not zero; refuse, not `unknown`.
+
+**Note for whoever rebuilds this script:** `.agent-runtime/` is gitignored, so
+`self-continue.sh` is **not in the repository** and neither fix travels with a
+clone. That is why both are written down here rather than only in the file.
