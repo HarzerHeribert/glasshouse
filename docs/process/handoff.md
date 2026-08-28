@@ -46,6 +46,33 @@ callers in `src/`; the one router reading `FreePool::is_available` builds an
 always-empty pool by its own doc; `api/unix.rs:331` says no live health signal is
 exposed. **1311/1321/1322/1324 need one consumer, not four packages.**
 
+### The recon's "cheapest way into Phase 51" was two-thirds wrong — gated before dispatch
+
+The Phase 51 recon recommended populating `purpose`, `cost` **and three timestamp
+fields** that `gateway/session.rs::record_routing_observation` (`:278-321`) never
+sets, calling it six lines of caller-side work with no migration. **Verified
+against source before any packet was written:**
+
+- **`purpose` is genuinely real and unset.** `NewObservation.purpose:
+  Option<String>` (`evidence.rs:247`) defaults to `None`; the writer sets route,
+  harness, quota context, timing and outcome, and never touches it — though the
+  gateway does know the job's nature. **This part holds.**
+- **`cost` cannot be filled honestly.** `ObservedCost` needs pricing, **Phase 32G
+  is 0/10**, and map line 1305 requires unknown pricing be treated as *unknown*
+  rather than assigned a number.
+- **The three timestamps are structurally unavailable, not merely unset.**
+  `evidence.rs`'s own module header (`:42`) calls `first_byte_at` /
+  `first_token_at` / `first_tool_call_at` *"not merely unavailable to this
+  round's partition — structurally unavailable to the ingress design itself"*,
+  because a pass-through gateway cannot read a response body. **The same blocker
+  that keeps five of map line 1762's seven columns unrenderable** — recorded in
+  `phase-47.md` this same batch.
+
+**So the package is `purpose` alone.** Still real, much smaller, and it must not
+be dispatched as six lines. **A recommendation from a recon is a lead, exactly as
+a recommendation in a handoff is** — the Phase −1 gate applies to both, and this
+one was caught by re-reading two files.
+
 ### Phase 51 is blocked on a primitive, and it is the user's decision
 
 All 37 lines blocked, one shared cause: **Glasshouse cannot count occurrences of a
