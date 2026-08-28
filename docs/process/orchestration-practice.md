@@ -1263,6 +1263,39 @@ file, and reported it upward — which is the only reason anyone knows.
 narrow file list must say `rustfmt <the one file>` and nothing else, and the
 lead must run `cargo fmt --all` itself before its own gate.
 
+### §37, addendum — `rustfmt <a mod file>` is not one file either
+
+Batch 39, and it is the fix for the paragraph above going wrong in its own way.
+`failure-domain`'s packet said exactly what §37 prescribes — *`rustfmt
+crates/glasshouse/src/routing/interactive.rs`, NOT `cargo fmt --all`* — and the
+worker followed it. Then it ran `rustfmt` on `routing/mod.rs` to format its
+one-line `pub mod domain;` addition, and **rustfmt recursively formatted every
+submodule that file declares**: `classify.rs`, `disposable.rs` and `evidence.rs`,
+two of them named in its own `FORBIDDEN FILES`.
+
+The changes were import reorderings with no semantic content, the worker caught
+them with `git status` seconds later, and restored them — safely, because they
+were its own edits from moments earlier and not another party's uncommitted work
+(§22's distinction, correctly applied).
+
+**A module file is a partition hazard that `FORBIDDEN FILES` cannot express.**
+`rustfmt path/to/mod.rs` reaches every `pub mod x;` it declares, transitively. So:
+
+- a packet that hands out a `mod.rs` should say **do not rustfmt it** — a
+  one-line `pub mod` addition needs no formatting anyway;
+- and the orchestrator runs `cargo fmt --all` itself at integration, which is
+  where §37 already put it.
+
+**And the invocation itself was wrong in the packet.** Bare `rustfmt <path>`
+fails outright on this crate's files that use let-chains — `gateway/session.rs`
+has an `if let ... && let ...` at lines 385-387 — with *"let chains are only
+allowed in Rust 2024 or later"*. The workspace declares `edition = "2024"`, but
+plain `rustfmt` does not read `Cargo.toml`. **The correct line for a packet in
+this repository is `rustfmt --edition 2024 <path>`.** The bare form appeared to
+work only because the first file it was tried on had no 2024-only syntax, which
+is the same shape as every other gate in this file that passed for the wrong
+reason.
+
 ---
 
 ## §38 — "run the binary" is not an instruction unless the packet says how
