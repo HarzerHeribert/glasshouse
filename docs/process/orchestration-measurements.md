@@ -2975,3 +2975,64 @@ test, because it lives in `shell::run()` — the real event loop, which nothing 
 this codebase unit-tests. **It reported this against its own package.** Phase 41
 has the structurally identical untested arm, so it is a pre-existing shape, and
 the honest disposition is recorded debt rather than a weakened test.
+
+## Batch 43 — a worker found a dead check inside the gate
+
+Dispatched from `0af9bb3`, integrated as `4ec21b9`. Two Sonnet implementers plus a
+read-only recon. **Four boxes closed (1762, 1764, 1314, 1315)**, two closed by a
+worker and **declined by the integrator**, and thirteen Phase 33 lines left open
+on one shared wall.
+
+| package | closed | note |
+|---|---|---|
+| `evidence-table` | 2 | `packet_errors: []` — the first this session |
+| `health-proof` | 4 proposed, **2 ticked** | a proof pass; `src/**` forbidden to it |
+| `recon-phase51` | n/a | all 37 lines blocked, one shared cause |
+
+### The finding: `validate_round.py`'s check 3 had been inert all session
+
+`health-proof`'s packet quoted nine Phase 33 lines. The worker compared them
+against `discover.py --phase 33` and found **five wrong at the same line
+numbers** — two with their topics swapped. **The round had passed validation.**
+
+`parse_box_lines` matched only lines whose *first* character was `☐`, the shape
+the map uses. Every packet this project writes dresses the quote as a list item
+labelled with its line number (`- **1311** ☐ …`), so the parser saw **nothing**,
+and check 3 — *"every quoted box line matches the map verbatim"* — verified zero
+lines while reporting PASSED.
+
+**That is practice §68's defect inside the gate built to catch it**, and the
+fifth costume of the shape this project keeps recording: `blind` not zero (§54),
+`unknown` not a session id (§67), *"0 tests matched"* not *"tests passed"* (§68),
+your own recommendation not the user's decision (§70), and now **a check that
+matched nothing reporting PASSED**.
+
+Fixed in `5971e9f` with two regression tests, verified in both directions: seven
+mismatches now reported in the bad packet, zero on six correctly-quoted packets
+from batches 40–43.
+
+**The measurement worth keeping: a mechanical gate needs its own non-vacuity
+check.** This project mutation-tests its product code as a matter of course and
+had never asked whether its *process* checks could fail. One did not, silently,
+for at least four rounds.
+
+### A proof package is a distinct and cheap package type
+
+`health-proof` was given **all of `src/**` as forbidden** and asked to prove or
+refuse nine lines a recon had called "already satisfied". It produced four
+closures, five refusals, and — more valuable — the reachability wall behind
+Phase 33: `ResourceHealth` is written for every exchange and **observable by
+nothing outside the gateway module** (`free_pool()` has zero callers in `src/`;
+the one router reading it builds an always-empty pool; `api/unix.rs:331` says so
+in its own doc).
+
+**That finding is what stops the next four packages being written against a false
+premise**, and it cost one worker that wrote no production code at all.
+
+### The integrator declined two of its four closures
+
+1320 and 1323 rest on *existing* tests, 1323 partly on a source-scan proof of
+absence. Practice §14 records that shape as a trap and map line 1748 was un-ticked
+for a vacuous absence claim. **Declining them costs a round; ticking them wrongly
+costs the project's ability to trust its own ledger.** They are recorded as strong
+candidates needing a mutation check, not as rejected.
