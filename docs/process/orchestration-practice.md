@@ -2793,3 +2793,56 @@ plausible-looking dataset is the outcome to reward**, and the cost of the refusa
 was one package; the cost of the alternative would have been a view nobody could
 trust and no test would have caught, because a fabricated row and a real row
 render identically.
+
+## §72 — killing a `--windows-vm` run locally orphans the process on the VM, and it poisons every run after
+
+Batch 42's Windows run hung: `gateway::conformance::an_unreachable_provider_answers_the_harness_and_leaves_no_credential_in_the_diagnostic`
+emitted *"has been running for over 60 seconds"* and the log then went silent for
+**458 seconds** while VMware sat at **2.7% CPU** — waiting, not computing. The
+orchestrator stopped the run to re-measure, per §40's two-runs rule.
+
+**The second run failed all three legs before a single test executed:**
+
+    \\?\C:\ci\glasshouse\crates\GLASSH~1 - The process cannot access the file
+    because it is being used by another process.
+    Could not replace CI source tree: C:\ci\glasshouse
+
+**`TaskStop` kills the local `ci-local.sh` driver. It does not kill anything on
+the VM.** The hung test binary and its `cargo.exe` parent were still running
+there, holding a lock on the CI source tree, so every later run failed to sync —
+and would have gone on failing indefinitely, in a way that looks nothing like the
+original hang.
+
+Confirmed and cleared directly:
+
+```sh
+ssh -i ~/.ssh/glasshouse-windows-ci -o BatchMode=yes glasshouse@<vm-ip> \
+  'tasklist | findstr /I "glasshouse cargo rustc"'
+# cargo.exe 10028 ... / glasshouse-0c453a4654cfd9 4700 ...
+ssh ... 'taskkill /F /PID 4700'
+# killing the test binary released cargo.exe with it
+```
+
+The VM's IP comes from the DHCP leases the runner already reads
+(`/var/db/vmware/vmnet-dhcpd-vmnet8.leases`); the endpoint is
+`glasshouse@<ip>` with `~/.ssh/glasshouse-windows-ci`.
+
+**The rule: after killing a `--windows-vm` run, always check the VM for orphans
+before re-running.** A second run that fails during *sync* rather than during
+*tests* is this, not a regression — read the first error, not the summary.
+
+### The wider shape, and it is the one this file keeps recording
+
+**Stopping a driver is not stopping the work.** The same asymmetry appears in
+§46 (closing a worker pane leaves its processes), in `close-worker.sh --scan`'s
+existence, and now across a VM boundary where it is least visible because nothing
+local shows the orphan. **When a mechanism reaches across a boundary — a pane, a
+worktree, a VM — killing the near side leaves the far side running.**
+
+### And a heartbeat blind spot worth knowing
+
+`orchestrator-heartbeat.sh` fired **ORCHESTRATOR IDLE** while this Windows run was
+in flight, because it checks worker watches and the idle directory and knows
+nothing about the orchestrator's own background tasks. It is not wrong to fire —
+it is measuring "no *workers* running" — but do not read it as "nothing is
+happening". Check your own background work before acting on it.
