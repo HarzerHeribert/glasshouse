@@ -36,11 +36,38 @@ done
 # none of its own changes — and the stale-source warning below could not fire,
 # because the worktree's sources are not newer than *that* binary. A Phase 2C
 # worker hit exactly this on 2026-08-26.
+#
+# The fallback below is silent by default and that was its own defect, found by
+# a worker on 2026-08-28. The `-f …/crates/glasshouse/Cargo.toml` guard fails in
+# ANY directory that is not a Glasshouse checkout — including a scratch project
+# with its own `git init`, which is exactly what you create when you follow this
+# project's most-repeated instruction and run the binary by hand. `REPO` then
+# stays `SCRIPT_REPO`, the message below cannot fire because the two paths are
+# equal, and you silently drive the MAIN checkout's binary against your test
+# project. That produced a real-looking rendering failure during a batch's
+# manual verification that was not a defect at all.
 SCRIPT_REPO="$(cd "$(dirname "$SELF")/../.." && pwd)"
 REPO="$SCRIPT_REPO"
+RESOLVED_FROM_CWD=0
 if git_root="$(git rev-parse --show-toplevel 2>/dev/null)" \
    && [ -f "$git_root/crates/glasshouse/Cargo.toml" ]; then
   REPO="$git_root"
+  RESOLVED_FROM_CWD=1
+fi
+# Standing outside any Glasshouse checkout is legitimate — that is how you test
+# the binary against a scratch project — so this warns rather than refusing.
+# But it must not be silent, because the one thing it cannot tell you afterwards
+# is which binary you actually ran.
+if [ "$RESOLVED_FROM_CWD" -eq 0 ]; then
+  case "$PWD/" in
+    "$SCRIPT_REPO"/*) ;;
+    *)
+      echo "glasshouse (dev shim): you are not standing in a Glasshouse checkout," >&2
+      echo "  so this runs ${SCRIPT_REPO}'s binary, which may be a different" >&2
+      echo "  branch or an older build than the tree you are testing." >&2
+      echo "  Run <that checkout>/target/debug/glasshouse directly to be certain." >&2
+      ;;
+  esac
 fi
 if [ "$REPO" != "$SCRIPT_REPO" ]; then
   echo "glasshouse (dev shim): using the checkout you are standing in," >&2

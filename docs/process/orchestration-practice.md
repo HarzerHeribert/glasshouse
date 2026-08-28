@@ -539,7 +539,40 @@ checkout the caller is standing in and says so when the two differ.
 
 **The general shape is worth more than the fix:** a tool that resolves context
 from where *it* lives rather than where it was *called* will be wrong for every
-worktree, and wrong silently. When a packet asks a worker to run the binary,
+worktree, and wrong silently.
+
+### §19, addendum — the fix covered worktrees and not the case §5 tells you to create
+
+Found by `memory-retrieval` on 2026-08-28, and it cost that worker a false alarm
+it correctly diagnosed as not-a-defect.
+
+The fix above resolves the repository from `git rev-parse --show-toplevel`,
+guarded by `[ -f "$git_root/crates/glasshouse/Cargo.toml" ]`. That guard is
+right for a Glasshouse worktree and **fails in every directory that is not a
+Glasshouse checkout** — including a scratch project with its own `git init`,
+which is exactly what you create when you follow §5's *"run the binary"*, the
+most-repeated instruction in this whole process.
+
+`REPO` then falls back to `SCRIPT_REPO`, and — this is the part that makes it a
+trap rather than a limitation — **the "using the checkout you are standing in"
+warning cannot fire, because the two paths are now equal.** You silently drive
+the *main checkout's* binary against your test project. The worker saw a
+rendering failure that did not exist in its own tree, and only found out by
+invoking `target/debug/glasshouse` explicitly.
+
+Note the shape: §19's original defect was *silently resolving to the wrong
+tree*, and its fix reintroduced the same failure one directory further out. The
+fallback itself is correct — standing outside a checkout is legitimate — so the
+repair is to **say so** rather than to refuse.
+
+Verified in all three directions before committing, which is this section's own
+standard: from a scratch project it now warns; from the main checkout it stays
+silent; from a Glasshouse worktree it still says "using the checkout you are
+standing in" and picks that tree.
+
+**The transferable rule: a fallback that changes which artifact you execute must
+announce itself.** A warning whose trigger condition is "the two paths differ"
+cannot report the case where the wrong path *is* the default. When a packet asks a worker to run the binary,
 that worker is in a worktree by definition.
 
 ## 20. A gate that cannot fail is not a gate — the MSRV case

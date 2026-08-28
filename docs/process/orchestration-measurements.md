@@ -2727,3 +2727,75 @@ cheapest artefact this process produces:
 3. **Do two concurrent Sonnets on genuinely disjoint partitions collide at
    review?** Batch 35 ran three and the reviews were serial; two is the smaller
    test of the same question.
+
+### Batch 39 outcomes — 13 boxes, and the most valuable finding was in code neither worker touched
+
+| package | boxes | cost | time | diff |
+|---|---|---|---|---|
+| `failure-domain` | **6 of 6** (33C 1371/1372/1375/1377/1378, 35B 1547) | ~$6.50 | 19 min | +674/−17 |
+| `memory-retrieval` | **7 of 8** (21F 929/931/933/935/936/937/938; 939 stretch, not attempted) | ~$12.20 | 29 min | +1444/−77 |
+
+645 → 658 (50% → 51%). **~$18.70 for 13 boxes: $1.44 per box.** Higher than
+batch 37's $1.00 and for the reason batch 34 already recorded — cost per box
+measures how much was already built, not the tier. Phase 21F needed a new CLI
+verb, a new external-door test binary and a grouping type; Phase 33C needed one
+type and one contribution because `on_provider_failure` was already there.
+
+**Both workers corrected their packets, and both were right — that is now six
+consecutive rounds.**
+
+- `rustfmt <a mod file>` recursively formats every submodule it declares. The
+  packet said what §37 prescribes and the worker followed it; formatting
+  `routing/mod.rs` reformatted three submodules, two of them in its own
+  `FORBIDDEN FILES`. Caught in seconds by `git status`, reverted. §37 has an
+  addendum now.
+- Bare `rustfmt` does not read `Cargo.toml`, so it defaults to edition 2015 and
+  **hard-fails** on this crate's let-chains. `rustfmt --edition 2024` is the
+  correct packet line. Both workers hit this independently.
+- The packet's EXPECTED FILES had no home for a test of `api/unix.rs`'s door,
+  while `api/mod.rs:35-37` says that door "is proven only by running the shipped
+  binary… never by an in-process unit test." The worker added
+  `tests/memory_query_api.rs` on the `tests/capacity_api.rs` precedent and said
+  so. That is the right call and the packet was wrong.
+
+### The mutation that mattered was about a write nobody was watching
+
+`memory-retrieval`'s `remove-validation` mutation deleted `mark_for_review`'s
+leading project-scope guard. The integrator re-ran it: the test fails with
+`right: "active"` — it read the **foreign project's row back** and found it
+flipped to `needs_review`. The call still returned a correct-looking error
+either way, because the function's *trailing* `self.get(id)` re-checks scope
+after the write.
+
+**A test asserting only the returned error would have passed against a build
+that silently corrupted another project's memory.** The worker's test reads the
+row back at the raw-connection level precisely to catch that, and said so.
+
+Following it up cost the integrator four greps and produced the round's most
+useful artefact: **six `UPDATE memories … WHERE id = ?1` statements carry no
+`project_id` in their own WHERE clause.** All five enclosing functions currently
+have the leading guard, so there is no live defect — checked one by one, and an
+initial heuristic that flagged two of them was **wrong**, because `supersede`
+names its parameter `old` and `set_authority` splits `self` from `.get(id)`
+across lines. Say the checked answer, not the scan's.
+
+The objection worth recording is the one that nearly closed the question early:
+`database.rs` *does* defend this table with triggers, and its own comment at
+line 248 makes the argument — *"a query can forget to filter by `project_id`; a
+`BEFORE INSERT` / `BEFORE UPDATE` guard cannot be forgotten."* **It does not
+reach this case.** The trigger is `BEFORE UPDATE OF project_id`, so a status-only
+write to a foreign row fires nothing. The triggers protect the *binding*; they
+do not decide *who may write the row*.
+
+That is a red-tier package for the next round, and it is the closest existing
+work to Phase 1 line 110, which is unstarted and has no ledger entry.
+
+### The fifth link's first prediction held
+
+Batch 39 dispatched line 1547 because the domain signal varies across the
+candidates being ranked, and declined line 1293 because its consumer is
+unreachable. The dispatched one closed six boxes with a contribution that
+**changes which candidate wins** — proven by neutralising it to `0.0`, which
+makes the pair tie, and `best()` prefers the first, which the test lists as the
+wrong answer. Contrast Phase 9J's prior at the same caller: built, wired,
+mutation-proven, inert. One check, two opposite outcomes, both correct.

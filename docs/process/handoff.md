@@ -6,6 +6,67 @@
 
 Last updated: 2026-08-28 (Europe/Berlin)
 
+## Checkpoint — 2026-08-28, batch 39 landed: 658 / 1280 (51%)
+
+**Green on all three platforms on this exact tree** — local gate 13/13 including
+the ubuntu clippy leg, `--windows-vm` **3/3 for real on the ARM64 VM**, 1358 lib
+tests, zero slow-test warnings, and the 33%-rate `session::api` flake did not
+fire.
+
+Two Sonnets on disjoint partitions, thirteen boxes. `failure-domain` closed
+Phase 33C 1371/1372/1375/1377/1378 and Phase 35B 1547 (`8e14f4f`);
+`memory-retrieval` closed Phase 21F 929/931/933/935/936/937/938 (`00bd59d`).
+~$18.70 for 13 boxes, $1.44 each.
+
+### The Phase −1 gate refused this file's own previous recommendation
+
+The batch-38 checkpoint opened with map line 1293 as the cheapest next win. It is
+not closable: `main.rs::disposable_candidates` builds only `Cost::Free`
+candidates, so `disposable.rs:558`'s `filter(|c| !c.cost().is_free())` is always
+empty in the shipped binary and `evaluate_reserve_spend` never runs. **1293 is
+blocked on the same product decision as 1550** — may a background job spend paid
+quota unasked? — and neither closes alone.
+
+**Three rounds running, the recommended next step was structurally impossible.**
+Do not treat anything below as cleared; treat it as a lead to be gated.
+
+### The fifth link chose the round, and it was right both ways
+
+Line 1547 was dispatched *because* its signal varies across the candidates being
+ranked; 1293 was declined because its consumer is unreachable. The dispatched one
+now changes which candidate a failover picks — proven by neutralising the penalty
+to `0.0`, which makes the pair tie, and `best()` prefers the first, which the test
+lists as the wrong answer. Phase 9J's prior at the same caller remains inert.
+
+### The finding worth more than the boxes: a write nobody was watching
+
+Deleting `mark_for_review`'s leading project-scope guard flips a **foreign
+project's row** while the call still returns a correct-looking error, because the
+trailing `self.get(id)` re-checks scope *after* the write. A test asserting only
+the error would have passed.
+
+**Six `UPDATE memories … WHERE id = ?1` statements carry no `project_id` in their
+own WHERE clause.** All five enclosing functions currently have the leading
+guard — checked one by one; a heuristic that flagged two of them was wrong — so
+**there is no live defect.** The existing triggers do not cover it:
+`memories_reject_foreign_project_update` is `BEFORE UPDATE OF project_id`, so a
+status-only write to a foreign row fires nothing. **This is the next round's
+red-tier package**, and the closest existing work to Phase 1 line 110, which is
+unstarted and has no ledger entry.
+
+### Both workers corrected their packets, and both were right — six rounds running
+
+- `rustfmt <a mod file>` recursively formats every submodule it declares; it
+  reached two FORBIDDEN files. Reverted in seconds. Practice §37 has an addendum.
+- Bare `rustfmt` ignores `Cargo.toml` and hard-fails on this crate's let-chains.
+  **Packets must say `rustfmt --edition 2024 <path>`.**
+- `api/mod.rs:35-37` requires that door be proven by running the shipped binary,
+  and the packet's file list had nowhere to do it. The worker added
+  `tests/memory_query_api.rs` on the `capacity_api.rs` precedent. Right call.
+- The `glasshouse` dev shim silently ran the **main checkout's** binary from a
+  scratch project, because its fallback cannot warn when the wrong path is the
+  default. Fixed and verified in three directions; practice §19 has an addendum.
+
 ## Checkpoint — 2026-08-28, batch 38 landed: 645 / 1280 (50%)
 
 **Green on all three platforms on this exact tree** — local 13/13 including the
