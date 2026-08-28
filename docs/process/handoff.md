@@ -101,12 +101,18 @@ and a future deletion *command* still owes its own test through that caller.
    (`main.rs:1233`), so `MeteredUse::Permitted` is live in production — the gap
    is candidate *generation*, not the policy. It must not fake the proportion
    (Phase 32G is 0/10; line 1305 says treat unknown pricing as unknown).
-2. **⚠ Check before trusting item 1's constraint.** `DisposableRouting::for_glasshouses_own_run`
-   has **ZERO non-test callers**, and no evidence file mentions it. Map line 542
-   (*"never a metered resource without an explicit opt-in"* for Glasshouse's own
-   runs) is **ticked** and may be resting on a constructor nothing calls. Read
-   its evidence before wiring metered use — the thing the new package must not
-   regress may not be exercised today.
+2. **Line 542 — checked this round, and it is not a defect.**
+   `DisposableRouting::for_glasshouses_own_run` has **zero non-test callers**,
+   which looks alarming and is not. `main.rs:1233`'s `for_support_work`
+   (`MeteredUse::Permitted`) is reached from `disposable_extraction_model` <-
+   `report_hook` (`main.rs:1177`) — the post-turn memory-extraction trigger,
+   which is *ordinary support work* and exactly what the decision permits to
+   fall back to metered. `for_glasshouses_own_run` has no caller because
+   **Glasshouse ships no automated evaluation or test-run feature**; its
+   behaviour is mutation-tested and the mechanism is correct. It is moot today
+   anyway, since only `Cost::Free` candidates are built. **The risk to carry
+   into item 1:** once metered candidates exist, nothing structurally stops a
+   future eval/test runner from reaching for `for_support_work` by mistake.
 3. **Phase 21E line 924** (stronger review before superseding invariants) is the
    cheapest remaining memory box: `supersede` now has its first production caller,
    and `require_reviewed_for_high_impact` is the gate to extend to it.
