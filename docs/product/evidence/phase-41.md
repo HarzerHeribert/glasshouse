@@ -280,9 +280,31 @@ contains them.
 
 ---
 
-### Phase 41 — Show protected premium reserves when they influence routing (line 1663) — OPEN
+### Phase 41 — Show protected premium reserves when they influence routing (line 1663)
 
-State: NOT STARTED, blocked
+> **SUPERSEDED 2026-08-29 — the account below was true when written and is not
+> true of current source.** Batch 42 wired `ProviderConfig::metered_models`, and
+> with it the reserve reached a live routing decision; nothing came back to
+> update this entry, so it went on telling three later packets that the box was
+> blocked. A worker checked the citation against source before trusting it
+> (§5), found it stale, and closed the line. **Verified independently by the
+> integrator before accepting:**
+>
+> - `main.rs:1387` — `disposable_candidate_capacity` folds the configured
+>   reserve in: `.with_resource_reserve(effective.reserve_percent(provider).value.get())`
+> - `main.rs:1395` — `.with_band(band)` carries it onto the candidate
+> - `routing/disposable.rs:558-566` — `evaluate_reserve_spend(ReserveDecisionInputs { band: candidate.value().capacity.band, .. })`,
+>   a real allow/deny gate on the metered-fallback path
+> - `main.rs:1336` — `disposable_candidate_capacity`'s production caller,
+>   confirmed by `discover.py --seam`
+>
+> **The transferable part: an evidence entry that records a blocker does not
+> expire when the blocker does.** This one outlived its own truth by three
+> batches because nothing re-reads a `NOT STARTED, blocked` entry when the thing
+> it was blocked on ships. When a batch removes a blocker, grep the ledger for
+> entries that named it.
+
+State (superseded): NOT STARTED, blocked
 
 `crate::config::EffectiveConfig::premium_reserve` (config/mod.rs:2300) is a
 real, configurable percentage — but nothing in `crate::routing` reads
