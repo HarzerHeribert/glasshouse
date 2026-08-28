@@ -3206,3 +3206,42 @@ once, in the module the intended consumer already calls.
 35B audit; the correct file is `phase-35b.md`, and both exist. It read the right
 one, said so in `PACKET ERRORS`, and confirmed every other citation in the packet
 matched the tree *"exactly, down to the line numbers."*
+
+### The round's own finding, turned into a gate before the round ended — `b00ed35`
+
+`ledger-audit` found that **nothing checks whether an evidence entry agrees with
+itself**, and that this is what let 1330 stay ticked. That is a ~40-line check,
+so it was written rather than left as a lead.
+
+`check-evidence-coverage.py` — which already owned the *entry exists* and *state
+vocabulary* checks — grew a third: **a ticked box whose own entry calls it
+`PARTIAL`/`OPEN`/`BLOCKED`/`NOT STARTED` fails the gate.**
+
+**Proven both directions before it was committed**, which is §20's standard and
+the one batch 43's dead check failed: re-ticking 1330 in a temporary map makes it
+report *"map:1330 is ticked, phase-33a.md says PARTIAL"* and exit 1; the real tree
+exits 0. Six regression tests, in `scripts/tests/` where `ci-local.sh` already
+runs them.
+
+**Two things about its construction are the transferable part.**
+
+- **The join-then-normalize step has its own test.** Evidence files hard-wrap at
+  ~76 columns while the map stores each box as one long line, so a matcher that
+  compared them raw would find nothing and report clean — **which is precisely how
+  `validate_round.py`'s box check sat inert for four rounds.** The failure mode of
+  this check is identical to the failure mode of the check whose defect motivated
+  it, so that step is asserted directly rather than implied.
+- **The load-bearing test is the negative one:** an *unticked* box called `PARTIAL`
+  must **not** be flagged. That is the ordinary, correct state of most of this
+  ledger, and a check that fired on honest entries would be switched off within a
+  day — §20's *"a gate that starts red teaches everyone to override it"*, from the
+  other side.
+
+It went in as `--strict-consistency` immediately rather than warn-only, because
+§51's reason for warn-only is a backlog, and there is none: the ledger is clean
+under it today.
+
+**Three of this project's process checks have now been found reporting success
+while measuring nothing** (the MSRV gate, `ci-local.sh`'s Linux leg,
+`validate_round.py`'s box check). This is the first one written with that
+failure mode assumed from the start.
