@@ -2156,3 +2156,62 @@ default was the defect — the recorded decision was that a background job **may
 use quota, and an off default ships the opposite while claiming to honour it.
 **A hedge between a real instruction and an invented alternative is not neutral;
 it silently picks the invented one.**
+
+
+## The A/B directive needs a capability Glasshouse does not have: counting events over time
+
+### The finding
+
+A read-only recon gated **Phase 51 (Evaluation hooks) — all 37 lines — and found
+every one of them BLOCKED.** Not one is closable today, and they fail for the
+same reason.
+
+> **Glasshouse cannot count occurrences of a decision or an effect over time.**
+
+Its schema is built almost entirely for **current state** — a memory's status, a
+session's mechanism, a routing row you can look up *if you already know its
+identity*. Phase 51 asks exclusively for **event counts**: how often routing
+picked the cheap route, how often a user overrode automation, how often a
+response profile changed behaviour, how often memory actually helped or hurt.
+**None of those is a lookup of current state.**
+
+### Why this matters more than 37 boxes
+
+The recorded alpha directive is that negotiable features be built so their
+usefulness can be **measured**, because early alpha needs A/B comparison. Every
+such comparison — feature on versus feature off — is an event count. So the
+directive and the phase that serves it are blocked on the same missing
+primitive, and no amount of per-feature switchability substitutes for it.
+
+**What can be measured today, honestly:** task success rate and sample
+count/freshness per `(provider, model, route, harness)` identity via
+`EvidenceLedger::summarize`; quota and capacity bands with reset timing via
+`GatewayQuotaCache`; per-session response-mechanism and pairing-class
+categorisation. That is enough to ask *"did this identity's success rate move?"*
+**by re-running `summarize()` manually before and after a change** — a real
+comparison, but a hand-driven one, not an experiment the product runs.
+
+### The cheapest way in, and it is not a migration
+
+**Populate the fields the schema already defines and the writer never sets.**
+`NewObservation` / `ObservedEvidence` define `purpose`, `cost`, and the
+`first_byte_at` / `first_token_at` / `first_tool_call_at` timestamps; the single
+production writer, `gateway/session.rs::record_routing_observation`, sets none of
+them. Adding `with_purpose` / `with_cost` builders and threading real per-exchange
+data through the one call site that already builds every other field is
+**caller-side work against an already-designed schema**, and it unblocks or
+materially advances six Phase 51 lines.
+
+The memory cluster is the expensive one: it needs **a new event-log table**, which
+is a migration and Red tier. It should be scoped and decided deliberately rather
+than arrived at by a package that discovers it mid-flight.
+
+### What this does not change
+
+**It does not make the negotiable-by-default decision wrong or premature.** A
+feature still has to be switchable before its effect can be compared, and the
+switch is cheap. What this records is that switchability is **half** of that
+decision's requirement, and the observability half currently bottoms out in a
+primitive the product lacks — so a packet claiming a feature is "built with A/B
+in mind" today can honestly promise a clean off state and legible per-decision
+output, and cannot yet promise a count.
