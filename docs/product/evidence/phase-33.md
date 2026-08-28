@@ -9,7 +9,7 @@ information, when Glasshouse reports resource capacity, it reflects the real
 observed quota state and reset timing — while never inventing a percentage for
 telemetry it does not have.
 
-State: **COMPLETE** for map lines 1314 and 1315 — two of fifteen. **NOT STARTED**
+State: **COMPLETE** for map lines 1314, 1315 and 1320 — three of fifteen. **NOT STARTED**
 for the rest, and the reason is one shared architectural finding rather than
 thirteen separate gaps.
 
@@ -67,12 +67,38 @@ package that gives health a durable, externally-readable surface; it is not
 reachable from a test file, which is why the proof package correctly declined
 rather than building a harness to reach `pub(super)`.
 
-**Two more lines were closed by the worker and deliberately NOT ticked by the
-integrator.** 1320 and 1323 were closed *on existing tests* — 1323 partly by a
-source-scan proof of absence. Practice §14 records that a source-scanning test is
-a line-ending trap, and map line 1748 was un-ticked once for a vacuous absence
-claim. Both deserve the mutation check the integrator did not have budget to run
-this round. **They are strong candidates, not oversights** — see the handoff.
+**Two lines were closed by the proof worker, declined by the integrator, and then
+settled by a dedicated mutation pass. They split.**
+
+**1320 — CLOSED, and it is a real code-enforced invariant.**
+`provider/quota.rs::CapacityState::metered_balance` (`:1402-1414`) constructs
+`Pool::unmeasured()` for every field Glasshouse cannot read, and
+`for_resource` (`:1477-1490`) routes every remote direct provider through it;
+`render_resource` prints a percentage only when both halves of a pool are
+measured. **Mutation:** fabricate a `Capacity::Measured` reading for `requests`
+where production never reads one. It **fails**
+`provider_discovery.rs::nothing_the_registry_can_describe_reports_a_capacity_number_it_could_not_have_read`
+at the assertion naming that very field (*"openrouter (remote) claims a measured
+requests remaining"*). Restored byte-identically, re-run green.
+
+**1323 — STAYS OPEN, and this is why declining it was right.** Its cited test is
+a source scan, and the scan *does* mechanically kill a mutation — but **the kill
+only proves the literal-match scan works, not that any rate guard exists.** The
+mutation worker searched beyond `routing/` for any background prober, interval,
+timer, or rate/cooldown guard — `main.rs`, `shell/mod.rs`, `shell/state.rs`,
+`provider/discovery.rs` — and **found none**. Every probe path is user-invoked:
+the CLI `--probe <name>` flag (`main.rs:2236-2271`, opt-in by its own doc) and
+the settings-screen `t` key (`shell/state.rs:1100 begin_provider_test`). There is
+no periodic or automatic trigger anywhere.
+
+So the property holds **only because the feature that would need guarding does
+not exist** — *"no, because nothing probes at all"*, not *"no, because a guard
+stops it"*. **That is map line 1748's shape exactly**, and practice §14's
+line-ending trap in its general form: a source-scanning test proves the scan, not
+the behaviour. The line stays open until either a real probing path with a
+rate/interval guard exists, or the map's intent is confirmed to mean *"no
+automatic probing exists"* rather than *"probing is rate-limited when it
+happens"* — **which is a map decision, not an engineering one.**
 
 Platform/external evidence: covered by the macOS and Ubuntu legs of the batch
 gate; Windows recorded with the batch in `docs/process/handoff.md`.

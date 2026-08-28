@@ -1317,7 +1317,7 @@ Phase 33 — Resource health
 ☐ Track whether a rate-limit failure appears to be provider-wide, model-specific, account-specific, or request-pool-specific when evidence permits.
 ☐ Feed rate-limit events back into the unified capacity estimator.
 ☐ Treat provider-declared Retry-After or equivalent cooldown information as authoritative for temporary scheduling blocks.
-☐ Treat unavailable quota telemetry as unknown rather than inventing a percentage.
+☑ Treat unavailable quota telemetry as unknown rather than inventing a percentage.
 ☐ Allow a resource to be temporarily marked degraded after repeated failures.
 ☐ Allow a degraded resource to recover after successful probes or requests.
 ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
