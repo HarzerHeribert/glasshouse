@@ -392,6 +392,10 @@ pub enum EvidenceLedgerError {
         column: &'static str,
         value: String,
     },
+    #[error(
+        "an observed routing identity grouped by (provider, model, route, context_state) stored an unrecognized {column} value `{value}`"
+    )]
+    UnknownAggregateValue { column: &'static str, value: String },
     #[error("could not {action} in the routing evidence ledger")]
     Sql {
         action: &'static str,
@@ -551,6 +555,52 @@ pub struct ObservationQuery<'a> {
     pub route: Option<&'a str>,
     /// `None` matches rows recorded with no harness, not "any harness."
     pub harness: Option<&'a str>,
+}
+
+/// One `(provider, model, route)` identity that actually has rows in
+/// `routing_observations` within a queried window, grouped further by
+/// [`ContextState`] — capability map line 1762's route-evidence table and
+/// line 1764's "which of warm, cold or unknown," and the missing link batch
+/// 42 found and this package builds (practice §71): [`EvidenceLedger::recent`]
+/// and [`EvidenceLedger::summarize`] both require the caller to already name
+/// an identity via [`ObservationQuery`]; neither, nor anything else on this
+/// ledger before [`EvidenceLedger::observed_identities`], can answer "which
+/// identities exist at all."
+///
+/// `context_state` is part of the group, not a value chosen or averaged
+/// across it — the same separation [`RoutingSummary`] keeps for the same
+/// reason (line 1337) — so an identity that genuinely has both warm and
+/// unknown rows gets one row per state here rather than one row picking a
+/// winner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedIdentity {
+    pub provider: String,
+    pub model: String,
+    /// `None` means these rows were recorded with no route, matching
+    /// [`ObservationQuery::route`]'s own convention.
+    pub route: Option<String>,
+    pub context_state: ContextState,
+    sample_count: usize,
+    window_start_unix: i64,
+    window_end_unix: i64,
+}
+
+impl ObservedIdentity {
+    /// How many raw `routing_observations` rows this identity was counted
+    /// from, within the queried window — a real `COUNT(*)` over recorded
+    /// rows, never an estimate and never rounded up to look confident.
+    pub fn sample_count(&self) -> usize {
+        self.sample_count
+    }
+
+    /// The observation window this count was drawn from, as
+    /// `(earliest_unix, latest_unix)` — the same shape
+    /// [`AggregateReading::window`] returns, for the same reason: a count
+    /// with no window attached invites reading it as "ever," which it is
+    /// not.
+    pub fn window(&self) -> (i64, i64) {
+        (self.window_start_unix, self.window_end_unix)
+    }
 }
 
 /// An open project database plus the routing observations inside it.
@@ -791,6 +841,60 @@ impl EvidenceLedger {
             failure_rate: failure_rate_aggregate(&observations),
         })
     }
+
+    /// The distinct `(provider, model, route, context_state)` identities
+    /// this project has actually recorded within the last `window_seconds`,
+    /// most recently active first — capability map lines 1762 and 1764, and
+    /// the enumeration link batch 42 found missing (practice §71):
+    /// [`Self::recent`] and [`Self::summarize`] both require the caller to
+    /// already name an identity; this is the one method on this ledger that
+    /// answers which identities exist at all.
+    ///
+    /// A `SELECT DISTINCT`, expressed as a `GROUP BY` with its own count and
+    /// window — over columns `routing_observations` already has. No schema
+    /// change, and [`Self::record`], [`Self::recent`], [`Self::summarize`]
+    /// and [`ObservationQuery`] are all untouched. Bounded by `limit`, the
+    /// same shape [`Self::recent`] takes: an unbounded listing over a
+    /// growing table is a defect waiting for a busy project.
+    ///
+    /// Scoped to this ledger's own `project_id`, like every write this
+    /// ledger makes — belt-and-suspenders alongside the physical per-project
+    /// database file [`Self::open`] already guarantees, because this method,
+    /// unlike [`Self::recent`] and [`Self::summarize`], reads across every
+    /// identity in the table rather than one already-named one.
+    pub fn observed_identities(
+        &self,
+        now_unix: i64,
+        window_seconds: i64,
+        limit: usize,
+    ) -> Result<Vec<ObservedIdentity>, EvidenceLedgerError> {
+        let earliest = now_unix.saturating_sub(window_seconds);
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(
+                "SELECT provider, model, route, context_state,
+                        COUNT(*) AS sample_count,
+                        MIN(observed_at) AS window_start,
+                        MAX(observed_at) AS window_end
+                 FROM routing_observations
+                 WHERE project_id = ?1 AND observed_at >= ?2 AND observed_at <= ?3
+                 GROUP BY provider, model, route, context_state
+                 ORDER BY window_end DESC, provider ASC, model ASC, route ASC, context_state ASC
+                 LIMIT ?4",
+            )
+            .map_err(sql_err("read observed routing identities"))?;
+        let rows = statement
+            .query_map(
+                params![self.project_id, earliest, now_unix, limit as i64],
+                row_to_identity,
+            )
+            .map_err(sql_err("read observed routing identities"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(sql_err("read an observed routing identity"))??);
+        }
+        Ok(out)
+    }
 }
 
 fn duration_aggregate(
@@ -957,6 +1061,28 @@ fn row_to_observation(
         failovers: row.get("failovers")?,
         outcome,
         context_state,
+    }))
+}
+
+fn row_to_identity(
+    row: &Row<'_>,
+) -> rusqlite::Result<Result<ObservedIdentity, EvidenceLedgerError>> {
+    let context_text: String = row.get("context_state")?;
+    let Some(context_state) = ContextState::from_stored(&context_text) else {
+        return Ok(Err(EvidenceLedgerError::UnknownAggregateValue {
+            column: "context_state",
+            value: context_text,
+        }));
+    };
+    let sample_count: i64 = row.get("sample_count")?;
+    Ok(Ok(ObservedIdentity {
+        provider: row.get("provider")?,
+        model: row.get("model")?,
+        route: row.get("route")?,
+        context_state,
+        sample_count: sample_count as usize,
+        window_start_unix: row.get("window_start")?,
+        window_end_unix: row.get("window_end")?,
     }))
 }
 
@@ -1547,5 +1673,194 @@ mod tests {
         );
         let source = ObservedEvidenceSource::new(&ledger, 10_000, 100_000);
         assert!(source.observed(&key).is_none());
+    }
+
+    /// Acceptance test 1: two recorded identities come back as exactly two
+    /// distinct identities, with their real sample counts — the enumeration
+    /// [`EvidenceLedger::recent`] and [`EvidenceLedger::summarize`] cannot
+    /// answer (practice §71).
+    #[test]
+    fn observed_identities_returns_the_distinct_identities_actually_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let ledger = fixture.ledger();
+
+        ledger.record(observation("anyrouter", "m"), 1_000).unwrap();
+        ledger.record(observation("anyrouter", "m"), 1_001).unwrap();
+        ledger
+            .record(NewObservation::new("openai-router", "gpt-5"), 1_002)
+            .unwrap();
+
+        let identities = ledger.observed_identities(10_000, 100_000, 50).unwrap();
+        let mut pairs: Vec<(String, String)> = identities
+            .iter()
+            .map(|i| (i.provider.clone(), i.model.clone()))
+            .collect();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                ("anyrouter".to_owned(), "m".to_owned()),
+                ("openai-router".to_owned(), "gpt-5".to_owned()),
+            ]
+        );
+
+        let anyrouter = identities
+            .iter()
+            .find(|i| i.provider == "anyrouter")
+            .expect("anyrouter identity");
+        let openai = identities
+            .iter()
+            .find(|i| i.provider == "openai-router")
+            .expect("openai identity");
+        assert_eq!(anyrouter.sample_count(), 2);
+        assert_eq!(openai.sample_count(), 1);
+        assert_ne!(
+            anyrouter.sample_count(),
+            openai.sample_count(),
+            "two identities with different counts must be distinguishable"
+        );
+    }
+
+    /// Acceptance test 2: bounded, the same shape [`EvidenceLedger::recent`]
+    /// takes.
+    #[test]
+    fn observed_identities_is_bounded_by_the_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let ledger = fixture.ledger();
+        for i in 0..5 {
+            ledger
+                .record(NewObservation::new(format!("provider-{i}"), "m"), 1_000 + i)
+                .unwrap();
+        }
+
+        let identities = ledger.observed_identities(10_000, 100_000, 3).unwrap();
+        assert_eq!(identities.len(), 3, "at most the limit must come back");
+    }
+
+    /// Acceptance test 3, structural half: physical per-project database
+    /// separation, the same guarantee
+    /// [`a_ledger_never_sees_another_projects_observations`] proves for
+    /// [`EvidenceLedger::recent`].
+    #[test]
+    fn observed_identities_never_sees_another_projects_observations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let alpha = Fixture::new(tmp.path(), "alpha");
+        let beta = Fixture::new(tmp.path(), "beta");
+        alpha
+            .ledger()
+            .record(observation("anyrouter", "m"), 1_000)
+            .unwrap();
+
+        let beta_identities = beta
+            .ledger()
+            .observed_identities(10_000, 100_000, 50)
+            .unwrap();
+        assert!(
+            beta_identities.is_empty(),
+            "a sibling project's database must never contain another project's identity"
+        );
+    }
+
+    /// Acceptance test 3, defensive half — and why this ledger's own
+    /// `WHERE project_id = ?1` cannot be demonstrated to fail by a mutation
+    /// that removes it: a row tagged with a foreign `project_id` can never
+    /// even be inserted into this database. Migration 11's own
+    /// `routing_observations_reject_foreign_project_insert` trigger refuses
+    /// it at the SQL layer, before [`EvidenceLedger::observed_identities`] or
+    /// [`EvidenceLedger::record`] ever runs — a stronger guarantee than this
+    /// method's own filter, and the reason
+    /// [`observed_identities_never_sees_another_projects_observations`]
+    /// above is this project's only *reachable* isolation test for this
+    /// method, exactly as it already is for [`EvidenceLedger::recent`] and
+    /// [`EvidenceLedger::summarize`], neither of which filters by
+    /// `project_id` in SQL at all.
+    #[test]
+    fn a_foreign_project_id_row_cannot_even_be_inserted_into_this_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let ledger = fixture.ledger();
+
+        let conn = ledger.lock();
+        let err = conn
+            .execute(
+                "INSERT INTO routing_observations
+                    (project_id, observed_at, provider, model, context_state)
+                 VALUES ('someone-elses-project', 1_001, 'anyrouter', 'm', 'unknown')",
+                [],
+            )
+            .expect_err("the schema's own trigger must refuse a foreign project_id");
+        assert!(err.to_string().contains("different project"), "got: {err}");
+    }
+
+    /// The window and sample count both reflect real recorded timestamps —
+    /// not a placeholder — and rows outside the queried window are excluded
+    /// from both, the same decay-without-deletion contract
+    /// [`an_observation_outside_the_window_is_excluded_from_the_summary_but_not_deleted`]
+    /// proves for [`EvidenceLedger::summarize`].
+    #[test]
+    fn observed_identities_reports_the_real_window_and_excludes_rows_outside_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let ledger = fixture.ledger();
+        ledger.record(observation("anyrouter", "old"), 0).unwrap();
+        ledger
+            .record(observation("anyrouter", "m"), 100_000)
+            .unwrap();
+        ledger
+            .record(observation("anyrouter", "m"), 100_050)
+            .unwrap();
+
+        let identities = ledger.observed_identities(100_050, 1_000, 50).unwrap();
+        let models: Vec<&str> = identities.iter().map(|i| i.model.as_str()).collect();
+        assert_eq!(
+            models,
+            vec!["m"],
+            "the row outside the window must not appear at all"
+        );
+        let m = identities.iter().find(|i| i.model == "m").unwrap();
+        assert_eq!(m.sample_count(), 2);
+        assert_eq!(m.window(), (100_000, 100_050));
+    }
+
+    /// Capability map line 1764, at the enumeration layer: rows in different
+    /// [`ContextState`] buckets are never blended into one identity — the
+    /// same separation [`warm_and_cold_observations_never_share_one_summary`]
+    /// proves for [`EvidenceLedger::summarize`].
+    #[test]
+    fn observed_identities_keeps_different_context_states_as_separate_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let ledger = fixture.ledger();
+        ledger
+            .record(
+                observation("anyrouter", "m").with_context_state(ContextState::Warm),
+                1_000,
+            )
+            .unwrap();
+        ledger
+            .record(
+                observation("anyrouter", "m").with_context_state(ContextState::Unknown),
+                1_001,
+            )
+            .unwrap();
+
+        let identities = ledger.observed_identities(10_000, 100_000, 50).unwrap();
+        assert_eq!(
+            identities.len(),
+            2,
+            "warm and unknown must not be blended into one row"
+        );
+        assert!(
+            identities
+                .iter()
+                .any(|i| i.context_state == ContextState::Warm)
+        );
+        assert!(
+            identities
+                .iter()
+                .any(|i| i.context_state == ContextState::Unknown)
+        );
     }
 }

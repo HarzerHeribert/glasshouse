@@ -57,7 +57,7 @@ pub use state::{
     Action, HarnessRow, IntegrationRow, KnowledgeSection, MemoryDetail, Mode, ModelRefresh,
     Overlay, OverviewState, ProbeKind, ProfileRow, ProfileSettingsEdit, ProviderNotice,
     ProviderProbeIntent, ProviderProbeResult, ProviderRow, ProviderSettingsEdit, ReachabilityCheck,
-    RoutingRow, RoutingSettingsEdit, SettingsEdit, ShellState, ViewportGrid,
+    RouteEvidenceRow, RoutingRow, RoutingSettingsEdit, SettingsEdit, ShellState, ViewportGrid,
 };
 
 /// Open the shell and run it until the user leaves.
@@ -262,6 +262,21 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                                 KnowledgeSection::default(),
                                 KnowledgeSection::default(),
                                 Some(format!("project memory unavailable: {err:#}")),
+                            );
+                        }
+                    },
+                    Action::OpenRouteEvidence => match build_route_evidence_table(runtime) {
+                        Ok(rows) => {
+                            state.open_route_evidence(rows, None);
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                "could not read the routing evidence ledger for the route table"
+                            );
+                            state.open_route_evidence(
+                                Vec::new(),
+                                Some(format!("routing evidence unavailable: {err:#}")),
                             );
                         }
                     },
@@ -1502,6 +1517,53 @@ fn knowledge_detail(record: &crate::memory::MemoryRecord) -> MemoryDetail {
         source_commit: record.source_commit.clone(),
         lifecycle: record.status.to_string(),
     }
+}
+
+/// How many identities [`build_route_evidence_table`] shows — the same
+/// generous, read-occasionally default [`PROJECT_KNOWLEDGE_SECTION_LIMIT`]
+/// uses.
+const ROUTE_EVIDENCE_ROW_LIMIT: usize = 20;
+
+/// How far back [`build_route_evidence_table`] looks for observed
+/// identities. A week — long enough that a project worked on across a normal
+/// week still sees its own routing activity, short enough that an identity
+/// nobody has exercised in a month quietly ages out of the table rather than
+/// accumulating in it forever. Provisional, like the constants
+/// `crate::routing::evidence`'s own module names for the same reason.
+const ROUTE_EVIDENCE_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
+
+/// Read the routing evidence ledger's own distinct identities — Phase 47
+/// lines 1762 and 1764, closed after batch 42 found the ledger could not
+/// enumerate identities at all (practice §71).
+/// [`crate::routing::evidence::EvidenceLedger::observed_identities`] is this
+/// package's one additive method and the whole of what makes this function
+/// possible; see its own doc comment for why `recent`/`summarize` alone
+/// could not answer this. Reading the ledger is file I/O this module
+/// deliberately does not hold in `shell/state.rs` — the same split
+/// [`build_project_overview_memory`] keeps.
+fn build_route_evidence_table(runtime: &Runtime) -> anyhow::Result<Vec<RouteEvidenceRow>> {
+    use crate::routing::evidence::EvidenceLedger;
+
+    let ledger = EvidenceLedger::open(runtime)?;
+    let now = crate::provider::cache::now_unix_seconds();
+    let identities =
+        ledger.observed_identities(now, ROUTE_EVIDENCE_WINDOW_SECONDS, ROUTE_EVIDENCE_ROW_LIMIT)?;
+    Ok(identities
+        .into_iter()
+        .map(|identity| {
+            let (window_start_unix, window_end_unix) = identity.window();
+            let sample_count = identity.sample_count();
+            RouteEvidenceRow {
+                provider: identity.provider,
+                model: identity.model,
+                route: identity.route,
+                context_state: identity.context_state.as_str().to_owned(),
+                sample_count,
+                window_start_unix,
+                window_end_unix,
+            }
+        })
+        .collect())
 }
 
 /// Build the rows the Settings overlay shows, from a fresh [`Discovery`]
@@ -3674,6 +3736,158 @@ mod project_knowledge_tests {
         assert_eq!(detail.source_session, None);
         assert_eq!(detail.source_commit, None);
         assert_eq!(detail.lifecycle, MemoryStatus::Active.to_string());
+    }
+}
+
+/// Phase 47 lines 1762 and 1764: the route-evidence table reads real
+/// recorded routing observations through [`build_route_evidence_table`] —
+/// the production function `Action::OpenRouteEvidence`'s handler calls, not
+/// a helper that re-implements
+/// `routing::evidence::EvidenceLedger::observed_identities` (practice §35),
+/// the one method that can answer which identities exist at all
+/// (practice §71).
+#[cfg(test)]
+mod route_evidence_tests {
+    use super::*;
+    use crate::routing::evidence::{EvidenceLedger, NewObservation};
+
+    /// Same bootstrap `project_overview_tests` and `project_knowledge_tests`
+    /// use — an isolated, real on-disk project database.
+    fn bootstrapped_runtime() -> (tempfile::TempDir, tempfile::TempDir, crate::Runtime) {
+        use clap::Parser;
+
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join(".git")).unwrap();
+
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+            "--config-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, workspace.path()).unwrap();
+        (data, workspace, runtime)
+    }
+
+    /// A project with no routing evidence at all gets an honest, empty
+    /// table — not an error. `EvidenceLedger::open` creates the database on
+    /// first use, so "no evidence yet" and "could not read the ledger" must
+    /// not collapse into the same outcome, the same rule
+    /// `a_project_with_no_memory_yet_reports_empty_sections_not_an_error`
+    /// proves for the project overview.
+    #[test]
+    fn a_project_with_no_routing_evidence_yet_reports_an_empty_table_not_an_error() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let rows = build_route_evidence_table(&runtime).expect("must not fail");
+        assert!(rows.is_empty());
+    }
+
+    /// Real recorded observations, through the production `EvidenceLedger`,
+    /// come back as distinct rows with their real sample counts — not a
+    /// fixture standing in for the ledger. Acceptance test 4.
+    #[test]
+    fn two_recorded_identities_come_back_as_two_rows_with_real_sample_counts() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let ledger = EvidenceLedger::open(&runtime).expect("open");
+        // `build_route_evidence_table` windows against the real wall clock
+        // (`ROUTE_EVIDENCE_WINDOW_SECONDS`), so observations here must be
+        // recorded near real "now" — a small fixed epoch like `1_000` would
+        // fall outside every window this function ever queries.
+        let now = crate::provider::cache::now_unix_seconds();
+        ledger
+            .record(
+                NewObservation::new("anyrouter", "claude-opus-4-1")
+                    .with_route(Some("anthropic-messages")),
+                now - 20,
+            )
+            .unwrap();
+        ledger
+            .record(
+                NewObservation::new("anyrouter", "claude-opus-4-1")
+                    .with_route(Some("anthropic-messages")),
+                now - 10,
+            )
+            .unwrap();
+        ledger
+            .record(NewObservation::new("openai-router", "gpt-5"), now)
+            .unwrap();
+
+        let rows = build_route_evidence_table(&runtime).expect("must not fail");
+        assert_eq!(rows.len(), 2);
+        let anyrouter = rows
+            .iter()
+            .find(|row| row.provider == "anyrouter")
+            .expect("anyrouter row");
+        let openai = rows
+            .iter()
+            .find(|row| row.provider == "openai-router")
+            .expect("openai row");
+        assert_eq!(anyrouter.sample_count, 2);
+        assert_eq!(openai.sample_count, 1);
+        assert_ne!(
+            anyrouter.sample_count, openai.sample_count,
+            "two identities with different counts must render differently"
+        );
+    }
+
+    /// Line 1764: a row recorded with no context state — the honest default
+    /// every real production row has today, since
+    /// `NewObservation::with_context_state` has zero non-test callers (see
+    /// `routing::evidence`'s own module header) — comes back labelled
+    /// `"unknown"`, never blank and never upgraded to a measurement.
+    #[test]
+    fn a_row_with_no_recorded_context_state_reads_unknown() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let ledger = EvidenceLedger::open(&runtime).expect("open");
+        let now = crate::provider::cache::now_unix_seconds();
+        ledger
+            .record(NewObservation::new("anyrouter", "m"), now)
+            .unwrap();
+
+        let rows = build_route_evidence_table(&runtime).expect("must not fail");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].context_state, "unknown");
+    }
+
+    /// The `r` key opens the overlay through the real run-loop action, and
+    /// the overlay carries the rows the run loop actually read — not a
+    /// hand-constructed fixture (practice §35).
+    #[test]
+    fn opening_the_route_evidence_table_shows_real_recorded_observations() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let ledger = EvidenceLedger::open(&runtime).expect("open");
+        let now = crate::provider::cache::now_unix_seconds();
+        ledger
+            .record(NewObservation::new("anyrouter", "claude-opus-4-1"), now)
+            .unwrap();
+
+        let mut state = state::ShellState::new(
+            "glasshouse",
+            runtime.project().display_root(),
+            "test",
+            Vec::new(),
+        );
+        assert_eq!(
+            state.handle_key(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Char('r')
+            )),
+            state::Action::OpenRouteEvidence
+        );
+
+        let rows = build_route_evidence_table(&runtime).expect("must not fail");
+        state.open_route_evidence(rows, None);
+
+        assert_eq!(state.overlay(), Some(state::Overlay::RouteEvidence));
+        let evidence = state.route_evidence().expect("open");
+        assert!(
+            evidence
+                .rows()
+                .iter()
+                .any(|row| row.provider == "anyrouter")
+        );
     }
 }
 

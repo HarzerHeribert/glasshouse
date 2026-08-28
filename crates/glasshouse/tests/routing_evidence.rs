@@ -221,3 +221,65 @@ fn observed_evidence_source_is_reachable_from_outside_the_crate() {
         .expect("five successes must produce evidence");
     assert_eq!(observed.task_success_rate, Some(1.0));
 }
+
+/// Batch 43's `observed_identities` — the enumeration link batch 42 found
+/// missing (practice §71) — reachable and correct from outside the crate:
+/// [`EvidenceLedger::recent`] and [`EvidenceLedger::summarize`] both require
+/// the caller to already name an identity, and this is the one public method
+/// that answers which identities this project has actually recorded.
+#[test]
+fn observed_identities_is_reachable_from_outside_the_crate_and_returns_real_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let ledger = EvidenceLedger::open(&fixture.runtime).unwrap();
+
+    ledger
+        .record(synthetic_observation(1_000, Outcome::Succeeded), 1_000)
+        .unwrap();
+    ledger
+        .record(synthetic_observation(1_001, Outcome::Succeeded), 1_001)
+        .unwrap();
+    ledger
+        .record(NewObservation::new("openai-router", "gpt-5"), 1_002)
+        .unwrap();
+
+    let identities = ledger.observed_identities(10_000, 100_000, 50).unwrap();
+    assert_eq!(identities.len(), 2, "two distinct identities were recorded");
+
+    let anyrouter = identities
+        .iter()
+        .find(|i| i.provider == "anyrouter")
+        .expect("anyrouter identity");
+    assert_eq!(anyrouter.model, "claude-opus-4-1");
+    assert_eq!(anyrouter.route.as_deref(), Some("anthropic-messages"));
+    assert_eq!(anyrouter.context_state, ContextState::Unknown);
+    assert_eq!(anyrouter.sample_count(), 2);
+
+    let bounded = ledger.observed_identities(10_000, 100_000, 1).unwrap();
+    assert_eq!(
+        bounded.len(),
+        1,
+        "the limit must be honored from outside the crate too"
+    );
+}
+
+/// The public half of migration 11's own isolation trigger, for
+/// `observed_identities` specifically: two projects sharing one data root
+/// never see each other's identities.
+#[test]
+fn observed_identities_is_project_scoped_from_outside_the_crate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alpha = Fixture::new(tmp.path(), "alpha");
+    let beta = Fixture::new(tmp.path(), "beta");
+
+    EvidenceLedger::open(&alpha.runtime)
+        .unwrap()
+        .record(synthetic_observation(1_000, Outcome::Succeeded), 1_000)
+        .unwrap();
+
+    let beta_identities = EvidenceLedger::open(&beta.runtime)
+        .unwrap()
+        .observed_identities(10_000, 100_000, 50)
+        .unwrap();
+    assert!(beta_identities.is_empty());
+}

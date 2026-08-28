@@ -975,6 +975,106 @@ fn groqs_own_real_headers_reach_the_shipped_binarys_report_as_groq() {
     );
 }
 
+/// Capability map Phase 33 line 1314 (`python3 scripts/discover.py --phase
+/// 33`): *"Track known quota or usage state when a provider or harness
+/// exposes it."* Through the real `Command::Resources` arm, over the same
+/// Groq header set `groqs_own_real_headers_reach_the_shipped_binarys_report_as_groq`
+/// plants — this is the same production path, asserting the two native-unit
+/// pool lines neither that test nor
+/// `a_planted_gateway_reading_now_reaches_the_shipped_binarys_report` (which
+/// only checks the derived `capacity NN%` line) pins down: the raw `remaining`
+/// and `limit` readings themselves, for both the token pool and the request
+/// pool, each carrying its own class and source rather than a bare number.
+#[test]
+fn groqs_own_real_headers_populate_both_native_unit_pools_in_the_shipped_binarys_report() {
+    let fixture = BinaryFixture::new();
+    let quota_cache_dir = fixture.config.path().join("gateway-quota");
+    let cache = glasshouse::provider::telemetry::GatewayQuotaCache::at(&quota_cache_dir);
+    cache.store(
+        "groq",
+        &RateLimitHeaders::read(vec![
+            ("x-ratelimit-limit-requests", "7000"),
+            ("x-ratelimit-limit-tokens", "6000"),
+            ("x-ratelimit-remaining-requests", "6999"),
+            ("x-ratelimit-remaining-tokens", "5991"),
+            ("x-ratelimit-reset-requests", "12.342s"),
+            ("x-ratelimit-reset-tokens", "90ms"),
+        ]),
+        TELEMETRY_OBSERVED,
+    );
+
+    let stdout = fixture.run(&["resources", "--no-harness"]);
+    let row = stdout
+        .split("\n\n")
+        .find(|block| block.starts_with("groq"))
+        .unwrap_or_else(|| panic!("no groq block in:\n{stdout}"));
+
+    assert!(
+        row.contains("remaining 5991 tokens [authoritative]"),
+        "the token pool's own remaining reading must reach the report:\n{row}"
+    );
+    assert!(
+        row.contains("limit 6000 tokens [authoritative]"),
+        "the token pool's own limit reading must reach the report:\n{row}"
+    );
+    assert!(
+        row.contains("remaining 6999 requests [authoritative]"),
+        "the request pool's own remaining reading must reach the report:\n{row}"
+    );
+    assert!(
+        row.contains("limit 7000 requests [authoritative]"),
+        "the request pool's own limit reading must reach the report:\n{row}"
+    );
+}
+
+/// Capability map Phase 33 line 1315 (`python3 scripts/discover.py --phase
+/// 33`): *"Track known quota reset time when it is exposed."* Through the
+/// real `Command::Resources` arm, over the same Groq header set the sibling
+/// tests above plant. `x-ratelimit-reset-requests: 12.342s` observed at
+/// `TELEMETRY_OBSERVED` (1787800000) is `RateLimitHeaders::resets_at_unix`
+/// read as a delta and folded into the rolling window by
+/// `RateLimitHeaders::apply_to` — capability map line 1211's own mechanism —
+/// so the shipped binary's `rolling window` line must carry the resulting
+/// absolute second, 1787800012, not just a derived percentage. Neither
+/// `groqs_own_real_headers_reach_the_shipped_binarys_report_as_groq` nor
+/// `the_shipped_binary_shows_every_windows_start_and_reset_state_when_verbose`
+/// (which only proves the *unmeasured* rendering) asserts this line's
+/// populated form.
+#[test]
+fn groqs_own_real_headers_populate_the_rolling_windows_reset_time_in_the_shipped_binarys_report() {
+    let fixture = BinaryFixture::new();
+    let quota_cache_dir = fixture.config.path().join("gateway-quota");
+    let cache = glasshouse::provider::telemetry::GatewayQuotaCache::at(&quota_cache_dir);
+    cache.store(
+        "groq",
+        &RateLimitHeaders::read(vec![
+            ("x-ratelimit-limit-requests", "7000"),
+            ("x-ratelimit-limit-tokens", "6000"),
+            ("x-ratelimit-remaining-requests", "6999"),
+            ("x-ratelimit-remaining-tokens", "5991"),
+            ("x-ratelimit-reset-requests", "12.342s"),
+            ("x-ratelimit-reset-tokens", "90ms"),
+        ]),
+        TELEMETRY_OBSERVED,
+    );
+
+    let stdout = fixture.run(&["resources", "--no-harness"]);
+    let row = stdout
+        .split("\n\n")
+        .find(|block| block.starts_with("groq"))
+        .unwrap_or_else(|| panic!("no groq block in:\n{stdout}"));
+
+    assert!(
+        row.contains("rolling window "),
+        "the groq block must carry a rolling-window line at all:\n{row}"
+    );
+    assert!(
+        row.contains("resets unix 1787800012 [authoritative]"),
+        "the provider's own reset-requests header must reach the report as an absolute \
+         unix second, not stay `unmeasured`:\n{row}"
+    );
+}
+
 /// The note that tells a user the override exists, when they have set none.
 /// A screen full of `unknown` with no way out of it is the failure this
 /// guards against.

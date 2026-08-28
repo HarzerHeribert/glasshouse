@@ -1311,8 +1311,8 @@ Phase 33 — Resource health
 ☐ Track whether each configured resource is currently available.
 ☐ Track recent request failures for gateway-backed resources.
 ☐ Track recent observed latency for gateway-backed resources where measurable.
-☐ Track known quota or usage state when a provider or harness exposes it.
-☐ Track known quota reset time when it is exposed.
+☑ Track known quota or usage state when a provider or harness exposes it.
+☑ Track known quota reset time when it is exposed.
 ☐ Track recent rate-limit responses separately from transport or model failures.
 ☐ Track whether a rate-limit failure appears to be provider-wide, model-specific, account-specific, or request-pool-specific when evidence permits.
 ☐ Feed rate-limit events back into the unified capacity estimator.
@@ -1759,9 +1759,9 @@ Fixed architectural requirements
 ☐ Add a debug view showing which memories were retrieved for a routed task.
 ☐ Add a debug view showing estimated cache temperature and the evidence used for that estimate.
 ☑ Add a debug view showing quota information and whether it is measured, inferred, or unknown.
-☐ Add an optional compact route-evidence table showing sample count, TTFC, effective TTFC, TTFT, decode throughput, successful rounds per minute, and observation window when available.
+☑ Add an optional compact route-evidence table showing sample count, TTFC, effective TTFC, TTFT, decode throughput, successful rounds per minute, and observation window when available.
 ☐ Show failure counts by class instead of presenting one unexplained error percentage.
-☐ Show whether latency evidence came from warm, cold, or unknown context.
+☑ Show whether latency evidence came from warm, cold, or unknown context.
 ☐ Show route health, immediate availability, cadence, quota reset, and failure-domain evidence as separate concepts.
 ☐ Show the strongest measured factors behind the most recent routing decision in concise text.
 ☐ Show correlations with their sample size and confidence instead of implying precise independence from sparse data.

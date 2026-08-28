@@ -312,11 +312,11 @@ or a run-loop event, never on a timer, so there is no mechanism by which a
 "graph visualization" could animate even if one were drawn.
 
 
-### Phase 47 — lines 1762 and 1764 attempted and BLOCKED: the ledger cannot be enumerated
+### Phase 47 — lines 1762 and 1764: returned once as premise-invalid, then CLOSED
 
-State: **NOT STARTED** for 1762 and 1764. Attempted in batch 42 and returned by
-the worker as premise-invalid. **The packet's feasibility block was wrong, and
-the worker was right to stop.**
+State: **COMPLETE** for 1762 and 1764, in batch 43. **The batch-42 attempt was
+returned as premise-invalid and that was the right call** — the account below is
+kept because the returned packet is what made the closing one possible.
 
 **The gap.** The line asks for *"one row per observed (provider, model, route)
 identity"*. That requires knowing **which identities exist**, and
@@ -348,3 +348,56 @@ report states plainly that `context_state` reads `Unknown` on 100% of real rows 
 `NewObservation::with_context_state` still has zero non-test callers.
 
 Missing evidence: an enumeration method on `EvidenceLedger`. Nothing else.
+
+
+### Phase 47 — 1762/1764 closed: the missing link was one query
+
+**What batch 42 was missing was enumeration, and batch 43 added exactly that and
+nothing else.** A `SELECT DISTINCT` over the `routing_observations` rows that
+already existed — additive, bounded by a window and a limit, project-scoped, no
+migration, and `record` / `recent` / `summarize` / `ObservationQuery` untouched.
+
+Production evidence: the new distinct-identity query on
+`routing/evidence.rs::EvidenceLedger`, consumed by a new `ShellState` overlay
+built on Phase 25's proven `build_project_knowledge_memory` pattern and rendered
+in `shell/view.rs`.
+
+**1762 is closed on TWO of its seven named columns, and the report says so.**
+Sample count and observation window are rendered; **TTFC, effective TTFC, TTFT,
+decode throughput and rounds-per-minute are not, and have no field anywhere in
+the row type, the identity type, or the SQL** — verified by a `bypass-fallback`
+mutation proving no code path could draw them even fabricated. The line's own
+*"when available"* is what licenses that, and the five absent columns are
+structurally unavailable to the gateway's ingress design, not merely unwired.
+
+**1764 is honest, and the honesty is the point.** `ContextState` reads `unknown`
+on **100% of real production rows** — `NewObservation::with_context_state` has
+zero non-test callers, and the gateway producer has no cache-state signal at all.
+The line asks which of *warm / cold / unknown* the evidence came from, and
+*unknown* is one of the three it names. **This is a provenance surface, not a
+cache-temperature measurement**; line 1760, which wants an estimate, stays out of
+scope precisely because building one from an always-`unknown` column would be
+inert.
+
+Failure/isolation evidence:
+
+- `no_fabricated_columns_appear_in_the_route_evidence_table` renders at **both**
+  120 and 400 columns and scans the flattened buffer for `ttfc` / `ttft` /
+  `throughput` / `rounds per minute` / `decode` (§17 — an absence assertion is
+  only as strong as the viewport it renders into).
+- **One mutation survived, and its disposition is correct.** Removing the new
+  query's project scoping killed no test — because cross-project leakage is
+  enforced **one layer down by the database schema**, proven by
+  `a_foreign_project_id_row_cannot_even_be_inserted_into_this_database`. Recorded
+  so a future reader does not mistake the survivor for a weak test.
+
+**`packet_errors: []` — the first this session, and it was earned rather than
+skipped.** The worker verified the packet's feasibility block against production
+code rather than accepting it: that `EvidenceLedger`'s surface really was
+`record`/`recent`/`summarize` with no listing method, that `ObservationQuery`'s
+fields really are required `&str`, and that `with_context_state` really has zero
+non-test callers.
+
+Missing evidence: the five structurally-unavailable columns, which need a
+component that reads the response stream's framing — the same blocker
+`routing/evidence.rs`'s own module header records.

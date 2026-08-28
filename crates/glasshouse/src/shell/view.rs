@@ -73,6 +73,7 @@ pub fn render(state: &ShellState, frame: &mut Frame) {
         Some(Overlay::ProjectOverview) => render_project_overview(state, frame, area),
         Some(Overlay::SessionEvents) => render_session_events(state, frame, area),
         Some(Overlay::ProjectKnowledge) => render_project_knowledge(state, frame, area),
+        Some(Overlay::RouteEvidence) => render_route_evidence(state, frame, area),
         None => {}
     }
 }
@@ -328,9 +329,10 @@ fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
         (Mode::Control, Some(Overlay::ProjectOverview)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::SessionEvents)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::ProjectKnowledge)) => "esc back to session   q quit",
+        (Mode::Control, Some(Overlay::RouteEvidence)) => "esc back to session   q quit",
         (Mode::Control, None) => {
             "tab session   enter session   n new   N headless   o overview   p project   \
-             k knowledge   e events   q quit"
+             k knowledge   e events   r routes   q quit"
         }
     };
     let mut spans = vec![Span::styled(hint, Style::default().fg(Color::DarkGray))];
@@ -904,6 +906,96 @@ fn push_knowledge_section(
             format!("  ...and {omitted} more"),
             Style::default().fg(Color::DarkGray),
         )));
+    }
+}
+
+/// Phase 47, map lines 1762 and 1764: a compact table of the distinct
+/// routing identities this project's gateway has actually recorded.
+///
+/// **Deliberately three columns, not line 1762's seven.** SAMPLES and WINDOW
+/// are the two of the line's seven this producer can supply at all — TTFC,
+/// effective TTFC, TTFT, decode throughput and rounds-per-minute have no
+/// producer on this gateway (see `crate::routing::evidence`'s own module
+/// header) — plus CONTEXT for line 1764. Rendering a column for any of the
+/// five absent figures would be a fabricated measurement, which is exactly
+/// what this phase's own "observability without spectacle" heading forbids,
+/// so this function has no code path that could draw one. See
+/// `no_fabricated_columns_appear_in_the_route_evidence_table` below, proved
+/// at a wide viewport per practice §17.
+///
+/// Line 1764's honesty: CONTEXT shows exactly what
+/// [`crate::shell::state::RouteEvidenceRow::context_state`] already carries as a
+/// plain string (`"warm"`, `"cold"`, or `"unknown"`) — and today, in real
+/// production data, every row reads `"unknown"`, because nothing that
+/// records a routing observation ever calls
+/// `crate::routing::evidence::NewObservation::with_context_state`. This
+/// table shows that plainly rather than omitting the column or guessing.
+fn render_route_evidence(state: &ShellState, frame: &mut Frame, area: Rect) {
+    let popup = centered(area, 84, 60);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" route evidence ")
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines = Vec::new();
+    let evidence = state.route_evidence();
+    let rows = evidence
+        .map(crate::shell::state::RouteEvidenceState::rows)
+        .unwrap_or_default();
+
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  {:<20} {:<20} {:<16} {:<8} {:<8} {}",
+            "PROVIDER", "MODEL", "ROUTE", "SAMPLES", "CONTEXT", "WINDOW"
+        ),
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no routing evidence recorded yet",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        let now = crate::provider::cache::now_unix_seconds();
+        for row in rows {
+            let (window_start, window_end) = (row.window_start_unix, row.window_end_unix);
+            lines.push(Line::from(format!(
+                "  {:<20} {:<20} {:<16} {:<8} {:<8} {}",
+                row.provider,
+                row.model,
+                row.route.as_deref().unwrap_or("(no route)"),
+                row.sample_count,
+                row.context_state,
+                describe_window(now, window_start, window_end),
+            )));
+        }
+    }
+
+    if let Some(note) = evidence.and_then(crate::shell::state::RouteEvidenceState::note) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            note.to_owned(),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The observation window `(start, end)` in words, using real recorded
+/// timestamps — never a placeholder. A single-sample identity has `start ==
+/// end` and says how long ago that one observation was; a wider window says
+/// both ends, so two identities with different windows read differently.
+fn describe_window(now: i64, start: i64, end: i64) -> String {
+    if start == end {
+        describe_age(now, end)
+    } else {
+        format!("{} – {}", describe_age(now, start), describe_age(now, end))
     }
 }
 
@@ -2533,9 +2625,11 @@ mod tests {
 
         // 120 columns fit the note alongside the bindings before Phase 47
         // added `e events`, and 132 after; Phase 25's `k knowledge` pushed
-        // the row past 132, so this is 150 now — the same margin this test
-        // always had, measured against the longer row rather than assumed.
-        let bottom = last_row(&state, 150, 24);
+        // the row past 132, so this became 150; Phase 47's `r routes`
+        // (batch 43) pushed it past 150, so this is 170 now — the same
+        // margin this test always had, measured against the longer row
+        // rather than assumed.
+        let bottom = last_row(&state, 170, 24);
         assert!(
             bottom.contains("only one session"),
             "the note must reach the status bar: `{bottom}`"
@@ -3657,6 +3751,234 @@ mod tests {
             state.overlay(),
             Some(crate::shell::state::Overlay::SessionEvents)
         );
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Action::Redraw
+        );
+        assert_eq!(state.overlay(), None);
+    }
+
+    fn route_row(
+        provider: &str,
+        model: &str,
+        route: Option<&str>,
+        context_state: &str,
+        sample_count: usize,
+        window_start_unix: i64,
+        window_end_unix: i64,
+    ) -> crate::shell::state::RouteEvidenceRow {
+        crate::shell::state::RouteEvidenceRow {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            route: route.map(str::to_owned),
+            context_state: context_state.to_owned(),
+            sample_count,
+            window_start_unix,
+            window_end_unix,
+        }
+    }
+
+    /// Acceptance test 4: the table renders sample count and window from
+    /// real recorded data, and two identities with different counts render
+    /// differently.
+    #[test]
+    fn the_route_evidence_table_renders_sample_count_and_window_and_distinguishes_identities() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        let now = crate::provider::cache::now_unix_seconds();
+        state.open_route_evidence(
+            vec![
+                route_row(
+                    "anyrouter",
+                    "claude-opus-4-1",
+                    Some("anthropic-messages"),
+                    "unknown",
+                    5,
+                    now - 3_600,
+                    now - 60,
+                ),
+                route_row(
+                    "openai-router",
+                    "gpt-5",
+                    None,
+                    "unknown",
+                    1,
+                    now - 30,
+                    now - 30,
+                ),
+            ],
+            None,
+        );
+
+        let text = rendered(&state, 120, 24);
+        assert!(text.contains("anyrouter"), "{text}");
+        assert!(text.contains("claude-opus-4-1"), "{text}");
+        assert!(text.contains("anthropic-messages"), "{text}");
+        assert!(text.contains('5'), "{text}");
+        assert!(text.contains("openai-router"), "{text}");
+        assert!(text.contains("gpt-5"), "{text}");
+        assert!(
+            text.contains("(no route)"),
+            "an identity with no recorded route must say so honestly:\n{text}"
+        );
+
+        let rows: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains("anyrouter") || line.contains("openai-router"))
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_ne!(
+            rows[0], rows[1],
+            "two identities with different counts and windows must render differently:\n{text}"
+        );
+    }
+
+    /// Acceptance test 5, capability map line 1764: an `Unknown` row renders
+    /// as `unknown`, neither omitted nor dressed up as a measurement.
+    #[test]
+    fn the_route_evidence_table_renders_unknown_context_state_plainly() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        state.open_route_evidence(
+            vec![route_row(
+                "anyrouter",
+                "m",
+                Some("anthropic-messages"),
+                "unknown",
+                5,
+                1_000,
+                1_000,
+            )],
+            None,
+        );
+
+        let text = rendered(&state, 120, 24);
+        assert!(text.contains("unknown"), "{text}");
+    }
+
+    /// Acceptance test 6, and practice §17: the rendered table names no
+    /// TTFC/TTFT/throughput/rounds-per-minute column, at a viewport wide
+    /// enough that such a column *would* have been visible rather than
+    /// clipped off-screen for the wrong reason.
+    #[test]
+    fn no_fabricated_columns_appear_in_the_route_evidence_table() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        state.open_route_evidence(
+            vec![route_row(
+                "anyrouter",
+                "claude-opus-4-1",
+                Some("anthropic-messages"),
+                "unknown",
+                5,
+                1_000,
+                1_050,
+            )],
+            None,
+        );
+
+        for (width, height) in [(120, 24), (400, 30)] {
+            let text = rendered(&state, width, height).to_lowercase();
+            for forbidden in [
+                "ttfc",
+                "ttft",
+                "throughput",
+                "rounds per minute",
+                "rounds/min",
+                "decode",
+            ] {
+                assert!(
+                    !text.contains(forbidden),
+                    "map line 1762: no fabricated `{forbidden}` column, width {width}:\n{text}"
+                );
+            }
+        }
+    }
+
+    /// Acceptance test 7, empty half: an empty ledger renders an honest
+    /// empty state, the same convention every other overlay section here
+    /// uses.
+    #[test]
+    fn the_route_evidence_table_says_so_when_there_is_no_evidence_yet() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        state.open_route_evidence(Vec::new(), None);
+
+        let text = rendered(&state, 120, 24);
+        assert!(text.contains("no routing evidence recorded yet"), "{text}");
+    }
+
+    /// Acceptance test 7, failure half: a read failure still opens the
+    /// overlay with an honest note — the same contract
+    /// `a_project_knowledge_read_failure_still_opens_with_an_honest_note`
+    /// proves for the project-knowledge view.
+    #[test]
+    fn a_route_evidence_read_failure_still_opens_with_an_honest_note() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        state.open_route_evidence(
+            Vec::new(),
+            Some("routing evidence unavailable: disk full".to_owned()),
+        );
+
+        let text = rendered(&state, 120, 24);
+        assert!(
+            text.contains("routing evidence unavailable: disk full"),
+            "{text}"
+        );
+    }
+
+    /// Map line 1770 for this overlay specifically: reached only by its own
+    /// key, never present on the screen a user sees without asking for it —
+    /// asserted at both widths per practice §17.
+    #[test]
+    fn route_evidence_is_absent_from_the_default_screen_at_a_realistic_and_a_wide_width() {
+        let state = sample();
+        for (width, height) in [(100, 24), (400, 24)] {
+            let text = rendered(&state, width, height);
+            assert!(
+                !text.contains("route evidence"),
+                "the default screen must not show the route-evidence overlay, \
+                 width {width}:\n{text}"
+            );
+        }
+    }
+
+    /// The overlay's own footer, and the control-mode footer advertising the
+    /// key that opens it — the same pair `the_session_events_footer_...`
+    /// proves for `e`/`Overlay::SessionEvents`.
+    #[test]
+    fn the_route_evidence_footer_names_its_own_key() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        state.open_route_evidence(Vec::new(), None);
+        let text = rendered(&state, 120, 24);
+        assert!(
+            text.contains("esc back to session"),
+            "route evidence footer:\n{text}"
+        );
+
+        let control_text = rendered(&sample(), 120, 24);
+        assert!(
+            control_text.contains("r routes"),
+            "control-mode footer must advertise the key:\n{control_text}"
+        );
+    }
+
+    /// `r` toggles like every other overlay key: pressing it again while open
+    /// closes it, exactly as `e`/`Overlay::SessionEvents` already does.
+    #[test]
+    fn r_opens_and_esc_closes_the_route_evidence_overlay() {
+        use crate::shell::Action;
+
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        state.open_route_evidence(Vec::new(), None);
+        assert_eq!(
+            state.overlay(),
+            Some(crate::shell::state::Overlay::RouteEvidence)
+        );
+
         assert_eq!(
             state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             Action::Redraw

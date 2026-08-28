@@ -77,6 +77,16 @@ pub enum Overlay {
     /// source commit and lifecycle state. See [`ProjectKnowledgeState`] for
     /// the data behind it.
     ProjectKnowledge,
+    /// Phase 47 lines 1762 and 1764: a compact table of the distinct
+    /// `(provider, model, route)` identities this project's own gateway has
+    /// actually routed, with each identity's sample count, observation
+    /// window and context state (warm, cold, or unknown). Deliberately
+    /// narrow — see [`RouteEvidenceRow`] for exactly which columns this
+    /// build can honestly show and why the rest have no producer yet.
+    /// Read-only, like [`Overlay::ProjectOverview`] and
+    /// [`Overlay::SessionEvents`]. See [`RouteEvidenceState`] for the data
+    /// behind it.
+    RouteEvidence,
 }
 
 /// Who currently owns the keyboard.
@@ -214,6 +224,14 @@ pub enum Action {
     /// open, the same contract [`Action::OpenProjectOverview`] already
     /// keeps. Phase 25, map lines 1098-1107.
     OpenProjectKnowledge,
+    /// Open the route-evidence table. Reading the routing evidence ledger
+    /// (`crate::routing::evidence::EvidenceLedger`) is file I/O this module
+    /// deliberately does not hold — the run loop reads it and calls
+    /// [`ShellState::open_route_evidence`], reporting a read failure back
+    /// through its own note rather than refusing to open, the same contract
+    /// [`Action::OpenProjectOverview`] and [`Action::OpenProjectKnowledge`]
+    /// already keep. Phase 47, map lines 1762 and 1764.
+    OpenRouteEvidence,
 }
 
 /// A session's screen, as a terminal would have drawn it, ready to draw.
@@ -506,6 +524,57 @@ impl ProjectKnowledgeState {
     }
 }
 
+/// One observed routing identity for the route-evidence table — Phase 47,
+/// map lines 1762 and 1764. Built by `shell::build_route_evidence_table`
+/// from `crate::routing::evidence::EvidenceLedger::observed_identities`'s own
+/// [`crate::routing::evidence::ObservedIdentity`] — this module holds plain
+/// data rather than importing `crate::routing::evidence`'s own types
+/// directly, the same split [`KnowledgeSection`] keeps from `crate::memory`.
+///
+/// **Deliberately three columns, not line 1762's seven.** TTFC, effective
+/// TTFC, TTFT, decode throughput and rounds-per-minute have no producer on
+/// this gateway at all — see `crate::routing::evidence`'s own module header
+/// — and this type has no fields for them, so there is nothing here a future
+/// render could accidentally show as a fabricated zero. `context_state` is
+/// already the string [`crate::routing::evidence::ContextState::as_str`]
+/// produces (`"warm"`, `"cold"`, or `"unknown"`) — never blank, and never
+/// upgraded to look like a measurement it is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteEvidenceRow {
+    pub provider: String,
+    pub model: String,
+    /// `None` means this identity's rows were recorded with no route.
+    pub route: Option<String>,
+    pub context_state: String,
+    pub sample_count: usize,
+    pub window_start_unix: i64,
+    pub window_end_unix: i64,
+}
+
+/// The route-evidence table's own data: every distinct routing identity the
+/// run loop already read from the evidence ledger. See
+/// [`ShellState::open_route_evidence`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteEvidenceState {
+    rows: Vec<RouteEvidenceRow>,
+    /// Set when the run loop could not read the evidence ledger at all. The
+    /// overlay still opens with an honest, empty table rather than refusing
+    /// to show anything — the same contract
+    /// [`ProjectOverviewState::memory_note`] and
+    /// [`ProjectKnowledgeState::memory_note`] keep.
+    note: Option<String>,
+}
+
+impl RouteEvidenceState {
+    pub fn rows(&self) -> &[RouteEvidenceRow] {
+        &self.rows
+    }
+
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
+    }
+}
+
 /// The abbreviated session identifier the overview shows.
 ///
 /// One definition, shared by the overview's rows and by every status note
@@ -612,6 +681,9 @@ pub struct ShellState {
     /// The project-knowledge view's own data, or `None` when it is not open —
     /// the same split as `project_overview`.
     project_knowledge: Option<ProjectKnowledgeState>,
+    /// The route-evidence table's own data, or `None` when it is not open —
+    /// the same split as `project_overview` and `project_knowledge`.
+    route_evidence: Option<RouteEvidenceState>,
     /// Recent lifecycle events, newest first, bounded at [`ACTIVITY_ROWS`].
     /// See [`ShellState::note_events`].
     activity: Vec<RecordedEvent>,
@@ -638,6 +710,7 @@ impl ShellState {
             overview: None,
             project_overview: None,
             project_knowledge: None,
+            route_evidence: None,
             activity: Vec::new(),
         }
     }
@@ -826,6 +899,30 @@ impl ShellState {
         self.project_knowledge.as_ref()
     }
 
+    /// Open the route-evidence table with rows the run loop already read
+    /// from the evidence ledger. Reading `crate::routing::evidence` is file
+    /// I/O this module deliberately does not hold — see
+    /// [`Self::open_project_overview`] for the same split.
+    ///
+    /// Opens even when `note` is `Some`: a project whose evidence ledger
+    /// could not be read still gets an honest, empty table rather than no
+    /// view at all — see `shell::build_route_evidence_table`'s doc comment
+    /// for why both failure paths reach this.
+    pub fn open_route_evidence(
+        &mut self,
+        rows: Vec<RouteEvidenceRow>,
+        note: Option<String>,
+    ) -> Action {
+        self.overlay = Some(Overlay::RouteEvidence);
+        self.route_evidence = Some(RouteEvidenceState { rows, note });
+        Action::Redraw
+    }
+
+    /// The route-evidence table's own data, or `None` when it is not open.
+    pub fn route_evidence(&self) -> Option<&RouteEvidenceState> {
+        self.route_evidence.as_ref()
+    }
+
     /// Open the presented session's recent-lifecycle-events overlay — map
     /// line 1758.
     ///
@@ -864,6 +961,7 @@ impl ShellState {
         self.overview = None;
         self.project_overview = None;
         self.project_knowledge = None;
+        self.route_evidence = None;
         Action::Redraw
     }
 
@@ -1216,6 +1314,12 @@ impl ShellState {
             return self.handle_project_knowledge_key(key, had_status);
         }
 
+        // Read-only, like the project overview and session events above:
+        // nothing to act on, so only its own close key is claimed.
+        if self.overlay == Some(Overlay::RouteEvidence) {
+            return self.handle_route_evidence_key(key, had_status);
+        }
+
         self.handle_control_key(key, had_status)
     }
 
@@ -1233,6 +1337,7 @@ impl ShellState {
             KeyCode::Char('p') => Action::OpenProjectOverview,
             KeyCode::Char('k') => Action::OpenProjectKnowledge,
             KeyCode::Char('e') => self.open_session_events(),
+            KeyCode::Char('r') => Action::OpenRouteEvidence,
             KeyCode::Enter | KeyCode::Char('i') => self.enter_session_mode(),
             KeyCode::Char('n') => Action::StartSession,
             // Shift-N is the same session `n` starts, minus the viewport —
@@ -1330,6 +1435,17 @@ impl ShellState {
     fn handle_session_events_key(&mut self, key: KeyEvent, had_status: bool) -> Action {
         match key.code {
             KeyCode::Esc | KeyCode::Char('e') => self.close_overlay(),
+            _ => self.handle_control_key(key, had_status),
+        }
+    }
+
+    /// Answer one key while the route-evidence table is open — the same
+    /// shape as [`Self::handle_project_overview_key`] and
+    /// [`Self::handle_session_events_key`], for the same reason: nothing
+    /// here is acted on, only shown.
+    fn handle_route_evidence_key(&mut self, key: KeyEvent, had_status: bool) -> Action {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('r') => self.close_overlay(),
             _ => self.handle_control_key(key, had_status),
         }
     }

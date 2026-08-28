@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████░░░░░░░░░░░░░░░░░░░` 683 / 1280 mandatory capabilities (53%)
+`█████████████████████░░░░░░░░░░░░░░░░░░░` 687 / 1280 mandatory capabilities (53%)
 
 <details>
 <summary>Per-phase breakdown (25 of 104 phases complete)</summary>
@@ -93,7 +93,7 @@ the authoritative specification and tracks what is done.
 | Phase 32E — Burn rate and exhaustion forecasting | 0/10 |
 | Phase 32F — Protected quota reserve | 2/8 |
 | Phase 32G — Provider-aware request-cost estimation | 0/10 |
-| Phase 33 — Resource health | 0/15 |
+| Phase 33 — Resource health | 2/15 |
 | Phase 33A — Routing evidence ledger | 11/15 |
 | Phase 33B — Reliability-adjusted agent performance | 0/14 |
 | Phase 33C — Failure, quota, and route correlation | 5/15 |
@@ -120,7 +120,7 @@ the authoritative specification and tracks what is done.
 | Phase 44 — User control and override | 0/9 |
 | Phase 45 — Failure handling | 7/9 |
 | Phase 46 — Security and contamination tests | 6/8 |
-| Phase 47 — Observability without spectacle | 5/15 |
+| Phase 47 — Observability without spectacle | 7/15 |
 | Phase 48 — CLI ergonomics | 8/8 ✅ |
 | Phase 49 — Configuration | 13/16 |
 | Phase 50 — Tracked project knowledge as an optional feature | 0/7 |
