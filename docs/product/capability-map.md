@@ -1368,14 +1368,14 @@ Phase 33C — Failure, quota, and route correlation
 ☐ Avoid retrying a paced route in place when the current cadence makes the retry predictably unavailable.
 ☐ Reduce or suppress active probes when probing would consume a material fraction of a scarce request pool.
 ☐ Measure temporally overlapping failures between routes rather than assuming different front doors are independent providers.
-☐ Represent a quota domain separately from a failure domain.
-☐ Treat uncorrelated account-level 429 events as evidence of separate quota buckets, not automatically as independent upstreams.
+☑ Represent a quota domain separately from a failure domain.
+☑ Treat uncorrelated account-level 429 events as evidence of separate quota buckets, not automatically as independent upstreams.
 ☐ Treat correlated model-specific 5xx events, matching provider metadata, or matching serving behavior as evidence of a shared failure domain.
 ☐ Preserve route-topology claims as confidence-weighted observations that can change when new evidence arrives.
-☐ Use failure-domain diversity when selecting failover candidates so a nominally different route does not provide fictitious resilience.
+☑ Use failure-domain diversity when selecting failover candidates so a nominally different route does not provide fictitious resilience.
 ☐ Require sufficient overlapping observations and expose sample size before presenting a route correlation as meaningful.
-☐ Record whether a routing benefit came from independent capacity, independent quota, independent failure handling, or merely a different queue onto the same upstream.
-☐ Keep correlation analysis optional for V1 routing and prevent absent evidence from being interpreted as independence.
+☑ Record whether a routing benefit came from independent capacity, independent quota, independent failure handling, or merely a different queue onto the same upstream.
+☑ Keep correlation analysis optional for V1 routing and prevent absent evidence from being interpreted as independence.
 
 Phase 34 — Capability registry
 
@@ -1544,7 +1544,7 @@ Fixed architectural requirements
 ☐ Include successful tool rounds per minute as supporting evidence without treating it as a universal quality score.
 ☐ Include cache affinity and the distinction between warm, cold, and unknown observations.
 ☐ Include current cadence availability separately from general route health.
-☐ Include failure-domain diversity when ranking fallback and failover candidates.
+☑ Include failure-domain diversity when ranking fallback and failover candidates.
 ☐ Reduce the influence of performance observations with small samples, low confidence, or stale windows.
 ☑ Include time until quota reset in candidate scoring.
 ☐ Include protected-reserve policy in candidate scoring.

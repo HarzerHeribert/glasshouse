@@ -60,6 +60,7 @@
 
 pub mod classify;
 pub mod disposable;
+pub mod domain;
 pub mod evidence;
 pub mod free;
 pub mod interactive;

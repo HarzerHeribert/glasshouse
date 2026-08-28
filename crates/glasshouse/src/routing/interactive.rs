@@ -57,6 +57,14 @@
 //! breaking a tie. A candidate can never be *excluded* this way — only
 //! `compatible` refuses one — so this is design decision 1's "additive,
 //! never a filter" made literal for this policy's own decision.
+//!
+//! Every candidate also carries a **failure-domain diversity** contribution
+//! (Phase 33C, `failure_domain_contribution`): a candidate sharing the
+//! failed backend's provider is penalised, because `Backend` carries no base
+//! URL and the provider is the only honest proxy this build has for "lands
+//! on the same infrastructure" (see [`super::domain::FailureDomain`]). A
+//! different provider scores `0.0` rather than a bonus — line 1378 forbids
+//! rewarding a candidate for independence nothing has established.
 
 use crate::config::pairing::{
     ObservationSource, PairingPreference, native_pairing_prior_contribution,
@@ -66,6 +74,7 @@ use crate::harness::pairing;
 use crate::integrations::IntegrationId;
 use crate::routing::apply_hard_constraints;
 
+use super::domain::FailureDomain;
 use super::{Backend, CacheLocality, Contribution, RoutingExplanation, ToolSemantics};
 
 /// The backend serving one live gateway-backed session, and the harness it is
@@ -495,7 +504,7 @@ impl InteractiveRouting {
                 Err(why) => rejected.push(why),
                 Ok(()) => {
                     let to = Assignment::new(current.harness(), candidate.clone());
-                    let explanation = match harness {
+                    let mut explanation = match harness {
                         Some(harness) => {
                             score_candidate(harness, candidate, preference, overrides, evidence)
                         }
@@ -513,6 +522,11 @@ impl InteractiveRouting {
                             explanation
                         }
                     };
+                    // Phase 33C lines 1375 and 1547: failure-domain
+                    // diversity is a ranking signal in its own right, named
+                    // and evidenced like every other contribution here — see
+                    // `failure_domain_contribution`'s own doc comment.
+                    explanation.push(failure_domain_contribution(current.backend(), candidate));
                     if candidate.model() == current.backend().model() {
                         // Line 513: the same model, served elsewhere. Every
                         // one found is kept; the best-scoring one is what
@@ -669,6 +683,44 @@ fn score_candidate(
     native_pairing_prior_contribution(&eligible, &key, preference, evidence)
 }
 
+/// Phase 33C lines 1375 and 1547: what failure-domain diversity contributes
+/// to ranking `candidate` against the backend that just failed.
+///
+/// A magnitude comparable to the native-pairing prior's own scale
+/// (`PriorStrength::Strong` peaks at `1.0` — see `crate::config::pairing`),
+/// large enough to actually move [`best`]'s decision (acceptance test 1's
+/// whole point) and never positive: sharing the failed backend's provider
+/// can only ever cost a candidate something, never earn it one, because
+/// "known shared" is the one thing this signal is ever certain about.
+/// [`FailureDomain::Unknown`] scores exactly `0.0` — not a bonus for being
+/// on a different provider, only the absence of the penalty, per line 1378.
+const SHARED_FAILURE_DOMAIN_PENALTY: f64 = -1.0;
+
+fn failure_domain_contribution(current: &Backend, candidate: &Backend) -> Contribution {
+    match FailureDomain::between(current, candidate) {
+        FailureDomain::Shared => Contribution::new(
+            "failure-domain diversity",
+            SHARED_FAILURE_DOMAIN_PENALTY,
+            format!(
+                "`{}` shares its provider with the backend that just failed, which is the only \
+                 failure-domain signal this build can observe — this candidate cannot be \
+                 credited with resilience against the failure that just happened",
+                candidate.provider()
+            ),
+        ),
+        FailureDomain::Unknown | FailureDomain::Independent => Contribution::new(
+            "failure-domain diversity",
+            0.0,
+            format!(
+                "`{}` is on a different provider than the backend that failed, but independence \
+                 is not established — Glasshouse has no correlation evidence for this pair, and \
+                 absent evidence is not treated as independence",
+                candidate.provider()
+            ),
+        ),
+    }
+}
+
 /// The best-scoring `(Assignment, RoutingExplanation)` in `candidates`,
 /// preferring the first one seen on a tie — the caller's own order. A build
 /// with no evidence source reproduces the pre-batch-46 "first compatible
@@ -712,6 +764,65 @@ fn compatible(current: &Backend, candidate: &Backend) -> Result<(), Incompatibil
         });
     }
     Ok(())
+}
+
+/// What Phase 33C line 1377 asks every recorded [`AssignmentChange`] to
+/// answer honestly: which domain(s) actually changed, computed from the two
+/// backends the change is between — never invented from [`ChangeCause`]
+/// alone, because a rotation and a failover can carry different causes and
+/// still need the same honest answer about what they bought.
+///
+/// Two variants, not the map line's full four ("independent capacity,
+/// independent quota, independent failure handling, or merely a different
+/// queue onto the same upstream"): a quota-domain change is certain — two
+/// [`super::CredentialId`]s are either the same allowance or they are not,
+/// by construction — but this build has no producer for a *capacity* signal
+/// (Phase 32G/33, both 0/N per `docs/product/evidence/phase-35b.md`'s own
+/// missing-evidence list) and line 1378 forbids ever calling a cross-provider
+/// move "independent failure handling" outright, proven or not. Reporting a
+/// category this build cannot honestly support would be exactly the
+/// "invent a source" mistake Phase 35B's own worker refused for the pairing
+/// prior on a disposable candidate — see that phase's evidence entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutingBenefit {
+    /// The provider changed. The failure domain moved from
+    /// [`FailureDomain::Shared`] (certain) to [`FailureDomain::Unknown`]
+    /// (never claimed as [`FailureDomain::Independent`]) — and, since a
+    /// different provider always means a different credential too, the
+    /// quota domain changed as well.
+    UnconfirmedFailureDomainChange,
+    /// The provider did not change; the credential did. Line 1372's exact
+    /// case: the quota domain changed — a real, certain gain — and the
+    /// failure domain did not, so this is never resilience against the
+    /// failure that just happened.
+    DifferentQueueSameUpstream,
+    /// Neither changed. Not reachable from any production caller today — an
+    /// [`AssignmentChange`] is only ever recorded when something moved —
+    /// kept so this type stays honest about what "nothing changed" would
+    /// mean rather than making it unrepresentable.
+    NoChange,
+}
+
+impl RoutingBenefit {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UnconfirmedFailureDomainChange => {
+                "a different provider, and therefore an unconfirmed failure domain — no evidence \
+                 establishes independence"
+            }
+            Self::DifferentQueueSameUpstream => {
+                "the same provider's other credential: a different queue onto the same upstream, \
+                 not independent failure handling"
+            }
+            Self::NoChange => "neither the provider nor the credential changed",
+        }
+    }
+}
+
+impl std::fmt::Display for RoutingBenefit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
 }
 
 /// Why the backend serving a session changed.
@@ -758,6 +869,21 @@ impl AssignmentChange {
             || self.from.backend().model() != self.to.backend().model()
     }
 
+    /// Line 1377: which domain(s) this change actually bought, computed from
+    /// the two backends rather than from `cause` — see [`RoutingBenefit`]'s
+    /// own doc comment for why `cause` alone cannot answer this honestly.
+    pub fn benefit(&self) -> RoutingBenefit {
+        let domain = FailureDomain::between(self.from.backend(), self.to.backend());
+        let credential_changed = self.from.backend().credential() != self.to.backend().credential();
+        match (domain, credential_changed) {
+            (FailureDomain::Shared, true) => RoutingBenefit::DifferentQueueSameUpstream,
+            (FailureDomain::Shared, false) => RoutingBenefit::NoChange,
+            (FailureDomain::Unknown | FailureDomain::Independent, _) => {
+                RoutingBenefit::UnconfirmedFailureDomainChange
+            }
+        }
+    }
+
     /// The warning line 516 asks for, or `None` when there is nothing to warn
     /// about. See [`CacheLocality`] for what makes it decidable.
     pub fn cache_warning(&self) -> Option<String> {
@@ -799,6 +925,7 @@ impl RoutingRecord {
             to = %change.to.label(),
             changed_provider_or_model = change.changed_provider_or_model(),
             cache = %change.cache,
+            benefit = %change.benefit(),
             "the backend serving a Glasshouse gateway session changed"
         );
         self.entries.push(change);
@@ -847,6 +974,27 @@ mod tests {
 
     fn session() -> Assignment {
         Assignment::new("claude-code", backend("openrouter", "the-model"))
+    }
+
+    /// A backend on `provider` using a specific credential variable, so a
+    /// test can put two backends on the same provider with two different
+    /// quota domains — the exact shape `Upstream::failover_candidates`
+    /// produces for a provider with two configured keys (see this package's
+    /// own feasibility note).
+    fn backend_with_credential(provider: &str, model: &str, var: &str) -> Backend {
+        Backend::new(
+            provider,
+            "anthropic-messages",
+            AssignedModel::named(model),
+            CredentialId::new(
+                provider,
+                SecretRef::Environment {
+                    var: var.to_owned(),
+                },
+            ),
+            Cost::Metered,
+            ToolSemantics::Unverified,
+        )
     }
 
     fn production_code(source: &str) -> String {
@@ -1325,5 +1473,121 @@ mod tests {
         assert!(entry.changed_provider_or_model());
         let warning = entry.cache_warning().expect("a provider change warns");
         assert!(warning.contains("invalidated"));
+    }
+
+    /// Acceptance test 1 (load-bearing): given two same-model survivors, one
+    /// sharing the failed backend's own provider (a different credential,
+    /// the exact shape a provider with two keys produces) and one on a
+    /// genuinely different provider, the diverse one must win — with nothing
+    /// else to distinguish them (`PairingPreference::Off` and
+    /// `NoObservations` zero every other contribution). Removing
+    /// `failure_domain_contribution` from the loop, or inverting its sign,
+    /// must make the shared-domain candidate win instead — the packet's
+    /// `remove-guard` and `invert-condition` mutations.
+    #[test]
+    fn on_provider_failure_prefers_a_different_failure_domain_over_a_shared_one() {
+        let routing = InteractiveRouting::new();
+        let current = session();
+        let shared_domain =
+            backend_with_credential("openrouter", "the-model", "OPENROUTER_API_KEY_2");
+        let diverse_domain = backend("nous", "the-model");
+
+        let response = routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            &[shared_domain, diverse_domain],
+            PairingPreference::Off,
+            &pairing::PairingOverrides::default(),
+            &NoObservations,
+        );
+
+        match response {
+            FailureResponse::FailOver { to, .. } => assert_eq!(
+                to.provider(),
+                "nous",
+                "a candidate on a different provider from the failed backend must be preferred \
+                 over one sharing its provider, when nothing else distinguishes them"
+            ),
+            other => panic!("expected a same-model failover: {other:?}"),
+        }
+    }
+
+    /// Acceptance test 2: a candidate on a different provider is scored
+    /// `Unknown`, and its evidence string says independence is not
+    /// established rather than crediting it as proven. See
+    /// `routing::domain::tests::between_can_never_construct_independent` for
+    /// the structural half of this line — no code path can produce
+    /// `FailureDomain::Independent` at all.
+    #[test]
+    fn a_cross_provider_candidate_is_scored_unknown_not_independence() {
+        let routing = InteractiveRouting::new();
+        let current = session();
+        let candidate = backend("nous", "the-model");
+
+        let response = routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            &[candidate],
+            PairingPreference::Off,
+            &pairing::PairingOverrides::default(),
+            &NoObservations,
+        );
+
+        match response {
+            FailureResponse::FailOver { explanation, .. } => {
+                let rendered = explanation.render();
+                assert!(
+                    rendered.contains("independence is not established"),
+                    "a cross-provider candidate must say independence is not established, not \
+                     imply it was proven: {rendered}"
+                );
+                assert!(
+                    rendered.contains("+0.000  failure-domain diversity"),
+                    "an unproven cross-provider candidate must score exactly 0.0 — a bonus for \
+                     being on a different provider would be crediting independence nothing \
+                     established: {rendered}"
+                );
+            }
+            other => panic!("expected a failover: {other:?}"),
+        }
+    }
+
+    /// Acceptance test 5: the contribution appears by name in
+    /// `RoutingExplanation::render()`, with a signed magnitude, exactly like
+    /// every other named contribution in this module.
+    #[test]
+    fn the_failure_domain_contribution_is_named_in_the_explanation_with_a_signed_magnitude() {
+        let routing = InteractiveRouting::new();
+        let current = session();
+        let shared_domain =
+            backend_with_credential("openrouter", "the-model", "OPENROUTER_API_KEY_2");
+
+        let response = routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            &[shared_domain],
+            PairingPreference::Off,
+            &pairing::PairingOverrides::default(),
+            &NoObservations,
+        );
+
+        match response {
+            FailureResponse::FailOver { explanation, .. } => {
+                assert!(
+                    explanation
+                        .contributions()
+                        .iter()
+                        .any(|c| c.name() == "failure-domain diversity"),
+                    "failure-domain diversity must be its own named contribution, never blended \
+                     into an opaque score: {explanation:?}"
+                );
+                let rendered = explanation.render();
+                assert!(
+                    rendered.contains("-1.000  failure-domain diversity"),
+                    "a shared failure domain must render a negative, signed magnitude: {rendered}"
+                );
+            }
+            other => panic!("expected a failover: {other:?}"),
+        }
     }
 }

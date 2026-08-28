@@ -9,9 +9,9 @@ Glasshouse picks one, it scores them with an inspectable weighted function whose
 every contribution is named and carries its evidence — while preserving the rule
 that a candidate failing a hard constraint is never scored at all, only refused.
 
-State: **COMPLETE** for map lines 1530, 1532, 1536, 1549, 1552, 1553 and 1554 —
-seven of twenty-five. **PARTIALLY VERIFIED** for 1548. **NOT STARTED** for the
-other seventeen, each with its missing source named below.
+State: **COMPLETE** for map lines 1530, 1532, 1536, 1547, 1549, 1552, 1553 and
+1554 — eight of twenty-five. **PARTIALLY VERIFIED** for 1548. **NOT STARTED**
+for the other sixteen, each with its missing source named below.
 
 Production evidence:
 - `main.rs:1120` → `DisposableRouting::for_support_work(...)` →
@@ -70,10 +70,16 @@ the next packages' brief and is the more useful half of this entry.
   tier for the reserve gate, not a per-candidate score).
 - **Hypothesis killed — see below**: 1540, 1541, 1542.
 - **Mechanism built, caller unreachable in practice**: 1550.
-- **A near-term win nobody has taken**: 1547 (failure-domain diversity).
-  `FreePool`'s allowance is already keyed per credential, so "two models sharing
-  one exhausted credential" is a signal that exists today and was not wired into
-  scoring only for time. Small follow-up.
+- **1547 is now CLOSED** (batch 39) — failure-domain diversity. The full
+  evidence is in `docs/product/evidence/phase-33c.md`, because the ranking it
+  feeds is `InteractiveRouting::on_provider_failure`'s rather than the
+  disposable scorer's. Note what changed against the guess recorded here: this
+  entry expected `FreePool`'s per-credential allowance to be the signal, and the
+  signal that actually decided it was **the provider on the candidate's own
+  `Backend`** — a credential exhaustion is a *quota*-domain fact, and 1547 asks
+  about the *failure* domain. Phase 33C's line 1371 exists precisely to keep
+  those two apart, and conflating them here would have scored a sibling
+  credential as if it were a different upstream.
 
 **The pairing prior does not apply here, and the packet was wrong to say it
 did.** The orchestrator's own design decision listed 1540/1541 as closable via

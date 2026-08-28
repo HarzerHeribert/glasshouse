@@ -809,6 +809,64 @@ mod policy_divergence {
     }
 }
 
+// =====================================================================
+// Phase 33C: failure-domain diversity in failover ranking
+// =====================================================================
+mod failure_domain {
+    use super::*;
+
+    fn backend_with_credential(provider: &str, model: &str, var: &str) -> Backend {
+        Backend::new(
+            provider,
+            "anthropic-messages",
+            AssignedModel::named(model),
+            CredentialId::new(
+                provider,
+                SecretRef::Environment {
+                    var: var.to_owned(),
+                },
+            ),
+            Cost::Metered,
+            ToolSemantics::Unverified,
+        )
+    }
+
+    /// Acceptance test 1, from outside the crate: two same-model survivors,
+    /// one sharing the failed backend's own provider (a different
+    /// credential — the exact shape a provider with two configured keys
+    /// produces, per `Upstream::failover_candidates`) and one on a
+    /// genuinely different provider. The diverse one must win when nothing
+    /// else distinguishes them, entering through the same
+    /// `on_provider_failure` the gateway's accept loop calls.
+    #[test]
+    fn a_candidate_sharing_the_failed_backends_own_provider_loses_to_a_diverse_one() {
+        let routing = InteractiveRouting::new();
+        let current = session_on("openrouter", "the-model");
+        let shared_domain =
+            backend_with_credential("openrouter", "the-model", "OPENROUTER_API_KEY_2");
+        let diverse_domain = backend("nous", "the-model");
+
+        let response = routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            &[shared_domain, diverse_domain],
+            PairingPreference::Off,
+            &PairingOverrides::default(),
+            &NoObservations,
+        );
+
+        match response {
+            FailureResponse::FailOver { to, .. } => assert_eq!(
+                to.provider(),
+                "nous",
+                "a candidate sharing the failed backend's own provider must never be preferred \
+                 over a genuinely different one when nothing else distinguishes them"
+            ),
+            other => panic!("expected a same-model failover: {other:?}"),
+        }
+    }
+}
+
 /// Independent tests of `glasshouse::routing::classify` (Phase 35), against
 /// its own doc-comment claims rather than `classify.rs`'s unit tests — the
 /// same split this file's header describes for the two routing policies.

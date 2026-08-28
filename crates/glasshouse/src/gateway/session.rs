@@ -601,6 +601,7 @@ mod tests {
     use super::*;
     use crate::gateway::upstream::{Route, UpstreamBackend};
     use crate::routing::evidence::NewObservation;
+    use crate::routing::interactive::RoutingBenefit;
     use crate::routing::{Cost, CredentialId};
     use crate::secret::{Secret, SecretRef};
     use crate::{Cli, Runtime};
@@ -651,6 +652,41 @@ mod tests {
                 detail: "connection refused",
             },
             status: 502,
+            provider: provider.to_owned(),
+            protocol: Some("anthropic-messages".to_owned()),
+            host: String::new(),
+        }
+    }
+
+    /// A second credential for `provider`, so a test can put two backends on
+    /// one provider — Phase 9I line 537's rotation candidate.
+    fn upstream_backend_with_credential(provider: &str, var: &str) -> UpstreamBackend {
+        UpstreamBackend::new(
+            provider.to_owned(),
+            vec![Route::new(
+                "anthropic-messages".to_owned(),
+                &["/messages"],
+                "http://127.0.0.1:1",
+            )],
+            Secret::mint_for_test("test-secret"),
+            CredentialId::new(
+                provider,
+                SecretRef::Environment {
+                    var: var.to_owned(),
+                },
+            ),
+            Cost::Metered,
+        )
+        .expect("a loopback http URL is absolute and this credential is header-safe")
+    }
+
+    fn rate_limited_exchange(provider: &str) -> Exchange {
+        Exchange {
+            outcome: Outcome::Forwarded {
+                upstream_status: 429,
+                bytes: 0,
+            },
+            status: 429,
             provider: provider.to_owned(),
             protocol: Some("anthropic-messages".to_owned()),
             host: String::new(),
@@ -854,6 +890,63 @@ mod tests {
         assert!(
             off.contains("+0.000  native-pairing prior"),
             "an Off preference must log a zeroed prior for the very same pairing: {off}"
+        );
+    }
+
+    /// Acceptance test 4, through the real production caller (§35/§36): a
+    /// single `429` on one credential rotates this session to the same
+    /// provider's other credential — Phase 9I line 537's existing behaviour
+    /// — and the recorded change must say honestly that this bought a
+    /// different queue onto the same upstream, never "independent failure
+    /// handling", per line 1372's inference ban.
+    #[test]
+    fn observe_exchange_records_a_credential_rotation_as_a_different_queue_not_independent_failure_handling()
+     {
+        let upstream = Upstream::with_failover(vec![
+            upstream_backend_with_credential("openrouter", "OPENROUTER_API_KEY"),
+            upstream_backend_with_credential("openrouter", "OPENROUTER_API_KEY_2"),
+        ])
+        .expect("two backends is not none");
+
+        let routing = SessionRouting::new();
+        routing.bind(
+            "claude-code",
+            "anthropic-messages",
+            AssignedModel::named("the-routed-model"),
+            &upstream,
+        );
+
+        routing.observe_exchange(
+            &upstream,
+            &rate_limited_exchange("openrouter"),
+            Instant::now(),
+            None,
+            0,
+        );
+
+        let changes = routing.changes();
+        let entry = changes.last().expect("a rotation must have been recorded");
+        assert_eq!(entry.cause, ChangeCause::CredentialRotation);
+
+        let benefit = entry.benefit();
+        assert_eq!(
+            benefit,
+            RoutingBenefit::DifferentQueueSameUpstream,
+            "a same-provider credential rotation must record a different queue onto the same \
+             upstream, not {benefit:?}, which is what implying resilience was gained would look \
+             like"
+        );
+        let rendered = benefit.as_str();
+        assert!(
+            rendered.contains("different queue onto the same upstream"),
+            "a same-provider credential rotation must record the honest reason rather than \
+             implying resilience was gained: {rendered}"
+        );
+        assert_ne!(
+            benefit,
+            RoutingBenefit::UnconfirmedFailureDomainChange,
+            "a credential rotation must never be recorded as an (even unconfirmed) failure-domain \
+             change — the failure domain did not move"
         );
     }
 }

@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`████████████████████░░░░░░░░░░░░░░░░░░░░` 645 / 1280 mandatory capabilities (50%)
+`████████████████████░░░░░░░░░░░░░░░░░░░░` 651 / 1280 mandatory capabilities (50%)
 
 <details>
 <summary>Per-phase breakdown (23 of 104 phases complete)</summary>
@@ -96,7 +96,7 @@ the authoritative specification and tracks what is done.
 | Phase 33 — Resource health | 0/15 |
 | Phase 33A — Routing evidence ledger | 11/15 |
 | Phase 33B — Reliability-adjusted agent performance | 0/14 |
-| Phase 33C — Failure, quota, and route correlation | 0/15 |
+| Phase 33C — Failure, quota, and route correlation | 5/15 |
 | Phase 34 — Capability registry | 0/10 |
 | Phase 34A — Workload tiers | 0/10 |
 | Phase 34B — Routing-model role | 0/15 |
@@ -106,7 +106,7 @@ the authoritative specification and tracks what is done.
 | Phase 34F — Model capability and tier calibration | 0/11 |
 | Phase 35 — Lightweight task classification | 14/14 ✅ |
 | Phase 35A — Candidate generation | 0/11 |
-| Phase 35B — Candidate scoring | 7/25 |
+| Phase 35B — Candidate scoring | 8/25 |
 | Phase 35C — Capacity-aware tier escalation and downgrade | 0/9 |
 | Phase 35D — Routing under subscription pressure | 0/8 |
 | Phase 36 — Session affinity | 0/8 |
