@@ -89,9 +89,31 @@ def parse_indented_block(lines: list[str], header_idx: int) -> list[tuple[int, s
     return items
 
 
+# A packet rarely quotes a box the way the map writes it. The map starts the
+# line with the marker; a packet almost always dresses it as a list item and
+# labels it with the map line number:
+#
+#     - **1311** ☐ Track whether each configured resource is currently available.
+#
+# Matching only `stripped[0]` therefore saw NOTHING in real packets, and check 3
+# -- "every quoted box line matches the map verbatim" -- silently verified zero
+# lines while reporting PASSED. That is exactly practice §68's defect living
+# inside the gate meant to catch it: a check that matches nothing is
+# indistinguishable from a check that passed.
+#
+# Found on 2026-08-28 when a worker compared its packet's nine quoted lines
+# against `discover.py --phase 33` and found FIVE of them wrong at the same line
+# numbers -- two with their topics swapped -- after this validator had passed the
+# round. So: allow an optional list marker and an optional bold/plain line-number
+# label before the marker, and keep requiring the marker itself.
+BOX_PREFIX = re.compile(r"^(?:[-*+]\s+)?(?:\*\*\s*\d+\s*\*\*|\d+[.):]?)?\s*")
+
+
 def parse_box_lines(lines: list[str]) -> list[tuple[int, str, str]]:
     """Find every `☐`/`☑` line, joining any indented continuation
     lines a wrapped quote leaves without their own marker.
+
+    Tolerates a leading list marker and line-number label -- see BOX_PREFIX.
 
     Returns (1-indexed start line, marker, joined text).
     """
@@ -99,7 +121,7 @@ def parse_box_lines(lines: list[str]) -> list[tuple[int, str, str]]:
     n = len(lines)
     i = 0
     while i < n:
-        stripped = lines[i].strip()
+        stripped = BOX_PREFIX.sub("", lines[i].strip(), count=1)
         if stripped[:1] in BOX_CHARS:
             marker = stripped[0]
             parts = [stripped[1:].strip()]
@@ -107,7 +129,7 @@ def parse_box_lines(lines: list[str]) -> list[tuple[int, str, str]]:
             j = i + 1
             while j < n:
                 nxt = lines[j]
-                nxt_stripped = nxt.strip()
+                nxt_stripped = BOX_PREFIX.sub("", nxt.strip(), count=1)
                 if nxt_stripped == "" or nxt_stripped[:1] in BOX_CHARS:
                     break
                 if not (nxt.startswith("    ") or nxt.startswith("\t")):

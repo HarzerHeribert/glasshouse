@@ -96,6 +96,41 @@ class ParsingTests(unittest.TestCase):
         )
         self.assertEqual(boxes[1][2], "A second, unwrapped box.")
 
+    def test_parse_box_lines_sees_a_box_dressed_as_a_numbered_list_item(self):
+        """The shape real packets actually use, which the parser once missed.
+
+        Packets quote a box as a list item labelled with its map line number.
+        Matching only the first character saw NOTHING in those packets, so the
+        verbatim check silently verified zero lines and still reported PASSED --
+        practice §68's defect inside the gate built to catch it. On 2026-08-28 a
+        worker found five of its packet's nine quoted lines wrong at the same
+        line numbers, two with their topics swapped, after this validator passed
+        the round.
+        """
+        lines = [
+            "- **1311** ☐ Track whether each configured resource is currently available.",
+            "* 1315 ☐ Track known quota reset time when it is exposed.",
+            "1. ☑ A plain numbered box.",
+            "    ☐ And the bare form the map itself uses.",
+        ]
+        boxes = vr.parse_box_lines(lines)
+        self.assertEqual(len(boxes), 4, "a dressed-up box quote must still be seen")
+        self.assertEqual(
+            boxes[0][2], "Track whether each configured resource is currently available."
+        )
+        self.assertEqual(boxes[1][2], "Track known quota reset time when it is exposed.")
+        self.assertEqual(boxes[2][1], "☑")
+        self.assertEqual(boxes[3][2], "And the bare form the map itself uses.")
+
+    def test_parse_box_lines_does_not_invent_a_box_from_ordinary_prose(self):
+        """The prefix tolerance must not turn any list item into a box quote."""
+        lines = [
+            "- **1311** Track whether each configured resource is currently available.",
+            "- a plain bullet with no marker at all",
+            "1. a numbered item that quotes nothing",
+        ]
+        self.assertEqual(vr.parse_box_lines(lines), [])
+
 
 class PatternOverlapTests(unittest.TestCase):
     def test_exact_paths_collide_only_when_equal(self):
