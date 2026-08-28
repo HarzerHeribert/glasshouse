@@ -3352,3 +3352,62 @@ measurements:
     scripts/usage-snapshot.py --capture post-upgrade
     scripts/usage-snapshot.py --report
     scripts/usage-snapshot.py --glasshouse --since 2026-09-01
+
+## Batch 45 — the deliberate parallelism test: eight workers at once
+
+**This round exists to answer a question, not only to close boxes.** The user
+asked, hours after the 20x upgrade, to *"fire a lot of parallel work"* — the
+metaphor was a round mountain with many workers boring inward to meet in the
+middle, *"needing a bit of adjustment on the final stretch."* That is a precise
+description of the design below, including the part that costs.
+
+**Eight workers, dispatched together**, all Sonnet 5 · high, all verified by
+reading their panes (§67) rather than trusting the flag:
+
+| package | kind | partition |
+|---|---|---|
+| `health-cache` | implementer | `provider/telemetry.rs`, `provider/resources.rs`, `gateway/**`, `api/unix.rs`, `main.rs` |
+| `phase-41-overview` | implementer | `shell/**` |
+| `recon-capability` | read-only | Phases 34, 34A, 34F |
+| `recon-router` | read-only | Phases 34B, 34C, 34D, 34E |
+| `recon-candidates` | read-only | Phases 35A, 35C, 35D, 36, 37 |
+| `recon-context` | read-only | Phases 27, 28, 29, 30, 31 |
+| `recon-control` | read-only | Phases 40, 42, 43, 44, 45 |
+| `recon-capacity` | read-only | Phases 32A, 32C, 32E, 32G, 33B |
+
+`validate_round.py`: **8 packets, no conflicts.**
+
+### The shape, and why it is not just "more workers"
+
+**Six of eight are read-only and cannot be premise-invalid by construction.**
+That is deliberate. The binding constraint on this project has never been worker
+throughput — it is that **five consecutive rounds opened with a recommendation
+that failed the dispatch gate**. Gating is the bottleneck, and gating is exactly
+what a cheap read-only worker can do in parallel while implementers build.
+
+So the wave is: **two workers bore where the gate already passed, six bore toward
+the next ring of gated work.** Wave two dispatches from what they find. That is
+the mountain: many faces, one interior, and the tunnels only connect if the
+gating was honest.
+
+**The adjustment on the final stretch is `main.rs`, and it is the orchestrator's.**
+Every package is scoped to its own module subtree; `main.rs` is given to exactly
+one worker and forbidden to the rest, with the standing instruction to report the
+patch rather than reach across (§32's rule, which cost a whole batch to learn).
+Integration is where the tunnels meet, and it is serial by nature.
+
+### What this measures, beyond boxes
+
+1. **Does eight collide at review?** §9 measured three as the point where reviews
+   start colliding, and that was an *attention* limit, not a quota one — so 20x
+   does not move it. Six of these return structured verdict tables rather than
+   diffs, which is the hypothesis: **recon reports are cheap to review, diffs are
+   not.** If that holds, the real ceiling is *two or three diffs plus any number
+   of reports*, and that is a more useful rule than "three workers".
+2. **Does the weekly window survive it?** The 5x plan ran out on the fourth
+   working day of a cycle. This is the first round where quota is not the
+   constraint, and the cost is recorded per package.
+3. **Does gating in parallel actually produce dispatchable work?** Six recons
+   assessing ~130 open lines should yield wave two's packages. If they mostly
+   return BLOCKED, that is the finding — it means the map's remaining work is
+   genuinely gated behind missing producers, not behind orchestrator attention.
