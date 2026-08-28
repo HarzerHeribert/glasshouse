@@ -3036,3 +3036,97 @@ absence. Practice §14 records that shape as a trap and map line 1748 was un-tic
 for a vacuous absence claim. **Declining them costs a round; ticking them wrongly
 costs the project's ability to trust its own ledger.** They are recorded as strong
 candidates needing a mutation check, not as rejected.
+
+## Batch 44 — the fifth consecutive round whose top recommendation failed the gate, and what that now means
+
+Dispatched from `c81dd9b`, records committed as `2796575`. A resumed orchestrator
+with a fresh context, a weekly window at **97%**, and the user's explicit budget
+instruction: *cheap workers, stay light.* **Two read-only Sonnet packages, no
+implementers**, chosen because the two implementation packages the checkpoint
+recommended both failed Phase −1 at the orchestrator's own gate.
+
+| package | tier | kind | note |
+|---|---|---|---|
+| `p51-eventlog` | Sonnet · high | read-only | design input for the Phase 51 event-log migration the user asked to have scoped deliberately |
+| `ledger-audit` | Sonnet · high | read-only | audits **ticked** boxes whose line names a field no production writer sets |
+
+### Two refusals, both of the checkpoint's own "next, in order" list
+
+**1. "Give `ResourceHealth` an externally-readable surface — one consumer
+unblocks 1311/1321/1322/1324."** Carried by two checkpoints as the cheapest real
+work available. It does not connect, and the failing link is **propagation**:
+
+- `resources_report` is called at `main.rs:140` from the **CLI dispatch**, whose
+  only argument is `&runtime`. The gateway starts at `main.rs:534`, on the
+  **session-launch** path. `glasshouse resources` never holds a `Gateway`, so a
+  health section there renders an empty pool on every run — the identical
+  always-empty-pool defect already recorded for the router's caller, one surface
+  further out.
+- `free_pool()` returns a **clone of in-memory state that nothing persists**.
+  `api/unix.rs:331` already says so in its own doc.
+
+The finding underneath it is the useful half: **`ResourceHealth` is much richer
+than four checkpoints credited.** Degradation (`consecutive_failures` +
+bounded-doubling cooldown), recovery (`WorkloadOutcome::Served` clears it),
+availability (`is_available`), the health/quota separation
+(`FreePool::is_available`), and even the enumerator §71 asks for
+(`FreePool::observed()`, whose own doc says it exists *"for a settings or
+diagnostic view"*) are **all already built**. The four boxes are not blocked on
+behaviour. They are blocked on a decision nobody has made: **persist it, or show
+only the current process's own pool.**
+
+**2. "Phase 51's `purpose` alone — smaller than advertised, still real."** Also
+does not connect, and this one is worse than premise-invalid — it points at a
+**box that is already ticked.**
+
+`NewObservation.purpose` (`routing/evidence.rs:247`) defaults to `None` (`:279`),
+is written to SQLite (`:711`) and read back (`:1048`). The single production
+writer, `gateway/session.rs::record_routing_observation` (`:278-325`), sets
+route, harness, quota context, timing and outcome and **never** `purpose`; no
+`with_purpose` builder exists. Meanwhile map line **1330 is `☑`** and reads:
+
+> Record provider, route, model identity, authenticated quota context, harness,
+> **request purpose**, and observation timestamp for each measurable turn.
+
+Seven facts named, six recorded. And the gateway cannot supply the seventh:
+`Exchange` (`gateway/ingress.rs:117`) carries `outcome`, `status`, `provider`,
+`protocol` and `host` — **nothing purpose-shaped**, and `protocol` is already
+recorded as `route`.
+
+**That is the standard by which 1542 and 1545 were refused** — *"an input absent
+across all real data cannot support a box that names it"* — applied to a box that
+is closed. Whether it is one box or a cluster is what `ledger-audit` was
+dispatched to establish, because **one lead is not a pattern** and un-ticking on
+an orchestrator's single grep is exactly the over-confidence this project keeps
+paying for.
+
+*(A near-miss worth recording: `SessionRecord.purpose`, rendered at `main.rs:3096`
+and `:3230`, is the Phase 10 session tag — a different field with the same name.
+The orchestrator briefly read it as a consumer of the observation's purpose and
+checked before writing it down. A grep for a field name crosses types silently.)*
+
+### The measurement: five for five, and the conclusion has changed
+
+`assurance-economics.md` records three refusals and notes that *"every one of
+those was the previous checkpoint's own recommended next step."* With batches 42,
+43 and now 44, it is **five consecutive rounds**. That is no longer a curiosity
+about one careless handoff — the rate is too high for that, and the checkpoints
+in question were written by careful orchestrators who had *just* learned the
+lesson.
+
+**So the recommendation itself is the defect, not the recommender.** A next step
+written at the end of a round is written when the code is least fresh and the
+reasoning most compressed, and it then arrives at the next session wearing the
+authority of a finding. The existing rule — *run the gate before dispatch* —
+catches it, but only after a fresh orchestrator has spent a turn believing it.
+
+**The cheap fix is one of labelling, and it costs nothing:** a checkpoint should
+record *what was checked and found true*, with its `file:line`, and mark anything
+forward-looking explicitly as **a lead requiring re-gating** rather than as "next,
+in order". The distinction this project already draws between a *fact* and a
+*recommendation* when relaying to a worker (§39) applies to the handoff itself,
+and it has never been written down there.
+
+**Cost of the two refusals: roughly fifteen minutes of one Opus turn, before any
+worker compute.** The alternative, at batch 36's measured rate, was ~$30 of
+packages that could not close their boxes.
