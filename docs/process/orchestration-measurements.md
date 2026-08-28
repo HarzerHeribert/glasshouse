@@ -2818,19 +2818,48 @@ quarter of its turn on a hardening change that closed **no box at all**. Cost
 per box measures how much was already built — batch 32 established that — and
 this round is another instance, not a tier signal.
 
-### One worker, deliberately, and the reason is the weekly window
+### One worker, deliberately — and the user overruled it the same day. The cost model was wrong.
 
-`CLAUDE.md` says run workers in parallel, and that is right. This round did not,
-and the trade should be recorded rather than look like an oversight: the weekly
-rate-limit window was at **91%** when the round was gated. A second package would
-have needed a partition disjoint from `memory/**` + `main.rs` + `cli.rs`, which
-the only other gated candidate (21E line 924) does not have, so the realistic
-second worker was an **ungated** package on an unexamined phase. Four of the last
-five packages considered on this project were refused at the Phase −1 gate. The
-expected value of speculatively dispatching one, at ~$15 of unrecoverable worker
-compute per miss, was negative against finishing and integrating one gated round.
+Batch 40 ran one worker and this ledger recorded the reasoning approvingly: the
+weekly window was at 91%, the only other gated candidate shared this one's
+partition, so a second worker meant an *ungated* package at ~$15 a miss.
 
-**Parallelism is a priority, not a mandate to dispatch an ungated package.**
+**The user's correction: "sonnet workers are incredibly cheap, use two or even
+three — you are the expensive part."** It is right, and the numbers were already
+in this repository:
+
+| | cost | note |
+|---|---|---|
+| `mem-revalidate`, Sonnet, 26 min | **~$7.53** | closed 3 boxes |
+| the batch-40 orchestrator, Opus xhigh | **~$17.50** by integration | one round |
+| the batch-39 predecessor pane, Opus xhigh | **~$62.27** at 54% context | 3h18m |
+
+**The error was the denominator.** Every cost-per-box figure in this ledger
+counts *worker* compute and silently omits the orchestrator, which is the larger
+and — this is the part that matters — the **fixed** term. Gating, packet writing,
+review, mutation re-runs, evidence, map, commits and the platform gate are paid
+once per *round*, not once per package. Spreading them over one package instead
+of three is the expensive choice, and no amount of worker frugality recovers it.
+
+**So the rule is not "dispatch carefully, therefore dispatch one."** It is:
+**gate three packages and dispatch three.** The gate is cheap — `discover.py
+--seam` plus reading what it prints — and a refusal costs one orchestrator turn.
+What is expensive is spending a whole round's fixed overhead on a single
+package's worth of boxes.
+
+**Where the original reasoning still holds:** an *ungated* package is still
+negative expected value, and partition disjointness is still a hard constraint.
+The fix is not to dispatch blind, it is to **do the gating for three and find
+three disjoint partitions** — which took one orchestrator turn when actually
+attempted, and produced `memory/**`, `routing/**`, and a read-only recon package
+that cannot be premise-invalid by construction.
+
+**A third worker does not need to be an implementer.** Batch 41's `gate-recon` is
+read-only: it runs the Phase −1 five-link check across five unassessed phases and
+reports verdicts. That is work the orchestrator would otherwise do at Opus rates
+inside its own scarce context, and it is exactly the shape that should be pushed
+down. **When no third implementation package is gated, the third worker should be
+gating the next round.**
 
 ### The integrator's own mutation was worth more than the worker's five
 
