@@ -3411,3 +3411,73 @@ Integration is where the tunnels meet, and it is serial by nature.
    assessing ~130 open lines should yield wave two's packages. If they mostly
    return BLOCKED, that is the finding — it means the map's remaining work is
    genuinely gated behind missing producers, not behind orchestrator attention.
+
+### Batch 45's recon half — the answer, and it is not the one the question expected
+
+**Six read-only workers assessed 255 open lines — 43% of everything still open on
+the map — for roughly $11, in parallel, in about twenty-five minutes.** Every one
+returned a structured verdict table with `file:line` citations; none edited a
+file; `git status --porcelain` was empty in the main checkout throughout.
+
+| recon | lines | CLOSABLE | blocked/inert |
+|---|---|---|---|
+| `recon-capability` (34, 34A, 34F) | 31 | 1 (weak) | 30 |
+| `recon-router` (34B–34E) | 50 | 11 | 39 |
+| `recon-candidates` (35A, 35C, 35D, 36, 37) | 47 | 3 | 44 |
+| `recon-context` (27–31) | 39 | 7 | 32 |
+| `recon-control` (40, 42–45) | 32 | 10 | 22 |
+| `recon-capacity` (32A, 32C, 32E, 32G, 33B) | 56 | 2 | 54 |
+| **total** | **255** | **34** | **221** |
+
+**The 221 is the product, not the 34.** Each blocked line is a package nobody
+will now dispatch against, and this project's measured rate for dispatching
+against a bad premise is ~$15 of unrecoverable worker compute per package. The
+whole assessment cost less than one such mistake.
+
+### And the finding is architectural, not administrative
+
+Five of the six clusters name **the same missing thing**:
+
+> **Nothing in the shipped binary makes a routing decision over a real candidate
+> set.**
+
+`routing::classify::classify` has exactly one production caller — the
+`glasshouse classify` CLI diagnostic (`main.rs:144`). `Capabilities` is populated
+by all seven adapters and read by exactly two things, a test and
+`glasshouse doctor` (`integrations/mod.rs:1123`) — neither a router.
+`WorkloadTier` reaches production only as a **hardcoded `Leaf` literal**
+(`routing/disposable.rs:565`).
+
+**So the remaining 593 open boxes are not 593 independent gaps.** A large share
+sits downstream of one absent seam, and the map's phase ordering hides that
+because the dependency runs sideways across phase families rather than down.
+**No amount of parallelism closes a box behind that seam**, which is the most
+useful thing this round could have learned before spending a wave of implementers
+on it.
+
+**`recon-candidates` proved the point by refusing to give work.** Asked to assess
+five phases, it reported that every one presupposes a candidate set or a
+session-start decision point that does not exist, and recommended **against**
+dispatching from its own phases — *"dispatching any of them now repeats exactly
+the mistake this packet exists to catch."* A worker declining to manufacture a
+package is the outcome to reward; it is the same instinct that made `route-view`
+refuse to fabricate a plausible table in batch 42.
+
+### What this says about the parallelism question
+
+**The hypothesis held: recon reports are cheap to review, diffs are not.** Six
+reports were read, ruled on and consolidated inside one orchestrator turn without
+collision, because each is a table with citations rather than a diff needing
+mutation checks. §9's ceiling of three is a limit on **diffs**, not on workers.
+
+**The operative rule is therefore better stated as: two or three implementers,
+plus as many read-only workers as there is gated ground to survey.** That is not
+what "increase parallelism" would have produced if read naively, and it is what
+the 20x plan actually bought — not four times the implementers, but the freedom
+to spend a whole wave on *finding out what is worth implementing.*
+
+**One caution, recorded before it bites.** Six recons produce six CLOSABLE lists,
+and a CLOSABLE verdict is a **lead, not a closure** — batch 43 declined two of
+four proposed closures, and batch 44 re-opened a box that had been ticked for a
+round. **34 candidates is 34 things to verify, not 34 boxes.** The orchestrator
+already declined one of them (`1395`) on the recon's own contradicting evidence.
