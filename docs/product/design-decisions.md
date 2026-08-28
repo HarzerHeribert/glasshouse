@@ -1996,3 +1996,78 @@ Taken together with the entitlement table: **`200` can be a failure, `404` can
 be a billing state, and empty content can be a success.** No single field of an
 HTTP response is load-bearing on its own, which is the whole design constraint
 this section exists to record.
+
+## Metered capacity for background jobs — permitted, and bounded by proportion
+
+### The conflict
+
+Glasshouse runs bounded internal jobs of its own — memory extraction, task
+classification, reranking. Phase 9I line 533 says to prefer free models for
+them. Phase 9I line 542 says Glasshouse's own automated evaluation and test runs
+must *"never [use] a metered resource without an explicit opt-in."*
+
+Neither line answers the question the router actually faces: **when no free
+resource can serve an ordinary support job, may it spend paid quota?** Until it
+is answered, `main.rs::disposable_candidates` builds only `Cost::Free`
+candidates, `routing/disposable.rs`'s metered branch is unreachable, and two map
+lines (1293, 1550) cannot close because the mechanism behind them can never run.
+
+### The decision: yes, and the spend must be small relative to the task it serves
+
+**A background job may use metered quota.** The user's decision, 2026-08-28,
+recorded verbatim because the qualifier is the substance:
+
+> *"yes a background job may use quota. But this has to be not much in contrast
+> to the actual task."*
+
+So the permission is real and the constraint is a **proportion, not a ceiling**.
+The comparison is to the work the job supports, not to a monthly budget. A
+classification that costs a fraction of the turn it routes is in scope; one that
+costs a material share of it is not, however small its absolute price.
+
+### What this does and does not authorise
+
+- **Ordinary support work** may fall back to a metered resource. This is
+  `MeteredUse::Permitted`, which already exists and whose own doc comment
+  already describes it as *"a legitimate last resort"* — free capacity first, in
+  line with line 533; metered only when no free resource can serve.
+- **Glasshouse's own automated evaluation and test runs are unchanged.** They
+  stay `MeteredUse::Withheld` unless `GLASSHOUSE_ALLOW_METERED_MODELS=1` is set.
+  Line 542 is already COMPLETE and this decision must not regress it — the two
+  are different callers with different answers, and collapsing them would make
+  "explicit opt-in" indistinguishable from a default, which is the exact wording
+  `MeteredUse`'s own doc warns against.
+- **Nothing here authorises spending premium interactive capacity on bookkeeping.**
+  Map line 1611 and the Product Rule at line 2201 still stand.
+
+### The sub-question this leaves genuinely open, and it must not be faked
+
+Enforcing *"not much in contrast to the actual task"* literally requires
+comparing a disposable job's expected cost against the task's — and **Glasshouse
+cannot estimate either today**: Phase 32G (provider-aware request-cost
+estimation) is 0/10, and map line 1305 explicitly says to *"treat unknown
+pricing as unknown instead of assigning a fake zero cost."*
+
+So the ratio is not computable yet, and inventing one from unavailable data
+would be precisely the failure this project keeps recording. The implementable
+reading of the constraint, using only what exists:
+
+1. free capacity is always preferred (line 533, already COMPLETE);
+2. metered is a **last resort**, reached only when no free resource can serve;
+3. the job stays bounded — a disposable job is bounded by definition (Phase 39);
+4. the fallback is **inspectable**: the routing explanation says a metered
+   resource was chosen and why, which is what map lines 1293 and 543 ask for.
+
+When Phase 32G exists, the proportion becomes measurable and this decision should
+be revisited against it rather than re-derived. Recorded as the validity
+condition: **this reading holds while cost estimation does not exist.**
+
+### Invariants a test must hold to
+
+- With free capacity available, a metered candidate is never chosen.
+- With no free capacity and metered permitted, a metered candidate is chosen and
+  the explanation names the reserve decision and the reason (lines 1293, 1550).
+- An automated Glasshouse run with `GLASSHOUSE_ALLOW_METERED_MODELS` unset
+  chooses nothing metered and fails instead — line 542, unchanged.
+- A stray value in that variable leaves metered use withheld: the fail-closed
+  direction, already implemented in `MeteredUse::for_automated_run`.
