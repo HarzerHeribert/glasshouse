@@ -991,6 +991,61 @@ pub enum MemoryCommand {
         reason: String,
     },
 
+    /// Record the outcome of reviewing a memory, or list what is waiting —
+    /// Phase 21G.
+    ///
+    /// This is the resolution `memory challenge` has always promised and
+    /// this build has never shipped: challenging a memory moves it to
+    /// `needs-review` and out of every default search, but until now
+    /// nothing could move it back. `<OUTCOME>` is exactly Phase 21G's four
+    /// words: `reaffirmed`, `needs-review`, `superseded`, `invalidated`.
+    ///
+    /// An automatic reviewer is refused on a high-impact memory — a
+    /// binding authority, or an unclassified one — the same gate Phase 22
+    /// already built for conflict resolution, reused here rather than
+    /// redesigned. This command defaults to the reviewed actor, because a
+    /// person typing it by hand already is the review the gate asks for;
+    /// `--automatic` invokes the automatic actor so the refusal is
+    /// reachable and testable.
+    ///
+    /// `--list` shows the bounded queue of memories actually waiting for
+    /// review instead of recording an outcome — there is no mode that
+    /// revalidates every memory in the project.
+    Revalidate {
+        /// The memory, or the leading part of its identifier. Required
+        /// unless `--list` is given.
+        id: Option<String>,
+
+        /// `reaffirmed`, `needs-review`, `superseded`, or `invalidated`.
+        /// Required unless `--list` is given.
+        #[arg(value_name = "OUTCOME")]
+        outcome: Option<String>,
+
+        /// The memory that replaced this one. Required for `superseded`;
+        /// rejected for every other outcome.
+        #[arg(long, value_name = "ID")]
+        by: Option<String>,
+
+        /// Why this still needs review — one of Phase 21C's six review
+        /// reasons. Required for `needs-review`; rejected for every other
+        /// outcome.
+        #[arg(long, value_name = "REASON")]
+        reason: Option<String>,
+
+        /// Act as an automatic reviewer instead of a human one.
+        #[arg(long)]
+        automatic: bool,
+
+        /// List memories waiting for review instead of recording an
+        /// outcome.
+        #[arg(long)]
+        list: bool,
+
+        /// Most memories to print, with `--list`.
+        #[arg(long, value_name = "N", default_value_t = 20)]
+        limit: usize,
+    },
+
     /// Run memory extraction over a session's recorded activity.
     ///
     /// `--reply-from` supplies a model's reply from a file, which is what

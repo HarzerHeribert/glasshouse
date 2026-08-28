@@ -29,7 +29,8 @@ use glasshouse::memory::extract::{
     ExtractionModel, ExtractionOutcome, ExtractionTrigger, Extractor, ModelError, Prompt,
 };
 use glasshouse::memory::{
-    MemoryId, MemoryKind, MemoryStatus, MemoryStoreError, NewMemory, ProjectMemory,
+    Classifier, ConflictResolver, MemoryAuthority, MemoryId, MemoryKind, MemoryStatus,
+    MemoryStoreError, NewMemory, ProjectMemory, ReviewReason,
 };
 use glasshouse::project::ScopeError;
 use glasshouse::session::{
@@ -585,4 +586,143 @@ fn deleting_one_projects_state_leaves_a_sibling_projects_state_intact() {
         .expect("beta's memory must survive alpha's deletion");
     assert_eq!(reopened.body, "beta fact");
     let _ = alpha_record; // proven gone by construction; kept for symmetry.
+}
+
+// -------------------------------------------------------------------------
+// Phase 21G, objective 4 — the five `UPDATE memories ... WHERE id = ?1`
+// statements `glasshouse memory revalidate` writes through now carry
+// `project_id` in their own `WHERE` clause, not only in a leading guard.
+// -------------------------------------------------------------------------
+
+/// Assert `result` is `MemoryStoreError::ForeignProject`, and that the
+/// planted row's status is still `active` — a refusal has to be a refusal to
+/// *write*, not a write followed by a correct-looking error. Generic over
+/// `T` because the five primitives return different success types
+/// (`set_authority` returns a tuple); none of them are inspected here.
+fn assert_foreign_and_untouched<T>(
+    beta: &Fixture,
+    result: Result<T, MemoryStoreError>,
+    label: &str,
+) {
+    let error = match result {
+        Ok(_) => panic!("{label} must refuse a memory planted from another project"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, MemoryStoreError::ForeignProject { .. }),
+        "{label}: unexpected error: {error}"
+    );
+    let conn = beta.raw_connection();
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM memories WHERE id = 'planted-memory'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        status, "active",
+        "{label}: a refused call must not have written anything to the planted row"
+    );
+}
+
+/// Acceptance test 5: every state-changing `MemoryStore` method
+/// `glasshouse memory revalidate` writes through — `mark_for_review`,
+/// `reaffirm`, `set_status`, `supersede` (both argument positions),
+/// `set_authority` — and the `revalidate_*` wrappers built on top of them,
+/// all refuse a memory planted from another project, and write nothing to
+/// it. That distinction — an error returned versus a write that never
+/// happened — is the entire finding behind objective 4's hardening; see
+/// `docs/product/evidence/phase-21f.md`'s account of the same shape for
+/// `mark_for_review` alone.
+///
+/// Mutation (acceptance test 6, applied and reverted by hand rather than as
+/// a persisted mutation — see the packet's report): drop the `project_id`
+/// predicate this batch adds to `mark_for_review`'s `UPDATE`, together with
+/// its pre-existing leading `self.get(id)?`. Before objective 4 that
+/// combination flips the foreign row to `needs_review` while this test's
+/// `mark_for_review` call still receives a correct-looking `ForeignProject`
+/// — because the (removed) guard was the only thing standing between the
+/// call and the write. After objective 4 the row still does not move even
+/// with the guard gone, because the `WHERE` clause itself now excludes it.
+#[test]
+fn every_revalidation_primitive_refuses_a_memory_planted_from_another_project_and_writes_nothing() {
+    let tmp = tempdir();
+    let alpha = Fixture::new(tmp.path(), "alpha");
+    let beta = Fixture::new(tmp.path(), "beta");
+
+    let conn = beta.raw_connection();
+    plant_foreign_memory(
+        &conn,
+        "planted-memory",
+        alpha.project_id(),
+        "must never be revalidated from beta",
+    );
+    drop(conn);
+
+    let beta_memory = beta.memory();
+    let beta_store = beta_memory.store();
+    let planted = MemoryId::new("planted-memory");
+
+    let own = beta_store
+        .record(NewMemory::new(MemoryKind::Finding, "beta's own memory"))
+        .unwrap();
+
+    assert_foreign_and_untouched(
+        &beta,
+        beta_store.mark_for_review(&planted, ReviewReason::ProjectState),
+        "mark_for_review",
+    );
+    assert_foreign_and_untouched(&beta, beta_store.reaffirm(&planted), "reaffirm");
+    assert_foreign_and_untouched(
+        &beta,
+        beta_store.set_status(&planted, MemoryStatus::Invalidated),
+        "set_status",
+    );
+    assert_foreign_and_untouched(
+        &beta,
+        beta_store.supersede(&planted, &own.id),
+        "supersede (foreign row superseded)",
+    );
+    assert_foreign_and_untouched(
+        &beta,
+        beta_store.supersede(&own.id, &planted),
+        "supersede (foreign row named as replacement)",
+    );
+    assert_foreign_and_untouched(
+        &beta,
+        beta_store.set_authority(
+            &planted,
+            Some(MemoryAuthority::Constraint),
+            Classifier::Reviewed,
+        ),
+        "set_authority",
+    );
+
+    // The revalidation wrappers built in this batch inherit the same
+    // refusal, one call above the primitives.
+    assert_foreign_and_untouched(
+        &beta,
+        beta_store.revalidate_reaffirmed(&planted, ConflictResolver::Reviewed),
+        "revalidate_reaffirmed",
+    );
+    assert_foreign_and_untouched(
+        &beta,
+        beta_store.revalidate_needs_review(
+            &planted,
+            ReviewReason::ProjectState,
+            ConflictResolver::Reviewed,
+        ),
+        "revalidate_needs_review",
+    );
+    assert_foreign_and_untouched(
+        &beta,
+        beta_store.revalidate_superseded(&planted, &own.id, ConflictResolver::Reviewed),
+        "revalidate_superseded",
+    );
+    assert_foreign_and_untouched(
+        &beta,
+        beta_store.revalidate_invalidated(&planted, ConflictResolver::Reviewed),
+        "revalidate_invalidated",
+    );
 }

@@ -945,9 +945,9 @@ Phase 21G — Memory revalidation
 ☐ Allow revalidation to run before a major architecture refactor.
 ☐ Allow revalidation to run after a major production incident.
 ☐ Allow revalidation to run when a memory has not been validated for a configurable period and is about to influence a high-impact change.
-☐ Use a stronger model or human review for ambiguous high-impact revalidation instead of trusting a cheap extractor blindly.
-☐ Mark a memory reaffirmed, needs_review, superseded, or invalidated after revalidation.
-☐ Keep revalidation bounded to relevant memories rather than periodically reprocessing the entire project history.
+☑ Use a stronger model or human review for ambiguous high-impact revalidation instead of trusting a cheap extractor blindly.
+☑ Mark a memory reaffirmed, needs_review, superseded, or invalidated after revalidation.
+☑ Keep revalidation bounded to relevant memories rather than periodically reprocessing the entire project history.
 ☐ Avoid automatic revalidation work when the memory is not about to affect any current task.
 
 Phase 21H — Simplicity-first implementation policy

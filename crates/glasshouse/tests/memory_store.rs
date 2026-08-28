@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use glasshouse::memory::{
     ConflictResolver, MemoryAuthority, MemoryId, MemoryKind, MemoryRefusal, MemoryStatus,
-    MemoryStoreError, NewMemory, ProjectMemory,
+    MemoryStoreError, NewMemory, ProjectMemory, ReviewReason,
 };
 use glasshouse::{Cli, Runtime};
 
@@ -839,6 +839,167 @@ fn a_high_impact_conflict_needs_review_and_an_ordinary_one_does_not() {
             )
             .unwrap_or_else(|error| panic!("{ordinary} is not high-impact: {error}"));
         assert_eq!(settled.status, MemoryStatus::Rejected);
+    }
+}
+
+// -------------------------------------------------------------------------
+// Phase 21G — revalidation: mark a memory reaffirmed, needs-review,
+// superseded, or invalidated, gated the way Phase 22 already gates a
+// conflict resolution.
+// -------------------------------------------------------------------------
+
+/// Acceptance test 2: each revalidation outcome leaves the memory in the
+/// matching status, and `superseded` records the successor named.
+#[test]
+fn every_revalidation_outcome_leaves_the_matching_status() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let memory = fixture.memory();
+    let store = memory.store();
+
+    let reaffirmed = store
+        .record(NewMemory::new(MemoryKind::Finding, "reaffirmed candidate"))
+        .unwrap();
+    store
+        .mark_for_review(&reaffirmed.id, ReviewReason::ProjectState)
+        .unwrap();
+    let result = store
+        .revalidate_reaffirmed(&reaffirmed.id, ConflictResolver::Reviewed)
+        .unwrap();
+    assert_eq!(result.status, MemoryStatus::Active);
+    assert!(
+        result.last_validated_at.is_some(),
+        "reaffirmed must record a validation timestamp"
+    );
+
+    let needs_review = store
+        .record(NewMemory::new(
+            MemoryKind::Finding,
+            "needs-review candidate",
+        ))
+        .unwrap();
+    let result = store
+        .revalidate_needs_review(
+            &needs_review.id,
+            ReviewReason::ArchitectureDrift,
+            ConflictResolver::Reviewed,
+        )
+        .unwrap();
+    assert_eq!(result.status, MemoryStatus::NeedsReview);
+    assert_eq!(result.review_reason, Some(ReviewReason::ArchitectureDrift));
+
+    let old = store
+        .record(NewMemory::new(MemoryKind::Finding, "old candidate"))
+        .unwrap();
+    let successor = store
+        .record(NewMemory::new(MemoryKind::Finding, "successor candidate"))
+        .unwrap();
+    let result = store
+        .revalidate_superseded(&old.id, &successor.id, ConflictResolver::Reviewed)
+        .unwrap();
+    assert_eq!(result.status, MemoryStatus::Superseded);
+    assert_eq!(result.superseded_by, Some(successor.id));
+
+    let invalidated = store
+        .record(NewMemory::new(MemoryKind::Finding, "invalidated candidate"))
+        .unwrap();
+    let result = store
+        .revalidate_invalidated(&invalidated.id, ConflictResolver::Reviewed)
+        .unwrap();
+    assert_eq!(result.status, MemoryStatus::Invalidated);
+    assert!(
+        !result.is_current(),
+        "an invalidated memory must never be current knowledge"
+    );
+}
+
+/// Acceptance test 3: an automatic reviewer is refused a high-impact
+/// revalidation — a binding authority, and an unclassified one — while a
+/// reviewed actor may revalidate either. Mirrors
+/// `a_high_impact_conflict_needs_review_and_an_ordinary_one_does_not`
+/// exactly, because revalidation reuses `resolve_conflict`'s own gate rather
+/// than a new one.
+#[test]
+fn an_automatic_reviewer_is_refused_a_high_impact_revalidation_and_a_reviewed_one_is_not() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let memory = fixture.memory();
+    let store = memory.store();
+
+    for binding in [
+        MemoryAuthority::Invariant,
+        MemoryAuthority::Constraint,
+        MemoryAuthority::Decision,
+    ] {
+        let record = store
+            .record(
+                NewMemory::new(
+                    MemoryKind::Finding,
+                    format!("a {binding} needing revalidation"),
+                )
+                .with_authority(Some(binding)),
+            )
+            .unwrap();
+        store
+            .mark_for_review(&record.id, ReviewReason::ProjectState)
+            .unwrap();
+
+        let refusal = store
+            .revalidate_reaffirmed(&record.id, ConflictResolver::Automatic)
+            .expect_err(&format!("{binding} is high-impact and needs review"));
+        assert!(
+            matches!(refusal, MemoryStoreError::ReviewRequired { .. }),
+            "unexpected error for {binding}: {refusal}"
+        );
+        assert_eq!(
+            store.get(&record.id).unwrap().unwrap().status,
+            MemoryStatus::NeedsReview,
+            "a refused automatic revalidation must change nothing"
+        );
+
+        let settled = store
+            .revalidate_reaffirmed(&record.id, ConflictResolver::Reviewed)
+            .unwrap();
+        assert_eq!(settled.status, MemoryStatus::Active);
+    }
+
+    // An unclassified authority is treated as high-impact too: `None` means
+    // nobody judged how binding it is, and unknown must not mean safe.
+    let unclassified = store
+        .record(NewMemory::new(
+            MemoryKind::Finding,
+            "nobody has classified how binding this is",
+        ))
+        .unwrap();
+    store
+        .mark_for_review(&unclassified.id, ReviewReason::ProjectState)
+        .unwrap();
+    let refusal = store
+        .revalidate_reaffirmed(&unclassified.id, ConflictResolver::Automatic)
+        .expect_err("an unclassified authority must fail closed");
+    assert!(matches!(refusal, MemoryStoreError::ReviewRequired { .. }));
+
+    // A low-authority memory is ordinary work an automatic reviewer may
+    // settle itself.
+    for ordinary in [
+        MemoryAuthority::Preference,
+        MemoryAuthority::Hypothesis,
+        MemoryAuthority::Idea,
+        MemoryAuthority::Historical,
+    ] {
+        let record = store
+            .record(
+                NewMemory::new(MemoryKind::Finding, format!("an ordinary {ordinary}"))
+                    .with_authority(Some(ordinary)),
+            )
+            .unwrap();
+        store
+            .mark_for_review(&record.id, ReviewReason::ProjectState)
+            .unwrap();
+        let settled = store
+            .revalidate_reaffirmed(&record.id, ConflictResolver::Automatic)
+            .unwrap_or_else(|error| panic!("{ordinary} is not high-impact: {error}"));
+        assert_eq!(settled.status, MemoryStatus::Active);
     }
 }
 

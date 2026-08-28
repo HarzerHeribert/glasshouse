@@ -726,8 +726,8 @@ pub enum MemoryStoreError {
         value: String,
     },
     #[error(
-        "memory `{id}` carries {impact} authority, so its conflict may not be \
-         resolved automatically; a person or a stronger agent has to decide"
+        "memory `{id}` carries {impact} authority, so it may not be settled \
+         automatically; a person or a stronger agent has to decide"
     )]
     ReviewRequired { id: MemoryId, impact: &'static str },
     #[error("the project database has no project identifier bound")]
@@ -1172,12 +1172,13 @@ impl<'a> MemoryStore<'a> {
         self.conn
             .execute(
                 "UPDATE memories SET status = ?2, superseded_by = ?3, updated_at = ?4 \
-                 WHERE id = ?1",
+                 WHERE id = ?1 AND project_id = ?5",
                 rusqlite::params![
                     old.as_str(),
                     MemoryStatus::Superseded.as_str(),
                     replacement.as_str(),
                     (self.clock)(),
+                    &self.project_id,
                 ],
             )
             .map_err(|source| MemoryStoreError::Sql {
@@ -1215,8 +1216,14 @@ impl<'a> MemoryStore<'a> {
                  SET status = ?2, \
                      superseded_by = CASE WHEN ?3 THEN superseded_by ELSE NULL END, \
                      updated_at = ?4 \
-                 WHERE id = ?1",
-                rusqlite::params![id.as_str(), status.as_str(), keep_successor, (self.clock)()],
+                 WHERE id = ?1 AND project_id = ?5",
+                rusqlite::params![
+                    id.as_str(),
+                    status.as_str(),
+                    keep_successor,
+                    (self.clock)(),
+                    &self.project_id,
+                ],
             )
             .map_err(|source| MemoryStoreError::Sql {
                 action: "change a memory's status",
@@ -1250,13 +1257,14 @@ impl<'a> MemoryStore<'a> {
             .execute(
                 "UPDATE memories \
                  SET status = ?2, review_reason = ?3, review_marked_at = ?4, updated_at = ?5 \
-                 WHERE id = ?1",
+                 WHERE id = ?1 AND project_id = ?6",
                 rusqlite::params![
                     id.as_str(),
                     MemoryStatus::NeedsReview.as_str(),
                     reason.as_str(),
                     now,
                     now,
+                    &self.project_id,
                 ],
             )
             .map_err(|source| MemoryStoreError::Sql {
@@ -1286,8 +1294,8 @@ impl<'a> MemoryStore<'a> {
 
         self.conn
             .execute(
-                "UPDATE memories SET last_validated_at = ?2 WHERE id = ?1",
-                rusqlite::params![id.as_str(), (self.clock)()],
+                "UPDATE memories SET last_validated_at = ?2 WHERE id = ?1 AND project_id = ?3",
+                rusqlite::params![id.as_str(), (self.clock)(), &self.project_id],
             )
             .map_err(|source| MemoryStoreError::Sql {
                 action: "reaffirm a memory",
@@ -1296,6 +1304,100 @@ impl<'a> MemoryStore<'a> {
 
         self.get(id)?
             .ok_or_else(|| MemoryStoreError::NotFound { id: id.clone() })
+    }
+
+    /// Refuse an automatic caller a high-impact memory — Phase 22's review
+    /// gate, shared with [`MemoryStore::resolve_conflict`] rather than
+    /// redesigned for Phase 21G's revalidation.
+    ///
+    /// Unclassified counting as high-impact is the same fail-closed reasoning
+    /// `resolve_conflict` documents: `None` means nobody has judged how
+    /// binding this memory is, and treating "unknown" as safe would make
+    /// every memory recorded before a classifier existed automatically
+    /// revalidatable by an automatic caller.
+    fn require_reviewed_for_high_impact(
+        &self,
+        record: &MemoryRecord,
+        by: ConflictResolver,
+    ) -> Result<(), MemoryStoreError> {
+        if by == ConflictResolver::Automatic
+            && let Some(impact) = high_impact_reason(record.authority)
+        {
+            return Err(MemoryStoreError::ReviewRequired {
+                id: record.id.clone(),
+                impact,
+            });
+        }
+        Ok(())
+    }
+
+    /// Revalidate a memory as reaffirmed — Phase 21G: looked at, still true.
+    ///
+    /// Two calls into existing primitives, deliberately: [`MemoryStore::reaffirm`]
+    /// records that the memory was rechecked without touching its status —
+    /// see that method's own documentation, which asks a caller to
+    /// "resolve the review with `set_status` separately once it has actually
+    /// been looked at." This *is* that review, so it does both: a fresh
+    /// `last_validated_at`, and a move back to [`MemoryStatus::Active`].
+    pub fn revalidate_reaffirmed(
+        &self,
+        id: &MemoryId,
+        by: ConflictResolver,
+    ) -> Result<MemoryRecord, MemoryStoreError> {
+        let record = self
+            .get(id)?
+            .ok_or_else(|| MemoryStoreError::NotFound { id: id.clone() })?;
+        self.require_reviewed_for_high_impact(&record, by)?;
+
+        self.reaffirm(id)?;
+        self.set_status(id, MemoryStatus::Active)
+    }
+
+    /// Revalidate a memory as still needing review — Phase 21G: unresolved,
+    /// with a reason that may have changed since it was first flagged.
+    pub fn revalidate_needs_review(
+        &self,
+        id: &MemoryId,
+        reason: ReviewReason,
+        by: ConflictResolver,
+    ) -> Result<MemoryRecord, MemoryStoreError> {
+        let record = self
+            .get(id)?
+            .ok_or_else(|| MemoryStoreError::NotFound { id: id.clone() })?;
+        self.require_reviewed_for_high_impact(&record, by)?;
+
+        self.mark_for_review(id, reason)
+    }
+
+    /// Revalidate a memory as superseded — Phase 21G: replaced by a named
+    /// successor.
+    pub fn revalidate_superseded(
+        &self,
+        id: &MemoryId,
+        replacement: &MemoryId,
+        by: ConflictResolver,
+    ) -> Result<MemoryRecord, MemoryStoreError> {
+        let record = self
+            .get(id)?
+            .ok_or_else(|| MemoryStoreError::NotFound { id: id.clone() })?;
+        self.require_reviewed_for_high_impact(&record, by)?;
+
+        self.supersede(id, replacement)
+    }
+
+    /// Revalidate a memory as invalidated — Phase 21G: a known invalidation
+    /// condition occurred.
+    pub fn revalidate_invalidated(
+        &self,
+        id: &MemoryId,
+        by: ConflictResolver,
+    ) -> Result<MemoryRecord, MemoryStoreError> {
+        let record = self
+            .get(id)?
+            .ok_or_else(|| MemoryStoreError::NotFound { id: id.clone() })?;
+        self.require_reviewed_for_high_impact(&record, by)?;
+
+        self.set_status(id, MemoryStatus::Invalidated)
     }
 
     /// Every memory with the given status, most recently updated first.
@@ -1436,11 +1538,13 @@ impl<'a> MemoryStore<'a> {
 
         self.conn
             .execute(
-                "UPDATE memories SET authority = ?2, updated_at = ?3 WHERE id = ?1",
+                "UPDATE memories SET authority = ?2, updated_at = ?3 \
+                 WHERE id = ?1 AND project_id = ?4",
                 rusqlite::params![
                     id.as_str(),
                     authority.map(MemoryAuthority::as_str),
                     (self.clock)(),
+                    &self.project_id,
                 ],
             )
             .map_err(|source| MemoryStoreError::Sql {

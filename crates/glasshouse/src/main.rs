@@ -242,6 +242,37 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             MemoryCommand::Challenge { id, reason } => {
                 print!("{}", memory_challenge(&runtime, id, reason)?);
             }
+            MemoryCommand::Revalidate {
+                id,
+                outcome,
+                by,
+                reason,
+                automatic,
+                list,
+                limit,
+            } => {
+                if *list {
+                    print!("{}", memory_revalidate_list(&runtime, *limit)?);
+                } else {
+                    let id = id.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("an id is required unless --list is given")
+                    })?;
+                    let outcome = outcome.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("an outcome is required unless --list is given")
+                    })?;
+                    print!(
+                        "{}",
+                        memory_revalidate(
+                            &runtime,
+                            id,
+                            outcome,
+                            by.as_deref(),
+                            reason.as_deref(),
+                            *automatic
+                        )?
+                    );
+                }
+            }
             MemoryCommand::Extract {
                 session,
                 activity,
@@ -2536,6 +2567,114 @@ fn memory_challenge(runtime: &Runtime, id: &str, reason: &str) -> anyhow::Result
     ))
 }
 
+/// `glasshouse memory revalidate --list` — Phase 21G line 950's selection
+/// half: the bounded queue of memories actually waiting for review, so
+/// revalidation never becomes a sweep over the project's whole history.
+/// Wires `MemoryStore::with_status`, which had no production caller before
+/// this.
+fn memory_revalidate_list(runtime: &Runtime, limit: usize) -> anyhow::Result<String> {
+    use glasshouse::memory::{MemoryStatus, ProjectMemory};
+
+    let memory = ProjectMemory::open(runtime)?;
+    let store = memory.store();
+    let waiting = store.with_status(MemoryStatus::NeedsReview, limit)?;
+
+    if waiting.is_empty() {
+        return Ok("no memory is waiting for review\n".to_owned());
+    }
+
+    let mut out = String::new();
+    for record in &waiting {
+        out.push_str(&format!(
+            "{} {} ({})\n",
+            record.id,
+            record.subject.as_deref().unwrap_or(&record.body),
+            record
+                .review_reason
+                .map_or("no reason recorded", |reason| reason.as_str())
+        ));
+    }
+    Ok(out)
+}
+
+/// `glasshouse memory revalidate <id> <outcome>` — Phase 21G line 949: the
+/// resolution `memory challenge` has always promised
+/// (`main.rs::memory_challenge` prints *"it will not be returned as current
+/// until the challenge is resolved"*) and this build has never shipped.
+/// `<outcome>` is exactly the four words the line names.
+///
+/// Defaults to the reviewed actor: a person typing this command by hand is
+/// the human review Phase 22's gate asks for. `--automatic` invokes the
+/// automatic actor instead, purely so the refusal on a high-impact memory
+/// (line 948) is reachable and testable — nothing in this build calls it
+/// that way itself.
+fn memory_revalidate(
+    runtime: &Runtime,
+    id: &str,
+    outcome: &str,
+    by: Option<&str>,
+    reason: Option<&str>,
+    automatic: bool,
+) -> anyhow::Result<String> {
+    use glasshouse::memory::{ConflictResolver, ProjectMemory, ReviewReason};
+
+    let memory = ProjectMemory::open(runtime)?;
+    let store = memory.store();
+    let resolved = store.resolve_id(id)?;
+    let actor = if automatic {
+        ConflictResolver::Automatic
+    } else {
+        ConflictResolver::Reviewed
+    };
+
+    let record = match outcome {
+        "reaffirmed" => {
+            if by.is_some() || reason.is_some() {
+                anyhow::bail!("`reaffirmed` takes neither --by nor --reason");
+            }
+            store.revalidate_reaffirmed(&resolved, actor)?
+        }
+        "needs-review" => {
+            if by.is_some() {
+                anyhow::bail!("`needs-review` does not take --by");
+            }
+            let reason = reason
+                .ok_or_else(|| anyhow::anyhow!("`needs-review` requires --reason <REASON>"))?;
+            let parsed_reason = ReviewReason::from_stored(reason).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "`{reason}` is not a review reason; use one of {}",
+                    ReviewReason::ALL
+                        .iter()
+                        .map(|r| r.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+            store.revalidate_needs_review(&resolved, parsed_reason, actor)?
+        }
+        "superseded" => {
+            if reason.is_some() {
+                anyhow::bail!("`superseded` does not take --reason");
+            }
+            let by = by.ok_or_else(|| anyhow::anyhow!("`superseded` requires --by <ID>"))?;
+            let successor = store.resolve_id(by)?;
+            store.revalidate_superseded(&resolved, &successor, actor)?
+        }
+        "invalidated" => {
+            if by.is_some() || reason.is_some() {
+                anyhow::bail!("`invalidated` takes neither --by nor --reason");
+            }
+            store.revalidate_invalidated(&resolved, actor)?
+        }
+        other => anyhow::bail!(
+            "`{other}` is not a revalidation outcome; use one of reaffirmed, needs-review, \
+             superseded, invalidated"
+        ),
+    };
+
+    Ok(format!("{} is now {}\n", record.id, record.status))
+}
+
 /// A model's reply read from a file, for `glasshouse memory extract`.
 ///
 /// [`describe`](glasshouse::memory::ExtractionModel::describe) says plainly
@@ -3922,6 +4061,161 @@ mod tests {
         // written.
         let refused = memory_challenge(&fixture.runtime, id.as_str(), "vibes");
         assert!(refused.is_err());
+    }
+
+    /// Phase 21G line 949, acceptance test 1 — the round trip the binary
+    /// currently promises and cannot deliver: challenging a memory moves it
+    /// to `needs-review` and out of every default search, and until this
+    /// batch nothing could move it back. Enters through `memory_challenge`,
+    /// `memory_report` and `memory_revalidate`, exactly what `glasshouse
+    /// memory challenge`, `glasshouse memory search` and `glasshouse memory
+    /// revalidate` run.
+    #[test]
+    fn a_challenged_memory_is_reaffirmed_back_into_default_search_with_a_fresh_validation() {
+        use glasshouse::memory::{
+            MemoryAuthority, MemoryKind, MemoryStatus, NewMemory, ProjectMemory,
+        };
+
+        let fixture = CliFixture::new();
+        let project = ProjectMemory::open(&fixture.runtime).unwrap();
+        let id = project
+            .store()
+            .record(
+                NewMemory::new(
+                    MemoryKind::Decision,
+                    "The heron worker retries at most three times.",
+                )
+                .with_authority(Some(MemoryAuthority::Decision)),
+            )
+            .unwrap()
+            .id;
+
+        const BODY: &str = "retries at most three times";
+
+        assert!(
+            project
+                .store()
+                .get(&id)
+                .unwrap()
+                .unwrap()
+                .last_validated_at
+                .is_none(),
+            "a freshly recorded memory has never been validated"
+        );
+
+        let before = memory_report(&fixture.runtime, "heron", false, 10).unwrap();
+        assert!(before.contains(BODY), "{before}");
+
+        memory_challenge(&fixture.runtime, id.as_str(), "project_state").unwrap();
+        let after_challenge = memory_report(&fixture.runtime, "heron", false, 10).unwrap();
+        assert!(
+            !after_challenge.contains(BODY),
+            "a challenged memory must drop out of a default search:\n{after_challenge}"
+        );
+
+        let revalidated = memory_revalidate(
+            &fixture.runtime,
+            id.as_str(),
+            "reaffirmed",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(revalidated.contains("active"), "{revalidated}");
+
+        // Back in a default search.
+        let after_revalidate = memory_report(&fixture.runtime, "heron", false, 10).unwrap();
+        assert!(
+            after_revalidate.contains(BODY),
+            "a reaffirmed memory must return to a default search:\n{after_revalidate}"
+        );
+
+        // ... with a fresh validation timestamp and the matching status.
+        let record = project.store().get(&id).unwrap().unwrap();
+        assert_eq!(record.status, MemoryStatus::Active);
+        assert!(
+            record.last_validated_at.is_some(),
+            "reaffirming must record a validation timestamp"
+        );
+
+        // An outcome that is not one of the four is refused.
+        let refused = memory_revalidate(&fixture.runtime, id.as_str(), "vibes", None, None, false);
+        assert!(refused.is_err());
+    }
+
+    /// Phase 21G line 950, acceptance test 4 — `--list` is bounded to
+    /// `NeedsReview` memories and touches nothing. Enters through
+    /// `memory_revalidate_list`, exactly what `glasshouse memory revalidate
+    /// --list` runs. Wires `MemoryStore::with_status`, which had no
+    /// production caller before this.
+    #[test]
+    fn revalidate_list_is_bounded_to_needs_review_memories_and_touches_nothing() {
+        use glasshouse::memory::{
+            MemoryKind, MemoryStatus, NewMemory, ProjectMemory, ReviewReason,
+        };
+
+        let fixture = CliFixture::new();
+        let project = ProjectMemory::open(&fixture.runtime).unwrap();
+        let store = project.store();
+
+        let mut needing_review = Vec::new();
+        for i in 0..3 {
+            let record = store
+                .record(NewMemory::new(
+                    MemoryKind::Finding,
+                    format!("egret finding {i}"),
+                ))
+                .unwrap();
+            store
+                .mark_for_review(&record.id, ReviewReason::ProjectState)
+                .unwrap();
+            needing_review.push(record.id);
+        }
+        // An active memory and an invalidated one: neither is waiting for
+        // review, and neither may ever appear in the listing.
+        store
+            .record(NewMemory::new(MemoryKind::Finding, "an active finding"))
+            .unwrap();
+        let invalidated = store
+            .record(NewMemory::new(
+                MemoryKind::Finding,
+                "an invalidated finding",
+            ))
+            .unwrap();
+        store
+            .set_status(&invalidated.id, MemoryStatus::Invalidated)
+            .unwrap();
+
+        let listing = memory_revalidate_list(&fixture.runtime, 2).unwrap();
+        let lines: Vec<&str> = listing.lines().collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "the listing must not exceed --limit:\n{listing}"
+        );
+        for line in &lines {
+            assert!(
+                needing_review
+                    .iter()
+                    .any(|id| line.starts_with(id.as_str())),
+                "every listed entry must be one of the needs-review memories: {line}"
+            );
+        }
+
+        // Nothing was touched: every needs-review memory is still
+        // needs-review, and the untouched active/invalidated rows are
+        // unchanged.
+        for id in &needing_review {
+            assert_eq!(
+                store.get(id).unwrap().unwrap().status,
+                MemoryStatus::NeedsReview
+            );
+        }
+        assert_eq!(
+            store.get(&invalidated.id).unwrap().unwrap().status,
+            MemoryStatus::Invalidated
+        );
     }
 
     /// Phase 21F line 936, on the CLI's own text report — the machine door's
