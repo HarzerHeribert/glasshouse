@@ -960,6 +960,36 @@ fn row_to_observation(
     }))
 }
 
+/// How old an aggregate's most recent contributing observation may be before
+/// [`ObservedEvidenceSource`] stops trusting it at full strength — map line
+/// 1548's "stale windows count for less." This is distinct from the window
+/// [`ObservedEvidenceSource::new`] is given: a row can sit comfortably inside
+/// a wide `summarize` window (`crate::routing::interactive`'s own
+/// `FAILOVER_EVIDENCE_WINDOW_SECONDS` is seven days) and still be the only
+/// thing behind an aggregate that has not moved in days — the window decides
+/// what is read at all, this decides how much the read result is trusted.
+///
+/// Provisional, like [`STALE_OBSERVATION_DISCOUNT`]: a day is long enough
+/// that a routing decision inside the same working session trusts it fully,
+/// and short enough that "stale" and "within the seven-day evidence window"
+/// stay two different words rather than one.
+const EVIDENCE_STALE_AFTER_SECONDS: i64 = 24 * 60 * 60;
+
+/// How much a stale aggregate's effective sample count is discounted before
+/// [`crate::config::pairing::evidence_signal`] — and, through
+/// [`ObservedEvidence::reliable_observation_count`], the native-pairing
+/// prior's own decay — ever sees it.
+///
+/// A fraction, never zero: line 1548 asks stale evidence to count for *less*,
+/// not to vanish, and reducing all the way to zero would silently reproduce
+/// the "no evidence at all" case this module already represents honestly
+/// (an absent [`ObservedEvidence`], not a zeroed-out one — see
+/// [`ObservedEvidenceSource::observed`]'s own empty-count fallback).
+/// Provisional, tuned against nothing but being large enough to prove
+/// against float rounding at [`MIN_SAMPLE_FOR_SUMMARY`]'s own boundary in a
+/// test.
+const STALE_OBSERVATION_DISCOUNT: f64 = 0.5;
+
 /// [`ObservationSource`] for [`crate::config::pairing`]'s pairing prior —
 /// design decision 6, replacing `NoObservations` with a real implementation
 /// backed by this ledger.
@@ -1016,10 +1046,21 @@ impl ObservationSource for ObservedEvidenceSource<'_> {
             .failure_rate
             .as_ref()
             .map(|reading| 1.0 - reading.value());
+        // Line 1548: a stale aggregate contributes less than a fresh one at
+        // the same sample count, never a fabricated number — `task_success_rate`
+        // above is untouched, only how many observations the rest of this
+        // struct claims to stand on. See `EVIDENCE_STALE_AFTER_SECONDS` and
+        // `STALE_OBSERVATION_DISCOUNT` for why these two numbers.
         let reliable_observation_count = summary
             .failure_rate
             .as_ref()
-            .map(AggregateReading::sample_count)
+            .map(|reading| {
+                let raw = reading.sample_count();
+                match reading.freshness(self.now_unix, EVIDENCE_STALE_AFTER_SECONDS) {
+                    Freshness::Fresh { .. } => raw,
+                    Freshness::Stale { .. } => ((raw as f64) * STALE_OBSERVATION_DISCOUNT) as usize,
+                }
+            })
             .unwrap_or(0);
 
         if reliable_observation_count == 0 {

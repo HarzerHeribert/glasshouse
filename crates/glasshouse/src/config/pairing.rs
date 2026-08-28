@@ -295,15 +295,27 @@ fn decay_factor(count: usize) -> f64 {
 /// exactly one component to move while the others say nothing, and a single
 /// pre-blended number could not be driven that way by a test.
 ///
-/// **No production source of this exists.** Phase 33A (the routing evidence
-/// ledger) is 0 of 15 and unbuilt; this struct is what it would eventually
-/// fill in, and today only a test double ever constructs one.
+/// **A real production source exists**: `crate::routing::evidence::ObservedEvidenceSource`
+/// wraps Phase 33A's routing evidence ledger and is what
+/// `crate::routing::interactive::score_candidate` hands to
+/// [`native_pairing_prior_contribution`] on a real provider failure. A test
+/// double (`NoObservations`, or a fixed stand-in) is still what most tests in
+/// this file construct, because most of what this file proves is the scoring
+/// policy itself, independent of where the numbers came from.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ObservedEvidence {
     /// How many reliable observations back the rest of this struct. Also
     /// what the native-pairing prior decays against — the same count answers
     /// "how much do we trust this" for both the prior's decay and the
     /// evidence signal's confidence.
+    ///
+    /// Not always the literal raw tally: map line 1548 asks a stale
+    /// observation window to count for less, and
+    /// `crate::routing::evidence::ObservedEvidenceSource` implements that by
+    /// discounting this count before it ever reaches here, rather than adding
+    /// a second, parallel "how much do we trust this" number. This field's
+    /// own role — "how much do we trust this" — is exactly what makes that a
+    /// faithful discount rather than a misrepresentation.
     pub reliable_observation_count: usize,
     /// `0.0..=1.0`. Higher is better.
     pub task_success_rate: Option<f64>,
@@ -372,6 +384,28 @@ impl ObservationSource for NoObservations {
 /// contributes — scaled down, never zeroed — because "no evidence yet" and
 /// "one data point" must not read identically to a routing explanation.
 const CONFIDENT_AT_OBSERVATIONS: f64 = 5.0;
+
+/// Map line 1542's own named threshold: how many reliable observations local
+/// evidence needs before it is trusted to **outrank** the native-pairing
+/// prior at all, not merely how confidently [`evidence_signal`] speaks once
+/// it is included.
+///
+/// This is a different question from [`CONFIDENT_AT_OBSERVATIONS`], which
+/// only scales a signal that is already in the explanation — a two-sample
+/// 100%-success record and a twenty-sample 60%-success record can both clear
+/// that scaling and still have the thin one carry a *larger* signal, which is
+/// exactly the case line 1542's "must not outrank" (acceptance test 3) rules
+/// out. This threshold is the gate that keeps thin evidence out of the
+/// comparison entirely, however strong it looks, rather than merely
+/// discounted — see [`native_pairing_prior_contribution`]'s own use.
+///
+/// **Provisional**, exactly like `RETRIEVAL_WEIGHT_FLOOR`: no experiment
+/// tuned this number. Equal to [`CONFIDENT_AT_OBSERVATIONS`] and
+/// `crate::routing::evidence::MIN_SAMPLE_FOR_SUMMARY` because matching an
+/// existing, already-provisional pair was the least arbitrary choice
+/// available, not because a fourth independent measurement agreed with the
+/// first three.
+const SUFFICIENT_EVIDENCE_OBSERVATIONS: usize = 5;
 
 /// Reduce one [`ObservedEvidence`] to a single signed number: positive means
 /// the observations support this pairing, negative means they contradict it.
@@ -530,14 +564,33 @@ pub fn native_pairing_prior_contribution(
         ),
     ));
 
-    if let Some(observed) = observed
-        && observed.reliable_observation_count > 0
-    {
-        explanation.push(Contribution::new(
-            "local observed evidence",
-            evidence_signal(&observed),
-            describe_observed(&observed),
-        ));
+    if let Some(observed) = observed {
+        if observed.reliable_observation_count >= SUFFICIENT_EVIDENCE_OBSERVATIONS {
+            // Line 1542: sufficient evidence is free to outrank the prior —
+            // `evidence_signal` is unbounded (design decision 1), and nothing
+            // here caps it back down.
+            explanation.push(Contribution::new(
+                "local observed evidence",
+                evidence_signal(&observed),
+                describe_observed(&observed),
+            ));
+        } else if observed.reliable_observation_count > 0 {
+            // Below the threshold: named and visible (never a silent
+            // adjustment), but always `0.0` — a thin record must not be able
+            // to outrank the prior no matter how strong it looks, which
+            // `evidence_signal`'s own confidence scaling alone cannot
+            // guarantee (see `SUFFICIENT_EVIDENCE_OBSERVATIONS`'s own doc
+            // comment for the case that scaling misses).
+            explanation.push(Contribution::new(
+                "local observed evidence",
+                0.0,
+                format!(
+                    "{} reliable observation(s), below the {SUFFICIENT_EVIDENCE_OBSERVATIONS} \
+                     needed before local evidence is trusted to outrank the native-pairing prior",
+                    observed.reliable_observation_count
+                ),
+            ));
+        }
     }
 
     explanation

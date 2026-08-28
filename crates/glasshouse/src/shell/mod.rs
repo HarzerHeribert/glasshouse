@@ -54,10 +54,10 @@ use crate::session::{
 use crate::tui::{AppEvent, DEFAULT_TICK, Event, EventSource, Screen};
 
 pub use state::{
-    Action, HarnessRow, IntegrationRow, Mode, ModelRefresh, Overlay, OverviewState, ProbeKind,
-    ProfileRow, ProfileSettingsEdit, ProviderNotice, ProviderProbeIntent, ProviderProbeResult,
-    ProviderRow, ProviderSettingsEdit, ReachabilityCheck, RoutingRow, RoutingSettingsEdit,
-    SettingsEdit, ShellState, ViewportGrid,
+    Action, HarnessRow, IntegrationRow, KnowledgeSection, Mode, ModelRefresh, Overlay,
+    OverviewState, ProbeKind, ProfileRow, ProfileSettingsEdit, ProviderNotice, ProviderProbeIntent,
+    ProviderProbeResult, ProviderRow, ProviderSettingsEdit, ReachabilityCheck, RoutingRow,
+    RoutingSettingsEdit, SettingsEdit, ShellState, ViewportGrid,
 };
 
 /// Open the shell and run it until the user leaves.
@@ -235,6 +235,32 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                                 Vec::new(),
                                 Vec::new(),
                                 0,
+                                Some(format!("project memory unavailable: {err:#}")),
+                            );
+                        }
+                    },
+                    Action::OpenProjectKnowledge => match build_project_knowledge_memory(runtime) {
+                        Ok(memory) => {
+                            state.open_project_knowledge(
+                                memory.decisions,
+                                memory.constraints,
+                                memory.features,
+                                memory.failed_attempts,
+                                memory.todos,
+                                None,
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                "could not read project memory for the knowledge view"
+                            );
+                            state.open_project_knowledge(
+                                KnowledgeSection::default(),
+                                KnowledgeSection::default(),
+                                KnowledgeSection::default(),
+                                KnowledgeSection::default(),
+                                KnowledgeSection::default(),
                                 Some(format!("project memory unavailable: {err:#}")),
                             );
                         }
@@ -1323,6 +1349,134 @@ fn summarize_memory_line(
         let cut: String = text.chars().take(PROJECT_OVERVIEW_BODY_CHARS).collect();
         format!("{kind}: {cut}…")
     }
+}
+
+/// How many entries [`build_project_knowledge_memory`] shows per section —
+/// the same generous default [`PROJECT_OVERVIEW_DECISION_LIMIT`] uses, for
+/// the same reason: a summary read occasionally, not a paginated list.
+const PROJECT_KNOWLEDGE_SECTION_LIMIT: usize = 20;
+/// Ceiling for one [`crate::memory::MemoryStore::with_status`] fetch before
+/// [`knowledge_section`] applies its own per-kind display limit. Generous
+/// enough that no real project's per-status memory count approaches it —
+/// this bounds one query, not the section shown on screen.
+const PROJECT_KNOWLEDGE_FETCH_LIMIT: usize = 10_000;
+
+/// Every kind of durable project knowledge, grouped and formatted for
+/// [`state::ShellState::open_project_knowledge`] — Phase 25, map lines
+/// 1098-1107.
+struct ProjectKnowledgeMemory {
+    decisions: KnowledgeSection,
+    constraints: KnowledgeSection,
+    features: KnowledgeSection,
+    failed_attempts: KnowledgeSection,
+    todos: KnowledgeSection,
+}
+
+/// Read every section the project-knowledge view shows, from the current
+/// project's memory database.
+///
+/// Reading `crate::memory` is file I/O this module deliberately does not
+/// hold in `shell/state.rs` — the same split [`build_project_overview_memory`]
+/// keeps. `MemoryStore` has no single "everything, by kind" query, so each
+/// section is built by [`knowledge_section`] against the public
+/// `with_status`/kind filter, exactly the surface
+/// [`build_project_overview_memory`] already uses.
+fn build_project_knowledge_memory(runtime: &Runtime) -> anyhow::Result<ProjectKnowledgeMemory> {
+    use crate::memory::{MemoryKind, ProjectMemory};
+
+    let memory = ProjectMemory::open(runtime)?;
+    let store = memory.store();
+
+    // Map lines 1100-1102: active decisions, known constraints, and
+    // implemented-or-planned features are all *current* project knowledge —
+    // `MemoryStatus::is_current` is the one test for that, so a superseded,
+    // rejected or invalidated record of any of these three kinds never
+    // reaches its section (acceptance test 3).
+    let decisions = knowledge_section(&store, MemoryKind::Decision, |status| status.is_current())?;
+    let constraints =
+        knowledge_section(&store, MemoryKind::Constraint, |status| status.is_current())?;
+    let features = knowledge_section(&store, MemoryKind::Feature, |status| status.is_current())?;
+
+    // Map line 1104: *unresolved*, not merely *current* —
+    // `MemoryStatus::is_open_work` also keeps a todo under review or in
+    // conflict, which `is_current` alone would drop, and excludes a resolved
+    // one exactly like `is_current` does.
+    let todos = knowledge_section(&store, MemoryKind::Todo, |status| status.is_open_work())?;
+
+    // Map line 1103: failed approaches get a dedicated *historical* section,
+    // deliberately unfiltered by status — the record of what was tried and
+    // did not work is the point, including one a newer memory has since
+    // superseded (map line 1106 is how that supersession is named).
+    let failed_attempts = knowledge_section(&store, MemoryKind::FailedAttempt, |_| true)?;
+
+    Ok(ProjectKnowledgeMemory {
+        decisions,
+        constraints,
+        features,
+        failed_attempts,
+        todos,
+    })
+}
+
+/// Every memory of `kind` whose status satisfies `include`, most recently
+/// updated first, formatted and capped at
+/// [`PROJECT_KNOWLEDGE_SECTION_LIMIT`].
+///
+/// `MemoryStore::binding` filters by authority, not kind, and
+/// `memory::snapshot::snapshot` only ever returns
+/// [`crate::memory::MemoryStatus::Active`] records — neither fits a section
+/// that needs one specific kind across a caller-chosen set of statuses. So
+/// this walks [`crate::memory::MemoryStatus::ALL`] through the public
+/// [`crate::memory::MemoryStore::with_status`] and keeps what matches both
+/// `kind` and `include`: the same public surface, used the way a caller
+/// outside `memory/**` is meant to combine it.
+fn knowledge_section(
+    store: &crate::memory::MemoryStore<'_>,
+    kind: crate::memory::MemoryKind,
+    include: impl Fn(crate::memory::MemoryStatus) -> bool,
+) -> anyhow::Result<KnowledgeSection> {
+    let mut matched: Vec<crate::memory::MemoryRecord> = crate::memory::MemoryStatus::ALL
+        .iter()
+        .copied()
+        .filter(|status| include(*status))
+        .map(|status| store.with_status(status, PROJECT_KNOWLEDGE_FETCH_LIMIT))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .filter(|record| record.kind == kind)
+        .collect();
+    matched.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+    });
+
+    let omitted = matched
+        .len()
+        .saturating_sub(PROJECT_KNOWLEDGE_SECTION_LIMIT);
+    let lines = matched
+        .into_iter()
+        .take(PROJECT_KNOWLEDGE_SECTION_LIMIT)
+        .map(|record| knowledge_line(&record))
+        .collect();
+
+    Ok(KnowledgeSection { lines, omitted })
+}
+
+/// One display line: [`summarize_memory_line`]'s kind-and-text line, with a
+/// trailing supersession note when [`crate::memory::MemoryRecord::superseded_by`]
+/// names a successor.
+///
+/// Map line 1106: said in words *when a supersession relationship exists*,
+/// and silent otherwise — never a placeholder like "none" or an empty
+/// column, which is why this is one conditional push rather than always
+/// appending a (possibly empty) field.
+fn knowledge_line(record: &crate::memory::MemoryRecord) -> String {
+    let mut line = summarize_memory_line(record.kind, record.subject.as_deref(), &record.body);
+    if let Some(successor) = &record.superseded_by {
+        line.push_str(&format!(" — superseded by {successor}"));
+    }
+    line
 }
 
 /// Build the rows the Settings overlay shows, from a fresh [`Discovery`]
@@ -3126,6 +3280,308 @@ mod project_overview_tests {
         assert!(
             overview
                 .decisions()
+                .iter()
+                .any(|line| line.contains("never run ci-local beside cargo"))
+        );
+    }
+}
+
+/// Phase 25: the project-knowledge view reads every kind of durable project
+/// memory through [`build_project_knowledge_memory`] — the production
+/// function `Action::OpenProjectKnowledge`'s handler calls, not a helper
+/// that re-implements the query (practice §35). Map lines 1098-1107.
+#[cfg(test)]
+mod project_knowledge_tests {
+    use super::*;
+    use crate::memory::{MemoryKind, MemoryStatus, NewMemory, ProjectMemory};
+
+    /// Same bootstrap `project_overview_tests` uses — an isolated, real
+    /// on-disk project database, not a fixture that reimplements the query.
+    fn bootstrapped_runtime() -> (tempfile::TempDir, tempfile::TempDir, crate::Runtime) {
+        use clap::Parser;
+
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join(".git")).unwrap();
+
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+            "--config-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, workspace.path()).unwrap();
+        (data, workspace, runtime)
+    }
+
+    /// A project with no memory at all gets five empty, honest sections —
+    /// not an error (map line 1098's empty-state half).
+    #[test]
+    fn a_project_with_no_knowledge_yet_reports_empty_sections_not_an_error() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let memory = build_project_knowledge_memory(&runtime).expect("must not fail");
+        for section in [
+            &memory.decisions,
+            &memory.constraints,
+            &memory.features,
+            &memory.failed_attempts,
+            &memory.todos,
+        ] {
+            assert!(section.lines.is_empty());
+            assert_eq!(section.omitted, 0);
+        }
+    }
+
+    /// Map line 1100, and acceptance test 3: a superseded decision is
+    /// history, not active knowledge, so it must not appear in the active
+    /// decisions section — only the memory that replaced it does.
+    #[test]
+    fn a_superseded_decision_does_not_appear_among_active_decisions() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let memory = ProjectMemory::open(&runtime).expect("open");
+        let store = memory.store();
+
+        let old = store
+            .record(NewMemory::new(
+                MemoryKind::Decision,
+                "ship the old approach",
+            ))
+            .unwrap();
+        let new = store
+            .record(NewMemory::new(
+                MemoryKind::Decision,
+                "ship the replacement approach",
+            ))
+            .unwrap();
+        store.supersede(&old.id, &new.id).unwrap();
+
+        let built = build_project_knowledge_memory(&runtime).expect("must not fail");
+        assert!(
+            built
+                .decisions
+                .lines
+                .iter()
+                .any(|line| line.contains("ship the replacement approach"))
+        );
+        assert!(
+            built
+                .decisions
+                .lines
+                .iter()
+                .all(|line| !line.contains("ship the old approach"))
+        );
+    }
+
+    /// Map lines 1101 and 1102: known constraints and implemented-or-planned
+    /// features are filtered to current knowledge the same way decisions
+    /// are — a superseded record of either kind does not reach its section.
+    #[test]
+    fn constraints_and_features_are_filtered_to_current_the_same_way_decisions_are() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let memory = ProjectMemory::open(&runtime).expect("open");
+        let store = memory.store();
+
+        store
+            .record(NewMemory::new(
+                MemoryKind::Constraint,
+                "the local gate must run alone",
+            ))
+            .unwrap();
+        let old_constraint = store
+            .record(NewMemory::new(MemoryKind::Constraint, "an old constraint"))
+            .unwrap();
+        let new_constraint = store
+            .record(NewMemory::new(MemoryKind::Constraint, "its replacement"))
+            .unwrap();
+        store
+            .supersede(&old_constraint.id, &new_constraint.id)
+            .unwrap();
+
+        store
+            .record(NewMemory::new(MemoryKind::Feature, "the knowledge view"))
+            .unwrap();
+        let old_feature = store
+            .record(NewMemory::new(MemoryKind::Feature, "an old feature plan"))
+            .unwrap();
+        let new_feature = store
+            .record(NewMemory::new(MemoryKind::Feature, "the revised plan"))
+            .unwrap();
+        store.supersede(&old_feature.id, &new_feature.id).unwrap();
+
+        let built = build_project_knowledge_memory(&runtime).expect("must not fail");
+        assert_eq!(built.constraints.lines.len(), 2);
+        assert!(
+            built
+                .constraints
+                .lines
+                .iter()
+                .all(|line| !line.contains("an old constraint"))
+        );
+        assert_eq!(built.features.lines.len(), 2);
+        assert!(
+            built
+                .features
+                .lines
+                .iter()
+                .all(|line| !line.contains("an old feature plan"))
+        );
+    }
+
+    /// Map line 1104, and acceptance test 3's other half: a resolved todo is
+    /// queryable but must never be presented as unresolved work.
+    #[test]
+    fn a_resolved_todo_does_not_appear_among_unresolved_todos() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let memory = ProjectMemory::open(&runtime).expect("open");
+        let store = memory.store();
+
+        store
+            .record(NewMemory::new(MemoryKind::Todo, "wire the knowledge view"))
+            .unwrap();
+        let resolved = store
+            .record(NewMemory::new(MemoryKind::Todo, "already done"))
+            .unwrap();
+        store
+            .set_status(&resolved.id, MemoryStatus::Resolved)
+            .unwrap();
+
+        let built = build_project_knowledge_memory(&runtime).expect("must not fail");
+        assert_eq!(built.todos.lines.len(), 1);
+        assert!(built.todos.lines[0].contains("wire the knowledge view"));
+        assert!(
+            built
+                .todos
+                .lines
+                .iter()
+                .all(|line| !line.contains("already done"))
+        );
+    }
+
+    /// Map line 1104 turns on `MemoryStatus::is_open_work`, not
+    /// `is_current`: a todo under review is not `Active`, but it is still
+    /// open work and must still count as unresolved. This is what would
+    /// distinguish the two predicates if `knowledge_section`'s todos call
+    /// were quietly narrowed to `is_current`.
+    #[test]
+    fn a_todo_marked_needs_review_still_counts_as_unresolved() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let memory = ProjectMemory::open(&runtime).expect("open");
+        let store = memory.store();
+
+        let todo = store
+            .record(NewMemory::new(MemoryKind::Todo, "revisit after the audit"))
+            .unwrap();
+        store
+            .set_status(&todo.id, MemoryStatus::NeedsReview)
+            .unwrap();
+
+        let built = build_project_knowledge_memory(&runtime).expect("must not fail");
+        assert!(
+            built
+                .todos
+                .lines
+                .iter()
+                .any(|line| line.contains("revisit after the audit"))
+        );
+    }
+
+    /// Map lines 1103 and 1106: failed approaches are shown regardless of
+    /// status — including one a newer memory has superseded — and the
+    /// superseded one names its successor while the current one stays
+    /// silent about supersession, since it has none.
+    #[test]
+    fn failed_approaches_are_shown_regardless_of_status_and_name_their_successor() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let memory = ProjectMemory::open(&runtime).expect("open");
+        let store = memory.store();
+
+        let old = store
+            .record(NewMemory::new(
+                MemoryKind::FailedAttempt,
+                "tried a global lock, it deadlocked",
+            ))
+            .unwrap();
+        let new = store
+            .record(NewMemory::new(
+                MemoryKind::FailedAttempt,
+                "tried per-project locks instead, still fails under load",
+            ))
+            .unwrap();
+        store.supersede(&old.id, &new.id).unwrap();
+
+        let built = build_project_knowledge_memory(&runtime).expect("must not fail");
+        assert_eq!(built.failed_attempts.lines.len(), 2);
+
+        let old_line = built
+            .failed_attempts
+            .lines
+            .iter()
+            .find(|line| line.contains("tried a global lock"))
+            .expect("the superseded failed attempt is still shown");
+        assert!(
+            old_line.contains(&format!("superseded by {}", new.id)),
+            "must name its successor: {old_line}"
+        );
+
+        let new_line = built
+            .failed_attempts
+            .lines
+            .iter()
+            .find(|line| line.contains("tried per-project locks"))
+            .expect("the current failed attempt is shown");
+        assert!(
+            !new_line.contains("superseded by"),
+            "has no successor, so must say nothing: {new_line}"
+        );
+    }
+
+    /// The `k` key opens the overlay through the real run-loop action, and
+    /// the overlay carries the memory the run loop read — not a
+    /// hand-constructed fixture.
+    #[test]
+    fn opening_the_project_knowledge_view_shows_real_memory() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let memory = ProjectMemory::open(&runtime).expect("open");
+        memory
+            .store()
+            .record(NewMemory::new(
+                MemoryKind::Constraint,
+                "never run ci-local beside cargo",
+            ))
+            .unwrap();
+
+        let mut state = state::ShellState::new(
+            "glasshouse",
+            runtime.project().display_root(),
+            "test",
+            Vec::new(),
+        );
+        assert_eq!(
+            state.handle_key(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Char('k')
+            )),
+            state::Action::OpenProjectKnowledge
+        );
+
+        let built = build_project_knowledge_memory(&runtime).expect("must not fail");
+        state.open_project_knowledge(
+            built.decisions,
+            built.constraints,
+            built.features,
+            built.failed_attempts,
+            built.todos,
+            None,
+        );
+
+        assert_eq!(state.overlay(), Some(state::Overlay::ProjectKnowledge));
+        let knowledge = state.project_knowledge().expect("open");
+        assert!(
+            knowledge
+                .constraints()
+                .lines
                 .iter()
                 .any(|line| line.contains("never run ci-local beside cargo"))
         );

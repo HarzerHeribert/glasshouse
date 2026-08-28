@@ -1003,6 +1003,123 @@ fn an_automatic_reviewer_is_refused_a_high_impact_revalidation_and_a_reviewed_on
     }
 }
 
+/// Acceptance test 4 (Phase 21E, box 924): an automatic actor is refused
+/// *supersession* specifically — not only reaffirmation, which the previous
+/// test already covers — of a binding authority and of an unclassified one;
+/// a reviewed actor may supersede either. `MemoryStore::supersede`'s first
+/// production caller is `revalidate_superseded` (the packet's feasibility
+/// note), and until this test only `revalidate_reaffirmed`'s side of the
+/// shared gate had a regression test entering through its own production
+/// path — see `require_reviewed_for_high_impact`, called identically by all
+/// four `revalidate_*` methods.
+#[test]
+fn an_automatic_reviewer_is_refused_a_high_impact_supersession_and_a_reviewed_one_is_not() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let memory = fixture.memory();
+    let store = memory.store();
+
+    for binding in [
+        MemoryAuthority::Invariant,
+        MemoryAuthority::Constraint,
+        MemoryAuthority::Decision,
+    ] {
+        let old = store
+            .record(
+                NewMemory::new(MemoryKind::Finding, format!("a {binding} to be superseded"))
+                    .with_authority(Some(binding)),
+            )
+            .unwrap();
+        let successor = store
+            .record(NewMemory::new(
+                MemoryKind::Finding,
+                format!("{binding}'s successor"),
+            ))
+            .unwrap();
+
+        let refusal = store
+            .revalidate_superseded(&old.id, &successor.id, ConflictResolver::Automatic)
+            .expect_err(&format!(
+                "{binding} is high-impact and needs review to be superseded"
+            ));
+        assert!(
+            matches!(refusal, MemoryStoreError::ReviewRequired { .. }),
+            "unexpected error for {binding}: {refusal}"
+        );
+        assert_eq!(
+            store.get(&old.id).unwrap().unwrap().status,
+            MemoryStatus::Active,
+            "a refused automatic supersession must change nothing"
+        );
+
+        let settled = store
+            .revalidate_superseded(&old.id, &successor.id, ConflictResolver::Reviewed)
+            .unwrap();
+        assert_eq!(settled.status, MemoryStatus::Superseded);
+        assert_eq!(settled.superseded_by, Some(successor.id));
+    }
+
+    // Unclassified is high-impact too: nobody has judged how binding it is,
+    // and treating "unknown" as safe would let an automatic caller supersede
+    // any memory recorded before a classifier existed.
+    let unclassified = store
+        .record(NewMemory::new(
+            MemoryKind::Finding,
+            "nobody has classified how binding this superseded memory is",
+        ))
+        .unwrap();
+    let unclassified_successor = store
+        .record(NewMemory::new(
+            MemoryKind::Finding,
+            "the unclassified memory's successor",
+        ))
+        .unwrap();
+    let refusal = store
+        .revalidate_superseded(
+            &unclassified.id,
+            &unclassified_successor.id,
+            ConflictResolver::Automatic,
+        )
+        .expect_err("an unclassified authority must fail closed against automatic supersession");
+    assert!(matches!(refusal, MemoryStoreError::ReviewRequired { .. }));
+    assert_eq!(
+        store.get(&unclassified.id).unwrap().unwrap().status,
+        MemoryStatus::Active,
+        "a refused automatic supersession must change nothing"
+    );
+    let settled = store
+        .revalidate_superseded(
+            &unclassified.id,
+            &unclassified_successor.id,
+            ConflictResolver::Reviewed,
+        )
+        .unwrap();
+    assert_eq!(settled.status, MemoryStatus::Superseded);
+
+    // A low-authority memory is ordinary work an automatic reviewer may
+    // supersede itself.
+    let ordinary = store
+        .record(
+            NewMemory::new(MemoryKind::Finding, "an ordinary preference")
+                .with_authority(Some(MemoryAuthority::Preference)),
+        )
+        .unwrap();
+    let ordinary_successor = store
+        .record(NewMemory::new(
+            MemoryKind::Finding,
+            "the preference's successor",
+        ))
+        .unwrap();
+    let settled = store
+        .revalidate_superseded(
+            &ordinary.id,
+            &ordinary_successor.id,
+            ConflictResolver::Automatic,
+        )
+        .unwrap_or_else(|error| panic!("a preference is not high-impact: {error}"));
+    assert_eq!(settled.status, MemoryStatus::Superseded);
+}
+
 // -------------------------------------------------------------------------
 // Phases 23 and 26 — the project boundary.
 // -------------------------------------------------------------------------

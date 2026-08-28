@@ -24,8 +24,8 @@ use crate::session::{
 };
 
 use super::state::{
-    Mode, Overlay, OverviewState, ProbeKind, ProviderRow, SettingsPathInputView, SettingsSection,
-    SettingsState, ShellState, ViewportGrid, format_usd,
+    KnowledgeSection, Mode, Overlay, OverviewState, ProbeKind, ProviderRow, SettingsPathInputView,
+    SettingsSection, SettingsState, ShellState, ViewportGrid, format_usd,
 };
 
 /// The shell's fixed vertical chrome: title, root, session bar, viewport,
@@ -72,6 +72,7 @@ pub fn render(state: &ShellState, frame: &mut Frame) {
         Some(Overlay::Settings) => render_settings(state, frame, area),
         Some(Overlay::ProjectOverview) => render_project_overview(state, frame, area),
         Some(Overlay::SessionEvents) => render_session_events(state, frame, area),
+        Some(Overlay::ProjectKnowledge) => render_project_knowledge(state, frame, area),
         None => {}
     }
 }
@@ -326,9 +327,10 @@ fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
         }
         (Mode::Control, Some(Overlay::ProjectOverview)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::SessionEvents)) => "esc back to session   q quit",
+        (Mode::Control, Some(Overlay::ProjectKnowledge)) => "esc back to session   q quit",
         (Mode::Control, None) => {
             "tab session   enter session   n new   N headless   o overview   p project   \
-             e events   q quit"
+             k knowledge   e events   q quit"
         }
     };
     let mut spans = vec![Span::styled(hint, Style::default().fg(Color::DarkGray))];
@@ -722,6 +724,112 @@ fn render_session_events(state: &ShellState, frame: &mut Frame, area: Rect) {
     }
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// Phase 25, map lines 1098-1107: the project's durable knowledge — active
+/// decisions, known constraints, implemented-or-planned features, failed
+/// approaches (historical), and unresolved todos — each grouped under its
+/// own labelled section of plain text.
+///
+/// **Map line 1107, by construction.** This function draws [`Line`]s of
+/// text and nothing else: no canvas, no coordinates, no box-drawing
+/// characters standing in for a "node". A relationship between two memories
+/// — the only one this view has, supersession — is said in a sentence
+/// (`knowledge_line` in `shell::mod`), never drawn as an edge. See
+/// `the_project_knowledge_view_renders_no_decorative_graph_glyphs` below,
+/// proven at a realistic width and a wide one per practice §17.
+fn render_project_knowledge(state: &ShellState, frame: &mut Frame, area: Rect) {
+    let popup = centered(area, 84, 78);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" project knowledge ")
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines = Vec::new();
+    let knowledge = state.project_knowledge();
+
+    push_knowledge_section(
+        &mut lines,
+        "ACTIVE DECISIONS",
+        knowledge.map(super::state::ProjectKnowledgeState::decisions),
+        "no active decisions recorded",
+    );
+    lines.push(Line::from(""));
+    push_knowledge_section(
+        &mut lines,
+        "KNOWN CONSTRAINTS",
+        knowledge.map(super::state::ProjectKnowledgeState::constraints),
+        "no known constraints recorded",
+    );
+    lines.push(Line::from(""));
+    push_knowledge_section(
+        &mut lines,
+        "FEATURES (IMPLEMENTED OR PLANNED)",
+        knowledge.map(super::state::ProjectKnowledgeState::features),
+        "no features recorded",
+    );
+    lines.push(Line::from(""));
+    push_knowledge_section(
+        &mut lines,
+        "FAILED APPROACHES (HISTORICAL)",
+        knowledge.map(super::state::ProjectKnowledgeState::failed_attempts),
+        "no failed approaches recorded",
+    );
+    lines.push(Line::from(""));
+    push_knowledge_section(
+        &mut lines,
+        "UNRESOLVED TODOS",
+        knowledge.map(super::state::ProjectKnowledgeState::todos),
+        "no unresolved todos",
+    );
+
+    if let Some(note) = knowledge.and_then(super::state::ProjectKnowledgeState::memory_note) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            note.to_owned(),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// One labelled section of the project-knowledge view: a bold heading, then
+/// either its entries (each on its own line, with a trailing "...and N more"
+/// when the section's budget left some out) or `empty_note` when there is
+/// nothing to show — the same honest-empty-state shape
+/// [`push_worker_section`] uses for the project overview.
+fn push_knowledge_section(
+    lines: &mut Vec<Line<'static>>,
+    title: &'static str,
+    section: Option<&KnowledgeSection>,
+    empty_note: &'static str,
+) {
+    lines.push(Line::from(Span::styled(
+        title,
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    let entries = section.map(|s| s.lines.as_slice()).unwrap_or_default();
+    if entries.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  {empty_note}"),
+            Style::default().fg(Color::DarkGray),
+        )));
+        return;
+    }
+    for line in entries {
+        lines.push(Line::from(format!("  {line}")));
+    }
+    if let Some(omitted) = section.map(|s| s.omitted).filter(|omitted| *omitted > 0) {
+        lines.push(Line::from(Span::styled(
+            format!("  ...and {omitted} more"),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
 }
 
 /// How many recently completed workers the project overview shows.
@@ -2314,13 +2422,16 @@ mod tests {
     #[test]
     fn the_status_bar_always_shows_the_key_bindings() {
         let mut state = sample();
-        let bottom = last_row(&state, 100, 24);
+        // 120, not 100: Phase 25's `k knowledge` binding took the row past a
+        // hundred columns, the same trade recorded on
+        // `the_status_bar_shows_a_note_next_to_the_bindings` below.
+        let bottom = last_row(&state, 120, 24);
         assert!(bottom.contains("tab"), "bindings missing: `{bottom}`");
         assert!(bottom.contains("overview"), "bindings missing: `{bottom}`");
         assert!(bottom.contains("quit"), "bindings missing: `{bottom}`");
 
         state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
-        let bottom = last_row(&state, 100, 24);
+        let bottom = last_row(&state, 120, 24);
         assert!(
             bottom.contains("esc") && bottom.contains("quit"),
             "the overlay's bindings must be shown too: `{bottom}`"
@@ -2345,9 +2456,10 @@ mod tests {
         state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
         // 120 columns fit the note alongside the bindings before Phase 47
-        // added `e events`; 132 is the same margin this test always had,
-        // measured against the longer row rather than assumed.
-        let bottom = last_row(&state, 132, 24);
+        // added `e events`, and 132 after; Phase 25's `k knowledge` pushed
+        // the row past 132, so this is 150 now — the same margin this test
+        // always had, measured against the longer row rather than assumed.
+        let bottom = last_row(&state, 150, 24);
         assert!(
             bottom.contains("only one session"),
             "the note must reach the status bar: `{bottom}`"
@@ -2401,6 +2513,20 @@ mod tests {
         screens.push(rendered(&state, 100, 30));
         state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        screens.push(rendered(&state, 100, 30));
+        // Phase 25's own diagnostic overlay, map line 1107: a "decorative
+        // node graph" is exactly the shape this sweep already guards
+        // against for every other overlay.
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        state.open_project_knowledge(
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            None,
+        );
         screens.push(rendered(&state, 100, 30));
 
         for screen in screens {
@@ -2564,7 +2690,8 @@ mod tests {
     fn the_status_bar_shows_control_mode_bindings_by_default() {
         let state = sample();
         assert_eq!(state.mode(), Mode::Control);
-        let bottom = last_row(&state, 100, 24).to_lowercase();
+        // 120, not 100 — see `the_status_bar_always_shows_the_key_bindings`.
+        let bottom = last_row(&state, 120, 24).to_lowercase();
         assert!(!bottom.contains("session mode"), "got: `{bottom}`");
         assert!(bottom.contains("quit"), "got: `{bottom}`");
     }
@@ -2808,6 +2935,260 @@ mod tests {
             Vec::new(),
             Vec::new(),
             0,
+            Some("project memory unavailable: disk full".to_owned()),
+        );
+
+        let text = rendered(&state, 120, 40);
+        assert!(
+            text.contains("project memory unavailable: disk full"),
+            "{text}"
+        );
+    }
+
+    /// One [`KnowledgeSection`] with a single fixture line, for the five
+    /// section-presence tests below — each supplies this to exactly one of
+    /// the project-knowledge view's five sections and leaves the other four
+    /// at their `Default`, so a mutation that deletes only one section's
+    /// heading fails only that section's test.
+    fn one_entry(text: &str) -> KnowledgeSection {
+        KnowledgeSection {
+            lines: vec![text.to_owned()],
+            omitted: 0,
+        }
+    }
+
+    /// Map lines 1098 and 1100: the project-knowledge view opens and shows
+    /// active decisions in their own labelled section.
+    #[test]
+    fn the_project_knowledge_view_shows_active_decisions_in_their_own_section() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        state.open_project_knowledge(
+            one_entry("decision: adopt the grouped-text project-knowledge view"),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            None,
+        );
+
+        let text = rendered(&state, 120, 40);
+        assert!(text.contains("ACTIVE DECISIONS"), "{text}");
+        assert!(
+            text.contains("adopt the grouped-text project-knowledge view"),
+            "{text}"
+        );
+    }
+
+    /// Map line 1101: known constraints show in their own labelled section.
+    #[test]
+    fn the_project_knowledge_view_shows_known_constraints_in_their_own_section() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        state.open_project_knowledge(
+            KnowledgeSection::default(),
+            one_entry("constraint: never run ci-local beside cargo"),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            None,
+        );
+
+        let text = rendered(&state, 120, 40);
+        assert!(text.contains("KNOWN CONSTRAINTS"), "{text}");
+        assert!(text.contains("never run ci-local beside cargo"), "{text}");
+    }
+
+    /// Map line 1102: implemented-or-planned features show in their own
+    /// labelled section.
+    #[test]
+    fn the_project_knowledge_view_shows_features_in_their_own_section() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        state.open_project_knowledge(
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            one_entry("feature: the project-knowledge overlay"),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            None,
+        );
+
+        let text = rendered(&state, 120, 40);
+        assert!(text.contains("FEATURES"), "{text}");
+        assert!(text.contains("the project-knowledge overlay"), "{text}");
+    }
+
+    /// Map line 1103: failed approaches show in their own, dedicated
+    /// historical section.
+    #[test]
+    fn the_project_knowledge_view_shows_failed_approaches_in_a_historical_section() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        state.open_project_knowledge(
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            one_entry("failed_attempt: a single global lock deadlocked"),
+            KnowledgeSection::default(),
+            None,
+        );
+
+        let text = rendered(&state, 120, 40);
+        assert!(text.contains("FAILED APPROACHES"), "{text}");
+        assert!(text.contains("HISTORICAL"), "{text}");
+        assert!(text.contains("a single global lock deadlocked"), "{text}");
+    }
+
+    /// Map line 1104: unresolved todos show in their own labelled section.
+    #[test]
+    fn the_project_knowledge_view_shows_unresolved_todos_in_their_own_section() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        state.open_project_knowledge(
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            one_entry("todo: wire the knowledge view into main"),
+            None,
+        );
+
+        let text = rendered(&state, 120, 40);
+        assert!(text.contains("UNRESOLVED TODOS"), "{text}");
+        assert!(text.contains("wire the knowledge view into main"), "{text}");
+    }
+
+    /// Map line 1098's empty-state half: with nothing recorded in any kind,
+    /// every one of the five sections says so honestly rather than
+    /// rendering an empty heading — the same rule
+    /// `the_project_overview_says_so_when_a_section_has_nothing` proves for
+    /// the project overview.
+    #[test]
+    fn the_project_knowledge_view_says_so_when_every_section_is_empty() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        state.open_project_knowledge(
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            None,
+        );
+
+        let text = rendered(&state, 120, 40);
+        assert!(text.contains("no active decisions recorded"), "{text}");
+        assert!(text.contains("no known constraints recorded"), "{text}");
+        assert!(text.contains("no features recorded"), "{text}");
+        assert!(text.contains("no failed approaches recorded"), "{text}");
+        assert!(text.contains("no unresolved todos"), "{text}");
+    }
+
+    /// Map line 1106, at the render layer: whatever line
+    /// `shell::knowledge_line` hands the overlay reaches the screen
+    /// unchanged — a supersession note included when it names one, and no
+    /// note appended when it does not. The query-layer proof that the note
+    /// is only ever added when a real `superseded_by` exists lives in
+    /// `shell::project_knowledge_tests::
+    /// failed_approaches_are_shown_regardless_of_status_and_name_their_successor`;
+    /// this proves the text that function produces is not lost or altered
+    /// on the way to the terminal.
+    #[test]
+    fn the_project_knowledge_view_shows_a_supersession_note_when_present_and_omits_it_when_absent()
+    {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        state.open_project_knowledge(
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection {
+                lines: vec![
+                    "failed_attempt: a global lock — superseded by mem_01AAAAAAAAAAAAAAAAAAAAAAAA"
+                        .to_owned(),
+                    "failed_attempt: a distinct approach, still true".to_owned(),
+                ],
+                omitted: 0,
+            },
+            KnowledgeSection::default(),
+            None,
+        );
+
+        let text = rendered(&state, 120, 40);
+        assert!(
+            text.contains("superseded by mem_01AAAAAAAAAAAAAAAAAAAAAAAA"),
+            "{text}"
+        );
+        assert_eq!(
+            text.matches("superseded by").count(),
+            1,
+            "the line with no successor must not also carry a note:\n{text}"
+        );
+    }
+
+    /// Map line 1107, and practice §17: the project-knowledge view draws
+    /// plain text and never a decorative node graph — proved by scanning the
+    /// rendered output for the glyphs a node-and-edge visualization would
+    /// need (node markers, arrows/connectors), at a realistic width *and* a
+    /// wide one, so a value truncated off a narrow render cannot make this
+    /// pass for the wrong reason.
+    ///
+    /// Deliberately **not** scanning for ordinary box-drawing border
+    /// characters (`┌│└` and friends): every overlay in this shell,
+    /// including this one, draws inside a single bordered `Block` — see
+    /// `nothing_draws_with_block_elements_so_the_design_stays_text_first`'s
+    /// own comment, "Box-drawing characters used for borders are a
+    /// different range and stay allowed." What line 1107 rules out is a
+    /// graph of scattered, connected nodes, not this popup's own frame.
+    #[test]
+    fn the_project_knowledge_view_renders_no_decorative_graph_glyphs() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        state.open_project_knowledge(
+            one_entry("decision: adopt the grouped-text project-knowledge view"),
+            one_entry("constraint: never run ci-local beside cargo"),
+            one_entry("feature: the project-knowledge overlay"),
+            KnowledgeSection {
+                lines: vec![
+                    "failed_attempt: a global lock — superseded by mem_01AAAAAAAAAAAAAAAAAAAAAAAA"
+                        .to_owned(),
+                ],
+                omitted: 0,
+            },
+            one_entry("todo: wire the knowledge view into main"),
+            None,
+        );
+
+        let graph_glyphs = [
+            '●', '○', '◆', '◇', '■', '□', '▲', '▼', '→', '←', '↑', '↓', '↔', '↕',
+        ];
+        for (width, height) in [(120, 40), (400, 60)] {
+            let text = rendered(&state, width, height);
+            for glyph in graph_glyphs {
+                assert!(
+                    !text.contains(glyph),
+                    "map line 1107: no decorative graph glyph `{glyph}`, width {width}:\n{text}"
+                );
+            }
+        }
+    }
+
+    /// A project-knowledge read failure still opens the overlay — the same
+    /// contract `a_project_memory_read_failure_still_opens_with_an_honest_note`
+    /// proves for the project overview — and says plainly that memory could
+    /// not be read rather than presenting empty sections as if there were
+    /// nothing to show.
+    #[test]
+    fn a_project_knowledge_read_failure_still_opens_with_an_honest_note() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        state.open_project_knowledge(
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
             Some("project memory unavailable: disk full".to_owned()),
         );
 

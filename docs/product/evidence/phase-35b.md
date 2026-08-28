@@ -115,3 +115,127 @@ Missing evidence:
   them. The worker reasoned that sorting by `.total()` would reproduce the same
   winner in every case the existing tests exercise, and said plainly that it did
   not prove it mechanically. A future reader should not take it as proven.
+
+### Phase 35B — evidence that varies where the prior cannot (lines 1541, 1548)
+
+Contract: Given two routing candidates that a same-vendor pairing prior scores
+identically, when Glasshouse has accumulated reliable observations for one of
+them, Glasshouse ranks the candidate with better observed success above the one
+the prior merely favours — while discounting observations drawn from small
+samples or stale windows rather than treating a single lucky turn as
+established evidence.
+
+State: **COMPLETE** for map lines 1541 and 1548. **NOT STARTED** for 1542 and
+1545, both declined by the integrator against the worker's proposal for 1542 —
+reasons below.
+
+**Why this package existed at all.** Phase 9J built the pairing prior, wired it
+to `InteractiveRouting::on_provider_failure`, mutation-proved it, and it was
+**inert**: `harness::pairing::classify` derives `PairingClass` from `(harness,
+model attribution, harness vendor)` and never reads `route`, so every same-model
+candidate scores an identical prior. The *evidence* does not share that defect —
+`EvidenceKey` is built per candidate carrying `candidate.model()` and `route`,
+so two same-model candidates on different providers get different observations.
+**The fifth link passes for evidence exactly where it fails for the prior**, and
+that is the whole basis of this package.
+
+Production evidence:
+
+- `routing/evidence.rs::ObservedEvidenceSource::observed` now supplies the
+  `reliable_observation_count` that `config/pairing.rs::decay_factor` decays
+  against, from a real `EvidenceLedger`, with a staleness discount built on
+  `AggregateReading::freshness` — line 1541's *real* input and line 1548's
+  stale-window half.
+- `config/pairing.rs::SUFFICIENT_EVIDENCE_OBSERVATIONS`, a hard sufficiency gate
+  in `native_pairing_prior_contribution` — line 1548's small-sample half.
+- The scoring path itself is unchanged and pre-existing:
+  `InteractiveRouting::on_provider_failure` → `score_candidate` →
+  `native_pairing_prior_contribution` → `RoutingExplanation::total` → `best()`.
+
+Regression evidence:
+
+- `routing::interactive::tests::on_provider_failure_prior_decays_as_real_recorded_evidence_accumulates`
+  — a **real** `EvidenceLedger`, 5 versus 15 fresh observations, strictly smaller
+  prior magnitude at 15.
+- `routing::interactive::tests::on_provider_failure_discounts_a_stale_observation_window`
+  — the same eight successes, ten seconds old versus two days old.
+- `routing::interactive::tests::score_candidate_does_not_let_a_thin_sample_outrank_an_established_one`
+- Pre-existing: `tests/pairing_prior.rs::the_prior_contribution_decays_to_zero_as_observations_accumulate`.
+
+**The new tests use a real ledger rather than the pre-existing hand-built
+`ObservationSource` doubles**, which matters here more than usual: the doubles
+can express counts and rates the shipped ledger can never produce, and one of
+this batch's findings is precisely that the shipped ledger's range is narrower
+than the doubles suggested.
+
+Failure/isolation evidence:
+
+- **Inertness check** (the one that mattered): `evidence_signal` neutralised to
+  an unconditional `return 0.0`. The acceptance test failed — both candidates
+  tie at their equal priors and `best()` falls back to caller order, returning
+  the wrong candidate. **The term is load-bearing, not decorative.**
+- Mutations, all killed: `bypass-fallback`, `remove-guard`, `invert-condition`,
+  `alter-boundary`, `accept-stale-state`.
+
+**A pre-existing mechanism found inert, and not fixed here.**
+`CONFIDENT_AT_OBSERVATIONS = 5` (Phase 9J) scales confidence continuously, but
+`routing/evidence.rs::MIN_SAMPLE_FOR_SUMMARY = 5` means `EvidenceLedger::summarize`
+**never returns a count below 5**. So every real observation is already at
+maximum confidence the instant it exists: **5 real samples and 5000 real samples
+score identically.** That curve is reachable only through a hand-built
+`ObservationSource`. This is why 1548 needed a hard gate rather than a second
+curve layered on a saturated one, and it is recorded rather than repaired
+because repairing it means choosing between lowering `MIN_SAMPLE_FOR_SUMMARY`
+and raising `CONFIDENT_AT_OBSERVATIONS`, which is a policy decision this package
+was not scoped to make.
+
+**Three provisional constants, named as provisional.**
+`SUFFICIENT_EVIDENCE_OBSERVATIONS = 5` (matched to the two existing constants
+answering the same question), `EVIDENCE_STALE_AFTER_SECONDS = 86400` (chosen
+clearly shorter than `FAILOVER_EVIDENCE_WINDOW_SECONDS`'s 7 days so *stale* and
+*outside the window* stay distinct concepts), `STALE_OBSERVATION_DISCOUNT = 0.5`
+(a fraction, not a curve — 1548 asks staleness to count for less, not to vanish;
+zeroing would silently reproduce the "no evidence" case). None is measured. Same
+standing as `RETRIEVAL_WEIGHT_FLOOR`, and recorded so none is mistaken for a
+constant with a derivation behind it.
+
+**Line 1542 was proposed COMPLETE by the worker and declined by the
+integrator.** The line reads *"prefer observed success **and reliability** over
+same-vendor alignment"*. `ObservedEvidence::reliability` is **`None` on 100% of
+real production rows** — `ObservedEvidenceSource::observed` leaves it unset
+because `RoutingSummary` has no field distinct from `failure_rate` that could
+honestly fill it, and the worker correctly declined to duplicate
+`task_success_rate` into it (both are summed as independent terms, so copying
+would double-count the one real signal). The mechanism therefore closes on
+`task_success_rate` alone.
+
+**That is the identical standard by which line 1545 was refused in the same
+round**, and consistency is the point: an input that is absent or constant
+across every real observation cannot support a box that names it. 1545's
+`ContextState` is `Unknown` on every real row because
+`NewObservation::with_context_state` has zero non-test callers; 1542's
+`reliability` is `None` on every real row for the same class of reason. Closing
+1542 would retire a requirement that a second, independent reliability signal
+ever be observed. It needs one — not more scoring code.
+
+**Line 1541 is closed with one narrowing recorded rather than hidden.** The line
+names the *"exact harness-profile-model-backend combination"*. The evidence key
+carries harness, model, provider and protocol, but **not the launch profile** —
+`ObservedEvidenceSource::observed`'s own doc states *"`key`'s launch profile is
+not part of the query, because nothing this ledger stores carries one."* The
+line's substantive requirement — decay as reliable observations accumulate,
+scoped to a combination rather than global — is implemented, production-wired
+and mutation-proven against a real ledger, so the box is ticked; recording the
+narrowing here keeps the remaining dimension discoverable. Adding it means a
+ledger column and a migration, which no phase currently asks for.
+
+Platform/external evidence: pure computation, no `#[cfg]` added.
+
+Missing evidence:
+
+- **1542** needs a reliability signal independent of `task_success_rate`.
+- **1545** needs a real producer for `ContextState`.
+- **1541's launch-profile dimension** needs a ledger column, and with it a
+  migration.
+- `CONFIDENT_AT_OBSERVATIONS`'s curve needs `MIN_SAMPLE_FOR_SUMMARY` and it to
+  stop being the same number before it can discriminate.

@@ -944,6 +944,9 @@ impl RoutingRecord {
 mod tests {
     use super::*;
     use crate::config::pairing::NoObservations;
+    use crate::routing::evidence::{
+        EvidenceLedger, MIN_SAMPLE_FOR_SUMMARY, NewObservation, ObservedEvidenceSource, Outcome,
+    };
     use crate::routing::{AssignedModel, Cost, CredentialId};
     use crate::secret::SecretRef;
 
@@ -1585,6 +1588,408 @@ mod tests {
                 assert!(
                     rendered.contains("-1.000  failure-domain diversity"),
                     "a shared failure domain must render a negative, signed magnitude: {rendered}"
+                );
+            }
+            other => panic!("expected a failover: {other:?}"),
+        }
+    }
+
+    // --- Map lines 1541, 1542 and 1548, through this module's own
+    // production entry points and a real `EvidenceLedger` rather than a hand
+    // built test double — the packet's own Phase −1 chain, exercised end to
+    // end without a socket. `gateway::conformance`'s
+    // `a_real_provider_failure_with_recorded_evidence_prefers_the_stronger_candidate_over_order`
+    // already proves the full stack including the gateway's own wiring; these
+    // prove the ranking policy itself is what does the work, one variable at
+    // a time. ---
+
+    /// A real, on-disk `EvidenceLedger` inside `base`, named `name` so two
+    /// fixtures in the same test never share a project — the same idiom
+    /// `routing::evidence::tests::Fixture` and `tests/routing_evidence.rs`
+    /// use.
+    fn evidence_ledger(base: &std::path::Path, name: &str) -> EvidenceLedger {
+        use clap::Parser;
+
+        let root = base.join("workspace").join(name);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            base.join("data").join(name).to_str().unwrap(),
+            "--config-dir",
+            base.join("config").join(name).to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, &root).unwrap();
+        EvidenceLedger::open(&runtime).unwrap()
+    }
+
+    /// `count` observations for `(provider, model, harness)`, all with
+    /// `outcome`, timestamped `at`, `at + 1`, `at + 2`, ... so
+    /// `EvidenceLedger::summarize`'s window sees them as distinct rows.
+    fn record_observations(
+        ledger: &EvidenceLedger,
+        provider: &str,
+        model: &str,
+        harness: &str,
+        count: usize,
+        outcome: Outcome,
+        at: i64,
+    ) {
+        for i in 0..count {
+            let t = at + i as i64;
+            ledger
+                .record(
+                    NewObservation::new(provider, model)
+                        .with_route(Some("anthropic-messages"))
+                        .with_harness(Some(harness))
+                        .with_timing(Some(t), Some(t + 1))
+                        .with_outcome(outcome),
+                    t,
+                )
+                .unwrap();
+        }
+    }
+
+    fn prior_magnitude(explanation: &RoutingExplanation) -> f64 {
+        explanation
+            .contributions()
+            .iter()
+            .find(|c| c.name() == "native-pairing prior")
+            .expect("every scored candidate carries a native-pairing prior line")
+            .magnitude()
+    }
+
+    /// Acceptance test 1 (load-bearing): two same-model candidates whose
+    /// native-pairing prior scores them identically (`"the-model"` is not
+    /// vendor-native for `claude-code` under either provider, so both prior
+    /// contributions are `0.0`) — one has five real, recent, recorded
+    /// failures and the other five real, recent, recorded successes for the
+    /// exact `(provider, model, route, harness)` combination.
+    /// `InteractiveRouting::on_provider_failure` must return the
+    /// observed-better one, `nous`, even though `kilo` is listed first.
+    /// Neutralising the evidence term (deleting the `local observed
+    /// evidence` push in `native_pairing_prior_contribution`, or forcing
+    /// `evidence_signal` to answer `0.0` unconditionally) leaves both totals
+    /// tied at their equal, zero priors, and `best` falls back to the
+    /// caller's own order — `kilo` — failing this test.
+    #[test]
+    fn on_provider_failure_with_real_recorded_evidence_prefers_the_stronger_candidate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = crate::provider::cache::now_unix_seconds();
+
+        let ledger = evidence_ledger(tmp.path(), "acceptance-one");
+        record_observations(
+            &ledger,
+            "kilo",
+            "the-model",
+            "claude-code",
+            MIN_SAMPLE_FOR_SUMMARY,
+            Outcome::Failed,
+            now - 10,
+        );
+        record_observations(
+            &ledger,
+            "nous",
+            "the-model",
+            "claude-code",
+            MIN_SAMPLE_FOR_SUMMARY,
+            Outcome::Succeeded,
+            now - 10,
+        );
+        let source = ObservedEvidenceSource::new(&ledger, now, FAILOVER_EVIDENCE_WINDOW_SECONDS);
+
+        let routing = InteractiveRouting::new();
+        let current = session();
+        let poor_evidence_first = backend("kilo", "the-model");
+        let good_evidence_second = backend("nous", "the-model");
+
+        let response = routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            &[poor_evidence_first, good_evidence_second],
+            PairingPreference::Strong,
+            &pairing::PairingOverrides::default(),
+            &source,
+        );
+
+        match response {
+            FailureResponse::FailOver {
+                to, explanation, ..
+            } => {
+                assert_eq!(prior_magnitude(&explanation), 0.0, "the tied prior");
+                assert_eq!(
+                    to.provider(),
+                    "nous",
+                    "the candidate with real recorded successes must win over the one with real \
+                     recorded failures, even though it was not first in the caller's own order: \
+                     {explanation:?}"
+                );
+            }
+            other => panic!("expected a same-model failover: {other:?}"),
+        }
+    }
+
+    /// Acceptance test 2 (1541): the same vendor-native candidate, scored
+    /// twice against two real ledgers that differ only in how many reliable
+    /// observations they hold — five and fifteen, both fresh, both
+    /// unanimous, so only `reliable_observation_count` differs between the
+    /// two calls. The prior's magnitude must be strictly smaller at fifteen
+    /// than at five, and positive at five (a fresh session gets a real
+    /// prior). Inverting `decay_factor` to grow with `count` instead of
+    /// shrink (the packet's `invert-condition`) fails this by making `high`
+    /// the larger of the two.
+    #[test]
+    fn on_provider_failure_prior_decays_as_real_recorded_evidence_accumulates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = crate::provider::cache::now_unix_seconds();
+
+        let low_ledger = evidence_ledger(tmp.path(), "acceptance-two-low");
+        record_observations(
+            &low_ledger,
+            "nous",
+            "claude-fable-5",
+            "claude-code",
+            MIN_SAMPLE_FOR_SUMMARY,
+            Outcome::Succeeded,
+            now - 10,
+        );
+        let low_source =
+            ObservedEvidenceSource::new(&low_ledger, now, FAILOVER_EVIDENCE_WINDOW_SECONDS);
+
+        let high_ledger = evidence_ledger(tmp.path(), "acceptance-two-high");
+        record_observations(
+            &high_ledger,
+            "nous",
+            "claude-fable-5",
+            "claude-code",
+            15,
+            Outcome::Succeeded,
+            now - 10,
+        );
+        let high_source =
+            ObservedEvidenceSource::new(&high_ledger, now, FAILOVER_EVIDENCE_WINDOW_SECONDS);
+
+        let routing = InteractiveRouting::new();
+        let current = Assignment::new("claude-code", backend("openrouter", "claude-fable-5"));
+        let candidate = backend("nous", "claude-fable-5");
+
+        let prior_at = |source: &dyn ObservationSource| match routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            std::slice::from_ref(&candidate),
+            PairingPreference::Strong,
+            &pairing::PairingOverrides::default(),
+            source,
+        ) {
+            FailureResponse::FailOver { explanation, .. } => prior_magnitude(&explanation),
+            other => panic!("expected a failover: {other:?}"),
+        };
+
+        let low = prior_at(&low_source);
+        let high = prior_at(&high_source);
+        assert!(
+            low > 0.0,
+            "five reliable observations must still leave a real prior: {low}"
+        );
+        assert!(
+            high < low,
+            "the prior at fifteen reliable observations ({high}) must be strictly smaller than \
+             at five ({low})"
+        );
+    }
+
+    /// A fixed reliable-observation count and success rate, unconditionally
+    /// — for exercising `score_candidate`'s sufficiency gate in isolation,
+    /// independent of what a real ledger could ever produce (it can never
+    /// answer a count below `MIN_SAMPLE_FOR_SUMMARY`).
+    struct FixedCount {
+        count: usize,
+        success_rate: f64,
+    }
+
+    impl ObservationSource for FixedCount {
+        fn observed(
+            &self,
+            _key: &pairing::EvidenceKey,
+        ) -> Option<crate::config::pairing::ObservedEvidence> {
+            let mut evidence = crate::config::pairing::ObservedEvidence::none();
+            evidence.reliable_observation_count = self.count;
+            evidence.task_success_rate = Some(self.success_rate);
+            Some(evidence)
+        }
+    }
+
+    /// Acceptance test 3 (1542/1548): a thin-but-perfect record must not
+    /// outrank a thick-but-modest one. Two samples at 100% success and
+    /// twenty at 60% success, scored through `score_candidate` (the exact
+    /// function `on_provider_failure` calls per candidate): without the
+    /// sufficiency gate, `evidence_signal`'s own confidence scaling alone is
+    /// not enough — `(1.0-0.5)*2.0*(2.0/5.0) = 0.4` beats
+    /// `(0.6-0.5)*2.0*1.0 = 0.2` — so the gate is what actually decides this,
+    /// not merely a discount on top of an already-correct answer. Setting
+    /// `SUFFICIENT_EVIDENCE_OBSERVATIONS` to `0` (the packet's
+    /// `alter-boundary`), or deleting the `>=` branch entirely (`remove-guard`),
+    /// both let the two-sample record back in and fail this test.
+    #[test]
+    fn score_candidate_does_not_let_a_thin_sample_outrank_an_established_one() {
+        let thin = FixedCount {
+            count: 2,
+            success_rate: 1.0,
+        };
+        let thick = FixedCount {
+            count: 20,
+            success_rate: 0.6,
+        };
+        let candidate = backend("nous", "unlisted-model-v1");
+
+        let thin_explanation = score_candidate(
+            IntegrationId::ClaudeCode,
+            &candidate,
+            PairingPreference::Strong,
+            &pairing::PairingOverrides::default(),
+            &thin,
+        );
+        let thick_explanation = score_candidate(
+            IntegrationId::ClaudeCode,
+            &candidate,
+            PairingPreference::Strong,
+            &pairing::PairingOverrides::default(),
+            &thick,
+        );
+
+        assert!(
+            !thin_explanation
+                .contributions()
+                .iter()
+                .any(|c| c.name() == "local observed evidence" && c.magnitude() != 0.0),
+            "two reliable observations must never contribute a nonzero evidence signal: \
+             {thin_explanation:?}"
+        );
+        assert!(
+            thick_explanation.total() > thin_explanation.total(),
+            "a candidate with a 100% success rate over two samples ({}) must not outrank one \
+             with a strong record over many ({})",
+            thin_explanation.total(),
+            thick_explanation.total()
+        );
+    }
+
+    /// Acceptance test 4 (1548): the same eight real, unanimous successes
+    /// for the same candidate, recorded ten seconds ago in one ledger and two
+    /// days ago in another. Eight is chosen so the stale discount
+    /// (`STALE_OBSERVATION_DISCOUNT`, 0.5) drops the effective count below
+    /// `SUFFICIENT_EVIDENCE_OBSERVATIONS` (four, against a threshold of
+    /// five) while the fresh count (eight) clears it — the same mechanism
+    /// acceptance test 3 proves, now driven by staleness rather than a raw
+    /// sample size. Ignoring `AggregateReading::freshness` entirely (the
+    /// packet's `accept-stale-state`) makes both ledgers answer identically
+    /// and this assertion fails.
+    #[test]
+    fn on_provider_failure_discounts_a_stale_observation_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = crate::provider::cache::now_unix_seconds();
+
+        let fresh_ledger = evidence_ledger(tmp.path(), "acceptance-four-fresh");
+        record_observations(
+            &fresh_ledger,
+            "nous",
+            "the-model",
+            "claude-code",
+            8,
+            Outcome::Succeeded,
+            now - 10,
+        );
+        let fresh_source =
+            ObservedEvidenceSource::new(&fresh_ledger, now, FAILOVER_EVIDENCE_WINDOW_SECONDS);
+
+        let stale_ledger = evidence_ledger(tmp.path(), "acceptance-four-stale");
+        let two_days_ago = now - 2 * 24 * 60 * 60;
+        record_observations(
+            &stale_ledger,
+            "nous",
+            "the-model",
+            "claude-code",
+            8,
+            Outcome::Succeeded,
+            two_days_ago,
+        );
+        let stale_source =
+            ObservedEvidenceSource::new(&stale_ledger, now, FAILOVER_EVIDENCE_WINDOW_SECONDS);
+
+        let routing = InteractiveRouting::new();
+        let current = session();
+        let candidate = backend("nous", "the-model");
+
+        let total_at = |source: &dyn ObservationSource| match routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            std::slice::from_ref(&candidate),
+            PairingPreference::Strong,
+            &pairing::PairingOverrides::default(),
+            source,
+        ) {
+            FailureResponse::FailOver { explanation, .. } => explanation.total(),
+            other => panic!("expected a failover: {other:?}"),
+        };
+
+        let fresh_total = total_at(&fresh_source);
+        let stale_total = total_at(&stale_source);
+        assert!(
+            fresh_total > stale_total,
+            "eight recent successes ({fresh_total}) must count for more than the same eight \
+             successes recorded two days ago ({stale_total}) — a stale observation window must \
+             be discounted, not trusted like a fresh one"
+        );
+    }
+
+    /// Acceptance test 5: no recorded evidence at all (a real, empty
+    /// ledger — never `NoObservations`, so this proves the real bridge's own
+    /// empty-count fallback, not merely the test double's) must leave the
+    /// prior at its full, undecayed strength and must not fabricate an
+    /// evidence contribution — absent evidence is not scored as failure, the
+    /// same rule Phase 33C settled for `FailureDomain::Unknown`. Making
+    /// absent evidence answer a zero success rate instead of `None` (the
+    /// packet's `bypass-fallback`) would leave the prior undecayed here too,
+    /// but would push a strongly negative `local observed evidence` line —
+    /// which the second assertion catches.
+    #[test]
+    fn on_provider_failure_falls_back_to_the_undecayed_prior_when_no_evidence_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now = crate::provider::cache::now_unix_seconds();
+        let empty_ledger = evidence_ledger(tmp.path(), "acceptance-five");
+        let source =
+            ObservedEvidenceSource::new(&empty_ledger, now, FAILOVER_EVIDENCE_WINDOW_SECONDS);
+
+        let routing = InteractiveRouting::new();
+        let current = Assignment::new("claude-code", backend("openrouter", "claude-fable-5"));
+        let candidate = backend("nous", "claude-fable-5");
+
+        let response = routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            &[candidate],
+            PairingPreference::Strong,
+            &pairing::PairingOverrides::default(),
+            &source,
+        );
+
+        match response {
+            FailureResponse::FailOver { explanation, .. } => {
+                assert_eq!(
+                    prior_magnitude(&explanation),
+                    1.0,
+                    "no recorded evidence must leave the prior at its full, undecayed strength, \
+                     not partway decayed and not a penalty: {explanation:?}"
+                );
+                assert!(
+                    !explanation
+                        .contributions()
+                        .iter()
+                        .any(|c| c.name() == "local observed evidence"),
+                    "no recorded evidence must not fabricate an evidence contribution at all: \
+                     {explanation:?}"
                 );
             }
             other => panic!("expected a failover: {other:?}"),

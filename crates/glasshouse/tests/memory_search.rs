@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 
-use glasshouse::memory::search::SearchScope;
+use glasshouse::memory::search::{LadderRung, SearchScope, ladder_rung};
 use glasshouse::memory::{
     DecisionProvenance, MemoryAuthority, MemoryKind, MemoryStatus, NewMemory, ProjectMemory,
     ProjectPhase,
@@ -485,4 +485,282 @@ fn a_prototype_phase_decision_is_penalized_until_it_is_reaffirmed() {
         after[0].id, exploratory.id,
         "reaffirming a prototype-phase decision must lift the penalty:\n{after:#?}"
     );
+}
+
+// -------------------------------------------------------------------------
+// Phase 21E — the decision ladder: authority and current validity rank
+// ahead of recency and raw lexical relevance. Every test below hands the
+// rung-losing side of the comparison a far *stronger* text match, so the
+// assertion can only pass because of the ladder, never by accident of
+// weight or relevance.
+// -------------------------------------------------------------------------
+
+/// Acceptance test 1 — the ladder is inspectable: a caller can name which
+/// rung a real search result sits on directly, without re-deriving it from
+/// `retrieval_weight`'s blended float, and the rungs are themselves
+/// comparable.
+#[test]
+fn a_caller_can_name_which_rung_a_search_result_sits_on_without_reading_a_float() {
+    let fixture = Fixture::new();
+    let project = fixture.open();
+    let store = project.store();
+
+    let invariant = store
+        .record(
+            NewMemory::new(MemoryKind::Constraint, "quartz tokens are never logged")
+                .with_subject(Some("quartz ladder invariant"))
+                .with_authority(Some(MemoryAuthority::Invariant)),
+        )
+        .unwrap();
+    let idea = store
+        .record(
+            NewMemory::new(MemoryKind::Finding, "quartz could maybe batch requests")
+                .with_subject(Some("quartz ladder idea"))
+                .with_authority(Some(MemoryAuthority::Idea)),
+        )
+        .unwrap();
+
+    let results = store.search("quartz", SearchScope::Current, 10).unwrap();
+    assert_eq!(results.len(), 2);
+
+    let invariant_result = results.iter().find(|r| r.id == invariant.id).unwrap();
+    let idea_result = results.iter().find(|r| r.id == idea.id).unwrap();
+    assert_eq!(
+        ladder_rung(invariant_result),
+        LadderRung::Invariant,
+        "a caller must be able to name the invariant's rung directly"
+    );
+    assert!(
+        ladder_rung(idea_result) < ladder_rung(invariant_result),
+        "the idea's rung must be distinguishable from, and below, the invariant's"
+    );
+}
+
+/// Acceptance test 2, line 915: a current decision outranks a historical
+/// one, despite a far weaker lexical match.
+#[test]
+fn line_915_a_current_decision_outranks_a_historical_one_despite_a_much_weaker_match() {
+    let fixture = Fixture::new();
+    let project = fixture.open();
+    let store = project.store();
+
+    let historical = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Decision,
+                "garnet garnet garnet garnet garnet garnet garnet",
+            )
+            .with_subject(Some("garnet strong historical match"))
+            .with_authority(Some(MemoryAuthority::Decision)),
+        )
+        .unwrap();
+    store
+        .set_status(&historical.id, MemoryStatus::Superseded)
+        .unwrap();
+
+    let current = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Decision,
+                "This note wanders across the release calendar, the on-call \
+                 rotation and, in passing, a single mention of garnet.",
+            )
+            .with_subject(Some("garnet weak current match"))
+            .with_authority(Some(MemoryAuthority::Decision)),
+        )
+        .unwrap();
+
+    let results = store.search("garnet", SearchScope::Historical, 10).unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results[0].id, current.id,
+        "a current decision must outrank a historical one despite a far weaker \
+         lexical match:\n{results:#?}"
+    );
+    assert_eq!(results[1].id, historical.id);
+}
+
+/// Acceptance test 2, line 916: a binding invariant outranks a convenience
+/// preference, despite a far weaker lexical match.
+#[test]
+fn line_916_a_binding_invariant_outranks_a_convenience_preference_despite_a_much_weaker_match() {
+    let fixture = Fixture::new();
+    let project = fixture.open();
+    let store = project.store();
+
+    let preference = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Finding,
+                "topaz topaz topaz topaz topaz topaz topaz",
+            )
+            .with_subject(Some("topaz strong preference match"))
+            .with_authority(Some(MemoryAuthority::Preference)),
+        )
+        .unwrap();
+
+    let invariant = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Constraint,
+                "This service must never log a customer's raw payment token; \
+                 topaz is only an unrelated internal code name mentioned once.",
+            )
+            .with_subject(Some("topaz weak invariant match"))
+            .with_authority(Some(MemoryAuthority::Invariant)),
+        )
+        .unwrap();
+
+    let results = store.search("topaz", SearchScope::Current, 10).unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results[0].id, invariant.id,
+        "a security invariant must outrank a convenience preference despite a \
+         far weaker lexical match:\n{results:#?}"
+    );
+    assert_eq!(results[1].id, preference.id);
+}
+
+/// Acceptance test 2, line 917: only a *validated* current constraint
+/// outranks an ordinary decision — an unvalidated constraint, even with a
+/// far stronger lexical match, does not, and neither does a decision with an
+/// equally strong match. This is the case `remove-validation` breaks.
+#[test]
+fn line_917_only_a_validated_current_constraint_outranks_an_older_decision() {
+    let fixture = Fixture::new();
+    let project = fixture.open();
+    let store = project.store();
+
+    let decision = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Decision,
+                "beryl beryl beryl beryl beryl beryl beryl",
+            )
+            .with_subject(Some("beryl strong decision match"))
+            .with_authority(Some(MemoryAuthority::Decision)),
+        )
+        .unwrap();
+
+    let unvalidated_constraint = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Constraint,
+                "beryl beryl beryl beryl beryl beryl beryl indeed",
+            )
+            .with_subject(Some("beryl strong unvalidated constraint match"))
+            .with_authority(Some(MemoryAuthority::Constraint)),
+        )
+        .unwrap();
+
+    let validated_constraint = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Constraint,
+                "This paragraph is mostly unrelated background, and only in \
+                 passing does it mention beryl as the limit still in force.",
+            )
+            .with_subject(Some("beryl weak validated constraint match"))
+            .with_authority(Some(MemoryAuthority::Constraint)),
+        )
+        .unwrap();
+    store.reaffirm(&validated_constraint.id).unwrap();
+
+    let results = store.search("beryl", SearchScope::Current, 10).unwrap();
+    let ids: Vec<_> = results.iter().map(|r| r.id.clone()).collect();
+    assert!(ids.contains(&decision.id));
+    assert!(ids.contains(&unvalidated_constraint.id));
+    assert_eq!(
+        results[0].id, validated_constraint.id,
+        "only a *validated* current constraint may outrank an ordinary decision \
+         or an unvalidated constraint that matched far more strongly:\n{results:#?}"
+    );
+}
+
+/// Acceptance test 2, line 918: an ordinary current decision outranks a
+/// stale/exploratory idea, despite a far weaker lexical match.
+#[test]
+fn line_918_an_ordinary_current_decision_outranks_a_stale_idea_despite_a_much_weaker_match() {
+    let fixture = Fixture::new();
+    let project = fixture.open();
+    let store = project.store();
+
+    let idea = store
+        .record(
+            NewMemory::new(MemoryKind::Finding, "opal opal opal opal opal opal opal")
+                .with_subject(Some("opal strong idea match"))
+                .with_authority(Some(MemoryAuthority::Idea)),
+        )
+        .unwrap();
+
+    let decision = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Decision,
+                "This note wanders across the release calendar, the on-call \
+                 rotation and, in passing, a single mention of opal.",
+            )
+            .with_subject(Some("opal weak decision match"))
+            .with_authority(Some(MemoryAuthority::Decision)),
+        )
+        .unwrap();
+
+    let results = store.search("opal", SearchScope::Current, 10).unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results[0].id, decision.id,
+        "an ordinary current decision must outrank a stale/exploratory idea \
+         despite a far weaker lexical match:\n{results:#?}"
+    );
+    assert_eq!(results[1].id, idea.id);
+}
+
+/// Acceptance test 3 — recency must not dominate: a brand-new idea never
+/// outranks an older, validated invariant, however much more strongly the
+/// idea matched the query.
+#[test]
+fn recency_does_not_dominate_a_brand_new_idea_never_outranks_an_older_validated_invariant() {
+    let fixture = Fixture::new();
+    let ticks = Arc::new(Mutex::new(1_000_000i64));
+    let clock = Arc::clone(&ticks);
+    let project =
+        ProjectMemory::open_with_clock(&fixture.runtime, Arc::new(move || *clock.lock().unwrap()))
+            .unwrap();
+    let store = project.store();
+
+    let invariant = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Constraint,
+                "This service must never persist a customer's raw card number; \
+                 jadeite is only an unrelated internal batching queue name.",
+            )
+            .with_subject(Some("jadeite ancient validated invariant"))
+            .with_authority(Some(MemoryAuthority::Invariant)),
+        )
+        .unwrap();
+    store.reaffirm(&invariant.id).unwrap();
+
+    // Two years pass before the idea is even written down.
+    *ticks.lock().unwrap() += 2 * 365 * 86_400;
+
+    let idea = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Finding,
+                "jadeite jadeite jadeite jadeite jadeite jadeite jadeite",
+            )
+            .with_subject(Some("jadeite brand new idea"))
+            .with_authority(Some(MemoryAuthority::Idea)),
+        )
+        .unwrap();
+
+    let results = store.search("jadeite", SearchScope::Current, 10).unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results[0].id, invariant.id,
+        "a brand-new idea must never outrank an older, validated invariant, \
+         however much more strongly it matched the query:\n{results:#?}"
+    );
+    assert_eq!(results[1].id, idea.id);
 }

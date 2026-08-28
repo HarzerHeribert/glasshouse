@@ -495,6 +495,13 @@ fn a_thin_decision_matching_better_is_not_jumped_by_a_finding() {
 /// A thin decision and a well-proven decision of *different* authority
 /// classes keep whatever order BM25 gave them: the rule only reorders within
 /// one authority class.
+///
+/// Both authorities here sit on the same Phase 21E ladder rung
+/// ([`LadderRung::StaleOrExploratory`]) **deliberately**. The ladder orders by
+/// rung before anything else, so a pair straddling two rungs would be reordered
+/// by *that* rule and could no longer say anything about this one. This test
+/// isolates the thin-decision rule by holding the rung constant; the ladder's
+/// own cross-rung ordering is Phase 21E's to prove.
 #[test]
 fn thin_and_well_proven_decisions_of_different_authority_classes_keep_bm25_order() {
     let tmp = tempdir();
@@ -511,17 +518,14 @@ fn thin_and_well_proven_decisions_of_different_authority_classes_keep_bm25_order
             .with_authority(Some(MemoryAuthority::Preference)),
         )
         .unwrap();
-    let well_proven_constraint = store
+    let well_proven_idea = store
         .record(
-            NewMemory::new(
-                MemoryKind::Decision,
-                "amber a constraint decision with a reason",
-            )
-            .with_authority(Some(MemoryAuthority::Constraint))
-            .with_provenance(DecisionProvenance {
-                rationale: Some("locked in by the platform's own limit".to_owned()),
-                ..Default::default()
-            }),
+            NewMemory::new(MemoryKind::Decision, "amber an idea decision with a reason")
+                .with_authority(Some(MemoryAuthority::Idea))
+                .with_provenance(DecisionProvenance {
+                    rationale: Some("locked in by the platform's own limit".to_owned()),
+                    ..Default::default()
+                }),
         )
         .unwrap();
 
@@ -531,7 +535,7 @@ fn thin_and_well_proven_decisions_of_different_authority_classes_keep_bm25_order
         hits[0].id, thin_preference.id,
         "different authority classes must not be compared against each other"
     );
-    assert_eq!(hits[1].id, well_proven_constraint.id);
+    assert_eq!(hits[1].id, well_proven_idea.id);
 }
 
 /// A decision with an assumption recorded but no rationale is not thin — the

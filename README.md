@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`████████████████████░░░░░░░░░░░░░░░░░░░░` 663 / 1280 mandatory capabilities (51%)
+`█████████████████████░░░░░░░░░░░░░░░░░░░` 680 / 1280 mandatory capabilities (53%)
 
 <details>
 <summary>Per-phase breakdown (24 of 104 phases complete)</summary>
@@ -68,7 +68,7 @@ the authoritative specification and tracks what is done.
 | Phase 21B — Decision provenance and assumptions | 11/11 ✅ |
 | Phase 21C — Validity conditions and invalidation | 11/11 ✅ |
 | Phase 21D — Memory age and relevance decay | 9/9 ✅ |
-| Phase 21E — Decision ladder and conflict handling | 0/12 |
+| Phase 21E — Decision ladder and conflict handling | 6/12 |
 | Phase 21F — Memory retrieval quality | 7/11 |
 | Phase 21G — Memory revalidation | 3/9 |
 | Phase 21H — Simplicity-first implementation policy | 0/10 |
@@ -78,7 +78,7 @@ the authoritative specification and tracks what is done.
 | Phase 22 — Memory lifecycle and supersession | 9/9 ✅ |
 | Phase 23 — Memory full-text search | 7/7 ✅ |
 | Phase 24 — Memory reranking | 0/6 |
-| Phase 25 — Project knowledge view | 0/10 |
+| Phase 25 — Project knowledge view | 9/10 |
 | Phase 26 — Memory query for agents | 0/6 |
 | Phase 27 — Context injection | 0/11 |
 | Phase 28 — File-aware memory lookup | 0/5 |
@@ -106,7 +106,7 @@ the authoritative specification and tracks what is done.
 | Phase 34F — Model capability and tier calibration | 0/11 |
 | Phase 35 — Lightweight task classification | 14/14 ✅ |
 | Phase 35A — Candidate generation | 0/11 |
-| Phase 35B — Candidate scoring | 8/25 |
+| Phase 35B — Candidate scoring | 10/25 |
 | Phase 35C — Capacity-aware tier escalation and downgrade | 0/9 |
 | Phase 35D — Routing under subscription pressure | 0/8 |
 | Phase 36 — Session affinity | 0/8 |

@@ -34,6 +34,7 @@
 //! reading the manual once.
 
 use super::policy::retrieval_weight;
+pub use super::policy::{LadderRung, ladder_rung};
 use super::store::{
     MemoryAuthority, MemoryKind, MemoryRecord, MemoryStatus, MemoryStore, MemoryStoreError,
     row_to_record,
@@ -189,6 +190,16 @@ impl<'a> MemoryStore<'a> {
     /// as `Option`, so a memory recorded without one reports it absent
     /// instead of inventing an empty string.
     ///
+    /// # Phase 21E: the ladder ranks before the weight does
+    ///
+    /// Every candidate is first placed on a [`LadderRung`] ([`ladder_rung`]),
+    /// and results are ordered by rung before anything else — a validated
+    /// current constraint outranks an older ordinary decision, and a
+    /// binding invariant outranks everything, regardless of how well any of
+    /// them matched the query text. The weight described below is only ever
+    /// a tie-breaker *within* one rung; it never lets a memory cross into a
+    /// rung its own authority and currency do not earn it.
+    ///
     /// # Phase 21D: decay is applied here, after the match
     ///
     /// The raw BM25 relevance of every candidate is multiplied by
@@ -273,25 +284,34 @@ impl<'a> MemoryStore<'a> {
 
         let now = self.now();
         scored.sort_by(|(a, a_relevance), (b, b_relevance)| {
-            let a_weight = retrieval_weight(
-                a.authority,
-                now,
-                a.created_at,
-                a.last_validated_at,
-                a.provenance.project_phase,
-            );
-            let b_weight = retrieval_weight(
-                b.authority,
-                now,
-                b.created_at,
-                b.last_validated_at,
-                b.provenance.project_phase,
-            );
-            let a_score = *a_relevance * a_weight;
-            let b_score = *b_relevance * b_weight;
-            a_score
-                .partial_cmp(&b_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            // Phase 21E: the ladder rung is the primary key — see
+            // `ladder_rung`'s own documentation for why an idea must never
+            // outrank an invariant regardless of how well it matched. Only
+            // within the same rung does the blended relevance/decay weight
+            // decide the order, exactly as it did before this phase.
+            let a_rung = ladder_rung(a);
+            let b_rung = ladder_rung(b);
+            b_rung.cmp(&a_rung).then_with(|| {
+                let a_weight = retrieval_weight(
+                    a.authority,
+                    now,
+                    a.created_at,
+                    a.last_validated_at,
+                    a.provenance.project_phase,
+                );
+                let b_weight = retrieval_weight(
+                    b.authority,
+                    now,
+                    b.created_at,
+                    b.last_validated_at,
+                    b.provenance.project_phase,
+                );
+                let a_score = *a_relevance * a_weight;
+                let b_score = *b_relevance * b_weight;
+                a_score
+                    .partial_cmp(&b_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
         });
 
         let mut records: Vec<MemoryRecord> = scored.into_iter().map(|(record, _)| record).collect();

@@ -370,6 +370,194 @@ pub fn retrieval_weight(
     RETRIEVAL_WEIGHT_FLOOR + (1.0 - RETRIEVAL_WEIGHT_FLOOR) * decayed
 }
 
+/// Phase 21E's decision ladder — an explicit, inspectable ranking over
+/// authority-and-validity classes, so a caller can ask which rung a memory is
+/// on ([`ladder_rung`]) without re-deriving it from `retrieval_weight`'s
+/// blended float. [`super::store::MemoryStore::search`] sorts by rung
+/// first; the weight remains the tie-breaker *within* one rung, never across
+/// two.
+///
+/// Declared lowest-authority-first, so the derived [`Ord`] needs no second
+/// mapping to keep in sync with the declaration: [`Self::Invariant`] is
+/// declared last and therefore compares greatest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LadderRung {
+    /// Line 918's floor: [`MemoryAuthority::Preference`],
+    /// [`MemoryAuthority::Hypothesis`] and [`MemoryAuthority::Idea`] — never
+    /// binding (see [`MemoryAuthority::is_binding`]) — and
+    /// [`MemoryAuthority::Historical`], which "already explains rather than
+    /// directs" (see `half_life_days`). None of the four ever outrank a
+    /// current decision, however weak that decision's own text match is, and
+    /// however fresh or strongly-matching the memory on this rung happens to
+    /// be — recency does not lift a memory out of its own rung.
+    StaleOrExploratory,
+    /// Line 915's "historical implementation decision": a memory whose own
+    /// [`super::store::MemoryStatus`] records it as no longer current knowledge —
+    /// superseded, rejected, resolved, needs-review, invalidated,
+    /// conflicted. Checked ahead of authority, so a memory that was once a
+    /// binding constraint but has since been superseded lands here, not on a
+    /// rung that presents it as still in force.
+    NotCurrent,
+    /// Line 918's "ordinary current decision": [`MemoryAuthority::Decision`]
+    /// or no assigned authority at all, currently active. Also where a
+    /// current [`MemoryAuthority::Constraint`] sits until it has been
+    /// validated at least once — see [`Self::ValidatedConstraint`].
+    CurrentDecision,
+    /// Line 917's "validated current constraint": [`MemoryAuthority::Constraint`],
+    /// currently active, with [`super::store::MemoryRecord::last_validated_at`] recorded.
+    /// The map's own line names *validated*, not merely *current* — an
+    /// as-yet-unvalidated constraint has not been checked against anything
+    /// and stays on [`Self::CurrentDecision`] until it has.
+    ValidatedConstraint,
+    /// Line 916's invariant: outranks every other rung unconditionally,
+    /// regardless of currency, validation or age. The same rule
+    /// `retrieval_weight` already enforces at the weight layer (`if
+    /// authority == Some(Invariant) { return 1.0 }`), restated here at the
+    /// rung layer so it holds even when two memories' weights would
+    /// otherwise disagree.
+    Invariant,
+}
+
+/// Which rung of [`LadderRung`] `record` sits on.
+///
+/// Reads exactly the three fields Phase 21E's vocabulary is built from —
+/// [`super::store::MemoryRecord::authority`], [`super::store::MemoryRecord::is_current`] and
+/// [`super::store::MemoryRecord::last_validated_at`] — checked in the priority order the
+/// four rules imply: an invariant is never demoted by anything (916); non-
+/// currency demotes everything else regardless of authority (915); only then
+/// does a constraint's own validation state decide whether it outranks an
+/// ordinary decision (917); and what is left splits into ordinary current
+/// decisions and never-binding classes (918).
+pub fn ladder_rung(record: &super::store::MemoryRecord) -> LadderRung {
+    if record.authority == Some(MemoryAuthority::Invariant) {
+        return LadderRung::Invariant;
+    }
+    if !record.is_current() {
+        return LadderRung::NotCurrent;
+    }
+    if record.authority == Some(MemoryAuthority::Constraint) && record.last_validated_at.is_some() {
+        return LadderRung::ValidatedConstraint;
+    }
+    match record.authority {
+        Some(MemoryAuthority::Decision) | Some(MemoryAuthority::Constraint) | None => {
+            LadderRung::CurrentDecision
+        }
+        Some(MemoryAuthority::Preference)
+        | Some(MemoryAuthority::Hypothesis)
+        | Some(MemoryAuthority::Idea)
+        | Some(MemoryAuthority::Historical) => LadderRung::StaleOrExploratory,
+        Some(MemoryAuthority::Invariant) => unreachable!("handled by the first check above"),
+    }
+}
+
+#[cfg(test)]
+mod ladder_tests {
+    use super::super::store::{MemoryId, MemoryKind, MemoryRecord, MemoryStatus};
+    use super::*;
+
+    /// A record with only the fields `ladder_rung` reads set explicitly,
+    /// everything else defaulted. Not a fixture that rebuilds `search`'s
+    /// ordering — see the integration tests in `tests/memory_search.rs` for
+    /// the acceptance-test proof that goes through `MemoryStore::search`
+    /// itself; this is a narrower, purely-unit check of the classification
+    /// function those integration tests rely on.
+    fn record(
+        authority: Option<MemoryAuthority>,
+        status: MemoryStatus,
+        last_validated_at: Option<i64>,
+    ) -> MemoryRecord {
+        MemoryRecord {
+            id: MemoryId::new("ladder-test"),
+            project_id: "project".to_string(),
+            kind: MemoryKind::Finding,
+            authority,
+            status,
+            subject: None,
+            body: "ladder test body".to_string(),
+            source_session_id: None,
+            source_commit: None,
+            source_events: None,
+            provenance: Default::default(),
+            superseded_by: None,
+            validity_conditions: None,
+            invalidation_conditions: None,
+            review_reason: None,
+            review_marked_at: None,
+            last_validated_at,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// Line 916: an invariant outranks a preference, regardless of currency
+    /// or validation on either side.
+    #[test]
+    fn an_invariant_outranks_a_preference() {
+        let invariant = record(Some(MemoryAuthority::Invariant), MemoryStatus::Active, None);
+        let preference = record(
+            Some(MemoryAuthority::Preference),
+            MemoryStatus::Active,
+            None,
+        );
+        assert!(ladder_rung(&invariant) > ladder_rung(&preference));
+    }
+
+    /// Line 915: a current decision outranks a historical one — same
+    /// authority, differing only in whether the record's own status still
+    /// counts as current.
+    #[test]
+    fn a_current_decision_outranks_a_historical_one() {
+        let current = record(Some(MemoryAuthority::Decision), MemoryStatus::Active, None);
+        let historical = record(
+            Some(MemoryAuthority::Decision),
+            MemoryStatus::Superseded,
+            None,
+        );
+        assert!(ladder_rung(&current) > ladder_rung(&historical));
+    }
+
+    /// Line 917: only a *validated* current constraint outranks an ordinary
+    /// decision — an unvalidated one sits at the same rung as the decision.
+    #[test]
+    fn only_a_validated_constraint_outranks_an_ordinary_decision() {
+        let decision = record(Some(MemoryAuthority::Decision), MemoryStatus::Active, None);
+        let unvalidated_constraint = record(
+            Some(MemoryAuthority::Constraint),
+            MemoryStatus::Active,
+            None,
+        );
+        let validated_constraint = record(
+            Some(MemoryAuthority::Constraint),
+            MemoryStatus::Active,
+            Some(1),
+        );
+        assert_eq!(
+            ladder_rung(&unvalidated_constraint),
+            ladder_rung(&decision),
+            "an unvalidated constraint must not outrank an ordinary decision"
+        );
+        assert!(ladder_rung(&validated_constraint) > ladder_rung(&decision));
+    }
+
+    /// Line 918: an ordinary current decision outranks a stale/exploratory
+    /// class, whatever that class's own currency happens to be.
+    #[test]
+    fn an_ordinary_decision_outranks_an_idea() {
+        let decision = record(Some(MemoryAuthority::Decision), MemoryStatus::Active, None);
+        let idea = record(Some(MemoryAuthority::Idea), MemoryStatus::Active, None);
+        assert!(ladder_rung(&decision) > ladder_rung(&idea));
+    }
+
+    /// Recency does not dominate: a brand-new idea's rung is fixed by its
+    /// authority alone, never lifted into the invariant's rung by freshness.
+    #[test]
+    fn an_idea_never_reaches_the_invariant_rung() {
+        let idea = record(Some(MemoryAuthority::Idea), MemoryStatus::Active, None);
+        let invariant = record(Some(MemoryAuthority::Invariant), MemoryStatus::Active, None);
+        assert!(ladder_rung(&idea) < ladder_rung(&invariant));
+    }
+}
+
 #[cfg(test)]
 mod decay_tests {
     use super::*;

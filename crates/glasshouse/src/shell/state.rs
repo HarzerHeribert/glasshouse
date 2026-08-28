@@ -65,6 +65,16 @@ pub enum Overlay {
     /// overlay is ever opened, exactly as [`Overlay::Overview`] carries none
     /// of the session list it shows.
     SessionEvents,
+    /// The project's durable knowledge — active decisions, known
+    /// constraints, implemented-or-planned features, failed approaches (kept
+    /// as history regardless of status), and unresolved todos — each in its
+    /// own labelled, grouped-text section. Phase 25, map lines 1098-1107.
+    /// [`Overlay::ProjectOverview`]'s sibling: that overlay summarizes what
+    /// the project is *doing* right now (sessions, live memory); this one
+    /// summarizes what the project has *learned*. Deliberately plain text —
+    /// line 1107 rules out a decorative node graph. See
+    /// [`ProjectKnowledgeState`] for the data behind it.
+    ProjectKnowledge,
 }
 
 /// Who currently owns the keyboard.
@@ -195,6 +205,13 @@ pub enum Action {
     /// still display and the overlay still opens either way. Phase 41's
     /// project-level sibling of [`Action::OpenSettings`].
     OpenProjectOverview,
+    /// Open the project-knowledge view. Reading project memory is file I/O
+    /// this module deliberately does not hold — the run loop reads it and
+    /// calls [`ShellState::open_project_knowledge`], reporting a read
+    /// failure back through its own `memory_note` rather than refusing to
+    /// open, the same contract [`Action::OpenProjectOverview`] already
+    /// keeps. Phase 25, map lines 1098-1107.
+    OpenProjectKnowledge,
 }
 
 /// A session's screen, as a terminal would have drawn it, ready to draw.
@@ -342,6 +359,70 @@ impl ProjectOverviewState {
     }
 }
 
+/// One [`crate::memory::MemoryKind`]'s entries for the
+/// project-knowledge view: already-formatted display lines, most recently
+/// updated first, plus how many further matching entries exist beyond what
+/// is shown. Built by `shell::build_project_knowledge_memory` — this module
+/// never queries `crate::memory` itself, the same split
+/// [`ProjectOverviewState`] keeps.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KnowledgeSection {
+    pub lines: Vec<String>,
+    pub omitted: usize,
+}
+
+/// The project-knowledge view's own data: every kind of durable project
+/// memory the run loop already read from disk, grouped by kind and
+/// formatted into display lines. Decisions, constraints and features are
+/// filtered to current knowledge
+/// ([`crate::memory::MemoryStatus::is_current`]); todos to open work
+/// ([`crate::memory::MemoryStatus::is_open_work`], which — unlike
+/// `is_current` — keeps one under review or in conflict); failed approaches
+/// are shown regardless of status, because the historical record of what was
+/// tried is the point of that section (map line 1103). See
+/// [`ShellState::open_project_knowledge`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectKnowledgeState {
+    decisions: KnowledgeSection,
+    constraints: KnowledgeSection,
+    features: KnowledgeSection,
+    failed_attempts: KnowledgeSection,
+    todos: KnowledgeSection,
+    /// Set when the run loop could not read project memory at all. The
+    /// overlay still opens with honest, empty sections rather than refusing
+    /// to show anything — the same contract
+    /// [`ProjectOverviewState::memory_note`] keeps.
+    memory_note: Option<String>,
+}
+
+impl ProjectKnowledgeState {
+    pub fn decisions(&self) -> &KnowledgeSection {
+        &self.decisions
+    }
+
+    pub fn constraints(&self) -> &KnowledgeSection {
+        &self.constraints
+    }
+
+    pub fn features(&self) -> &KnowledgeSection {
+        &self.features
+    }
+
+    /// Kept as history regardless of status — map line 1103's dedicated
+    /// section.
+    pub fn failed_attempts(&self) -> &KnowledgeSection {
+        &self.failed_attempts
+    }
+
+    pub fn todos(&self) -> &KnowledgeSection {
+        &self.todos
+    }
+
+    pub fn memory_note(&self) -> Option<&str> {
+        self.memory_note.as_deref()
+    }
+}
+
 /// The abbreviated session identifier the overview shows.
 ///
 /// One definition, shared by the overview's rows and by every status note
@@ -445,6 +526,9 @@ pub struct ShellState {
     /// The project overview's own data, or `None` when it is not open — the
     /// same split as `settings` and `overview`.
     project_overview: Option<ProjectOverviewState>,
+    /// The project-knowledge view's own data, or `None` when it is not open —
+    /// the same split as `project_overview`.
+    project_knowledge: Option<ProjectKnowledgeState>,
     /// Recent lifecycle events, newest first, bounded at [`ACTIVITY_ROWS`].
     /// See [`ShellState::note_events`].
     activity: Vec<RecordedEvent>,
@@ -470,6 +554,7 @@ impl ShellState {
             settings: None,
             overview: None,
             project_overview: None,
+            project_knowledge: None,
             activity: Vec::new(),
         }
     }
@@ -621,6 +706,41 @@ impl ShellState {
         self.project_overview.as_ref()
     }
 
+    /// Open the project-knowledge view with memory the run loop already read
+    /// from disk, grouped by kind. Reading `crate::memory` is file I/O this
+    /// module deliberately does not hold — see [`Self::open_project_overview`]
+    /// for the same split.
+    ///
+    /// Opens even when `memory_note` is `Some`: a project whose memory
+    /// database could not be read still gets an honest, empty view rather
+    /// than no view at all — see `shell::build_project_knowledge_memory`'s
+    /// doc comment for why both failure paths reach this.
+    pub fn open_project_knowledge(
+        &mut self,
+        decisions: KnowledgeSection,
+        constraints: KnowledgeSection,
+        features: KnowledgeSection,
+        failed_attempts: KnowledgeSection,
+        todos: KnowledgeSection,
+        memory_note: Option<String>,
+    ) -> Action {
+        self.overlay = Some(Overlay::ProjectKnowledge);
+        self.project_knowledge = Some(ProjectKnowledgeState {
+            decisions,
+            constraints,
+            features,
+            failed_attempts,
+            todos,
+            memory_note,
+        });
+        Action::Redraw
+    }
+
+    /// The project-knowledge view's own data, or `None` when it is not open.
+    pub fn project_knowledge(&self) -> Option<&ProjectKnowledgeState> {
+        self.project_knowledge.as_ref()
+    }
+
     /// Open the presented session's recent-lifecycle-events overlay — map
     /// line 1758.
     ///
@@ -658,6 +778,7 @@ impl ShellState {
         self.settings = None;
         self.overview = None;
         self.project_overview = None;
+        self.project_knowledge = None;
         Action::Redraw
     }
 
@@ -1002,6 +1123,12 @@ impl ShellState {
             return self.handle_session_events_key(key, had_status);
         }
 
+        // Read-only, like the three above: the map's boxes ask this view to
+        // *show* project knowledge, never to act on it from here.
+        if self.overlay == Some(Overlay::ProjectKnowledge) {
+            return self.handle_project_knowledge_key(key, had_status);
+        }
+
         self.handle_control_key(key, had_status)
     }
 
@@ -1017,6 +1144,7 @@ impl ShellState {
             KeyCode::Char('o') => self.open_overview(),
             KeyCode::Char('s') => Action::OpenSettings,
             KeyCode::Char('p') => Action::OpenProjectOverview,
+            KeyCode::Char('k') => Action::OpenProjectKnowledge,
             KeyCode::Char('e') => self.open_session_events(),
             KeyCode::Enter | KeyCode::Char('i') => self.enter_session_mode(),
             KeyCode::Char('n') => Action::StartSession,
@@ -1115,6 +1243,16 @@ impl ShellState {
     fn handle_session_events_key(&mut self, key: KeyEvent, had_status: bool) -> Action {
         match key.code {
             KeyCode::Esc | KeyCode::Char('e') => self.close_overlay(),
+            _ => self.handle_control_key(key, had_status),
+        }
+    }
+
+    /// Answer one key while the project-knowledge view is open — the same
+    /// shape as [`Self::handle_project_overview_key`], for the same reason:
+    /// nothing here is acted on, only shown.
+    fn handle_project_knowledge_key(&mut self, key: KeyEvent, had_status: bool) -> Action {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('k') => self.close_overlay(),
             _ => self.handle_control_key(key, had_status),
         }
     }

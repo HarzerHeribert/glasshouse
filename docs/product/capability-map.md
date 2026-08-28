@@ -911,17 +911,17 @@ Fixed architectural requirements
 - Recency alone does not determine authority.
 - Conflicts are resolved using explicit invariants, current scope, provenance, validity conditions, evidence, and user overrides; uncertain conflicts are surfaced rather than silently guessed.
 
-☐ Build a decision ladder that ranks current instructions by authority, validity, recency, evidence, and scope.
-☐ Place explicit current user requirements above historical implementation decisions.
-☐ Place current security and correctness invariants above convenience preferences.
-☐ Place validated current constraints above older ordinary architecture decisions.
-☐ Place ordinary current decisions above stale preferences, hypotheses, and ideas.
+☑ Build a decision ladder that ranks current instructions by authority, validity, recency, evidence, and scope.
+☑ Place explicit current user requirements above historical implementation decisions.
+☑ Place current security and correctness invariants above convenience preferences.
+☑ Place validated current constraints above older ordinary architecture decisions.
+☑ Place ordinary current decisions above stale preferences, hypotheses, and ideas.
 ☐ Treat current source code and executable tests as stronger evidence of actual behavior than stale memory summaries.
 ☐ Detect when a new requested implementation directly conflicts with an active remembered decision.
 ☐ Do not automatically route around a conflicting decision by adding layers, adapters, compatibility shims, or duplicate pathways.
 ☐ Surface the conflict and ask whether the older decision should be superseded when the conflict is material and cannot be resolved from current evidence.
 ☐ Allow an implementation agent to supersede an older ordinary decision automatically when current requirements clearly invalidate it and the change is low risk.
-☐ Require stronger review before superseding security, legal, data-integrity, or externally imposed invariants.
+☑ Require stronger review before superseding security, legal, data-integrity, or externally imposed invariants.
 ☐ Record why a decision was superseded so future agents do not resurrect it without context.
 
 Phase 21F — Memory retrieval quality
@@ -1095,16 +1095,16 @@ Fixed architectural requirements
 
 Phase 25 — Project knowledge view
 
-☐ Add a project-knowledge TUI view backed by the current project’s memory database.
-☐ Show active architecture-related decisions as a simple hierarchical or grouped text view.
-☐ Show active decisions in a dedicated section.
-☐ Show known constraints in a dedicated section.
-☐ Show implemented or planned features in a dedicated section.
-☐ Show failed approaches in a dedicated historical section.
-☐ Show unresolved todos in a dedicated section.
+☑ Add a project-knowledge TUI view backed by the current project’s memory database.
+☑ Show active architecture-related decisions as a simple hierarchical or grouped text view.
+☑ Show active decisions in a dedicated section.
+☑ Show known constraints in a dedicated section.
+☑ Show implemented or planned features in a dedicated section.
+☑ Show failed approaches in a dedicated historical section.
+☑ Show unresolved todos in a dedicated section.
 ☐ Allow the user to open a memory item and inspect its rationale, source session, source commit, and lifecycle state.
-☐ Show supersession relationships textually when they exist.
-☐ Avoid rendering a decorative node graph unless a future concrete use case requires one.
+☑ Show supersession relationships textually when they exist.
+☑ Avoid rendering a decorative node graph unless a future concrete use case requires one.
 
 Phase 26 — Memory query for agents
 
@@ -1538,14 +1538,14 @@ Fixed architectural requirements
 ☐ Include expected marginal cost in candidate scoring.
 ☐ Include expected latency in candidate scoring.
 ☐ Include harness-model pairing as an inspectable soft prior for fresh sessions with limited local evidence.
-☐ Decay the pairing prior as reliable observations accumulate for the exact harness-profile-model-backend combination.
+☑ Decay the pairing prior as reliable observations accumulate for the exact harness-profile-model-backend combination.
 ☐ Prefer observed success and reliability over same-vendor alignment when evidence is sufficient.
 ☐ Prefer effective TTFC over raw TTFC for tool-using gateway routes when reliability evidence is sufficient.
 ☐ Include successful tool rounds per minute as supporting evidence without treating it as a universal quality score.
 ☐ Include cache affinity and the distinction between warm, cold, and unknown observations.
 ☐ Include current cadence availability separately from general route health.
 ☑ Include failure-domain diversity when ranking fallback and failover candidates.
-☐ Reduce the influence of performance observations with small samples, low confidence, or stale windows.
+☑ Reduce the influence of performance observations with small samples, low confidence, or stale windows.
 ☑ Include time until quota reset in candidate scoring.
 ☐ Include protected-reserve policy in candidate scoring.
 ☐ Include session-switching and bootstrap cost in candidate scoring.
