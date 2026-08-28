@@ -135,6 +135,37 @@ asking, for any input feeding a *ranking*: what does its value actually vary
 with, and is that thing different between the alternatives? A prior that exists
 and never differs is a caller-shaped gap wearing a working mechanism's clothes.
 
+### Promoted to a required link, 2026-08-28 — it decided a round
+
+The fifth link stopped being optional the first time it chose between two
+packages. Batch 39 dispatched map line 1547 (failure-domain diversity in the
+failover ranking) **because** the signal varies across the candidates being
+compared — `Upstream::failover_candidates` returns backends that share a
+provider alongside backends that do not — and declined map line 1293 for the
+ordinary link-4 reason.
+
+Ask it as a required question, not a suggested one: **for any input feeding a
+ranking, what does its value vary with, and is that thing different between the
+alternatives?** If the answer is "nothing that differs here", the mechanism will
+be built, wired, mutation-proven, and inert — which is what three rounds and
+roughly $39 of worker compute bought before anyone asked.
+
+### Three refusals, and the pattern in who wrote them
+
+| round | refused | why |
+|---|---|---|
+| 37 | ledger reader into `DisposableRouting` | a disposable candidate carries no harness; the query matches zero rows forever |
+| 38 | (preflight, not a refusal) | `profile/**` must not import `crate::config` — the constraint reached the packet instead of the worker |
+| 39 | map line 1293, reserve in routing explanations | `disposable_candidates` builds only `Cost::Free`, so the reserve loop is always empty |
+
+**Every one of those was the previous checkpoint's own recommended next step,
+written by an orchestrator that had just finished learning this lesson.** That
+is the finding. The gate is not compensating for a careless predecessor; it is
+compensating for the fact that a next step written at the *end* of a round is
+written when the code is least fresh and the reasoning is most compressed. Two
+greps at dispatch time beat any amount of care at writing time, which is why
+this is mechanical and why `CLAUDE.md` says do not route around it.
+
 **Metric this phase owns: compute cost per *closable* packet dispatched.** A
 worker executing an impossible premise dominates efficiency statistics even when
 the worker and the assurance system both behave correctly.

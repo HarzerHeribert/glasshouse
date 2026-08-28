@@ -2639,3 +2639,91 @@ minutes; the healthy run did not.
 When it *is* stuck: kill it, narrow the test filter, re-run — and **check first
 whether it left a source file mid-mutation**, because one of these did, and the
 restore is the urgent part, not the re-run.
+
+## Batch 39 — two concurrent Sonnets, and the gate refused the handoff's own top pick
+
+Dispatched from `3350abf`. Two Sonnet implementers on disjoint partitions,
+started about twenty minutes apart because the Phase −1 work for the second
+package was done while the first ran.
+
+| package | boxes claimed | partition |
+|---|---|---|
+| `failure-domain` | 33C 1371/1372/1375/1377/1378 + 35B 1547 | `routing/**`, `gateway/session.rs` |
+| `memory-retrieval` | 21F 929/931/933/935/936/937/938 | `memory/**`, `main.rs`, `cli.rs`, `api/**` |
+
+### The third consecutive round where a handoff's "cheapest next win" was impossible
+
+`CONTINUATION.md`'s Part 2 opened with map line 1293 — *"reserve inspectable in
+routing explanations… the surface now exists and is reached in production…
+should be small."* Every clause of that is true and the conclusion is still
+wrong.
+
+`routing/disposable.rs:693-707` already pushes the reserve decision's reason into
+the explanation, correctly. But the loop that reaches it is
+`eligible.iter().filter(|c| !c.value().cost().is_free())`, and
+`main.rs::disposable_candidates` (`:1256-1300`) builds **only** `Cost::Free`
+candidates — it iterates `provider_config.free_models()` and hardcodes the cost.
+**The filter is always empty in the shipped binary**, so `evaluate_reserve_spend`
+never runs and the contribution can never appear. Link 4 fails: the consumer
+cannot observe it.
+
+1293 is blocked on the same product decision as 1550 — *may a background job
+spend paid quota unasked?* — and neither closes alone.
+
+**Three rounds, three refusals, and each recommendation was written by an
+orchestrator that had just watched the previous one fail.** Batch 37 refused the
+ledger-into-`DisposableRouting` pick; batch 38's preflight redirected the pairing
+work; this one refused 1293. That consistency is the argument for the gate: the
+failure is not carelessness, it is that *a plausible-sounding next step written
+at the end of a round is not a feasibility argument*, and no amount of care at
+writing time substitutes for two greps at dispatch time.
+
+### The fifth link decided which package to dispatch, for the first time
+
+`assurance-economics.md` added a fifth question after batch 37 — for any input
+feeding a *ranking*, what does its value vary with, and does that differ between
+the alternatives? Batch 39 is the first round where it was the deciding test
+rather than a note.
+
+- **Line 1547 passes it.** `Upstream::failover_candidates`
+  (`gateway/upstream.rs:562`) filters out only the currently-serving index and
+  returns every other backend, so a provider with two credentials yields
+  candidates that share a provider alongside candidates that do not.
+  `candidate.provider() == current.backend().provider()` genuinely differs
+  across the alternatives being ranked.
+- **Phase 9J's prior failed it**, three rounds and roughly $39 of worker compute
+  ago, because `classify` never reads `route` and every same-model candidate
+  scored identically.
+
+Both signals reach the same caller. The difference is only whether the value
+varies, which is exactly what the first four links do not ask.
+
+### Two packages that were considered and not dispatched, and why
+
+Recording these because a refusal costs one orchestrator turn and is the
+cheapest artefact this process produces:
+
+- **Phase 32E (burn rate, 0/10).** `GatewayQuotaCache::load`
+  (`provider/telemetry.rs:1191`) returns *"the most recent"* reading and
+  overwrites it. A burn rate needs two readings separated in time; there is **no
+  history series**, so the producer does not exist. This is a build-the-producer
+  package, not a wiring one, and sizing it as the latter would have repeated
+  batch 36.
+- **Phase 47's routing debug views (1757, 1766).** The routing explanation lives
+  in gateway session state, in the gateway's process. A CLI debug view runs in a
+  different process. This is probably Phase 15/16's cross-process blocker
+  wearing new clothes, and it needs checking before a packet, not after.
+
+### What this round is testing, beyond its boxes
+
+1. **Does the fifth link generalise?** It selected this round's package. If
+   `failure-domain`'s diversity contribution turns out to change which candidate
+   wins — the load-bearing acceptance test — the check has now prevented one
+   inert mechanism and enabled one live one.
+2. **Does a wide partition still beat a narrow one (§32)?** `memory-retrieval`
+   has `main.rs`, `cli.rs` and `api/**` alongside `memory/**` deliberately,
+   because 935 and 937 need a caller. `failure-domain`'s is narrower but its
+   caller (`gateway/session.rs`) is inside it.
+3. **Do two concurrent Sonnets on genuinely disjoint partitions collide at
+   review?** Batch 35 ran three and the reviews were serial; two is the smaller
+   test of the same question.
