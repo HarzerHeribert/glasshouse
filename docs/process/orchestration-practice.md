@@ -2937,3 +2937,71 @@ concurrent workers means four or five `target/` directories and more contention
 for one machine — and §40 records that the local gate reports the machine's own
 load as a Linux pty failure. **Never run `ci-local.sh` beside a live batch**, and
 expect that rule to bite more often now than it did at two workers.
+
+## §75 — a recon's decisive claim is a lead too, and I treated one as a producer link
+
+Batch 45 dispatched `compaction-events` to translate Codex's
+`PreCompact`/`PostCompact` into lifecycle events. Its packet's FEASIBILITY table
+stated the producer link as:
+
+> *the harness already delivers it. `session/lifecycle.rs:183`'s own test
+> `an_unfamiliar_event_changes_nothing` proves `PreCompact` is received and
+> translates to `None` — the event arrives and is dropped on the floor*
+
+**The worker refused the package and was right on two independent counts**, both
+checkable in one grep each:
+
+1. **`PreCompact` is a Codex event, not a Claude Code one**, so capability 310
+   (Claude Code) cannot be closed by any amount of work — Claude Code 2.1.245
+   fires no compaction hook, and `docs/product/evidence/phase-7.md` already
+   recorded that entry as *"NOT STARTED — blocked by the harness, not by
+   Glasshouse."* The packet aimed a worker at a box its own evidence file had
+   already closed the question on.
+2. **Even for Codex the harness does not deliver it.** `HOOK_EVENTS`
+   (`harness/codex.rs:34-46`) is the *catalogue* of events Codex offers;
+   `REPORTED_EVENTS` (`:57-63`) is what Glasshouse actually asks Codex to report,
+   and `hook_installation` (`:281-291`) builds the generated `hooks.json` from
+   the second list only. `PreCompact` is in the first and not the second, so a
+   real Codex session **never registers a command for it** and
+   `glasshouse hook PreCompact` never runs in production.
+
+**The only place that string reaches the translator is a hand-written literal
+inside a test** — proving the translator's *default* behaviour is safe, not that
+the event is ever observed.
+
+### Where the error actually came from, which is the point
+
+The claim was inherited from a read-only recon, whose decisive claim #1 read:
+*"`session/lifecycle.rs:183` proves `PreCompact` is received but translates to
+`None`."* **That sentence is true.** It is true about the *translator under
+test*. I read it as a statement about production and promoted it into a packet's
+producer link without re-checking.
+
+This project already guards the recon's *verdicts*: the checkpoint says in as
+many words that **a CLOSABLE verdict is a lead requiring re-gating**, and batch
+43 declined two of four proposed closures. **Nothing guarded the claims
+underneath the verdicts**, and those carry more authority precisely because they
+are narrow, cited, and read like facts.
+
+**So: §5's rule — check a declaration against the *use* — applies to a recon's
+own evidence, not only to its conclusions.** The specific question that would
+have caught this in one grep: *"is this symbol reached from production, or only
+from a test?"* — which is exactly what `scripts/discover.py --seam` answers, and
+which was not run for `PreCompact` because the claim already sounded like a
+seam check.
+
+**Cost: one dispatch, no code, roughly a worker's opening context.** Cheap,
+because the packet's own STOP CONDITION invited the refusal and the worker took
+it. **A packet that names its expected refusal gets refusals instead of
+inventions** — §44's rule, working as designed for the second time.
+
+### What it hands to the next round
+
+The real Codex wiring gap is two lines and the worker wrote the patch:
+`"PreCompact"` and `"PostCompact"` added to `REPORTED_EVENTS`. **It needs one
+live-Codex check first** (§38): confirm 0.149.1 accepts those hooks at the
+existing timeout and still enumerates them on its review screen. And even then,
+capability 327's *durable* half still needs a decision, because compaction moves
+no `SessionLifecycle` state — it is a fact to record, not a transition, and
+recording it means either a new event kind behind a `CHECK`-rebuilding migration
+or somewhere else to put it.
