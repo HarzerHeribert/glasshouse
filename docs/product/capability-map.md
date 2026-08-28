@@ -107,7 +107,7 @@ Fixed architectural requirements
 ☑ Reject any attempt to resume a Glasshouse-managed session whose project identifier differs from the current project identifier.
 ☑ Add a canonical-path guard that rejects file paths resolving outside the current project root.
 ☑ Apply the canonical-path guard after resolving symlinks so a project symlink cannot escape the project boundary.
-☐ Keep cross-project memory retrieval disabled by design rather than relying only on query filters.
+☑ Keep cross-project memory retrieval disabled by design rather than relying only on query filters.
 ☑ Display the active canonical project root prominently in the TUI.
 
 Phase 2A — Cross-platform runtime

@@ -202,3 +202,70 @@ Remaining caveats (recorded, not blocking):
 - Native Windows UNC project roots are still refused rather than supported;
   `cmd.exe` cannot reliably hold a UNC working directory. This is a
   documented limitation of the contract, not a gap in it.
+
+### Phase 1 — Keep cross-project memory retrieval disabled by design rather than relying only on query filters
+
+Contract: Given two Glasshouse projects on one machine, when either retrieves
+durable memory, it can reach only its own project's memories — and it can do so
+because the storage is physically and structurally separated, not because a
+`WHERE` clause remembered to filter.
+
+State: **COMPLETE**
+
+Production evidence:
+- `memory/store.rs::ProjectMemory::open(runtime)` — **takes no path and no
+  project identifier.** Its own doc states the constraint the line asks for:
+  *"The path comes from `runtime` and nowhere else, so there is no argument a
+  caller could pass to reach another project's file."*
+- `memory/store.rs::MemoryStore::new` / `with_clock` — the project identifier is
+  **read out of the database** rather than accepted as an argument, so a store
+  is bound to whichever project's file it was handed, and a caller that is
+  confused about which project it is in cannot express that confusion.
+- One database per project, in its own directory keyed by the project id —
+  Phase 1's *"store each project's memory in its own SQLite database"*, already
+  COMPLETE. Verified on this machine: fourteen projects, fourteen
+  `projects/<project-id>/glasshouse.db` files.
+- `database.rs::memories_reject_foreign_project_insert` — a `BEFORE INSERT`
+  trigger comparing `NEW.project_id` against the database's own recorded
+  binding. **This is the mechanism the line means by "by design".**
+
+Regression evidence:
+- `tests/project_isolation.rs::one_project_database_cannot_be_queried_through_another_projects_glasshouse_instance`
+- `tests/project_isolation.rs::memory_extraction_only_ever_writes_into_its_own_projects_database`
+- `tests/project_isolation.rs::deleting_one_projects_state_leaves_a_sibling_projects_state_intact`
+  — proves the physical separation the other two rest on.
+
+Failure/isolation evidence:
+
+**The decisive observation is what the isolation test has to do to test
+anything at all.** `plant_foreign_memory` must
+`DROP TRIGGER memories_reject_foreign_project_insert`, insert, and then
+re-create the trigger. A foreign memory row **cannot be created through any
+ordinary path** — the test has to dismantle the guard to manufacture the
+condition it then checks the filter against.
+
+Confirmed by the integrator directly against a **real database written by the
+shipped binary** (copied to a scratch path first; no live project database was
+written). A plain `INSERT` naming another project is refused by SQLite itself:
+
+    IntegrityError: memory belongs to a different project
+    foreign rows present: 0
+
+That is the whole of this line's claim, demonstrated rather than argued: the
+`AND memories.project_id = ?2` in `MemoryStore::search` is **defence in depth
+over a state the schema refuses to reach**, not the thing standing between two
+projects. Both layers are load-bearing and neither is alone: the trigger
+prevents the row existing, and the filter still excludes one planted by
+tampering — which is exactly *"disabled by design rather than relying **only**
+on query filters."*
+
+Missing evidence:
+- None. Note the one thing this does **not** claim: it is about *retrieval*.
+  The memory store's six `UPDATE memories … WHERE id = ?1` statements carry no
+  `project_id` in their own `WHERE` clause and are scoped by a leading
+  `self.get(id)` guard in each function instead. No live defect — every one of
+  those functions currently has the guard — but that is the *write* path, it is
+  a check-then-act pair rather than a structural refusal, and
+  `memories_reject_foreign_project_update` does not cover it because it is
+  `BEFORE UPDATE OF project_id`. See `docs/product/evidence/phase-21f.md` for
+  the mutation that demonstrates it and the red-tier package it earns.
