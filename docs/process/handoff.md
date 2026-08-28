@@ -91,6 +91,37 @@ test actually guards — physical separation in
 anyone. The old §33 argument is preserved in `phase-46.md` rather than deleted,
 and a future deletion *command* still owes its own test through that caller.
 
+### Phase 47's "cross-process blocker" was wrong, and a $3.90 recon worker settled it
+
+Two checkpoints recorded that Phase 47's routing debug views (1757, 1766) were
+blocked because the routing explanation lives *"in the gateway's process"* while
+a debug view runs in another. **Refuted.**
+`gateway::start_if_required_with_telemetry` is a direct call from `main.rs:534`
+and `main.rs:1076` — **same OS process** as the shell. (`glasshouse api serve` is
+genuinely separate; so is memory extraction, line 1769.)
+
+They are still blocked, but on something fixable: the `Gateway` is bound into
+`_gateway_guard` (`main.rs:2113`, *"Never read again, only held"*), and the
+`RoutingExplanation` is rendered **only** into a `tracing` field at
+`gateway/session.rs:437-460`, never captured into a structure. `BLOCKED: no
+consumer`, not an architecture problem.
+
+Underneath it, a finding that narrows the box even after a consumer exists: **the
+first assignment at session launch never scores candidates at all** —
+`profile::apply_gateway` calls `InteractiveRouting::assign`
+(`interactive.rs:423`), a plain wrap. An explanation exists only for mid-session
+failover or migration.
+
+And one that killed a stretch line already in flight: `ContextState` is `Unknown`
+on 100% of real rows (`with_context_state` has zero non-test callers), so map
+line 1545 fails the fifth link. Relayed to the live worker mid-round.
+
+**The method is the point.** This was a read-only worker running the Phase −1
+five-link check across five phases — 14 minutes, ~$3.90, and it corrected a
+standing claim in two checkpoints. That work does not need an Opus orchestrator's
+context, and doing it there is how a round's fixed cost gets spent on gating
+instead of building.
+
 ### Next, and one of them is a lead that needs checking before it is trusted
 
 1. **The metered-quota package.** The user's decision is recorded in
