@@ -2038,6 +2038,43 @@ Maybe I — Evaluation criteria for file coordination
 ☐ Measure how often users override warnings and whether those overrides later require reconciliation.
 ☐ Keep the feature experimental until conflict prevention provides a measurable benefit over ordinary Git-based reconciliation.
 
+Maybe L — Convergent co-editing of a contended file
+
+Intent and boundaries
+
+☐ Consider letting two sessions work on the same file concurrently in isolated buffers, rather than serializing them behind a claim, when both genuinely need it.
+☐ Treat this as a third option beside queueing and reconcile-later, not a replacement for either, and keep queueing as the default until measurement justifies otherwise.
+☐ Keep the isolated buffer a real working tree the session can compile and test in, because a change nobody can verify is not an implementation.
+☐ Do not build automatic semantic merge; a merged file neither author would accept is worse than a queue.
+☐ Do not make this part of MVP or a V1 completion requirement.
+
+Mutual visibility
+
+☐ Allow a session to see another session's in-progress changes to a file both are editing, before either has finished.
+☐ Present another session's in-progress change as an unfinished proposal rather than as committed truth.
+☐ Allow a session to adapt its own pending change in response to what another session is doing to the same file.
+☐ Prefer a single read at finalization over continuous mutual adaptation, so two sessions cannot oscillate against each other's stale state.
+☐ Record when a session adapted its change because of another session's work, so the benefit can be measured rather than assumed.
+
+The join barrier and reconciliation
+
+☐ Hold reconciliation until every session editing a contended file has declared its work on that file finished.
+☐ Reconcile the buffers into the real file only when the result preserves what each session intended.
+☐ Escalate to the orchestrator or the user, with both versions visible, when reconciliation cannot preserve both intents.
+☐ Never silently invent a merge that neither session wrote.
+☐ Never silently discard one session's change because another session finished first.
+☐ Allow a session that is blocked at the barrier to continue with its other files rather than idling.
+☐ Surface a contended file's barrier state so the user can see why reconciliation has not happened.
+
+Evaluation before promotion
+
+☐ Measure how often two sessions genuinely require the same file, since a partition that avoids the case entirely is cheaper than any protocol for it.
+☐ Measure how often convergent editing yields a reconciliation both sessions accept without escalation.
+☐ Measure wall-clock against simply queueing the second session, which is the honest baseline.
+☐ Measure how often mutual visibility caused a session to adapt in a way that later proved wrong.
+☐ Measure escalation rate and the cost of an escalation, including the reviewer's time.
+☐ Promote this beyond experimental status only if it beats queueing on real work without producing merges an author would disown.
+
 Maybe J — Experimental agent diagnostic feedback bus
 
 Intent and scope

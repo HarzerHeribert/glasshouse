@@ -2398,3 +2398,88 @@ table will not unblock them.**
 **Doing 3 first is the expensive mistake this scoping exists to prevent**, because
 a table designed before anything counts anything is a table designed against
 guesses.
+
+## Convergent co-editing — a third answer to a file two agents need
+
+### The user's proposal, 2026-08-29
+
+> *"lets say 2 agents get 5 files each and one file needs to be touched by both.
+> Instead of them actually doing it they could write into some pre-implementation
+> buffer and it could be waited until both agents state their work done on that
+> file. Agents could see changes made by other agents before they are finished
+> with their work and can mutate their changes to fit. As soon as both are done,
+> reconcile into the actual file with all features from both agents respected."*
+
+### Why this is a third option, not a restatement of Maybe D/E/F
+
+The experimental sections already hold three answers to a contended file, and
+**none of them is this one**:
+
+- **Maybe D — queue.** One agent waits. Correct, and it serializes.
+- **Maybe E — reconcile later.** Both proceed blind; the conflict is marked and
+  *"the orchestrator receives a reconciliation task after both conflicting
+  workers finish."* Reconciliation is **post-hoc**, between two versions that
+  never knew about each other.
+- **Maybe F — turn-scoped claims.** A finer-grained lock. Still a lock.
+- **Maybe G — read visibility.** Warns *readers* that a file is being edited. It
+  says nothing about two *writers* adapting to one another.
+
+**The proposal's distinctive claim is mutual visibility *during* the work.** Each
+agent can see the other's in-progress change and *mutate its own to fit*, so by
+the time anyone reconciles, the two versions already account for each other. That
+is **convergent co-editing**, and it is strictly better than post-hoc merge for
+one reason: the reconciler inherits two versions built with knowledge of each
+other, instead of two versions that must be reconciled by someone who understands
+neither as well as their authors did.
+
+### Why Glasshouse specifically can do this, and a single harness cannot
+
+**A harness sees its own edits. Glasshouse sees every session's.** That is not a
+feature to be added — it is what the product already is: the session layer, the
+lifecycle event bus, and project-scoped state all sit above the harnesses. The
+same argument the map already makes for the unified event bus (*"one normalized
+core lifecycle-event stream shared by the TUI, router, memory, API and MCP
+surfaces"*) applies here. No individual Claude Code or Codex session can offer
+this, because none of them can see the others.
+
+### The three hard parts, stated before anyone builds it
+
+**1. The buffer must be compilable, which means it is a worktree, not a patch
+file.** An agent whose change lives in a staging buffer cannot compile, test, or
+mutation-check it — and for this project that is the agent's entire value. **So
+"pre-implementation buffer" must resolve to an isolated working tree**, which
+Glasshouse can already create per session. The buffer is not a new storage
+concept; it is the isolation the product already needs, plus a merge protocol.
+
+**2. Visibility creates staleness.** If A reads B at T1 and adapts, and B changes
+at T2, A's adaptation is stale — the classic convergence problem, and an
+unbounded version of it will oscillate. **The cheap discipline that captures most
+of the value: read the other's version once, at finalization, not continuously.**
+One look, before declaring done. Continuous mutual adaptation is a research
+problem; a read-before-finalize barrier is a protocol.
+
+**3. Reconciliation judgement does not disappear — it moves and improves.** Two
+agents both adding a parameter to one function still need someone to decide the
+final signature. What changes is that the decider *reviews* a proposed merge
+instead of *authoring* one from two reports. That is a real saving and it should
+be measured as such, not claimed as automation.
+
+### What must not be built
+
+**Not automatic semantic merge.** *"Reconcile with all features from both agents
+respected"* is the goal, not the mechanism — and a system that silently produces
+a merged file both agents would disown is worse than a queue. The map's existing
+rule holds: *"Never silently discard one worker's changes merely because another
+worker claimed the file first"* — and its mirror belongs here, **never silently
+invent a merge neither worker wrote.** A reconciliation either is confirmed by
+both authors, or is escalated with both versions visible.
+
+### Evaluation before promotion, per the experimental sections' own standard
+
+The honest baseline is that a queue already works. So this must be measured
+against it: how often two agents genuinely need one file; how often convergent
+editing produces a merge both accept without escalation; how much wall-clock the
+barrier costs versus queueing; and how often mutual visibility caused an agent to
+adapt in a way that turned out wrong. **If it does not beat "queue and serialize"
+on real work, it should not ship** — Maybe I's criteria for file coordination
+already say this and apply unchanged.
