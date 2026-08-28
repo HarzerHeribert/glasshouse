@@ -742,21 +742,36 @@ fn render_project_knowledge(state: &ShellState, frame: &mut Frame, area: Rect) {
     let popup = centered(area, 84, 78);
     frame.render_widget(Clear, popup);
 
+    let knowledge = state.project_knowledge();
+    let showing_detail = knowledge.is_some_and(super::state::ProjectKnowledgeState::detail_open);
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" project knowledge ")
+        .title(if showing_detail {
+            " memory detail "
+        } else {
+            " project knowledge "
+        })
         .style(Style::default().bg(Color::Black));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    if showing_detail {
+        render_knowledge_detail(knowledge, frame, inner);
+        return;
+    }
+
     let mut lines = Vec::new();
-    let knowledge = state.project_knowledge();
+    let cursor = knowledge.map(super::state::ProjectKnowledgeState::cursor);
+    let mut index = 0usize;
 
     push_knowledge_section(
         &mut lines,
         "ACTIVE DECISIONS",
         knowledge.map(super::state::ProjectKnowledgeState::decisions),
         "no active decisions recorded",
+        cursor,
+        &mut index,
     );
     lines.push(Line::from(""));
     push_knowledge_section(
@@ -764,6 +779,8 @@ fn render_project_knowledge(state: &ShellState, frame: &mut Frame, area: Rect) {
         "KNOWN CONSTRAINTS",
         knowledge.map(super::state::ProjectKnowledgeState::constraints),
         "no known constraints recorded",
+        cursor,
+        &mut index,
     );
     lines.push(Line::from(""));
     push_knowledge_section(
@@ -771,6 +788,8 @@ fn render_project_knowledge(state: &ShellState, frame: &mut Frame, area: Rect) {
         "FEATURES (IMPLEMENTED OR PLANNED)",
         knowledge.map(super::state::ProjectKnowledgeState::features),
         "no features recorded",
+        cursor,
+        &mut index,
     );
     lines.push(Line::from(""));
     push_knowledge_section(
@@ -778,6 +797,8 @@ fn render_project_knowledge(state: &ShellState, frame: &mut Frame, area: Rect) {
         "FAILED APPROACHES (HISTORICAL)",
         knowledge.map(super::state::ProjectKnowledgeState::failed_attempts),
         "no failed approaches recorded",
+        cursor,
+        &mut index,
     );
     lines.push(Line::from(""));
     push_knowledge_section(
@@ -785,6 +806,8 @@ fn render_project_knowledge(state: &ShellState, frame: &mut Frame, area: Rect) {
         "UNRESOLVED TODOS",
         knowledge.map(super::state::ProjectKnowledgeState::todos),
         "no unresolved todos",
+        cursor,
+        &mut index,
     );
 
     if let Some(note) = knowledge.and_then(super::state::ProjectKnowledgeState::memory_note) {
@@ -798,16 +821,66 @@ fn render_project_knowledge(state: &ShellState, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
+/// Map line 1105: the detail popup for whichever memory the cursor is on —
+/// its rationale, source session, source commit and lifecycle state, each
+/// said honestly as "not recorded" rather than left blank when the producer
+/// never captured one (`MemoryDetail`'s own doc comment). `lifecycle` is
+/// never absent, so it never gets that treatment.
+fn render_knowledge_detail(
+    knowledge: Option<&super::state::ProjectKnowledgeState>,
+    frame: &mut Frame,
+    inner: Rect,
+) {
+    let mut lines = Vec::new();
+    match knowledge.and_then(super::state::ProjectKnowledgeState::selected) {
+        Some((text, detail)) => {
+            lines.push(Line::from(Span::styled(
+                text.to_owned(),
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(format!(
+                "rationale: {}",
+                detail.rationale.as_deref().unwrap_or("not recorded")
+            )));
+            lines.push(Line::from(format!(
+                "source session: {}",
+                detail.source_session.as_deref().unwrap_or("not recorded")
+            )));
+            lines.push(Line::from(format!(
+                "source commit: {}",
+                detail.source_commit.as_deref().unwrap_or("not recorded")
+            )));
+            lines.push(Line::from(format!("lifecycle: {}", detail.lifecycle)));
+        }
+        None => {
+            lines.push(Line::from(Span::styled(
+                "nothing selected",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
 /// One labelled section of the project-knowledge view: a bold heading, then
 /// either its entries (each on its own line, with a trailing "...and N more"
 /// when the section's budget left some out) or `empty_note` when there is
 /// nothing to show — the same honest-empty-state shape
 /// [`push_worker_section`] uses for the project overview.
+///
+/// `cursor` and `index` are map line 1105's selection: `index` is the
+/// running position across every section rendered so far (the same order
+/// [`super::state::ProjectKnowledgeState::selected`] walks), and the entry
+/// at `cursor` gets a leading `> ` instead of two spaces so the cursor is
+/// visible without a second pass over the rendered lines.
 fn push_knowledge_section(
     lines: &mut Vec<Line<'static>>,
     title: &'static str,
     section: Option<&KnowledgeSection>,
     empty_note: &'static str,
+    cursor: Option<usize>,
+    index: &mut usize,
 ) {
     lines.push(Line::from(Span::styled(
         title,
@@ -822,7 +895,9 @@ fn push_knowledge_section(
         return;
     }
     for line in entries {
-        lines.push(Line::from(format!("  {line}")));
+        let marker = if cursor == Some(*index) { "> " } else { "  " };
+        lines.push(Line::from(format!("{marker}{line}")));
+        *index += 1;
     }
     if let Some(omitted) = section.map(|s| s.omitted).filter(|omitted| *omitted > 0) {
         lines.push(Line::from(Span::styled(
@@ -1954,6 +2029,7 @@ fn truncate_start(text: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::state::MemoryDetail;
     use super::*;
     use crate::session::{
         SessionId, SessionLifecycle, SessionPresentation, SessionRecord, SessionRole,
@@ -2945,6 +3021,19 @@ mod tests {
         );
     }
 
+    /// A [`MemoryDetail`] fixture with something recorded in every field —
+    /// paired with [`one_entry`] so `lines` and `details` stay index-aligned
+    /// the way production [`super::super::build_project_knowledge_memory`]
+    /// keeps them.
+    fn fixture_detail() -> MemoryDetail {
+        MemoryDetail {
+            rationale: Some("fixture rationale".to_owned()),
+            source_session: Some("sess_fixture".to_owned()),
+            source_commit: Some("abc1234".to_owned()),
+            lifecycle: "active".to_owned(),
+        }
+    }
+
     /// One [`KnowledgeSection`] with a single fixture line, for the five
     /// section-presence tests below — each supplies this to exactly one of
     /// the project-knowledge view's five sections and leaves the other four
@@ -2953,6 +3042,7 @@ mod tests {
     fn one_entry(text: &str) -> KnowledgeSection {
         KnowledgeSection {
             lines: vec![text.to_owned()],
+            details: vec![fixture_detail()],
             omitted: 0,
         }
     }
@@ -3109,6 +3199,7 @@ mod tests {
                         .to_owned(),
                     "failed_attempt: a distinct approach, still true".to_owned(),
                 ],
+                details: vec![fixture_detail(), fixture_detail()],
                 omitted: 0,
             },
             KnowledgeSection::default(),
@@ -3154,6 +3245,7 @@ mod tests {
                     "failed_attempt: a global lock — superseded by mem_01AAAAAAAAAAAAAAAAAAAAAAAA"
                         .to_owned(),
                 ],
+                details: vec![fixture_detail()],
                 omitted: 0,
             },
             one_entry("todo: wire the knowledge view into main"),
@@ -3197,6 +3289,113 @@ mod tests {
             text.contains("project memory unavailable: disk full"),
             "{text}"
         );
+    }
+
+    /// Map line 1105, through the production key path: pressing Enter on
+    /// the cursor's entry opens a detail popup showing its rationale,
+    /// source session, source commit and lifecycle state.
+    #[test]
+    fn opening_a_memory_from_the_knowledge_view_shows_its_full_provenance() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        state.open_project_knowledge(
+            KnowledgeSection {
+                lines: vec!["decision: adopt the drill-down view".to_owned()],
+                details: vec![MemoryDetail {
+                    rationale: Some("keeps the popup answering one question at a time".to_owned()),
+                    source_session: Some("sess_01AAAAAAAAAAAAAAAAAAAAAAAA".to_owned()),
+                    source_commit: Some("d34db33f".to_owned()),
+                    lifecycle: "active".to_owned(),
+                }],
+                omitted: 0,
+            },
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            None,
+        );
+
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let text = rendered(&state, 120, 40);
+        assert!(text.contains("adopt the drill-down view"), "{text}");
+        assert!(
+            text.contains("rationale: keeps the popup answering one question at a time"),
+            "{text}"
+        );
+        assert!(
+            text.contains("source session: sess_01AAAAAAAAAAAAAAAAAAAAAAAA"),
+            "{text}"
+        );
+        assert!(text.contains("source commit: d34db33f"), "{text}");
+        assert!(text.contains("lifecycle: active"), "{text}");
+    }
+
+    /// Map line 1105's honesty half: a memory recorded with no rationale, no
+    /// source session and no source commit says so in the detail popup
+    /// rather than rendering an empty field or fabricating one — the same
+    /// rule `knowledge_line`'s absent-supersession case follows for line
+    /// 1106.
+    #[test]
+    fn the_memory_detail_view_says_so_honestly_when_a_field_is_absent() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        state.open_project_knowledge(
+            KnowledgeSection {
+                lines: vec!["todo: wire the knowledge view into main".to_owned()],
+                details: vec![MemoryDetail {
+                    rationale: None,
+                    source_session: None,
+                    source_commit: None,
+                    lifecycle: "active".to_owned(),
+                }],
+                omitted: 0,
+            },
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            None,
+        );
+
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let text = rendered(&state, 120, 40);
+        assert!(text.contains("rationale: not recorded"), "{text}");
+        assert!(text.contains("source session: not recorded"), "{text}");
+        assert!(text.contains("source commit: not recorded"), "{text}");
+        assert!(
+            !text.contains("rationale: \n") && !text.contains("rationale: source"),
+            "an absent rationale must never render as an empty or run-together field:\n{text}"
+        );
+    }
+
+    /// Esc closes the detail popup and returns to the entry list, leaving
+    /// the cursor where it was rather than closing the whole overlay — the
+    /// same "close the innermost thing first" shape
+    /// `handle_overview_entry_key`'s own Esc arm follows for the send
+    /// field.
+    #[test]
+    fn esc_closes_the_memory_detail_popup_without_closing_the_knowledge_view() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        state.open_project_knowledge(
+            one_entry("decision: adopt the drill-down view"),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            None,
+        );
+
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(rendered(&state, 120, 40).contains("memory detail"));
+
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let text = rendered(&state, 120, 40);
+        assert!(text.contains("project knowledge"), "{text}");
+        assert!(text.contains("adopt the drill-down view"), "{text}");
     }
 
     /// Map line 1768: the project overview must never show a lifetime token

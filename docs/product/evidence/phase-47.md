@@ -310,3 +310,41 @@ animation loop at all to produce a moving visualization from — every frame
 in `shell::view::render` is drawn once, synchronously, in response to a key
 or a run-loop event, never on a timer, so there is no mechanism by which a
 "graph visualization" could animate even if one were drawn.
+
+
+### Phase 47 — lines 1762 and 1764 attempted and BLOCKED: the ledger cannot be enumerated
+
+State: **NOT STARTED** for 1762 and 1764. Attempted in batch 42 and returned by
+the worker as premise-invalid. **The packet's feasibility block was wrong, and
+the worker was right to stop.**
+
+**The gap.** The line asks for *"one row per observed (provider, model, route)
+identity"*. That requires knowing **which identities exist**, and
+`EvidenceLedger` cannot answer that. Its entire public surface is `record`,
+`recent` and `summarize`, and both readers take an `ObservationQuery` whose
+`provider` and `model` are **required `&str`** — the caller must already name the
+exact identity. `ObservationQuery`'s own doc is explicit that a `None` route
+*"matches rows recorded with no route, not 'any route'"*. **There is no wildcard
+and no listing operation.**
+
+**What the packet got wrong.** Its five links checked producer, caller,
+propagation, consumer and variability — and all five hold for a *lookup*. None of
+them asks whether the data can be **enumerated**. A table is not a lookup: it
+needs the set, and the set had no producer. The orchestrator verified the
+worker's finding directly against `routing/evidence.rs` before accepting it.
+
+**What the worker refused to do, and this is the valuable part.** It could have
+reconstructed the identity list from session and provider configuration. That
+would have rendered a table that *looks* like recorded evidence but is actually a
+mix of *configured* and *observed* — a fabricated measurement, which is exactly
+what Phase 47's own "observability without spectacle" heading exists to prevent.
+It stopped instead, because `routing/evidence.rs` was FORBIDDEN to it (a
+concurrent worker's file) and adding a method there would have been lost.
+
+**What would close them.** One small additive method on `EvidenceLedger` that
+lists distinct observed identities within a window, then the overlay this packet
+described. Both lines then close together, and 1764 remains honest only if the
+report states plainly that `context_state` reads `Unknown` on 100% of real rows —
+`NewObservation::with_context_state` still has zero non-test callers.
+
+Missing evidence: an enumeration method on `EvidenceLedger`. Nothing else.

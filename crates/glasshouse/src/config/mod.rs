@@ -678,6 +678,24 @@ pub struct ProviderConfig {
     /// [`ProviderConfig::cost_of`], the one place that answer is computed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     free_models: Vec<String>,
+    /// Model identifiers on this provider the user has explicitly named as
+    /// eligible for metered (paid) fallback on Glasshouse's own bounded
+    /// support work — the decision recorded in
+    /// `docs/product/design-decisions.md`, *"Metered capacity for background
+    /// jobs"*: ordinary support work may spend quota as a last resort when no
+    /// free resource can serve.
+    ///
+    /// **This list is the control, not a switch beside it.** Empty (the
+    /// default) means no metered fallback for this provider — the coherent
+    /// off state, and the only honest default: Glasshouse never invents a
+    /// model name, so a provider nobody named a paid model for contributes
+    /// nothing metered. Naming one here is the user's decision already made;
+    /// nothing above this list asks permission again. **Names only**, exactly
+    /// like [`ProviderConfig::free_models`] — a model in both lists resolves
+    /// through [`ProviderConfig::cost_of`], which still answers `Free` for
+    /// it, because [`ProviderConfig::free_models`] is checked first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    metered_models: Vec<String>,
     /// A prompt transformation this backend performs on the way through —
     /// Phase 9K line 609.
     ///
@@ -1149,6 +1167,7 @@ impl ProviderConfig {
             headers: Vec::new(),
             enabled: true,
             free_models: Vec::new(),
+            metered_models: Vec::new(),
             prompt_transform: None,
             quota: None,
         }
@@ -1236,6 +1255,18 @@ impl ProviderConfig {
 
     pub fn set_free_models(&mut self, models: Vec<String>) -> &mut Self {
         self.free_models = models;
+        self
+    }
+
+    /// The model identifiers the user has explicitly named as eligible for
+    /// metered disposable-job fallback. See the field's own doc for why an
+    /// empty list is the off state rather than a separate flag.
+    pub fn metered_models(&self) -> &[String] {
+        &self.metered_models
+    }
+
+    pub fn set_metered_models(&mut self, models: Vec<String>) -> &mut Self {
+        self.metered_models = models;
         self
     }
 

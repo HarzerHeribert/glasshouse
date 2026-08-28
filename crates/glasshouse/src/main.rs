@@ -1272,14 +1272,35 @@ fn disposable_extraction_model(runtime: &Runtime) -> Box<dyn glasshouse::memory:
     ))
 }
 
-/// Every free resource Glasshouse's disposable-job routing may choose from,
-/// built the same way `build_settings` builds a `ProviderRow`'s
-/// configuration in `shell/mod.rs`: a provider's whole configuration comes
-/// from whichever layer actually holds its name, project winning over user.
+/// Every resource Glasshouse's disposable-job routing may choose from — free
+/// and metered alike — built the same way `build_settings` builds a
+/// `ProviderRow`'s configuration in `shell/mod.rs`: a provider's whole
+/// configuration comes from whichever layer actually holds its name, project
+/// winning over user.
 ///
-/// A provider that named no free models, or whose credential does not
+/// A provider that named neither a free model
+/// ([`ProviderConfig::free_models`]) nor a metered one
+/// ([`ProviderConfig::metered_models`]), or whose credential does not
 /// currently resolve, contributes nothing — never a candidate with an
 /// invented model name or a credential this process cannot actually use.
+///
+/// # Where the metered half comes from, and why it is not a permission gate
+///
+/// `docs/product/design-decisions.md`'s *"Metered capacity for background
+/// jobs"* records that ordinary support work may spend metered quota as a
+/// last resort. [`ProviderConfig::metered_models`] **is** that decision
+/// applied per provider, not a switch that sits above it: an empty list is
+/// the coherent off state (this function then builds only free candidates
+/// for that provider, exactly as before this batch), and naming a model
+/// there is the user's decision already made — nothing here asks again.
+/// Whether a candidate this loop builds is actually *usable* is
+/// [`glasshouse::routing::disposable::DisposableRouting::choose`]'s job:
+/// free capacity still wins whenever any can serve (line 533), and Phase
+/// 32F's protected-reserve policy still gates every metered one.
+///
+/// A model named in both lists resolves through
+/// [`ProviderConfig::cost_of`] — `Free` wins, and it is added once, not
+/// twice.
 ///
 /// Each candidate carries whatever real capacity data `telemetry` has cached
 /// for its provider — map lines 1536 and 1549, the same
@@ -1295,7 +1316,6 @@ fn disposable_candidates(
     telemetry: &glasshouse::provider::resources::GatheredTelemetry,
     now_unix: i64,
 ) -> Vec<glasshouse::routing::disposable::DisposableCandidate> {
-    use glasshouse::routing::Cost;
     use glasshouse::routing::CredentialId;
     use glasshouse::routing::disposable::DisposableCandidate;
     use glasshouse::secret::SecretRef;
@@ -1308,7 +1328,9 @@ fn disposable_candidates(
         let Some(provider_config) = found else {
             continue;
         };
-        if !provider_config.enabled() || provider_config.free_models().is_empty() {
+        let free_models = provider_config.free_models();
+        let metered_models = provider_config.metered_models();
+        if !provider_config.enabled() || (free_models.is_empty() && metered_models.is_empty()) {
             continue;
         }
         let capacity = disposable_candidate_capacity(&name, effective, telemetry, now_unix);
@@ -1318,13 +1340,16 @@ fn disposable_candidates(
                 continue;
             }
             let credential_id = CredentialId::new(name.clone(), reference);
-            for model in provider_config.free_models() {
+            let models = free_models
+                .iter()
+                .chain(metered_models.iter().filter(|m| !free_models.contains(m)));
+            for model in models {
                 candidates.push(
                     DisposableCandidate::new(
                         name.clone(),
                         model.clone(),
                         credential_id.clone(),
-                        Cost::Free,
+                        provider_config.cost_of(model),
                     )
                     .with_capacity(capacity.clone()),
                 );
@@ -4684,6 +4709,160 @@ mod tests {
         assert!(
             !described.contains("no reset time known"),
             "a real cached reading carries a reset time too: {described}"
+        );
+    }
+
+    /// Map lines 1293 and 1550, at `disposable_extraction_model` itself —
+    /// the same production entry point the two tests above use, not a
+    /// `routing::disposable` type constructed by hand (§35). A provider that
+    /// named only a [`glasshouse::config::ProviderConfig::metered_models`]
+    /// entry, with no telemetry cached (so the reserve gate sees the least
+    /// protective band, [`glasshouse::provider::quota::CapacityBand::Plenty`]),
+    /// is reachable and chosen: `disposable_candidates` built a real metered
+    /// candidate, and Phase 32F's `evaluate_reserve_spend` ran and allowed it.
+    #[test]
+    fn disposable_extraction_model_falls_back_to_a_configured_metered_model_when_permitted() {
+        const VAR: &str = "GLASSHOUSE_TEST_ONLY_WIRE_DISPOSABLE_METERED_KEY";
+        // SAFETY: `VAR` is unique to this test and removed again below.
+        unsafe {
+            std::env::set_var(VAR, "sk-fabricated-test-value-not-a-real-credential");
+        }
+
+        let fixture = CliFixture::new();
+        let mut user = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let mut provider = glasshouse::config::ProviderConfig::new("openai-compatible");
+        provider.set_credential_env(vec![VAR.to_owned()]);
+        provider.set_metered_models(vec!["an-expensive-model".to_owned()]);
+        user.providers_mut()
+            .set("wire-disposable-metered-test-provider", provider);
+        user.save(fixture.runtime.paths()).unwrap();
+
+        let model = disposable_extraction_model(&fixture.runtime);
+        let described = model.describe();
+
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+
+        assert!(
+            described.contains("an-expensive-model"),
+            "the metered model the user named must be the one chosen: {described}"
+        );
+        assert!(
+            described.contains("metered"),
+            "the candidate must be reported as metered, never as free: {described}"
+        );
+        assert!(
+            described.contains("protected-reserve policy"),
+            "Phase 32F's gate must have actually run and left its reasoning in the \
+             explanation: {described}"
+        );
+        assert!(
+            described.contains("no model was called"),
+            "Phase 39 does not exist yet: {described}"
+        );
+    }
+
+    /// Line 533's load-bearing half, through the real production caller
+    /// rather than a hand-built `routing::disposable` policy: a provider
+    /// that named both a free and a metered model still yields the free one,
+    /// however the metered candidate would otherwise have scored.
+    #[test]
+    fn disposable_extraction_model_prefers_a_free_model_over_a_configured_metered_one() {
+        const VAR: &str = "GLASSHOUSE_TEST_ONLY_WIRE_DISPOSABLE_BOTH_KEY";
+        // SAFETY: `VAR` is unique to this test and removed again below.
+        unsafe {
+            std::env::set_var(VAR, "sk-fabricated-test-value-not-a-real-credential");
+        }
+
+        let fixture = CliFixture::new();
+        let mut user = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let mut provider = glasshouse::config::ProviderConfig::new("openai-compatible");
+        provider.set_credential_env(vec![VAR.to_owned()]);
+        provider.set_free_models(vec!["nvidia/nemotron-nano-9b-v2:free".to_owned()]);
+        provider.set_metered_models(vec!["an-expensive-model".to_owned()]);
+        user.providers_mut()
+            .set("wire-disposable-both-test-provider", provider);
+        user.save(fixture.runtime.paths()).unwrap();
+
+        let model = disposable_extraction_model(&fixture.runtime);
+        let described = model.describe();
+
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+
+        assert!(
+            described.contains("nvidia/nemotron-nano-9b-v2:free"),
+            "free capacity must win whenever any can serve, however plentiful the reserve: \
+             {described}"
+        );
+        assert!(
+            !described.contains("an-expensive-model"),
+            "the metered candidate must not be the one chosen while a free one can serve: \
+             {described}"
+        );
+    }
+
+    /// Map line 1550, denying rather than allowing, through the real capacity
+    /// telemetry `disposable_candidate_capacity` reads — not a hand-built
+    /// `CandidateCapacity` (that proof already exists in
+    /// `routing::disposable::tests`; this one proves the real reading reaches
+    /// the gate). A remaining balance of 10% falls inside
+    /// `CapacityBandThresholds::DEFAULT`'s `Reserve` band (above 2%, at or
+    /// below 15%), and a reset 7200s away is `RESET_DISTANT_SECONDS` or
+    /// further — the same combination `routing::disposable::tests::the_protected_reserve_policy_gates_the_metered_fallback`
+    /// denies, reached here through `disposable_extraction_model` end to end.
+    #[test]
+    fn disposable_extraction_model_lets_the_protected_reserve_policy_deny_a_metered_candidate() {
+        const VAR: &str = "GLASSHOUSE_TEST_ONLY_WIRE_DISPOSABLE_DENIED_KEY";
+        const PROVIDER: &str = "wire-disposable-denied-test-provider";
+        // SAFETY: `VAR` is unique to this test and removed again below.
+        unsafe {
+            std::env::set_var(VAR, "sk-fabricated-test-value-not-a-real-credential");
+        }
+
+        let fixture = CliFixture::new();
+        let mut user = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let mut provider = glasshouse::config::ProviderConfig::new("openai-compatible");
+        provider.set_credential_env(vec![VAR.to_owned()]);
+        provider.set_metered_models(vec!["a-reserved-model".to_owned()]);
+        user.providers_mut().set(PROVIDER, provider);
+        user.save(fixture.runtime.paths()).unwrap();
+
+        let now_unix = glasshouse::provider::cache::now_unix_seconds();
+        glasshouse::provider::telemetry::GatewayQuotaCache::new(fixture.runtime.paths()).store(
+            PROVIDER,
+            &glasshouse::provider::telemetry::RateLimitHeaders::read(vec![
+                ("x-ratelimit-limit-requests", "1000"),
+                ("x-ratelimit-limit-tokens", "1000"),
+                ("x-ratelimit-remaining-requests", "100"),
+                ("x-ratelimit-remaining-tokens", "100"),
+                ("x-ratelimit-reset-requests", "7200s"),
+                ("x-ratelimit-reset-tokens", "7200s"),
+            ]),
+            now_unix,
+        );
+
+        let model = disposable_extraction_model(&fixture.runtime);
+        let described = model.describe();
+
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+
+        assert!(
+            described.contains("protected-reserve policy denied"),
+            "a Reserve-band candidate with a distant reset and no cheaper alternative must be \
+             denied: {described}"
+        );
+        assert!(
+            described.contains("a-reserved-model"),
+            "the denial must name the candidate it refused: {described}"
+        );
+        assert!(
+            described.contains("no model was called"),
+            "a refusal is still not a call: {described}"
         );
     }
 

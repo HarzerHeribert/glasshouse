@@ -1102,7 +1102,7 @@ Phase 25 — Project knowledge view
 ☑ Show implemented or planned features in a dedicated section.
 ☑ Show failed approaches in a dedicated historical section.
 ☑ Show unresolved todos in a dedicated section.
-☐ Allow the user to open a memory item and inspect its rationale, source session, source commit, and lifecycle state.
+☑ Allow the user to open a memory item and inspect its rationale, source session, source commit, and lifecycle state.
 ☑ Show supersession relationships textually when they exist.
 ☑ Avoid rendering a decorative node graph unless a future concrete use case requires one.
 
@@ -1290,7 +1290,7 @@ Phase 32F — Protected quota reserve
 ☐ Allow the user to override reserve protection for a specific task or session.
 ☐ Allow reserve policy to become more permissive shortly before a known quota reset.
 ☐ Allow reserve policy to become more conservative when the next reset is distant.
-☐ Keep reserve behavior inspectable in routing explanations.
+☑ Keep reserve behavior inspectable in routing explanations.
 ☐ Avoid moving an almost-complete high-value task to another session solely because a reserve threshold was crossed.
 
 Phase 32G — Provider-aware request-cost estimation
@@ -1547,7 +1547,7 @@ Fixed architectural requirements
 ☑ Include failure-domain diversity when ranking fallback and failover candidates.
 ☑ Reduce the influence of performance observations with small samples, low confidence, or stale windows.
 ☑ Include time until quota reset in candidate scoring.
-☐ Include protected-reserve policy in candidate scoring.
+☑ Include protected-reserve policy in candidate scoring.
 ☐ Include session-switching and bootstrap cost in candidate scoring.
 ☑ Include user preference and pinning as explicit high-priority policy inputs.
 ☑ Avoid collapsing hard constraints and soft preferences into one opaque model-generated score.

@@ -72,8 +72,10 @@ pub enum Overlay {
     /// [`Overlay::ProjectOverview`]'s sibling: that overlay summarizes what
     /// the project is *doing* right now (sessions, live memory); this one
     /// summarizes what the project has *learned*. Deliberately plain text —
-    /// line 1107 rules out a decorative node graph. See
-    /// [`ProjectKnowledgeState`] for the data behind it.
+    /// line 1107 rules out a decorative node graph. Line 1105: a cursor
+    /// selects one entry and Enter opens its rationale, source session,
+    /// source commit and lifecycle state. See [`ProjectKnowledgeState`] for
+    /// the data behind it.
     ProjectKnowledge,
 }
 
@@ -365,10 +367,38 @@ impl ProjectOverviewState {
 /// is shown. Built by `shell::build_project_knowledge_memory` — this module
 /// never queries `crate::memory` itself, the same split
 /// [`ProjectOverviewState`] keeps.
+///
+/// `details` is index-aligned with `lines` — `details[i]` is
+/// [`MemoryDetail`] for the memory `lines[i]` summarizes — map line 1105's
+/// drill-down. Kept as a parallel `Vec` rather than folding the two into one
+/// per-entry type so every existing reader of `lines` (and every fixture
+/// that builds one by hand) stays unaffected by a field it does not use.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct KnowledgeSection {
     pub lines: Vec<String>,
+    pub details: Vec<MemoryDetail>,
     pub omitted: usize,
+}
+
+/// One memory's rationale, source session, source commit and lifecycle
+/// state — map line 1105: *"allow the user to open a memory item and
+/// inspect its rationale, source session, source commit, and lifecycle
+/// state."* Built by `shell::knowledge_detail` from
+/// [`crate::memory::MemoryRecord`]'s own fields — this module holds plain
+/// strings rather than importing `crate::memory`, the same split
+/// [`KnowledgeSection`] itself keeps.
+///
+/// `None` on `rationale`, `source_session` or `source_commit` means the
+/// producer never recorded one — never rendered as an empty field, always
+/// as an honest "none recorded" note (see `view::render_knowledge_detail`).
+/// `lifecycle` is never absent: every memory has a
+/// [`crate::memory::MemoryStatus`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryDetail {
+    pub rationale: Option<String>,
+    pub source_session: Option<String>,
+    pub source_commit: Option<String>,
+    pub lifecycle: String,
 }
 
 /// The project-knowledge view's own data: every kind of durable project
@@ -393,6 +423,19 @@ pub struct ProjectKnowledgeState {
     /// to show anything — the same contract
     /// [`ProjectOverviewState::memory_note`] keeps.
     memory_note: Option<String>,
+    /// Index into the entries of [`Self::sections`], concatenated in the
+    /// same order the view renders them (decisions, constraints, features,
+    /// failed attempts, todos) — map line 1105's selection, the same cursor
+    /// idiom [`OverviewState::cursor`] uses. Meaningless when there are no
+    /// entries at all; every accessor guards for that rather than trusting
+    /// it, the same rule [`ShellState::selected`]'s own doc comment states.
+    cursor: usize,
+    /// Whether the detail popup for the entry under [`Self::cursor`] is
+    /// currently shown. A separate flag rather than folding into `cursor`
+    /// (say, a sentinel value) because "which entry" and "am I looking at
+    /// its detail" are independent facts — the cursor keeps moving to the
+    /// same place if the detail view is closed and reopened.
+    detail_open: bool,
 }
 
 impl ProjectKnowledgeState {
@@ -420,6 +463,46 @@ impl ProjectKnowledgeState {
 
     pub fn memory_note(&self) -> Option<&str> {
         self.memory_note.as_deref()
+    }
+
+    /// The five sections, in the exact order the view renders them —
+    /// [`Self::cursor`] and [`Self::selected`] both walk this order, and
+    /// nothing else, so the two can never disagree about which entry is
+    /// "the third one".
+    fn sections(&self) -> [&KnowledgeSection; 5] {
+        [
+            &self.decisions,
+            &self.constraints,
+            &self.features,
+            &self.failed_attempts,
+            &self.todos,
+        ]
+    }
+
+    /// How many selectable entries exist across every section, combined.
+    pub fn total_entries(&self) -> usize {
+        self.sections().iter().map(|s| s.lines.len()).sum()
+    }
+
+    /// Which entry the cursor is on, meaningless when [`Self::total_entries`]
+    /// is zero.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Whether the detail popup for the entry under the cursor is open.
+    pub fn detail_open(&self) -> bool {
+        self.detail_open
+    }
+
+    /// The entry under the cursor — its display line and its
+    /// [`MemoryDetail`] — or `None` when nothing is selectable.
+    pub fn selected(&self) -> Option<(&str, &MemoryDetail)> {
+        self.sections()
+            .into_iter()
+            .flat_map(|section| section.lines.iter().zip(section.details.iter()))
+            .map(|(line, detail)| (line.as_str(), detail))
+            .nth(self.cursor)
     }
 }
 
@@ -732,6 +815,8 @@ impl ShellState {
             failed_attempts,
             todos,
             memory_note,
+            cursor: 0,
+            detail_open: false,
         });
         Action::Redraw
     }
@@ -1123,8 +1208,10 @@ impl ShellState {
             return self.handle_session_events_key(key, had_status);
         }
 
-        // Read-only, like the three above: the map's boxes ask this view to
-        // *show* project knowledge, never to act on it from here.
+        // Unlike the three read-only overlays above, this one now has a
+        // cursor and a drill-down to open — map line 1105 — so it claims
+        // Up/Down/Enter the same way the Overview claims its own keys, and
+        // passes everything else through underneath.
         if self.overlay == Some(Overlay::ProjectKnowledge) {
             return self.handle_project_knowledge_key(key, had_status);
         }
@@ -1247,14 +1334,82 @@ impl ShellState {
         }
     }
 
-    /// Answer one key while the project-knowledge view is open — the same
-    /// shape as [`Self::handle_project_overview_key`], for the same reason:
-    /// nothing here is acted on, only shown.
+    /// Answer one key while the project-knowledge view is open.
+    ///
+    /// Unlike [`Self::handle_project_overview_key`], this overlay now has a
+    /// cursor and something to act on — map line 1105's drill-down — so it
+    /// claims Up/Down and Enter the same way [`Self::handle_overview_key`]
+    /// does, and passes everything else through unchanged. While the detail
+    /// popup is open every key but its own close key is swallowed rather
+    /// than passed through: a live shell moving underneath a popup that is
+    /// itself showing detail on a *specific* entry would let the cursor
+    /// wander before the detail closes, silently showing the wrong memory's
+    /// detail next time.
     fn handle_project_knowledge_key(&mut self, key: KeyEvent, had_status: bool) -> Action {
+        if self
+            .project_knowledge
+            .as_ref()
+            .is_some_and(ProjectKnowledgeState::detail_open)
+        {
+            return match key.code {
+                KeyCode::Esc => self.close_knowledge_detail(),
+                _ => Action::None,
+            };
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('k') => self.close_overlay(),
+            KeyCode::Up => self.move_knowledge_cursor(-1),
+            KeyCode::Down => self.move_knowledge_cursor(1),
+            KeyCode::Enter => self.open_knowledge_detail(),
             _ => self.handle_control_key(key, had_status),
         }
+    }
+
+    /// Move the project-knowledge cursor, wrapping — the same ring
+    /// [`Self::move_overview_cursor`] is, for the same reason.
+    fn move_knowledge_cursor(&mut self, delta: isize) -> Action {
+        let total = self
+            .project_knowledge
+            .as_ref()
+            .map(ProjectKnowledgeState::total_entries)
+            .unwrap_or(0);
+        if total == 0 {
+            self.set_status("nothing to select in the project-knowledge view");
+            return Action::Redraw;
+        }
+        if let Some(knowledge) = self.project_knowledge.as_mut() {
+            knowledge.cursor =
+                (knowledge.cursor as isize + delta).rem_euclid(total as isize) as usize;
+        }
+        Action::Redraw
+    }
+
+    /// Open the detail popup for the entry under the cursor — map line
+    /// 1105. A project with nothing recorded yet has nothing to select, so
+    /// this refuses rather than opening a detail popup with nothing in it.
+    fn open_knowledge_detail(&mut self) -> Action {
+        let has_selection = self
+            .project_knowledge
+            .as_ref()
+            .is_some_and(|knowledge| knowledge.total_entries() > 0);
+        if !has_selection {
+            self.set_status("nothing selected to inspect");
+            return Action::Redraw;
+        }
+        if let Some(knowledge) = self.project_knowledge.as_mut() {
+            knowledge.detail_open = true;
+        }
+        Action::Redraw
+    }
+
+    /// Close the detail popup, returning to the entry list — the cursor is
+    /// left exactly where it was, so reopening the same key shows the same
+    /// memory.
+    fn close_knowledge_detail(&mut self) -> Action {
+        if let Some(knowledge) = self.project_knowledge.as_mut() {
+            knowledge.detail_open = false;
+        }
+        Action::Redraw
     }
 
     /// Move the overview's cursor, wrapping — the same ring the session bar
@@ -6854,6 +7009,119 @@ mod overview_tests {
             status.contains("background") && status.contains("running"),
             "got {status:?}"
         );
+    }
+}
+
+/// Map line 1105: the project-knowledge overlay's cursor and detail popup,
+/// exercised through [`ShellState::handle_key`] — the same production key
+/// path a real terminal drives — rather than by poking `ProjectKnowledgeState`
+/// fields directly.
+#[cfg(test)]
+mod project_knowledge_state_tests {
+    use super::*;
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn entry(text: &str) -> KnowledgeSection {
+        KnowledgeSection {
+            lines: vec![text.to_owned()],
+            details: vec![MemoryDetail {
+                rationale: Some(format!("why: {text}")),
+                source_session: Some("sess_fixture".to_owned()),
+                source_commit: Some("abc1234".to_owned()),
+                lifecycle: "active".to_owned(),
+            }],
+            omitted: 0,
+        }
+    }
+
+    fn opened_with_three_entries() -> ShellState {
+        let mut state = ShellState::new("p", "/p", "0.1.0", Vec::new());
+        state.handle_key(press(KeyCode::Char('k')));
+        state.open_project_knowledge(
+            entry("decision: first"),
+            entry("constraint: second"),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            entry("todo: third"),
+            None,
+        );
+        state
+    }
+
+    /// The cursor walks every section's entries in render order — decisions,
+    /// constraints, features, failed attempts, todos — and wraps at both
+    /// ends, the same ring [`ShellState::move_overview_cursor`] is.
+    #[test]
+    fn moving_the_knowledge_cursor_wraps_across_every_section() {
+        let mut state = opened_with_three_entries();
+        assert_eq!(state.project_knowledge().unwrap().cursor(), 0);
+
+        state.handle_key(press(KeyCode::Down));
+        assert_eq!(state.project_knowledge().unwrap().cursor(), 1);
+        state.handle_key(press(KeyCode::Down));
+        assert_eq!(state.project_knowledge().unwrap().cursor(), 2);
+        state.handle_key(press(KeyCode::Down));
+        assert_eq!(
+            state.project_knowledge().unwrap().cursor(),
+            0,
+            "must wrap forward past the last entry"
+        );
+
+        state.handle_key(press(KeyCode::Up));
+        assert_eq!(
+            state.project_knowledge().unwrap().cursor(),
+            2,
+            "must wrap backward past the first entry"
+        );
+    }
+
+    /// Enter opens the detail popup for whichever entry the cursor is on —
+    /// not always the first one — and Esc returns to the list without
+    /// closing the whole overlay.
+    #[test]
+    fn enter_opens_detail_for_the_entry_under_the_cursor_and_esc_returns_to_the_list() {
+        let mut state = opened_with_three_entries();
+        state.handle_key(press(KeyCode::Down));
+        assert_eq!(state.project_knowledge().unwrap().cursor(), 1);
+
+        state.handle_key(press(KeyCode::Enter));
+        assert!(state.project_knowledge().unwrap().detail_open());
+        let (text, detail) = state.project_knowledge().unwrap().selected().unwrap();
+        assert_eq!(text, "constraint: second");
+        assert_eq!(detail.rationale.as_deref(), Some("why: constraint: second"));
+
+        state.handle_key(press(KeyCode::Esc));
+        assert!(!state.project_knowledge().unwrap().detail_open());
+        assert_eq!(
+            state.overlay(),
+            Some(Overlay::ProjectKnowledge),
+            "Esc must close only the detail popup, not the whole overlay"
+        );
+    }
+
+    /// A project-knowledge view with nothing recorded has nothing to
+    /// select: Enter must not open an empty detail popup, and must say why
+    /// rather than doing nothing silently.
+    #[test]
+    fn enter_refuses_when_nothing_is_selectable() {
+        let mut state = ShellState::new("p", "/p", "0.1.0", Vec::new());
+        state.handle_key(press(KeyCode::Char('k')));
+        state.open_project_knowledge(
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            KnowledgeSection::default(),
+            None,
+        );
+
+        state.handle_key(press(KeyCode::Enter));
+
+        assert!(!state.project_knowledge().unwrap().detail_open());
+        assert!(state.status().unwrap_or_default().contains("nothing"));
     }
 }
 

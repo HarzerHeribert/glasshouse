@@ -54,10 +54,10 @@ use crate::session::{
 use crate::tui::{AppEvent, DEFAULT_TICK, Event, EventSource, Screen};
 
 pub use state::{
-    Action, HarnessRow, IntegrationRow, KnowledgeSection, Mode, ModelRefresh, Overlay,
-    OverviewState, ProbeKind, ProfileRow, ProfileSettingsEdit, ProviderNotice, ProviderProbeIntent,
-    ProviderProbeResult, ProviderRow, ProviderSettingsEdit, ReachabilityCheck, RoutingRow,
-    RoutingSettingsEdit, SettingsEdit, ShellState, ViewportGrid,
+    Action, HarnessRow, IntegrationRow, KnowledgeSection, MemoryDetail, Mode, ModelRefresh,
+    Overlay, OverviewState, ProbeKind, ProfileRow, ProfileSettingsEdit, ProviderNotice,
+    ProviderProbeIntent, ProviderProbeResult, ProviderRow, ProviderSettingsEdit, ReachabilityCheck,
+    RoutingRow, RoutingSettingsEdit, SettingsEdit, ShellState, ViewportGrid,
 };
 
 /// Open the shell and run it until the user leaves.
@@ -1454,13 +1454,18 @@ fn knowledge_section(
     let omitted = matched
         .len()
         .saturating_sub(PROJECT_KNOWLEDGE_SECTION_LIMIT);
-    let lines = matched
+    let shown: Vec<crate::memory::MemoryRecord> = matched
         .into_iter()
         .take(PROJECT_KNOWLEDGE_SECTION_LIMIT)
-        .map(|record| knowledge_line(&record))
         .collect();
+    let lines = shown.iter().map(knowledge_line).collect();
+    let details = shown.iter().map(knowledge_detail).collect();
 
-    Ok(KnowledgeSection { lines, omitted })
+    Ok(KnowledgeSection {
+        lines,
+        details,
+        omitted,
+    })
 }
 
 /// One display line: [`summarize_memory_line`]'s kind-and-text line, with a
@@ -1477,6 +1482,26 @@ fn knowledge_line(record: &crate::memory::MemoryRecord) -> String {
         line.push_str(&format!(" — superseded by {successor}"));
     }
     line
+}
+
+/// Map line 1105's drill-down data for one memory: its rationale, source
+/// session, source commit and lifecycle state, straight off
+/// [`crate::memory::MemoryRecord`]'s own fields.
+///
+/// `rationale` comes from `record.provenance.rationale` rather than the
+/// whole [`crate::memory::DecisionProvenance`] — the line names only the
+/// rationale, not the five kinds of recorded assumption sitting beside it,
+/// and showing those here would be answering a question the box does not
+/// ask. `lifecycle` uses [`crate::memory::MemoryStatus`]'s own `Display`
+/// (`"active"`, `"superseded"`, and so on) rather than inventing a second
+/// vocabulary for the same fact.
+fn knowledge_detail(record: &crate::memory::MemoryRecord) -> MemoryDetail {
+    MemoryDetail {
+        rationale: record.provenance.rationale.clone(),
+        source_session: record.source_session_id.clone(),
+        source_commit: record.source_commit.clone(),
+        lifecycle: record.status.to_string(),
+    }
 }
 
 /// Build the rows the Settings overlay shows, from a fresh [`Discovery`]
@@ -3585,6 +3610,70 @@ mod project_knowledge_tests {
                 .iter()
                 .any(|line| line.contains("never run ci-local beside cargo"))
         );
+    }
+
+    /// Map line 1105: [`knowledge_detail`] carries the real rationale,
+    /// source session and source commit a memory was recorded with —
+    /// through [`build_project_knowledge_memory`], the production function,
+    /// not a hand-built fixture.
+    #[test]
+    fn build_project_knowledge_memory_carries_real_provenance_for_the_detail_view() {
+        use crate::memory::DecisionProvenance;
+
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let memory = ProjectMemory::open(&runtime).expect("open");
+        memory
+            .store()
+            .record(
+                NewMemory::new(MemoryKind::Decision, "adopt the drill-down view")
+                    .with_source_session(Some("sess_01AAAAAAAAAAAAAAAAAAAAAAAA"))
+                    .with_source_commit(Some("d34db33f"))
+                    .with_provenance(DecisionProvenance {
+                        rationale: Some("answers one question at a time".to_owned()),
+                        ..Default::default()
+                    }),
+            )
+            .unwrap();
+
+        let built = build_project_knowledge_memory(&runtime).expect("must not fail");
+        assert_eq!(built.decisions.lines.len(), 1);
+        assert_eq!(built.decisions.details.len(), 1);
+        let detail = &built.decisions.details[0];
+        assert_eq!(
+            detail.rationale.as_deref(),
+            Some("answers one question at a time")
+        );
+        assert_eq!(
+            detail.source_session.as_deref(),
+            Some("sess_01AAAAAAAAAAAAAAAAAAAAAAAA")
+        );
+        assert_eq!(detail.source_commit.as_deref(), Some("d34db33f"));
+        assert_eq!(detail.lifecycle, "active");
+    }
+
+    /// Map line 1105's honesty half, at the query layer: a memory recorded
+    /// with no rationale, no source session and no source commit produces a
+    /// [`MemoryDetail`] with `None` in each of those fields — never an
+    /// empty string standing in for "not recorded".
+    #[test]
+    fn build_project_knowledge_memory_leaves_unrecorded_provenance_as_none() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let memory = ProjectMemory::open(&runtime).expect("open");
+        memory
+            .store()
+            .record(NewMemory::new(
+                MemoryKind::Todo,
+                "wire the knowledge view into main",
+            ))
+            .unwrap();
+
+        let built = build_project_knowledge_memory(&runtime).expect("must not fail");
+        assert_eq!(built.todos.details.len(), 1);
+        let detail = &built.todos.details[0];
+        assert_eq!(detail.rationale, None);
+        assert_eq!(detail.source_session, None);
+        assert_eq!(detail.source_commit, None);
+        assert_eq!(detail.lifecycle, MemoryStatus::Active.to_string());
     }
 }
 

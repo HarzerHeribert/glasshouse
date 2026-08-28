@@ -11,8 +11,9 @@ kind in its own labelled section, naming supersession relationships where they
 exist — while reading only the current project's database and never drawing a
 decorative graph.
 
-State: **COMPLETE** for map lines 1098, 1099, 1100, 1101, 1102, 1103, 1104, 1106
-and 1107 — nine of ten. **NOT STARTED** for 1105, deliberately not attempted.
+State: **COMPLETE** for all ten of map lines 1098–1107. Nine landed in batch 41;
+**1105 landed in batch 42**, deliberately deferred one batch as a second
+interaction shape rather than bundled and rushed.
 
 **No new mechanism.** The package copied Phase 41's proven pattern rather than
 inventing one: open `ProjectMemory` from the run loop, read through the store,
@@ -111,16 +112,24 @@ it is what the project already does**; the packet's wording was the defect.
 Gates run by the integrator on the integrated tree: recorded with the batch in
 `docs/process/handoff.md`.
 
-**Why one stays open.**
+**The last line, and why it waited a batch.**
 
-- **1105** (*"allow the user to open a memory item and inspect its rationale,
-  source session, source commit, and lifecycle state"*) — **not attempted, by
-  instruction.** Every field it needs already exists on `MemoryRecord`
-  (`provenance`, `source_session`, `source_commit`, `status`), so it is feasible;
-  it was separated because it is a *second interaction shape* — drill-down and
-  selection state rather than a flat render — and bundling two shapes into one
-  package is how a package overruns. It is a clean, well-specified follow-on now
-  that the overlay exists to hang it on.
+**1105 — closed in batch 42, and deferring it was the right call.**
+`ProjectKnowledgeState` gained a cursor over every section's entries in render
+order plus a `detail_open` flag; Enter opens a detail popup carrying the selected
+memory's rationale, source session, source commit and lifecycle state; Esc closes
+the detail first — cursor unmoved — and only then the overlay, mirroring
+`handle_overview_entry_key`'s existing nested-Esc shape rather than inventing a
+second idiom. **A memory missing a rationale, session or commit renders "not
+recorded" for each**, never an empty field and never a fabricated one.
+
+Production evidence: `shell::knowledge_detail(&MemoryRecord) -> state::MemoryDetail`,
+called from `knowledge_section` alongside the existing `knowledge_line` so
+`KnowledgeSection.details` stays index-aligned with `.lines`; driven by
+`ShellState::{open_knowledge_detail, move_knowledge_cursor, close_knowledge_detail}`
+through the real `handle_key` path, rendered by `view::render_knowledge_detail`.
+**No `memory/**` change was needed** — the second package in a row to close boxes
+against that module's existing public API without touching it.
 
 Platform/external evidence: pure rendering over SQLite, no `#[cfg]` beyond
 `#[cfg(test)]`.

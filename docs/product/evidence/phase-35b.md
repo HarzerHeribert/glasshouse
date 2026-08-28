@@ -239,3 +239,103 @@ Missing evidence:
   migration.
 - `CONFIDENT_AT_OBSERVATIONS`'s curve needs `MIN_SAMPLE_FOR_SUMMARY` and it to
   stop being the same number before it can discriminate.
+
+### Phase 35B / Phase 32F — the reserve gate becomes reachable (lines 1293, 1550)
+
+Contract: Given a disposable support job and no free resource able to serve it,
+when Glasshouse routes that job, it considers metered candidates, lets the
+protected-reserve policy decide whether the spend is permitted, and reports that
+decision as a named contribution in the routing explanation — while always
+preferring free capacity when any can serve, and never inventing a model name or
+a price.
+
+State: **COMPLETE** for map lines 1293 and 1550.
+
+**Four checkpoints misdiagnosed this as a policy gap. It was candidate
+generation.** `main.rs::disposable_candidates` iterated
+`provider_config.free_models()` and hardcoded `Cost::Free`, so
+`routing/disposable.rs:558`'s `filter(|c| !c.cost().is_free())` was **always
+empty in the shipped binary**, `evaluate_reserve_spend` never ran, and the
+reserve contribution — written and correct since batch 36 — could never appear.
+The policy was ready the whole time.
+
+**No migration, and no new mechanism.** `MeteredUse`, `evaluate_reserve_spend`
+and the reserve `Contribution` are untouched. The change is a
+`ProviderConfig::metered_models` field, symmetric to the existing
+`free_models()`, and candidate generation that uses it.
+
+Production evidence:
+
+- `config/mod.rs::ProviderConfig::metered_models` — the user names the specific
+  paid model IDs disposable jobs may fall back to. **Glasshouse never invents a
+  model name**, which is why an unconfigured project generates no metered
+  candidate at all.
+- `main.rs::disposable_candidates` — now builds real `Cost::Metered` candidates,
+  reached from `disposable_extraction_model` ← `report_hook` (`main.rs:1177`),
+  the post-turn extraction trigger.
+- `routing/disposable.rs::DisposableRouting::choose` (unchanged) now reaches
+  `evaluate_reserve_spend` and pushes the named `protected-reserve policy`
+  contribution into the explanation — line 1293.
+- `DisposableRouting::score` (unchanged) consumes the reserve result as a
+  **named, zero-magnitude, reason-carrying** contribution — line 1550.
+
+Regression evidence:
+
+- `main.rs::disposable_extraction_model_prefers_a_free_model_over_a_configured_metered_one`
+  — free capacity wins whenever any can serve. **Load-bearing.**
+- `main.rs::disposable_extraction_model_falls_back_to_a_configured_metered_model_when_permitted`
+- `main.rs::disposable_extraction_model_lets_the_protected_reserve_policy_deny_a_metered_candidate`
+
+**Why the zero magnitude is correct and not inertness.** An allow/deny **gate**
+is not a scoring weight, and `DisposableRouting::score`'s own doc comment — which
+predates this batch and was *verified rather than assumed* — says the gate must
+not be double-counted as a magnitude. The gate's effect is proven by the deny
+test: with 10% remaining, band `Reserve`, and 7200s to reset (past
+`RESET_DISTANT_SECONDS`), it **refuses a real candidate** built from real
+telemetry through `disposable_candidates`, not from a hand-built
+`CandidateCapacity`. `routing/disposable.rs`'s own pre-existing
+`the_protected_reserve_policy_gates_the_metered_fallback` could not prove that,
+because it constructs the capacity by hand rather than deriving it through the
+production reading path (§35).
+
+Failure/isolation evidence:
+
+- Mutations killed at candidate generation, including one the worker added
+  itself (`remove-fallback-generation`) when it found the packet's named
+  mutations targeted `routing/disposable.rs`, a file this change did not need to
+  touch. **Mutating what the change actually did, rather than what the packet
+  guessed it would do, is the right correction.**
+- **§69 applied without being asked.** The worker ran the full `--lib` (1384) and
+  full `--bin` (35) suites rather than the named targets, on the reasoning that
+  candidate generation is something anything routing-, config- or shell-adjacent
+  could assert about — and confirmed the new field does not collide with the
+  concurrent `shell/**` work it was forbidden from opening.
+- Binary run: `glasshouse resources` against a real on-disk `config.toml`
+  carrying `metered_models = [...]`, proving the TOML round-trip for real rather
+  than through serde unit tests.
+
+**The control surface, and why there is no second switch.** `metered_models`
+**is** the setting: an empty list is the coherent off state (no metered
+candidates, free-only), a populated one is the on state. A separate boolean was
+considered and rejected — it would be a second source of truth able to contradict
+the list (models configured, flag says off), which is the *"second place that has
+to know"* defect this project keeps paying for. Glasshouse cannot spend on a
+provider the user never configured, so an empty default is not a hedge; it is the
+only honest default when inventing a model name is forbidden.
+
+**One deliberate non-enforcement, recorded so it is met rather than
+rediscovered.** The user's decision bounds the spend *"in proportion to the actual
+task"*. That ratio is **not** enforced here and must not be faked: cost estimation
+is **Phase 32G, 0/10**, and map line 1305 requires unknown pricing be treated as
+unknown rather than assigned a fake zero. What is implemented is the decision's
+own recorded validity condition — free-first, last-resort, bounded, inspectable —
+which holds *while cost estimation does not exist* and should be revisited
+against Phase 32G rather than re-derived.
+
+Missing evidence:
+
+- The proportion bound above, pending Phase 32G.
+- A model named in both `free_models` and `metered_models` resolves to `Free`
+  and is deduplicated rather than rejected. Well-defined by `cost_of`'s existing
+  contract, untested, and flagged by the worker as a candidate for a
+  `glasshouse doctor` warning rather than a hard error.
