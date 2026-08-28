@@ -12,6 +12,37 @@ Last updated: 2026-08-28 (Europe/Berlin)
 boxes** — Phase 21E 914-918/924, Phase 35B 1541/1548, Phase 25 1098-1104/1106/1107.
 Local gate **13/13**, 3789 passed / 0 failed.
 
+### Windows: 3/3 on the second run, and a NEW flake found and attributed
+
+**Do not read this as an unqualified three-platform green.** The first
+`--windows-vm` run on this exact tree **failed one test**:
+
+    gateway::conformance::a_real_forwarded_exchanges_rate_limit_headers_reach_the_gateway
+
+The second run of the **identical tree** passed 3/3, that test included. Same
+tree, two runs, two answers is §40's definition of nondeterminism, and three
+independent checks agree it is not this batch's:
+
+- it **passed** on batch 40's Windows run;
+- batch 41 touched **no** `gateway/**` or `provider/**` file at all;
+- `SessionRouting::observe_quota_headers`, the seam it exercises, lives in
+  `gateway/session.rs:245` — untouched — and the only `impl` this batch added to
+  `routing/interactive.rs` is a `#[cfg(test)]` `ObservationSource`.
+
+**It is a newly-observed flake with no prior record**, and it has the same shape
+as the other two: a **real TCP exchange** driven through the real accept loop
+against a `FixtureUpstream`, which on Windows is where port binding and
+connection timing bite. Observed rate so far: **1 failure in 2 runs**, which is
+far too small a sample to quote as a rate — batch 35 needed nine runs to
+establish the `session::api` flake at 33%, and quoting a rate from two runs is
+exactly the error that cost four Windows runs then.
+
+**It joins the standing Windows flake debt**, beside the 33% `session::api`
+interrupt flake (which **passed on both runs here**) and the 1-in-37 `pty_smoke`
+`SIGABRT`. Nobody owns any of the three. The cost is now visible: this batch
+spent an extra full Windows round trip to attribute one, and every future
+orchestrator pays that toll before it can trust a red Windows result.
+
 ### The round exists because the user corrected the cost model
 
 Batch 40 ran one worker and justified it by the weekly window. The user's
