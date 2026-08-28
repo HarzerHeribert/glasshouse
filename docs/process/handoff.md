@@ -43,6 +43,32 @@ interrupt flake (which **passed on both runs here**) and the 1-in-37 `pty_smoke`
 spent an extra full Windows round trip to attribute one, and every future
 orchestrator pays that toll before it can trust a red Windows result.
 
+### A second recon corrected the first in both directions, for ~$3.24
+
+Recon-1's Phase 33 verdicts contradicted themselves (one read `CLOSABLE` while
+its own consumer field read `MISSING`). A second read-only worker re-verified
+them, and the orchestrator re-checked each correction against source.
+
+**The expensive one it prevented:** recon-1 said line 1313 had no consumer
+because *"no resource-health surface reads `EvidenceLedger`"*. That is false —
+`gateway/session.rs:420` constructs `ObservedEvidenceSource` and its own comment
+calls it *"Phase 9J and Phase 33A's one production consumer"*. The verdict stays
+blocked, but the real gap is that the **latency fields have no field on
+`ObservedEvidence` to land in**. A package built on recon-1's reason would have
+added a redundant shell overlay instead of a duration field and a two-line
+mapping change.
+
+It also found **1314 and 1315 closable** (recon-1 never checked
+`main.rs::resources_report` or `api/unix.rs::resource_capacity`, the shipped
+`glasshouse resources` command), and that `ResourceHealth`'s writer covers
+**paid** assignments too, not just the free pool.
+
+**The lesson is not "recon is unreliable" — it is that a recon worker is cheap
+enough to run twice.** Two of them cost ~$7 together and between them refuted a
+standing architectural claim, caught an inert input in a live packet, and
+prevented a misdirected package. That is the cheapest verification tier this
+project has.
+
 ### The round exists because the user corrected the cost model
 
 Batch 40 ran one worker and justified it by the weekly window. The user's
