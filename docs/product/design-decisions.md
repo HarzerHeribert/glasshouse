@@ -2071,3 +2071,88 @@ condition: **this reading holds while cost estimation does not exist.**
   chooses nothing metered and fails instead — line 542, unchanged.
 - A stray value in that variable leaves metered use withheld: the fail-closed
   direction, already implemented in `MeteredUse::for_automated_run`.
+
+## Negotiable by default, and built to be measured — the alpha's shape
+
+### The decision
+
+**Most of Glasshouse's behaviour should be optional, and every optional behaviour
+should be built so its usefulness can be measured.** The user's words, 2026-08-28:
+
+> *"not every feature needs to be optional, some are just what glasshouse is and
+> can't be negotiated. But I don't think this only applies to some workings of
+> it — most of it can and should be. Glasshouse is gonna be early alpha so a lot
+> of A/B testing to measure usefulness of feature is needed, which will clarify
+> while using it. So negotiable features should be built with this in mind."*
+
+Two claims, and the second is the one that changes how packets are written.
+
+### 1. There is a core, and it is small
+
+A minority of behaviours **are** Glasshouse and are not negotiable. The product
+invariants already name them — Glasshouse orchestrates real installed harnesses
+and does not hide them; every interactive session is backed by a real native
+harness; memory, session state and logs are project-scoped; cross-project access
+is disabled structurally; secrets never enter logs, `Debug`, diagnostics,
+snapshots, fixtures or commits. **Those are not settings and must never become
+settings** — a switch that can turn off project isolation is a defect, not a
+feature.
+
+**Everything outside that core is presumed negotiable.** The default assumption
+for a new behaviour is *optional*, and making something mandatory is the choice
+that now needs an argument.
+
+### 2. Negotiable means switchable **and observable**
+
+*"Built with A/B testing in mind"* is the operative half, and it is a
+construction requirement, not a documentation one. A negotiable behaviour must:
+
+- **be switchable cleanly**, so the off state is a real alternative rather than a
+  degraded one — turning it off must produce coherent behaviour a user could
+  live with, because that is the control arm of the comparison;
+- **default to the behaviour the product wants**, not to off. A default of off is
+  not neutral; it is a decision that the feature is not worth having, and it will
+  silently win every comparison nobody runs;
+- **make its effect observable** — the decision it changed must be legible
+  somewhere a person or a metric can see it. A behaviour whose only evidence is
+  that it ran has nothing to A/B.
+
+**This is why `Contribution` and `RoutingExplanation` matter beyond their own
+boxes.** A routing signal that pushes a named contribution with an honest reason
+is measurable by construction; one that quietly adjusts a number is not.
+
+### What it does NOT authorise
+
+**It does not authorise building A/B infrastructure ad hoc.** Measurement is
+**Phase 51 (Evaluation hooks), 0 of 37**, and every one of its lines is a
+*"measure how often…"* question this decision now makes strategically important:
+how often retrieved memory is actually useful, how often stale memory is
+retrieved, how often automatic routing is overridden by the user, how often
+warm-session reuse is chosen over a fresh session. **A package makes its own
+behaviour switchable and observable; it does not invent a second telemetry
+system beside Phase 51's.**
+
+It also does not authorise a setting for everything. A setting is a promise to
+maintain both paths forever, and Phase 21H exists to discourage exactly the
+speculative variation that produces. **Optional by default is a bias, not a
+mandate** — if a behaviour has no plausible off state a user would want, say so
+and make it mandatory.
+
+### Consequence for how packets are written
+
+A packet for a negotiable behaviour should state, explicitly:
+
+1. whether the behaviour is core or negotiable, and why;
+2. if negotiable, what its **default** is and why that matches the product's
+   intent — not what is safest to ship;
+3. how the behaviour's effect is **observable** to someone measuring it later.
+
+### Where this came from, and the mistake it corrects
+
+An orchestrator proposed gating metered quota behind a switch defaulting to
+**off**, and justified it as satisfying two readings of an earlier decision at
+once. The user rejected it: *"you can't just build something conflicting."* The
+default was the defect — the recorded decision was that a background job **may**
+use quota, and an off default ships the opposite while claiming to honour it.
+**A hedge between a real instruction and an invented alternative is not neutral;
+it silently picks the invented one.**
