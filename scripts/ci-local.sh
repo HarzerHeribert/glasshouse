@@ -83,7 +83,7 @@ if [ "$DO_MAC" -eq 1 ]; then
   # Free-because-local checks. These never ran on GitHub Actions; they exist
   # because a local gate can afford questions a metered one could not.
   step "lint / doc boundary" scripts/check-doc-boundary.sh
-  step "lint / evidence coverage" python3 scripts/check-evidence-coverage.py --strict
+  step "lint / evidence coverage" python3 scripts/check-evidence-coverage.py --strict --strict-consistency
   # The orchestration scripts have tests and, until 2026-08-27, nothing ran
   # them. validate_round.py gates every round and worker-watch.sh decides
   # when a worker is finished; both are cheap to break and expensive to

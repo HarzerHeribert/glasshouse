@@ -149,6 +149,83 @@ def check_vocabulary(evidence_dir, strict):
     return 1 if strict else 0
 
 
+def normalize_ws(text):
+    """Collapse every run of whitespace to one space.
+
+    Evidence files hard-wrap at ~76 columns; the map stores each box as one
+    long unwrapped line. Comparing them needs this on both sides -
+    `scripts/validate_round.py` carries the same helper for the same reason.
+    """
+    return re.sub(r"\s+", " ", text).strip()
+
+
+# The verdicts an entry uses for a line it is NOT closing. A ticked box whose
+# own entry says one of these is the defect this check exists for.
+OPEN_VERDICTS = ("PARTIAL", "OPEN", "BLOCKED", "NOT STARTED")
+
+
+def map_box_texts(map_path):
+    """Every box line's normalized text -> (line number, is_ticked)."""
+    boxes = {}
+    with open(map_path, encoding="utf-8") as handle:
+        for line_no, raw in enumerate(handle, start=1):
+            if not raw.startswith(("\u2611", "\u2610")):
+                continue
+            boxes[normalize_ws(raw[1:])] = (line_no, raw.startswith("\u2611"))
+    return boxes
+
+
+def self_inconsistent(map_path, evidence_dir):
+    """Ticked boxes whose own evidence entry calls them PARTIAL/OPEN/BLOCKED.
+
+    Map line 1330 was ticked from its entry's *summary* line while that same
+    entry's per-line disposition read `PARTIAL. ... open on purpose alone`.
+    Both sentences were in the same file. Nothing compared them.
+
+    The entry quotes the box text in bold and follows it with a bolded verdict,
+    so the pair is findable. Whitespace is normalized across the whole document
+    first because evidence files hard-wrap at ~76 columns and the map stores
+    each box as one long line - practice section 49's join-then-normalize, and
+    section 42's rule that prose a file has wrapped will not match a search for it.
+    """
+    boxes = map_box_texts(map_path)
+    pair = re.compile(
+        r"\*\*(?P<quote>[^*]{20,}?)\*\*\s*\*\*(?P<verdict>"
+        + "|".join(OPEN_VERDICTS)
+        + r")\b"
+    )
+    findings = []
+    for path in sorted(glob.glob(os.path.join(evidence_dir, "*.md"))):
+        with open(path, encoding="utf-8") as handle:
+            flat = normalize_ws(handle.read())
+        for match in pair.finditer(flat):
+            quote = normalize_ws(match.group("quote"))
+            entry = boxes.get(quote)
+            if entry is None:
+                continue
+            line_no, is_ticked = entry
+            if is_ticked:
+                findings.append((path, line_no, match.group("verdict"), quote))
+    return findings
+
+
+def check_self_consistency(map_path, evidence_dir, strict):
+    findings = self_inconsistent(map_path, evidence_dir)
+    if not findings:
+        print("evidence self-consistency: clean - no ticked box is called "
+              "PARTIAL/OPEN/BLOCKED by its own entry")
+        return 0
+    print(f"\n  {len(findings)} ticked box(es) contradicted by their own evidence entry:")
+    for path, line_no, verdict, quote in findings:
+        shown = quote if len(quote) <= 66 else quote[:63] + "..."
+        print(f"    map:{line_no} is ticked, {os.path.basename(path)} says {verdict}")
+        print(f"      {shown}")
+    print("\n  An entry's summary and its own per-line disposition must agree.")
+    print("  Either the box is not COMPLETE and should be unticked, or the")
+    print("  disposition is stale and should be updated. Do not leave both.")
+    return 1 if strict else 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--map", default=MAP)
@@ -158,6 +235,9 @@ def main():
     ap.add_argument("--strict-vocabulary", action="store_true",
                     help="exit non-zero on any State: outside the SDLC's six "
                          "(warn-only by default while a backlog exists — §51)")
+    ap.add_argument("--strict-consistency", action="store_true",
+                    help="exit non-zero when a ticked box is called "
+                         "PARTIAL/OPEN/BLOCKED by its own evidence entry")
     args = ap.parse_args()
 
     if not os.path.exists(args.map):
@@ -165,6 +245,9 @@ def main():
         return 2
 
     vocabulary_rc = check_vocabulary(args.evidence, args.strict_vocabulary)
+    print()
+    consistency_rc = check_self_consistency(args.map, args.evidence,
+                                            args.strict_consistency)
     print()
 
     ticked = ticked_by_phase(args.map)
@@ -183,7 +266,7 @@ def main():
           f"have evidence ({len(have)} phases referenced in the ledger)")
 
     if not uncovered:
-        return vocabulary_rc
+        return vocabulary_rc or consistency_rc
 
     boxes = sum(c for _, c in uncovered)
     print(f"\n  {len(uncovered)} phase(s), {boxes} ticked box(es), with no evidence entry:")
@@ -191,7 +274,7 @@ def main():
         print(f"    {phase}: {count} ticked")
     print("\n  A ticked box without an evidence entry is a claim with nothing behind it.")
     print("  Either write the entry, or untick the box.")
-    return 1 if args.strict else vocabulary_rc
+    return 1 if args.strict else (vocabulary_rc or consistency_rc)
 
 
 if __name__ == "__main__":
