@@ -63,8 +63,10 @@ exchange's honest, transport-level subset of identity, timing and outcome,
 while preserving every prior row unedited and computing every rolling
 summary on read rather than replacing the raw rows that produced it.
 
-State: **COMPLETE** for map lines 1329, 1330, 1337, 1338, 1342 and 1343 — six
-of fifteen. **NOT STARTED, blocked** for the other nine.
+State: **COMPLETE** for map lines 1329, 1337, 1338, 1342 and 1343 — five
+of fifteen. **1330 was listed here as COMPLETE and is now re-opened** — see
+*"1330 re-opened"* at the end of this entry; the summary disagreed with this
+same document's own per-line disposition below, which has always read PARTIAL. **NOT STARTED, blocked** for the other nine.
 
 > **Orchestrator's ruling, and the line it draws.** A box closes here when the
 > **recording** path runs in the shipped binary, which it now does: `main.rs`
@@ -368,3 +370,87 @@ summary that reads them (1335), and a bounded observation window (1341).
 
 **Still open: 1331–1334**, because the gateway cannot read a response body by
 design — unchanged by this round, and unreachable from `gateway/**` at all.
+
+---
+
+### 1330 re-opened, 2026-08-29 — the summary disagreed with this file's own body
+
+**The box was ticked from this entry's summary line while this entry's own
+per-line disposition said `PARTIAL`.** Both sentences were in the same document
+the whole time. The disposition, unchanged since it was written, reads:
+
+> *"`purpose` is never supplied by this producer — nothing in the gateway's
+> partition knows why a turn was made — and stays `NULL` on every row this build
+> writes. **Open on `purpose` alone**; the rest closes with the wiring patch."*
+
+Confirmed independently by a read-only audit and by the orchestrator:
+
+- `NewObservation.purpose` is declared at `routing/evidence.rs:247` and defaults
+  to `None` at `:279`.
+- **There is no `with_purpose` builder anywhere on the type.** `evidence.rs:296-329`
+  lists every builder that exists: `with_route`, `with_quota_context`,
+  `with_harness`, `with_timing`, `with_outcome`, `with_context_state`. A field
+  with no setter cannot be set by any caller, production **or test** — which is
+  a stronger statement than the usual "no production caller".
+- The sole production writer, `gateway/session.rs::record_routing_observation`
+  (`:278-322`), calls five of those builders and never touches `purpose`.
+- The gateway could not supply one anyway: `Exchange` (`gateway/ingress.rs:117`)
+  carries `outcome`, `status`, `provider`, `protocol` and `host`, and `protocol`
+  is already stored as `route`. Nothing purpose-shaped reaches this writer.
+
+**The standard that decides it is the project's own, applied twice already in
+the same phase family.** Map lines **1542** (`ObservedEvidence::reliability` is
+`None` on 100% of real rows) and **1545** (`ContextState` is `Unknown` on 100% of
+real rows) are both refused and unticked, with the reasoning recorded in
+`phase-35b.md`. `purpose` is absent by a wider margin than either. Leaving 1330
+ticked would make that standard something this project applies to open boxes and
+suspends for closed ones.
+
+**Six of the seven facts the line names are genuinely recorded and remain
+proven** — provider, route, model, quota context, harness and timestamp, through
+`a_real_forwarded_exchange_reaches_the_routing_evidence_ledger`. Nothing about
+that evidence is withdrawn. The line simply names seven things and the build
+records six.
+
+**What closing it now requires:** a producer, not a builder. Adding
+`with_purpose` is five minutes; the missing part is that no purpose-bearing fact
+reaches `record_routing_observation`. Whoever closes this must first answer what
+distinguishes one gateway turn's purpose from another's in the current build —
+and today the honest answer may be "nothing", in which case the line waits for
+disposable-job routing to actually traverse the gateway.
+
+### Two more PARTIAL ticks found by the same audit — flagged, deliberately NOT reversed
+
+The audit applied its vocabulary to every ticked line in Phases 33A, 33C and 35B
+(27 lines) and returned **24 SOUND**. Besides 1330 it found two more it judged
+`PARTIAL`. **Both are left ticked, and the reason is that both were closed
+knowingly, with the narrowing written down at the time** — which is a different
+situation from 1330, where a summary contradicted its own body.
+
+- **Map line 1377** (four categories of routing benefit) — `RoutingBenefit`
+  (`routing/interactive.rs:787-804`) has three variants, and two of the four
+  named categories have no producer in the current build. **Already disclosed in
+  full at `phase-33c.md:117-142`** as a deliberate two-of-four closure.
+- **Map line 1541** (decay scoped to *"the exact harness-profile-model-backend
+  combination"*) — the audit sharpened what was known: `launch_profile` is not
+  merely unqueried, it is **`String::new()` at the only non-test constructor**
+  (`routing/interactive.rs:681`, annotated in-line explaining why), and
+  `ObservedEvidenceSource::observed` (`evidence.rs:1141-1156`) never reads it.
+  So the decay is scoped to three of the four named dimensions on every real row.
+  Disclosed as a narrowing in `phase-35b.md:221-230`.
+
+**The orchestrator's ruling, with its reasoning, per practice §33.** A disclosed
+narrowing that a previous integrator weighed and accepted is a judgement, and
+reversing it deserves more than one audit at the end of a spent window. 1330 is
+not that: its own entry says `PARTIAL` and *"open on `purpose` alone"*, so
+un-ticking it restores agreement rather than overturning a decision. **1377 and
+1541 are recorded here as live questions for the next round**, with the audit's
+sharper evidence attached so that whoever takes them up starts from it rather
+than re-deriving it.
+
+**The systemic finding worth more than the three boxes:** in every case the
+*evidence files were honest* and the *map tick was more generous than the entry
+it rested on*. The gap is between an entry's summary line and its body. Nothing
+checks that those two agree — `scripts/check-evidence-coverage.py` verifies an
+entry **exists** for a phase, not that its summary matches its dispositions.
+That is a cheap gate somebody could write, and it would have caught this one.
