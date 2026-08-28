@@ -6,6 +6,56 @@
 
 Last updated: 2026-08-28 (Europe/Berlin)
 
+## Checkpoint — 2026-08-28, batch 43 landed: 687 / 1280 (53%)
+
+**Green on all three platforms** — local 13/13, 3855 passed / 0 failed,
+`--windows-vm` **3/3 first try**, no flake. Two implementers plus a read-only
+recon. Four boxes: 1762, 1764, 1314, 1315.
+
+### The round's finding is about the gate, not the product
+
+**`validate_round.py` check 3 had been verifying nothing.** It matched only lines
+whose *first* character is `☐` — the shape the map uses. Every packet dresses the
+quote as `- **1311** ☐ …`, so it saw **zero box lines** and reported PASSED, for
+at least four rounds.
+
+A worker found it by hand: **five of its packet's nine quoted Phase 33 lines were
+wrong at the same line numbers**, two with their topics swapped. Fixed in
+`5971e9f`, two regression tests, verified both ways — seven mismatches now caught
+in the bad packet, zero false positives on six good ones.
+
+**That is practice §68's defect inside the gate built to catch it**, and the fifth
+instance of one shape: `blind` not zero (§54), `unknown` not a session id (§67),
+*"0 tests matched"* not *"tests passed"* (§68), your own recommendation not the
+user's decision (§70), and now a check that matched nothing reporting PASSED.
+**A mechanical gate needs its own non-vacuity check** — this project
+mutation-tests its product code as routine and had never asked whether its
+*process* checks could fail.
+
+### Two closures declined, deliberately
+
+1320 and 1323 rest on existing tests, 1323 partly on a source-scan proof of
+absence — §14's trap, and map 1748's history. They need a mutation check.
+**Declining costs a round; ticking wrongly costs the ledger's credibility.**
+
+### Phase 33's thirteen open lines are one wall
+
+`ResourceHealth` is real and written for **every** exchange, paid included — but
+**nothing outside the `gateway` module can observe it**. `free_pool()` has zero
+callers in `src/`; the one router reading `FreePool::is_available` builds an
+always-empty pool by its own doc; `api/unix.rs:331` says no live health signal is
+exposed. **1311/1321/1322/1324 need one consumer, not four packages.**
+
+### Phase 51 is blocked on a primitive, and it is the user's decision
+
+All 37 lines blocked, one shared cause: **Glasshouse cannot count occurrences of a
+decision or effect over time.** The schema is built for current state. Every
+feature-on-vs-off comparison the alpha directive asks for is an event count. The
+cheap way in is caller-side (populate `purpose`/`cost`/timestamps that
+`record_routing_observation` never sets — six lines); the memory cluster needs a
+**new event-log table**, a migration and Red tier. Recorded in
+`docs/product/design-decisions.md`.
+
 ## Checkpoint — 2026-08-28, batch 42 landed: 683 / 1280 (53%)
 
 **Green on all three platforms** — local gate 13/13, 3811 passed / 0 failed,
