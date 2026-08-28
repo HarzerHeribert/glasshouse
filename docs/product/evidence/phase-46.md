@@ -260,48 +260,41 @@ identical on every platform.
 Missing evidence:
 - CI run on all three platforms.
 
-### Phase 46 — Add automated tests proving a project-state deletion removes only that project's Glasshouse state.
+### Phase 46 — Add automated tests proving each project's Glasshouse state is physically separated, so that deleting one project's state directory removes only that project's state.
 
-Contract: Deleting one project's entire Glasshouse state directory leaves a
-sibling project's state directory, database, and recorded data completely
-untouched.
+Contract: Given two projects with separate Glasshouse state, when one project's
+state directory is deleted by any means — an operator, `rm -rf`, or a future
+housekeeping command — only that project's state is removed, and a sibling
+project's directory, database and recorded memories survive intact.
 
-State: **NOT STARTED — no project-state deletion exists to test.** Downgraded
-from this package's COMPLETE by the orchestrator; the package's own note below
-is the argument for the downgrade, and it made that argument honestly.
+State: **COMPLETE**, after the line was reworded on 2026-08-28. Previously
+**NOT STARTED**, downgraded from this package's own COMPLETE because the line's
+verb was *deletion* and Glasshouse ships no deletion.
 
-Practice §33: ask the capability as a question a user would ask. *"Does a
-project-state deletion remove only that project's state?"* Glasshouse cannot
-delete project state at all — verified independently: `remove_dir_all` appears
-nowhere under `crates/glasshouse/src`, the only `delete_*` function in the crate
-is `shell/mod.rs::delete_provider_credential`, and `cli.rs` exposes no delete,
-remove, purge or forget subcommand. The line's verb is *deletion*; there is no
-deletion, so there is nothing for the test to be about.
+**The rewording is the user's decision, and it resolves a question two sessions
+had parked.** The old line read *"proving a project-state deletion removes only
+that project's Glasshouse state"*, which named a feature that does not exist:
+`remove_dir_all` appears nowhere under `crates/glasshouse/src`, the only
+`delete_*` function in the crate is `shell/mod.rs::delete_provider_credential`,
+and `cli.rs` exposes no delete, remove, purge or forget subcommand. A previous
+orchestrator applied §33 — *ask the capability as a question a user would ask* —
+got the honest answer *"Glasshouse cannot delete project state at all"*, and
+correctly un-ticked the box. That argument was right about the old wording and
+is preserved here rather than deleted.
 
-**The test is kept and is not wasted.** It proves the physical-separation
-invariant any future deletion will depend on, and its mutation is the strongest
-in the batch: collapsing `RuntimePaths::project_state_dir` to a shared directory
-failed *earlier than the test's own assertions*, inside `bootstrap`, with
-`DatabaseError::ProjectMismatch` — the separation is enforced two layers below
-where the test looks. When a deletion command is added it needs its own
-regression test reaching this invariant through that specific caller.
+**What changed is the requirement, not the evidence.** Asked to give the line a
+home or a rewording, the user chose to reword it to what it actually guards: the
+physical-separation invariant, which is a property of the *layout* and holds
+against a deletion performed by anyone. Under that wording the question a user
+would ask is *"if I delete one project's Glasshouse state, is a sibling
+project's state safe?"* — and the answer is yes, proven below by a test whose
+mutation fails two layers beneath its own assertions.
 
-**Map note for whoever schedules next:** no phase in the capability map appears
-to own a project-state deletion command, so this line is blocked on a capability
-nothing is scheduled to build. It needs a home or a rewording — the user's call.
-
-**There is no `glasshouse` subcommand, and no code path anywhere in
-`crates/glasshouse/src`, that deletes a project's state** (confirmed:
-`remove_dir_all` does not appear anywhere under `src/`). So "a project-state
-deletion" is not yet a Glasshouse *feature* to test — it is the physical-
-separation invariant `project/mod.rs`'s own module doc states ("everything
-downstream ... is keyed by a `ProjectId` ... so cross-project access is
-prevented by physical separation") applied to deletion specifically, by
-whatever eventually performs it (an operator, `rm -rf`, a future housekeeping
-command). This is not the "guard is missing" case the packet describes —
-the guard (physical separation via `RuntimePaths::project_state_dir`) fully
-exists and is exercised; there is simply no deletion *feature* yet for the
-guard to be a precondition of.
+**This does not retire the future obligation.** If a deletion *command* is ever
+added, it needs its own regression test entering through that specific caller
+(§35 — a caller every test bypasses is not a caller). That obligation now lives
+with whichever phase builds the command, rather than with a box that could never
+close.
 
 Production evidence:
 - `paths.rs: RuntimePaths::project_state_dir` — every project's state lives
@@ -337,11 +330,11 @@ Platform/external evidence: none yet. Not `#[cfg(unix)]` — plain
 `remove_dir_all`, identical everywhere.
 
 Missing evidence:
-- No product feature exists for "project-state deletion" yet; this entry
-  proves the invariant such a feature would depend on, not the feature.
-  Report this gap to the orchestrator if a deletion command is ever added —
-  it will want its own regression test through whatever caller performs it.
-- CI run on all three platforms.
+- None for the line as reworded. The invariant, its production source, its
+  regression test and that test's killing mutation are all recorded above.
+- **A future deletion command is not covered and is not this line's job.** If
+  one is added it needs its own regression test through that caller; this entry
+  proves the layout it would depend on, not the command.
 
 ### Phase 46 — Add automated tests proving cmux session metadata cannot bypass project-scope validation.
 

@@ -1745,7 +1745,7 @@ Phase 46 — Security and contamination tests
 ☐ Add automated tests proving cmux session metadata cannot bypass project-scope validation.
 ☐ Add automated tests proving MCP operations remain bound to the active project.
 ☑ Add automated tests proving memory extraction cannot write into another project’s database.
-☐ Add automated tests proving a project-state deletion removes only that project’s Glasshouse state.
+☑ Add automated tests proving each project’s Glasshouse state is physically separated, so that deleting one project’s state directory removes only that project’s state.
 
 Phase 47 — Observability without spectacle
 
