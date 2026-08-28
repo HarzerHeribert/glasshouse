@@ -6,6 +6,72 @@
 
 Last updated: 2026-08-28 (Europe/Berlin)
 
+## Checkpoint — 2026-08-28, batch 42 landed: 683 / 1280 (53%)
+
+**Green on all three platforms** — local gate 13/13, 3811 passed / 0 failed,
+`--windows-vm` **3/3 on a clean VM**. Three Sonnet implementers plus a second
+read-only recon. **Three boxes closed, two returned as premise-invalid**, and the
+returns cost less than the closures.
+
+### The reserve gate was never a policy gap
+
+Four checkpoints called 1293/1550 blocked on policy. It was **candidate
+generation**: `disposable_candidates` hardcoded `Cost::Free`, so
+`disposable.rs:558`'s filter was always empty, `evaluate_reserve_spend` never
+ran, and a reserve contribution correct since batch 36 could never appear. Fixed
+with `ProviderConfig::metered_models`, symmetric to `free_models()`.
+
+**`metered_models` IS the control — there is deliberately no boolean above it.**
+Empty is the off state, populated is on. A second switch would be a source of
+truth able to contradict the list. The user's decision governs the default:
+metered use is *permitted*, so nothing gates it beyond having configured a model.
+
+### Two boxes returned, and the packet was at fault both times
+
+**1762/1764.** The table needs one row per *observed* identity. `EvidenceLedger`
+exposes only `record`/`recent`/`summarize`, and `ObservationQuery` requires
+`provider` and `model` as `&str` with no wildcard — **there is no way to ask which
+identities exist.** The packet's five links all held for a *lookup*; none asks
+whether data can be **enumerated**. Now practice **§71**.
+
+**The worker could have shipped it** by reconstructing identities from config —
+rendering *configured* routes beside *observed* ones as if both were measurements,
+inside a phase called *observability without spectacle*. It stopped instead. **A
+fabricated row and a real row render identically, so no test would have caught it.**
+
+### The Windows hang was a flake, and the second failure was the integrator's
+
+Run 1 hung on `gateway::conformance::an_unreachable_provider_...` — silent 458s
+at 2.7% VM CPU. Run 2 then failed **all three legs before any test ran**:
+`Could not replace CI source tree ... used by another process`. **`TaskStop`
+kills the local driver and nothing on the VM** — the hung binary and its
+`cargo.exe` were still holding the lock. Killed over ssh; run 3 clean, the test
+passing, the standing 33% flake passing too. Practice **§72**.
+
+**That is now two hang-flakes in `gateway::conformance`**, both driving real
+sockets, joining the 33% `session::api` interrupt flake and the 1-in-37
+`pty_smoke` `SIGABRT`. Four unowned Windows flakes; none is anyone's job.
+
+### Recon-2 corrected recon-1 in both directions
+
+See the batch-41 section. The transferable part: **a recon worker is cheap enough
+to run twice** — two cost ~$7 and between them refuted a standing architectural
+claim, caught an inert input in a live packet, and prevented a misdirected
+package.
+
+### Next
+
+1. **Phase 33 ticking pass** — 1314/1315 closable with zero new files, per
+   recon-2. **1315 carries a proof gap**: it wants a test asserting rendered reset
+   text, and the orchestrator found **no literal `resets` string in `src/`** —
+   what exists is `seconds_until_reset()` and a JSON field. Settle the wording
+   before writing the packet.
+2. **Phase 47 1762/1764** — one small additive `EvidenceLedger` method listing
+   distinct observed identities, then the overlay. Both close together.
+3. **Phase 51 (Evaluation hooks, 0/37)** — now strategically important: the
+   user's alpha needs A/B measurement of feature usefulness, and every line of
+   that phase is a *"measure how often…"* question.
+
 ## Checkpoint — 2026-08-28, batch 41 landed: 680 / 1280 (53%)
 
 **Three Sonnet workers in parallel on provably disjoint partitions. Seventeen
