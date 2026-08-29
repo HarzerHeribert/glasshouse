@@ -3132,6 +3132,38 @@ needed escalation, whether each worker adapted because of what it saw, and the
 wall-clock against simply queueing. **The honest baseline is that queueing already
 works** — Maybe L ships only if co-editing beats it on real work.
 
+### It is built, not a proposal — `scripts/coedit.sh` and a hook
+
+The protocol above is implemented and tested end to end against two real git
+worktrees:
+
+    scripts/coedit.sh claim   <file> <worker> [worktree]   register intent
+    scripts/coedit.sh diff    <file> <worker>              read every peer's version
+    scripts/coedit.sh done    <file> <worker>              declare finished
+    scripts/coedit.sh status  <file>                       barrier state
+    scripts/coedit.sh ready   <file>                       exit 0 iff all done
+    scripts/coedit.sh list | release <file>
+
+State lives in `.agent-runtime/coedit/`, which is gitignored. **The tool only
+ever reads a peer's worktree** — never writes to one, never writes to `main` —
+and `test_reading_a_peer_never_writes_to_its_worktree` is the load-bearing test,
+because a peer's tree holds the only copy of that worker's deliverable and §22
+already cost this project 161 lines learning what happens when something writes
+where it should not.
+
+**`scripts/hooks/coedit-peer-notice.sh` is registered on `PreToolUse`**
+(`Edit|Write|MultiEdit`) so the reminder arrives from the harness at the moment a
+worker edits a contended file, rather than depending on the worker remembering —
+**§76 records that habits fail under load, twice in one round.** It is advisory
+and never blocks; a hook is a gate and cannot answer for the model
+(`harness-hook-protocol.md`), so it does the one thing a gate does well and puts
+text in front of it. It deliberately does **not** inject the peer's diff: that
+would push an unfinished proposal into a context that did not ask for it, on
+every edit, which is the opposite of *read once, at finalization*.
+
+Proven in both directions before landing: silent on an unclaimed file, and
+speaking with the full instruction when two claimants exist.
+
 ### The trap to watch for, stated in advance
 
 **A worker that reads another's in-progress file may treat it as settled.** It is
