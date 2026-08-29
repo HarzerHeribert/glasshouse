@@ -1728,7 +1728,7 @@ Fixed architectural requirements
 
 ☑ Detect child-process crashes and mark the corresponding session failed.
 ☑ Preserve terminal output and event history after a worker crashes.
-☐ Preserve the most recent checkpoint after a worker crashes.
+☑ Preserve the most recent checkpoint after a worker crashes.
 ☑ Allow a failed task to be resumed in the same native session when possible.
 ☑ Allow a failed task to be handed off to a fresh session when appropriate.
 ☑ Avoid automatically retrying destructive tasks on another harness without sufficient task-state information.

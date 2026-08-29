@@ -100,13 +100,18 @@
 //! A real end-to-end proof of the fix was attempted here first and pulled
 //! back out: closing a real terminal also delivers `SIGHUP`, which races
 //! `crate::shutdown`'s own signal handling against the clean-shutdown path
-//! this file's test proves — a pre-existing defect, independent of both of
-//! this packet's, reported rather than fixed. On this development machine
-//! that race decided anywhere from roughly half to (in a container, every
-//! single time observed) *all* attempts, so an end-to-end test of the
-//! exit-code fix cannot be made to fail reliably on the unfixed tree here.
-//! `tui::mod`'s own tests prove it instead, directly against the drop
-//! mechanism, without a real terminal, pty, or signal in the way.
+//! this file's test proves. On this development machine that race decided
+//! anywhere from roughly half to (in a container, every single time observed)
+//! *all* attempts, so an end-to-end test of the exit-code fix cannot be made
+//! to fail reliably on the unfixed tree here. `tui::mod`'s own tests prove it
+//! instead, directly against the drop mechanism, without a real terminal, pty,
+//! or signal in the way.
+//!
+//! **That race is closed now**, which is why no forced exit is tolerated any
+//! more — see `a_terminal_that_goes_away_ends_the_interface_instead_of_spinning`
+//! for the measurement and `shutdown::interpret_signal` for the reasoning.
+//! The paragraph above is kept because the reason a drop-mechanism test lives
+//! in `tui::mod` rather than here has not changed.
 
 #![cfg(unix)]
 
@@ -163,34 +168,6 @@ const SETTLE: Duration = Duration::from_millis(1500);
 /// exits with this. Both leave a dead process behind, which is why "did it
 /// exit?" cannot distinguish them and this file used to check neither.
 const EXIT_FORCED: u32 = 130;
-
-/// How many of [`TRIALS`] may exit through the forced path before the sighted
-/// test calls it a failure.
-///
-/// **A tolerance rather than a zero, because [`EXIT_FORCED`] has two causes
-/// and only one of them is this file's business.**
-///
-/// The one that matters is an interface that did not notice its terminal had
-/// gone and had to be put down. The other is already here and predates
-/// everything in this packet: closing a real terminal delivers `SIGHUP` as
-/// well as a hangup, and a Glasshouse that has already restored its terminal
-/// by the time that signal is dispatched is no longer `TERMINAL_ENGAGED`, so
-/// `shutdown::interpret_signal` reads it as "nothing owns the terminal, leave
-/// immediately" and exits 130 from a run that was in every other respect
-/// clean. That race is *lost by exiting too fast*, which is why it cannot be
-/// designed out from this side and why this file's own header already records
-/// it as reported rather than fixed.
-///
-/// **Measured on the tree before this packet — which has no watchdog at all,
-/// so every one of them is the second cause: 8 forced exits in 350 hangups**,
-/// in a Linux container under 24 spinners, the same load the gate's own flake
-/// lives under. The tree *with* the watchdog measured 15 in 600 over the same
-/// runs, which is the same rate — the watchdog is not what produces these.
-///
-/// At 2.3%, four or more in [`TRIALS`] is a 6-in-10,000 run, while the
-/// mutation that reverts the hangup ordering produces **fifteen out of
-/// fifteen**. So the slack costs the proof nothing.
-const MAX_FORCED: usize = 3;
 
 /// How many times the blinded scenario is run.
 ///
@@ -325,6 +302,41 @@ const READ_POLL: Duration = Duration::from_millis(10);
 /// than the exit poll — the exit is what this test is usually waiting for.
 const CPU_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 
+/// A terminal that goes away ends the interface, and the interface is what
+/// ends it.
+///
+/// # Why no forced exit is tolerated here any more
+///
+/// This used to allow three of [`TRIALS`] to exit at [`EXIT_FORCED`], because
+/// that code had two causes and only one of them was this file's business.
+/// The other was a race in `crate::shutdown`: closing a real terminal delivers
+/// `SIGHUP` as well as a hangup, and a Glasshouse that had already restored
+/// its terminal by the time that signal was dispatched was no longer
+/// `TERMINAL_ENGAGED`, so `interpret_signal` read it as "nothing owns the
+/// terminal, leave immediately" and exited 130 from a run that was in every
+/// other respect clean — **8 in 350 hangups** in a Linux container under 24
+/// spinners, and **1 in 400** here under eight concurrent trials. A race lost
+/// by exiting *too fast*.
+///
+/// `shutdown::interpret_signal` now answers the same way whichever side of the
+/// restore that signal lands on; its doc has the reasoning and what the change
+/// costs. What is left of [`EXIT_FORCED`] is the one cause this file exists
+/// for: an interface that did not notice its terminal had gone and had to be
+/// put down by `tui::event`'s watchdog.
+///
+/// **This test passing is not the measurement that justifies the zero**, and
+/// per practice §60 it must not be read as one. `0 in 400` bounds a residual
+/// rate below 0.75% while the rate being replaced was 0.25%, so the field rate
+/// alone cannot tell "fixed" from "unchanged". What carries it is the
+/// interleaving *constructed* rather than waited for — a Glasshouse whose pty
+/// is deliberately **not** its controlling terminal, so it receives no kernel
+/// `SIGHUP` of its own, quit normally, and sent exactly one `SIGHUP` the
+/// instant the `ESC[?1049l` on its pty shows the terminal has been given back:
+///
+/// | tree | trials | forced |
+/// |---|---|---|
+/// | before | 50 | **35** |
+/// | after | 30 | **0** |
 #[test]
 fn a_terminal_that_goes_away_ends_the_interface_instead_of_spinning() {
     let mut forced = Vec::new();
@@ -335,13 +347,13 @@ fn a_terminal_that_goes_away_ends_the_interface_instead_of_spinning() {
     }
     // Every trial above has already required the process to be *gone*. This
     // requires the interface to have got there itself, which is the thing the
-    // watchdog would otherwise hide — see [`MAX_FORCED`].
+    // watchdog would otherwise hide.
     assert!(
-        forced.len() <= MAX_FORCED,
+        forced.is_empty(),
         "{} of {TRIALS} hangups ended with the interface being put down rather than leaving on \
-         its own (trials {forced:?}). One or two of those are the `SIGHUP`-after-restore race \
-         this file's header describes; this many means the loop is not noticing its own terminal \
-         going away.",
+         its own (trials {forced:?}). Two things reach this line: the loop no longer noticing \
+         its own terminal going away, and `shutdown::interpret_signal` going back to reading \
+         `TERMINAL_ENGAGED` alone.",
         forced.len(),
     );
 }
@@ -409,9 +421,9 @@ fn one_terminal_loss(trial: usize) -> Ending {
             // *itself*, and the only evidence of that from outside is which of
             // the two routes it left by.
             //
-            // Not asserted here, because [`EXIT_FORCED`] has a second and
-            // innocent cause and the caller has to count rather than judge:
-            // see [`MAX_FORCED`]. A code that is neither 0 nor forced is not
+            // Not asserted here, because the caller counts rather than judges
+            // and says which trials went which way. A code that is neither 0
+            // nor forced is not
             // interesting either way — Ratatui's `Terminal` drop tries to show
             // the cursor on the way out and panics when it cannot, which on a
             // terminal that has gone away is an honest 101 and happens after

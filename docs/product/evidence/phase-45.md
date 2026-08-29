@@ -218,3 +218,57 @@ Missing evidence, recorded rather than discovered later:
   line 1763 depends on it being widened — see `phase-47.md`.
 - **The pre-install replay path is exercised by no test**, because in the
   shipped binary no exchange can happen before `install`.
+
+---
+
+### Phase 45 — Preserve the most recent checkpoint after a worker crashes (line 1731)
+
+State: **COMPLETE** — orchestrator ruling, batch 51. **This line needed evidence,
+not code**, and establishing which of those it was came before anything was
+written.
+
+Contract: Given a session with a checkpoint, when its harness crashes and the
+session restarts, the most recent checkpoint survives and is still reachable
+under the same session identity — while nothing on the crash or restart path
+writes, moves or replaces it.
+
+**The finding.** The checkpoint already survives, because it is a committed
+SQLite row and nothing on the crash or restart path touches it. Crucially the
+preservation is an **absence**: `consider_restart` preserves the scrollback by
+deliberately not replacing it, and preserves the checkpoint by deliberately not
+replacing `session.id`. That is why neither had a test, and why the mutation
+below had to *add* a line rather than remove one.
+
+Regression (new, against real child processes — the nearest pre-existing test
+only moved a `SessionLifecycle` enum to `Failed`, which is not a process dying):
+`checkpoint_portability::a_restarted_worker_can_still_reach_the_checkpoint_it_had_before_it_crashed`
+and its sibling on survival.
+
+Mutations — both KILLED, `reinstate-the-early-exit-reading` re-run by the
+orchestrator in the integrated tree:
+- `drop-the-durability` — wrap `save`'s INSERT in an unchecked transaction bound
+  to `_rolled_back` so it reports success and the row does not outlive the call.
+  KILLED by both new tests on their named assertions.
+- `the-restart-forgets-which-session-it-is` — rename `session.id` on restart.
+  KILLED by the reachability test **alone**, at `checkpoint_portability.rs:1149`.
+
+**Orchestrator packet errors, recorded because they were load-bearing:** the
+FEASIBILITY block named `main.rs:1245`'s automatic checkpoint as the producer.
+It is *a* producer and it is **not on the crash path** — it fires on
+`TurnEnded`. The producer that matters is whichever writer ran last before the
+crash, and the line's content is that none runs at crash time and none needs to.
+
+### A defect this line turned up, and it is bigger than the line — OPEN
+
+`CheckpointStore::latest_for` and `::latest` order by `created_at DESC, id DESC`.
+`created_at` is **whole seconds** and `id` is `randomblob(16)`, so two
+checkpoints written in the same second are separated by a coin flip. Measured
+through the real store: **of 200 back-to-back pairs, 199 shared a second, and 86
+of those resolved to the older checkpoint.**
+
+The most recent checkpoint is preserved; *identifying* it is ~43% wrong inside a
+second. That reaches `glasshouse checkpoint show`, `--from-checkpoint latest`,
+and the automatic task-boundary carry-forward. The fix needs a monotonic column,
+which is `database.rs`'s migration ladder and was outside this packet's files —
+**documented on the function and reported rather than smuggled in.** Next
+package.

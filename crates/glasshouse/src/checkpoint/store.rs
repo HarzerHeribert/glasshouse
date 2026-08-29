@@ -269,7 +269,38 @@ impl<'a> CheckpointStore<'a> {
     /// This is what "the most recent checkpoint survives a crash" means in
     /// practice: the session's process is gone and its checkpoint is still
     /// here, because it was written to the project database rather than kept
-    /// in the process that died.
+    /// in the process that died. Proved end to end against a real harness
+    /// process in `tests/checkpoint_portability.rs`, both for a worker that
+    /// died and for one that was put back afterwards.
+    ///
+    /// # "Most recent" is only decided to the second, and inside a second it
+    /// is a coin flip
+    ///
+    /// `created_at` comes from [`CheckpointStore::now`], which is
+    /// `session::store::system_clock` and reads **whole seconds**. Two
+    /// checkpoints written in the same second therefore tie, and the tie is
+    /// broken by `id DESC` on an identifier that is 16 bytes of
+    /// `randomblob` — so the answer is whichever random identifier sorted
+    /// higher, not whichever was written last.
+    ///
+    /// Measured, not reasoned: **of 200 back-to-back pairs through this
+    /// function, 199 shared a second and 86 of those resolved to the older
+    /// checkpoint.** It is reachable from the shipped binary — a
+    /// `glasshouse checkpoint save` and the task-boundary checkpoint that
+    /// `shell::checkpoint_task_boundaries` takes when the turn ends land in
+    /// the same second easily — and it reaches the user through
+    /// `glasshouse checkpoint show`, `--from-checkpoint latest`, and
+    /// [`CheckpointStore::latest`], which orders the same way.
+    ///
+    /// **Recorded rather than worked around.** Making this a total order
+    /// needs something monotonic in the row, which means a column, which
+    /// means the migration ladder in `crate::database` — and the three
+    /// alternatives that stay inside this file all lie: stamping a
+    /// `created_at` past the wall clock, rejection-sampling identifiers until
+    /// they happen to sort, or ordering on a field the query cannot see. What
+    /// the automatic path loses when it happens is the repository reading
+    /// rather than the handoff, because a task-boundary checkpoint carries the
+    /// previous handoff forward unchanged.
     pub fn latest_for(&self, session: &SessionId) -> Result<Option<Stored>, StoreError> {
         self.first(
             "SELECT id, document FROM checkpoints WHERE session_id = ?1 \
@@ -280,6 +311,11 @@ impl<'a> CheckpointStore<'a> {
 
     /// The most recent checkpoint in the project, whichever session it
     /// belongs to.
+    ///
+    /// This is what `glasshouse checkpoint show` and
+    /// `glasshouse launch --from-checkpoint latest` resolve, and it carries
+    /// [`CheckpointStore::latest_for`]'s same-second tie exactly — see that
+    /// function's own doc, which has the measurement.
     pub fn latest(&self) -> Result<Option<Stored>, StoreError> {
         self.first(
             "SELECT id, document FROM checkpoints ORDER BY created_at DESC, id DESC LIMIT 1",

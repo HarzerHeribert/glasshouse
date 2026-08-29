@@ -15,6 +15,13 @@ use crossterm::{cursor, execute, terminal};
 
 /// True while the terminal is in raw mode / on the alternate screen.
 static TERMINAL_ENGAGED: AtomicBool = AtomicBool::new(false);
+/// True once the terminal has been engaged, and never false again.
+///
+/// [`TERMINAL_ENGAGED`] answers *"is there something to wind down right now"*.
+/// This answers a different question — *"is this the kind of process that has
+/// a wind-down at all"* — and the two stop agreeing at exactly the moment
+/// [`interpret_signal`] is most likely to be asked. See its doc comment.
+static TERMINAL_EVER_ENGAGED: AtomicBool = AtomicBool::new(false);
 /// Set when a signal has asked the application to wind down.
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -100,6 +107,12 @@ pub fn install_panic_hook() {
 /// exit code 130 — instead of shutting down cleanly and exiting 0. Measured at
 /// roughly even odds on macOS and **ten times out of ten** inside a Linux
 /// container.
+///
+/// The residue of that same race — the handler arriving *after* the wind-down
+/// has given the terminal back — is answered in `interpret_signal`, which is
+/// where "while the terminal is not engaged" above stopped being the whole
+/// story. (Named rather than linked: it is private, and a public doc comment
+/// that links a private item is a `rustdoc` warning and a failed gate job.)
 pub fn install_signal_handler() -> Result<()> {
     ctrlc::set_handler(|| match interpret_signal() {
         SignalMeaning::LeaveImmediately | SignalMeaning::StopWaiting => force_exit(),
@@ -124,14 +137,61 @@ enum SignalMeaning {
 /// This is the function that *asks* the policy; the handler above only acts on
 /// the answer. It is separate because a handler can only be exercised by
 /// ending the process, and the distinction it draws is worth a test.
+///
+/// # Why a terminal that has been *given back* is not a terminal that was
+/// never held
+///
+/// This used to ask [`TERMINAL_ENGAGED`] alone: nothing owns the terminal, so
+/// there is nothing to wind down, so leave. That is right for `glasshouse
+/// sessions`, and it is wrong for the last few milliseconds of every TUI run,
+/// because the two things that end a run when a terminal closes are **two
+/// observations of one event**: `tui::event`'s `POLLHUP` detector, and the
+/// `SIGHUP` the kernel delivers to the session at the same instant. The
+/// detector's answer is to wind down, and winding down restores the terminal —
+/// so if the handler thread is scheduled after that, the *same event* is read
+/// as "nothing owns the terminal" and the run is forced down with exit 130
+/// having done everything right.
+///
+/// Measured before this changed: **2.3% of clean hangups** ended at
+/// [`EXIT_INTERRUPTED`], on the tree that introduced `tui::event`'s watchdog
+/// and on the tree before it — 8 in 350 and 15 in 600 in a loaded Linux
+/// container. It is the tolerance `tests/terminal_loss.rs` used to carry, and
+/// it is a race *lost by exiting too fast*.
+///
+/// [`TERMINAL_EVER_ENGAGED`] is what tells the two apart, and the fix is to
+/// **remove** the special case rather than add one: a process that has ever
+/// held the terminal falls through to the ordinary counting rule, so the
+/// hangup's `SIGHUP` is the first ask whichever side of the restore it lands
+/// on, and the two interleavings stop having different answers. Nothing about
+/// the wind-down gets slower; the branch that used to call
+/// [`std::process::exit`] now returns and lets it finish.
+///
+/// # What this costs, stated rather than buried
+///
+/// Exactly **one** signal. A `SIGTERM` or `SIGINT` arriving after the terminal
+/// has been given back is answered by [`request_shutdown`] instead of by
+/// forcing, and the next one forces as it always did. That matters for
+/// `tui::event`'s watchdog, which is why it sends its `SIGTERM` twice and says
+/// so; and it is the reason this counts rather than swallowing.
 fn interpret_signal() -> SignalMeaning {
-    if !TERMINAL_ENGAGED.load(Ordering::SeqCst) {
+    // Never held the terminal: an ordinary command, and a signal ends it now.
+    if !TERMINAL_ENGAGED.load(Ordering::SeqCst) && !TERMINAL_EVER_ENGAGED.load(Ordering::SeqCst) {
         return SignalMeaning::LeaveImmediately;
     }
     if SIGNALS_SEEN.fetch_add(1, Ordering::SeqCst) > 0 {
         return SignalMeaning::StopWaiting;
     }
     SignalMeaning::AskToStop
+}
+
+/// Record that the terminal is now this process's to give back.
+///
+/// Both guards call this rather than storing [`TERMINAL_ENGAGED`] themselves,
+/// so the latch [`interpret_signal`] depends on cannot be set by one of them
+/// and forgotten by the other.
+fn engage_terminal() {
+    TERMINAL_EVER_ENGAGED.store(true, Ordering::SeqCst);
+    TERMINAL_ENGAGED.store(true, Ordering::SeqCst);
 }
 
 /// How many signals have asked Glasshouse to stop.
@@ -227,7 +287,7 @@ impl TerminalGuard {
         // touching the alternate screen: a signal landing in that window
         // previously saw raw mode on but the flag still false, so
         // `restore_terminal` no-op'd and the shell was left unusable.
-        TERMINAL_ENGAGED.store(true, Ordering::SeqCst);
+        engage_terminal();
 
         let mut out = std::io::stdout();
         if let Err(e) = execute!(out, EnterAlternateScreen, cursor::Hide) {
@@ -282,7 +342,7 @@ impl RawModeGuard {
     /// Put the terminal into raw mode.
     pub fn acquire() -> Result<Self> {
         terminal::enable_raw_mode().context("could not enable raw terminal mode")?;
-        TERMINAL_ENGAGED.store(true, Ordering::SeqCst);
+        engage_terminal();
         Ok(Self { _private: () })
     }
 }
@@ -323,6 +383,7 @@ mod tests {
     fn a_shutdown_already_requested_elsewhere_is_not_a_second_interrupt() {
         let _turn = terminal_state_turn();
         let engaged_before = TERMINAL_ENGAGED.swap(true, Ordering::SeqCst);
+        let ever_before = TERMINAL_EVER_ENGAGED.swap(false, Ordering::SeqCst);
         let requested_before = SHUTDOWN_REQUESTED.swap(true, Ordering::SeqCst);
         SIGNALS_SEEN.store(0, Ordering::SeqCst);
 
@@ -339,14 +400,108 @@ mod tests {
         // second Ctrl-C this policy exists for must keep working.
         assert_eq!(interpret_signal(), SignalMeaning::StopWaiting);
 
-        // With no terminal engaged there is nothing to wind down, whatever
-        // has been counted.
+        // A process that never held the terminal has nothing to wind down,
+        // whatever has been counted. **`TERMINAL_EVER_ENGAGED` false is what
+        // makes this the ordinary-command case** rather than a TUI that has
+        // given its terminal back — see
+        // `a_signal_that_arrives_after_the_terminal_was_given_back_does_not_force`,
+        // which is the same two flags with the latch set.
         TERMINAL_ENGAGED.store(false, Ordering::SeqCst);
         assert_eq!(interpret_signal(), SignalMeaning::LeaveImmediately);
 
         SIGNALS_SEEN.store(0, Ordering::SeqCst);
         TERMINAL_ENGAGED.store(engaged_before, Ordering::SeqCst);
+        TERMINAL_EVER_ENGAGED.store(ever_before, Ordering::SeqCst);
         SHUTDOWN_REQUESTED.store(requested_before, Ordering::SeqCst);
+    }
+
+    /// **The `SIGHUP`-after-restore race, at the seam where it is decided.**
+    ///
+    /// Closing a terminal is one event with two observers: `tui::event`'s
+    /// `POLLHUP` detector, which winds the run down and gives the terminal
+    /// back, and the `SIGHUP` the kernel delivers to the session. Whichever is
+    /// scheduled second is looking at the same event — so both orderings have
+    /// to reach the same answer, and while this read [`TERMINAL_ENGAGED`]
+    /// alone they did not: the late one exited 130 from a run that had done
+    /// everything right, on 2.3% of hangups.
+    ///
+    /// Driven here rather than only through a pty because the window is
+    /// microseconds wide and the losing side of it cannot be *constructed*
+    /// from outside the process — the rate is measured in
+    /// `tests/terminal_loss.rs`, and this is the state that rate is made of
+    /// (practice §60: the deterministic pair is what carries the claim, the
+    /// rate is what says it is the right claim).
+    #[test]
+    fn a_signal_that_arrives_after_the_terminal_was_given_back_does_not_force() {
+        let _turn = terminal_state_turn();
+        let _flags = RestoreFlags::now();
+
+        // The state a hangup leaves behind: the terminal was held, and the
+        // wind-down the detector asked for has already given it back. No
+        // signal has been counted, because a `POLLHUP` is not one.
+        //
+        // **`SHUTDOWN_REQUESTED` is deliberately not touched.** The hangup
+        // detector does set it, and reading it here would answer the question
+        // this test is asking with the very flag
+        // [`install_signal_handler`]'s doc warns against treating as a signal
+        // count. Leaving it alone proves the answer does not depend on it.
+        TERMINAL_EVER_ENGAGED.store(true, Ordering::SeqCst);
+        TERMINAL_ENGAGED.store(false, Ordering::SeqCst);
+        SIGNALS_SEEN.store(0, Ordering::SeqCst);
+
+        assert_eq!(
+            interpret_signal(),
+            SignalMeaning::AskToStop,
+            "the `SIGHUP` that came with a hangup the interface has already \
+             answered was read as `LeaveImmediately`, so a clean run was forced \
+             down with exit {EXIT_INTERRUPTED}"
+        );
+
+        // And the escape hatch is untouched: a second signal still forces,
+        // which is what `tui::event`'s watchdog relies on when it sends
+        // `SIGTERM` twice to a process that has stopped listening.
+        assert_eq!(
+            interpret_signal(),
+            SignalMeaning::StopWaiting,
+            "a process that has given its terminal back must still be forceable"
+        );
+    }
+
+    /// Puts the process-global signal flags back, **including when the test
+    /// that moved them panicked**.
+    ///
+    /// Written while mutating `interpret_signal`: the mutation failed the test
+    /// above at its first assertion, which skipped the restores that used to
+    /// sit at the end of it, which left `SHUTDOWN_REQUESTED` set, which failed
+    /// `tui::event`'s own `a_pending_shutdown_short_circuits_before_any_terminal_access`
+    /// as a second and entirely misleading failure. A mutation's verdict has
+    /// to be readable (practice §80), and a restore that only runs on the
+    /// happy path is a restore that is missing exactly when it is needed.
+    struct RestoreFlags {
+        engaged: bool,
+        ever_engaged: bool,
+        requested: bool,
+        signals: usize,
+    }
+
+    impl RestoreFlags {
+        fn now() -> Self {
+            Self {
+                engaged: TERMINAL_ENGAGED.load(Ordering::SeqCst),
+                ever_engaged: TERMINAL_EVER_ENGAGED.load(Ordering::SeqCst),
+                requested: SHUTDOWN_REQUESTED.load(Ordering::SeqCst),
+                signals: SIGNALS_SEEN.load(Ordering::SeqCst),
+            }
+        }
+    }
+
+    impl Drop for RestoreFlags {
+        fn drop(&mut self) {
+            TERMINAL_ENGAGED.store(self.engaged, Ordering::SeqCst);
+            TERMINAL_EVER_ENGAGED.store(self.ever_engaged, Ordering::SeqCst);
+            SHUTDOWN_REQUESTED.store(self.requested, Ordering::SeqCst);
+            SIGNALS_SEEN.store(self.signals, Ordering::SeqCst);
+        }
     }
 
     /// The forced-exit path skips destructors, so whatever a session

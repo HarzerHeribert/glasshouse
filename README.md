@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████░░░░░░░░░░░░░░░░░` 737 / 1280 mandatory capabilities (57%)
+`███████████████████████░░░░░░░░░░░░░░░░░` 738 / 1280 mandatory capabilities (57%)
 
 <details>
-<summary>Per-phase breakdown (33 of 104 phases complete)</summary>
+<summary>Per-phase breakdown (34 of 104 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -118,7 +118,7 @@ the authoritative specification and tracks what is done.
 | Phase 42 — External control API | 12/13 |
 | Phase 43 — MCP surface for orchestrators | 0/10 |
 | Phase 44 — User control and override | 0/9 |
-| Phase 45 — Failure handling | 8/9 |
+| Phase 45 — Failure handling | 9/9 ✅ |
 | Phase 46 — Security and contamination tests | 6/8 |
 | Phase 47 — Observability without spectacle | 8/15 |
 | Phase 48 — CLI ergonomics | 8/8 ✅ |

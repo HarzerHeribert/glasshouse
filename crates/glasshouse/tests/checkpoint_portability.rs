@@ -9,13 +9,19 @@
 //! running can start work in a different one.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 
 use glasshouse::checkpoint::{Checkpoint, CheckpointReason, GitPosition, Handoff};
+use glasshouse::events::MessageOrigin;
+use glasshouse::launch::HarnessLaunch;
 use glasshouse::memory::search::SearchScope;
 use glasshouse::memory::{MemoryKind, NewMemory, ProjectMemory};
-use glasshouse::session::{NewSession, SessionId, SessionLifecycle};
+use glasshouse::platform::exec;
+use glasshouse::session::{
+    LiveSession, NewSession, SessionId, SessionLifecycle, SessionPresentation, SessionRuntime,
+};
 use glasshouse::{Cli, Runtime};
 
 /// The same bootstrapped-project idiom `tests/memory_store.rs` and
@@ -821,4 +827,358 @@ fn the_repository_is_actually_readable(root: &Path) -> bool {
         }
     };
     git_dir.join("HEAD").is_file()
+}
+
+// -------------------------------------------------------------------------
+// Line 1731 — "Preserve the most recent checkpoint after a worker crashes."
+//
+// The sibling line, *"preserve terminal output and event history after a
+// worker crashes"*, is proved in `tests/events_lifecycle.rs` against a real
+// child process, and these are written in its shape deliberately: the claim
+// is about what survives a process dying, and a store-level test that moves a
+// session's lifecycle enum to `Failed` has not had anything die.
+//
+// `a_checkpoint_outlives_the_session_that_made_it` above is that store-level
+// test. It is kept — it says the row is not keyed to a running session — and
+// it is not this line, for the reason practice §65 gives: presence is not
+// behaviour, and nothing in it starts, kills, or restarts a process.
+// -------------------------------------------------------------------------
+
+/// A project, a place to put fake harnesses, and a real `Runtime` over both.
+struct CrashFixture {
+    _tmp: tempfile::TempDir,
+    runtime: Runtime,
+    bin_dir: std::path::PathBuf,
+}
+
+impl CrashFixture {
+    fn new(name: &str) -> Self {
+        let tmp = tempdir();
+        let fixture = Fixture::new(tmp.path(), name);
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        Self {
+            _tmp: tmp,
+            runtime: fixture.runtime,
+            bin_dir,
+        }
+    }
+
+    /// A launch of `path` inside this fixture's project, through the same seam
+    /// `shell::run` uses — no explicit working directory and no explicit
+    /// program appear anywhere in these tests.
+    fn launch(&self, path: &Path) -> HarnessLaunch<'_> {
+        let resolved = exec::resolve_explicit(path).expect("resolve fake harness");
+        HarnessLaunch::new(resolved, self.runtime.project())
+    }
+
+    /// A fresh handle on the project database — a second `Connection`, which
+    /// is what a `glasshouse checkpoint show` in a new process would open.
+    fn reopen(&self) -> glasshouse::checkpoint::ProjectCheckpoints {
+        glasshouse::checkpoint::ProjectCheckpoints::open(&self.runtime).expect("reopen the project")
+    }
+}
+
+/// A harness that announces itself and then dies badly.
+///
+/// The same two shapes `tests/events_lifecycle.rs` has used since the sibling
+/// line closed: `SIGKILL` on Unix, which is what a crash looks like there, and
+/// a non-zero code on Windows, which has no signals. Both are
+/// `ProcessExit::is_crash`.
+#[cfg(unix)]
+fn install_crashing_harness(bin_dir: &Path) -> std::path::PathBuf {
+    unix_script(bin_dir, "crasher", "#!/bin/sh\necho STARTED\nkill -9 $$\n")
+}
+
+#[cfg(windows)]
+fn install_crashing_harness(bin_dir: &Path) -> std::path::PathBuf {
+    windows_script(
+        bin_dir,
+        "crasher",
+        "@echo off\r\necho STARTED\r\nexit /b 3\r\n",
+    )
+}
+
+/// A harness that comes up, stays up until it is spoken to, and then dies.
+///
+/// **Waiting on input rather than sleeping, and that is the portable half.**
+/// The restart this drives needs the harness to have been alive for
+/// `SessionRuntime::HEALTHY_AFTER` before it dies — a harness that was never
+/// healthy is a start that did not work and is deliberately not restarted —
+/// and a sleep long enough to cross that window is a race on a loaded runner
+/// and a second variable inside ConPTY. Blocking on a read is neither: the
+/// test decides when the harness dies, on both platforms, by writing to it.
+#[cfg(unix)]
+fn install_harness_that_dies_when_spoken_to(bin_dir: &Path) -> std::path::PathBuf {
+    unix_script(
+        bin_dir,
+        "diesonword",
+        "#!/bin/sh\necho STARTED\nIFS= read -r line\nexit 3\n",
+    )
+}
+
+#[cfg(windows)]
+fn install_harness_that_dies_when_spoken_to(bin_dir: &Path) -> std::path::PathBuf {
+    windows_script(
+        bin_dir,
+        "diesonword",
+        "@echo off\r\necho STARTED\r\nset /p line=\r\nexit /b 3\r\n",
+    )
+}
+
+#[cfg(unix)]
+fn unix_script(bin_dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join(name);
+    std::fs::write(&path, body).expect("write fake harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+#[cfg(windows)]
+fn windows_script(bin_dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+    let path = bin_dir.join(format!("{name}.cmd"));
+    std::fs::write(&path, body).expect("write fake harness");
+    path
+}
+
+/// Long enough for a child to start, be seen healthy and die on a loaded
+/// machine; short enough that a hang is a failure rather than a wait.
+const CRASH_TIMEOUT: Duration = Duration::from_secs(30);
+const CRASH_POLL: Duration = Duration::from_millis(20);
+
+/// Drive the runtime the way `shell::run`'s tick does until `done`, or fail
+/// saying what was seen.
+///
+/// `answer_terminal_queries` is in the loop because it is in the production
+/// tick — see `tests/events_lifecycle.rs`, which says why leaving it out hangs
+/// on Windows for a reason unrelated to the assertion.
+fn drive(
+    runtime: &mut SessionRuntime,
+    what: &str,
+    mut done: impl FnMut(&mut SessionRuntime) -> bool,
+) {
+    let deadline = Instant::now() + CRASH_TIMEOUT;
+    loop {
+        runtime.answer_terminal_queries();
+        runtime.poll_exits();
+        if done(runtime) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}; sessions: {runtime:?}"
+        );
+        std::thread::sleep(CRASH_POLL);
+    }
+}
+
+/// The checkpoint a worker leaves behind, with an objective a test can point
+/// at when it comes back.
+fn checkpoint_before_the_crash(session: &SessionId, at: i64) -> Checkpoint {
+    Checkpoint {
+        created_at: at,
+        handoff: Handoff {
+            objective: "the work that was in flight when the harness died".to_owned(),
+            ..checkpoint_handoff()
+        },
+        ..full_checkpoint(session.as_str(), "claude-code", at)
+    }
+}
+
+/// 8. **Line 1731, first half — a real process dies and the checkpoint is
+///    still there.**
+///
+/// A harness started through `HarnessLaunch` and driven through
+/// `SessionRuntime` — the type `shell::run` owns in the shipped binary — is
+/// checkpointed and then dies badly. The checkpoint is read back through a
+/// **second connection to the project database**, which is the handle a
+/// `glasshouse checkpoint show` in a new process opens; reading it back
+/// through the same `CheckpointStore` that wrote it would prove only that the
+/// value was still in this test's memory.
+///
+/// Three things, and the third is the one that says a crash is not a task
+/// boundary: nothing new is written for a harness that died, because Phase
+/// 19's automatic checkpoint is taken after a *completed turn* and a crash is
+/// not one.
+#[test]
+fn the_most_recent_checkpoint_survives_the_worker_that_made_it_crashing() {
+    let fixture = CrashFixture::new("crash-survives");
+    let harness = install_crashing_harness(&fixture.bin_dir);
+    let id = SessionId::new("crashed-worker");
+
+    let mut live = SessionRuntime::new();
+    live.start(
+        id.clone(),
+        SessionPresentation::Embedded,
+        &fixture.launch(&harness),
+    )
+    .expect("start the crashing harness");
+
+    // The checkpoint the worker had before it died. Written through the same
+    // store `glasshouse checkpoint save` uses, while the process is alive.
+    let before = {
+        let project = fixture.reopen();
+        let store = project.store();
+        store
+            .save(checkpoint_before_the_crash(&id, store.now()))
+            .expect("save the checkpoint")
+    };
+
+    drive(&mut live, "the harness to crash", |live| {
+        live.get(&id).is_some_and(|s| s.exit().is_some())
+    });
+    let crashed = live.get(&id).expect("the session is still held");
+    let exit = glasshouse::events::ProcessExit::from_status(
+        crashed.exit().expect("the harness has exited"),
+    );
+    assert!(exit.is_crash(), "{exit:?} is not a crash");
+
+    // A second connection, opened after the process died: the view a new
+    // `glasshouse` has of this project.
+    let after = fixture.reopen();
+    let store = after.store();
+
+    let latest = store
+        .latest_for(&id)
+        .expect("read the crashed worker's checkpoints")
+        .expect("the most recent checkpoint must survive the worker that made it");
+    assert_eq!(
+        latest, before,
+        "the checkpoint that came back is not the one the worker had"
+    );
+    assert_eq!(
+        latest.checkpoint.handoff.objective, "the work that was in flight when the harness died",
+        "the handoff must come back whole, not merely as a row"
+    );
+
+    // Reachable without knowing which session died, too — this is what
+    // `glasshouse checkpoint show` and `--from-checkpoint latest` resolve.
+    assert_eq!(
+        store.latest().expect("read the project's checkpoints"),
+        Some(before.clone()),
+        "the project's most recent checkpoint must be the crashed worker's"
+    );
+    assert_eq!(
+        store.get(&before.id).expect("look the checkpoint up"),
+        Some(before.clone()),
+        "and it must still resolve by its own identifier"
+    );
+
+    // A crash is not a task boundary, so nothing may have written a second
+    // one. Without this the test would pass on a build that had replaced the
+    // handoff with something invented from the dead harness's scrollback,
+    // which is the one thing this project refuses to do everywhere else.
+    assert_eq!(
+        store.list().expect("list the project's checkpoints").len(),
+        1,
+        "a crash is not a completed turn and must not produce a checkpoint of its own"
+    );
+
+    live.close(&id).expect("close the session");
+}
+
+/// 9. **Line 1731, second half — and it is still reachable after the restart.**
+///
+/// Surviving is not the whole claim. `CheckpointStore::latest_for` is keyed on
+/// the session identifier, and Phase 10A's tenth line puts a crashed harness
+/// *back* — so a restart that decided it was a new session would leave the
+/// checkpoint present in the project and unreachable from the work it
+/// describes. That is the shape `session/runtime.rs` already guards for
+/// scrollback, in as many words, and nothing was watching the same question
+/// for the checkpoint.
+///
+/// The harness has to be seen healthy before it dies or there is no restart at
+/// all: a harness that never came up is a start that did not work, and
+/// `consider_restart` deliberately leaves it alone. So this one waits to be
+/// spoken to rather than racing a sleep against `HEALTHY_AFTER`.
+#[test]
+fn a_restarted_worker_can_still_reach_the_checkpoint_it_had_before_it_crashed() {
+    let fixture = CrashFixture::new("crash-restart");
+    let harness = install_harness_that_dies_when_spoken_to(&fixture.bin_dir);
+    let id = SessionId::new("restarted-worker");
+
+    let mut live = SessionRuntime::new();
+    live.start(
+        id.clone(),
+        SessionPresentation::Embedded,
+        &fixture.launch(&harness),
+    )
+    .expect("start the harness");
+
+    let before = {
+        let project = fixture.reopen();
+        let store = project.store();
+        store
+            .save(checkpoint_before_the_crash(&id, store.now()))
+            .expect("save the checkpoint")
+    };
+
+    // Health is decided by a poll that finds the process still running after
+    // `HEALTHY_AFTER`, so the loop has to keep ticking through that window.
+    drive(&mut live, "the harness to be verified healthy", |live| {
+        live.get(&id).is_some_and(LiveSession::verified_healthy)
+    });
+
+    // Now kill it, by saying something to it.
+    //
+    // **`\r`, not `\n`, and through the sender the binary itself uses.** A
+    // Windows console never completes a `set /p` on `\n`, so a test that
+    // writes its own terminator exercises a line nothing in production sends
+    // and hangs on the one platform it was meant to cover — the same reasoning
+    // `tests/events_lifecycle.rs` records beside its own `ping\r`.
+    live.send_text_from(&id, "go\r", MessageOrigin::Machine)
+        .expect("write to the harness");
+    // **Waited for by session count, not by identifier**, and that is
+    // practice §80's fifth case rather than a style choice: the identity is
+    // the thing under test here, so a build that renamed the session on
+    // restart would make `get(&id)` answer `None` forever and this would fail
+    // as *"timed out waiting for the harness to crash and be put back"* —
+    // a true verdict credited to an assertion that never ran. Watching the
+    // runtime's own list instead lets the failure land on the line below,
+    // which says what is actually wrong.
+    drive(&mut live, "the harness to crash and be put back", |live| {
+        live.sessions()
+            .iter()
+            .any(|session| session.restarts() >= 1)
+    });
+
+    let restarted = live.get(&id).expect(
+        "a restarted harness must come back under the session identity it had: \
+         `CheckpointStore::latest_for` is keyed on it, so a session that came back \
+         under a new one has left its checkpoint present in the project and \
+         unreachable from the work it describes",
+    );
+    assert_eq!(
+        restarted.restarts(),
+        1,
+        "the harness must have been put back"
+    );
+    assert!(
+        restarted.restart_halted().is_none(),
+        "the restart must have worked: {:?}",
+        restarted.restart_halted()
+    );
+    assert!(
+        restarted.is_running(),
+        "and the new harness must be running"
+    );
+
+    // The claim: the session that came back is the same session, so what it
+    // had before the crash is still its own.
+    let after = fixture.reopen();
+    let store = after.store();
+    let latest = store
+        .latest_for(&id)
+        .expect("read the restarted worker's checkpoints")
+        .expect("a restarted worker must still reach the checkpoint it had before it crashed");
+    assert_eq!(
+        latest, before,
+        "the restarted session reached a different checkpoint than the one it had"
+    );
+
+    live.close(&id).expect("close the session");
 }
