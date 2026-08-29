@@ -1100,6 +1100,13 @@ mod tests {
         events.sort_unstable();
         let mut expected = vec![
             "PermissionRequest",
+            // Compaction is *observed* (logged), not recorded as a
+            // `SessionLifecycle` state — see `harness::codex::REPORTED_EVENTS`
+            // and `docs/product/evidence/phase-8.md`. This assertion is on the
+            // file Codex actually reads, so it is the one that proves the two
+            // events reach disk rather than only the adapter's constant.
+            "PostCompact",
+            "PreCompact",
             "SessionEnd",
             "SessionStart",
             "Stop",

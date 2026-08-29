@@ -46,20 +46,28 @@ const HOOK_EVENTS: &[&str] = &[
 ];
 /// The events Glasshouse asks Codex to report.
 ///
-/// A subset of [`HOOK_EVENTS`], deliberately not the per-tool events
-/// (`PreToolUse`/`PostToolUse`/`PreCompact`/`PostCompact`/`SubagentStart`/
-/// `SubagentStop`): those fire many times per turn and say nothing about a
-/// *session's* state, the same reasoning Claude Code's adapter applies.
-/// `SessionEnd` is asked for here even though `session/lifecycle.rs`
-/// deliberately never maps it to a state — Codex still reports it, and
-/// declining to *ask* for it would be a second, redundant way of encoding
-/// the same decision.
+/// A subset of [`HOOK_EVENTS`], deliberately not the remaining per-tool
+/// events (`PreToolUse`/`PostToolUse`/`SubagentStart`/`SubagentStop`): those
+/// fire many times per turn and say nothing about a *session's* state, the
+/// same reasoning Claude Code's adapter applies. `SessionEnd` is asked for
+/// here even though `session/lifecycle.rs` deliberately never maps it to a
+/// state — Codex still reports it, and declining to *ask* for it would be a
+/// second, redundant way of encoding the same decision.
+///
+/// `PreCompact`/`PostCompact` are asked for here even though they, too, are
+/// not a `SessionLifecycle` state — a session that compacts was running
+/// before and is running after. They are requested anyway so a real Codex
+/// session registers a command for them and the event is observed (logged
+/// by `RawObservation::preserve()`), which is a distinct, narrower claim
+/// than *recording* a compaction durably. See `docs/product/evidence/phase-8.md`.
 const REPORTED_EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
     "PermissionRequest",
     "Stop",
     "SessionEnd",
+    "PreCompact",
+    "PostCompact",
 ];
 
 /// Seconds a reporting hook may take before Codex abandons it.
@@ -648,9 +656,12 @@ mod tests {
     }
 
     #[test]
-    fn codex_reports_exactly_the_five_session_level_events() {
-        // Not the per-tool events (`PreToolUse`/`PostToolUse`/...): those
-        // fire many times per turn and say nothing about a session's state.
+    fn codex_reports_exactly_the_seven_session_level_and_compaction_events() {
+        // Not the remaining per-tool events (`PreToolUse`/`PostToolUse`/
+        // `SubagentStart`/`SubagentStop`): those fire many times per turn and
+        // say nothing about a session's state. `PreCompact`/`PostCompact` are
+        // included even though compaction is not a `SessionLifecycle` state —
+        // see the doc comment on `REPORTED_EVENTS`.
         let installation = Codex
             .hook_installation(&hook_command())
             .expect("an installation");
@@ -662,8 +673,47 @@ mod tests {
             "PermissionRequest",
             "Stop",
             "SessionEnd",
+            "PreCompact",
+            "PostCompact",
         ];
         expected.sort_unstable();
         assert_eq!(events, expected);
+    }
+
+    #[test]
+    fn the_generated_document_registers_a_command_for_both_compaction_events() {
+        // §35: a caller every test bypasses is not a caller. This checks the
+        // generated JSON itself, not just the declared event list, so a
+        // regression that declared the events without emitting a runnable
+        // command for them would still fail here.
+        let installation = Codex
+            .hook_installation(&hook_command())
+            .expect("an installation");
+        let parsed: serde_json::Value = serde_json::from_str(&installation.contents)
+            .unwrap_or_else(|err| panic!("not valid JSON: {err}\n{}", installation.contents));
+        let hooks = parsed["hooks"].as_object().expect("a hooks object");
+        for event in ["PreCompact", "PostCompact"] {
+            let entries = hooks
+                .get(event)
+                .unwrap_or_else(|| panic!("{event} has no entry in the generated document"))
+                .as_array()
+                .unwrap_or_else(|| panic!("{event}'s entry is not an array"));
+            assert!(
+                !entries.is_empty(),
+                "{event} has no matcher entries in the generated document"
+            );
+            let command = entries[0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{event} declares no command string"));
+            assert!(!command.is_empty(), "{event} declares an empty command");
+            let timeout = entries[0]["hooks"][0]["timeout"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{event} declares no numeric timeout"));
+            assert_eq!(
+                timeout,
+                u64::from(HOOK_TIMEOUT_SECONDS),
+                "{event} does not declare the shared hook timeout"
+            );
+        }
     }
 }
