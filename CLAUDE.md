@@ -231,5 +231,40 @@ reasoning and the one trap. Start Ox with the normal `ox` TUI—never
 `ox run` or a headless loop. Follow the worker do/don't rules and the safe hook
 protocol rather than personal global routing configuration.
 
+## Every script, because naming only some of them cost a session
+
+**CLAUDE.md named fifteen of these and the repo has twenty-seven.** An
+orchestrator on 2026-08-29 queued a package behind `main.rs` for a whole round
+and wrote a "wait for the file to free" packet — with `scripts/coedit.sh`
+sitting unread, and practice **§77** in the index it had already loaded. It had
+the pointer and did not follow it. The fix is a list, not more prose.
+
+**Round mechanics:** `new-packet.sh` · `validate_round.py` · `dev/new-worker.sh`
+· `worker-watch.sh` · `worker-ack.sh` · `worker-done.sh` · `close-worker.sh` ·
+`integrate.sh` · `evidence_from_report.py`
+
+**Deciding what to work on:** `discover.py` · `orient.py` · `cluster-b.py`
+(finds production code with no production caller — the shape behind four of
+batch 51's eight closures) · `pipeline.sh` (nags when the board runs dry) ·
+`map-index.py` · `progress.py`
+
+**Verification:** `ci-local.sh` (`--macos --linux --windows-vm`; **any flag
+suppresses the macOS+Linux default**) · `blast-radius.sh` · `mutate.sh` ·
+`msrv-check.sh` · `check-doc-boundary.sh` · `check-evidence-coverage.py`
+
+**Sharing a contended file — read §77 before queueing on `main.rs`:**
+`coedit.sh claim|peers|diff|done|status|ready|list|release`. Contention on
+`main.rs` is **structural**, not bad luck: §32 says put the caller's file in the
+partition and that is where every production caller lives. Batch 45 deferred six
+of seven packets on it.
+
+**Continuity and housekeeping:** `continuity-watch.sh` (`--role
+worker|orchestrator`) · `orchestrator-heartbeat.sh` · `usage-snapshot.py` ·
+`reap-worktrees.sh` · `ask-user.sh`
+
+**Hooks (`scripts/hooks/`), which enforce rather than remind:**
+`guard-worktree-boundary.sh` · `guard-destructive-git.sh` ·
+`coedit-peer-notice.sh` · `coedit-unreleased-guard.sh` · `worker-turn-ended.sh`
+
 Current phase and next action belong in `docs/process/handoff.md`; do not encode
 phase-specific assumptions in this file.
