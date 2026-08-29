@@ -291,6 +291,7 @@ fn dispatch(
             }
         }
         Request::ResourceCapacity => resource_capacity(runtime),
+        Request::RoutingModel => routing_model_status(runtime),
         Request::GetCheckpoint {
             checkpoint,
             document,
@@ -538,6 +539,116 @@ fn resource_capacity(runtime: &Runtime) -> Response {
     Response::ok(glasshouse::provider::resources::capacity_json(
         &effective, &telemetry, now_unix,
     ))
+}
+
+/// Current routing-model selection and its health — capability map line 1680.
+///
+/// `selection` is the recorded [`config::RoutingModelChoice`] together with
+/// the layer it came from, reported the way every other layered value in
+/// this project is reported (see [`describe_layer`]). `resolution` is what
+/// will actually classify a request right now:
+/// `EffectiveConfig::routing_model_resolution` already checks a pinned
+/// choice against the providers configured this instant and degrades to
+/// heuristics with a named [`config::RoutingFallback`] when one has gone
+/// missing — this handler reports that computed state, keyed by the type's
+/// own variant names, rather than re-deriving or re-wording it into prose of
+/// its own. There is no live latency or health probe anywhere in this
+/// project (see that function's own doc comment); a project that has
+/// configured nothing gets [`config::RoutingFallback::NotConfigured`], the
+/// honest default, never a fabricated pin.
+fn routing_model_status(runtime: &Runtime) -> Response {
+    let user = match UserConfig::load(runtime.paths()) {
+        Ok(user) => user,
+        Err(err) => return Response::err(err),
+    };
+    let project_config = match config::load_project_config(runtime.project()) {
+        Ok(project_config) => project_config,
+        Err(err) => return Response::err(err),
+    };
+    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+
+    let selection = effective.routing_model();
+    let resolution = effective.routing_model_resolution();
+
+    Response::ok(serde_json::json!({
+        "selection": routing_choice_json(&selection.value),
+        "layer": describe_layer(resolution.layer),
+        "resolution": routing_resolution_json(&resolution.value),
+    }))
+}
+
+/// A recorded [`config::RoutingModelChoice`] as JSON. `provider`/`model` are
+/// `null` for every choice but [`config::RoutingModelChoice::Pinned`] —
+/// never an empty string, so an absent value cannot be mistaken for one that
+/// was measured and happened to be empty (§71).
+fn routing_choice_json(choice: &config::RoutingModelChoice) -> serde_json::Value {
+    match choice {
+        config::RoutingModelChoice::Deterministic => serde_json::json!({
+            "choice": "deterministic",
+            "provider": null,
+            "model": null,
+        }),
+        config::RoutingModelChoice::Automatic => serde_json::json!({
+            "choice": "automatic",
+            "provider": null,
+            "model": null,
+        }),
+        config::RoutingModelChoice::Pinned { provider, model } => serde_json::json!({
+            "choice": "pinned",
+            "provider": provider,
+            "model": model,
+        }),
+    }
+}
+
+/// A computed [`config::RoutingModelResolution`] as JSON — what will
+/// actually classify a request right now, distinct from the recorded
+/// [`routing_choice_json`].
+fn routing_resolution_json(resolution: &config::RoutingModelResolution) -> serde_json::Value {
+    match resolution {
+        config::RoutingModelResolution::Automatic => serde_json::json!({ "state": "automatic" }),
+        config::RoutingModelResolution::Pinned { provider, model } => serde_json::json!({
+            "state": "pinned",
+            "provider": provider,
+            "model": model,
+        }),
+        config::RoutingModelResolution::Heuristics(reason) => routing_fallback_json(reason),
+    }
+}
+
+/// Why deterministic heuristics are answering instead of a model, keyed by
+/// [`config::RoutingFallback`]'s own variant names rather than its
+/// [`std::fmt::Display`] prose — a client matching on `reason` must be able
+/// to tell the cases apart mechanically, not by parsing a sentence meant for
+/// a person.
+fn routing_fallback_json(reason: &config::RoutingFallback) -> serde_json::Value {
+    match reason {
+        config::RoutingFallback::NotConfigured => serde_json::json!({
+            "state": "heuristics",
+            "reason": "not_configured",
+        }),
+        config::RoutingFallback::DeterministicChosen => serde_json::json!({
+            "state": "heuristics",
+            "reason": "deterministic_chosen",
+        }),
+        config::RoutingFallback::ProviderNotConfigured { provider, model } => serde_json::json!({
+            "state": "heuristics",
+            "reason": "provider_not_configured",
+            "provider": provider,
+            "model": model,
+        }),
+    }
+}
+
+/// Matches `provider::resources::describe_layer`'s own wire spelling for
+/// [`config::Layer`] (`"project"` / `"user"` / `"default"`), duplicated
+/// rather than imported because that one is private to its own module.
+fn describe_layer(layer: config::Layer) -> &'static str {
+    match layer {
+        config::Layer::Project => "project",
+        config::Layer::User => "user",
+        config::Layer::Default => "default",
+    }
 }
 
 /// Search this project's durable memory — box 10, and Phase 21F lines

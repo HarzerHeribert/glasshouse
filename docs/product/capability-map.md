@@ -1677,7 +1677,7 @@ Fixed architectural requirements
 ☑ Allow the API to interrupt sessions.
 ☑ Allow the API to retrieve lifecycle state.
 ☑ Allow the API to retrieve current resource capacity and quota telemetry.
-☐ Allow the API to retrieve the current routing-model selection and health.
+☑ Allow the API to retrieve the current routing-model selection and health.
 ☐ Allow the API to request an inspectable routing recommendation without executing it.
 ☑ Allow the API to query project memory.
 ☑ Allow the API to request a checkpoint.
@@ -1788,7 +1788,7 @@ Phase 49 — Configuration
 ☑ Keep project-level configuration inside the project root when the user explicitly chooses to create it.
 ☑ Keep secrets out of tracked project configuration.
 ☑ Make sensible defaults sufficient for Claude Code and Codex when their native executables are already usable from the shell.
-☐ Allow automatic routing and memory extraction to be disabled independently.
+☑ Allow automatic routing and memory extraction to be disabled independently.
 ☑ Allow the user to configure provider-specific quota overrides when automatic telemetry is unavailable.
 ☑ Allow the user to configure a monthly or rolling monetary budget for metered providers.
 ☑ Allow the user to configure protected reserve percentages for premium subscriptions.

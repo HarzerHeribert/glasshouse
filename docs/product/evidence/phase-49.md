@@ -364,3 +364,74 @@ implement it. A person debugging their own configuration would have been told
 to add the setting they had already added. Fixed in
 `EffectiveConfig::native_pairing_preference` and
 `describe_preference_source`, with the regression test above.
+
+---
+
+## Phase 49 line 1791 — CLOSED 2026-08-29 (batch 47)
+
+**This supersedes "Orchestrator verification: 1791 stays OPEN" above.** That
+section is kept, not deleted: it records the mutation that proved the gap, and
+the gap is what this entry closes.
+
+Contract: Given a project whose configuration disables automatic memory
+extraction, when a harness reports a completed turn through `glasshouse hook`,
+Glasshouse records the lifecycle event as usual but attempts no memory
+extraction — while the same hook with extraction enabled does attempt it.
+
+State: COMPLETE
+
+**What was actually missing, and it was not the switch.** The routing half was
+already satisfied (`RoutingModelChoice::Deterministic`, with real onboarding and
+settings callers). The memory-extraction half had a production caller and no
+proof it was load-bearing: deleting `&& memory_extraction_enabled(runtime)` from
+`main.rs` left 1138 lib + 24 bin tests + every integration binary green. §35 —
+a caller you can delete without a test noticing is, to the test suite, not a
+caller.
+
+Production evidence:
+- `crates/glasshouse/src/main.rs:1200` — `memory_extraction_enabled(runtime)`,
+  reading `EffectiveConfig::memory_extraction_enabled()`
+  (`config/mod.rs:2634`), which layers project over user over default.
+- `crates/glasshouse/src/main.rs:1490-1498` — the gate itself, on
+  `LifecycleEvent::TurnEnded { outcome: TurnOutcome::Completed }`, guarding
+  `run_extraction_after_turn`.
+- **No production code was written to close this line.** The mechanism shipped
+  already; only its proof was missing.
+
+Regression evidence — `crates/glasshouse/tests/session_hook.rs`, which spawns
+`env!("CARGO_BIN_EXE_glasshouse")` and runs `glasshouse hook` as a real
+separate process:
+- `memory_extraction_left_enabled_is_attempted_after_a_completed_turn` — the
+  premise (§17): with no `memory_extraction` key written, the hook produces one
+  of `run_extraction_after_turn`'s two `tracing::info!` lines.
+- `memory_extraction_disabled_in_user_config_is_not_attempted_while_the_hook_still_records_the_turn`
+  — the line: with `memory_extraction = false` planted through
+  `UserConfig::set_memory_extraction` (not hand-written TOML), **neither** line
+  appears, while the `TurnEnded { Completed }` event is still recorded — so the
+  switch turned off extraction specifically, not the hook.
+
+**The assertion is on the extraction log lines, deliberately not on an empty
+memory database.** An empty database is exactly what a run that extracted and
+stored nothing would leave, and that is the vacuous pass this line already
+survived once.
+
+Mutation, re-run by the orchestrator rather than accepted from the report:
+
+| mutation | vocabulary | result |
+|---|---|---|
+| `&& memory_extraction_enabled(runtime)` → deleted (`main.rs:1495`) | `remove-guard` | **killed** — `memory_extraction_disabled_..._records_the_turn` FAILED at `session_hook.rs:508` |
+
+The `--test session_hook` target is the one holding the killing test; checked,
+because a SURVIVED from a command that never ran the killing test is
+indistinguishable from a real one (`phase-40.md` records that exact error).
+
+**A packet error worth keeping.** The packet placed this test in
+`tests/events_lifecycle.rs`, following this ledger's own earlier note. That was
+wrong: `events_lifecycle.rs` drives the library type `SessionRuntime`, and the
+gate is in `main.rs` inside the binary, which no library seam reaches. Corrected
+to `session_hook.rs` before dispatch.
+
+Platform/external evidence: `session_hook.rs` is not platform-gated and runs on
+Windows. No `#[cfg]` was added.
+
+Missing evidence: CI run on all three platforms.

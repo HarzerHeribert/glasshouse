@@ -402,3 +402,82 @@ Gate, for this appended section only:
 - `cargo build -p glasshouse` and `cargo test -p glasshouse --test
   capacity_api` (3/3, run alone) — see `phase-32d.md`'s own gate section for
   the full-crate run this appended section shares.
+
+---
+
+## Phase 42 line 1680 — CLOSED 2026-08-29 (batch 47)
+
+Contract: Given a project whose configuration selects a routing model, when a
+client asks the control API for the current routing-model selection, Glasshouse
+answers with that selection, the layer it came from, and whether it actually
+resolves or has degraded to heuristics with a named reason — while never
+fabricating a measurement it does not have, and never leaking the credential
+behind a pinned provider.
+
+State: COMPLETE
+
+**What "health" means here, because the obvious reading is unavailable.** There
+is no live latency or health probe anywhere in this project;
+`max_router_latency_ms` is a configured *ceiling*, not a measurement, and a
+previous orchestrator killed a packet (line 1661) over exactly that confusion.
+The routing model's health is `RoutingModelResolution`: whether the configured
+choice resolves against the providers configured this instant, or has degraded
+to deterministic heuristics carrying a `RoutingFallback` that names which one
+went missing. That is computed, project-scoped, and real.
+
+Production evidence:
+- `crates/glasshouse/src/api/protocol.rs` — `Request::RoutingModel`.
+- `crates/glasshouse/src/api/unix.rs` — `routing_model_status`, reached from
+  `dispatch`, reading `EffectiveConfig::routing_model()` and
+  `::routing_model_resolution()` and reporting both.
+- **`EffectiveConfig::routing_model_resolution()` had ZERO production callers
+  before this package.** Every call site outside `config/mod.rs`'s own test
+  module was `config/response.rs:747`, itself inside that file's
+  `#[cfg(test)] mod tests`. `validate_round.py`'s cited-seams check flagged
+  this at packet time and the orchestrator confirmed it directly. The producer
+  was fully built and unit-tested and nothing in the shipped binary had ever
+  asked it a question; **becoming its first production caller is what line 1680
+  asks for**, and is what this package did.
+
+Regression evidence — `crates/glasshouse/tests/routing_api.rs`, driving
+`glasshouse api serve` over a real Unix domain socket:
+- `the_default_project_reports_its_default_selection_and_layer`
+- `a_pinned_routing_model_round_trips_through_the_door`
+- `a_pin_naming_an_unconfigured_provider_degrades_to_heuristics_with_the_reason`
+- `no_credential_value_appears_in_the_routing_model_response` — the negative,
+  asserted rather than assumed.
+
+Mutation, re-run by the orchestrator rather than accepted from the report:
+
+| mutation | vocabulary | result |
+|---|---|---|
+| `Request::RoutingModel => routing_model_status(runtime)` → a hardcoded deterministic/not_configured response | `skip-state-update` | **killed** — `a_pin_naming_an_unconfigured_provider_degrades_...` and `a_pinned_routing_model_round_trips_...` both FAILED |
+
+The `--test routing_api` target holds both killing tests; checked. The worker's
+own first attempt at this mutation reported SURVIVED because it quoted the whole
+cargo command as one `--test` argument, which `mutate.sh` takes as a single
+test-name filter matching zero tests. It caught that itself by reading the
+`test result:` line — §68's trap, inside the tool that exists to guard §68.
+
+**Deliberate scope refusals.** Line 1681 (an inspectable routing recommendation
+without executing it) was verified premise-invalid before dispatch and left
+untouched: `routing/disposable.rs:469 choose` is the only chooser and it chooses
+by executing. No recommendation producer exists to inspect, and inventing one to
+tick a box is the failure this ledger exists to prevent.
+
+**Scope overflow, flagged by the worker rather than hidden.**
+`api/protocol.rs` was not in the packet's EXPECTED FILES, but a `Request`
+variant must exist in the enum `dispatch` matches on — `dispatch` has no
+wildcard arm. One variant, mirroring the adjacent `ResourceCapacity`. The
+packet was wrong; the judgment was right.
+
+Unknown stays unknown: `provider`/`model` are JSON `null`, never an empty
+string, for every choice that does not name one (§71). `reason` is the
+`RoutingFallback` variant name in snake_case, not its `Display` prose, so a
+client matches mechanically rather than parsing a sentence.
+
+Platform/external evidence: `#![cfg(unix)]`, matching `capacity_api.rs` — the
+control door is a Unix domain socket and this claims no Windows coverage it
+does not have.
+
+Missing evidence: CI run; no Windows claim is made.

@@ -243,6 +243,51 @@ EOF
 
 EOF
 
+  # THE FACTS BLOCK, WITH ITS SCHEMA.
+  #
+  # `scripts/evidence_from_report.py` consumes this block to draft the ledger
+  # entry. Batch 47 asked four workers for "a glasshouse-facts block" without
+  # ever saying what shape it takes; all four invented a flat `key: value`
+  # form, and the tool refused every one of them with `missing top-level
+  # lines`. The schema lived only in the consuming script's docstring, which
+  # the worker is explicitly told not to read. Emitting it here is what makes
+  # the two tools actually meet.
+  cat <<'FACTS'
+## FACTS BLOCK — required, and this exact schema
+
+End your report with one fenced block. `scripts/evidence_from_report.py`
+parses it; a flat `key: value` list is REFUSED. `lines:` is mandatory.
+
+```glasshouse-facts
+task: GH-EXAMPLE
+status: complete            # complete | partial | blocked
+worktree: .worktrees/example
+lines:
+  - id: 1641                # the map line number, as an integer
+    verdict: closed         # closed | open | refused
+    contract: "Given ..., when ..., Glasshouse ..., while preserving ..."
+    production:
+      - "src/foo.rs :: Type::method"
+    regression:
+      - "test_file::test_name"
+    mutations:
+      - vocabulary: skip-state-update
+        change: "the exact find -> replace"
+        result: killed      # killed | survived | not-run
+        killed_by: "test_file::test_name"
+        observed: "what the failure actually printed"
+    limits:
+      - "what this does NOT prove"
+packet_errors:
+  - "the packet said X; current source says Y (src/foo.rs:12)"
+scope_overflow:
+  - path: "src/bar.rs"
+    reason: "why it was unavoidable"
+gates:
+  - "cargo clippy --all-targets --all-features -D warnings: clean"
+```
+
+FACTS
   printf '## REPORT TO\n\n`%s`\n' "$REPORT_REL"
 } > "$OUT"
 

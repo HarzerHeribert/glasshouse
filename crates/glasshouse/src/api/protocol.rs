@@ -61,6 +61,18 @@ pub enum Request {
     /// `glasshouse::provider::resources::capacity_json`, which this is
     /// answered with directly, for the exact shape.
     ResourceCapacity,
+    /// The current routing-model selection and its health — capability map
+    /// line 1680.
+    ///
+    /// Read-only, like every other request this door answers. Answered from
+    /// `glasshouse::config::EffectiveConfig::routing_model` and
+    /// `::routing_model_resolution` directly: the recorded choice and the
+    /// layer it came from, and whether that choice actually resolves or has
+    /// degraded to deterministic heuristics with a reason named in the
+    /// type's own words. There is no live latency or health probe anywhere
+    /// in this project — a degrade to heuristics *is* the health signal this
+    /// line asks for; see those functions' own doc comments.
+    RoutingModel,
     /// Search this project's durable memory.
     QueryMemory {
         query: String,

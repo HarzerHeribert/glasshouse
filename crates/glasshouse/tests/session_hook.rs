@@ -15,6 +15,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use glasshouse::config::UserConfig;
 use glasshouse::events::{EventLog, LifecycleEvent, TurnOutcome};
 use glasshouse::session::{NewSession, ProjectSessions, SessionId, SessionLifecycle};
 use glasshouse::{Cli, Runtime};
@@ -433,5 +434,96 @@ fn the_tail_returns_harness_reports_and_not_the_interfaces_own_events() {
             .iter()
             .any(|event| event.event == LifecycleEvent::SessionStarted),
         "the control row is missing, so the filter test proves nothing"
+    );
+}
+
+/// Map line 1791's memory-extraction half, premise. Left enabled — the
+/// default, so no `memory_extraction` key is written at all — a `Stop` for a
+/// completed turn reaches `run_extraction_after_turn`, which always logs one
+/// of its two `tracing::info!` lines (`main.rs:1648` or `main.rs:1657`): this
+/// fixture configures no provider, so `RoutedNoModel` always fails and the
+/// "produced nothing" line is the one that fires, but either is proof the
+/// trigger ran.
+///
+/// This is the control for
+/// [`memory_extraction_disabled_in_user_config_is_not_attempted_while_the_hook_still_records_the_turn`]:
+/// without it, that test's silence would be indistinguishable from a hook
+/// that never attempts extraction at all.
+#[test]
+fn memory_extraction_left_enabled_is_attempted_after_a_completed_turn() {
+    let fixture = Fixture::new();
+    let id = running_session(&fixture, "codex");
+    let log_file = fixture.base.join("extraction-enabled.log");
+
+    assert!(
+        fixture
+            .hook_logging(id.as_str(), "Stop", &payload(), Some(&log_file))
+            .success()
+    );
+
+    let written = std::fs::read_to_string(&log_file).expect("the hook must have written a log");
+    assert!(
+        written.contains("memory extraction ran after a completed task")
+            || written.contains("memory extraction after a completed task produced nothing"),
+        "extraction left enabled must be attempted after a completed turn: {written}"
+    );
+}
+
+/// Map line 1791's memory-extraction half, the line itself.
+/// `memory_extraction = false` planted in the user config layer — through
+/// [`UserConfig::set_memory_extraction`] and [`UserConfig::save`], so this
+/// test breaks if the key is ever renamed — makes
+/// `memory_extraction_enabled(runtime)` false, and neither of
+/// `run_extraction_after_turn`'s log lines appears for the same completed
+/// turn the premise test above drives.
+///
+/// The lifecycle event is still recorded: this proves the switch turned off
+/// extraction specifically, not that the hook did nothing at all.
+#[test]
+fn memory_extraction_disabled_in_user_config_is_not_attempted_while_the_hook_still_records_the_turn()
+ {
+    let fixture = Fixture::new();
+    let id = running_session(&fixture, "codex");
+
+    let mut user = UserConfig::load(fixture.runtime.paths())
+        .expect("a fresh fixture has no config file yet, which loads as the default");
+    user.set_memory_extraction(Some(false));
+    user.save(fixture.runtime.paths())
+        .expect("the user config layer must be writable in the fixture's own tempdir");
+
+    let log_file = fixture.base.join("extraction-disabled.log");
+    let before = fixture.log().len().unwrap();
+
+    assert!(
+        fixture
+            .hook_logging(id.as_str(), "Stop", &payload(), Some(&log_file))
+            .success()
+    );
+
+    let written = std::fs::read_to_string(&log_file).expect("the hook must have written a log");
+    for forbidden in [
+        "memory extraction ran after a completed task",
+        "memory extraction after a completed task produced nothing",
+    ] {
+        assert!(
+            !written.contains(forbidden),
+            "`{forbidden}` was logged even though memory_extraction=false:\n{written}"
+        );
+    }
+
+    // The switch turned off extraction, not the hook: the turn's own closing
+    // event is still recorded for this session.
+    let recorded = fixture.log().for_session(&id).unwrap();
+    assert_eq!(
+        recorded.len() as u64,
+        fixture.log().len().unwrap() - before,
+        "the hook recorded something for a different session"
+    );
+    assert!(
+        recorded.iter().any(|event| event.event
+            == LifecycleEvent::TurnEnded {
+                outcome: TurnOutcome::Completed
+            }),
+        "the turn's own closing event must still be recorded even with extraction off: {recorded:?}"
     );
 }
