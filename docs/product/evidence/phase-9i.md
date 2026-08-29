@@ -97,3 +97,47 @@ Regression evidence — including the §35 check this packet required by name:
   separation of the two policy classes across the new caller.
 
 ---
+
+---
+
+## Line 531 — examined and REFUSED, 2026-08-29 (batch 49)
+
+**531 is the only unticked line in its block** — 530, 532, 533, 534, 536, 537,
+538, 539, 540 are all ☑ around it, including 540, which is its close relative
+about per-credential pools. That asymmetry looks like an oversight and is not.
+
+The section above records lines 530, 531, 532 and 540 as `State: COMPLETE` once
+`RoutedNoModel` gave the disposable policy a production caller. **530, 532 and
+540 were ticked on that basis and 531 was not, and 531 is right to stay open.**
+
+The mechanism is real and is genuinely watched:
+- `Allowance::RequestPool { limit, remaining, resets_at }` and
+  `Allowance::TokenPriced` are separate variants with no shared arithmetic, and
+  `Allowance::record` (`routing/free.rs`) early-returns unless the allowance is
+  a request pool, so a pool reading cannot touch a token-priced credential.
+- Mutation by the orchestrator: make `record` coerce a `TokenPriced` allowance
+  into a `RequestPool` built from the reading. **KILLED** —
+  `a_token_priced_allowance_is_never_asked_how_many_requests_are_left` FAILED at
+  `free.rs:749`. The `--lib routing::free` target holds it; checked.
+
+**But `declare_token_priced` has zero non-test callers.** `record_pool` has
+exactly one, `free.rs:366`, inside this module's own observe path. So in the
+shipped binary every credential is a request pool by default and **no
+token-priced allowance is ever created**. There is nothing to track request
+pools *separately from*.
+
+That is §35 applied to a variant rather than a function: a branch no production
+path can reach is, to the running program, not there. It is the same shape as
+this ledger's own note on 528 — *"the token-priced half does not [have a real
+production feed], because nothing reads a provider's pricing"* — and the same
+shape as Phase 32F's 1289 and 1290, whose inputs are hardcoded at their only
+caller.
+
+**What would close it:** something that reads a provider's pricing and calls
+`declare_token_priced`, so that a real metered credential and a real pooled one
+coexist and are tracked apart. Until then the separation is structural, proven
+by unit tests, and unexercised.
+
+Recorded so the next reader does not repeat the path: mechanism present, tests
+present, mutation killed — and still not closeable, because the caller check is
+the one that decides.
