@@ -122,6 +122,20 @@ the backup — failing loudly if the restore does not come back byte-identical.
 A SURVIVED result is the valuable one: it names behaviour no test in the
 command actually watches.
 
+**Integrate with `scripts/integrate.sh <worktree>...`, and read what it prints.**
+It applies each worker's diff, copies the untracked deliverables `git diff`
+cannot see (a tests-only worker has *no* tracked changes — three of batch 45's
+six were invisible), runs fmt, and runs the blast radius. It refuses a dirty
+tree, a non-ancestor base, and any file two worktrees both touched.
+
+**It deliberately stops there.** It never commits, ticks a box, writes evidence,
+or runs a mutation. The mechanics caught nothing on their own in batch 45 —
+every real catch came from reading a diff or choosing a mutation, and the
+classify-caller refusal was noticed *while applying the patch*. Automating the
+mechanics is a win; delegating them to an agent would remove the exposure that
+produces the rulings. **Reading every diff, every mutation target, every box
+decision and every commit stays with the orchestrator.**
+
 **Before the gate, run `scripts/blast-radius.sh`.** It maps the files you changed
 to the cargo test targets that could break, and runs them. Practice §79 exists
 because a worker ran §69's grep, the grep correctly named the affected file, and
