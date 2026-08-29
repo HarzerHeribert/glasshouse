@@ -73,3 +73,19 @@ def test_the_block_explains_the_absolute_path_trap_that_caused_it():
     done = subprocess.run([str(HOOK)], input=payload, capture_output=True, text=True)
     assert "READING ONLY" in done.stderr
     assert "REPORT TO" in done.stderr
+
+
+def test_a_team_lead_may_write_a_subpacket_to_the_main_checkout():
+    """A lead's output is subpackets, not only a report.
+
+    Blocked in batch 49 the first time a lead decomposed a phase. Its
+    subcontractors live in their own worktrees and must be able to read the
+    subpacket, and the lead's own tree is deleted at close, which would take
+    the record of what was delegated with it.
+    """
+    assert run("Write", f"{REPO}/.agent-runtime/subpacket-ceilings.md", WT) == 0
+
+
+def test_the_subpacket_exception_does_not_extend_to_the_leads_own_packet():
+    """A worker must not rewrite its own instructions."""
+    assert run("Write", f"{REPO}/.agent-runtime/packet-lead-capacity.md", WT) == 2

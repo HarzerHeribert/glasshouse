@@ -87,7 +87,8 @@ case "$target" in
   "$boundary"|"$boundary"/*) exit 0 ;;
 esac
 
-# THE ONE EXCEPTION, and it is load-bearing: a worker's report.
+# THE EXCEPTIONS, and both are load-bearing: a worker's report, and a team
+# lead's subpackets.
 #
 # Every packet's REPORT TO names an absolute path in the MAIN checkout's
 # `.agent-runtime/`, because that directory is gitignored and so does not
@@ -96,14 +97,31 @@ esac
 # break the return leg of every worker in the process, which is how a guard
 # gets switched off wholesale instead of fixed.
 #
-# Narrow on purpose: `<repo>/.agent-runtime/<something>.md` and nothing else.
-# Not the whole directory (packets, CONTINUATION.md and the evidence drafts
-# live there too and are not a worker's to rewrite), and not any other tree.
+# `subpacket-*.md` is the second exception, added 2026-08-29 after a team lead
+# was blocked writing one. A LEAD'S OUTPUT IS SUBPACKETS, not only a report:
+# it decomposes its phase, writes a packet per subcontractor, and those must be
+# readable from the subcontractors' own worktrees, which are different trees.
+#
+# Putting them in the lead's worktree instead does work and the lead recovered
+# that way, but it is the wrong home for two reasons: `git worktree remove`
+# deletes the lead's tree at close and takes the record of what was delegated
+# with it — which is precisely what the orchestrator asks a lead to report —
+# and a subcontractor reading across into another worker's tree is the coupling
+# `.worktrees/` exists to prevent.
+#
+# Allowing this is safe for the reason the whole guard exists: `.agent-runtime/`
+# is gitignored, so a write there cannot touch a tracked file, corrupt a diff,
+# or make "what did this worker change" unanswerable. The harm this hook
+# prevents is a worker editing SOURCE in a tree it does not own.
+#
+# Narrow on purpose: two filename prefixes under `<repo>/.agent-runtime/` and
+# nothing else. `packet-*.md` stays blocked — a worker must not rewrite its own
+# instructions — and so do `CONTINUATION.md` and the evidence drafts.
 repo_root="${boundary%%/.worktrees/*}"
 case "$target" in
   "$repo_root"/.agent-runtime/*.md)
     case "${target##*/}" in
-      report-*) exit 0 ;;
+      report-*|subpacket-*) exit 0 ;;
     esac
     ;;
 esac
@@ -130,10 +148,12 @@ Every path you WRITE is relative to your worktree.
 WHAT TO DO
   * editing a source file:  use the path relative to your worktree
                             (crates/glasshouse/src/..., not /Users/.../glasshouse/crates/...)
-  * writing your report:    that one absolute path is correct and is the single
-                            exception — but write it exactly as the packet's
-                            REPORT TO line gives it, not a relative
-                            \`.agent-runtime/...\` from inside your worktree.
+  * writing your report:    that one absolute path is correct — write it exactly
+                            as the packet's REPORT TO line gives it, not a
+                            relative \`.agent-runtime/...\` from inside your worktree.
+  * a team lead's subpacket: \`<repo>/.agent-runtime/subpacket-<name>.md\` is
+                            allowed, so your subcontractors can read it from
+                            their own worktrees.
 
 On 2026-08-29 a worker edited the main checkout for thirteen minutes this way,
 including a schema migration, while its own worktree stayed empty. It was found
