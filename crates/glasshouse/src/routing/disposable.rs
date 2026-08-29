@@ -33,6 +33,7 @@
 //! policy holding it. There is no second door — [`DisposableChoice`]'s fields
 //! are private and nothing else in the crate constructs one.
 
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 use super::free::{FreePool, FreePreferences, FreeResource, FreeResourceKey};
@@ -384,6 +385,100 @@ impl std::fmt::Display for NoResource {
     }
 }
 
+/// The user's own override of protected-reserve protection — capability map
+/// line 1290, *"allow the user to override reserve protection for a specific
+/// task or session"*.
+///
+/// # Why this is a pair and not a boolean
+///
+/// [`crate::provider::quota::ReserveDecisionInputs::user_override`] is a
+/// `bool`, and a `bool` is all a policy function should need. The scope
+/// belongs one level up, here, because a boolean *setting* would be a
+/// different capability from the one line 1290 asks for: set once, it would
+/// spend protected reserve for every job in every session for ever, and no
+/// reason string could say on whose behalf.
+///
+/// So the scope is part of the value. One half is the set of sessions the
+/// user named; the other is the session this routing instance is deciding
+/// for; and [`ReserveOverride::applies`] is true only where the two meet.
+/// **There is deliberately no constructor meaning "everywhere"** — a user who
+/// wants two sessions overridden names two sessions — and
+/// [`ReserveOverride::default`] is the empty override that every caller
+/// predating this line already gets.
+///
+/// # The task half of "task or session", which is not built
+///
+/// Only the session half exists, because only the session half has an
+/// identifier on this path. A disposable job carries a [`JobKind`] —
+/// `memory-extraction` or `classification` — which names a *class* of work
+/// rather than one task, so a `JobKind`-scoped override would be a
+/// category-wide switch wearing a scope's clothes: precisely the shape the
+/// paragraph above refuses. Nothing in this build gives one disposable job an
+/// identity its successor does not share, so there is nothing narrower to
+/// name. The line is a disjunction and the session half is real; the task
+/// half is recorded here as absent rather than approximated.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReserveOverride {
+    /// The sessions the user named, as
+    /// [`crate::config::EffectiveConfig::reserve_override_sessions`] resolved
+    /// them. A [`BTreeSet`] so the membership test does not depend on the
+    /// order a configuration file happened to list them in.
+    sessions: BTreeSet<String>,
+    /// The session whose work this routing instance is deciding for, when the
+    /// caller knows one.
+    ///
+    /// `None` is every caller that predates line 1290, and it can never
+    /// match — which is what keeps this type's arrival a no-op for them.
+    deciding_for: Option<String>,
+}
+
+impl ReserveOverride {
+    /// No override at all: the reserve policy decides on its own signals.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The sessions the user named. Naming none is the same as [`Self::none`].
+    pub fn for_sessions<S: Into<String>>(sessions: impl IntoIterator<Item = S>) -> Self {
+        Self {
+            sessions: sessions.into_iter().map(Into::into).collect(),
+            deciding_for: None,
+        }
+    }
+
+    /// Point this override at the session actually being decided for.
+    ///
+    /// Separate from [`Self::for_sessions`] because the two facts come from
+    /// different places — the set from configuration, the subject from
+    /// whichever caller is routing — and a single constructor taking both
+    /// would invite a caller to pass the same value twice and prove nothing.
+    #[must_use]
+    pub fn deciding_for(mut self, session: impl Into<String>) -> Self {
+        self.deciding_for = Some(session.into());
+        self
+    }
+
+    /// Whether the user overrode reserve protection *for this decision*.
+    ///
+    /// False whenever the user named nothing, whenever the caller named no
+    /// session, and — the case that matters — whenever the session being
+    /// decided for is not one the user named.
+    pub fn applies(&self) -> bool {
+        self.deciding_for
+            .as_deref()
+            .is_some_and(|session| self.sessions.contains(session))
+    }
+
+    /// The session this override was granted for, when it applies — for the
+    /// routing explanation, so a spend of protected reserve names the scope
+    /// the user actually gave rather than only the fact of an override.
+    pub fn granted_session(&self) -> Option<&str> {
+        self.applies()
+            .then_some(self.deciding_for.as_deref())
+            .flatten()
+    }
+}
+
 /// The routing policy for bounded internal jobs.
 #[derive(Debug, Clone)]
 pub struct DisposableRouting {
@@ -395,6 +490,11 @@ pub struct DisposableRouting {
     /// way, which is line 530.
     prefer_free_setting: bool,
     preferences: FreePreferences,
+    /// The user's scoped override of protected-reserve protection —
+    /// capability map line 1290. [`ReserveOverride::none`] unless a caller
+    /// said otherwise, so every construction that predates the line keeps
+    /// exactly the behaviour it had.
+    reserve_override: ReserveOverride,
 }
 
 impl DisposableRouting {
@@ -405,6 +505,7 @@ impl DisposableRouting {
             metered: MeteredUse::Permitted,
             prefer_free_setting,
             preferences,
+            reserve_override: ReserveOverride::none(),
         }
     }
 
@@ -426,6 +527,7 @@ impl DisposableRouting {
             metered,
             prefer_free_setting: true,
             preferences,
+            reserve_override: ReserveOverride::none(),
         }
     }
 
@@ -435,6 +537,25 @@ impl DisposableRouting {
 
     pub fn preferences(&self) -> &FreePreferences {
         &self.preferences
+    }
+
+    /// Carry the user's scoped reserve override — capability map line 1290.
+    ///
+    /// A builder rather than a constructor argument, and deliberately: both
+    /// constructors above describe *what kind of work* this policy is for,
+    /// which is a permanent property, while an override is a statement about
+    /// one session that most callers will never make. Omitting it is
+    /// [`ReserveOverride::none`], which is what every existing caller does.
+    #[must_use]
+    pub fn with_reserve_override(mut self, reserve_override: ReserveOverride) -> Self {
+        self.reserve_override = reserve_override;
+        self
+    }
+
+    /// The override this policy is carrying, for a caller that wants to
+    /// report it.
+    pub fn reserve_override(&self) -> &ReserveOverride {
+        &self.reserve_override
     }
 
     /// Choose a resource for one bounded job.
@@ -596,8 +717,16 @@ impl DisposableRouting {
                     .map(TaskClassification::conservative_workload_tier)
                     .unwrap_or(WorkloadTier::Leaf),
                 cheaper_adequate_resource_exists: cheaper_adequate_resource_exists(&metered, index),
-                user_override: false,
+                // Line 1290, scoped: true only when the session this policy
+                // was built for is one the user actually named. See
+                // [`ReserveOverride`] for why the scope lives here and not
+                // in the policy function.
+                user_override: self.reserve_override.applies(),
                 seconds_until_reset: candidate.value().capacity.seconds_until_reset,
+                // Line 1294, and it stays a literal on purpose — nothing in
+                // this build can observe that a task is nearly complete, and
+                // [`ReserveDecisionInputs::task_nearly_complete`] records why
+                // a proxy must not be invented for it.
                 task_nearly_complete: false,
             });
             if !decision.is_allowed() {
@@ -721,6 +850,18 @@ impl DisposableRouting {
                 "no reset time known for this provider (map line 1549)".to_owned(),
             ),
         });
+
+        if let (Some(session), true) = (self.reserve_override.granted_session(), reserve.is_some())
+        {
+            explanation.push(Contribution::new(
+                "user reserve override",
+                0.0,
+                format!(
+                    "the user overrode reserve protection for session {session}; protected \
+                     reserve may be spent for this session's work and no other (map line 1290)"
+                ),
+            ));
+        }
 
         if let Some(decision) = reserve {
             explanation.push(Contribution::new(

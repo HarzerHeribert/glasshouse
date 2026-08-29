@@ -2205,7 +2205,7 @@ impl ReserveDecision {
 
 /// Everything [`evaluate_reserve_spend`] needs to decide whether spending a
 /// resource's protected reserve is justified — capability map lines
-/// 1288-1292 and 1294, gathered into one input rather than six positional
+/// 1287-1292 and 1294, gathered into one input rather than six positional
 /// booleans a call site could transpose.
 #[derive(Debug, Clone, Copy)]
 pub struct ReserveDecisionInputs {
@@ -2213,26 +2213,75 @@ pub struct ReserveDecisionInputs {
     /// built against thresholds that already carry this resource's own
     /// protected reserve percentage via
     /// [`CapacityBandThresholds::with_resource_reserve`] — capability map
-    /// line 1288.
+    /// line 1287.
     pub band: CapacityBand,
     /// The task's required workload tier —
     /// [`crate::routing::classify::WorkloadTier`], read here rather than
     /// re-invented: a task's capability *requirement* is exactly what Phase
     /// 35 already models, and duplicating it would be two scales for one
     /// question.
+    ///
+    /// # Why the hard-capability set is not a second input beside it
+    ///
+    /// Capability map line 1289 says *"when their capability requirement
+    /// justifies it"*, and Phase 35 now has a literal capability set —
+    /// [`crate::routing::classify::TaskClassification::hard_capabilities`].
+    /// It must not be plumbed here, and the reason is in its own doc comment:
+    /// a [`crate::routing::classify::HardCapability`] names something a
+    /// *harness* must be wired for — repository access, a shell, a browser —
+    /// "rather than something a smarter model makes more likely to succeed".
+    ///
+    /// This decision is entirely about whether to spend a stronger model's
+    /// protected quota. A signal defined as *not satisfiable by choosing a
+    /// stronger model* therefore varies with something this consumer is not
+    /// measuring: wiring it in would let `run the tests and paste the output`
+    /// spend protected premium reserve because it needs a shell, while a
+    /// genuinely demanding pure-reasoning task, needing none of the three,
+    /// would not. The tier is the scale that varies with demand, and it is
+    /// the one this field carries.
     pub tier: crate::routing::classify::WorkloadTier,
     /// Whether a resource outside the reserve band could adequately serve
-    /// this task instead — capability map line 1289.
+    /// this task instead — capability map line 1288.
     pub cheaper_adequate_resource_exists: bool,
     /// Whether the user explicitly overrode reserve protection for this task
-    /// or session — capability map line 1291.
+    /// or session — capability map line 1290.
+    ///
+    /// A `bool` here and a *scope* at the producer: see
+    /// [`crate::routing::disposable::ReserveOverride`], which is the only
+    /// thing in this build that may set this true, and which is true only
+    /// where the session the user named is the session being decided for.
+    /// Nothing may set this from a global preference — line 1290 says "for a
+    /// specific task or session", and a switch that covered everything would
+    /// be the reserve turned off rather than overridden.
     pub user_override: bool,
     /// Seconds until this resource's quota resets, if known — see
-    /// [`CapacityState::seconds_until_reset`]. Capability map lines 1292 and
-    /// its distant-reset complement.
+    /// [`CapacityState::seconds_until_reset`]. Capability map lines 1291 and
+    /// its distant-reset complement, 1292.
     pub seconds_until_reset: Option<i64>,
     /// Whether the task this decision is for is almost complete — capability
     /// map line 1294's guard on migration.
+    ///
+    /// # Nothing in this build can produce this, and a proxy must not be
+    /// invented for it
+    ///
+    /// Every caller passes `false`, and that is a refusal rather than a gap
+    /// waiting to be filled. Glasshouse's own event vocabulary
+    /// ([`crate::events::LifecycleEvent`]) is deliberately binary and
+    /// retrospective — a turn started, a turn ended and how, the harness is
+    /// waiting for the user, the process exited — and two of its variants
+    /// carry doc comments saying in as many words that they are *not*
+    /// statements about the session's work. No harness this build integrates
+    /// reports task progress, and the one path that reaches
+    /// [`evaluate_reserve_spend`] runs *after* `TurnEnded { Completed }`, so
+    /// the only completion fact available there is that the turn is already
+    /// over.
+    ///
+    /// A turn count or an elapsed-time threshold would compile and would look
+    /// like a producer. It would also be wrong in the one situation this line
+    /// exists to protect: it would report "almost complete" for a task that
+    /// had merely been running a while, and this field is the *first* branch
+    /// [`evaluate_reserve_spend`] takes, outranking every other signal. A
+    /// fabricated value here does not degrade the policy, it inverts it.
     pub task_nearly_complete: bool,
 }
 
@@ -2247,16 +2296,19 @@ pub struct ReserveDecisionInputs {
 /// 1. **Line 1294 first, unconditionally.** An almost-complete high-value
 ///    task is never moved "solely because a reserve threshold was crossed" —
 ///    the line's own words — so nothing below this can override it.
-/// 2. **Line 1291 next.** An explicit user override is a statement about
+/// 2. **Line 1290 next.** An explicit user override is a statement about
 ///    *this* task or session that the user made on purpose; it outranks
 ///    every automatic signal below it, but not line 1294's guard, which
 ///    protects work already in flight regardless of what either party
-///    intended about reserve.
+///    intended about reserve. It is scoped at its producer — see
+///    [`crate::routing::disposable::ReserveOverride`] — so "the user
+///    overrode this" can only ever be true of a session the user named.
 /// 3. **The band itself.** Above [`CapacityBand::Reserve`], nothing here is
 ///    protected in the first place and every request is allowed —
 ///    the bands below `Reserve` are the only ones this function ever has
 ///    an opinion about.
-/// 4. **Reset proximity** — lines 1292 and its distant-reset complement.
+/// 4. **Reset proximity** — lines 1291 and its distant-reset complement,
+///    1292.
 ///    Imminent (within [`RESET_IMMINENT_SECONDS`]) makes the policy
 ///    permissive outright; distant ([`RESET_DISTANT_SECONDS`] or further, or
 ///    explicitly known and not imminent) makes it strictly conservative,
@@ -2264,7 +2316,7 @@ pub struct ReserveDecisionInputs {
 ///    least the heavy tier
 ///    ([`crate::routing::classify::WorkloadTier::Heavy`] or
 ///    [`crate::routing::classify::WorkloadTier::Frontier`]).
-/// 5. **Tier and alternatives** — lines 1289 and 1290. A task at the heavy
+/// 5. **Tier and alternatives** — lines 1289 and 1288. A task at the heavy
 ///    tier or above justifies spending the reserve; a lighter task may spend
 ///    it only when nothing cheaper is adequate.
 pub fn evaluate_reserve_spend(inputs: ReserveDecisionInputs) -> ReserveDecision {
@@ -2281,8 +2333,8 @@ pub fn evaluate_reserve_spend(inputs: ReserveDecisionInputs) -> ReserveDecision 
 
     if inputs.user_override {
         return ReserveDecision::Allow {
-            reason: "the user explicitly overrode reserve protection for this task or session \
-                     (line 1291)"
+            reason: "the user explicitly overrode reserve protection for this session \
+                     (line 1290)"
                 .to_owned(),
         };
     }
@@ -2302,7 +2354,7 @@ pub fn evaluate_reserve_spend(inputs: ReserveDecisionInputs) -> ReserveDecision 
             return ReserveDecision::Allow {
                 reason: format!(
                     "the quota resets in {seconds}s, within the reserve policy's imminent \
-                     window; conserving now buys little (line 1292)"
+                     window; conserving now buys little (line 1291)"
                 ),
             };
         }
@@ -2328,7 +2380,7 @@ pub fn evaluate_reserve_spend(inputs: ReserveDecisionInputs) -> ReserveDecision 
     if inputs.tier >= WorkloadTier::Heavy {
         return ReserveDecision::Allow {
             reason: "the task requires at least the heavy workload tier (tier 3 or higher), \
-                     which justifies spending protected reserve (line 1290)"
+                     which justifies spending protected reserve (line 1289)"
                 .to_owned(),
         };
     }
@@ -2336,7 +2388,7 @@ pub fn evaluate_reserve_spend(inputs: ReserveDecisionInputs) -> ReserveDecision 
     if inputs.cheaper_adequate_resource_exists {
         return ReserveDecision::Deny {
             reason: "a cheaper adequate resource exists and this task does not require the \
-                     heavy tier, so protected reserve is not spent on it (line 1289)"
+                     heavy tier, so protected reserve is not spent on it (line 1288)"
                 .to_owned(),
         };
     }

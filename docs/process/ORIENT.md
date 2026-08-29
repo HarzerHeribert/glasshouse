@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**800 / 1280 mandatory capabilities (62%)** — 480 open across 64 phases.
+**802 / 1280 mandatory capabilities (63%)** — 478 open across 64 phases.
 
 ## Where the work is
 
@@ -31,6 +31,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 27 | Context injection | **1** | 10 | `1118` |
 | Phase 30 | Session context metadata | **1** | 7 | `1156` |
 | Phase 32B | Quota telemetry sources | **1** | 13 | `1220` |
+| Phase 32F | Protected quota reserve | **1** | 7 | `1285` |
 | Phase 41 | Project overview | **1** | 14 | `1648` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 9E | Secret storage | **2** | 11 | `432` |
@@ -41,7 +42,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 46 | Security and contamination tests | **2** | 6 | `1739` |
 | Phase 49 | Configuration | **2** | 14 | `1784` |
 | Phase 16 | Worker transparency | **3** | 4 | `742` |
-| Phase 32F | Protected quota reserve | **3** | 5 | `1285` |
 | Phase 34A | Workload tiers | **3** | 7 | `1393` |
 | Phase 37 | Basic session-aware router | **3** | 8 | `1590` |
 | Phase 54 | Criteria before deeper cmux coupling | **4** | 0 | `1885` |
@@ -138,6 +138,10 @@ these unwrapped.
 
 - **1239** ☐ Treat completely unknown quota as a routing uncertainty rather than as zero or one hundred percent remaining.
 
+### Phase 32F — Protected quota reserve  (1 open, 7 closed)
+
+- **1294** ☐ Avoid moving an almost-complete high-value task to another session solely because a reserve threshold was crossed.
+
 ### Phase 41 — Project overview  (1 open, 14 closed)
 
 - **1661** ☐ Show the currently selected routing model and its recent latency.
@@ -187,12 +191,6 @@ these unwrapped.
 - **745** ☐ Allow the user to enter any orchestrated worker while it is running.
 - **746** ☐ Allow direct user input to an orchestrated worker without requiring the orchestrator as an intermediary.
 - **747** ☐ Allow the user to interrupt an orchestrated worker directly.
-
-### Phase 32F — Protected quota reserve  (3 open, 5 closed)
-
-- **1289** ☐ Allow high-tier tasks to consume protected reserve when their capability requirement justifies it.
-- **1290** ☐ Allow the user to override reserve protection for a specific task or session.
-- **1294** ☐ Avoid moving an almost-complete high-value task to another session solely because a reserve threshold was crossed.
 
 ### Phase 34A — Workload tiers  (3 open, 7 closed)
 

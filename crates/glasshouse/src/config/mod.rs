@@ -1963,6 +1963,28 @@ pub struct RoutingConfig {
     /// [`crate::provider::quota::CapacityBandThresholds::DEFAULT`] apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     capacity_band_thresholds: Option<CapacityBandThresholdsConfig>,
+    /// The sessions whose work may spend protected quota reserve whatever the
+    /// reserve policy would otherwise decide — capability map line 1290.
+    ///
+    /// A list of session identifiers and **not a boolean**, which is the
+    /// whole of the design: line 1290 asks for an override *"for a specific
+    /// task or session"*, so there is no spelling of this setting that means
+    /// "always". The empty list and `None` both mean no override, and
+    /// [`crate::routing::disposable::ReserveOverride`] documents why the
+    /// scope travels with the value rather than being checked once at a call
+    /// site.
+    ///
+    /// Same `None`-means-undecided reasoning as
+    /// [`RoutingConfig::free_resource_order`]: a layer that has recorded
+    /// nothing defers to the next one, and a layer that wants to record an
+    /// explicit "no sessions, ignore the layer below" writes `Some(vec![])`.
+    ///
+    /// Not validated against the session store when loading or saving, for
+    /// [`RoutingConfig::free_resource_pin`]'s reason: a session that has since
+    /// been closed must not stop Glasshouse from starting, and a stale entry
+    /// here is inert — it can only ever match a session with that identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reserve_override_sessions: Option<Vec<String>>,
 }
 
 impl RoutingConfig {
@@ -2010,6 +2032,17 @@ impl RoutingConfig {
 
     pub fn set_premium_reserve(&mut self, value: Option<PremiumReservePercent>) -> &mut Self {
         self.premium_reserve_percent = value;
+        self
+    }
+
+    /// This layer's recorded reserve overrides, or `None` for "never
+    /// decided" — capability map line 1290.
+    pub fn reserve_override_sessions(&self) -> Option<&[String]> {
+        self.reserve_override_sessions.as_deref()
+    }
+
+    pub fn set_reserve_override_sessions(&mut self, value: Option<Vec<String>>) -> &mut Self {
+        self.reserve_override_sessions = value;
         self
     }
 
@@ -2092,6 +2125,7 @@ impl RoutingConfig {
             && self.free_resource_disabled.is_none()
             && self.free_resource_pin.is_none()
             && self.capacity_band_thresholds.is_none()
+            && self.reserve_override_sessions.is_none()
     }
 }
 
@@ -2871,6 +2905,29 @@ impl<'a> EffectiveConfig<'a> {
             return Layered::new(value, Layer::User);
         }
         Layered::new(true, Layer::Default)
+    }
+
+    /// The sessions the user overrode reserve protection for — capability
+    /// map line 1290 — resolved per field, project over user over the empty
+    /// default, exactly like [`Self::free_resource_disabled`].
+    ///
+    /// First layer wins outright rather than the two being unioned. A union
+    /// would mean a project could add sessions a user's own configuration
+    /// never named and the user had no single place to look to see what was
+    /// overridden; every other list on this type resolves the same way, and
+    /// this one is a *spending* control, which is the last place to invent a
+    /// second resolution rule.
+    pub fn reserve_override_sessions(&self) -> Layered<Vec<String>> {
+        if let Some(value) = self
+            .project
+            .and_then(|p| p.routing().reserve_override_sessions())
+        {
+            return Layered::new(value.to_vec(), Layer::Project);
+        }
+        if let Some(value) = self.user.routing().reserve_override_sessions() {
+            return Layered::new(value.to_vec(), Layer::User);
+        }
+        Layered::new(Vec::new(), Layer::Default)
     }
 
     /// Premium remaining-capacity threshold below which reserve protection

@@ -200,6 +200,15 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     return Ok(ExitCode::FAILURE);
                 }
             },
+            Some(SessionCommand::Reserve { session, clear }) => {
+                match reserve_override_session(&runtime, session, *clear) {
+                    Ok(report) => print!("{report}"),
+                    Err(err) => {
+                        eprintln!("glasshouse: {err:#}");
+                        return Ok(ExitCode::FAILURE);
+                    }
+                }
+            }
         },
         // `run` and `launch` dispatch through this one arm on purpose — see
         // `Command::Run`'s doc. A change to how a launch is assembled can
@@ -2248,8 +2257,8 @@ fn install_session_document(
 /// them is worth costing the user a turn. Glasshouse's bookkeeping is never
 /// more important than the session it is keeping books about.
 fn report_hook(runtime: &Runtime, session: &str, event: &str) {
-    report_hook_with(runtime, session, event, || {
-        disposable_extraction_model(runtime)
+    report_hook_with(runtime, session, event, |id| {
+        disposable_extraction_model(runtime, id)
     });
 }
 
@@ -2450,7 +2459,10 @@ fn configured_extraction_model(
 /// read at all — the same non-fatal-to-the-session posture
 /// [`report_hook_with`]'s own doc comment describes for every other failure
 /// on this path.
-fn disposable_extraction_model(runtime: &Runtime) -> Box<dyn glasshouse::memory::ExtractionModel> {
+fn disposable_extraction_model(
+    runtime: &Runtime,
+    session: &glasshouse::session::SessionId,
+) -> Box<dyn glasshouse::memory::ExtractionModel> {
     if let Some(chosen) = configured_extraction_model(runtime) {
         return chosen;
     }
@@ -2506,10 +2518,21 @@ fn disposable_extraction_model(runtime: &Runtime) -> Box<dyn glasshouse::memory:
                 .as_ref()
                 .map(|pin| pin.to_key()),
         );
+    // Capability map line 1290's production wiring: the sessions the user
+    // named, paired with the session this decision is actually for.
+    // `ReserveOverride::applies` is what makes those two facts one input, and
+    // it is false for every session the user did not name — including when
+    // the list is empty, which is every user who has never run `glasshouse
+    // sessions reserve`.
+    let reserve_override = glasshouse::routing::disposable::ReserveOverride::for_sessions(
+        effective.reserve_override_sessions().value,
+    )
+    .deciding_for(session.to_string());
     let routing = glasshouse::routing::disposable::DisposableRouting::for_support_work(
         effective.prefer_free_routing().value,
         free_preferences,
-    );
+    )
+    .with_reserve_override(reserve_override);
     Box::new(glasshouse::memory::RoutedNoModel::new(
         glasshouse::routing::disposable::JobKind::MemoryExtraction,
         &candidates,
@@ -2706,11 +2729,18 @@ fn abandon_after(bound: std::time::Duration, work: impl FnOnce() + Send + 'stati
 ///
 /// A factory rather than a reference, because extraction runs on its own
 /// thread and needs something it can own.
+///
+/// It takes the session's *resolved* identifier because the routing decision
+/// behind the model depends on it: capability map line 1290 lets the user
+/// override protected-reserve protection for one named session, and
+/// [`disposable_extraction_model`] can only honour that for the session it is
+/// deciding for. `session` above is whatever the harness put on the command
+/// line; the resolved id is what the user's configuration records.
 fn report_hook_with(
     runtime: &Runtime,
     session: &str,
     event: &str,
-    model: impl Fn() -> Box<dyn glasshouse::memory::ExtractionModel>,
+    model: impl Fn(&glasshouse::session::SessionId) -> Box<dyn glasshouse::memory::ExtractionModel>,
 ) {
     // Codex writes its payload to the hook's stdin, and a process that never
     // reads it can leave the harness writing into a closed pipe. Glasshouse
@@ -2802,7 +2832,7 @@ fn report_hook_with(
                     run_extraction(
                         runtime,
                         &id,
-                        model(),
+                        model(&id),
                         glasshouse::memory::ExtractionTrigger::BeforeCompaction,
                     );
                 }
@@ -2859,7 +2889,7 @@ fn report_hook_with(
                 run_extraction(
                     runtime,
                     &id,
-                    model(),
+                    model(&id),
                     glasshouse::memory::ExtractionTrigger::TaskCompleted,
                 );
             }
@@ -5072,6 +5102,74 @@ fn tag_session(
     })
 }
 
+/// Capability map line 1290: *"allow the user to override reserve protection
+/// for a specific task or session"* — the user-facing half.
+///
+/// # The scope is the whole point
+///
+/// The override is recorded as a **session identifier**, never as a flag.
+/// There is no argument here that means "every session", and
+/// [`glasshouse::routing::disposable::ReserveOverride`] has no constructor
+/// that could express one: an override covering everything would be the
+/// protected reserve disabled, which is a different capability from the one
+/// this line asks for and a worse one, because the reserve exists to stop
+/// background jobs exhausting the quota an interactive session needs.
+///
+/// The identifier is resolved through the session store first, so what lands
+/// in the configuration is the canonical id rather than whatever prefix was
+/// typed — the hook path that later reads it has resolved its own id the same
+/// way, and two spellings of one session must not fail to match.
+///
+/// # Why the user layer
+///
+/// Writes go to the user-level configuration, like every other write outside
+/// the settings UI: [`glasshouse::config::write_project_config_with_consent`]
+/// puts a file inside the user's repository and its own doc comment reserves
+/// that for a caller that has obtained explicit confirmation. Typing this
+/// command is consent to record a preference, not consent to add a file to a
+/// checked-out tree.
+fn reserve_override_session(
+    runtime: &Runtime,
+    session: &str,
+    clear: bool,
+) -> anyhow::Result<String> {
+    let sessions = ProjectSessions::open(runtime)?;
+    let store = sessions.store();
+    let id = store.resolve_id(session)?;
+    let id = id.to_string();
+
+    let mut user = UserConfig::load(runtime.paths())?;
+    let mut granted: Vec<String> = user
+        .routing()
+        .reserve_override_sessions()
+        .map(<[String]>::to_vec)
+        .unwrap_or_default();
+    granted.retain(|recorded| recorded != &id);
+    if !clear {
+        granted.push(id.clone());
+    }
+    // `Some(vec![])` rather than `None` once the user has touched this: an
+    // empty list is "this layer says no sessions", which is a decision, and
+    // `None` is "this layer never decided", which would defer to a project
+    // layer the user has just tried to overrule. See the field's own doc.
+    user.routing_mut()
+        .set_reserve_override_sessions(Some(granted));
+    user.save(runtime.paths())?;
+
+    let short = &id[..id.len().min(8)];
+    Ok(if clear {
+        format!(
+            "Session {short} no longer overrides reserve protection; its background jobs are \
+             subject to the protected reserve again.\n"
+        )
+    } else {
+        format!(
+            "Session {short} may now spend protected quota reserve. No other session is \
+             affected, and `glasshouse sessions reserve {short} --clear` withdraws it.\n"
+        )
+    })
+}
+
 /// Retire Glasshouse's record of a session — line 654.
 ///
 /// The second line is the whole of the capability's second half, said out
@@ -6357,7 +6455,7 @@ mod tests {
 
         {
             let asked = std::sync::Arc::clone(&asked);
-            report_hook_with(&fixture.runtime, id.as_str(), "Stop", move || {
+            report_hook_with(&fixture.runtime, id.as_str(), "Stop", move |_| {
                 Box::new(Canned {
                     reply: ONE_FINDING.to_owned(),
                     asked: std::sync::Arc::clone(&asked),
@@ -6403,7 +6501,7 @@ mod tests {
 
             {
                 let asked = std::sync::Arc::clone(&asked);
-                report_hook_with(&fixture.runtime, id.as_str(), event, move || {
+                report_hook_with(&fixture.runtime, id.as_str(), event, move |_| {
                     Box::new(Canned {
                         reply: ONE_FINDING.to_owned(),
                         asked: std::sync::Arc::clone(&asked),
@@ -6440,7 +6538,7 @@ mod tests {
             let fixture = CliFixture::new();
             let id = recorded_session(&fixture.runtime);
 
-            report_hook_with(&fixture.runtime, id.as_str(), "Stop", move || {
+            report_hook_with(&fixture.runtime, id.as_str(), "Stop", move |_| {
                 Box::new(Hostile(match kind {
                     HostileKind::Refuses => HostileKind::Refuses,
                     HostileKind::Panics => HostileKind::Panics,
@@ -6481,7 +6579,7 @@ mod tests {
         let id = recorded_session(&fixture.runtime);
 
         let started = std::time::Instant::now();
-        report_hook_with(&fixture.runtime, id.as_str(), "Stop", || {
+        report_hook_with(&fixture.runtime, id.as_str(), "Stop", |_| {
             Box::new(Hostile(HostileKind::Hangs))
         });
         let waited = started.elapsed();
@@ -6535,6 +6633,136 @@ mod tests {
         );
     }
 
+    /// Capability map line 1290, end to end inside the shipped binary: the
+    /// command a person types records the override, and
+    /// `disposable_extraction_model` — the function `report_hook` calls to
+    /// build its extraction model — honours it for that session and denies
+    /// the identical candidate for another.
+    ///
+    /// **Through `disposable_extraction_model` itself, not through a helper
+    /// that reads the same configuration.** The first version of this test
+    /// did the latter, and a mutation replacing the production wiring with
+    /// `ReserveOverride::none()` SURVIVED all 44 tests in this binary:
+    /// practice §35's exact shape, where the helper that makes a test
+    /// convenient reproduces the production step the test claims to prove.
+    /// The mutation is killed now, at the two assertions below.
+    ///
+    /// The candidate setup is
+    /// `disposable_extraction_model_lets_the_protected_reserve_policy_deny_a_metered_candidate`'s,
+    /// deliberately: a 10% remaining balance is inside the `Reserve` band and
+    /// a 7200s reset is at or past `RESET_DISTANT_SECONDS`, so this is the
+    /// combination the policy denies. Only the override differs between the
+    /// two halves.
+    #[test]
+    fn the_reserve_override_a_user_records_reaches_the_routing_decision() {
+        const VAR: &str = "GLASSHOUSE_TEST_ONLY_RESERVE_OVERRIDE_KEY";
+        const PROVIDER: &str = "wire-reserve-override-test-provider";
+        // SAFETY: `VAR` is unique to this test and removed again below.
+        unsafe {
+            std::env::set_var(VAR, "sk-fabricated-test-value-not-a-real-credential");
+        }
+
+        let fixture = CliFixture::new();
+        let granted = recorded_session(&fixture.runtime);
+        let other = recorded_session(&fixture.runtime);
+        assert_ne!(granted, other);
+
+        let mut user = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let mut provider = glasshouse::config::ProviderConfig::new("openai-compatible");
+        provider.set_credential_env(vec![VAR.to_owned()]);
+        provider.set_metered_models(vec!["a-reserved-model".to_owned()]);
+        user.providers_mut().set(PROVIDER, provider);
+        user.save(fixture.runtime.paths()).unwrap();
+
+        let now_unix = glasshouse::provider::cache::now_unix_seconds();
+        glasshouse::provider::telemetry::GatewayQuotaCache::new(fixture.runtime.paths()).store(
+            PROVIDER,
+            &glasshouse::provider::telemetry::RateLimitHeaders::read(vec![
+                ("x-ratelimit-limit-requests", "1000"),
+                ("x-ratelimit-limit-tokens", "1000"),
+                ("x-ratelimit-remaining-requests", "100"),
+                ("x-ratelimit-remaining-tokens", "100"),
+                ("x-ratelimit-reset-requests", "7200s"),
+                ("x-ratelimit-reset-tokens", "7200s"),
+            ]),
+            now_unix,
+        );
+
+        // Before the user says anything, this candidate is denied — which is
+        // what makes the two assertions after the grant attributable.
+        let before = disposable_extraction_model(&fixture.runtime, &granted).describe();
+
+        let report = reserve_override_session(&fixture.runtime, granted.as_str(), false).unwrap();
+        let after_granted = disposable_extraction_model(&fixture.runtime, &granted).describe();
+        let after_other = disposable_extraction_model(&fixture.runtime, &other).describe();
+
+        reserve_override_session(&fixture.runtime, granted.as_str(), true).unwrap();
+        let after_clear = disposable_extraction_model(&fixture.runtime, &granted).describe();
+
+        let recorded = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let project_file = fixture
+            .runtime
+            .project()
+            .root()
+            .join(".glasshouse")
+            .join("config.toml");
+
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+
+        assert!(
+            before.contains("protected-reserve policy denied"),
+            "the control case must be denied, or nothing below is attributable: {before}"
+        );
+        assert!(
+            report.contains("No other session is affected"),
+            "the command must say what it did not do, too: {report}"
+        );
+
+        assert!(
+            !after_granted.contains("protected-reserve policy denied"),
+            "the session the user named must be allowed to spend the reserve: {after_granted}"
+        );
+        assert!(
+            after_granted.contains(granted.as_str()),
+            "the explanation must name the session the override was granted for: {after_granted}"
+        );
+
+        // The assertion that separates line 1290 from "the reserve is off".
+        assert!(
+            after_other.contains("protected-reserve policy denied"),
+            "a session the user never named must not inherit another session's override: \
+             {after_other}"
+        );
+
+        assert!(
+            after_clear.contains("protected-reserve policy denied"),
+            "`--clear` must actually withdraw the override: {after_clear}"
+        );
+
+        // The write went to the user layer and nowhere near the repository.
+        assert_eq!(
+            recorded.routing().reserve_override_sessions(),
+            Some([].as_slice())
+        );
+        assert!(
+            !project_file.exists(),
+            "recording a preference must not put a file in the user's repository"
+        );
+    }
+
+    /// A session identifier no test here has recorded a reserve override
+    /// for — capability map line 1290's *negative* case, and the state every
+    /// one of these tests was in before that line existed.
+    ///
+    /// Named rather than inlined so that a test which ever *does* want the
+    /// override has to say so, and so a reader of these tests can see at a
+    /// glance that the reserve policy below is deciding without one.
+    fn a_session_not_overridden() -> glasshouse::session::SessionId {
+        glasshouse::session::SessionId::new("a-session-with-no-reserve-override")
+    }
+
     /// Phase 9I lines 530, 531 and 540, at the function `report_hook` itself
     /// calls to get its model. A user-configured free model, written to disk
     /// exactly as Settings would write it, is the one the disposable routing
@@ -6570,7 +6798,7 @@ mod tests {
             .set("wire-disposable-test-provider", provider);
         user.save(fixture.runtime.paths()).unwrap();
 
-        let model = disposable_extraction_model(&fixture.runtime);
+        let model = disposable_extraction_model(&fixture.runtime, &a_session_not_overridden());
         let described = model.describe();
 
         unsafe {
@@ -6644,7 +6872,7 @@ mod tests {
             now_unix,
         );
 
-        let model = disposable_extraction_model(&fixture.runtime);
+        let model = disposable_extraction_model(&fixture.runtime, &a_session_not_overridden());
         let described = model.describe();
 
         unsafe {
@@ -6690,7 +6918,7 @@ mod tests {
             .set("wire-disposable-metered-test-provider", provider);
         user.save(fixture.runtime.paths()).unwrap();
 
-        let model = disposable_extraction_model(&fixture.runtime);
+        let model = disposable_extraction_model(&fixture.runtime, &a_session_not_overridden());
         let described = model.describe();
 
         unsafe {
@@ -6738,7 +6966,7 @@ mod tests {
             .set("wire-disposable-both-test-provider", provider);
         user.save(fixture.runtime.paths()).unwrap();
 
-        let model = disposable_extraction_model(&fixture.runtime);
+        let model = disposable_extraction_model(&fixture.runtime, &a_session_not_overridden());
         let described = model.describe();
 
         unsafe {
@@ -6797,7 +7025,7 @@ mod tests {
             now_unix,
         );
 
-        let model = disposable_extraction_model(&fixture.runtime);
+        let model = disposable_extraction_model(&fixture.runtime, &a_session_not_overridden());
         let described = model.describe();
 
         unsafe {

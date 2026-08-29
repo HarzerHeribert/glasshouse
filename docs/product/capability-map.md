@@ -1286,8 +1286,8 @@ Phase 32F — Protected quota reserve
 
 ☑ Allow each premium resource to define a protected reserve percentage.
 ☑ Avoid spending protected reserve on low-tier work while cheaper adequate resources exist.
-☐ Allow high-tier tasks to consume protected reserve when their capability requirement justifies it.
-☐ Allow the user to override reserve protection for a specific task or session.
+☑ Allow high-tier tasks to consume protected reserve when their capability requirement justifies it.
+☑ Allow the user to override reserve protection for a specific task or session.
 ☑ Allow reserve policy to become more permissive shortly before a known quota reset.
 ☑ Allow reserve policy to become more conservative when the next reset is distant.
 ☑ Keep reserve behavior inspectable in routing explanations.

@@ -429,3 +429,196 @@ one describes something this caller does not do. And 1319 (site B) was one
 argument in one file exactly as `phase-33.md` described it; bundling it here
 made it no smaller. It was included because the partition was free, not because
 the framing helped.
+
+
+---
+
+# Lines 1289, 1290 closed and 1294 refused — 2026-08-30
+
+Package `GH-RESERVE-INPUTS`; report in `.agent-runtime/report-reserve-inputs.md`.
+
+## The register was stale and this package corrects it
+
+Cluster A listed three hardcoded literals in the reserve inputs. **Only two
+were still there.** `routing/disposable.rs:598` already called the real
+`cheaper_adequate_resource_exists` (`:828`), closing 1288 and unblocking 1291,
+and neither had been noticed. Both rows are now struck through in the register.
+
+## 1290 — an override that is a scope, not a switch
+
+`user_override` had no producer anywhere: a literal `false`. It is now set by
+`ReserveOverride`, which pairs **the sessions the user named** with the session
+being decided for, and `glasshouse sessions reserve <ID>` is the control.
+
+**There is no spelling of it that means "every session"** — no constructor, no
+config value, no flag. That was the packet's ruling 2 and it is enforced by
+construction rather than by documentation, which matters because the thing
+being overridden is a spending protection.
+
+Six mutations, all killed, **two of them at the "and not elsewhere"
+assertion** — the half of the test that carries the ruling.
+
+## 1289 — closed on the tier, and the capability set deliberately refused
+
+The workload tier *is* the capability-requirement scale at this decision. The
+worker refused to plumb `hard_capabilities` in beside it and gave §79's reason:
+**it varies with the wrong thing.** The refusal is written at the field, with a
+test, rather than only in this report — so the next reader finds it where they
+would otherwise add the wiring.
+
+This is the right call and it is consistent with `phase-34.md`: the registry
+answers *"can this resource do the work"*, not *"does this work deserve the
+reserve"*. Merging them is the collapse `classify.rs:79` already refuses.
+
+## 1294 — refused
+
+Nothing in this build can observe that a task is nearly complete.
+`task_nearly_complete` stays a literal `false` with the refusal recorded at the
+field. A proxy from turn counts or elapsed time would have made the policy
+confidently wrong at exactly the moment the line exists to protect — the line
+asks Glasshouse *not* to move an almost-done task, so a false positive moves
+work that should have stayed.
+
+**This is the second reserve-input field with no producer, and the pattern is
+worth naming:** a hardcoded `false` in a policy input is not a safe default, it
+is an unobservable branch. Cluster A's line 1291 was unreachable for exactly
+that reason until 1288 gained a producer.
+
+---
+
+### Allow high-tier tasks to consume protected reserve when their capability requirement justifies it. (line 1289)
+
+Contract: Given a task whose required workload tier is Heavy or above, when the protected-reserve policy evaluates a metered candidate in the Reserve band, Glasshouse allows the spend and says which map line justified it, while preserving the denial for every tier below Heavy and refusing to let a hard capability requirement — which no model choice can satisfy — buy the reserve.
+
+State: **COMPLETE**
+
+Production evidence:
+- `src/provider/quota.rs` — `evaluate_reserve_spend`
+- `src/provider/quota.rs` — `ReserveDecisionInputs::tier`
+
+Regression evidence:
+- `reserve_inputs::the_tier_is_what_decides_whether_a_capability_requirement_justifies_the_reserve`
+- `reserve_inputs::the_hard_capability_set_is_not_a_reserve_input`
+- `reserve_inputs::every_reserve_decision_reachable_before_this_package_is_unchanged`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| quota.rs: 'which justifies spending protected reserve (line 1289)' -> '(line 1290)' | `wrong-map-line-in-user-visible-reason` | **killed** | `reserve_inputs::the_tier_is_what_decides_whether_a_capability_requirement_justifies_the_reserve` |
+| quota.rs: 'if inputs.band > CapacityBand::Reserve {' -> 'if inputs.band >= CapacityBand::Reserve {' | `widen-a-gate` | **killed** | `reserve_inputs::every_reserve_decision_reachable_before_this_package_is_unchanged` |
+
+> wrong-map-line-in-user-visible-reason observed: 1 failed, 14 passed; the assertion the test is named for, requiring the reason to cite the line it answers
+
+> widen-a-gate observed: 8 of 15 failed, including the 280-combination sweep — the sweep is not vacuous
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Production's one caller of DisposableRouting::choose passes classification: None (memory/extract/disposable.rs::RoutedNoModel::new, from main.rs:2513), so the tier the shipped binary presents is always Leaf and the >= Heavy branch is reachable only through new_for_request. Practice §79 deliberately refused wiring new_for_request into main.rs and that refusal stands.
+- The identical objection applies to line 1288, which is already ticked: same function, same inputs, same reachability, and it is 1289's exact dual. The pair should be ruled the same way.
+- Does not prove a hard capability requirement is irrelevant to routing generally — only that it must not buy protected reserve, because it names something no model choice can supply.
+
+---
+
+### Allow the user to override reserve protection for a specific task or session. (line 1290)
+
+Contract: Given a user who has named one session with `glasshouse sessions reserve <ID>`, when that session's background jobs reach the protected-reserve policy, Glasshouse allows them to spend protected reserve and names the session in the routing explanation, while preserving the policy's ordinary denial for every session the user did not name and offering no setting, flag or constructor that could mean 'every session'.
+
+State: **COMPLETE**
+
+Production evidence:
+- `src/routing/disposable.rs` — `ReserveOverride`
+- `src/routing/disposable.rs` — `DisposableRouting::with_reserve_override`
+- `src/routing/disposable.rs` — `DisposableRouting::choose`
+- `src/config/mod.rs` — `RoutingConfig::reserve_override_sessions`
+- `src/config/mod.rs` — `EffectiveConfig::reserve_override_sessions`
+- `src/cli.rs` — `SessionCommand::Reserve`
+- `src/main.rs` — `reserve_override_session`
+- `src/main.rs` — `disposable_extraction_model`
+- `src/main.rs` — `report_hook`
+
+Regression evidence:
+- `reserve_inputs::the_override_grants_the_reserve_for_the_session_the_user_named`
+- `reserve_inputs::the_override_does_not_reach_a_session_the_user_did_not_name`
+- `reserve_inputs::the_same_override_decides_two_sessions_differently`
+- `reserve_inputs::no_reserve_override_means_everywhere`
+- `reserve_inputs::a_routing_policy_that_names_no_override_is_unchanged`
+- `reserve_inputs::a_granted_override_names_its_session_in_the_explanation`
+- `reserve_inputs::the_user_override_branch_outranks_every_automatic_denial`
+- `reserve_inputs::the_almost_complete_guard_still_answers_before_the_override`
+- `reserve_inputs::the_reserve_override_setting_layers_project_over_user`
+- `reserve_inputs::the_reserve_override_setting_round_trips_through_the_config_file`
+- `glasshouse(bin)::tests::the_reserve_override_a_user_records_reaches_the_routing_decision`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| disposable.rs: 'user_override: self.reserve_override.applies(),' -> 'user_override: false,' | `restore-the-hardcoded-literal` | **killed** | `reserve_inputs::the_override_grants_the_reserve_for_the_session_the_user_named` |
+| disposable.rs ReserveOverride::applies: 'self.deciding_for.as_deref().is_some_and(|session| self.sessions.contains(session))' -> '!self.sessions.is_empty()' | `widen-a-scope-to-global` | **killed** | `reserve_inputs::the_override_does_not_reach_a_session_the_user_did_not_name` |
+| main.rs disposable_extraction_model: 'ReserveOverride::for_sessions(effective.reserve_override_sessions().value).deciding_for(session.to_string())' -> 'ReserveOverride::none()' | `skip-the-production-read-back` | **killed** | `glasshouse(bin)::tests::the_reserve_override_a_user_records_reaches_the_routing_decision` |
+| main.rs disposable_extraction_model: '.deciding_for(session.to_string())' -> '.deciding_for(first configured override, falling back to session)' | `ignore-the-subject-of-a-scoped-decision` | **killed** | `glasshouse(bin)::tests::the_reserve_override_a_user_records_reaches_the_routing_decision` |
+
+> restore-the-hardcoded-literal observed: 3 of 15 failed; 'assertion failed: reserve_allows(&named)' at the two-session test's own assertion
+
+> widen-a-scope-to-global observed: 3 of 15 failed; 'assertion failed: !reserve_allows(&other)' — the second half, which is the half that matters
+
+> skip-the-production-read-back observed: SURVIVED first (44 passed, 0 failed) against a test that read the config through its own helper — practice §35. After rewriting the test to drive disposable_extraction_model itself: 1 failed at 'the session the user named must be allowed to spend the reserve', printing the real denial reason.
+
+> ignore-the-subject-of-a-scoped-decision observed: 1 failed at 'a session the user never named must not inherit another session's override', printing the full explanation with the other session's id in it
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Session-scoped only. The 'task' half of 'task or session' is refused: a disposable job carries a JobKind (a class of work), not a task identity, so a JobKind-scoped override would be a category-wide switch. Recorded in ReserveOverride's doc comment.
+- Writes the user layer only; no project-layer path and no Settings-screen surface (shell/mod.rs is outside this packet's expected files).
+- The override never expires and is not reaped when a session closes. A stale entry is inert — it can only match a session with that identifier — the same reasoning free_resource_pin documents.
+- Does not prove a real harness hook run spends the reserve: RoutedNoModel never calls a model, so the evidence stops at the routing decision and its explanation.
+
+---
+
+### Avoid moving an almost-complete high-value task to another session solely because a reserve threshold was crossed. (line 1294)
+
+Contract: n/a — the decisive input has no producer and must not be approximated.
+
+State: NOT STARTED — worker refused the line; see its reason
+
+Regression evidence:
+- `reserve_inputs::nothing_in_this_build_produces_task_nearly_complete`
+- `reserve_inputs::the_event_vocabulary_cannot_express_almost_complete`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| disposable.rs: 'task_nearly_complete: false,' -> 'task_nearly_complete: true,' | `fabricate-the-missing-producer` | **killed** | `reserve_inputs::nothing_in_this_build_produces_task_nearly_complete` |
+
+> fabricate-the-missing-producer observed: 5 of 15 failed; the scan test names the site and says why a proxy is not acceptable there
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The refusal is about producers, not about the consumer: evaluate_reserve_spend honours task_nearly_complete correctly and outranks the user override with it, proven by reserve_inputs::the_almost_complete_guard_still_answers_before_the_override.
+- in-repo: NO for now. Every LifecycleEvent is binary and retrospective, no integrated harness reports task progress, and the one path reaching this policy runs after TurnEnded { Completed }. It becomes in-repo only if a harness begins reporting progress.
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **1289** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+- **1290** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+- **1294** — verdict `refused`. Confirm the worker's reason against current source before recording it.
+
+**Packet errors the worker reported — read these BEFORE its results.**
+Thirteen consecutive rounds a worker corrected its packet and was right:
+- The packet said the reserve-inputs struct is built at disposable.rs:596-602 (correct) but the refusal register cites disposable.rs:568 for all four Cluster A rows; the literal has not been at :568 since before 62473a6.
+- Refusal register Cluster A row 1288 says `cheaper_adequate_resource_exists: false` is hardcoded. It is not: disposable.rs:598 calls the real function at disposable.rs:828, and map line 1288 is already ticked (☑), so the row should have been deleted under the register's own rule 3.
+- Refusal register Cluster A row 1291 says the imminent-reset branch is 'blocked by 1288' because a false cheaper-adequate makes the function fall through to Allow. The mechanism is backwards — quota.rs evaluates the imminent-reset branch before the cheaper-adequate check, so that input could never block it — and map line 1291 is ticked (☑) with dedicated tests at disposable.rs:1292, :1560 and :1578.
+- The packet's Phase -1 says 'the tier half already works'. It works as a policy, but production's single caller passes classification: None (memory/extract/disposable.rs::RoutedNoModel::new from main.rs:2513), so the shipped binary always presents WorkloadTier::Leaf to this decision and the >= Heavy branch has no production producer.
+- Every capability-map citation in ReserveDecisionInputs and evaluate_reserve_spend was one line too high against the current map (band 1288->1287, cheaper-adequate 1289->1288, tier 1290->1289, user override 1291->1290, imminent reset 1292->1291), while disposable.rs's own tests used the correct numbers. Corrected inside that one function because two of the five are this packet's box lines and a partial fix would have printed one number twice.
+- Still wrong and left alone for the orchestrator: config/mod.rs:903 and :946 and provider/resources.rs:615 and :1536 cite 1288 for the reserve-percentage line, which is now 1287; tests/workload_tiers.rs:90 and :152 name the tier branch 'at_line_1290' when it is 1289, and phase-34a.md quotes the second name as evidence.
+- scripts/blast-radius.sh traced 12 targets and rustdoc but named none of capacity_score, routing_score, routing_disposable_tier, routing_policy or reserve_inputs, despite routing/disposable.rs and provider/quota.rs being in the diff. The full workspace suite was run instead.
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo build: clean
+- cargo test --test reserve_inputs: 15 passed, 0 failed
+- cargo test --test workload_tiers: 12 passed, 0 failed
+- cargo test --test capacity_score: 31 passed, 0 failed
+- cargo test --test route_command: 12 passed, 0 failed
+- cargo test --workspace: 65 targets, all ok, 0 failed
+- cargo clippy --all-targets --all-features -- -D warnings: clean
+- cargo fmt --all -- --check: clean
+- scripts/blast-radius.sh: every traced target passed; rustdoc clean
+

@@ -1003,6 +1003,32 @@ pub enum SessionCommand {
         /// The session, or the leading part of its identifier.
         session: String,
     },
+
+    /// Let this session's background jobs spend protected quota reserve.
+    ///
+    /// Glasshouse keeps a protected reserve of each premium resource's quota
+    /// and normally refuses to spend it on the small background jobs it runs
+    /// for itself — memory extraction and the like. This overrides that
+    /// refusal, for the session named here and for no other.
+    ///
+    /// It is recorded in your user configuration and stays until you remove
+    /// it with `--clear`. There is deliberately no way to say "every
+    /// session": an override that covered everything would be the reserve
+    /// switched off rather than overridden, and the reserve exists to stop
+    /// background work exhausting the quota an interactive session needs.
+    ///
+    /// The override is never silent. When it is what allowed a spend, the
+    /// routing explanation the decision carries names this session by
+    /// identifier, so a reader can see whose override it was rather than only
+    /// that one existed.
+    Reserve {
+        /// The session, or the leading part of its identifier.
+        session: String,
+
+        /// Withdraw this session's override instead of granting one.
+        #[arg(long)]
+        clear: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
