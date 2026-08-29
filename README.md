@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████░░░░░░░░░░░░░░░░░` 740 / 1280 mandatory capabilities (57%)
+`███████████████████████░░░░░░░░░░░░░░░░░` 742 / 1280 mandatory capabilities (57%)
 
 <details>
-<summary>Per-phase breakdown (35 of 104 phases complete)</summary>
+<summary>Per-phase breakdown (36 of 104 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -45,7 +45,7 @@ the authoritative specification and tracks what is done.
 | Phase 9C — Provider protocol model | 12/12 ✅ |
 | Phase 9D — Built-in provider templates | 14/14 ✅ |
 | Phase 9E — Secret storage | 11/13 |
-| Phase 9F — Direct provider launch profiles | 11/13 |
+| Phase 9F — Direct provider launch profiles | 13/13 ✅ |
 | Phase 9G — Glasshouse local gateway process | 19/19 ✅ |
 | Phase 9H — Sticky gateway routing for harness-backed interactive sessions | 13/14 |
 | Phase 9I — Free-pool routing | 13/14 |

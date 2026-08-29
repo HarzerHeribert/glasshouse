@@ -184,3 +184,67 @@ None of the new tests is `#[cfg]`-gated, which is why they run there at all.
   Phase 9D, and it is what would close this gap end to end.
 - **Lines 440 and 441 of the map stay unchecked** (pre-flight capability
   check; installed-executable requirement before offering a profile).
+
+---
+
+### Phase 9F — lines 468 and 469 (batch 51). **Phase 9F is now fully closed.**
+
+#### 468 — verify the combination before starting an interactive session
+
+State: **COMPLETE** — orchestrator ruling.
+
+Contract: Given an interactive launch whose profile has a cheap capability
+check available, when the session is about to start, Glasshouse runs that check
+first and reports what it found — while a profile with no check available
+launches exactly as before.
+
+**The gap was a caller, not a mechanism.** `capability_probe`
+(`profile/mod.rs:2014`) existed and `#[cfg(test)]` begins at `profile/mod.rs:2156`
+— every call site was after it. Zero production callers: refusal-register
+Cluster B's shape for the fourth time this session.
+
+Production: `profile::preflight`, called at `main.rs:617` on the interactive
+launch path **before the session record and before any process**.
+
+Regression: `tests/launch_preflight.rs`, five tests through the shipped binary.
+
+**The ruling the packet reserved: a failed check WARNS and PROCEEDS. It never
+refuses, and therefore needs no "start anyway" key.** The reasoning lives on
+`Preflight`'s doc comment (`profile/mod.rs:2130`) rather than only in a report.
+The decisive reason: no outcome of this check is unambiguous evidence that the
+combination is wrong. `ProbeTarget::BaseUrl` — the target for every provider
+whose model-list endpoint nobody has established, which is most of them — sends
+`GET <base>`, and a 404 or 405 from a base URL that serves no `GET` is
+indistinguishable from a real misconfiguration. Refusing on that would refuse
+correct launches, which is worse than not checking.
+
+Mutation: `drop-the-production-preflight-call` — KILLED, re-run by the
+orchestrator in the integrated tree. Also killed: reversing the ruling so an
+unconfirmed check exits FAILURE (3 tests), and promoting `Answered` to a warning
+(1 test).
+
+**One SURVIVED, handled the way §80 asks.** Widening `PREFLIGHT_TIMEOUTS` to the
+interactive default (5/10/20s) survived cleanly — 8 passed — meaning nothing
+watched the probe's own time budget, so a preflight could have delayed a launch
+by twenty seconds with no test objecting. A guard was added and the identical
+mutation re-run: KILLED.
+
+#### 469 — require the harness executable to be installed and usable
+
+State: **COMPLETE** — orchestrator ruling. **No code was written**, and
+establishing that was the work.
+
+The requirement is enforced one step **earlier** than the map's wording
+suggests: `session::select::select` refuses an uninstalled harness on every
+production path that can start a session, so a profile is never *offered* for
+one. Two integration tests make that a controlled experiment rather than an
+argument.
+
+**A mutation that was KILLED for the wrong reason, caught and fixed.** M5 made
+an uninstalled harness fall back to another program instead of refusing. It came
+back KILLED — but on the exit-code assertion rather than on the assertion about
+*which program ran*. A test led by the exit code would have reported a healthy
+KILLED while its real subject went unwatched, which is the weakest kind of
+evidence. The test was reordered and the identical mutation re-run: KILLED at
+the right assertion. That distinction — a verdict that is right for the wrong
+reason — is §80 case 5, and the worker found it in its own work.

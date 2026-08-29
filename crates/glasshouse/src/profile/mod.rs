@@ -2098,6 +2098,185 @@ pub fn describe_probe_outcome(outcome: &crate::provider::discovery::ProbeOutcome
     }
 }
 
+/// The timeout budget a pre-flight check runs under, and why it is
+/// deliberately not [`crate::provider::discovery::ProbeTimeouts::default`].
+///
+/// Every existing caller of [`crate::provider::discovery::connectivity`] is
+/// answering a question a keystroke just asked, and can afford the default's
+/// 5/10/20 seconds because waiting *is* what the user asked for.
+///
+/// A pre-flight check is the opposite. Nobody asked for it, it sits between
+/// `glasshouse launch` and the session, and its entire justification is the
+/// qualifier capability map line 468 puts on the requirement itself: **when a
+/// cheap capability check is available**. A launch that stalls twenty seconds
+/// on an unreachable host has already cost more than the check could be
+/// worth, so this budget is the worst delay a launch may pay — four seconds,
+/// once, and only for a profile that has a check at all.
+///
+/// The numbers are not arbitrary. Every provider catalogue probed on
+/// 2026-08-26 answered in well under a second — see
+/// [`crate::provider::discovery::RESPONSE_TIMEOUT`]'s own doc — so two and a
+/// half seconds is still an order of magnitude of headroom over every
+/// measured healthy answer. A host that misses it is reported as "did not
+/// answer", which, because a pre-flight check never refuses a launch, costs
+/// the user a line of text rather than their session.
+pub const PREFLIGHT_TIMEOUTS: crate::provider::discovery::ProbeTimeouts =
+    crate::provider::discovery::ProbeTimeouts {
+        connect: std::time::Duration::from_millis(1_500),
+        response: std::time::Duration::from_millis(2_500),
+        total: std::time::Duration::from_secs(4),
+    };
+
+/// What a pre-flight check found — capability map line 468.
+///
+/// # There is no `Refuse` variant, and that is the ruling
+///
+/// The map's verb is *verify*, and the obvious reading of "verify before
+/// starting" is that a failed check refuses the launch. It was considered and
+/// rejected, for reasons that are about this check specifically rather than
+/// about caution in general:
+///
+/// 1. **No outcome of this check is unambiguous evidence that the combination
+///    is wrong.** [`crate::provider::discovery::ProbeTarget::BaseUrl`] — the
+///    target for every provider whose model-list endpoint nobody has
+///    established, which is most of them — sends `GET <base>`, and a `404` or
+///    `405` from a base URL that serves no `GET` is the *healthy* answer.
+///    Refusing on that would refuse correct configurations.
+/// 2. **Reachability is not correctness.** Three of the twenty-two provider
+///    hosts probed for Phase 9D answer identically to a real path and a
+///    nonsense one, so a negative result from a single request is a claim
+///    about whether the host routed at all, never about whether this
+///    credential would work. Turning that into a refusal is the mistake that
+///    nearly deleted a correct URL from the provider table.
+/// 3. **The failure it would prevent is cheaper than the failure it would
+///    cause.** A wrong combination costs one harness startup and the
+///    provider's own error — the status quo. A false refusal costs the user
+///    the ability to start work at all, on a path (the network) that fails
+///    independently of anything they configured.
+/// 4. **[`resolve`] already owns refusal, and owns it better.** It refuses
+///    from declarations — deterministically, offline, with a message naming
+///    what was asked for. Putting a second, network-dependent authority
+///    beside it would make whether a session may start depend on a remote
+///    host's mood.
+///
+/// So this check *reports*, and the launch proceeds. The corollary is that it
+/// needs no "start anyway" key: a refusal before start would need one, and the
+/// reason it would need one — that the check can be wrong about a working
+/// setup — is the same reason it does not refuse.
+///
+/// # What each variant means the caller should do
+///
+/// [`Preflight::NotChecked`] and [`Preflight::Answered`] are for the log.
+/// [`Preflight::CredentialRejected`] and [`Preflight::Unreachable`] are the
+/// two outcomes a user can act on before the harness takes the screen, and
+/// [`Preflight::warning`] returns exactly those.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Preflight {
+    /// No check was available, which is line 468's own qualifier and **not a
+    /// failure**: the launch proceeds exactly as it would if this function
+    /// did not exist. See [`capability_probe`] for the three profiles that
+    /// answer this way.
+    NotChecked { reason: &'static str },
+    /// The endpoint produced an HTTP response. Whether it was `200` or a
+    /// `404` from a base URL that serves no `GET` is in the summary; either
+    /// way the host is there and routing, which is the strongest claim one
+    /// request can support.
+    Answered { summary: String },
+    /// The endpoint answered `401` or `403`. Reachable, and it refused this
+    /// credential — the one outcome here that is both specific and
+    /// actionable, and the reason the check is worth making at all.
+    CredentialRejected { summary: String },
+    /// Nothing answered: no route, no host, a refused connection, or the
+    /// budget in [`PREFLIGHT_TIMEOUTS`] ran out.
+    Unreachable { summary: String },
+}
+
+impl Preflight {
+    /// One line for the launch log, on every path including the one where no
+    /// check was possible — "there was nothing to check" is a fact a reader
+    /// diagnosing a launch needs as much as a result.
+    pub fn summary(&self) -> &str {
+        match self {
+            Self::NotChecked { reason } => reason,
+            Self::Answered { summary }
+            | Self::CredentialRejected { summary }
+            | Self::Unreachable { summary } => summary,
+        }
+    }
+
+    /// The line to put in front of the user before the harness starts, or
+    /// `None` when there is nothing they can act on.
+    ///
+    /// `Answered` is deliberately not a warning. A `GET` to a base URL that
+    /// serves none answers `404` for a perfectly good provider, and a channel
+    /// that fires on every launch of a working profile is a channel users
+    /// learn to ignore — which would cost them the two warnings that matter.
+    pub fn warning(&self) -> Option<&str> {
+        match self {
+            Self::CredentialRejected { summary } | Self::Unreachable { summary } => Some(summary),
+            Self::NotChecked { .. } | Self::Answered { .. } => None,
+        }
+    }
+}
+
+/// Run the pre-flight capability check for `profile` — capability map line
+/// 468 — or report that there was none to run.
+///
+/// # This is the one function in this module that touches the network
+///
+/// [`resolve`] and [`resolve_with_gateway`] are pure functions of the values
+/// in [`Resolution`], and stay that way: nothing here is called by either of
+/// them, and **this runs after resolution, never before it**. That ordering
+/// is not incidental — it is what makes
+/// `a_capability_probe_cannot_influence_which_backend_resolve_selects` true
+/// by construction on the production path rather than by inspection. A check
+/// that ran first, and whose result reached `resolve`, would be a router; the
+/// backend is chosen from the profile's declaration and nothing this function
+/// learns can change it.
+///
+/// It costs nothing at all for a profile with no check available — no
+/// request, no socket, no thread — which is every `Native` and every
+/// gateway-backed profile, and therefore every launch that did not name a
+/// direct provider. For one that does, it costs exactly one bounded HTTP
+/// request; see [`PREFLIGHT_TIMEOUTS`] for the ceiling.
+///
+/// # The credential
+///
+/// The summary is built from the provider's name, the protocol slug, the URL
+/// the probe requested and [`describe_probe_outcome`] — none of which is the
+/// credential, and the last of which
+/// [`crate::provider::discovery::ProbeOutcome::Unreachable`] deliberately
+/// builds from a fixed set of phrases rather than an error's own words. It is
+/// then passed through [`crate::secret::redact`] anyway, because a *base URL*
+/// is user-supplied text that can carry anything and this string reaches both
+/// the terminal and the log.
+pub fn preflight(profile: &LaunchProfile, cx: &Resolution<'_>) -> Preflight {
+    use crate::provider::discovery::{ProbeOutcome, connectivity};
+
+    let request = match capability_probe(profile, cx) {
+        CapabilityProbe::Unavailable { reason } => return Preflight::NotChecked { reason },
+        CapabilityProbe::Available(request) => request,
+    };
+    let outcome = connectivity(&request, PREFLIGHT_TIMEOUTS);
+    let summary = crate::secret::redact(&format!(
+        "launch profile `{}`: provider `{}` at {} over `{}` {}",
+        profile.name,
+        request.provider(),
+        request.url(),
+        request.protocol(),
+        describe_probe_outcome(&outcome),
+    ));
+    match outcome {
+        ProbeOutcome::Reached { .. } | ProbeOutcome::Unexpected { .. } => {
+            Preflight::Answered { summary }
+        }
+        ProbeOutcome::Rejected { .. } => Preflight::CredentialRejected { summary },
+        ProbeOutcome::TimedOut { .. } | ProbeOutcome::Unreachable { .. } => {
+            Preflight::Unreachable { summary }
+        }
+    }
+}
+
 /// A comma-separated list of protocol slugs, or an honest sentence when the
 /// list is empty — "nothing" and "an empty list" read the same way to a user
 /// and neither is served by printing `[]`.
@@ -4959,6 +5138,59 @@ mod tests {
 
         let reached = describe_probe_outcome(&ProbeOutcome::Reached { status: 200 });
         assert_ne!(reached, rejected);
+    }
+
+    /// [`PREFLIGHT_TIMEOUTS`] is strictly tighter than the interactive
+    /// default on every axis — the claim that a pre-flight check cannot cost
+    /// a launch what an on-demand probe may cost a keystroke.
+    ///
+    /// # Why this is a declaration test and not a stopwatch
+    ///
+    /// The behaviour worth guarding is "a launch is bounded by a budget
+    /// chosen for launches". The obvious test — start `glasshouse launch`
+    /// against a dead host and assert it finished inside N seconds — measures
+    /// wall clock on the machine running it, and this project's own gate is
+    /// already flaky under concurrent load for exactly that reason. A timing
+    /// assertion there would report the runner's CPU contention as a product
+    /// defect.
+    ///
+    /// So this asserts the thing that is actually decidable: the constant the
+    /// launch path uses is not the one an interactive probe uses, and is
+    /// smaller on all three axes. Widening it back to the default fails here,
+    /// on every platform, in microseconds. Found by mutation: the budget was
+    /// unwatched by anything until this test existed, and a launch quietly
+    /// restored to a twenty-second ceiling would have passed the whole suite.
+    #[test]
+    fn a_pre_flight_check_is_bounded_more_tightly_than_an_interactive_probe() {
+        use crate::provider::discovery::ProbeTimeouts;
+
+        let interactive = ProbeTimeouts::default();
+        assert!(
+            PREFLIGHT_TIMEOUTS.connect < interactive.connect,
+            "a launch may not wait as long for a connection as a keystroke may: {:?} vs {:?}",
+            PREFLIGHT_TIMEOUTS.connect,
+            interactive.connect
+        );
+        assert!(
+            PREFLIGHT_TIMEOUTS.response < interactive.response,
+            "a launch may not wait as long for a response as a keystroke may: {:?} vs {:?}",
+            PREFLIGHT_TIMEOUTS.response,
+            interactive.response
+        );
+        assert!(
+            PREFLIGHT_TIMEOUTS.total < interactive.total,
+            "the whole-call ceiling is the one a stalled launch actually pays: {:?} vs {:?}",
+            PREFLIGHT_TIMEOUTS.total,
+            interactive.total
+        );
+        // And the ceiling is a number a person would accept in front of a
+        // session they asked for, rather than merely smaller than twenty
+        // seconds.
+        assert!(
+            PREFLIGHT_TIMEOUTS.total <= std::time::Duration::from_secs(5),
+            "a pre-flight check that can hold a launch for {:?} is not cheap",
+            PREFLIGHT_TIMEOUTS.total
+        );
     }
 
     /// End to end, over a real loopback socket: [`capability_probe`] builds

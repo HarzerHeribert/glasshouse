@@ -594,6 +594,40 @@ fn launch_session(
         }
     };
 
+    // Phase 9F line 468: verify the combination this profile resolved to
+    // before the session starts, when a cheap check is available.
+    //
+    // **After the resolution, never before it.** The backend is chosen from
+    // the profile's declaration alone, and running the check on this side of
+    // `resolve_with_gateway` is what makes that structurally true on the
+    // production path rather than merely asserted in a unit test — see
+    // `profile::preflight`'s own doc and
+    // `a_capability_probe_cannot_influence_which_backend_resolve_selects`.
+    //
+    // And before `ProjectSessions::open` below, which is what "before
+    // starting" buys the user: whatever this reports, they read it while
+    // nothing has been recorded and no process exists.
+    //
+    // It reports; it decides nothing. A profile with no check available —
+    // every `Native` and every gateway-backed one, so every launch that did
+    // not name a direct provider — pays no request and gets one line in the
+    // log. A check that fails still starts the session, on purpose: see the
+    // four reasons on `profile::Preflight`, of which the shortest is that a
+    // `GET` to a base URL serving none answers `404` for a healthy provider.
+    let preflight = glasshouse::profile::preflight(&launch_profile, &resolution);
+    tracing::info!(
+        profile = %launch_profile.name,
+        backend = %launch_profile.backend.slug(),
+        preflight = preflight.summary(),
+        "pre-flight capability check"
+    );
+    if let Some(warning) = preflight.warning() {
+        // Not a refusal, and it must not read like one — the next thing this
+        // process does is start the session.
+        eprintln!("glasshouse: pre-flight check did not confirm {warning}");
+        eprintln!("glasshouse: starting the session anyway; this check never refuses a launch.");
+    }
+
     // Record the session before the harness exists, so a session that dies
     // during startup still leaves a trace. Failing to open the project
     // database is fatal here rather than a warning: `bootstrap` already

@@ -465,8 +465,8 @@ Fixed architectural requirements
 ☑ Support Codex custom-provider launch profiles using Glasshouse-owned configuration when the configured provider supports the wire API required by Codex.
 ☑ Avoid overwriting the user’s normal ~/.codex/config.toml to create a Glasshouse provider profile.
 ☑ Generate an isolated Codex configuration or environment for Glasshouse-managed custom-provider sessions where supported.
-☐ Verify the selected harness, model, provider, and protocol combination before starting an interactive session when a cheap capability check is available.
-☐ Require the selected coding harness executable to be installed and usable before offering an interactive direct-provider or gateway-backed launch profile.
+☑ Verify the selected harness, model, provider, and protocol combination before starting an interactive session when a cheap capability check is available.
+☑ Require the selected coding harness executable to be installed and usable before offering an interactive direct-provider or gateway-backed launch profile.
 ☑ Keep the real harness responsible for the agent loop, coding tools, permission flow, compaction, and native session semantics.
 ☑ Treat environment variables, CLI overrides, and isolated generated configuration as adapter-specific ways to point that harness at the backend.
 ☑ Fall back to a clear launch error rather than silently using the native paid provider when a requested gateway profile cannot be configured.
