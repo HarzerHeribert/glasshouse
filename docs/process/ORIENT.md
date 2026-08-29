@@ -272,6 +272,7 @@ to do, and the orchestrator should follow its own rule.
 - **§81** — never mark a recon's claim "established, do not re-derive"
 - **§82** — a team lead pays when the work is code, not when it is judgement
 - **§83** — refusals accumulate; gather them by root cause and attack that
+- **§84** — a defect gets its own worker, not the whole line's attention
 
 ## Recent checkpoints
 

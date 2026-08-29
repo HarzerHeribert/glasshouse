@@ -3588,3 +3588,38 @@ the fixture's own timeout or setup guard rather than the assertion the test is
 named for, the test has not been shown to work. The fix is to make the fixture
 able to observe the failure independently of the thing being mutated — here, by
 recording argv unconditionally so the assertion fails on its own terms.
+
+## §84 — a defect gets its own worker, not the whole line's attention
+
+**The user's standing decision, 2026-08-29, in their own framing: *"eventual
+code consistency completion."*** When the gate finds a defect, do not stop the
+line. Give the defect its own worker and keep dispatching; the fix appends to
+the stream and consistency is reached eventually rather than as a precondition
+for every step.
+
+**What this replaced.** Batch 50's Windows deadlock was found, correctly
+attributed, and given a worker — and then the orchestrator withheld the push and
+sat on **two already-written, already-validated packets** waiting for the fix.
+Three workers' worth of forward motion was parked behind one defect in an
+unrelated file, on a 20x plan whose whole point is that this is not necessary.
+The user's correction was immediate and it was right.
+
+**Why it is safe here, specifically.** This is not a licence to ignore breakage;
+it works because three mechanisms already contain it:
+
+- `integrate.sh` refuses any file two worktrees both touched, so parallel work
+  is file-disjoint by construction;
+- the blast radius runs at integration, so interactions surface when the
+  patches share a tree rather than in production;
+- commits are local until pushed, and a commit message can carry a defect
+  honestly — `a1042c9`'s first line says *"and a Windows deadlock this must not
+  be pushed with"*, which is a record, not a lie.
+
+**What still serialises, and it is exactly one thing.** The local gate must run
+alone: competing CPU load is reported as a Linux pty failure, and this project
+has measured a spin defect that reproduces only under load. So **batch the gate
+runs**; do not batch the work. The gate is a checkpoint, not a gate in the
+blocking sense, and a FAIL is a dispatch trigger rather than a stop signal.
+
+**The rule.** A red gate produces two actions in the same turn: a fix packet for
+the defect, and the next package for everything else. Never only the first.
