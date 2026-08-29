@@ -171,6 +171,33 @@ for b in "${BINS[@]-}"; do
   run_target "cargo test --bin $b" --bin "$b" || rc=1
 done
 
+# Rustdoc, unconditionally, because this tool could not see it and the gate can.
+#
+# WHY: twice now a package has gone green here and red on the gate's
+# `lint / rustdoc` job, both times for the same shape — a **public** doc
+# comment linking a **private** item, which trips
+# `-D rustdoc::private-intra-doc-links`. Migration 15 did it, and
+# `memory/inject.rs` did it again two batches later, reaching `main` because
+# this script reported every traced target passing.
+#
+# The recorded rule was "a schema change needs the full gate, blast-radius
+# green is not sufficient". That was too narrow: the real gap is that this
+# tool maps changed files to *cargo test targets*, and rustdoc is not one.
+# Any package adding a doc comment can be red in a job nothing here runs.
+#
+# It costs about eight seconds and it closes the whole class.
+echo
+printf '\033[1m=== cargo doc --no-deps (rustdoc) ===\033[0m\n'
+doc_out="$(mktemp)"
+if RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p glasshouse >"$doc_out" 2>&1; then
+  echo "  rustdoc: clean"
+else
+  rc=1
+  echo "  --- rustdoc failures ---"
+  grep -E '^(error|warning)' "$doc_out" | head -12
+fi
+rm -f "$doc_out"
+
 echo
 if [ "$rc" -eq 0 ]; then
   printf '\033[32mblast-radius: every traced target passed\033[0m\n'
