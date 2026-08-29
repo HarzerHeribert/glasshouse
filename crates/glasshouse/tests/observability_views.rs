@@ -21,6 +21,24 @@
 //! function is private to the crate, and the caches it reads are written by
 //! the gateway's accept loop, which `gateway::conformance` already covers.
 //! This suite is about what a user sees.
+//!
+//! # What this suite structurally cannot reach, and what does
+//!
+//! Everything here calls `ShellState::open_route_health` itself, with rows it
+//! built itself. That is the right shape for a question about rendering, and
+//! it is also why deleting the run loop's own
+//! `state.open_route_health(build_route_health_table(runtime))` argument
+//! changed nothing in this file — the mutation `phase-47.md` records as
+//! SURVIVED against 275 tests, and practice §35's "a caller every test
+//! bypasses is not a caller" one layer out.
+//!
+//! `tests/tui_harness.rs` is what closes that: it starts the shipped binary on
+//! a real pty, presses `h`, and reads the rendered screen back through a
+//! terminal emulator, so the run loop's dispatch arm is on the path between
+//! the cache on disk and the assertion. The two suites are complementary and
+//! neither replaces the other — this one is fast, exercises the crate's public
+//! surface, and can vary a row field by field; that one is the only thing that
+//! fails when the key stops reaching the view.
 
 use glasshouse::shell::state::{Overlay, RouteHealthRow, ShellState};
 use glasshouse::shell::view::render;

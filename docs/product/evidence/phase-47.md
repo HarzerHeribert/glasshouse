@@ -561,3 +561,47 @@ newtype with one constructor and no `From<String>`, and `Prompt::build` scrubs
 debug view can show a `Prompt` safely **only because of that constructor** —
 the guarantee is about the `Prompt` type, not about a `SessionChunk` or a raw
 reply, neither of which has an equivalent screen.
+
+#### 1765 — the recorded limit is now CLOSED (batch 51)
+
+The entry above records a SURVIVED mutation and names its fix: *"a pty harness
+driving `glasshouse run`'s key handling, which would serve every TUI contract
+in the map rather than this one line."* That harness now exists —
+`crates/glasshouse/tests/tui_harness.rs` — and the mutation is **KILLED**,
+re-run by the orchestrator in the integrated tree:
+
+    state.open_route_health(build_route_health_table(runtime));
+      ->  state.open_route_health(Vec::new());
+
+    KILLED — pressing_h_draws_the_route_health_the_run_loop_read_from_disk
+    tui_harness.rs:226: at 120x40 the interface opened route health and drew its
+    empty state. The gateway caches on disk hold a reading for `anyrouter`, and
+    `build_route_health_table` returns it — so the run loop's
+    `Action::OpenRouteHealth` arm did not carry it to the view.
+
+**It fails on the test's own named assertion, not on a fixture timeout**, and
+that was designed rather than lucky: each test waits twice, and the second wait
+accepts *either* the seeded value *or* the view's own empty-state sentence, so a
+mutated tree reaches the `assert_eq!` instead of dying in the wait. That is
+practice §80 case 5 engineered into a harness rather than discovered after it.
+
+Three properties of the harness worth carrying to every future TUI contract:
+
+- **The ready signal is causal, not a delay** (§38). `TerminalGuard::acquire`
+  enables raw mode before touching the alternate screen, `Screen::acquire` calls
+  it before building the Ratatui terminal, and `shell::run` draws after that —
+  so the banner appearing *proves* raw mode is on and the event source exists.
+  Nothing sleeps for a fixed period.
+- **The screen is read through `vt100`, not by stripping escapes.** Ratatui
+  redraws by diffing, emitting only changed cells in runs separated by cursor
+  moves; stripping those concatenates unrelated rows. Assertions are per
+  rendered row, which is also what makes "these two facts are on the same line"
+  expressible.
+- **Measured, not asserted:** 540 runs after the fix, 0 failures, 0 orphans —
+  bounding a residual below ~0.55% at 95% confidence, which the report
+  explicitly declines to call zero. Its own first version failed 1 run in 30 on
+  a partial-frame race, and that was found by measuring rather than by passing.
+
+`1765` was already COMPLETE; this does not change its state. It removes the one
+limit that entry recorded, and it makes every other overlay dispatch arm in
+`shell/mod.rs` testable for the first time.
