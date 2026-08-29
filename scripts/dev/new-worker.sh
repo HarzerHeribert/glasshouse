@@ -66,8 +66,51 @@ done
 
 echo "new-worker: $NAME -> $ws $surface  (cwd $CWD)"
 
-# 1. start the harness with NO prompt argument
-cmux send --surface "$surface" "claude --model $MODEL --permission-mode auto --remote-control" >/dev/null
+# 1. start the harness with NO prompt argument.
+#
+# WAIT FOR THE SHELL FIRST, AND VERIFY WHAT LANDED.
+# ------------------------------------------------
+# A resolved surface is not a ready shell. The pane is created, then zsh runs
+# the user's profile and prints a login banner and a prompt, and text sent
+# during that window interleaves with the terminal's own output. Measured
+# 2026-08-29: a launch arrived as `e ofclaude --model sonnet ...`, zsh answered
+# `command not found: e`, and the packet prompt was then typed at a shell
+# prompt instead of into the harness. The delivery proof at the end of this
+# script cannot catch that -- the harness never started, so there is no token
+# counter to move, and it reports the generic "prompt did not land".
+#
+# So: wait for a prompt character, send, then READ THE LINE BACK before
+# committing to it with Enter. A mangled line is recoverable with ctrl-u; a
+# mangled line that has already been executed is a zombie pane.
+shell_ready=0
+for _ in $(seq 1 20); do
+  screen="$(cmux read-screen --surface "$surface" 2>/dev/null)"
+  # A prompt, and nothing still being written after it.
+  if printf '%s' "$screen" | tail -3 | grep -qE '(❯|\$|%) *$'; then
+    shell_ready=1; break
+  fi
+  sleep 1
+done
+[ "$shell_ready" -eq 1 ] || echo "new-worker: WARNING — no shell prompt seen on $surface; sending anyway"
+
+LAUNCH="claude --model $MODEL --permission-mode auto --remote-control"
+landed=0
+for attempt in 1 2 3; do
+  cmux send --surface "$surface" "$LAUNCH" >/dev/null
+  sleep 1
+  # Verify the command is on screen INTACT before executing it.
+  if cmux read-screen --surface "$surface" 2>/dev/null | grep -qF -- "$LAUNCH"; then
+    landed=1; break
+  fi
+  echo "new-worker: launch line garbled on attempt $attempt (send raced the shell); clearing and retrying"
+  cmux send-key --surface "$surface" C-u >/dev/null 2>&1
+  sleep 2
+done
+if [ "$landed" -ne 1 ]; then
+  echo "new-worker: could not get a clean launch line onto $surface after 3 attempts." >&2
+  echo "  The pane is at a shell prompt; nothing was executed. Send it by hand." >&2
+  exit 1
+fi
 cmux send-key --surface "$surface" Enter >/dev/null
 
 # 2. wait for the TUI to come up
