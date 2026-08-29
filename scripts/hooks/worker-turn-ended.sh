@@ -30,10 +30,25 @@ dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 name="$(basename "$dir")"
 
 # The orchestrator works in the main checkout and must never signal itself.
+#
+# TWO LAYOUTS, and missing the second one killed this hook silently.
+#
+# Worker worktrees used to be siblings named `glasshouse-<name>`. Practice §73
+# moved them INSIDE the repo, to `.worktrees/<name>`, and this case statement was
+# not updated — so every worker under the new layout fell through to `*) exit 0`
+# and NO worker has emitted a done signal since. The symptom was visible in every
+# watch alarm ("pane went quiet, NO done signal") and read past for a whole batch,
+# because a missing signal looks exactly like a worker that simply had not
+# finished. That is the same shape as a check matching nothing and reporting
+# PASSED: absence of a signal is not evidence of anything.
+parent="$(basename "$(dirname "$dir")")"
 case "$name" in
-  glasshouse) exit 0 ;;
-  glasshouse-*) name="${name#glasshouse-}" ;;
-  *) exit 0 ;;
+  glasshouse) exit 0 ;;                 # the main checkout: the orchestrator
+  glasshouse-*) name="${name#glasshouse-}" ;;   # legacy sibling worktrees
+  *)
+    # Current layout: <repo>/.worktrees/<name>
+    [ "$parent" = ".worktrees" ] || exit 0
+    ;;
 esac
 
 # `git worktree list` prints the main checkout first, whichever worktree asks.

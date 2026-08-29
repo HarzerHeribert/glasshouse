@@ -73,17 +73,37 @@ DONE_RE='(Churned|Worked|Ran|Thought) for .*· *done |· *done [0-9]+:[0-9]{2}'
 # signal is a **parenthesised elapsed timer**, which only a working state draws.
 # `(shift+tab to cycle)` does not match it, `Churned for 35m 7s` does not match
 # it (no parenthesis), and the status bar's own `1h34m` does not match it.
-BUSY_RE='esc to interrupt|esc to cancel|[0-9]+s · ↓|\([0-9]+[hms]|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|will retry in|Retrying|Waiting for API response|API Error.*retry'
+#
+# Matched CASE-INSENSITIVELY (see is_busy_screen): a real pane rendered
+# `Esc to cancel` with a capital E while this pattern had lowercase only, and
+# the capitalised form read as idle.
+#
+# The verb before the ellipsis rotates — Photosynthesizing, Discombobulating,
+# Flowing, Flibbertigibbeting, Tinkering, Swooping, Baked, and whatever comes
+# next — so matching specific gerunds is unwinnable, and was never the
+# reliable part. What is reliable, per its own header line, is a leading
+# spinner glyph (any symbol that is not a tool-output marker) immediately
+# followed by one bare word and an ellipsis — `✻ Flowing…` — whether or not a
+# parenthesised timer has appeared yet. `⎿ Tool result: ...(truncated)` does
+# NOT match: the ellipsis there does not sit directly after the first word.
+BUSY_RE='esc to interrupt|esc to cancel|[0-9]+s · ↓|\([0-9]+[hms]|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|will retry in|Retrying|Waiting for API response|API Error.*retry|^[[:space:]]*[^[:space:][:alnum:]⎿─❯][[:space:]]+[A-Za-z]+(…|\.\.\.)'
 
 # The last line that says something, for the idle announcement. A notification
 # that carries the pane's own last words would have caught both false idles
 # without anyone opening the pane.
-last_words() {
+#
+# Takes the already-read screen text rather than reading the pane again: a
+# fresh `cmux read-screen` call here would read a DIFFERENT moment than
+# whatever is_busy/is_never_started just judged, which is exactly the kind of
+# gap §57's addenda warn about — a check must not report on state it did not
+# itself establish.
+last_words_from() {
+  local screen="$1"
   # Skip the status bar as well as the blanks and rules: it is drawn last, so a
   # naive `tail -1` quotes `/rc` and tells the reader nothing. What is wanted is
   # the last thing the WORKER said.
-  cmux read-screen --surface "$SURFACE" 2>/dev/null \
-    | grep -vE '^\s*$|^─+$|^\s*❯\s*$|^\s*/rc\s*$|auto mode on|^\s*Opus |^\s*Sonnet |[░█]{6}|^\s*⎿|Tip: Use' \
+  printf '%s\n' "$screen" \
+    | grep -vE '^\s*$|^─+$|^\s*❯\s*$|^\s*/rc\s*$|auto mode on|^\s*Opus |^\s*Sonnet |[░█]{6}|^\s*⎿|Tip: Use|remote-control is active' \
     | tail -1 \
     | sed 's/^[[:space:]]*//' \
     | cut -c1-110
@@ -110,13 +130,50 @@ signal_kind() {
   fi
 }
 
+# Kept as a no-arg call (`if is_busy; then`) because test_worker_signal.py
+# greps for that exact call site as the guarantee that the pane, not the
+# marker, gates. is_busy_screen below is the same test against an
+# already-read screen, for the places that must not read the pane twice.
 is_busy() {
   local screen
   screen="$(cmux read-screen --surface "$SURFACE" 2>/dev/null)" || return 1
+  is_busy_screen "$screen"
+}
+
+is_busy_screen() {
+  local screen="$1"
   # Finished beats working. A pane showing its completion line is done even if
-  # something above it still looks like activity.
-  printf '%s' "$screen" | grep -qE "$DONE_RE" && return 1
-  printf '%s' "$screen" | grep -qE "$BUSY_RE"
+  # something above it still looks like activity. Case-insensitive: the
+  # harness does not render these consistently (see BUSY_RE's header).
+  printf '%s' "$screen" | grep -qiE "$DONE_RE" && return 1
+  printf '%s' "$screen" | grep -qiE "$BUSY_RE"
+}
+
+# NEVER STARTED, distinct from every other quiet reading.
+#
+# Three workers on 2026-08-29 sat at an empty prompt for five minutes, and
+# this watch called it "pane went quiet, NO report" three separate times. The
+# orchestrator dismissed all three as the known false-idle-on-startup-banner
+# case, because the message read exactly like the benign one. It was a real
+# failure each time: the prompt never landed.
+#
+# NOT keyed on the status line. An earlier version of this required a `0/1M`
+# token count and `~$0.00` cost reading — but those strings are the reporting
+# integrator's OWN personal statusline configuration, not something this
+# harness guarantees. Coupling detection to one user's statusline means it
+# silently reverts to the false-idle behaviour this exists to remove the
+# moment anyone's statusline differs or changes — the same failure shape as a
+# check that quietly matches nothing and reports PASSED.
+#
+# Use the transcript instead of the chrome: a worker that received its prompt
+# produces OUTPUT in the pane body; a worker that did not shows only the
+# startup banner and an empty prompt. So never-started == no worker output at
+# all, once the banner, the prompt line, the rules, the blanks and the status
+# bar are filtered out — the same filter last_words_from already applies, so
+# there is exactly one filter list to keep current, not two.
+is_never_started() {
+  local screen="$1"
+  [ -z "$(last_words_from "$screen")" ]
 }
 
 # §28's growth signal: a worktree that changed since the last read is being
@@ -148,6 +205,7 @@ worktree_fingerprint() {
 
 quiet=0
 announced=0
+announced_kind=""   # "done" or "never-started"
 growth_noted=0
 last_fingerprint="$(worktree_fingerprint)"
 
@@ -159,14 +217,29 @@ while true; do
       echo "acknowledged: worker '$NAME' ticked off; watch ending"
       exit 0
     fi
+    # A never-started worker can be re-sent its prompt. If it starts
+    # producing, the stale announcement is dropped and normal watching
+    # resumes — otherwise a fixed misfire nags forever as if nothing changed.
+    # One read here serves both this check and the message below it.
+    ann_screen="$(cmux read-screen --surface "$SURFACE" 2>/dev/null)"
+    if [ "$announced_kind" = "never-started" ] && is_busy_screen "$ann_screen"; then
+      announced=0
+      announced_kind=""
+      quiet=0
+      rm -f "$MARKER"
+      echo "NOTE  '$NAME' started producing output after being flagged NEVER STARTED — resuming normal watch"
+      continue
+    fi
     now=$(date +%s)
     stamped=$(cat "$MARKER" 2>/dev/null || echo "$now")
     if [ $(( now - stamped )) -ge "$NAG" ]; then
       date +%s > "$MARKER"
-      if [ -f "$REPORT" ]; then
+      if [ "$announced_kind" = "never-started" ]; then
+        echo "WORKER NEVER STARTED: '$NAME' — the prompt did not land; re-send it (surface $SURFACE)"
+      elif [ -f "$REPORT" ]; then
         echo "STILL UNACKNOWLEDGED: '$NAME' idle with a report waiting at $REPORT — review it, then: scripts/worker-ack.sh $NAME"
       else
-        echo "STILL UNACKNOWLEDGED: '$NAME' idle and wrote NO report — its last line was: $(last_words) — inspect $SURFACE, then: scripts/worker-ack.sh $NAME"
+        echo "STILL UNACKNOWLEDGED: '$NAME' idle and wrote NO report — its last line was: $(last_words_from "$ann_screen") — inspect $SURFACE, then: scripts/worker-ack.sh $NAME"
       fi
     fi
     continue
@@ -210,10 +283,18 @@ while true; do
   if [ "$quiet" -ge 2 ]; then
     date +%s > "$MARKER"
     announced=1
-    if [ -f "$REPORT" ]; then
-      echo "WORKER DONE: '$NAME' — $(signal_kind), report present at $REPORT — review, then: scripts/worker-ack.sh $NAME"
+    # One read serves both the never-started test and the message it feeds.
+    quiet_screen="$(cmux read-screen --surface "$SURFACE" 2>/dev/null)"
+    if is_never_started "$quiet_screen"; then
+      announced_kind="never-started"
+      echo "WORKER NEVER STARTED: '$NAME' — the prompt did not land; re-send it (surface $SURFACE)"
     else
-      echo "WORKER DONE: '$NAME' — $(signal_kind), but NO report — its last line was: $(last_words) — inspect $SURFACE, then: scripts/worker-ack.sh $NAME"
+      announced_kind="done"
+      if [ -f "$REPORT" ]; then
+        echo "WORKER DONE: '$NAME' — $(signal_kind), report present at $REPORT — review, then: scripts/worker-ack.sh $NAME"
+      else
+        echo "WORKER DONE: '$NAME' — $(signal_kind), but NO report — its last line was: $(last_words_from "$quiet_screen") — inspect $SURFACE, then: scripts/worker-ack.sh $NAME"
+      fi
     fi
   fi
 done
