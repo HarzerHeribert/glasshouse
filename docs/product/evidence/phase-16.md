@@ -224,3 +224,48 @@ paths) and `launch.rs`/`session::api` (read-only, per the packet's grant).
   nothing surfaces it as a read path today.
 - **Windows/Linux execution.** Not run for this entry, same caveat as
   `phase-14.md`.
+
+---
+
+## Phase 15 lines 733-739 — CLOSED, batch 49 (team lead, two subcontractors)
+
+Seven of twelve closed; 740, 745, 746, 747 and 748 returned.
+
+**The ruling, first.** The orchestrator can be woken and act, *and* the user can
+have already moved the worker underneath it. Those contradict only if the
+notification claims to describe the worker **now**. It does not: it is a
+statement about the past, and the orchestrator re-reads current state through
+the door before acting.
+
+**734 was the missing wire, and the gap was real.**
+`api::unix::spawn_session` was **the one launch path in the binary that
+installed no lifecycle hooks** — `main.rs::launch_session` always has; this
+door never did. So an orchestrator's own worker was the only kind of Glasshouse
+session that could finish a turn and leave no trace of finishing. The producer
+for this entire phase did not exist for exactly the sessions the phase is about.
+`install_worker_hooks` now uses the same public seam `main.rs` uses, best-effort,
+and *"when available"* is literal: a harness with no verified hook mechanism
+returns no arguments and the session still starts.
+
+Regression evidence: `tests/worker_wakeup.rs` (9 tests, through the real socket).
+
+### M6 SURVIVED, and that was the finding rather than a weak mutation
+
+Deleting `row.session != watch.worker` — so a watch delivers **every**
+completion in the project — survived eight passing tests. Read under §80's three
+questions it was **unwatched behaviour**, not an irrelevant mutation: the
+command ran the tests, the target held them, and the line is on the pumped path
+for every row.
+
+Every one of those eight tests ran a single worker. An orchestrator running five
+would have been told the wrong one finished — **worse than not being told**,
+because it sends the orchestrator to inspect a session that is still working,
+which is the exact failure this phase exists to remove. The ninth test has the
+*unwatched* worker finish first, so the leak would arrive at a lower log
+position and the absence is an ordering assertion rather than a race. M6b then
+killed.
+
+### The five returned
+
+740, 745, 746, 747, 748 — the user-direct-access half. Returned with an
+adversarial subcontractor having tried and failed to falsify the claim.

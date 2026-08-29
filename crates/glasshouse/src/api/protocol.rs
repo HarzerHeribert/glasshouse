@@ -93,6 +93,31 @@ pub enum Request {
         #[serde(default = "default_events_limit")]
         limit: usize,
     },
+    /// Register interest in one worker session's completion events, to be
+    /// delivered into an orchestrator session — capability map line 733.
+    ///
+    /// `session` is the worker to watch and `notify` is the session the
+    /// completion notification is typed into. Both are resolved through
+    /// `session::api::SessionApi`, so both must belong to this project, and
+    /// `notify` must be live in *this* process's runtime — an orchestrator
+    /// this door did not spawn has no terminal here to be woken through, and
+    /// saying so at registration is the difference between an orchestrator
+    /// that knows it is not being watched over and one that waits forever.
+    ///
+    /// Idempotent per `(session, notify)` pair: registering twice replaces
+    /// the watch rather than adding a second one, because two watches over
+    /// one pair would wake the orchestrator twice for one completion, which
+    /// is exactly what line 739 forbids.
+    ///
+    /// The response carries `from`, the log position the watch starts at.
+    /// Nothing already in the log is replayed: registering interest is a
+    /// statement about what happens next.
+    WatchWorker {
+        /// The worker session to watch.
+        session: String,
+        /// The session a completion is delivered into.
+        notify: String,
+    },
     /// Search this project's durable memory.
     QueryMemory {
         query: String,

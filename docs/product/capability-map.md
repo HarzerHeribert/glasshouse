@@ -730,13 +730,13 @@ Phase 14 — Orchestrator role
 
 Phase 15 — Orchestrator wake-up flow
 
-☐ Allow an orchestrator to register interest in completion events from a worker session.
-☐ Detect worker turn completion from native lifecycle hooks when available.
-☐ Generate a small structured worker-completion event when a watched worker finishes.
-☐ Deliver the worker-completion event back into the orchestrator session as a new machine-originated message.
-☐ Include the worker session ID, harness, lifecycle result, and concise result summary in the completion notification.
-☐ Allow the orchestrator to inspect the worker directly after receiving the notification.
-☐ Avoid waking the orchestrator repeatedly for duplicate completion events.
+☑ Allow an orchestrator to register interest in completion events from a worker session.
+☑ Detect worker turn completion from native lifecycle hooks when available.
+☑ Generate a small structured worker-completion event when a watched worker finishes.
+☑ Deliver the worker-completion event back into the orchestrator session as a new machine-originated message.
+☑ Include the worker session ID, harness, lifecycle result, and concise result summary in the completion notification.
+☑ Allow the orchestrator to inspect the worker directly after receiving the notification.
+☑ Avoid waking the orchestrator repeatedly for duplicate completion events.
 ☐ Preserve the user’s ability to enter and modify a worker session before the orchestrator acts on its result.
 
 Phase 16 — Worker transparency

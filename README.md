@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`██████████████████████░░░░░░░░░░░░░░░░░░` 727 / 1280 mandatory capabilities (56%)
+`██████████████████████░░░░░░░░░░░░░░░░░░` 734 / 1280 mandatory capabilities (57%)
 
 <details>
 <summary>Per-phase breakdown (33 of 104 phases complete)</summary>
@@ -57,7 +57,7 @@ the authoritative specification and tracks what is done.
 | Phase 12 — Unified lifecycle event bus | 8/8 ✅ |
 | Phase 13 — Direct session messaging | 7/7 ✅ |
 | Phase 14 — Orchestrator role | 11/11 ✅ |
-| Phase 15 — Orchestrator wake-up flow | 0/8 |
+| Phase 15 — Orchestrator wake-up flow | 7/8 |
 | Phase 16 — Worker transparency | 3/7 |
 | Phase 17 — cmux optional integration | 0/10 |
 | Phase 18 — Raw event recording | 10/10 ✅ |

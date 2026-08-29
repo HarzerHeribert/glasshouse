@@ -82,19 +82,50 @@ pub fn serve(runtime: &Runtime, socket_override: Option<PathBuf>) -> anyhow::Res
 
     let sessions = ProjectSessions::open(runtime)?;
     let live = Arc::new(Mutex::new(SessionRuntime::new()));
+    let watches: Arc<Watches> = Arc::new(Mutex::new(Vec::new()));
 
     // The accept loop only touches the runtime while a request is being
     // handled; a session with nothing asking about it between requests would
     // otherwise never have its exit reaped. This mirrors `run_headless`'s own
     // reason for ticking outside the wait for the next event.
+    //
+    // The orchestrator wake-up flow rides the same tick — see
+    // [`pump_watches`]. It belongs here rather than in a thread of its own
+    // because it needs exactly what this one already holds, and because a
+    // watch that only advanced while a request happened to arrive would wake
+    // an orchestrator only when it was already talking to the door.
+    // `Runtime` is cheap to clone and holds no connection, so the thread
+    // owns one rather than borrowing this function's.
     {
         let live = Arc::clone(&live);
+        let watches = Arc::clone(&watches);
+        let runtime = runtime.clone();
         std::thread::spawn(move || {
+            let mut state: Option<WatchState> = None;
+            let mut complained = false;
             loop {
                 {
-                    let mut live = lock(&live);
-                    live.answer_terminal_queries();
-                    for _ in live.poll_exits() {}
+                    let mut guard = lock(&live);
+                    guard.answer_terminal_queries();
+                    for _ in guard.poll_exits() {}
+                }
+                // Nothing is opened, and no lock is taken beyond the registry
+                // peek, until an orchestrator has actually registered
+                // interest. A door nobody is watching through does exactly
+                // what it did before this phase.
+                if watching(&watches) {
+                    if state.is_none() {
+                        state = WatchState::open(&runtime);
+                        if state.is_none() && !std::mem::replace(&mut complained, true) {
+                            tracing::warn!(
+                                "could not open this project's database to \
+                                 deliver worker completions"
+                            );
+                        }
+                    }
+                    if let Some(state) = &state {
+                        pump_watches(state, &live, &watches);
+                    }
                 }
                 std::thread::sleep(TICK);
             }
@@ -113,7 +144,7 @@ pub fn serve(runtime: &Runtime, socket_override: Option<PathBuf>) -> anyhow::Res
             eprintln!("glasshouse: control API refused a connection: {refusal}");
             continue;
         }
-        if let Err(err) = handle_connection(stream, runtime, &sessions, &live) {
+        if let Err(err) = handle_connection(stream, runtime, &sessions, &live, &watches) {
             eprintln!("glasshouse: control API connection error: {err}");
         }
     }
@@ -226,6 +257,7 @@ fn handle_connection(
     runtime: &Runtime,
     sessions: &ProjectSessions,
     live: &Mutex<SessionRuntime>,
+    watches: &Watches,
 ) -> anyhow::Result<()> {
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
@@ -233,7 +265,7 @@ fn handle_connection(
     reader.read_line(&mut line)?;
 
     let response = match serde_json::from_str::<Request>(line.trim_end()) {
-        Ok(request) => dispatch(request, runtime, sessions, live),
+        Ok(request) => dispatch(request, runtime, sessions, live, watches),
         Err(err) => Response::err(format!("malformed request: {err}")),
     };
 
@@ -248,6 +280,7 @@ fn dispatch(
     runtime: &Runtime,
     sessions: &ProjectSessions,
     live: &Mutex<SessionRuntime>,
+    watches: &Watches,
 ) -> Response {
     let store = sessions.store();
 
@@ -303,6 +336,9 @@ fn dispatch(
         Request::ResourceCapacity => resource_capacity(runtime),
         Request::RoutingModel => routing_model_status(runtime),
         Request::Events { after, limit } => project_events(runtime, after, limit),
+        Request::WatchWorker { session, notify } => {
+            watch_worker(runtime, &store, live, watches, &session, &notify)
+        }
         Request::GetCheckpoint {
             checkpoint,
             document,
@@ -446,7 +482,33 @@ fn spawn_session(
         Err(err) => return Response::err(err),
     };
 
-    let launch = HarnessLaunch::new(selection.executable().clone(), runtime.project()).args(args);
+    // Lifecycle hooks — capability map line 734, *"detect worker turn
+    // completion from native lifecycle hooks when available."*
+    //
+    // Until this existed, a session spawned through this door was the one
+    // kind of Glasshouse session that reported nothing: `main.rs`'s
+    // `launch_session` installs a hook document and this path did not, so a
+    // worker an orchestrator started could finish a turn and leave no trace
+    // of having finished. The wake-up flow's whole producer is the `Stop`
+    // this makes the harness send.
+    //
+    // Best effort, exactly as `main.rs`'s own installation is: a harness with
+    // no verified hook mechanism, or a document that cannot be written, is a
+    // session Glasshouse knows less about — and that is a far smaller loss
+    // than refusing to spawn a worker somebody asked for.
+    //
+    // `Application::none` because this door deliberately resolves no
+    // response profile (see this function's own doc comment above); the
+    // reason travels with it rather than being an empty cell.
+    let mut launch_args = args;
+    launch_args.extend(
+        install_worker_hooks(runtime, &selection, &record.id, &effective)
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned()),
+    );
+
+    let launch =
+        HarnessLaunch::new(selection.executable().clone(), runtime.project()).args(launch_args);
     let mut guard = lock(live);
     if let Err(err) = guard.start(record.id.clone(), SessionPresentation::Headless, &launch) {
         return Response::err(err);
@@ -469,6 +531,58 @@ fn spawn_session(
     }
 
     Response::ok(serde_json::json!({ "session": record.id.as_str() }))
+}
+
+/// Write the harness's lifecycle-hook document for a session this door is
+/// about to start, and return the arguments that make the harness read it.
+///
+/// The same public seam `main.rs`'s own `install_session_document` uses —
+/// [`glasshouse::harness::HookCommand`] and
+/// `session::HarnessSelection::install_session_document` — rather than a
+/// second mechanism. There is one hook vocabulary in this crate and one
+/// place that installs it; a door with its own would be a second source of
+/// truth for what a Glasshouse session reports.
+///
+/// Every path the hook needs is pinned from the runtime, because a hook runs
+/// as a fresh process with whatever working directory the harness gives it —
+/// see `HookCommand::report`'s own doc comment. Nothing here is derived from
+/// the environment.
+fn install_worker_hooks(
+    runtime: &Runtime,
+    selection: &glasshouse::session::HarnessSelection,
+    id: &SessionId,
+    effective: &EffectiveConfig<'_>,
+) -> Vec<std::ffi::OsString> {
+    let program = match std::env::current_exe() {
+        Ok(program) => program,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not find the Glasshouse executable for hooks");
+            return Vec::new();
+        }
+    };
+    let report = glasshouse::harness::HookCommand::new(
+        program,
+        id.as_str(),
+        runtime.session_dir(id.as_str()),
+        runtime.project().root(),
+        runtime.paths().data_dir(),
+        runtime.paths().config_dir(),
+    );
+    let consent = effective.project_hooks(selection.id()).value;
+    let response = glasshouse::harness::response::Application::none(
+        "the control API resolves no response profile for a session it spawns",
+    );
+    match selection.install_session_document(&report, consent, &response) {
+        Ok(document) => document.args,
+        Err(err) => {
+            tracing::warn!(
+                session = %id,
+                error = %format!("{err:#}"),
+                "could not write a spawned worker's harness document"
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// Retrieve a checkpoint — box 10, the read half of [`request_checkpoint`].
@@ -780,6 +894,414 @@ fn event_json(logged: &LoggedEvent) -> serde_json::Value {
     }
 
     serde_json::Value::Object(fields)
+}
+
+// ---------------------------------------------------------------------------
+// The orchestrator wake-up flow — capability map Phase 15, lines 733-739.
+// ---------------------------------------------------------------------------
+
+/// How many log rows one pump reads. Bounded for the same reason
+/// [`MAX_EVENTS_LIMIT`] is: a watch that has fallen a long way behind must
+/// catch up over several ticks rather than pull the whole table into one
+/// pass, and the cursor makes the next tick resume exactly where this one
+/// stopped.
+const WATCH_PUMP_LIMIT: usize = 256;
+
+/// How many event kinds a completion summary names before it elides.
+const SUMMARY_KINDS: usize = 6;
+
+/// The one thing an orchestrator learns without asking — line 736's
+/// "machine-originated message" — and therefore the one place this door
+/// speaks first.
+///
+/// # This is a statement about the past, never about the present
+///
+/// Every field is read from one row of the durable event log and the row is
+/// named by its own `seq`. That is deliberate and it is the whole design
+/// ruling behind lines 740 and 748: an orchestrator woken by this knows that
+/// *at log position `seq`* a harness reported a turn ending, and knows
+/// nothing whatever about the session **now**. Anyone — a person, another
+/// orchestrator, the harness itself — may have moved the session in the
+/// meantime, and the only way to find out is to ask again
+/// ([`Request::SessionState`], line 738).
+///
+/// A notification that carried a live state would be a lie with a timestamp
+/// on it, and it would make the orchestrator's picture authoritative over
+/// the user's, which is exactly backwards.
+struct Completion {
+    worker: SessionId,
+    harness: Option<String>,
+    outcome: TurnOutcome,
+    seq: i64,
+    at: i64,
+    summary: String,
+}
+
+impl Completion {
+    /// One line, and one line only.
+    ///
+    /// [`SessionApi::send_text`] appends the carriage return that submits
+    /// this to the harness's line editor, so an embedded newline here would
+    /// submit half a notification and leave the rest as the start of the
+    /// next message. Every field below is either an integer, a session
+    /// identifier, a harness slug, or [`Completion::summary`] — see
+    /// [`summarize`] for why none of them can contain one.
+    fn line(&self) -> String {
+        let payload = serde_json::json!({
+            "worker": self.worker.as_str(),
+            "harness": self.harness,
+            "outcome": turn_outcome_str(self.outcome),
+            "seq": self.seq,
+            "at": self.at,
+            "summary": self.summary,
+        });
+        format!("glasshouse worker-completion {payload}")
+    }
+}
+
+/// One registered interest — line 733.
+///
+/// `cursor` is the log position this watch has already consumed. It is the
+/// entire dedup mechanism (line 739): a row is read exactly once, because
+/// the cursor advances past **every** row the pump saw, matched or not, and
+/// the log assigns `seq` monotonically from the database rather than from
+/// any one process's counter.
+struct Watch {
+    worker: SessionId,
+    notify: SessionId,
+    cursor: i64,
+}
+
+/// Every registered interest this door is currently holding.
+///
+/// # Lock order: `watches` before `live`, never the reverse
+///
+/// Two paths take both — [`watch_worker`], which validates a registration
+/// against the runtime, and [`pump_watches`], which delivers through it.
+/// Taking them in opposite orders is a deadlock that would strand the whole
+/// door, and it is a deadlock that compiles and passes every test that does
+/// not happen to interleave a registration with a delivery. So the order is
+/// fixed here and stated at both sites.
+type Watches = Mutex<Vec<Watch>>;
+
+/// Register interest in a worker's completions — line 733.
+///
+/// Both identifiers go through [`SessionApi`], so both are refused unless
+/// they belong to this project: a watch is a standing instruction to type
+/// into a session, and the one thing this door may never do is type into
+/// another project's.
+///
+/// Three refusals, each because the alternative is worse than an error:
+///
+/// - **`notify` is not live in this process.** The runtime this door owns is
+///   the only one it can write to (see this module's own doc comment), so an
+///   orchestrator that was not spawned through this door has no terminal
+///   here. Registering anyway would produce a watch that silently never
+///   fires — the exact failure `scripts/worker-watch.sh` produced when a
+///   finished worker was lost because nothing was really watching it.
+/// - **`session` is the same as `notify`.** A session watching itself types
+///   its own completions into itself, which is a loop with a keyboard.
+/// - **an unknown or foreign session**, from `SessionApi` itself.
+fn watch_worker(
+    runtime: &Runtime,
+    store: &SessionStore<'_>,
+    live: &Mutex<SessionRuntime>,
+    watches: &Watches,
+    session: &str,
+    notify: &str,
+) -> Response {
+    let worker = SessionId::new(session.to_owned());
+    let notify = SessionId::new(notify.to_owned());
+
+    if worker == notify {
+        return Response::err(format!(
+            "session `{worker}` cannot be watched on its own behalf: a completion \
+             would be typed back into the session that produced it"
+        ));
+    }
+
+    // Lock order: `watches` first, then `live`. See [`Watches`].
+    let mut registry = watches
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    {
+        let mut guard = lock(live);
+        let api = SessionApi::new(store, &mut guard);
+        // `state` rather than `list`: it resolves through the same
+        // project-scope check every other method starts with, and answers
+        // for the one session asked about.
+        if let Err(err) = api.state(&worker) {
+            return Response::err(api_error(err));
+        }
+        if let Err(err) = api.state(&notify) {
+            return Response::err(api_error(err));
+        }
+        if guard.get(&notify).is_none() {
+            return Response::err(format!(
+                "session `{notify}` is not live in this Glasshouse, so a completion \
+                 notification would have nowhere to be delivered; an orchestrator \
+                 must be a session this door holds"
+            ));
+        }
+    }
+
+    let from = match EventLog::open(runtime) {
+        Ok(log) => match log.head() {
+            Ok(head) => head,
+            Err(err) => return Response::err(err.to_string()),
+        },
+        Err(err) => return Response::err(err.to_string()),
+    };
+
+    // Idempotent per pair. A second registration replaces the first rather
+    // than adding to it: two watches over one pair would deliver one
+    // completion twice, which is precisely line 739's failure.
+    if let Some(existing) = registry
+        .iter_mut()
+        .find(|watch| watch.worker == worker && watch.notify == notify)
+    {
+        existing.cursor = from;
+    } else {
+        registry.push(Watch {
+            worker: worker.clone(),
+            notify: notify.clone(),
+            cursor: from,
+        });
+    }
+
+    Response::ok(serde_json::json!({
+        "worker": worker.as_str(),
+        "notify": notify.as_str(),
+        "from": from,
+    }))
+}
+
+/// Whether any orchestrator has registered interest yet.
+///
+/// Peeked before anything is opened, so a door nobody is watching through
+/// costs one uncontended mutex acquisition per tick and nothing else.
+fn watching(watches: &Watches) -> bool {
+    !watches
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_empty()
+}
+
+/// The two database handles the wake-up pump reads through, opened **once**.
+///
+/// # Why this is not opened per tick
+///
+/// Both of these go through `database::open`, which does considerably more
+/// than hand back a connection: it takes a `BEGIN IMMEDIATE` **write**
+/// transaction and runs the migration ladder before returning. That is
+/// exactly right once per process and badly wrong twenty times a second.
+///
+/// A pump that reopened on every 50ms tick would take SQLite's write lock
+/// forty times a second for the whole life of the door — contending with the
+/// very `glasshouse hook` processes that write the rows it is reading. Those
+/// run *inside the user's own session*, and `report_hook`'s own doc comment
+/// explains why a hook must never be made slow: Claude Code treats a hook's
+/// failure as a veto, and the busy wait it would be pushed into is five
+/// seconds. The door's bookkeeping is never more important than the session
+/// it is keeping books about.
+///
+/// Opened lazily, on the first tick where a watch exists, so a door nobody
+/// watches through holds no extra connection at all.
+struct WatchState {
+    log: EventLog,
+    sessions: ProjectSessions,
+}
+
+impl WatchState {
+    fn open(runtime: &Runtime) -> Option<Self> {
+        let log = EventLog::open(runtime).ok()?;
+        let sessions = ProjectSessions::open(runtime).ok()?;
+        Some(Self { log, sessions })
+    }
+}
+
+/// Deliver any completion each watch has not yet seen — lines 734-737, 739.
+///
+/// Called from the door's own background tick, which is what makes this a
+/// production installation rather than a mechanism waiting for one: nothing
+/// outside `glasshouse api serve` has to remember to call it.
+///
+/// # Why this reads the log rather than the bus
+///
+/// A turn ending is reported by the harness's own lifecycle hook, in a
+/// **separate short-lived process** (`glasshouse hook <session> Stop`), which
+/// translates it through `session::lifecycle::event_for` — the single
+/// construction site of `TurnEnded` — and appends it to the project's event
+/// log. That row is the only place this process can see it: the hook's
+/// process is gone by the time anyone could have subscribed to anything.
+///
+/// So this is line 734's *"from native lifecycle hooks"* in the literal
+/// sense. It is not a screen-scraper and it cannot become one: nothing here
+/// reads a session's output, and `TurnEnded` cannot be minted from silence.
+///
+/// # Why the cursor advances past rows that did not match
+///
+/// `observed_since` returns every observed row, not only this worker's. A
+/// cursor that advanced only on a match would re-read the same unmatched
+/// rows on every tick forever, and would eventually re-read a matched row
+/// too once the batch limit cut it off. Advancing past everything seen is
+/// what makes "read exactly once" a property of the loop rather than of the
+/// filter.
+fn pump_watches(state: &WatchState, live: &Mutex<SessionRuntime>, watches: &Watches) {
+    // Lock order: `watches` first, then `live`. See [`Watches`].
+    let mut registry = watches
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if registry.is_empty() {
+        return;
+    }
+
+    let log = &state.log;
+    let store = state.sessions.store();
+
+    let mut dropped = Vec::new();
+    for (index, watch) in registry.iter_mut().enumerate() {
+        let rows = match log.observed_since(watch.cursor, WATCH_PUMP_LIMIT) {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not read the event log for a worker watch");
+                continue;
+            }
+        };
+        if rows.is_empty() {
+            continue;
+        }
+
+        let mut completions = Vec::new();
+        for row in &rows {
+            watch.cursor = watch.cursor.max(row.seq);
+            let LifecycleEvent::TurnEnded { outcome } = row.event else {
+                continue;
+            };
+            if row.session != watch.worker {
+                continue;
+            }
+            completions.push(Completion {
+                worker: row.session.clone(),
+                harness: row.observed.as_ref().map(|o| o.harness.clone()),
+                outcome,
+                seq: row.seq,
+                at: row.at,
+                summary: summarize(log, &row.session, row.seq, row.at),
+            });
+        }
+        if completions.is_empty() {
+            continue;
+        }
+
+        let mut guard = lock(live);
+        let mut api = SessionApi::new(&store, &mut guard);
+        for completion in completions {
+            // `SessionApi::send_text`, so the delivery is recorded as
+            // `MessageOrigin::Machine` — line 736's "machine-originated
+            // message" — through the same seam an orchestrator's own
+            // `send_message` uses. There is no second write path into a
+            // session, deliberately.
+            match api.send_text(&watch.notify, &completion.line()) {
+                Ok(()) => tracing::info!(
+                    worker = %completion.worker,
+                    notify = %watch.notify,
+                    seq = completion.seq,
+                    "delivered a worker completion to an orchestrator"
+                ),
+                // The orchestrator's own session ended. A watch that can
+                // never be delivered again is dropped rather than retried
+                // every tick for the life of the process.
+                Err(ApiError::NotLive { .. }) | Err(ApiError::NotFound { .. }) => {
+                    tracing::warn!(
+                        notify = %watch.notify,
+                        "dropping a worker watch: the session to notify is gone"
+                    );
+                    dropped.push(index);
+                    break;
+                }
+                Err(err) => tracing::warn!(
+                    notify = %watch.notify,
+                    error = %err,
+                    "could not deliver a worker completion"
+                ),
+            }
+        }
+    }
+
+    for index in dropped.into_iter().rev() {
+        registry.remove(index);
+    }
+}
+
+/// What Glasshouse actually observed about the turn that just ended — line
+/// 737's "concise result summary", closed at exactly the width the evidence
+/// supports and no wider.
+///
+/// # Every character of this comes from a fixed vocabulary
+///
+/// The rendered kinds are [`LifecycleEvent::kind`]'s own words — a
+/// `&'static str` from the eleven the enum defines — joined with an arrow,
+/// plus one integer. **No value read out of a hook payload, a session's
+/// scrollback, or a harness's own event spelling can reach this string**,
+/// because none of those is in the type it is built from. That is not care
+/// on the author's part; it is what `LoggedEvent` makes available.
+///
+/// This matters more than concision. A summary quoting a worker's output
+/// would breach the same boundary `tests/session_hook.rs` holds for the
+/// project database — the hook path deliberately drains its payload into
+/// `io::sink()` unread — and it would do it on the one path whose whole
+/// purpose is to carry information *out* of a worker and into another agent.
+///
+/// # What it can honestly say, and what it cannot
+///
+/// It says: the shape of the turn, in Glasshouse's own vocabulary, and how
+/// long it took. `turn_started → waiting_for_user → turn_ended in 41s` tells
+/// an orchestrator that the worker stopped to ask something and then
+/// finished, which is real and actionable.
+///
+/// It does **not** say what the worker did, produced, or concluded.
+/// Glasshouse does not observe that anywhere — the only place it exists is
+/// the conversation, which this door does not read. An orchestrator that
+/// needs the result asks the worker (line 738) or reads a checkpoint.
+fn summarize(log: &EventLog, session: &SessionId, seq: i64, at: i64) -> String {
+    let history = match log.recent_for_session(session, SUMMARY_KINDS * 4) {
+        Ok(history) => history,
+        Err(err) => {
+            tracing::warn!(session = %session, error = %err, "could not summarize a turn");
+            return "no observed history for this turn".to_owned();
+        }
+    };
+
+    // The turn is what happened after the previous `turn_ended` — the
+    // harness's own boundary, not a guess at one.
+    let start = history
+        .iter()
+        .rposition(|row| row.seq < seq && matches!(row.event, LifecycleEvent::TurnEnded { .. }))
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let turn: Vec<&LoggedEvent> = history[start..]
+        .iter()
+        .filter(|row| row.seq <= seq)
+        .collect();
+
+    let elapsed = turn.first().map(|first| at - first.at).unwrap_or(0).max(0);
+
+    let mut kinds: Vec<&'static str> = turn.iter().map(|row| row.event.kind()).collect();
+    let elided = kinds.len().saturating_sub(SUMMARY_KINDS);
+    if elided > 0 {
+        // Keep the end of the turn, which is the part that says how it went.
+        kinds.drain(..elided);
+    }
+    let shape = kinds.join(" → ");
+    let shape = if elided > 0 {
+        format!("… ({elided} earlier) → {shape}")
+    } else {
+        shape
+    };
+
+    format!("{shape} in {elapsed}s")
 }
 
 /// Matches `events::log`'s own private `outcome_sql` spelling, duplicated

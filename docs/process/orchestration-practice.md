@@ -3565,3 +3565,26 @@ Before writing the handoff, re-read the batch's refusals **together** and ask
 which share a cause. If two or more do, that cause is the next package. This
 takes minutes and it is the difference between a ledger that records failure
 and one that routes it.
+
+## §80, case 5 — a KILLED delivered through a fixture's own timeout
+
+§80 lists four ways a mutation lies. A fifth was paid for in batch 49, and it is
+the subtlest because **the verdict is true and the evidence is wrong**.
+
+A mutation removed a worker's hook installation. Three tests failed — a real
+KILLED. But all three failed at the fixture's generic `wait_for` assertion,
+*"timed out waiting for the harness to record its command line"*, because the
+fixture identified a session by the `--settings` argument the hook installation
+adds. Removing the installation removed the fixture's ability to **identify**
+anything, so the test's own explicit assertions never ran at all.
+
+The other four cases produce a verdict that is wrong. This one produces a
+verdict that is **right, credited to assertions that did not execute**. A
+reader checking §80's existing questions — did the command run the test, is the
+test in the target, is the site on the path — gets "yes" three times.
+
+**The check:** when a mutation kills, read *which assertion* failed. If it is
+the fixture's own timeout or setup guard rather than the assertion the test is
+named for, the test has not been shown to work. The fix is to make the fixture
+able to observe the failure independently of the thing being mutated — here, by
+recording argv unconditionally so the assertion fails on its own terms.
