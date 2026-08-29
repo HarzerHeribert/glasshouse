@@ -17,22 +17,26 @@
 //! - **The transport a person's input would travel on exists, and is
 //!   cross-process.** [`a_message_sent_through_the_door_reaches_a_real_worker_process`]
 //!   proves it against a real harness that writes down what it read.
-//! - **Nothing that travels it is recorded where an orchestrator could read
-//!   it.** [`an_intervention_through_the_door_never_reaches_the_orchestrators_event_read_path`]
-//!   pins map line 748's gap.
+//! - **What travels it is recorded where an orchestrator can read it.**
+//!   [`an_intervention_through_the_door_reaches_the_orchestrators_event_read_path`]
+//!   is map line 748, and it used to assert the opposite — see below.
 //! - **No user surface reaches this door at all.** That one is not testable
 //!   from here and is not attempted: `UnixStream::connect` appears nowhere in
 //!   `crates/glasshouse/src/`, and `cli::ApiCommand` has exactly one variant,
 //!   `Serve`. Both are facts about the source, and the honest place for them
 //!   is the evidence ledger, not an assertion dressed up as a test.
 //!
-//! # This file pins a defect, and says so
+//! # This file pinned a defect, and the pin worked
 //!
 //! `an_intervention_through_the_door_never_reaches_the_orchestrators_event_read_path`
-//! asserts today's behaviour, which is **wrong behaviour**. It is here so that
-//! the gap has a name, a viewport (§17) and a failure the moment somebody
-//! fixes it. **The package that closes line 748 must invert it**, not delete
-//! it: it already builds the exact situation that closure has to change.
+//! asserted the wrong behaviour on purpose, so that the gap had a name, a
+//! viewport (§17) and a failure the moment somebody fixed it. Somebody did:
+//! `glasshouse api serve` now attaches an event-log sink and `Request::Events`
+//! reads the project's whole history rather than only what a harness reported.
+//! The test failed with the message it was written to print, and it was
+//! **inverted rather than deleted** — same setup, same viewport, opposite
+//! assertion. `tests/api_event_log.rs` holds the rest of that closure,
+//! including the read half on its own.
 
 #![cfg(unix)]
 
@@ -312,34 +316,40 @@ fn a_message_sent_through_the_door_reaches_a_real_worker_process() {
     });
 }
 
-/// Map line 748's gap, pinned. **Invert this test when closing 748.**
+/// Map line 748, and the inversion of the test that used to pin its gap.
 ///
 /// *"Record user intervention so the orchestrator can be informed that the
-/// worker state may have changed."* An intervention is delivered here and
-/// demonstrably arrives — and then cannot be seen through the only read path
-/// an orchestrator in another process has.
+/// worker state may have changed."* An intervention is delivered here,
+/// demonstrably arrives, and is then visible through the read path an
+/// orchestrator in another process has.
 ///
-/// # Why it is absent, in two independent places
+/// # What had to change, in two independent places
 ///
-/// 1. `api::unix::serve` builds its runtime with `SessionRuntime::new()`,
+/// 1. `api::unix::serve` built its runtime with `SessionRuntime::new()`,
 ///    whose `EventBus` has no sink attached — unlike `shell::run`, which
 ///    calls `attach_event_log` first and passes the bus in. So
-///    `LifecycleEvent::TextDelivered` and `InterruptDelivered` are published
+///    `LifecycleEvent::TextDelivered` and `InterruptDelivered` were published
 ///    and discarded in the one process that owns every orchestrated worker.
-/// 2. Even with a sink, `EventLog::observed_since` — which backs both
-///    `Request::Events` and the worker-watch pump — filters to
+///    `api::unix::EventRecorder` is that sink, opened lazily on its own
+///    writer thread.
+/// 2. Even with a sink, `EventLog::observed_since` filters to
 ///    `observed_harness IS NOT NULL`, and an intervention is not something a
-///    harness reports.
+///    harness reports. `Request::Events` now reads `EventLog::since`, because
+///    that filter de-duplicates for a reader that shares this process's event
+///    bus and there is no such reader on the far end of a socket.
 ///
-/// # The viewport this absence is rendered into (§17)
+/// **Fixing only one of the two changes nothing**, which is why the write
+/// half's mutation survived before this test existed in this form.
 ///
-/// An absence assertion is only as strong as the window it is made through,
-/// so the window is proven to work first: a real `glasshouse hook` process
-/// writes one observed row for **this same session**, and the test asserts it
-/// comes back. The read path is therefore demonstrably reporting events for
-/// this worker at the moment it fails to report the intervention.
+/// # The viewport this is rendered into (§17)
+///
+/// Kept from the pinning version, because it still earns its place: a real
+/// `glasshouse hook` process writes one observed row for **this same
+/// session** first, so the read path is demonstrably carrying events for this
+/// worker independently of the two changes under test. Without it a door that
+/// returned everything for the wrong reason would look the same.
 #[test]
-fn an_intervention_through_the_door_never_reaches_the_orchestrators_event_read_path() {
+fn an_intervention_through_the_door_reaches_the_orchestrators_event_read_path() {
     let fixture = Fixture::new();
     let root = fixture.project_root("alpha");
     let server = Server::start(&fixture, &root);
@@ -398,11 +408,13 @@ fn an_intervention_through_the_door_never_reaches_the_orchestrators_event_read_p
         .collect();
 
     assert!(
-        recorded.is_empty(),
-        "map line 748 has been closed — an intervention is now visible to the \
-         orchestrator's read path as {recorded:?}. That is the desired \
-         behaviour and this test is now wrong: invert it, and record the \
-         closure in docs/product/evidence/phase-16.md."
+        recorded.contains(&"text_delivered"),
+        "the line delivered above reached the worker and must be in the \
+         history the orchestrator reads: {mine:?}"
+    );
+    assert!(
+        recorded.contains(&"interrupt_delivered"),
+        "so must the interrupt: {mine:?}"
     );
 }
 

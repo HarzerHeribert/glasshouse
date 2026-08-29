@@ -351,6 +351,42 @@ impl EventLog {
         Ok(rows)
     }
 
+    /// Every event after position `after`, oldest first.
+    ///
+    /// # Why this exists beside [`EventLog::observed_since`]
+    ///
+    /// `observed_since`'s filter is a **de-duplication** rule, not a
+    /// relevance one. Its own doc gives the reason: a consumer that is
+    /// already subscribed to this process's [`crate::events::EventBus`]
+    /// receives everything this process published, so reading the whole log
+    /// would show each of those events twice. That premise is true of
+    /// `shell::run`, which holds both a subscription and a log tail, and it
+    /// is the query that belongs there.
+    ///
+    /// **A reader in another process holds no such subscription.** For it
+    /// there is nothing to double, and the filter stops being
+    /// de-duplication and becomes loss: it hides precisely the events the
+    /// logging process produced itself. For `glasshouse api serve` — which
+    /// owns the pseudo-terminal of every orchestrated worker — that is every
+    /// spawn, every intervention and every exit, which is to say the whole
+    /// history the orchestrator on the far end of the socket is asking for.
+    ///
+    /// So the choice between the two is a question about **where the reader
+    /// is**, not about which events matter. This one is for a reader that is
+    /// somewhere else.
+    ///
+    /// It is also the query [`EventLog::head`] already agrees with: `head`
+    /// is `MAX(seq)` over the whole table and never was filtered, so a
+    /// caller paging with `after`/`head` against `observed_since` was
+    /// carrying a cursor that counted rows it could not be shown.
+    pub fn since(&self, after: i64, limit: usize) -> Result<Vec<LoggedEvent>, EventLogError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.query(
+            "SELECT {C} FROM lifecycle_events WHERE seq > ?1 ORDER BY seq LIMIT ?2",
+            &[&after, &limit],
+        )
+    }
+
     /// Harness-reported events after position `after`, oldest first.
     ///
     /// # Why this filters to observed events
@@ -365,6 +401,10 @@ impl EventLog {
     /// came from, not a guess about which ones matter.
     ///
     /// Reading the whole log instead would show every in-process event twice.
+    ///
+    /// That reasoning is about the reader's *location*, so it does not
+    /// survive being carried to a reader in another process — see
+    /// [`EventLog::since`], which is the query for one.
     pub fn observed_since(
         &self,
         after: i64,

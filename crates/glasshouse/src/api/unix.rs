@@ -13,7 +13,8 @@ use glasshouse::checkpoint::store::{ProjectCheckpoints, StoreError as Checkpoint
 use glasshouse::checkpoint::{Checkpoint, CheckpointReason, Handoff};
 use glasshouse::config::{self, EffectiveConfig, UserConfig};
 use glasshouse::events::{
-    EventLog, GatewayFailure, LifecycleEvent, LoggedEvent, MessageOrigin, TurnOutcome,
+    EventBus, EventLog, EventLogSink, EventSink, GatewayFailure, LifecycleEvent, LoggedEvent,
+    MessageOrigin, TurnOutcome,
 };
 use glasshouse::launch::HarnessLaunch;
 use glasshouse::session::api::{ApiError, SessionApi};
@@ -75,14 +76,31 @@ pub fn serve(runtime: &Runtime, socket_override: Option<PathBuf>) -> anyhow::Res
     // Owner-only. Box 12's first half — see `authorize` for the second.
     std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
 
+    let sessions = ProjectSessions::open(runtime)?;
+    // The door's own lifecycle stream, and the durable recording of it. See
+    // [`EventRecorder`] for why the runtime is built around a bus this
+    // function owns rather than `SessionRuntime::new`'s private one.
+    let events = EventBus::new();
+    let recorder = EventRecorder::attach(runtime, &events);
+    let live = Arc::new(Mutex::new(SessionRuntime::with_event_bus(
+        glasshouse::session::runtime::DEFAULT_SCROLLBACK_BYTES,
+        events,
+    )));
+    let watches: Arc<Watches> = Arc::new(Mutex::new(Vec::new()));
+
+    // Announced here rather than straight after `bind`, because everything
+    // above it can still fail — a project database that cannot be opened
+    // read-write ends this function — and a door that has said it is
+    // listening and then exits is worse than one that has not spoken yet.
+    // Every caller in this repository treats this line as the ready signal,
+    // which is only true if it comes after the last thing that can refuse to
+    // start. The socket is bound by now, so a client that connects between
+    // this line and the accept loop waits in the backlog rather than being
+    // refused.
     eprintln!(
         "glasshouse: control API listening on {}",
         socket_path.display()
     );
-
-    let sessions = ProjectSessions::open(runtime)?;
-    let live = Arc::new(Mutex::new(SessionRuntime::new()));
-    let watches: Arc<Watches> = Arc::new(Mutex::new(Vec::new()));
 
     // The accept loop only touches the runtime while a request is being
     // handled; a session with nothing asking about it between requests would
@@ -144,7 +162,8 @@ pub fn serve(runtime: &Runtime, socket_override: Option<PathBuf>) -> anyhow::Res
             eprintln!("glasshouse: control API refused a connection: {refusal}");
             continue;
         }
-        if let Err(err) = handle_connection(stream, runtime, &sessions, &live, &watches) {
+        if let Err(err) = handle_connection(stream, runtime, &sessions, &live, &watches, &recorder)
+        {
             eprintln!("glasshouse: control API connection error: {err}");
         }
     }
@@ -251,6 +270,121 @@ fn lock(live: &Mutex<SessionRuntime>) -> std::sync::MutexGuard<'_, SessionRuntim
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// How long [`project_events`] waits for the recorder to catch up before it
+/// answers anyway.
+///
+/// Matches `shell::run`'s own flush bound, for the same reason it gives: a
+/// bookkeeping step must never be the thing that makes the interface
+/// unresponsive. Reached only when the writer is genuinely behind, because
+/// the flush answers as soon as the queue drains.
+const RECORDER_FLUSH: Duration = Duration::from_millis(500);
+
+/// This door's durable recording of what happens to the sessions it owns.
+///
+/// # The hole this fills
+///
+/// `shell::run` builds an [`EventBus`], attaches an [`EventLogSink`] to it,
+/// and hands the bus to its [`SessionRuntime`]. This door built its runtime
+/// with `SessionRuntime::new()` — a bus with no sink and no subscriber — so
+/// every lifecycle event of every orchestrated worker was published into
+/// nothing. Not only the interventions of map line 748: `session_started`
+/// and `process_exited` too. A worker's whole life left no durable trace
+/// unless a `glasshouse hook` process happened to write a row from outside.
+///
+/// # Why the log is opened on the writer thread, and not before there is
+/// something to write
+///
+/// `EventLog::open` goes through `database::open`, which takes a
+/// `BEGIN IMMEDIATE` **write** transaction and runs the migration ladder,
+/// under a five-second busy timeout. It is not a cheap handle to acquire and
+/// it can genuinely wait — on the very `glasshouse hook` processes that run
+/// inside a user's own session, which [`WatchState`]'s doc explains must
+/// never be made to queue behind this door's bookkeeping.
+///
+/// So neither the accept thread nor a pseudo-terminal's thread ever performs
+/// that open. The sink's writer thread does, on the first event it is handed,
+/// which has three consequences worth stating separately:
+///
+/// - **A door that records nothing opens nothing.** `serve` attaches this
+///   unconditionally, but a process that never starts a session publishes no
+///   event, so the connection is never created. That is [`WatchState`]'s
+///   pattern and it is here for §65's reason: a resource acquired on a path
+///   nobody exercises is invisible to every test and still charged for at
+///   runtime, on the platform where SQLite's locks are mandatory rather than
+///   advisory.
+/// - **The five-second wait, if it ever happens, is paid by a thread nobody
+///   is waiting on.** No request is delayed, no pty is stalled, and
+///   [`project_events`]'s flush is separately bounded, so even a caller that
+///   asks for history while the open is in flight gets an answer.
+/// - **A failure to open is not a failure to serve.** It is warned about once
+///   and the door keeps working — the same direction `shell::attach_event_log`
+///   trades in, for the same reason: a project whose database cannot be
+///   opened should lose event history and keep its sessions.
+///
+/// # On holding the handle afterwards
+///
+/// Once open it is kept, because the alternative is re-running that
+/// transaction and that ladder per event. It costs one connection, which is
+/// not a new class of thing for this process: `serve` already opens
+/// [`ProjectSessions`] unconditionally and holds it for the door's whole
+/// life. In SQLite's rollback-journal mode an idle connection holds no lock
+/// on any platform; what costs is the open, and this design performs at most
+/// one of those.
+struct EventRecorder {
+    sink: Arc<EventLogSink>,
+}
+
+impl EventRecorder {
+    /// Send everything `events` records to the project's log as well.
+    fn attach(runtime: &Runtime, events: &EventBus) -> Self {
+        let runtime = runtime.clone();
+        // Opened by the closure below, on the writer thread, at the first
+        // event — never here. `attempted` is what keeps a project whose
+        // database genuinely cannot be opened from retrying the whole
+        // migration ladder once per lifecycle event for the life of the door.
+        let mut log: Option<EventLog> = None;
+        let mut attempted = false;
+        let sink = EventLogSink::with_writer(
+            glasshouse::events::log::DEFAULT_SINK_QUEUE,
+            move |recorded, observed| {
+                if !std::mem::replace(&mut attempted, true) {
+                    match EventLog::open(&runtime) {
+                        Ok(opened) => log = Some(opened),
+                        Err(err) => tracing::warn!(
+                            error = %format!("{err:#}"),
+                            "could not open the project event log; the sessions this \
+                             door owns will not be recorded"
+                        ),
+                    }
+                }
+                let Some(log) = log.as_ref() else {
+                    return;
+                };
+                if let Err(err) = log.append(&recorded, observed.as_ref()) {
+                    tracing::warn!(error = %err, "could not append to the project event log");
+                }
+            },
+        );
+        events.attach_sink(Arc::clone(&sink) as Arc<dyn EventSink>);
+        Self { sink }
+    }
+
+    /// Wait, at most [`RECORDER_FLUSH`], for what has been published so far
+    /// to reach the database.
+    ///
+    /// Never fallible from the caller's side: a writer that did not finish in
+    /// time is a reason the next answer is more complete, not a reason to
+    /// refuse this one.
+    fn flush(&self) {
+        if !self.sink.flush(RECORDER_FLUSH) {
+            tracing::debug!(
+                dropped = self.sink.dropped(),
+                "the event log had not caught up when the door was asked for history"
+            );
+        }
+    }
+}
+
 /// Read one request line, dispatch it, and write back one response line.
 fn handle_connection(
     stream: UnixStream,
@@ -258,6 +392,7 @@ fn handle_connection(
     sessions: &ProjectSessions,
     live: &Mutex<SessionRuntime>,
     watches: &Watches,
+    recorder: &EventRecorder,
 ) -> anyhow::Result<()> {
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
@@ -265,7 +400,7 @@ fn handle_connection(
     reader.read_line(&mut line)?;
 
     let response = match serde_json::from_str::<Request>(line.trim_end()) {
-        Ok(request) => dispatch(request, runtime, sessions, live, watches),
+        Ok(request) => dispatch(request, runtime, sessions, live, watches, recorder),
         Err(err) => Response::err(format!("malformed request: {err}")),
     };
 
@@ -281,6 +416,7 @@ fn dispatch(
     sessions: &ProjectSessions,
     live: &Mutex<SessionRuntime>,
     watches: &Watches,
+    recorder: &EventRecorder,
 ) -> Response {
     let store = sessions.store();
 
@@ -335,7 +471,7 @@ fn dispatch(
         }
         Request::ResourceCapacity => resource_capacity(runtime),
         Request::RoutingModel => routing_model_status(runtime),
-        Request::Events { after, limit } => project_events(runtime, after, limit),
+        Request::Events { after, limit } => project_events(runtime, after, limit, recorder),
         Request::WatchWorker { session, notify } => {
             watch_worker(runtime, &store, live, watches, &session, &notify)
         }
@@ -779,20 +915,57 @@ fn describe_layer(layer: config::Layer) -> &'static str {
 /// This project's lifecycle events, harness-independent — capability map
 /// line 701.
 ///
-/// Incremental the way [`EventLog::observed_since`] itself is: `after` is
-/// the log position the caller has already consumed, and `head` — the log's
-/// current position, returned even when `events` is empty — is what it
-/// hands back next time, so a caller that sees nothing new still has a
-/// cursor rather than only after the first event ever exists. `limit` is
-/// capped at [`MAX_EVENTS_LIMIT`] regardless of what is asked for.
-fn project_events(runtime: &Runtime, after: i64, limit: usize) -> Response {
+/// Incremental: `after` is the log position the caller has already consumed,
+/// and `head` — the log's current position, returned even when `events` is
+/// empty — is what it hands back next time, so a caller that sees nothing
+/// new still has a cursor rather than only after the first event ever
+/// exists. `limit` is capped at [`MAX_EVENTS_LIMIT`] regardless of what is
+/// asked for.
+///
+/// # Why this reads [`EventLog::since`] and not `observed_since`
+///
+/// Because the caller is **in another process**. `observed_since` filters to
+/// harness-reported rows for one stated reason — a reader subscribed to this
+/// process's own [`EventBus`] would otherwise see every in-process event
+/// twice — and that reason is a fact about `shell::run`, which holds both a
+/// subscription and a log tail. Nothing on the far end of this socket holds
+/// either. Applying the filter here does not de-duplicate anything; it
+/// deletes the entire class of events this process is the only witness to,
+/// which is every spawn, intervention and exit of every orchestrated worker
+/// — see [`EventRecorder`] for the other half of the same defect.
+///
+/// The narrower query is still right where its premise holds, and it is
+/// still used there: [`pump_watches`] wants exactly the harness reports,
+/// because `TurnEnded` is minted only in a hook process and a completion
+/// carries the reporting harness's name.
+///
+/// # Why it flushes first
+///
+/// Recording is asynchronous by construction (see [`EventRecorder`]), so an
+/// orchestrator that sends a message and immediately asks what happened
+/// would otherwise race its own write. The wait is bounded and its failure
+/// is ignored: a slow writer makes this answer *older*, never absent, and
+/// the caller's cursor brings it back next call.
+///
+/// This makes the door's **own** writes visible before it answers. It cannot
+/// do the same for a harness report, which is written by a separate
+/// `glasshouse hook` process on its own schedule — no reader anywhere can
+/// know that one is pending.
+fn project_events(
+    runtime: &Runtime,
+    after: i64,
+    limit: usize,
+    recorder: &EventRecorder,
+) -> Response {
+    recorder.flush();
+
     let log = match EventLog::open(runtime) {
         Ok(log) => log,
         Err(err) => return Response::err(err.to_string()),
     };
 
     let bounded_limit = limit.min(MAX_EVENTS_LIMIT);
-    let events = match log.observed_since(after, bounded_limit) {
+    let events = match log.since(after, bounded_limit) {
         Ok(events) => events,
         Err(err) => return Response::err(err.to_string()),
     };

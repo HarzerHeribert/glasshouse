@@ -87,7 +87,6 @@ CREATE TABLE evaluation_observations (
     -- "remain separately represented" rule (`database.rs:831-836`).
     feature      TEXT,
     arm          TEXT,
-    CHECK ((feature IS NULL) = (arm IS NULL)),
 
     -- Provenance: the row in the ledger that owns the measurement, so this
     -- table never copies one. Bare ids, no REFERENCES — migration 12's rule.
@@ -96,7 +95,13 @@ CREATE TABLE evaluation_observations (
 
     -- The sentence a human reads after a count surprises them. Never parsed,
     -- never a WHERE key. `gateway_cause` (migration 7) is the precedent.
-    detail       TEXT
+    detail       TEXT,
+
+    -- Table constraint, and it must come AFTER every column definition:
+    -- SQLite accepts no column after the first table constraint, so the
+    -- position this sat in originally made the statement unparseable
+    -- (`near "memory_id": syntax error`). Same constraint, only legal place.
+    CHECK ((feature IS NULL) = (arm IS NULL))
 );
 
 -- The one access pattern this table exists for: how many rows of one kind

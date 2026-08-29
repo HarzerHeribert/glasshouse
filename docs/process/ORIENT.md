@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**745 / 1280 mandatory capabilities (58%)** — 535 open across 67 phases.
+**746 / 1280 mandatory capabilities (58%)** — 534 open across 67 phases.
 
 ## Where the work is
 
@@ -38,8 +38,8 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
 | Phase 46 | Security and contamination tests | **2** | 6 | `1739` |
 | Phase 49 | Configuration | **2** | 14 | `1784` |
+| Phase 16 | Worker transparency | **3** | 4 | `742` |
 | Phase 32F | Protected quota reserve | **3** | 5 | `1285` |
-| Phase 16 | Worker transparency | **4** | 3 | `742` |
 | Phase 21F | Memory retrieval quality | **4** | 7 | `927` |
 | Phase 54 | Criteria before deeper cmux coupling | **4** | 0 | `1885` |
 | Phase 21E | Decision ladder and conflict handling | **5** | 7 | `907` |
@@ -96,7 +96,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~509 open lines are not.
+other ~505 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -175,6 +175,12 @@ these unwrapped.
 
 - **1795** ☐ Allow the user to configure the routing-model fallback chain.
 - **1796** ☐ Allow the user to configure workload-tier ceilings for individual models.
+
+### Phase 16 — Worker transparency  (3 open, 4 closed)
+
+- **745** ☐ Allow the user to enter any orchestrated worker while it is running.
+- **746** ☐ Allow direct user input to an orchestrated worker without requiring the orchestrator as an intermediary.
+- **747** ☐ Allow the user to interrupt an orchestrated worker directly.
 
 ### Phase 32F — Protected quota reserve  (3 open, 5 closed)
 

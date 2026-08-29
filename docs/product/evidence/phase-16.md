@@ -269,3 +269,54 @@ killed.
 
 740, 745, 746, 747, 748 — the user-direct-access half. Returned with an
 adversarial subcontractor having tried and failed to falsify the claim.
+
+---
+
+### Phase 16 — Record user intervention so the orchestrator can be informed the worker state may have changed (line 748)
+
+State: **COMPLETE** — orchestrator ruling, batch 51.
+
+Contract: Given a session driven through `glasshouse api serve`, when a user
+intervenes, an orchestrator in another process reads that intervention back
+through the same door — while the API door does not hold a write-capable SQLite
+handle for its whole life.
+
+**The defect this closed is larger than the line.** `serve` built its runtime
+with `SessionRuntime::new()` — an `EventBus` with no sink — where
+`shell::run` calls `attach_event_log`. So the API door wrote **nothing** to the
+project event log: not interventions, not `session_started`, not
+`process_exited`. Measured by the discovery package with a shipped-binary probe
+plus a control.
+
+**Both halves were needed, and that is the point.** The discovery package's
+SURVIVED mutation had already proved the write half alone buys nothing: rows
+appear, correctly stamped `machine`, and `Request::Events` still returns `[]`,
+because `observed_since` filters `observed_harness IS NOT NULL`. So this package
+had to argue what that filter was *for* before routing around it, and add
+`EventLog::since` beside it rather than loosening it. **Removing either half
+alone now fails a test** — which is precisely what the SURVIVED mutation could
+not say. `drop-the-write-half` re-run by the orchestrator in the integrated
+tree: KILLED.
+
+**A product defect found while testing, and fixed.** `serve` printed
+`control API listening on …` immediately after `bind` and **before**
+`ProjectSessions::open`. Every shipped-binary test in this repository uses that
+line as its ready signal and it was not one: a door that has announced can still
+exit, because the database open below it can fail. The window is exactly where
+`EventRecorder::attach` now sits. The announcement moved below the last thing
+that can refuse to start; the socket is bound by then, so a client connecting in
+the remaining window waits in the backlog rather than being refused. Diagnosed
+by reading the actual failure — `EOF while parsing a value`, then the server's
+stderr saying `project database … was opened read-only` — not by retrying.
+
+**Cross-worker handoff worth recording.** `GH-WORKER-ACCESS` returned 748 open
+and left a test pinning the gap, asserting the *wrong* behaviour on purpose so
+the gap had a name, with the instruction that whoever closed the line must
+**invert it, not delete it**. It was inverted:
+`an_intervention_through_the_door_never_reaches_the_orchestrators_event_read_path`
+became `..._reaches_...`. Two workers who never spoke, coordinating through a
+test left as a marker.
+
+Limits: 745, 746 and 747 remain open on a separate unmade product decision
+(refusal register Cluster K) — a user still cannot *enter* an orchestrated
+worker. This line is about the record, not the access.
