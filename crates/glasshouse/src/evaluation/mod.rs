@@ -82,7 +82,7 @@ use crate::database::{EVALUATION_KINDS, PROJECT_ID_KEY};
 ///
 /// The store encodes through an exhaustive `match`, so a new variant is a
 /// compile error at the writer rather than a constraint violation on whatever
-/// thread happens to be recording. [`crate::database::EVALUATION_KINDS`] is
+/// thread happens to be recording. `database::EVALUATION_KINDS` is
 /// the constant a test pins this against, for the same reason
 /// `LIFECYCLE_EVENT_KINDS` exists beside its own `CHECK`.
 ///
