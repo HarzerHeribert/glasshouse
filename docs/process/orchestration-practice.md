@@ -3566,6 +3566,48 @@ which share a cause. If two or more do, that cause is the next package. This
 takes minutes and it is the difference between a ledger that records failure
 and one that routes it.
 
+## §80, case 6 — the test derived its own input from the constant being mutated
+
+**Found 2026-08-29 by `GH-CANONICAL-LINE-LIMIT`, which diagnosed it against the
+packet's own stated explanation and was right to.**
+
+The mutation was the required one: raise `MAX_CANONICAL_LINE_BYTES` from
+`Some(1024)` to `Some(65536)` and watch the over-long-line test fail. **It
+SURVIVED.**
+
+The packet had pre-declared what a SURVIVED here would mean — *"your test is
+not actually driving a canonical-mode terminal"* — and that was wrong. The
+test **was** driving a real canonical pty; the other four mutations in the same
+batch prove it. The actual cause:
+
+> the test derived its own input length from the constant being mutated, so it
+> **rescaled with the mutation**.
+
+Raise the ceiling to 65536 and the test dutifully built a 65537-byte line,
+which is still over the terminal's *real* `MAX_CANON`, so it was still
+refused, so the assertion still passed. The mutation moved the goalposts and
+the test carried them along.
+
+**The repair is bracketing.** Assert against a value the mutation cannot move —
+here, that a line of exactly the mutated size does *not* arrive whole, which is
+false only if the compiled constant genuinely matches the terminal's own limit.
+That turned the SURVIVED into a KILLED with a message that names the real
+claim: *"a line of exactly 65536 bytes did not arrive whole, so 65536 is above
+this terminal's real MAX_CANON and the compiled constant is wrong."*
+
+**The general rule, and it is not only about constants.** A test whose input is
+computed from the thing under mutation cannot detect that thing changing. Ask
+of every mutation target: *does any test input derive from this value?* If yes,
+the mutation tests the derivation and not the behaviour, and a SURVIVED means
+nothing either way.
+
+**And the second lesson is about packets.** A packet that pre-declares what a
+SURVIVED will mean is doing the worker a service and also handing it a wrong
+answer to accept. This worker checked the stated cause against the other four
+mutations, rejected it, and found the real one. **Pre-declared diagnoses are
+hypotheses; §44 already says a packet's hypothesis is an anchor and should be
+labelled killable. That applies to the mutation section too.**
+
 ## §80, case 5 — a KILLED delivered through a fixture's own timeout
 
 §80 lists four ways a mutation lies. A fifth was paid for in batch 49, and it is

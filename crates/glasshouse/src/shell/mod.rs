@@ -857,6 +857,11 @@ fn refusal_reason(err: &RuntimeError) -> String {
         RuntimeError::NotLive { .. } => "it is not running in this Glasshouse".to_owned(),
         RuntimeError::Exited { .. } => "it has already exited".to_owned(),
         RuntimeError::Headless { .. } => "it is headless and has no viewport".to_owned(),
+        // Names neither the session nor the line: the note has already named
+        // the session, and the line may be anything the user pasted.
+        RuntimeError::LineTooLong { bytes, limit, .. } => {
+            format!("that line is {bytes} bytes and its terminal takes at most {limit} in one line")
+        }
         RuntimeError::Io { source, .. } => source.to_string(),
     }
 }

@@ -360,6 +360,179 @@ impl std::fmt::Debug for PtyOutput {
     }
 }
 
+/// What a session's terminal is doing with the bytes written to it.
+///
+/// # Why anything above the pty needs to know
+///
+/// A terminal line discipline in **canonical mode** assembles input one line
+/// at a time in a kernel buffer, and that buffer has a hard ceiling —
+/// `MAX_CANON`. A write that pushes a line past the ceiling is not truncated:
+/// the excess is discarded, **the line terminator is discarded with it**, so
+/// the line never reaches the reader, the buffer stays full, and every byte
+/// written to that terminal afterwards is discarded too. The session's input
+/// is wedged for good and nothing on the writing side is told.
+///
+/// Measured on macOS 25.5 against a real pty by
+/// `tests/canonical_line_limit.rs`, one fresh pty per case:
+///
+/// ```text
+/// 1023 bytes + CR = 1024 total -> arrives, terminal still works
+/// 1024 bytes + CR = 1025 total -> discarded, terminal wedged forever
+/// ```
+///
+/// In **raw** mode there is no line and no such ceiling: the same 2000-byte
+/// write arrives intact. A harness TUI puts its own tty into raw mode as it
+/// starts; a plain shell, and a harness before its first draw, does not. The
+/// two cases need different answers, which is why
+/// [`PtyProcess::line_discipline`] obtains one rather than assuming it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineDiscipline {
+    /// `ICANON` is set, and this platform's ceiling is known.
+    ///
+    /// A terminal whose `ICANON` is set on a platform with no known ceiling
+    /// is [`LineDiscipline::Unknown`] instead, so that this variant always
+    /// carries a limit that can actually be enforced.
+    Canonical(CanonicalLine),
+    /// `ICANON` is clear: bytes reach the child as they arrive, unbounded.
+    Raw,
+    /// The mode could not be read, or no ceiling is known for this platform.
+    ///
+    /// Windows has no line discipline at all — ConPTY is a screen buffer,
+    /// not a tty (practice §21) — and on Unix a master that answers neither
+    /// `as_raw_fd` nor `tcgetattr` lands here too.
+    ///
+    /// **Treated as unbounded**, deliberately. Enforcing a Unix ceiling where
+    /// there is none would refuse deliveries that work, and the defect this
+    /// enum exists for cannot occur where there is no canonical buffer to
+    /// overflow.
+    Unknown,
+}
+
+impl LineDiscipline {
+    /// The ceiling one line of input must stay under, or `None` where none
+    /// applies.
+    pub const fn max_line_bytes(self) -> Option<usize> {
+        match self {
+            Self::Canonical(line) => Some(line.max_bytes),
+            Self::Raw | Self::Unknown => None,
+        }
+    }
+}
+
+/// A canonical-mode terminal's limit on one line, and what it counts as the
+/// end of one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalLine {
+    max_bytes: usize,
+    cr_ends_a_line: bool,
+}
+
+impl CanonicalLine {
+    /// The most bytes one line may carry, **its terminator included**.
+    ///
+    /// # These numbers are the kernel's, and they differ
+    ///
+    /// - **macOS and the BSDs**: `MAX_CANON`, `1024`, from
+    ///   `<sys/syslimits.h>`. The measurement in [`LineDiscipline`]'s doc
+    ///   comment is what establishes that the terminator is counted.
+    /// - **Linux**: the `n_tty` line discipline's own buffer,
+    ///   `N_TTY_BUF_SIZE` = `4096`. Linux's `<linux/limits.h>` says
+    ///   `MAX_CANON` is 255 and `fpathconf(_PC_MAX_CANON)` agrees, but the
+    ///   driver does not — that constant is the POSIX minimum rather than
+    ///   the kernel's buffer, and enforcing it would refuse 256-byte lines
+    ///   that demonstrably arrive. `fpathconf` is the portable spelling and
+    ///   it is wrong on the platform where it differs most, so the value is
+    ///   compiled in per target and `tests/canonical_line_limit.rs` measures
+    ///   it back on whichever platform the test runs on.
+    /// - **Everything else**, Windows included: no limit, and such a
+    ///   terminal is [`LineDiscipline::Unknown`] rather than
+    ///   [`LineDiscipline::Canonical`].
+    pub const fn max_bytes(self) -> usize {
+        self.max_bytes
+    }
+
+    /// Whether this terminal treats `byte` as the end of a line.
+    ///
+    /// `NL` always. `CR` only when `ICRNL` is set — which it is by default,
+    /// and which is why a carriage return is what
+    /// `SessionApi::send_text` appends — because with `ICRNL` clear a
+    /// carriage return is an ordinary character that ends nothing, and
+    /// counting it as a terminator would let a 3000-byte CR-separated block
+    /// through to wedge the terminal.
+    ///
+    /// `VEOF` and `VEOL` also end a canonical line and are deliberately not
+    /// listed: leaving a terminator out can only make a line look *longer*
+    /// than it is, which refuses a delivery that would have worked. Adding
+    /// one wrongly does the opposite, and the opposite is the defect.
+    pub const fn ends_a_line(self, byte: u8) -> bool {
+        byte == b'\n' || (self.cr_ends_a_line && byte == b'\r')
+    }
+
+    /// The longest run of bytes in `input` that this terminal's line buffer
+    /// would have to hold at once, terminator included.
+    ///
+    /// The run after the last terminator counts, and counts as if it were
+    /// terminated: it stays in the buffer waiting for one, and it is the
+    /// *next* write's terminator that gets discarded for want of room.
+    /// Measured — writing 1024 bytes and then a bare `CR` as two separate
+    /// calls wedges a macOS pty exactly as one 1025-byte write does.
+    pub fn longest_line(self, input: &[u8]) -> usize {
+        input
+            .split(|&byte| self.ends_a_line(byte))
+            .map(|segment| segment.len() + 1)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// `Some(bytes)` when `input` carries a line this terminal would
+    /// discard, naming that line's length; `None` when every line fits.
+    ///
+    /// # What this cannot see
+    ///
+    /// Only `input`. Bytes already sitting in the kernel's line buffer from
+    /// an earlier unterminated delivery are invisible from the master side —
+    /// there is no ioctl that reports them — so two 600-byte unterminated
+    /// deliveries each pass this check and together wedge the terminal. Every
+    /// caller Glasshouse has today ends its delivery with a terminator (see
+    /// `SessionApi::send_text`), which empties the buffer and makes the check
+    /// exact for them. Reconstructing the buffer's depth across deliveries
+    /// would mean modelling the kernel's line editor — erase, kill, werase,
+    /// `tcflush` — and a model that drifts high refuses a healthy session
+    /// forever, which is a worse failure than the one being prevented.
+    pub fn would_discard(self, input: &[u8]) -> Option<usize> {
+        let longest = self.longest_line(input);
+        (longest > self.max_bytes).then_some(longest)
+    }
+}
+
+/// See [`CanonicalLine::max_bytes`], which documents these numbers and is the
+/// only thing that should read this.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+))]
+const MAX_CANONICAL_LINE_BYTES: Option<usize> = Some(1024);
+
+/// See [`CanonicalLine::max_bytes`].
+#[cfg(target_os = "linux")]
+const MAX_CANONICAL_LINE_BYTES: Option<usize> = Some(4096);
+
+/// See [`CanonicalLine::max_bytes`].
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly",
+    target_os = "linux"
+)))]
+const MAX_CANONICAL_LINE_BYTES: Option<usize> = None;
+
 /// A running child process attached to a pseudo-terminal.
 pub struct PtyProcess {
     child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -610,6 +783,65 @@ impl PtyProcess {
         self.size
     }
 
+    /// What the session's terminal is doing with input **right now**.
+    ///
+    /// # Read every time, never cached
+    ///
+    /// A child owns its own tty and may change its mode at any instant: a
+    /// harness enters raw mode as it draws its first frame, leaves it while
+    /// it shells out, and re-enters it afterwards. A remembered answer would
+    /// be a lie with a timestamp, so this asks the kernel on every call and
+    /// callers are expected to call it immediately before the write it
+    /// governs. The residual race is one syscall wide and is stated where it
+    /// is acted on — see `SessionRuntime::send_text_from`.
+    ///
+    /// # What it reads
+    ///
+    /// `tcgetattr` on the **master** fd. A pty pair shares one `termios`
+    /// between its two ends, so the master's answer *is* the slave's line
+    /// discipline — which is the thing that matters and the only side
+    /// Glasshouse holds. Verified rather than assumed: a child that runs
+    /// `stty -icanon` on its own tty flips this from
+    /// [`LineDiscipline::Canonical`] to [`LineDiscipline::Raw`], measured in
+    /// `tests/canonical_line_limit.rs`.
+    ///
+    /// `portable-pty` exposes the fd through `MasterPty::as_raw_fd`. It is
+    /// borrowed for the duration of the call and never stored, closed, or
+    /// duplicated.
+    #[cfg(unix)]
+    pub fn line_discipline(&self) -> LineDiscipline {
+        let (Some(fd), Some(max_bytes)) = (self.master.as_raw_fd(), MAX_CANONICAL_LINE_BYTES)
+        else {
+            return LineDiscipline::Unknown;
+        };
+        let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: `fd` is the pty master's descriptor, owned by
+        // `self.master`, which outlives this call; nothing here takes
+        // ownership of it or closes it. `termios` is a correctly sized and
+        // aligned allocation for the one struct `tcgetattr` writes.
+        if unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) } != 0 {
+            return LineDiscipline::Unknown;
+        }
+        // SAFETY: `tcgetattr` returned 0, so it initialised the struct.
+        let termios = unsafe { termios.assume_init() };
+        if termios.c_lflag & libc::ICANON == 0 {
+            return LineDiscipline::Raw;
+        }
+        LineDiscipline::Canonical(CanonicalLine {
+            max_bytes,
+            cr_ends_a_line: termios.c_iflag & libc::ICRNL != 0,
+        })
+    }
+
+    /// What the session's terminal is doing with input right now.
+    ///
+    /// Always [`LineDiscipline::Unknown`] here: Windows has no line
+    /// discipline to read. See that variant's doc comment.
+    #[cfg(not(unix))]
+    pub fn line_discipline(&self) -> LineDiscipline {
+        LineDiscipline::Unknown
+    }
+
     /// The size the operating system reports for the pseudo-terminal.
     ///
     /// Used to confirm a resize actually reached the kernel rather than only
@@ -731,6 +963,95 @@ where
 mod tests {
     use super::*;
     use crate::platform::paths as platform_paths;
+
+    /// A terminal shaped like the pty every test in
+    /// `tests/canonical_line_limit.rs` measures: `MAX_CANON` 1024, `ICRNL`
+    /// set, which is a pty's default on both platforms Glasshouse ships on.
+    fn macos_default() -> CanonicalLine {
+        CanonicalLine {
+            max_bytes: 1024,
+            cr_ends_a_line: true,
+        }
+    }
+
+    /// `payload` bytes followed by the carriage return `SessionApi::send_text`
+    /// appends.
+    fn terminated(payload: usize) -> Vec<u8> {
+        let mut line = vec![b'x'; payload];
+        line.push(b'\r');
+        line
+    }
+
+    #[test]
+    fn a_lines_length_counts_its_terminator() {
+        let line = macos_default();
+        // 1023 payload + CR = 1024 total, which is exactly what a real macOS
+        // pty accepts; one more byte is what wedges it.
+        assert_eq!(line.longest_line(b"abc\r"), 4);
+        assert_eq!(line.would_discard(&terminated(1023)), None);
+        assert_eq!(line.would_discard(&terminated(1024)), Some(1025));
+    }
+
+    #[test]
+    fn an_unterminated_run_counts_as_if_it_were_terminated() {
+        // It is the *next* write's terminator that gets discarded for want of
+        // room, so a trailing run needs the same byte of headroom a
+        // terminated one does. Measured: 1024 bytes then a bare CR, as two
+        // writes, wedges a macOS pty exactly as one 1025-byte write does.
+        let line = macos_default();
+        assert_eq!(line.longest_line(b"abc"), 4);
+        assert_eq!(line.would_discard(&[b'x'; 1023]), None);
+        assert_eq!(line.would_discard(&[b'x'; 1024]), Some(1025));
+    }
+
+    /// Two 999-byte lines separated and terminated by carriage returns —
+    /// 2000 bytes that a real pty delivers whole when `ICRNL` is set.
+    fn cr_separated() -> Vec<u8> {
+        [&b"a".repeat(999)[..], b"\r", &b"b".repeat(999)[..], b"\r"].concat()
+    }
+
+    #[test]
+    fn a_long_block_of_short_lines_is_not_a_long_line() {
+        // The regression a whole-text ceiling would have caused: 3000 bytes
+        // of 999-byte lines all arrive on a real pty, so refusing them would
+        // refuse something that works.
+        let line = macos_default();
+        let block = cr_separated();
+        assert_eq!(block.len(), 2000);
+        assert_eq!(line.longest_line(&block), 1000);
+        assert_eq!(line.would_discard(&block), None);
+    }
+
+    #[test]
+    fn a_carriage_return_ends_a_line_only_when_icrnl_says_so() {
+        let with_icrnl = macos_default();
+        let without = CanonicalLine {
+            max_bytes: 1024,
+            cr_ends_a_line: false,
+        };
+        let block = cr_separated();
+        // Same bytes, two terminals, two honest answers: with ICRNL the CRs
+        // end lines and this is fine; without it they are ordinary characters
+        // and the whole block is one 2000-byte line that would wedge.
+        assert_eq!(with_icrnl.would_discard(&block), None);
+        assert_eq!(without.would_discard(&block), Some(2001));
+        // A newline ends a line either way.
+        assert!(with_icrnl.ends_a_line(b'\n'));
+        assert!(without.ends_a_line(b'\n'));
+        assert!(with_icrnl.ends_a_line(b'\r'));
+        assert!(!without.ends_a_line(b'\r'));
+    }
+
+    #[test]
+    fn nothing_is_discarded_where_no_line_discipline_applies() {
+        // Windows, and any Unix master that will not answer `tcgetattr`.
+        assert_eq!(LineDiscipline::Raw.max_line_bytes(), None);
+        assert_eq!(LineDiscipline::Unknown.max_line_bytes(), None);
+        assert_eq!(
+            LineDiscipline::Canonical(macos_default()).max_line_bytes(),
+            Some(1024)
+        );
+    }
 
     #[test]
     fn terminal_size_never_has_a_zero_dimension() {

@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 
 use crate::events::{EventBus, LifecycleEvent, MessageOrigin, ProcessExit, RecordedEvent};
 use crate::launch::{HarnessLaunch, OwnedHarnessLaunch};
-use crate::pty::{ExitStatus, PtyOutput, PtyProcess, TerminalSize};
+use crate::pty::{ExitStatus, LineDiscipline, PtyOutput, PtyProcess, TerminalSize};
 use crate::session::supervision;
 use crate::session::{SessionId, SessionPresentation};
 
@@ -533,6 +533,19 @@ impl LiveSession {
         }
     }
 
+    /// What this session's terminal is doing with input right now.
+    ///
+    /// Exposed because it is the one thing about a session that a caller
+    /// cannot infer and that decides whether a long message can be delivered
+    /// at all. Read from the kernel on every call — see
+    /// [`PtyProcess::line_discipline`] for why it is never cached — and
+    /// enforced for the caller by [`SessionRuntime::send_text_from`], so
+    /// reading it here is for reporting rather than for anyone re-deriving
+    /// the check.
+    pub fn line_discipline(&self) -> LineDiscipline {
+        self.process.line_discipline()
+    }
+
     pub fn process_id(&self) -> Option<u32> {
         self.process.process_id()
     }
@@ -588,6 +601,19 @@ impl LiveSession {
                 ),
             });
         };
+        // Read the terminal's mode here rather than anywhere earlier: inside
+        // the delivery lock, one statement before the write it governs, and
+        // never cached. See `PtyProcess::line_discipline`.
+        if let Delivery::Bytes(input) = what
+            && let LineDiscipline::Canonical(line) = self.process.line_discipline()
+            && let Some(bytes) = line.would_discard(input)
+        {
+            return Err(RuntimeError::LineTooLong {
+                id: self.id.clone(),
+                bytes,
+                limit: line.max_bytes(),
+            });
+        }
         match what {
             Delivery::Bytes(bytes) => self.process.write_input(bytes),
             Delivery::Interrupt => self.process.interrupt(),
@@ -654,6 +680,22 @@ pub enum RuntimeError {
          change its presentation first"
     )]
     Headless { id: SessionId },
+    #[error(
+        "session `{id}` is in canonical mode, where one line of input may carry at \
+         most {limit} bytes including its terminator; a {bytes}-byte line would be \
+         discarded along with every byte written to that terminal afterwards, so it \
+         was refused instead"
+    )]
+    LineTooLong {
+        id: SessionId,
+        /// The offending line's length in bytes, terminator included. **Never
+        /// the line itself** — a caller's text can be arbitrarily long and may
+        /// carry a secret it pasted, and this sentence is logged.
+        bytes: usize,
+        /// The terminal's own ceiling, from
+        /// [`crate::pty::CanonicalLine::max_bytes`].
+        limit: usize,
+    },
     #[error("could not {action} session `{id}`")]
     Io {
         id: SessionId,
