@@ -47,7 +47,25 @@
 #   coedit.sh release <file>                       clear it after reconciliation
 set -uo pipefail
 
-REPO="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+# ANCHOR ON THE MAIN CHECKOUT, NEVER THE CALLER'S WORKTREE.
+#
+# `git rev-parse --show-toplevel` answers "this worktree", and every worker runs
+# in its own. The first version used it, and a live two-agent trial found the
+# consequence immediately: each worker wrote its claims into ITS OWN tree, so no
+# worker could ever see another's, and the whole mechanism was silently a no-op
+# across exactly the boundary it exists to cross. The synthetic test missed it
+# because it invoked this script from the main checkout.
+#
+# `--git-common-dir` is the SHARED `.git` of the worktree family, so its parent
+# is the main checkout from anywhere. This is practice §19's rule — a tool that
+# resolves context from the wrong place is wrong for every worktree, and wrong
+# silently.
+_common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+if [ -n "$_common" ]; then
+  REPO="$(dirname "$_common")"
+else
+  REPO="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+fi
 ROOT="$REPO/.agent-runtime/coedit"
 
 slug() { printf '%s' "$1" | sed 's#^\./##; s#[/ ]#__#g'; }
@@ -97,9 +115,17 @@ cmd_diff() {
     local wt; wt="$(cat "$c")"
     printf '\n===== %s — %s =====\n' "$w" "$file"
     if [ -d "$wt" ]; then
-      git -C "$wt" diff -- "$file" 2>/dev/null || printf '(could not read)\n'
-      git -C "$wt" status --porcelain -- "$file" 2>/dev/null | grep -q '^??' \
-        && printf '(untracked in that worktree — new file)\n'
+      # A file the peer has CREATED is untracked, so `git diff` says nothing
+      # about it — and a brand-new file is the most likely thing two workers
+      # collide on. Show its content instead, as a diff against nothing.
+      if git -C "$wt" status --porcelain -- "$file" 2>/dev/null | grep -q '^??'; then
+        printf '(new file, untracked in that worktree)\n'
+        git -C "$wt" diff --no-index -- /dev/null "$wt/$file" 2>/dev/null \
+          || sed 's/^/+ /' "$wt/$file" 2>/dev/null \
+          || printf '(could not read)\n'
+      else
+        git -C "$wt" diff -- "$file" 2>/dev/null || printf '(could not read)\n'
+      fi
     else
       printf '(worktree gone: %s)\n' "$wt"
     fi

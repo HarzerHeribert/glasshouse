@@ -99,6 +99,30 @@ class CoEdit(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertIn("no claims", r.stdout)
 
+    def test_state_is_shared_when_invoked_from_inside_a_worktree(self):
+        """The load-bearing test, and the one the first version did not have.
+
+        Every worker runs in its own worktree, and `git rev-parse --show-toplevel`
+        answers "this worktree" from each of them. The first version anchored on
+        that, so each worker wrote its claims into its OWN tree and no worker
+        could ever see another's — the mechanism was silently a no-op across the
+        exact boundary it exists to cross.
+
+        A synthetic test invoking the script from the main checkout cannot catch
+        that. A live two-agent trial caught it in one run. This asserts the
+        property directly: a claim made from inside worktree A is visible to a
+        call made from inside worktree B.
+        """
+        r = sh("claim", "f.txt", "wa", str(self.a), cwd=self.a)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = sh("peers", "f.txt", "wb", cwd=self.b).stdout
+        self.assertIn("wa", out,
+                      "a claim made inside one worktree was invisible from another")
+        self.assertNotIn("no claims", out)
+        # and the state must live in the main checkout, not either worktree
+        self.assertFalse((self.a / ".agent-runtime" / "coedit").exists(),
+                         "state leaked into the caller's worktree")
+
     def test_release_clears_the_contention(self):
         self.claim_both()
         sh("release", "f.txt", cwd=self.repo)
