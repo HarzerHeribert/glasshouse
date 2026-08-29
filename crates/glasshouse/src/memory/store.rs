@@ -87,10 +87,23 @@ pub enum MemoryKind {
 /// How binding a memory is — Phase 21A's seven authority classes.
 ///
 /// Stored from Phase 20 onwards so that Phase 21A adds *classification* rather
-/// than a migration. Nothing classifies yet, which is why the column and this
-/// field are optional: `None` means no authority has been assigned, a distinct
-/// fact from every one of the seven classes. Retrieval must treat `None`
-/// conservatively — see [`MemoryAuthority::is_binding`], which `None` is not.
+/// than a migration.
+///
+/// **Automatic extraction classifies now** (Phase 21A line 862, closed
+/// 2026-08-29): `memory::extract::schema` refuses a proposed memory that
+/// declares no authority, and `memory::extract::authority::conservative`
+/// decides what it is stored under — never stronger than declared, and never
+/// stronger than `EXTRACTOR_CEILING`. This comment previously read *"Nothing
+/// classifies yet"*, which stopped being true when that extractor shipped and
+/// then sat here as an expired claim of exactly the kind the evidence-ledger
+/// sweeps hunt.
+///
+/// The column and this field stay optional anyway, for a different and still
+/// live reason: a memory recorded before classification existed, or written by
+/// a path that does not classify, has **no** authority assigned. `None` is
+/// that fact and is distinct from every one of the seven classes. Retrieval
+/// must treat `None` conservatively — see [`MemoryAuthority::is_binding`],
+/// which `None` is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum MemoryAuthority {
     /// Must not be violated without explicit review.
