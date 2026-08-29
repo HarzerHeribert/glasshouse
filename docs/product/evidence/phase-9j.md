@@ -416,3 +416,55 @@ configuration-side twin) and line 1287 were both ticked at, the latter while its
 reserve policy had no caller at all. **Ticking it here is consistent with those;
 refusing it would not be.** The inertness is recorded against **566**, which is
 the line that actually asks the prior to matter, and 566 stays open.
+
+---
+
+### Phase 9J — 566 and 569 returned PARTIAL, with a structural reason (batch 51)
+
+State: **NOT STARTED** for both. The mechanism is built, mutation-killed and
+integrated; **neither box is ticked**, and the orchestrator's ruling is that
+integrating it was still right. Both parts of that need saying.
+
+**Why they cannot close.** `harness::pairing::classify` derives `PairingClass`
+from the harness, the model and the user's corrections. **It never derives it
+from the route.** Every candidate set the shipped binary can construct varies
+only by route: `UpstreamBackend` carries a provider, routes, a credential and a
+cost and **has no model field**, and the one model arrives at
+`SessionRouting::bind` from `profile.model` and is applied to every backend.
+
+So the native-pairing prior is **constant across every candidate set Glasshouse
+ranks**, and a signal constant on the set being ranked cannot change the
+ranking. 566 asks for a prior that gives a native pairing an edge; there is no
+axis along which it can have one. 569 is unreachable for the same reason — a
+warm session cannot outweigh a prior that never tipped anything.
+
+Separately, **a fresh session does not reach the scorer at all**: `best` has
+exactly two call sites, both in `on_provider_failure`. Session start runs
+`assign`, which records a backend the caller already chose.
+
+**This corrects an attribution in this file.** The earlier entry recorded the
+constancy for same-model failover survivors and attributed it to *that caller*.
+It is not about the caller. It is about `classify`'s inputs versus the axis
+every routing decision varies along, and it applies identically to the session
+start this ledger recommended trying next.
+
+**Why the code was integrated anyway — a deliberate, tripwired Cluster B.**
+This project's most common defect is a mechanism built and never installed, and
+this batch closed four of them. Adding a fifth needs a reason. The reason is
+`routing::interactive::tests::the_native_pairing_prior_is_constant_across_a_real_session_start_candidate_set`,
+which builds the candidate set the way `Upstream` + `bind` do and asserts every
+prior is identical **and positive**. If anyone ever makes `classify` read the
+route, **that test fails**, and its failure means 566 has just become reachable.
+
+That is a refusal that maintains itself rather than one that decays in a
+document — which is precisely what the refusal register was created because
+prose could not do. The cost is production code that provably cannot affect a
+decision today, and it is recorded here so no later reader mistakes its presence
+for progress.
+
+**One stale doc comment left deliberately.** `best`'s own comment claims a build
+with no evidence source reproduces "first compatible candidate" with every
+contribution `0.0`. Two later contributions falsified it: a vendor-native
+candidate's prior is 1.0 under `NoObservations`, and
+`failure_domain_contribution` returns −1.0 for a shared domain. Outside the two
+lines; someone should correct it deliberately.

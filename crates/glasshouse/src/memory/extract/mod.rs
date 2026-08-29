@@ -58,6 +58,7 @@ pub mod chunk;
 pub mod credentials;
 pub mod disposable;
 pub mod lifecycle;
+pub mod model;
 pub mod schema;
 
 use std::fmt;

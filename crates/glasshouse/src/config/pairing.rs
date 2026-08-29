@@ -379,6 +379,218 @@ impl ObservationSource for NoObservations {
     }
 }
 
+/// Whether an existing session on one pairing can still be *continued*, and
+/// how.
+///
+/// Two states and no third, for the same reason [`crate::routing::Cost`] has
+/// two: a session Glasshouse cannot say is continuable must not be credited
+/// as if it were. `crate::session::store::SessionRecord::disposition` is what
+/// a caller reads this off — `Active` is [`Self::Live`], `Resumable` is
+/// [`Self::Resumable`], and `Closed` or `Failed` are not warm sessions at
+/// all, so they produce no [`WarmSession`] rather than a third variant here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarmSessionState {
+    /// The session is still running. Continuing it costs nothing and keeps
+    /// every byte of accumulated context.
+    Live,
+    /// The session has stopped but recorded a native identifier, so the
+    /// harness can be asked to resume rather than start fresh. Worth less
+    /// than [`Self::Live`]: the context survives, the process does not.
+    Resumable,
+}
+
+impl WarmSessionState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Resumable => "resumable",
+        }
+    }
+}
+
+impl std::fmt::Display for WarmSessionState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+/// Map line 569's "relevant warm session", as the two facts a caller can
+/// actually establish about one.
+///
+/// Deliberately **not** a pre-blended "continuity value". Line 569 says a
+/// warm session may outweigh the prior *when continuity evidence is
+/// stronger*, which means the comparison has to be driveable from evidence
+/// rather than from a number somebody already decided — the same reason
+/// [`ObservedEvidence`] is a bounded summary of components instead of one
+/// opaque score.
+///
+/// Both fields come straight off one `crate::session::store::SessionRecord`:
+/// `state` from its `disposition()`, `idle_seconds` from the clock minus its
+/// `last_activity_at`. Nothing here is derived, estimated or guessed, and
+/// there is deliberately no field for "how much context accumulated" — the
+/// session store records no turn count, and a field a caller could only fill
+/// by inventing a number is worse than an absent one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WarmSession {
+    pub state: WarmSessionState,
+    /// Seconds since that session last did anything. Negative values (a
+    /// clock that moved backwards) are treated as zero rather than as
+    /// extra freshness — see `continuity_factor`.
+    pub idle_seconds: i64,
+}
+
+/// A source of relevant warm sessions, one evidence key at a time.
+///
+/// A trait for exactly the reason [`ObservationSource`] is one, and with a
+/// second reason on top: the only module that can answer this is
+/// `crate::session`, and `crate::routing::interactive` is forbidden from
+/// naming it — `routing::interactive::tests::the_assignment_is_not_a_session_of_its_own`
+/// scans the source and fails the build if it ever does, because Phase 9H
+/// line 507 requires a gateway assignment not to become a session in its own
+/// right. Continuity therefore arrives as a **value the caller looked up**,
+/// never as a lookup the policy performs.
+pub trait ContinuitySource {
+    /// The warm session relevant to exactly this evidence key, or `None`
+    /// when there is none.
+    ///
+    /// "Relevant" is the caller's word to keep: the key already pins the
+    /// harness, the launch profile, the model and the route, so a source
+    /// that answers `Some` for a key has said those four match. It must not
+    /// answer for a *near* match — line 572's whole point is that the same
+    /// nominal model served two ways is not one body of evidence, and it is
+    /// not one warm session either.
+    fn warm_session(&self, key: &pairing::EvidenceKey) -> Option<WarmSession>;
+}
+
+/// A [`ContinuitySource`] that answers from nothing — a build with no session
+/// store to ask, and the state of a machine that has never run this pairing.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoWarmSessions;
+
+impl ContinuitySource for NoWarmSessions {
+    fn warm_session(&self, _key: &pairing::EvidenceKey) -> Option<WarmSession> {
+        None
+    }
+}
+
+/// How long after its last activity a warm session is worth exactly nothing.
+///
+/// One working day, decayed linearly to **exactly** zero rather than to a
+/// floor — the same shape, and the same reason, as
+/// [`FULL_DECAY_OBSERVATIONS`]: a test can assert `0.0` instead of "smaller
+/// than before".
+///
+/// **Provisional, and the reasoning rather than a measurement.** What is
+/// being valued is the *conversation* a person could pick back up, not a
+/// provider-side prompt cache (those expire in minutes, and Glasshouse
+/// observes neither their presence nor their TTL). A thread abandoned before
+/// lunch is plausibly resumed after it; one abandoned last Tuesday is a new
+/// task wearing an old session's name. Deliberately **much shorter** than
+/// `crate::routing::interactive::FAILOVER_EVIDENCE_WINDOW_SECONDS` (7 days),
+/// because that window asks "has this backend behaved well lately", which
+/// stays true across days, and this one asks "is this thread still live in
+/// someone's head", which does not.
+///
+/// The measurement that would change it: the distribution of
+/// `last_activity_at`-to-resume gaps in the session store. If half of real
+/// resumes happen after this window, it is too short.
+const WARM_SESSION_RELEVANCE_WINDOW_SECONDS: i64 = 8 * 60 * 60;
+
+/// What a *live* warm session contributes at zero idle time.
+///
+/// Above [`PriorStrength::Strong`]'s own `1.0` ceiling on purpose: line 569
+/// requires a warm session to be *able* to outweigh the prior, and a value
+/// at or below the prior's maximum could never do it however fresh the
+/// session was, which would make the line unreachable by construction.
+///
+/// And only `1.5`, not `10.0`: the crossover has to fall somewhere a person
+/// could recognise. At this value a live session outweighs a full-strength
+/// `Strong` prior while it has been idle less than a third of the window —
+/// about two hours and forty minutes — and loses to it after that. A prior a
+/// warm session could never beat is a rule; a prior no warm session could
+/// ever survive is also a rule, in the other direction.
+const LIVE_WARM_SESSION_VALUE: f64 = 1.5;
+
+/// What a *resumable* warm session contributes at zero idle time.
+///
+/// Half the live value, and deliberately **below** `PriorStrength::Strong`'s
+/// `1.0`: resuming a stopped harness restores the context and not the
+/// process, and Glasshouse has no evidence that a resume lands as cleanly as
+/// a session that never stopped. So a stopped session never outweighs a
+/// full-strength strong preference, and does outweigh a `Weak` one (`0.4`)
+/// for the first several hours — which is the interaction line 576's four
+/// preference values are supposed to have with this decision.
+const RESUMABLE_WARM_SESSION_VALUE: f64 = 0.75;
+
+/// A warm session's freshness factor: `1.0` at zero idle time, linear down to
+/// exactly `0.0` at [`WARM_SESSION_RELEVANCE_WINDOW_SECONDS`] and beyond.
+///
+/// A negative `idle_seconds` — a clock that moved backwards between the
+/// session's last activity and now — clamps to `1.0` rather than exceeding
+/// it. Freshness is not a thing a wrong clock may award extra of.
+fn continuity_factor(idle_seconds: i64) -> f64 {
+    if idle_seconds <= 0 {
+        return 1.0;
+    }
+    if idle_seconds >= WARM_SESSION_RELEVANCE_WINDOW_SECONDS {
+        return 0.0;
+    }
+    1.0 - (idle_seconds as f64 / WARM_SESSION_RELEVANCE_WINDOW_SECONDS as f64)
+}
+
+/// Map line 569, as one contribution: what a relevant warm session for `key`
+/// is worth to a routing decision, on the same scale as
+/// [`native_pairing_prior_contribution`]'s own prior.
+///
+/// Always returns a contribution, `0.0` when there is no warm session, for
+/// the same reason the prior is always present even at `0.0`: an explanation
+/// that silently omits a term a reader is looking for cannot be distinguished
+/// from one where the term was never computed, and a mutation that deletes
+/// the lookup would then be invisible.
+///
+/// **Never negative.** The absence of a warm session is not evidence against
+/// a candidate, exactly as [`crate::routing::interactive`]'s failure-domain
+/// signal refuses to reward a candidate for an independence nothing
+/// established. A cold candidate is scored on its prior and its evidence, and
+/// this term simply says nothing about it.
+///
+/// This is additive and never a filter: a candidate with no warm session is
+/// still ranked, and a strong enough `evidence_signal` outranks the
+/// warmest session there is — `evidence_signal` is unbounded and this is
+/// bounded by `LIVE_WARM_SESSION_VALUE`.
+pub fn session_continuity_contribution(
+    key: &pairing::EvidenceKey,
+    continuity: &dyn ContinuitySource,
+) -> crate::routing::Contribution {
+    use crate::routing::Contribution;
+
+    let Some(warm) = continuity.warm_session(key) else {
+        return Contribution::new(
+            "session continuity",
+            0.0,
+            "no relevant warm session for this exact harness, launch profile, model and backend \
+             combination — a cold candidate is not penalised for it",
+        );
+    };
+
+    let base = match warm.state {
+        WarmSessionState::Live => LIVE_WARM_SESSION_VALUE,
+        WarmSessionState::Resumable => RESUMABLE_WARM_SESSION_VALUE,
+    };
+    let factor = continuity_factor(warm.idle_seconds);
+    Contribution::new(
+        "session continuity",
+        base * factor,
+        format!(
+            "a {} warm session for this exact combination, idle {}s of the \
+             {WARM_SESSION_RELEVANCE_WINDOW_SECONDS}s a warm session stays relevant for \
+             (worth nothing at or past it)",
+            warm.state,
+            warm.idle_seconds.max(0)
+        ),
+    )
+}
+
 /// How many reliable observations it takes for [`evidence_signal`] to speak
 /// at full confidence. Below this, a real but thin observation record still
 /// contributes — scaled down, never zeroed — because "no evidence yet" and
@@ -1295,6 +1507,53 @@ fn write_configured(out: &mut String, entry: &ConfiguredPairing, overrides: &Pai
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three boundaries of a warm session's freshness, including the one
+    /// no caller should ever produce: a clock that moved backwards must not
+    /// award a session *more* than full freshness. `1.0` is the ceiling
+    /// because [`LIVE_WARM_SESSION_VALUE`] is stated as the value at zero
+    /// idle time, and a factor above one would silently raise it.
+    #[test]
+    fn a_warm_sessions_freshness_is_bounded_at_both_ends() {
+        assert_eq!(continuity_factor(0), 1.0);
+        assert_eq!(continuity_factor(-3600), 1.0);
+        assert_eq!(
+            continuity_factor(WARM_SESSION_RELEVANCE_WINDOW_SECONDS),
+            0.0
+        );
+        assert_eq!(
+            continuity_factor(WARM_SESSION_RELEVANCE_WINDOW_SECONDS * 100),
+            0.0
+        );
+        let half = continuity_factor(WARM_SESSION_RELEVANCE_WINDOW_SECONDS / 2);
+        assert!(
+            (half - 0.5).abs() < 1e-9,
+            "linear decay, not a curve: {half}"
+        );
+    }
+
+    /// The two constants the whole of line 569 turns on, as an assertion
+    /// rather than as arithmetic in a doc comment: a live warm session must
+    /// be *able* to outweigh the strongest prior, and a resumable one must
+    /// not. If either constant is edited so that this stops holding, the two
+    /// lines it is here for become unreachable in one direction or the other.
+    #[test]
+    fn the_warm_session_values_straddle_the_strongest_prior() {
+        assert!(
+            LIVE_WARM_SESSION_VALUE > PriorStrength::Strong.base_magnitude(),
+            "a live warm session that could never outweigh the prior makes line 569 \
+             unreachable"
+        );
+        assert!(
+            RESUMABLE_WARM_SESSION_VALUE < PriorStrength::Strong.base_magnitude(),
+            "a prior no warm session of any kind could survive is a rule, not a prior"
+        );
+        assert!(
+            RESUMABLE_WARM_SESSION_VALUE > PriorStrength::Weak.base_magnitude(),
+            "continuity must interact with the user's four preference values, not sit \
+             above or below all of them"
+        );
+    }
 
     /// Design decision 7: `Pin` is not a strength, and it must not
     /// type-check where a strength is required. This does not compile if

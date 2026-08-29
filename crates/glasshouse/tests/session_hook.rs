@@ -440,11 +440,17 @@ fn the_tail_returns_harness_reports_and_not_the_interfaces_own_events() {
 
 /// Map line 1791's memory-extraction half, premise. Left enabled — the
 /// default, so no `memory_extraction` key is written at all — a `Stop` for a
-/// completed turn reaches `run_extraction_after_turn`, which always logs one
-/// of its two `tracing::info!` lines (`main.rs:1648` or `main.rs:1657`): this
-/// fixture configures no provider, so `RoutedNoModel` always fails and the
-/// "produced nothing" line is the one that fires, but either is proof the
-/// trigger ran.
+/// completed turn reaches `run_extraction`, which always logs one of its two
+/// `tracing::info!` lines: this fixture configures no provider, so
+/// `RoutedNoModel` always fails and the "produced nothing" line is the one
+/// that fires, but either is proof the trigger ran.
+///
+/// **The trigger is asserted as well as the attempt.** Those two log lines
+/// used to name the completed turn in their own message text; there are two
+/// triggers now (Phase 21's compaction line landed beside this one), so the
+/// message is trigger-agnostic and the trigger travels as its own field.
+/// Asserting only the message would leave this control unable to tell the
+/// post-turn trigger from the compaction one.
 ///
 /// This is the control for
 /// [`memory_extraction_disabled_in_user_config_is_not_attempted_while_the_hook_still_records_the_turn`]:
@@ -464,9 +470,14 @@ fn memory_extraction_left_enabled_is_attempted_after_a_completed_turn() {
 
     let written = std::fs::read_to_string(&log_file).expect("the hook must have written a log");
     assert!(
-        written.contains("memory extraction ran after a completed task")
-            || written.contains("memory extraction after a completed task produced nothing"),
+        written.contains("memory extraction ran")
+            || written.contains("memory extraction produced nothing"),
         "extraction left enabled must be attempted after a completed turn: {written}"
+    );
+    assert!(
+        written.contains("trigger=task_completed"),
+        "the attempt must name the trigger that made it, and this one is a completed task: \
+         {written}"
     );
 }
 
@@ -475,8 +486,13 @@ fn memory_extraction_left_enabled_is_attempted_after_a_completed_turn() {
 /// [`UserConfig::set_memory_extraction`] and [`UserConfig::save`], so this
 /// test breaks if the key is ever renamed — makes
 /// `memory_extraction_enabled(runtime)` false, and neither of
-/// `run_extraction_after_turn`'s log lines appears for the same completed
-/// turn the premise test above drives.
+/// `run_extraction`'s log lines appears for the same completed turn the
+/// premise test above drives.
+///
+/// The forbidden strings are kept identical to the ones the premise test
+/// asserts *present*, and that is load-bearing: an absence assertion against
+/// a string production no longer emits passes for the wrong reason, silently,
+/// forever. The two lists are read together or not at all.
 ///
 /// The lifecycle event is still recorded: this proves the switch turned off
 /// extraction specifically, not that the hook did nothing at all.
@@ -503,8 +519,9 @@ fn memory_extraction_disabled_in_user_config_is_not_attempted_while_the_hook_sti
 
     let written = std::fs::read_to_string(&log_file).expect("the hook must have written a log");
     for forbidden in [
-        "memory extraction ran after a completed task",
-        "memory extraction after a completed task produced nothing",
+        "memory extraction ran",
+        "memory extraction produced nothing",
+        "trigger=task_completed",
     ] {
         assert!(
             !written.contains(forbidden),

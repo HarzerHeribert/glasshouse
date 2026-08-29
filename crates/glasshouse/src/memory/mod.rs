@@ -45,6 +45,7 @@ mod store;
 pub use extract::{
     ExtractionModel, ExtractionOutcome, ExtractionTrigger, Extractor, ModelError,
     disposable::RoutedNoModel,
+    model::{ConfiguredModel, ConfiguredModelError},
 };
 pub use policy::{MemoryRefusal, admit};
 pub use store::{

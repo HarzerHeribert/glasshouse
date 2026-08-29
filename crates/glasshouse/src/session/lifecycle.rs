@@ -117,6 +117,41 @@ pub fn lifecycle_for(event: &str) -> Option<SessionLifecycle> {
     event_for(event)?.implied_state()
 }
 
+/// Whether `event` is a harness saying it is about to compact its own
+/// context — Phase 21's *"allow memory extraction to run before or around
+/// native prompt compaction."*
+///
+/// # Why this is a separate question from [`event_for`]
+///
+/// A compaction is **not a `SessionLifecycle` state**: a session that
+/// compacts was running before and is running after, and there is no
+/// `LifecycleEvent` for it. Answering it through [`event_for`] would mean
+/// inventing one, which would mean a new `database::LIFECYCLE_EVENT_KINDS`
+/// value and a migration to widen a `CHECK` — for a fact nobody asked to
+/// have recorded. So this is a predicate a *trigger* can ask, and the event
+/// stays exactly as observable as it already was: preserved by
+/// [`observe`]'s own [`crate::events::RawObservation`] line, and recorded
+/// nowhere.
+///
+/// # Why `PostCompact` is not here
+///
+/// `PostCompact` is a real Codex event and Glasshouse asks for it (see
+/// `harness::codex`'s `REPORTED_EVENTS`), but extraction reads **this
+/// project's event log**, which a harness compacting its own context does not
+/// change. Running on both would be two extractions over identical material,
+/// inside the user's session, per compaction. `PreCompact` is the "before"
+/// the line names and the one that arrives while the harness still has what
+/// it is about to lose. Named explicitly, rather than left to the wildcard,
+/// so the omission reads as a decision.
+///
+/// Claude Code's observed catalogue has no compaction event at all, so this
+/// answers `false` for every event that harness sends today.
+///
+/// Event names are the harness's own, exactly as its adapter declares them.
+pub fn precedes_native_compaction(event: &str) -> bool {
+    matches!(event, "PreCompact")
+}
+
 /// Whether `current` may be moved to `next` by a harness event.
 ///
 /// Only a live session can change state this way. A session that has stopped,
@@ -170,6 +205,23 @@ mod tests {
         // arm for why the operating system, not this hook, is the authority
         // for a session having ended.
         assert_eq!(lifecycle_for("SessionEnd"), None);
+    }
+
+    /// A compaction is observable and is not a state. Both halves matter:
+    /// the first is what makes Phase 21's compaction trigger possible at
+    /// all, and the second is why it needs no migration.
+    #[test]
+    fn a_compaction_is_observable_and_is_not_a_lifecycle_state() {
+        assert!(precedes_native_compaction("PreCompact"));
+        assert_eq!(lifecycle_for("PreCompact"), None);
+        assert_eq!(event_for("PreCompact"), None);
+
+        for other in ["PostCompact", "Stop", "UserPromptSubmit", "PreToolUse", ""] {
+            assert!(
+                !precedes_native_compaction(other),
+                "`{other}` is not a harness saying it is about to compact"
+            );
+        }
     }
 
     #[test]

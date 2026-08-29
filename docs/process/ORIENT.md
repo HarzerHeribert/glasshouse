@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**742 / 1280 mandatory capabilities (58%)** — 538 open across 68 phases.
+**745 / 1280 mandatory capabilities (58%)** — 535 open across 67 phases.
 
 ## Where the work is
 
@@ -38,7 +38,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
 | Phase 46 | Security and contamination tests | **2** | 6 | `1739` |
 | Phase 49 | Configuration | **2** | 14 | `1784` |
-| Phase 21 | Memory extraction | **3** | 10 | `831` |
 | Phase 32F | Protected quota reserve | **3** | 5 | `1285` |
 | Phase 16 | Worker transparency | **4** | 3 | `742` |
 | Phase 21F | Memory retrieval quality | **4** | 7 | `927` |
@@ -91,7 +90,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 51 | Evaluation hooks | **37** | 0 | `1818` |
 | Phase 21K | Assumption-aware implementation guardrails | **43** | 0 | `992` |
 
-**Fully closed (36):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 18, Phase 19, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 32, Phase 35, Phase 40, Phase 45, Phase 48.
+**Fully closed (37):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 32, Phase 35, Phase 40, Phase 45, Phase 48.
 
 ## The nearly-finished phases, in full
 
@@ -176,12 +175,6 @@ these unwrapped.
 
 - **1795** ☐ Allow the user to configure the routing-model fallback chain.
 - **1796** ☐ Allow the user to configure workload-tier ceilings for individual models.
-
-### Phase 21 — Memory extraction  (3 open, 10 closed)
-
-- **834** ☐ Allow a configurable cheap or local model to perform memory extraction.
-- **842** ☐ Allow memory extraction to run after task completion.
-- **843** ☐ Allow memory extraction to run before or around native prompt compaction.
 
 ### Phase 32F — Protected quota reserve  (3 open, 5 closed)
 

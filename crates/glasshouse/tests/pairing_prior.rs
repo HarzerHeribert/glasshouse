@@ -504,3 +504,354 @@ fn an_unusable_preference_spelling_is_reported_rather_than_silently_defaulted() 
         "the report claimed nothing was configured while a value sat in the file:\n{report}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Lines 566 and 569, entered through `InteractiveRouting::start` — which is
+// the function that reaches `best`, not the prior's own scorer (§35).
+//
+// Read `docs/product/evidence/phase-9j.md` and this package's report before
+// reading these as evidence for the two boxes: `start` has **no production
+// caller**, and the native-pairing prior is constant across every candidate
+// set the shipped binary can build. What these prove is the policy — that the
+// prior and a warm session are commensurable, that either can win, and that
+// neither is a short circuit. What they do not prove is that any of it
+// changes a decision the binary makes today.
+// ---------------------------------------------------------------------------
+
+use glasshouse::config::pairing::{
+    ContinuitySource, NoWarmSessions, WarmSession, WarmSessionState,
+    session_continuity_contribution,
+};
+use glasshouse::routing::interactive::{InteractiveRouting, SessionStartInputs};
+use glasshouse::routing::{Backend, Cost, CredentialId, ToolSemantics};
+use glasshouse::secret::SecretRef;
+
+fn candidate(provider: &str, model: &str) -> Backend {
+    Backend::new(
+        provider,
+        "anthropic-messages",
+        AssignedModel::named(model),
+        CredentialId::new(
+            provider,
+            SecretRef::Environment {
+                var: format!("{}_API_KEY", provider.to_uppercase()),
+            },
+        ),
+        Cost::Metered,
+        ToolSemantics::Unverified,
+    )
+}
+
+/// A warm session on exactly one provider, matched through the evidence key's
+/// own route so that line 572's "the same nominal model served two ways is
+/// not one body of evidence" holds for continuity too.
+struct WarmOn(&'static str, WarmSession);
+
+impl ContinuitySource for WarmOn {
+    fn warm_session(&self, key: &EvidenceKey) -> Option<WarmSession> {
+        (key.route().provider.as_deref() == Some(self.0)).then_some(self.1)
+    }
+}
+
+fn live(idle_seconds: i64) -> WarmSession {
+    WarmSession {
+        state: WarmSessionState::Live,
+        idle_seconds,
+    }
+}
+
+fn resumable(idle_seconds: i64) -> WarmSession {
+    WarmSession {
+        state: WarmSessionState::Resumable,
+        idle_seconds,
+    }
+}
+
+fn start_with(
+    preference: PairingPreference,
+    candidates: &[Backend],
+    evidence: &dyn ObservationSource,
+    continuity: &dyn ContinuitySource,
+) -> glasshouse::routing::interactive::SessionStart {
+    InteractiveRouting::new()
+        .start(
+            "claude-code",
+            "default",
+            candidates,
+            &SessionStartInputs {
+                preference,
+                overrides: &no_overrides(),
+                evidence,
+                continuity,
+            },
+        )
+        .expect("a non-empty candidate set produces a start")
+}
+
+/// Line 569, the direction that makes the line non-trivial: a warm session
+/// beats a native pairing that has nothing but its prior.
+///
+/// The vendor-native candidate is configured **first**, so order cannot
+/// explain the result, and it holds a full-strength `Strong` prior with zero
+/// observations — the most favourable case line 566 could ask for.
+///
+/// This candidate set has two different models for one harness, which is a
+/// set the shipped binary cannot build (`Upstream::backends` carries no
+/// model). It is the set line 569's sentence describes, and constructing it
+/// by hand is the only way to exercise the comparison at all.
+#[test]
+fn a_live_warm_session_outweighs_a_full_strength_native_pairing_prior() {
+    let candidates = [
+        candidate("anthropic", "claude-fable-5"),
+        candidate("openrouter", "unlisted-model-v1"),
+    ];
+    let start = start_with(
+        PairingPreference::Strong,
+        &candidates,
+        &NoObservations,
+        &WarmOn("openrouter", live(0)),
+    );
+
+    assert_eq!(
+        start.assignment().provider(),
+        "openrouter",
+        "a fresh live warm session must be able to outweigh the prior, or line 569 is \
+         unreachable by construction:\n{}",
+        start.explanation().render()
+    );
+}
+
+/// The same comparison, losing. Continuity decays, and once it has decayed
+/// past the prior the native pairing wins again — which is what stops 569
+/// from having quietly turned a soft prior into a warm-session trump card.
+#[test]
+fn a_stale_warm_session_no_longer_outweighs_the_native_pairing_prior() {
+    let candidates = [
+        candidate("anthropic", "claude-fable-5"),
+        candidate("openrouter", "unlisted-model-v1"),
+    ];
+    let start = start_with(
+        PairingPreference::Strong,
+        &candidates,
+        &NoObservations,
+        // Six hours of the eight-hour relevance window: 1.5 * 0.25 = 0.375,
+        // below the undecayed strong prior's 1.0.
+        &WarmOn("openrouter", live(6 * 60 * 60)),
+    );
+
+    assert_eq!(
+        start.assignment().provider(),
+        "anthropic",
+        "a warm session idle for most of its relevance window must lose to the prior:\n{}",
+        start.explanation().render()
+    );
+}
+
+/// A warm session past the relevance window is worth exactly zero, not a
+/// floor — the same property `FULL_DECAY_OBSERVATIONS` gives the prior, and
+/// the reason an equality assertion is possible here at all.
+#[test]
+fn a_warm_session_past_its_relevance_window_contributes_exactly_zero() {
+    let key = key_for(IntegrationId::ClaudeCode, "claude-fable-5");
+    let contribution =
+        session_continuity_contribution(&key, &FixedWarm(vec![(key.clone(), live(9 * 60 * 60))]));
+    assert_eq!(contribution.magnitude(), 0.0);
+    assert_eq!(contribution.name(), "session continuity");
+}
+
+struct FixedWarm(Vec<(EvidenceKey, WarmSession)>);
+
+impl ContinuitySource for FixedWarm {
+    fn warm_session(&self, key: &EvidenceKey) -> Option<WarmSession> {
+        self.0
+            .iter()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, warm)| *warm)
+    }
+}
+
+/// Continuity is commensurable with the user's own preference, not just with
+/// the default: a stopped-but-resumable session is worth less than a full
+/// `Strong` prior and more than a `Weak` one. If the two signals were on
+/// unrelated scales this test could not be written.
+#[test]
+fn a_resumable_warm_session_loses_to_a_strong_prior_and_beats_a_weak_one() {
+    let candidates = [
+        candidate("anthropic", "claude-fable-5"),
+        candidate("openrouter", "unlisted-model-v1"),
+    ];
+
+    let strong = start_with(
+        PairingPreference::Strong,
+        &candidates,
+        &NoObservations,
+        &WarmOn("openrouter", resumable(0)),
+    );
+    assert_eq!(
+        strong.assignment().provider(),
+        "anthropic",
+        "0.75 of resumable continuity must not beat a 1.0 strong prior:\n{}",
+        strong.explanation().render()
+    );
+
+    let weak = start_with(
+        PairingPreference::Weak,
+        &candidates,
+        &NoObservations,
+        &WarmOn("openrouter", resumable(0)),
+    );
+    assert_eq!(
+        weak.assignment().provider(),
+        "openrouter",
+        "0.75 of resumable continuity must beat a 0.4 weak prior, or the user's four \
+         preference values do not interact with continuity at all:\n{}",
+        weak.explanation().render()
+    );
+}
+
+/// Neither signal is a trump card. Line 571 already says observed evidence
+/// may outweigh the prior; this is the same requirement extended to
+/// continuity, and it is what keeps line 574 true at this caller — measured
+/// evidence still wins over both.
+#[test]
+fn measured_evidence_outranks_both_the_prior_and_a_fresh_warm_session() {
+    let native = candidate("anthropic", "claude-fable-5");
+    let warm_cross_vendor = candidate("openrouter", "unlisted-model-v1");
+    let measured = candidate("bedrock", "unlisted-model-v1");
+
+    let observations = FixedObservations(vec![(
+        EvidenceKey::new(
+            IntegrationId::ClaudeCode,
+            "default",
+            AssignedModel::named("unlisted-model-v1"),
+            ServingRoute {
+                provider: Some("bedrock".to_owned()),
+                gateway: None,
+                protocol: Some(WireProtocol::AnthropicMessages),
+            },
+        ),
+        good_observations(5),
+    )]);
+
+    let start = start_with(
+        PairingPreference::Strong,
+        &[native, warm_cross_vendor, measured],
+        &observations,
+        &WarmOn("openrouter", live(0)),
+    );
+
+    assert_eq!(
+        start.assignment().provider(),
+        "bedrock",
+        "a strong measured record must outrank both a full-strength native prior and a fresh \
+         live warm session, or the prior and continuity have become rules:\n{}",
+        start.explanation().render()
+    );
+}
+
+/// Nothing fabricates "vendor-native". The prior is zero for a model no
+/// declaration covers, and becomes positive only once somebody declares the
+/// family — through the same `[pairing.harnesses.<slug>]` correction line 561
+/// already ships.
+#[test]
+fn the_prior_at_session_start_comes_only_from_a_declared_native_family() {
+    let candidates = [candidate("openrouter", "unlisted-model-v1")];
+
+    let undeclared = start_with(
+        PairingPreference::Strong,
+        &candidates,
+        &NoObservations,
+        &NoWarmSessions,
+    );
+    let prior_of = |start: &glasshouse::routing::interactive::SessionStart| {
+        start
+            .explanation()
+            .contributions()
+            .iter()
+            .find(|c| c.name() == "native-pairing prior")
+            .expect("the prior is always named")
+            .magnitude()
+    };
+    assert_eq!(
+        prior_of(&undeclared),
+        0.0,
+        "a model nobody declared native must earn no prior"
+    );
+
+    let mut harnesses = std::collections::BTreeMap::new();
+    harnesses.insert(
+        IntegrationId::ClaudeCode.slug().to_owned(),
+        glasshouse::harness::pairing::SupportCorrection {
+            native_families: Some(vec!["unlisted".to_owned()]),
+            supported_models: None,
+        },
+    );
+    let mut models = std::collections::BTreeMap::new();
+    models.insert(
+        "unlisted-model-v1".to_owned(),
+        glasshouse::harness::pairing::ModelCorrection {
+            developer: Some(glasshouse::harness::pairing::ModelDeveloper::named(
+                "anthropic",
+            )),
+            family: Some("unlisted".to_owned()),
+            behaviour: None,
+        },
+    );
+    let corrected = InteractiveRouting::new()
+        .start(
+            "claude-code",
+            "default",
+            &candidates,
+            &SessionStartInputs {
+                preference: PairingPreference::Strong,
+                overrides: &glasshouse::harness::pairing::PairingOverrides::from_parts(
+                    "the user configuration file",
+                    models,
+                    harnesses,
+                ),
+                evidence: &NoObservations,
+                continuity: &NoWarmSessions,
+            },
+        )
+        .expect("one candidate is not none");
+    assert!(
+        prior_of(&corrected) > 0.0,
+        "a declared native family must earn the prior:\n{}",
+        corrected.explanation().render()
+    );
+}
+
+/// Line 575 at this caller, and the one security invariant a routing
+/// explanation has: it reaches a diagnostic, so it must name the credential
+/// only as `CredentialId` already names it — never a value.
+#[test]
+fn a_session_start_explanation_names_every_signal_and_no_credential_value() {
+    let start = start_with(
+        PairingPreference::Strong,
+        &[candidate("anthropic", "claude-fable-5")],
+        &NoObservations,
+        &WarmOn("anthropic", live(60)),
+    );
+    let rendered = start.explanation().render();
+
+    for expected in [
+        "pairing class",
+        "local evidence strength",
+        "native-pairing prior",
+        "session continuity",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "the explanation must name `{expected}`:\n{rendered}"
+        );
+    }
+    assert!(
+        rendered.contains("vendor-native"),
+        "line 575's first term is the class itself:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("ANTHROPIC_API_KEY"),
+        "an explanation reaches a diagnostic and must not carry a credential reference into \
+         it:\n{rendered}"
+    );
+}

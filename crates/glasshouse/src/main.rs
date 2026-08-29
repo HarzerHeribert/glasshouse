@@ -1256,7 +1256,7 @@ fn report_hook(runtime: &Runtime, session: &str, event: &str) {
 /// back the same way, for the same reason — a broken config file must not
 /// silently and permanently turn off a working capability, and this trigger
 /// already tolerates every other failure non-fatally (see
-/// [`run_extraction_after_turn`]'s own doc comment).
+/// [`run_extraction`]'s own doc comment).
 fn memory_extraction_enabled(runtime: &Runtime) -> bool {
     let Ok(user) = UserConfig::load(runtime.paths()) else {
         return true;
@@ -1291,7 +1291,7 @@ fn automatic_checkpoint_enabled(runtime: &Runtime) -> bool {
 ///
 /// # Nothing here can hurt the session
 ///
-/// Matching [`run_extraction_after_turn`]'s own policy for its neighbour: a
+/// Matching [`run_extraction`]'s own policy for its neighbour: a
 /// checkpoint that cannot be taken is logged and this returns. It never
 /// propagates an error to [`report_hook_with`] and never blocks past a
 /// synchronous read of a couple of small files and one write — there is no
@@ -1338,6 +1338,102 @@ fn checkpoint_after_turn(runtime: &Runtime, id: &SessionId, harness: &str) {
     }
 }
 
+/// Phase 21 line 834's production caller: the cheap or local model the user
+/// actually chose, ready to be asked.
+///
+/// # `None` is the whole of the consent, and it is the default
+///
+/// This returns `Some` only when
+/// [`glasshouse::config::EffectiveConfig::memory_extraction_model`] names a
+/// provider and model — a field that is `None` until a person writes it. A
+/// user who has configured providers, free models, routing preferences and
+/// nothing else gets `None` here and therefore exactly today's behaviour:
+/// [`disposable_extraction_model`] falls through to
+/// `glasshouse::memory::RoutedNoModel`, which chooses a resource, says so,
+/// and calls nothing.
+///
+/// That is deliberately stricter than "the user has configured a free
+/// model". A free-model list is a statement about cost; it is not a request
+/// that a hook running **inside a coding session** start making outbound
+/// requests. Line 834 says *configurable*, and this is the configuration.
+///
+/// # Every failure below is `None`, logged once
+///
+/// An unreadable configuration, a provider that is not in the table, a
+/// template that does not resolve, a protocol this build does not speak, a
+/// credential that is named and unset — each is a choice that cannot produce
+/// a call, and each returns `None` after one log line. Never a guess at a
+/// correction, and never a silent one: the resulting outcome still says in
+/// words that no model was called, which is what stops an evaluation reading
+/// later as evidence that one did.
+fn configured_extraction_model(
+    runtime: &Runtime,
+) -> Option<Box<dyn glasshouse::memory::ExtractionModel>> {
+    use glasshouse::memory::ConfiguredModel;
+    use glasshouse::secret::{SecretRef, SecretStore as _};
+
+    let user = UserConfig::load(runtime.paths())
+        .inspect_err(
+            |err| tracing::debug!(error = %err, "could not read configuration for the extraction model"),
+        )
+        .ok()?;
+    let project = config::load_project_config(runtime.project())
+        .inspect_err(
+            |err| tracing::debug!(error = %err, "could not read project configuration for the extraction model"),
+        )
+        .ok()
+        .flatten();
+    let effective = EffectiveConfig::new(&user, project.as_ref());
+    let chosen = effective.memory_extraction_model().value?;
+
+    // The provider's whole configuration comes from whichever layer actually
+    // holds its name, project winning over user — the same rule
+    // `disposable_candidates` applies, and for the same reason.
+    let Some(provider_config) = project
+        .as_ref()
+        .and_then(|p| p.providers().get(chosen.provider()))
+        .or_else(|| user.providers().get(chosen.provider()))
+    else {
+        tracing::warn!(
+            provider = chosen.provider(),
+            "the configured extraction model names a provider this project has not configured"
+        );
+        return None;
+    };
+    if !provider_config.enabled() {
+        tracing::warn!(
+            provider = chosen.provider(),
+            "the configured extraction model names a disabled provider"
+        );
+        return None;
+    }
+    let provider = match provider_config.to_provider(chosen.provider()) {
+        Ok(provider) => provider,
+        Err(err) => {
+            tracing::warn!(error = %err, "the configured extraction model's provider does not resolve");
+            return None;
+        }
+    };
+
+    // A provider that names no credential variable is the local case — a
+    // runner on loopback needs none, and `ConfiguredModel::new` builds it
+    // without one. A provider that names several and has one set resolves to
+    // the first that does, the same order `disposable_candidates` walks.
+    let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
+    let credential = provider
+        .credential_env
+        .iter()
+        .find_map(|var| secrets.resolve(&SecretRef::Environment { var: var.clone() }));
+
+    match ConfiguredModel::new(&provider, chosen.model(), credential) {
+        Ok(model) => Some(Box::new(model)),
+        Err(err) => {
+            tracing::warn!(error = %err, "the configured extraction model cannot be used");
+            None
+        }
+    }
+}
+
 /// Phase 9I lines 530, 531 and 540's production caller: route this
 /// extraction through `glasshouse::routing::disposable::DisposableRouting`
 /// over the free models the user has actually configured, and report the
@@ -1349,6 +1445,9 @@ fn checkpoint_after_turn(runtime: &Runtime, id: &SessionId, harness: &str) {
 /// [`report_hook_with`]'s own doc comment describes for every other failure
 /// on this path.
 fn disposable_extraction_model(runtime: &Runtime) -> Box<dyn glasshouse::memory::ExtractionModel> {
+    if let Some(chosen) = configured_extraction_model(runtime) {
+        return chosen;
+    }
     let user = match UserConfig::load(runtime.paths()) {
         Ok(user) => user,
         Err(err) => {
@@ -1576,7 +1675,7 @@ const PAYLOAD_DRAIN_BOUND: std::time::Duration = std::time::Duration::from_secs(
 /// work is left running, the process finishes what it was doing and exits, and
 /// the operating system closes whatever handle the thread was waiting on.
 ///
-/// [`run_extraction_after_turn`] does the same thing by hand rather than
+/// [`run_extraction`] does the same thing by hand rather than
 /// through this, because it needs the extraction's *outcome* back and not
 /// merely the fact that it arrived.
 fn abandon_after(bound: std::time::Duration, work: impl FnOnce() + Send + 'static) -> bool {
@@ -1653,6 +1752,32 @@ fn report_hook_with(
         // drained into `io::sink()` above, unread; nothing downstream of here
         // has it to leak. See `the_hook_command_never_reads_its_payload`.
         let Some(translated) = session::lifecycle::observe(&record.harness, event) else {
+            // Phase 21: *allow memory extraction to run before or around
+            // native prompt compaction.*
+            //
+            // A compaction is not a `SessionLifecycle` state and has no
+            // `LifecycleEvent`, so it lands here — in the arm for events that
+            // translate to nothing — rather than beside the completed-turn
+            // trigger below. That is the whole reason this trigger needs no
+            // migration: nothing is recorded, `observe` has already preserved
+            // the raw observation, and only the trigger fires. See
+            // `session::lifecycle::precedes_native_compaction`.
+            //
+            // Gated by the same `memory_extraction` switch as the post-turn
+            // trigger, and deliberately so: a user who turned automatic
+            // extraction off turned it off, not "off except when the harness
+            // compacts".
+            if session::lifecycle::precedes_native_compaction(event) {
+                if memory_extraction_enabled(runtime) {
+                    run_extraction(
+                        runtime,
+                        &id,
+                        model(),
+                        glasshouse::memory::ExtractionTrigger::BeforeCompaction,
+                    );
+                }
+                return Ok(());
+            }
             // An event this build does not recognise. Harnesses gain events
             // between releases, and guessing a state from an unfamiliar name
             // would be worse than ignoring it.
@@ -1686,7 +1811,7 @@ fn report_hook_with(
         // Ordered **after** the event is recorded, on purpose: the log is the
         // material extraction reads, and a turn's own closing event should be
         // in it. Ordered **before** the state change for no reason at all
-        // beyond it reading better; neither `run_extraction_after_turn` nor
+        // beyond it reading better; neither `run_extraction` nor
         // `checkpoint_after_turn` can fail in a way the rest of this function
         // could notice.
         //
@@ -1701,7 +1826,12 @@ fn report_hook_with(
             }
         ) {
             if memory_extraction_enabled(runtime) {
-                run_extraction_after_turn(runtime, &id, model());
+                run_extraction(
+                    runtime,
+                    &id,
+                    model(),
+                    glasshouse::memory::ExtractionTrigger::TaskCompleted,
+                );
             }
             if automatic_checkpoint_enabled(runtime) {
                 checkpoint_after_turn(runtime, &id, &record.harness);
@@ -1806,14 +1936,15 @@ const EXTRACTION_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
 /// reading a bounded window of the log, scrubbing and bounding the chunk — so
 /// what is on the far side of the bound is the model call and the insert, and
 /// a timeout means the model, not Glasshouse.
-fn run_extraction_after_turn(
+fn run_extraction(
     runtime: &Runtime,
     id: &SessionId,
     model: Box<dyn glasshouse::memory::ExtractionModel>,
+    trigger: glasshouse::memory::ExtractionTrigger,
 ) {
     use glasshouse::memory::extract::chunk::ChunkLimits;
     use glasshouse::memory::extract::lifecycle::{EVENT_WINDOW, chunk_for_session};
-    use glasshouse::memory::{ExtractionTrigger, Extractor, ProjectMemory};
+    use glasshouse::memory::{Extractor, ProjectMemory};
 
     let prepared = (|| -> anyhow::Result<_> {
         let log = EventLog::open(runtime)?;
@@ -1846,8 +1977,7 @@ fn run_extraction_after_turn(
     let session = id.clone();
     std::thread::spawn(move || {
         let store = memory.store();
-        let outcome =
-            Extractor::new(&store, model.as_ref()).run(&chunk, ExtractionTrigger::TaskCompleted);
+        let outcome = Extractor::new(&store, model.as_ref()).run(&chunk, trigger);
         // A closed receiver means the bound expired and nobody is listening.
         // That is a normal outcome here, not an error.
         let _ = tx.send(outcome);
@@ -1858,22 +1988,25 @@ fn run_extraction_after_turn(
         Ok(outcome) => match &outcome.failure {
             None => tracing::info!(
                 session = %id,
+                trigger = %trigger,
                 model = outcome.model,
                 stored = outcome.stored(),
                 duplicates = outcome.duplicates,
                 speculative = outcome.speculative,
                 rejected = outcome.rejected.len(),
-                "memory extraction ran after a completed task"
+                "memory extraction ran"
             ),
             Some(failure) => tracing::info!(
                 session = %id,
+                trigger = %trigger,
                 model = outcome.model,
                 reason = %failure,
-                "memory extraction after a completed task produced nothing"
+                "memory extraction produced nothing"
             ),
         },
         Err(_) => tracing::warn!(
             session = %id,
+            trigger = %trigger,
             bound_ms = EXTRACTION_BOUND.as_millis(),
             "memory extraction did not finish within its bound; the session is unaffected"
         ),
@@ -5216,7 +5349,7 @@ mod tests {
     /// policy names, and the description says plainly that no model was
     /// called.
     ///
-    /// **Not through `report_hook`'s own log line.** `run_extraction_after_turn`
+    /// **Not through `report_hook`'s own log line.** `run_extraction`
     /// reports its outcome only via `tracing`, and capturing that reliably
     /// needs a thread-local subscriber — which this project's own
     /// `gateway::ingress::tests::recorded` uses successfully in isolation, but

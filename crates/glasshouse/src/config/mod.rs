@@ -1422,6 +1422,48 @@ impl FreeResourceRef {
     }
 }
 
+/// The provider and model a user has chosen to perform memory extraction —
+/// Phase 21's *"allow a configurable cheap or local model to perform memory
+/// extraction."*
+///
+/// # Why this is its own field and not a reuse of the routing preferences
+///
+/// [`FreeResourceRef`] is the same two strings, and reusing it was the
+/// tempting move. It would have been wrong: the free-routing preferences say
+/// *which resource to prefer when Glasshouse routes*, and a user who has
+/// written them has not thereby asked Glasshouse to start making outbound
+/// requests from a hook that runs inside their coding session. This field is
+/// that request, made once and explicitly, and `None` — the default — is
+/// exactly today's behaviour.
+///
+/// # Names only, exactly like every other provider field here
+///
+/// A provider name and a model identifier. The base URL, the credential
+/// variable names and any extra headers all come from the
+/// [`ProviderConfig`] this names, which is where they already live.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtractionModelRef {
+    provider: String,
+    model: String,
+}
+
+impl ExtractionModelRef {
+    pub fn new(provider: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+        }
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+}
+
 /// A map of configured providers, keyed by provider name.
 ///
 /// Providers are configuration, never a credential store: every value this
@@ -2113,6 +2155,17 @@ pub struct UserConfig {
     /// memory extraction never disables this and vice versa.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     automatic_checkpoint: Option<bool>,
+    /// Which model performs memory extraction, or `None` for "the user has
+    /// not chosen one" — Phase 21 line 834. See [`ExtractionModelRef`] for
+    /// why this is a field of its own rather than a reading of the routing
+    /// preferences, and [`EffectiveConfig::memory_extraction_model`] for how
+    /// a project may override it.
+    ///
+    /// **`None` is the default and means no model is ever called.** This is
+    /// the whole of the consent: nothing else in this file, and nothing in
+    /// the provider table, turns memory extraction into an outbound request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_extraction_model: Option<ExtractionModelRef>,
 }
 
 impl Default for UserConfig {
@@ -2128,6 +2181,7 @@ impl Default for UserConfig {
             response: response::ResponseConfig::default(),
             memory_extraction: None,
             automatic_checkpoint: None,
+            memory_extraction_model: None,
         }
     }
 }
@@ -2201,6 +2255,16 @@ impl UserConfig {
 
     pub fn set_memory_extraction(&mut self, enabled: Option<bool>) -> &mut Self {
         self.memory_extraction = enabled;
+        self
+    }
+    /// The model this user has chosen to perform memory extraction, or
+    /// `None` — see [`UserConfig::memory_extraction_model`].
+    pub fn memory_extraction_model(&self) -> Option<&ExtractionModelRef> {
+        self.memory_extraction_model.as_ref()
+    }
+
+    pub fn set_memory_extraction_model(&mut self, model: Option<ExtractionModelRef>) -> &mut Self {
+        self.memory_extraction_model = model;
         self
     }
 
@@ -2291,6 +2355,11 @@ pub struct ProjectConfig {
     /// layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     automatic_checkpoint: Option<bool>,
+    /// A project may name its own extraction model — see
+    /// [`UserConfig::memory_extraction_model`] for the field this mirrors and
+    /// [`EffectiveConfig::memory_extraction_model`] for how the two layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_extraction_model: Option<ExtractionModelRef>,
 }
 
 impl Default for ProjectConfig {
@@ -2305,6 +2374,7 @@ impl Default for ProjectConfig {
             response: response::ResponseConfig::default(),
             memory_extraction: None,
             automatic_checkpoint: None,
+            memory_extraction_model: None,
         }
     }
 }
@@ -2370,6 +2440,16 @@ impl ProjectConfig {
 
     pub fn set_memory_extraction(&mut self, enabled: Option<bool>) -> &mut Self {
         self.memory_extraction = enabled;
+        self
+    }
+    /// The model this project has chosen to perform memory extraction, or
+    /// `None` — see [`ProjectConfig::memory_extraction_model`].
+    pub fn memory_extraction_model(&self) -> Option<&ExtractionModelRef> {
+        self.memory_extraction_model.as_ref()
+    }
+
+    pub fn set_memory_extraction_model(&mut self, model: Option<ExtractionModelRef>) -> &mut Self {
+        self.memory_extraction_model = model;
         self
     }
 
@@ -2683,6 +2763,33 @@ impl<'a> EffectiveConfig<'a> {
             return Layered::new(value, Layer::User);
         }
         Layered::new(true, Layer::Default)
+    }
+
+    /// Which model may perform memory extraction, and which layer chose it —
+    /// Phase 21 line 834. Project first, then user, then [`Layer::Default`],
+    /// matching [`Self::memory_extraction_enabled`]'s own layering.
+    ///
+    /// [`Layer::Default`] carries `None`, and `None` is the answer that keeps
+    /// today's behaviour: no model is called. **A project naming a model
+    /// overrides a user who named none** — the same direction every other
+    /// lookup on this type resolves, and what lets one repository use a local
+    /// runner without the user turning it on everywhere.
+    ///
+    /// Deliberately independent of [`Self::memory_extraction_enabled`]: that
+    /// one is whether the trigger may fire at all, this one is what it asks
+    /// when it does, and a user who turns the trigger off has turned the
+    /// model off with it whatever this says.
+    pub fn memory_extraction_model(&self) -> Layered<Option<ExtractionModelRef>> {
+        if let Some(value) = self
+            .project
+            .and_then(ProjectConfig::memory_extraction_model)
+        {
+            return Layered::new(Some(value.clone()), Layer::Project);
+        }
+        if let Some(value) = self.user.memory_extraction_model() {
+            return Layered::new(Some(value.clone()), Layer::User);
+        }
+        Layered::new(None, Layer::Default)
     }
 
     /// Whether Glasshouse may take a checkpoint automatically at a task

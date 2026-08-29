@@ -67,12 +67,13 @@
 //! rewarding a candidate for independence nothing has established.
 
 use crate::config::pairing::{
-    ObservationSource, PairingPreference, native_pairing_prior_contribution,
+    ContinuitySource, ObservationSource, PairingPreference, native_pairing_prior_contribution,
+    session_continuity_contribution,
 };
 use crate::harness::Declared;
 use crate::harness::pairing;
 use crate::integrations::IntegrationId;
-use crate::routing::apply_hard_constraints;
+use crate::routing::{HardConstraint, apply_hard_constraints};
 
 use super::domain::FailureDomain;
 use super::{Backend, CacheLocality, Contribution, RoutingExplanation, ToolSemantics};
@@ -377,6 +378,74 @@ impl std::fmt::Display for MigrationRefusal {
 
 /// Whether the session is between tasks.
 ///
+/// Everything [`InteractiveRouting::start`] weighs that is not a candidate:
+/// the user's resolved pairing configuration and the two sources of local
+/// knowledge about a pairing.
+///
+/// One struct rather than four arguments because these four always travel
+/// together and are resolved together — `crate::gateway::session::SessionRouting`
+/// already holds the first two on its own `State` (see
+/// `SessionRouting::set_pairing_preference`), and the day a session-start
+/// caller exists it will hold all four. A caller assembling them one at a
+/// time at the call site is a caller that can silently pass last session's
+/// preference with this session's evidence.
+pub struct SessionStartInputs<'a> {
+    /// Line 576: the native-pairing preference the user configured, resolved
+    /// by `crate::config::EffectiveConfig` and carried here by the caller.
+    pub preference: PairingPreference,
+    /// Line 561: the user's own corrections to pairing metadata.
+    pub overrides: &'a pairing::PairingOverrides,
+    /// Phase 33A: what has actually been observed about each candidate.
+    pub evidence: &'a dyn ObservationSource,
+    /// Line 569: which candidates a relevant warm session already exists for.
+    pub continuity: &'a dyn ContinuitySource,
+}
+
+impl std::fmt::Debug for SessionStartInputs<'_> {
+    /// Hand-written because neither source is [`Debug`]: a trait object is
+    /// whatever the caller implemented, and requiring `Debug` of it would
+    /// push a derive onto every future session store and ledger for the sake
+    /// of one diagnostic line.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionStartInputs")
+            .field("preference", &self.preference)
+            .field("overrides", self.overrides)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What [`InteractiveRouting::start`] decided for a session that is starting,
+/// and why.
+///
+/// The same shape as [`TurnRouting`] — an assignment plus the one thing that
+/// makes it inspectable — and deliberately not an [`Assignment`] on its own.
+/// Map line 575 asks for the pairing class, the evidence strength and the
+/// prior's contribution to be *surfaced in routing explanations*; a session
+/// start that returned only its answer would have computed all three and
+/// thrown them away at the one moment a person is most likely to ask "why
+/// this backend?".
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionStart {
+    assignment: Assignment,
+    explanation: RoutingExplanation,
+}
+
+impl SessionStart {
+    pub fn assignment(&self) -> &Assignment {
+        &self.assignment
+    }
+
+    /// Every named contribution behind this choice, in the order they were
+    /// weighed. [`RoutingExplanation::render`] is what a diagnostic prints.
+    pub fn explanation(&self) -> &RoutingExplanation {
+        &self.explanation
+    }
+
+    pub fn into_assignment(self) -> Assignment {
+        self.assignment
+    }
+}
+
 /// Line 511's "task boundary", as a value the caller must state rather than a
 /// comment asking it to be careful.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -422,6 +491,170 @@ impl InteractiveRouting {
     /// nothing about which harness is talking to it.
     pub fn assign(&self, harness: &str, backend: Backend) -> Assignment {
         Assignment::new(harness, backend)
+    }
+
+    /// Map lines 566 and 569: which of several eligible backends a **fresh**
+    /// session starts on, and the full explanation of why.
+    ///
+    /// [`Self::assign`] above is the older, narrower entry point: the caller
+    /// had already chosen, and `assign` recorded the choice. This one is the
+    /// caller *asking*. It exists because line 566 asks for a positive
+    /// **initial** routing prior — "initial" is a moment, and until this
+    /// function there was no moment in Glasshouse where a starting session
+    /// compared two backends. `crate::gateway::session::SessionRouting::bind`
+    /// took `Upstream::serving()`, the first configured backend, and its own
+    /// doc said so: *"Nothing here chooses; the choice was made when the
+    /// upstream was built."*
+    ///
+    /// # What is weighed, and in what order
+    ///
+    /// 1. **Hard constraints first** (line 568), through
+    ///    [`apply_hard_constraints`] and therefore structurally rather than
+    ///    by convention: a session pin is a
+    ///    [`HardConstraint::UserConstraint`] and removes a candidate outright.
+    ///    Unlike `score_candidate`'s own receipt-shaped call, this check can
+    ///    actually reject, so the [`EligibleCandidate`](crate::routing::EligibleCandidate)s
+    ///    below are a filter's output and not a formality.
+    /// 2. **The native-pairing prior** (line 566) and **local observed
+    ///    evidence** (Phase 33A), from `score_candidate` — the same function,
+    ///    unchanged, that [`Self::on_provider_failure`] already scores
+    ///    failover survivors with.
+    /// 3. **Session continuity** (line 569), from
+    ///    [`session_continuity_contribution`] — bounded, never negative, and
+    ///    on the prior's own scale so that `best` can weigh the two against
+    ///    each other by simple sum. That is what "commensurable" has to mean
+    ///    here: not that a warm session is compared to a prior by a special
+    ///    rule, but that neither term knows the other exists and
+    ///    [`RoutingExplanation::total`] adds them up.
+    ///
+    /// A candidate is never *excluded* by any of steps 2 or 3 — only step 1
+    /// can remove one, and only for a constraint the user or the protocol
+    /// imposed. That is design decision 1 ("additive, never a filter") at the
+    /// one caller where a prior could most easily have been written as
+    /// `if native { return it }`.
+    ///
+    /// # What a build with nothing configured does
+    ///
+    /// Exactly what it did before this function existed. With
+    /// [`NoObservations`](crate::config::pairing::NoObservations),
+    /// [`NoWarmSessions`](crate::config::pairing::NoWarmSessions) and no
+    /// vendor-native candidate, every contribution is `0.0`, every candidate
+    /// ties, and `best` keeps the first — which is `Upstream::backends()`'
+    /// own order, which is the user's configuration order.
+    ///
+    /// # What this function cannot decide, and it is not a gap here
+    ///
+    /// **The native-pairing prior is constant across every candidate set the
+    /// shipped binary can build**, so at this caller it contributes a real
+    /// number to every explanation and separates nothing.
+    /// [`pairing::classify`] reads `query.route` exactly once, and only to
+    /// compute `Pairing::protocol_fit` — a field
+    /// `native_pairing_prior_contribution` never looks at — so
+    /// [`pairing::PairingClass`] is a function of the harness, the model and
+    /// the user's corrections alone. A session start's candidates are
+    /// `crate::gateway::upstream::Upstream::backends`, which carry a
+    /// provider, a credential and a cost and **no model**: the one model
+    /// comes from the launch profile and is the same for all of them. Same
+    /// harness plus same model means same class means same prior.
+    ///
+    /// `tests::the_native_pairing_prior_is_constant_across_a_real_session_start_candidate_set`
+    /// holds that as an executable fact rather than a comment. What *does*
+    /// separate candidates here is local evidence and session continuity,
+    /// both of which are keyed by [`pairing::EvidenceKey`] and therefore vary
+    /// with the route.
+    ///
+    /// `None` only when `candidates` is empty: there is nothing to start on,
+    /// and `best` may not be called with nothing.
+    pub fn start(
+        &self,
+        harness: &str,
+        launch_profile: &str,
+        candidates: &[Backend],
+        inputs: &SessionStartInputs<'_>,
+    ) -> Option<SessionStart> {
+        if candidates.is_empty() {
+            return None;
+        }
+
+        // Line 568, before anything is scored. The pin is the only hard
+        // constraint a *starting* session has that this policy can decide:
+        // protocol and tool semantics are `compatible()`'s question, and
+        // that compares a candidate against a current backend, which a
+        // session that has not started yet does not have.
+        let (eligible, rejected) =
+            apply_hard_constraints(candidates.to_vec(), |candidate: &Backend| {
+                if self.pin.permits(candidate.provider()) {
+                    Ok(())
+                } else {
+                    Err(HardConstraint::UserConstraint)
+                }
+            });
+
+        // A pin naming a provider none of the configured backends serve
+        // would otherwise leave nothing to start on. Refusing the launch
+        // over it would be worse than starting somewhere and saying so, and
+        // silently dropping the pin would be worse than both — so the pin is
+        // reported as unappliable, in the explanation, on every candidate.
+        let pin_eliminated_everything = eligible.is_empty();
+        let scored_candidates: Vec<Backend> = if pin_eliminated_everything {
+            rejected
+                .into_iter()
+                .map(|(candidate, _)| candidate)
+                .collect()
+        } else {
+            eligible
+                .into_iter()
+                .map(crate::routing::EligibleCandidate::into_inner)
+                .collect()
+        };
+
+        let harness_id = resolve_harness(harness);
+        let mut scored: Vec<(Assignment, RoutingExplanation)> =
+            Vec::with_capacity(scored_candidates.len());
+        for candidate in scored_candidates {
+            let mut explanation = match harness_id {
+                Some(id) => score_candidate(
+                    id,
+                    launch_profile,
+                    &candidate,
+                    inputs.preference,
+                    inputs.overrides,
+                    inputs.evidence,
+                ),
+                None => unrecognised_harness_explanation(harness),
+            };
+            if let Some(id) = harness_id {
+                // Line 569. Pushed here rather than inside `score_candidate`
+                // because `on_provider_failure` deliberately does not weigh
+                // continuity: the backend that just failed is the one the
+                // session was warm on, and crediting a *replacement* for a
+                // warmth it does not have would be an invention. A fresh
+                // session's candidates can each honestly hold one.
+                explanation.push(session_continuity_contribution(
+                    &evidence_key_for(id, launch_profile, &candidate),
+                    inputs.continuity,
+                ));
+            }
+            if pin_eliminated_everything {
+                explanation.push(Contribution::new(
+                    "session pin",
+                    0.0,
+                    format!(
+                        "this session is pinned to `{}`, which none of the configured backends \
+                         serve — the pin could not be applied, and every candidate was scored \
+                         instead of the session being refused a backend",
+                        self.pin.provider().unwrap_or("<unset>")
+                    ),
+                ));
+            }
+            scored.push((Assignment::new(harness, candidate), explanation));
+        }
+
+        let (assignment, explanation) = best(scored);
+        Some(SessionStart {
+            assignment,
+            explanation,
+        })
     }
 
     /// Lines 508, 509 and 510: what a normal turn is served by.
@@ -505,22 +738,19 @@ impl InteractiveRouting {
                 Ok(()) => {
                     let to = Assignment::new(current.harness(), candidate.clone());
                     let mut explanation = match harness {
-                        Some(harness) => {
-                            score_candidate(harness, candidate, preference, overrides, evidence)
-                        }
-                        None => {
-                            let mut explanation = RoutingExplanation::new();
-                            explanation.push(Contribution::new(
-                                "native-pairing prior",
-                                0.0,
-                                format!(
-                                    "`{}` is not a harness this build recognises, so no pairing \
-                                     could be classified for it",
-                                    current.harness()
-                                ),
-                            ));
-                            explanation
-                        }
+                        // A failover has no launch profile name to key
+                        // evidence by — see `score_candidate`'s own doc
+                        // comment — so it passes the empty one it has always
+                        // effectively used.
+                        Some(harness) => score_candidate(
+                            harness,
+                            NO_LAUNCH_PROFILE,
+                            candidate,
+                            preference,
+                            overrides,
+                            evidence,
+                        ),
+                        None => unrecognised_harness_explanation(current.harness()),
                     };
                     // Phase 33C lines 1375 and 1547: failure-domain
                     // diversity is a ranking signal in its own right, named
@@ -637,20 +867,17 @@ fn resolve_harness(slug: &str) -> Option<IntegrationId> {
 /// never reads.
 fn score_candidate(
     harness: IntegrationId,
+    launch_profile: &str,
     candidate: &Backend,
     preference: PairingPreference,
     overrides: &pairing::PairingOverrides,
     evidence: &dyn ObservationSource,
 ) -> RoutingExplanation {
-    let route = pairing::ServingRoute {
-        provider: Some(candidate.provider().to_owned()),
-        gateway: None,
-        protocol: pairing::wire_protocol_from_slug(candidate.protocol()),
-    };
+    let route = serving_route(candidate);
     let query = pairing::PairingQuery {
         harness,
         model: candidate.model().clone(),
-        route: route.clone(),
+        route,
         // Not the `Declared<bool>` evidence string `crate::routing::Backend`
         // was built from — `routing` never keeps it, see `Backend::tools`'
         // own doc comment — and `classify` uses this only for
@@ -674,13 +901,74 @@ fn score_candidate(
         );
     };
 
-    // `EvidenceKey::launch_profile` is not part of this query:
-    // `ObservedEvidenceSource` never reads it (see `routing::evidence`'s own
-    // header for why), and a bound gateway assignment does not carry a
-    // launch profile name to supply one honestly.
-    let key = pairing::EvidenceKey::new(harness, String::new(), candidate.model().clone(), route);
+    let key = evidence_key_for(harness, launch_profile, candidate);
 
     native_pairing_prior_contribution(&eligible, &key, preference, evidence)
+}
+
+/// The launch profile name a caller that genuinely has none passes.
+///
+/// `crate::gateway::session::SessionRouting`'s failover path is that caller:
+/// a bound assignment carries the harness, the protocol and the model, and no
+/// profile name. Named rather than written as `""` at the call site so that
+/// "this caller has no profile" and "this profile is called the empty string"
+/// are not the same three characters. `ObservedEvidenceSource` does not read
+/// the field at all (see `routing::evidence`'s own header for why), so this
+/// costs that source nothing; a continuity source, which distinguishes
+/// sessions, is handed a real name by [`InteractiveRouting::start`].
+const NO_LAUNCH_PROFILE: &str = "";
+
+/// The route a [`Backend`] describes, as the pairing model's own type.
+///
+/// `protocol` degrades to `None` for a slug this build does not recognise
+/// rather than guessing — [`Backend::protocol`] is deliberately an opaque
+/// slug, and [`pairing::wire_protocol_from_slug`] is the one reverse lookup.
+fn serving_route(candidate: &Backend) -> pairing::ServingRoute {
+    pairing::ServingRoute {
+        provider: Some(candidate.provider().to_owned()),
+        gateway: None,
+        protocol: pairing::wire_protocol_from_slug(candidate.protocol()),
+    }
+}
+
+/// The [`pairing::EvidenceKey`] naming exactly one harness, launch profile,
+/// model and backend combination — map line 572's four axes, and the key both
+/// [`ObservationSource`] and [`ContinuitySource`] are asked with.
+///
+/// One function so the two sources are always asked the *same* question. Two
+/// call sites building the key independently is how a warm session for one
+/// route ends up credited to another.
+fn evidence_key_for(
+    harness: IntegrationId,
+    launch_profile: &str,
+    candidate: &Backend,
+) -> pairing::EvidenceKey {
+    pairing::EvidenceKey::new(
+        harness,
+        launch_profile,
+        candidate.model().clone(),
+        serving_route(candidate),
+    )
+}
+
+/// The explanation for a candidate whose harness slug this build does not
+/// know: no pairing could be classified, so the prior is `0.0` and says why.
+///
+/// Shared by [`InteractiveRouting::start`] and
+/// [`InteractiveRouting::on_provider_failure`] so that an unrecognised
+/// harness degrades identically at both callers rather than in two places
+/// that could drift.
+fn unrecognised_harness_explanation(harness: &str) -> RoutingExplanation {
+    let mut explanation = RoutingExplanation::new();
+    explanation.push(Contribution::new(
+        "native-pairing prior",
+        0.0,
+        format!(
+            "`{harness}` is not a harness this build recognises, so no pairing could be \
+             classified for it"
+        ),
+    ));
+    explanation
 }
 
 /// Phase 33C lines 1375 and 1547: what failure-domain diversity contributes
@@ -1009,6 +1297,235 @@ mod tests {
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// A session-start candidate set exactly as the shipped binary builds
+    /// one: `Upstream::backends()` carries a provider, a credential and a
+    /// cost and **no model**, and `SessionRouting::bind` supplies one
+    /// `AssignedModel` for all of them. Every candidate therefore shares the
+    /// harness and the model.
+    fn session_start_candidates() -> Vec<Backend> {
+        vec![
+            backend("openrouter", "claude-fable-5"),
+            backend("anthropic", "claude-fable-5"),
+            backend("bedrock", "claude-fable-5"),
+        ]
+    }
+
+    /// **The finding of this package, as an executable fact.**
+    ///
+    /// Map line 566 asks the native-pairing prior to matter for a fresh
+    /// session. It cannot, and the reason is not a missing caller: it is that
+    /// `pairing::classify` derives `PairingClass` from the harness, the model
+    /// and the user's corrections, and never from the route. A real
+    /// session-start candidate set varies **only** by route, so every
+    /// candidate is classified identically and every prior has the same
+    /// magnitude. A signal that is constant on the set being ranked cannot
+    /// change the ranking.
+    ///
+    /// This is the same structural bar `docs/product/evidence/phase-9j.md`
+    /// recorded for same-model failover survivors, and it turns out to be
+    /// general rather than particular to failover.
+    #[test]
+    fn the_native_pairing_prior_is_constant_across_a_real_session_start_candidate_set() {
+        let routing = InteractiveRouting::new();
+        let candidates = session_start_candidates();
+        let overrides = pairing::PairingOverrides::default();
+
+        let mut magnitudes = Vec::new();
+        for candidate in &candidates {
+            let start = routing
+                .start(
+                    "claude-code",
+                    "default",
+                    std::slice::from_ref(candidate),
+                    &SessionStartInputs {
+                        preference: PairingPreference::Strong,
+                        overrides: &overrides,
+                        evidence: &crate::config::pairing::NoObservations,
+                        continuity: &crate::config::pairing::NoWarmSessions,
+                    },
+                )
+                .expect("one candidate is not none");
+            let prior = start
+                .explanation()
+                .contributions()
+                .iter()
+                .find(|c| c.name() == "native-pairing prior")
+                .expect("every explanation carries the prior")
+                .magnitude();
+            magnitudes.push(prior);
+        }
+
+        assert!(
+            magnitudes[0] > 0.0,
+            "the model is vendor-native for this harness, so the prior must be positive — \
+             otherwise this test proves nothing about a prior that cannot separate"
+        );
+        assert!(
+            magnitudes.windows(2).all(|pair| pair[0] == pair[1]),
+            "the native-pairing prior differed across a session-start candidate set that \
+             varies only by route ({magnitudes:?}); if this ever fails, `classify` has started \
+             reading the route and map line 566 has become reachable"
+        );
+    }
+
+    /// The other half of the same fact: what *does* separate those candidates
+    /// is session continuity, because it is keyed by `EvidenceKey`, which
+    /// carries the route.
+    #[test]
+    fn session_continuity_separates_the_same_candidate_set_the_prior_cannot() {
+        let routing = InteractiveRouting::new();
+        let candidates = session_start_candidates();
+        let overrides = pairing::PairingOverrides::default();
+        let warm = WarmOn {
+            provider: "anthropic",
+            session: crate::config::pairing::WarmSession {
+                state: crate::config::pairing::WarmSessionState::Live,
+                idle_seconds: 0,
+            },
+        };
+
+        let start = routing
+            .start(
+                "claude-code",
+                "default",
+                &candidates,
+                &SessionStartInputs {
+                    preference: PairingPreference::Strong,
+                    overrides: &overrides,
+                    evidence: &crate::config::pairing::NoObservations,
+                    continuity: &warm,
+                },
+            )
+            .expect("a non-empty candidate set produces a start");
+
+        assert_eq!(
+            start.assignment().provider(),
+            "anthropic",
+            "the second-configured backend holds the warm session and must win despite the \
+             first-configured one tying it on every other signal"
+        );
+    }
+
+    /// A `ContinuitySource` that answers for exactly one provider, matched
+    /// through the `EvidenceKey`'s own route — never by a near match, which
+    /// is what line 572 forbids.
+    struct WarmOn {
+        provider: &'static str,
+        session: crate::config::pairing::WarmSession,
+    }
+
+    impl crate::config::pairing::ContinuitySource for WarmOn {
+        fn warm_session(
+            &self,
+            key: &pairing::EvidenceKey,
+        ) -> Option<crate::config::pairing::WarmSession> {
+            (key.route().provider.as_deref() == Some(self.provider)).then_some(self.session)
+        }
+    }
+
+    /// A build with nothing to say behaves exactly as it did before `start`
+    /// existed: the first configured backend serves, which is what
+    /// `SessionRouting::bind` did by taking `Upstream::serving()`.
+    #[test]
+    fn a_fresh_session_with_nothing_observed_keeps_the_configured_order() {
+        let routing = InteractiveRouting::new();
+        let start = routing
+            .start(
+                "claude-code",
+                "default",
+                &session_start_candidates(),
+                &SessionStartInputs {
+                    preference: PairingPreference::Strong,
+                    overrides: &pairing::PairingOverrides::default(),
+                    evidence: &crate::config::pairing::NoObservations,
+                    continuity: &crate::config::pairing::NoWarmSessions,
+                },
+            )
+            .expect("a non-empty candidate set produces a start");
+        assert_eq!(start.assignment().provider(), "openrouter");
+    }
+
+    /// `best` may not be called with nothing, and a caller with no backends
+    /// gets an honest `None` rather than a panic.
+    #[test]
+    fn a_session_start_with_no_candidates_chooses_nothing() {
+        let routing = InteractiveRouting::new();
+        assert!(
+            routing
+                .start(
+                    "claude-code",
+                    "default",
+                    &[],
+                    &SessionStartInputs {
+                        preference: PairingPreference::Strong,
+                        overrides: &pairing::PairingOverrides::default(),
+                        evidence: &crate::config::pairing::NoObservations,
+                        continuity: &crate::config::pairing::NoWarmSessions,
+                    },
+                )
+                .is_none()
+        );
+    }
+
+    /// Line 568 at this caller, and the part `score_candidate`'s own
+    /// trivially-true closure could never show: the hard-constraint filter
+    /// actually rejects, and it rejects for the user's own pin.
+    #[test]
+    fn a_session_pin_removes_every_other_candidate_before_anything_is_scored() {
+        let routing = InteractiveRouting::pinned_to("anthropic");
+        let start = routing
+            .start(
+                "claude-code",
+                "default",
+                &session_start_candidates(),
+                &SessionStartInputs {
+                    preference: PairingPreference::Strong,
+                    overrides: &pairing::PairingOverrides::default(),
+                    evidence: &crate::config::pairing::NoObservations,
+                    continuity: &WarmOn {
+                        provider: "openrouter",
+                        session: crate::config::pairing::WarmSession {
+                            state: crate::config::pairing::WarmSessionState::Live,
+                            idle_seconds: 0,
+                        },
+                    },
+                },
+            )
+            .expect("the pinned provider is among the candidates");
+        assert_eq!(start.assignment().provider(), "anthropic");
+    }
+
+    /// A pin naming a provider none of the configured backends serve must not
+    /// leave a session with nowhere to start. It degrades visibly instead —
+    /// the same rule an unrecognised configuration value follows everywhere
+    /// else in this crate.
+    #[test]
+    fn a_pin_no_configured_backend_can_satisfy_starts_the_session_and_says_so() {
+        let routing = InteractiveRouting::pinned_to("a-provider-nobody-configured");
+        let start = routing
+            .start(
+                "claude-code",
+                "default",
+                &session_start_candidates(),
+                &SessionStartInputs {
+                    preference: PairingPreference::Strong,
+                    overrides: &pairing::PairingOverrides::default(),
+                    evidence: &crate::config::pairing::NoObservations,
+                    continuity: &crate::config::pairing::NoWarmSessions,
+                },
+            )
+            .expect("an unsatisfiable pin must not refuse the session a backend");
+        assert_eq!(start.assignment().provider(), "openrouter");
+        let note = start
+            .explanation()
+            .contributions()
+            .iter()
+            .find(|c| c.name() == "session pin")
+            .expect("the unappliable pin is named in the explanation");
+        assert_eq!(note.magnitude(), 0.0);
+        assert!(note.evidence().contains("a-provider-nobody-configured"));
     }
 
     /// Line 507, structurally: a value that cannot see the session model
@@ -1846,6 +2363,7 @@ mod tests {
 
         let thin_explanation = score_candidate(
             IntegrationId::ClaudeCode,
+            NO_LAUNCH_PROFILE,
             &candidate,
             PairingPreference::Strong,
             &pairing::PairingOverrides::default(),
@@ -1853,6 +2371,7 @@ mod tests {
         );
         let thick_explanation = score_candidate(
             IntegrationId::ClaudeCode,
+            NO_LAUNCH_PROFILE,
             &candidate,
             PairingPreference::Strong,
             &pairing::PairingOverrides::default(),

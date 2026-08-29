@@ -158,6 +158,12 @@ batch 50 and it was wrong; the correction is in `phase-47.md`.
 |---|---|
 | 442 | `keyring` 3.6.3's Secret Service backend can block **up to a year** on an unlock prompt (`dbus-secret-service-4.1.0/src/prompt.rs:42`, `unwrap_or(ONE_YEAR_SECONDS)`); keyring never calls `connect_with_max_prompt_timeout` and a caller cannot reach it. A probe returns `NoEntry` before anything needs unlocking, so `detect()` reports healthy and the **first real credential read freezes the TUI**. Not a runner gap — "when available" has no correct implementation on this dependency. **Next step: does keyring 4.x's `zbus-secret-service-keyring-store` bound the prompt?** |
 
+### Cluster J — the discriminating input is never read *(in-repo: yes, and it is a design change, not a wiring one)*
+
+| line | missing link |
+|---|---|
+| 566, 569 | `harness::pairing::classify` derives `PairingClass` from harness + model + corrections and **never from the route**, while every candidate set the binary builds varies **only** by route (`UpstreamBackend` has no model field). So the native-pairing prior is constant across every set Glasshouse ranks, and a constant cannot change a ranking. **Tripwired:** `the_native_pairing_prior_is_constant_across_a_real_session_start_candidate_set` fails the moment `classify` reads the route, and that failure means 566 became reachable |
+
 ## Standing refusals that are decisions, not blockers
 
 - **1323** stays open by the user's own reasoning. Do not re-ask (§70).

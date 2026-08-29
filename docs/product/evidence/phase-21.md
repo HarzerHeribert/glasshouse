@@ -217,3 +217,71 @@ labelled wrong — rule 7 is not one of the three fields `judge()` enforces.
 
 The worker searched for a way to close it and reported the gap instead of
 inventing a check. Recorded so the next package starts from here.
+
+---
+
+### Phase 21 — lines 834, 842 and 843 (batch 51). All three COMPLETE.
+
+**The packet's ordering was wrong and the worker inverted it, correctly.** It
+said 842 probably already held and 843 was probably premise-invalid. Neither
+was true, and both errors came from reasoning off documents that had gone stale
+against current source:
+
+- **842 was blocked on 834**, not already-holding. `phase-21.md` had already
+  argued this line and left it open on a sharpened criterion — *"the test is not
+  whether a model is called; it is whether the capability completes and produces
+  its result in the shipped binary"* — and recorded that it "closes the moment
+  any model exists".
+- **843's blocker did not apply.** A compaction trigger needs no
+  `LIFECYCLE_EVENT_KINDS` value, because a compaction is not a lifecycle event
+  and nothing needs to record it. Codex reports `PreCompact` today.
+- **834's premise — "there is no way to call a model here" — was false.**
+  `ureq` is a declared dependency and `provider/discovery.rs` has been making
+  real authenticated provider requests since the gateway landed. The missing
+  half was never an architecture; it was a transport.
+
+Production: `memory/extract/model.rs` (new) — a configured model reached over
+HTTP; extraction triggers for task completion and pre-compaction wired through
+`main.rs` and `session/lifecycle.rs`.
+
+**A credential leak found by the worker in its own new code, and fixed at the
+source.** The first `ConfiguredModel` accepted `https://key@host/v1` and
+asserted only that `describe()` omitted it — the credential then appeared in
+full in the type's own `Debug`, which redacted the `credential` field and had no
+reason to suspect the `endpoint` built from the base URL. **Redacting that
+second exit would have left a third**, so a base URL carrying userinfo is now
+refused outright, which is what `config`'s "No secrets here" rule already
+required. Mutation `accept-a-credential-in-the-base-url` re-run by the
+orchestrator: KILLED by
+`a_base_url_carrying_a_credential_is_refused_rather_than_redacted`.
+
+*Carried forward, outside that packet's scope:* `provider/discovery.rs::ProbeRequest`
+has the same latent shape — a hand-written `Debug` redacting a credential field
+beside a `base_url` printed in full. Not currently reachable with a userinfo URL
+by any path checked, but worth a look.
+
+**An absence assertion that was one edit away from going vacuous.**
+`session_hook.rs` holds a matched pair keyed off a literal log string: one
+asserting the line is present with extraction on, one asserting it absent with
+it off. The message changed. The positive test failed loudly in the blast
+radius; **the negative one would have passed silently forever**, asserting the
+absence of a string production no longer emits. Both were updated together and
+the positive one strengthened to require `trigger=task_completed`.
+
+#### Limits — the 5s bound is now load-bearing in a way it never was
+
+`EXTRACTION_BOUND` abandons extraction after five seconds and the hook process
+exits moments later. Until now that could not bite, because no model existed. It
+can now: **a model slower than five seconds produces nothing, silently, on every
+turn**, and the user is not told — the log says only "did not finish within its
+bound". A loopback runner answers in milliseconds and a fast hosted model
+usually does; a large local model on a busy machine will not. This is the
+existing design and the worker did not change it, but it is the number most
+likely to need revisiting.
+
+Also: **Codex clamps hook timeouts to 3 seconds**, below `EXTRACTION_BOUND`.
+**No real provider was ever called** — every test is a loopback fixture
+asserting the documented OpenAI chat-completions shape byte-for-byte off the
+wire. **Nothing ran on Windows.** And **843 is live for Codex only**: Claude
+Code's observed catalogue lists no compaction event, which is map line 310's
+business and remains open.

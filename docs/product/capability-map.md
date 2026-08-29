@@ -831,7 +831,7 @@ Fixed architectural requirements
 Phase 21 — Memory extraction
 
 ☑ Define a structured JSON schema for extracting durable memories from session activity.
-☐ Allow a configurable cheap or local model to perform memory extraction.
+☑ Allow a configurable cheap or local model to perform memory extraction.
 ☑ Feed the extractor bounded session/event chunks rather than entire unbounded session histories.
 ☑ Require the extractor to classify every emitted memory into one supported memory kind.
 ☑ Require the extractor to omit speculative claims that were not established during the session.
@@ -839,8 +839,8 @@ Phase 21 — Memory extraction
 ☑ Require the extractor to preserve concise rationale when a decision’s rationale is important.
 ☑ Require the extractor to avoid duplicating an existing active memory when nothing materially changed.
 ☑ Store the originating session and event references so extracted memory retains provenance.
-☐ Allow memory extraction to run after task completion.
-☐ Allow memory extraction to run before or around native prompt compaction.
+☑ Allow memory extraction to run after task completion.
+☑ Allow memory extraction to run before or around native prompt compaction.
 ☑ Allow memory extraction to run manually for debugging and evaluation.
 ☑ Keep memory-extraction failure non-fatal to the coding session.
 
