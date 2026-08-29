@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████░░░░░░░░░░░░░░░░░░░` 687 / 1280 mandatory capabilities (53%)
+`██████████████████████░░░░░░░░░░░░░░░░░░` 710 / 1280 mandatory capabilities (55%)
 
 <details>
 <summary>Per-phase breakdown (25 of 104 phases complete)</summary>
@@ -93,13 +93,13 @@ the authoritative specification and tracks what is done.
 | Phase 32E — Burn rate and exhaustion forecasting | 0/10 |
 | Phase 32F — Protected quota reserve | 2/8 |
 | Phase 32G — Provider-aware request-cost estimation | 0/10 |
-| Phase 33 — Resource health | 3/15 |
+| Phase 33 — Resource health | 7/15 |
 | Phase 33A — Routing evidence ledger | 10/15 |
 | Phase 33B — Reliability-adjusted agent performance | 0/14 |
 | Phase 33C — Failure, quota, and route correlation | 5/15 |
 | Phase 34 — Capability registry | 0/10 |
 | Phase 34A — Workload tiers | 0/10 |
-| Phase 34B — Routing-model role | 0/15 |
+| Phase 34B — Routing-model role | 7/15 |
 | Phase 34C — Automatic routing-model selection | 0/13 |
 | Phase 34D — Router request schema | 0/13 |
 | Phase 34E — Router economics | 0/9 |
@@ -113,8 +113,8 @@ the authoritative specification and tracks what is done.
 | Phase 37 — Basic session-aware router | 0/11 |
 | Phase 38 — Quota-preserving routing | 0/7 |
 | Phase 39 — Gateway-backed disposable jobs | 0/9 |
-| Phase 40 — Fresh-session handoff | 0/9 |
-| Phase 41 — Project overview | 9/15 |
+| Phase 40 — Fresh-session handoff | 7/9 |
+| Phase 41 — Project overview | 14/15 |
 | Phase 42 — External control API | 11/13 |
 | Phase 43 — MCP surface for orchestrators | 0/10 |
 | Phase 44 — User control and override | 0/9 |

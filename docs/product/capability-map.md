@@ -1308,7 +1308,7 @@ Phase 32G — Provider-aware request-cost estimation
 
 Phase 33 — Resource health
 
-☐ Track whether each configured resource is currently available.
+☑ Track whether each configured resource is currently available.
 ☐ Track recent request failures for gateway-backed resources.
 ☐ Track recent observed latency for gateway-backed resources where measurable.
 ☑ Track known quota or usage state when a provider or harness exposes it.
@@ -1318,10 +1318,10 @@ Phase 33 — Resource health
 ☐ Feed rate-limit events back into the unified capacity estimator.
 ☐ Treat provider-declared Retry-After or equivalent cooldown information as authoritative for temporary scheduling blocks.
 ☑ Treat unavailable quota telemetry as unknown rather than inventing a percentage.
-☐ Allow a resource to be temporarily marked degraded after repeated failures.
-☐ Allow a degraded resource to recover after successful probes or requests.
+☑ Allow a resource to be temporarily marked degraded after repeated failures.
+☑ Allow a degraded resource to recover after successful probes or requests.
 ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
-☐ Keep resource health separate from immediate availability so a healthy paced route can remain temporarily unschedulable without being scored as broken.
+☑ Keep resource health separate from immediate availability so a healthy paced route can remain temporarily unschedulable without being scored as broken.
 ☐ Record whether a health observation came from a real task, a retry, a repair attempt, or an explicit probe.
 
 Phase 33A — Routing evidence ledger
@@ -1410,18 +1410,18 @@ Fixed architectural requirements
 - The routing model is a cheap, fast, replaceable decision component, not the orchestrator and not a hidden agent hierarchy.
 - It receives a bounded routing schema and cannot independently acquire repository tools or an open-ended coding loop.
 
-☐ Define a dedicated routing_model role separate from interactive coding sessions and memory-extraction models.
-☐ Allow the routing model to be a remote paid model.
-☐ Allow the routing model to be a free-tier remote model.
-☐ Allow the routing model to be a local model.
-☐ Allow GPT-5.6 Luna or another inexpensive fast model to be configured for the routing-model role when available to the user.
-☐ Never hard-code GPT-5.6 Luna or any other specific model as a mandatory routing dependency.
+☑ Define a dedicated routing_model role separate from interactive coding sessions and memory-extraction models.
+☑ Allow the routing model to be a remote paid model.
+☑ Allow the routing model to be a free-tier remote model.
+☑ Allow the routing model to be a local model.
+☑ Allow GPT-5.6 Luna or another inexpensive fast model to be configured for the routing-model role when available to the user.
+☑ Never hard-code GPT-5.6 Luna or any other specific model as a mandatory routing dependency.
 ☐ Prefer a routing model whose marginal decision cost is materially lower than the premium capacity it protects.
 ☐ Prefer a routing model with sufficient requests per minute to avoid becoming the scheduler bottleneck.
 ☐ Prefer a routing model with low enough latency that routing does not make interactive use feel slower than direct harness use.
 ☐ Prefer a routing model that reliably returns the required structured classification schema.
 ☐ Allow multiple routing-model candidates to form a fallback chain.
-☐ Allow deterministic heuristics to remain the final fallback when every routing model is unavailable.
+☑ Allow deterministic heuristics to remain the final fallback when every routing model is unavailable.
 ☐ Keep routing-model prompts short and exclude unnecessary repository history.
 ☐ Do not send secrets, unrelated project memory, or full conversation histories to the routing model.
 ☐ Allow a user to route classifications through a privacy-preserving local model even when remote models are available.
@@ -1635,14 +1635,14 @@ Fixed architectural requirements
 - A fresh-session migration uses an explicit bounded handoff with provenance and current task state.
 - Glasshouse must not simulate native resume semantics by blindly copying complete transcripts between different harnesses or models.
 
-☐ Allow the router or user to create a fresh session from an existing portable checkpoint.
-☐ Include the checkpoint as explicit handoff context rather than replaying the complete old conversation.
-☐ Include current Git status and relevant diff references in the handoff when useful.
+☑ Allow the router or user to create a fresh session from an existing portable checkpoint.
+☑ Include the checkpoint as explicit handoff context rather than replaying the complete old conversation.
+☑ Include current Git status and relevant diff references in the handoff when useful.
 ☐ Include relevant project-memory records in the handoff when useful.
-☐ Allow a Claude session to hand off to Codex.
-☐ Allow a Codex session to hand off to Claude Code.
-☐ Allow either session type to hand off to Antigravity when supported.
-☐ Preserve the old session as resumable unless the user explicitly closes it.
+☑ Allow a Claude session to hand off to Codex.
+☑ Allow a Codex session to hand off to Claude Code.
+☑ Allow either session type to hand off to Antigravity when supported.
+☑ Preserve the old session as resumable unless the user explicitly closes it.
 ☐ Record the handoff relationship between source and destination sessions.
 
 Phase 41 — Project overview
@@ -1654,13 +1654,13 @@ Phase 41 — Project overview
 ☑ Show recently completed workers.
 ☑ Show important active decisions and constraints.
 ☑ Show unresolved project-memory todos.
-☐ Show known resource degradation or quota pressure.
-☐ Show normalized remaining-capacity bands for configured resources.
-☐ Show whether each displayed capacity value is measured, estimated, manual, or unknown.
-☐ Show the next known or estimated reset time for constrained resources.
+☑ Show known resource degradation or quota pressure.
+☑ Show normalized remaining-capacity bands for configured resources.
+☑ Show whether each displayed capacity value is measured, estimated, manual, or unknown.
+☑ Show the next known or estimated reset time for constrained resources.
 ☐ Show the currently selected routing model and its recent latency.
 ☑ Show the harness, backend, model, pairing class, and response profile for active sessions when relevant.
-☐ Show protected premium reserves when they influence routing.
+☑ Show protected premium reserves when they influence routing.
 ☑ Keep the overview factual and derived from stored state rather than generating decorative AI commentary by default.
 
 Phase 42 — External control API

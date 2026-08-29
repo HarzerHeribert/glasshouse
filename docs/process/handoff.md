@@ -4,7 +4,136 @@
 > here is a product requirement. Capability requirements live only in
 > `docs/product/capability-map.md`.
 
-Last updated: 2026-08-28 (Europe/Berlin)
+Last updated: 2026-08-29 (Europe/Berlin)
+
+## Checkpoint — 2026-08-29, batch 45 landed: 710 / 1280 (55%)
+
+**Green on all three platforms.** macOS and Linux through `scripts/ci-local.sh`;
+Windows for real on the ARM64 VM, 3/3. Six parked worktrees integrated, 23 boxes
+closed, six commits plus this one.
+
+### What landed
+
+| worktree | lines closed | note |
+|---|---|---|
+| `health-cache` | 1311, 1321, 1322, 1324 | the "one consumer" Phase 33's wall needed |
+| `phase-41-overview` | 1657, 1658, 1659, 1660, 1663 | Phase 41 now 14 of 15; only 1661 open |
+| `proof-router` | 1413–1418, 1424 | tests-only; 7 of 11 candidates survived, 4 refused |
+| `handoff-checkpoint` | 1638, 1639, 1640, 1642, 1643, 1644, 1645 | new `phase-40.md` |
+| `codex-hooks` | none — wiring only | PreCompact/PostCompact now requested |
+| `classify-caller` | none by design | mechanism kept, **wiring refused** — see below |
+
+New ledger files: `docs/product/evidence/phase-34b.md`, `phase-40.md`.
+
+### The three rulings this checkpoint owed, and how they went
+
+**1. `handoff-checkpoint`'s six lines: accepted, and upgraded from behavioural to
+mutation-proven.** The worker closed them on a shipped-binary integration test
+but could not mutate `main.rs` or `session/**`, because its own packet forbade
+the files the evidence lives in (§78, my predecessor's defect). **A worker's
+packet does not bind the integrator.** I ran the four mutations it could not:
+wrong target harness (killed at `handoff_lines.rs:314`), a full `Debug` replay in
+place of the bootstrap prompt (`:326`), closing the source session on launch
+(`:362`), and a second `store.create` per launch (`:268`). All killed; `main.rs`
+restored byte-identical after each. The six lines are closed on mutation proof,
+not on judgment.
+
+**2. `classify-caller`'s wiring patch: refused, for a reason one level below the
+one it found.** The worker was right that `disposable_extraction_model` is called
+before the job text exists, and wrote a `main.rs` patch reordering the path so the
+chunk is built first. I am not applying it. The chunk is a **transcript**;
+`classify_heuristically` is documented as classifying a **request**; and the tier
+it produces feeds `evaluate_reserve_spend`, whose distant-reset branch releases
+protected premium reserve only for `WorkloadTier::Heavy`. Wiring the chunk would
+let a cheap extraction job spend the reserve because the conversation it is
+summarising happened to contain demanding-sounding words — the tier would vary
+with **conversation topic** rather than with the job's own demand, inverting what
+the gate protects.
+
+That is the fifth link failing on **semantics**, not plumbing: the input varies,
+but with the wrong thing. Worth adding to the Phase −1 vocabulary — "does it
+vary?" is not enough; the question is "does it vary with the thing the consumer
+is actually measuring?"
+
+The mechanism is kept (every call site passes `None`, reproducing the old fixed
+`Leaf` exactly) and `new_for_request`'s doc comment now states all of this, so the
+next agent does not wire it. It is correct and ready for a `JobKind` carrying a
+real user request — `Classification`, `Reranking`, `Evaluation` — none of which
+has a production caller.
+
+**3. Map lines 1377 and 1541 (ticked but PARTIAL): still open, not ruled on.**
+Inherited from my predecessor and deliberately not resolved in this batch. **This
+is the first thing the next orchestrator owes.**
+
+### What the gate caught, and the rule it argues for
+
+**`session::select::tests::codex_hooks_are_written_where_codex_reads_them` failed
+on both macOS and Linux.** `codex-hooks` added two events to `REPORTED_EVENTS`;
+that test hardcodes the expected list. The worker's blast-radius grep (§69) *did*
+name `session/select.rs` — it read the file and concluded nothing there asserted
+an event count, which was wrong.
+
+**The cheap rule: once a blast-radius grep names a file, *run* that file's tests
+instead of reading them.** `cargo test --lib session::select` would have caught it
+in seconds. Reading a file to decide whether it is affected is the step that
+failed; running it is not a judgment call.
+
+The test it broke is the *better* evidence of the two, because it asserts on the
+`.codex/hooks.json` Codex actually loads rather than on the adapter's constant.
+Fixed by adding the two events to its expectation.
+
+### A Windows failure that was a flake, attributed with two runs
+
+`session::api::tests::interrupting_through_the_api_is_recorded_as_machine_initiated`
+timed out on the first `--windows-vm` run — in a file **no worker in this batch
+touched**. Per §40 a FAIL is attributed with two runs, not one; the second run
+passed 3/3 including that test. Recorded as a load-sensitive flake, not a
+regression. No run was killed, so §72's orphan hazard does not apply.
+
+### Two ledger entries that had outlived their own truth
+
+Both found in one batch, both the same failure mode:
+
+- **1663** — said "nothing in `crate::routing` reads `premium_reserve_percent`".
+  Batch 42 wired `metered_models` and made that false; nothing re-read the entry,
+  so it went on telling three later packets the box was blocked.
+- **1657–1660** — said `NOT STARTED, blocked` on Phase 32A/32B. Those shipped.
+- **phase-33's "Correction" paragraph** — still described wiring quota into
+  `main.rs` as future work, after it was already wired.
+
+**The rule, now recorded in both files: when a batch removes a blocker, grep the
+ledger for entries that named it.** An evidence entry that records a blocker does
+not expire when the blocker does.
+
+### Worker packet corrections: thirteen consecutive rounds
+
+`phase-41-overview` corrected 1663's stale feasibility note and was right.
+`classify-caller` refuted its own packet's central premise and was right.
+`proof-router` closed 1424 through a different production caller than its packet
+cited, and refused four lines its packet expected it to close.
+
+One integrator correction in the other direction: `proof-router` argued 1427 and
+1457/1459 from "`classify_heuristically` has zero callers outside its module".
+That grep was too narrow — `main.rs:144` calls `routing::classify::report` for
+`glasshouse classify <text>`. The refusals survive in a sharper form (**the
+classifier's only production caller is a manual CLI diagnostic, not a routing
+decision**), and the same miss was caught independently by `classify-caller` in
+the same batch.
+
+### Next exact action
+
+1. **Rule on map lines 1377 and 1541** — ticked but PARTIAL, inherited, unresolved.
+2. **1641** is the cheapest real line left in Phase 40, and it is an
+   implementation packet, not a patch: `Handoff` gains a `memory` field, which
+   breaks two `Handoff` literals (`main.rs::checkpoint_command`,
+   `api/unix.rs::request_checkpoint` — the second is a caller nobody had
+   recorded). Verified breakage, not assumed: `cargo check` fails `E0063` at both.
+3. `.agent-runtime/WAVE-2-PLAN.md` still holds the gated leads from six recons —
+   treat its remaining candidates as ~65% reliable, since `proof-router` tested
+   eleven and only seven survived.
+4. **Convergent co-editing (§77) has still not been used in anger.** Batch 45's
+   partitioning was fully disjoint — verified at integration, zero file overlap
+   across all six worktrees — so the hard case remains untested.
 
 ## Checkpoint — 2026-08-28, batch 43 landed: 687 / 1280 (53%)
 

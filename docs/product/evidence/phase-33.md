@@ -9,9 +9,13 @@ information, when Glasshouse reports resource capacity, it reflects the real
 observed quota state and reset timing — while never inventing a percentage for
 telemetry it does not have.
 
-State: **COMPLETE** for map lines 1314, 1315 and 1320 — three of fifteen. **NOT STARTED**
-for the rest, and the reason is one shared architectural finding rather than
-thirteen separate gaps.
+State: **COMPLETE** for map lines 1314, 1315, 1320 and — as of 2026-08-29 —
+1311, 1321, 1322 and 1324: seven of fifteen. **NOT STARTED** for the rest.
+
+**The architectural finding below has been acted on.** It said these four lines
+needed one consumer rather than four packages; `GH-HEALTH-CACHE` built that
+consumer and all four closed together. The finding stands as written for the
+remaining lines; see "The health-cache package" further down for what changed.
 
 **This entry came from a *proof* package, not a feature package.** A recon had
 reported nine of these lines as satisfied by shipped behaviour. That is a claim,
@@ -109,6 +113,148 @@ Missing evidence:
   that unblocks 1311/1321/1322/1324.
 - A consumer treating provider-declared `Retry-After` as authoritative — 1319.
 - The mutation check for 1320 and 1323 before either is ticked.
+
+---
+
+### The health-cache package, 2026-08-29 — the "one consumer" the wall needed (lines 1311, 1321, 1322, 1324)
+
+**The wall this entry described is down for four lines.** The finding above was
+that `ResourceHealth` is real and written for every exchange but **nothing
+outside the `gateway` module can observe it** — so 1311/1321/1322/1324 needed one
+consumer, not four packages. `GH-HEALTH-CACHE` built that consumer (worktree
+`.worktrees/health-cache`, report `.agent-runtime/report-health-cache.md`).
+
+**The design, and the one piece of real design in it.** `GatewayHealthCache`
+(`provider/telemetry.rs`) is `GatewayQuotaCache`'s exact shape: a versioned JSON
+file per provider under `paths.data_dir().join("gateway-health")`, atomic-rename
+write, fail-soft read where absent / truncated / wrong-version / wrong-provider
+all mean "no reading here". The design work is the **cooldown conversion**:
+`ResourceHealth`'s cooldown is an `Instant`, which has no epoch and **cannot
+cross a process boundary**, so it is converted to an absolute unix second on
+write. Everything else is a deliberate copy of a shipped precedent.
+
+The five links, end to end in current code:
+
+| link | evidence |
+|---|---|
+| producer | `routing/free.rs` — `ResourceHealth`, untouched (it was on the packet's FORBIDDEN list) |
+| caller | `gateway/session.rs` — `health_readings_for`, called from `gateway/mod.rs`'s accept loop, beside the existing quota-cache write |
+| propagation | `provider/telemetry.rs` — `GatewayHealthCache`, built at both of `main.rs`'s launch sites |
+| consumer | `provider/resources.rs` — `render_health` (text) and the JSON path, reached only through `report` / `capacity_json`, read from `main.rs` and `api/unix.rs` |
+| fifth (varies, and changes behaviour) | `consecutive_failures`, `cooling_down_until_unix` and `credential_rejected` differ per real exchange and change what a **later, separate** `glasshouse resources` invocation prints — proven by the write-path test, not asserted |
+
+**Out-of-partition file, flagged rather than hidden.** `gateway/conformance.rs`
+was not in EXPECTED FILES. Widening `Gateway::start_with_telemetry` to thread the
+cache through the accept loop forced updating its two existing call sites or
+nothing compiled, and once there it was the only place the real write-path test
+could live. Accepted.
+
+Mutations, 3/3 killed:
+
+- **`remove-persistence-call`** — the health-cache write deleted from the accept
+  loop. Killed by
+  `gateway::conformance::a_real_forwarded_exchanges_health_is_persisted_for_the_next_process`:
+  *"no health reading was persisted for `fixture` within 2s of a completed
+  exchange"*.
+- **`accept-stale-state`** — `GatewayHealthCache::load`'s three fail-soft branches
+  made to fabricate a healthy entry instead of returning empty. Killed, 5 failures.
+  **Honest caveat, recorded because the worker raised it:** this proves the
+  property at `load` only. `load_all` — the method `gather_gateway_health`
+  actually calls in production — is a structurally separate directory scan with
+  its own fail-soft branches, and the two binary-level "unknown" tests that go
+  through it stayed green under this mutation. `load_all`'s per-entry
+  parse-failure branch is exercised (not mutated) by the corrupt-file tests. A
+  faithful `accept-stale-state` on `load_all` would have to invent a provider key
+  too — the provider name lives inside the bytes that failed to parse — which
+  stops being the same defect. **This is a known, bounded gap in the mutation
+  evidence, not a claim of full coverage.**
+- **`invert-condition`** — `render_health`'s `until > options.now_unix` flipped.
+  Killed at both the unit and shipped-binary level.
+
+---
+
+### Phase 33 — Track whether each configured resource is currently available (line 1311)
+
+Contract: Given a resource the gateway has forwarded exchanges through, when the
+user asks Glasshouse for resource state in a **later process**, it reports that
+resource's observed availability, while reporting `unknown` for a resource it has
+never observed rather than assuming it is healthy.
+
+State: COMPLETE
+
+Production evidence: the five links above.
+
+Regression evidence:
+- `gateway::conformance::a_real_forwarded_exchanges_health_is_persisted_for_the_next_process`
+  — a real `Gateway`, a real bound assignment, a real 200 OK exchange, then a
+  poll-read of `GatewayHealthCache::load("fixture")` off disk.
+- `provider::resources::tests::a_resource_with_no_health_observation_reports_unknown`
+  and `provider_discovery.rs::a_resource_with_no_health_observation_reports_unknown_through_the_shipped_binary`
+  — the fail-closed half: every registry entry prints `health unknown`, never a
+  number, with no cache present at all.
+
+---
+
+### Phase 33 — Allow a resource to be temporarily marked degraded after repeated failures (line 1321)<br>Phase 33 — Allow a degraded resource to recover after successful probes or requests (line 1322)
+
+Contract: Given a resource that has failed repeatedly, when Glasshouse reports
+it, the resource is shown as degraded with its observed failure count; and when
+its cooldown has elapsed, it is shown as available again — while a rejected
+credential stays distinct from a paced one, because waiting does not fix a
+rejection.
+
+State: COMPLETE (both)
+
+Regression evidence:
+- `provider::resources::tests::a_cooling_down_resource_is_shown_as_paced_not_broken`
+  and `provider_discovery.rs::a_cooling_down_resource_is_shown_as_paced_through_the_shipped_binary`
+  — the degraded half (1321).
+- `provider::resources::tests::an_elapsed_cooldown_reads_as_available_again` — the
+  recovery half (1322): a cooldown already past renders as available with no fresh
+  observation, matching `ResourceHealth::is_available`'s own in-memory rule.
+- `provider::resources::tests::a_rejected_credential_is_shown_as_rejected_not_paced`
+  — keeps the two failure kinds visually distinct.
+- `provider::telemetry::gateway_health_cache_tests::a_stored_reading_round_trips_including_a_cooldown_deadline`
+  — the `Instant` → absolute-unix-second conversion survives the process boundary,
+  which is the whole reason either line is observable at all.
+
+---
+
+### Phase 33 — Keep resource health separate from immediate availability so a healthy paced route can remain temporarily unschedulable without being scored as broken (line 1324)
+
+Contract: Given a resource that is merely pacing, when Glasshouse renders it,
+it says paced and names the cooldown deadline, while never rendering it in the
+vocabulary it uses for a broken or credential-rejected resource.
+
+State: COMPLETE
+
+This is the line the `invert-condition` mutation targets directly: with
+`until > options.now_unix` flipped, a resource still cooling down rendered as
+`available, 3 consecutive failure(s)` — i.e. exactly the conflation of "paced"
+with "broken" this line forbids. Killed at both levels:
+
+- `provider::resources::tests::a_cooling_down_resource_is_shown_as_paced_not_broken`
+- `provider_discovery.rs::a_cooling_down_resource_is_shown_as_paced_through_the_shipped_binary`
+
+Fail-soft evidence, so a bad cache cannot take the command down with it:
+- `provider::telemetry::gateway_health_cache_tests::{a_truncated_health_cache_file_reads_as_an_empty_list, a_reading_stored_by_a_future_format_version_is_ignored, a_provider_with_no_stored_health_reads_as_an_empty_list}`
+- `provider::resources::tests::a_corrupt_health_cache_file_leaves_the_report_working_with_no_health`
+- `provider_discovery.rs::a_corrupt_gateway_health_cache_file_leaves_the_shipped_binary_working`
+  — overwrites the actual file `store` just wrote and asserts the command still
+  exits 0 and prints `unknown` for that provider.
+
+---
+
+### A ledger correction this package forced
+
+`phase-33.md`'s "Correction, same session" section still described wiring quota
+into `main.rs` as future work (*"main.rs is this package's FORBIDDEN FILES"*).
+That was true of an earlier packet and not of current code — quota was already
+fully wired by the time this package ran. The paragraph is frozen at an earlier
+moment than the section beside it. Nothing was acted on incorrectly, because this
+package's own feasibility table carried the corrected citations. Recorded here
+because it is the **same failure mode as line 1663's** in the same batch: an
+entry that records a blocker does not expire when the blocker does.
 
 ---
 

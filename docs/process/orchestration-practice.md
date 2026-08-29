@@ -3272,3 +3272,95 @@ to Haiku.** The session comes up in `accept edits` instead, which does not cover
 Bash, so every `coedit.sh` call prompts. The user authorised
 `--dangerously-skip-permissions` for this trial specifically because it ran in
 throwaway worktrees. **Do not carry that flag to a worker touching real files.**
+
+## §79 — three findings from integrating six worktrees at once
+
+Batch 45's integration was the largest this project has done in one pass: six
+parked worktrees, ~2,500 lines, 23 boxes. Nothing about the *parallelism* went
+wrong — the six diffs were **fully disjoint**, verified mechanically at
+integration with zero file overlap, which is itself worth recording as evidence
+that map-order partitioning works. All three findings came from the integration
+step, not the dispatch step.
+
+### A worker's packet does not bind the integrator
+
+`handoff-checkpoint` closed six lines on a shipped-binary integration test and
+said plainly it could not mutation-prove them, because its packet forbade
+`main.rs` and `session/**` — the files those lines' behaviour lives in (§78's
+defect, committed again). It was right to refuse: a worker that quietly edits a
+forbidden file is worse than one that reports a gap.
+
+**But the gap was mine to close, and closing it cost twenty minutes.** The
+integrator owns `main.rs`. I ran the four mutations the worker could not — wrong
+target harness, a `Debug` replay in place of the bootstrap prompt, closing the
+source session on launch, a second `store.create` — and all four were killed by
+the worker's own test, at four different assertion lines. The six lines went from
+"closed on behaviour, flagged as not mutation-proof" to "mutation-proven" without
+a single new test being written.
+
+**The rule: when a worker reports a proof it was forbidden to complete, complete
+it yourself before ruling on the box.** Do not accept it on judgment and do not
+reject it for a gap the packet caused. A packet's FORBIDDEN FILES list is a
+concurrency device for one round, not a statement about what can be verified.
+
+### A blast-radius grep names a file; running it is what tells you
+
+`codex-hooks` added two events to `REPORTED_EVENTS` and ran §69's blast-radius
+grep. **The grep worked** — it named `session/select.rs`. The worker then *read*
+that file and concluded nothing in it asserted an event count. That was wrong:
+`codex_hooks_are_written_where_codex_reads_them` hardcodes the expected list, and
+the gate failed on both macOS and Linux.
+
+The test name contains neither `REPORTED_EVENTS` nor `event`, so no refinement of
+the grep pattern would have helped. The failing step was **reading a file to
+decide whether it was affected.**
+
+> **Once a blast-radius grep names a file, run that file's tests. Do not read
+> them.** `cargo test --lib session::select` costs seconds and is not a judgment
+> call; reading 300 lines to decide "this looks unaffected" costs longer and is.
+
+This is §68's shape again — the check that looks like it ran and did not — moved
+one level up, into the human reading rather than the tooling.
+
+The consolation: the test that broke was the *better* of the two, because it
+asserts on the `.codex/hooks.json` Codex actually loads rather than on the
+adapter's own constant. A blast-radius miss found better evidence than the
+package wrote for itself.
+
+### The fifth link can fail on semantics, not only on plumbing
+
+`classify-caller` was asked to make a task classification reach the
+metered-fallback tier. It refuted its own packet correctly: the classification
+happens before the job text exists, because Rust evaluates `model()`'s arguments
+before the call and the chunk is built fifteen lines later. It wrote a `main.rs`
+patch reordering the path so the chunk exists first, and by the four-link test
+that patch is sound — producer, caller, propagation, consumer, all real.
+
+**I refused it anyway, and the reason is a new failure mode for Phase −1.** The
+chunk is a *transcript of a finished turn*. `classify_heuristically` is documented
+as classifying *a request*. The tier feeds `evaluate_reserve_spend`, whose
+distant-reset branch releases protected premium reserve only for
+`WorkloadTier::Heavy`. So the patch would have let a cheap memory-extraction job
+spend protected reserve **because the conversation it was summarising contained
+demanding-sounding words**. The tier would have varied with conversation topic
+rather than with the job's own demand — precisely inverting what the gate exists
+to protect.
+
+The fifth link currently asks: *what does this input vary with, and is that thing
+different between the alternatives?* Here the answer to "does it vary" is yes, and
+the mechanism was built, tested and mutation-proven. **The question that catches
+it is one word longer:**
+
+> **Does it vary with the thing the consumer is actually measuring?**
+
+An input that varies with the wrong thing is worse than one that never varies. An
+inert prior is merely wasted; a *plausible* one that tracks an unrelated signal
+will confidently make the wrong decision, and every test of the mechanism will
+pass while it does. Note the asymmetry with §35: a mechanism with no caller is
+visibly incomplete, and this one would have looked finished.
+
+The mechanism was kept — every existing call site passes `None`, reproducing the
+old fixed `Leaf` exactly — and the constructor's doc comment now states why
+`MemoryExtraction` must never call it, so the next agent does not rediscover the
+patch and apply it. **When you refuse a wiring, write the refusal where the wiring
+would be attempted, not only in the handoff.**
