@@ -317,7 +317,12 @@ def check_cited_seams(packets, findings, src_root, strict):
         for sym in feasibility_symbols(text):
             checked += 1
             sites = discover.find_call_sites(sym, src_root)
-            if not sites["literal"] and not sites["method"]:
+            # `bare` counts too: a free function imported by `use` and called
+            # without a path or receiver is a production caller. Omitting it
+            # reported `memory::snapshot::snapshot` as dead on 2026-08-29 and
+            # that false verdict reached a dispatched packet.
+            if (not sites["literal"] and not sites["method"]
+                    and not sites.get("bare")):
                 dead += 1
                 msg = (f"{p.path} cites `{sym}()` and it has ZERO non-test "
                        f"call sites in {src_root}. Two readings, and the packet "

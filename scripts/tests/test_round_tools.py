@@ -391,6 +391,75 @@ class DiscoverSeamTests(unittest.TestCase):
         self.assertEqual(hits["literal"], [])
         self.assertEqual(len(hits["definition"]), 3)
 
+    # --- The bare-call blind spot, measured 2026-08-29 ------------------
+    #
+    # `find_call_sites` matched only a fully-qualified path or `.method(`. A
+    # free function brought into scope by `use path::{name}` and called bare
+    # matched neither, so `memory::snapshot::snapshot` was reported as having
+    # ZERO non-test call sites while `shell/mod.rs:1357` had been calling it in
+    # production since Phase 41. That false verdict reached a dispatched packet,
+    # which told a worker the symbol "has never had a production caller"; the
+    # worker re-derived it and returned it as a packet error.
+    #
+    # A false ABSENCE of a caller manufactures work, which is the mirror of the
+    # false-presence defect the tests above this line exist for.
+
+    def test_a_bare_call_to_a_use_imported_free_function_is_a_caller(self):
+        """The real shape: a QUALIFIED seam whose call site writes no path.
+
+        A single-component seam would not reproduce this — `literal_re` is a
+        bare substring match, so `seam` matches `seam(3)` anyway. The defect
+        only appears when the packet cites `a::b::name`, which is how every
+        FEASIBILITY block in this project cites a free function.
+        """
+        write(self.tmp / "src" / "mem" / "snap.rs",
+              "pub fn seam(x: u8) -> u8 { x }\n")
+        write(
+            self.tmp / "src" / "caller.rs",
+            "use crate::mem::snap::{Budget, seam};\n"
+            "pub fn calls_it() -> u8 {\n"
+            "    seam(3)\n"
+            "}\n",
+        )
+        hits = disc.find_call_sites("mem::snap::seam", str(self.tmp))
+        self.assertEqual(hits["literal"], [], "no qualified path is written")
+        self.assertEqual(hits["method"], [], "there is no receiver")
+        self.assertEqual(
+            len(hits["bare"]), 1,
+            "a bare call to a `use`-imported free function is a production caller",
+        )
+        self.assertIn("caller.rs", hits["bare"][0][0])
+
+    def test_an_import_is_not_counted_as_a_call_site(self):
+        """`use a::b::seam;` matches a qualified literal exactly. It is not a call."""
+        write(self.tmp / "src" / "mem" / "snap.rs",
+              "pub fn seam(x: u8) -> u8 { x }\n")
+        write(self.tmp / "src" / "importer.rs", "use crate::mem::snap::seam;\n")
+        hits = disc.find_call_sites("mem::snap::seam", str(self.tmp))
+        self.assertEqual(hits["literal"], [], "an import is not a caller")
+        self.assertEqual(hits["bare"], [], "nor does it count as a bare call")
+
+    def test_a_bare_call_bucket_still_excludes_the_definition_and_docs(self):
+        write(
+            self.tmp / "src" / "lib.rs",
+            "/// Calls seam(3) in the example below.\n"
+            "pub fn seam(x: u8) -> u8 { x }\n",
+        )
+        hits = disc.find_call_sites("seam", str(self.tmp))
+        self.assertEqual(hits["bare"], [], "neither the decl nor its doc is a call")
+
+    def test_a_longer_identifier_ending_in_the_name_is_not_a_bare_call(self):
+        write(
+            self.tmp / "src" / "lib.rs",
+            "pub fn seam(x: u8) -> u8 { x }\n",
+        )
+        write(
+            self.tmp / "src" / "other.rs",
+            "pub fn calls() -> u8 { reseam(1) }\n",
+        )
+        hits = disc.find_call_sites("seam", str(self.tmp))
+        self.assertEqual(hits["bare"], [], "`reseam(` must not match `seam(`")
+
     def test_a_real_caller_beside_the_definition_still_counts(self):
         """The whole point: definition excluded, caller kept."""
         write(

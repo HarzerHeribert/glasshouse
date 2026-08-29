@@ -58,6 +58,7 @@
 //! printed. `SecretRef` is already the one shape in Glasshouse that is safe
 //! to write into a tracked configuration file, so it is the one used here.
 
+pub mod capability;
 pub mod classify;
 pub mod disposable;
 pub mod domain;

@@ -914,6 +914,7 @@ fn a_task_needing_tool_calls_refuses_a_backend_known_not_to_carry_them() {
         now: fixture.now,
         requirements: TaskRequirements {
             needs_tool_calls: true,
+            ..TaskRequirements::default()
         },
     };
 

@@ -45,6 +45,34 @@ const MAX_SOCKET_PATH_BYTES: usize = 90;
 /// polls again rather than pulling the whole table in one line of JSON.
 const MAX_EVENTS_LIMIT: usize = 1000;
 
+/// The hard ceiling on how many memories [`Request::QueryMemory`] returns in
+/// one call, regardless of the `limit` a caller asks for — capability map
+/// line 1115's *"concise results rather than dumping the complete memory
+/// database into agent context."*
+///
+/// Generous against the default of twenty and still far short of a project's
+/// whole store, because the point of the bound is that the response size
+/// stops depending on how much the project has accumulated. A caller that
+/// wants more searches again with a narrower query, which is what a ranked
+/// search is for.
+const MAX_MEMORY_LIMIT: usize = 100;
+
+/// The hard ceiling on entries in any one [`Request::CurrentMemory`] section,
+/// regardless of the `limit` asked for — line 1115 again, per section rather
+/// than per response, because `memory::snapshot::snapshot` budgets each
+/// section independently.
+const MAX_SNAPSHOT_SECTION_LIMIT: usize = 50;
+
+/// The hard ceiling on characters in any one [`Request::CurrentMemory`]
+/// entry's body, regardless of the `body_chars` asked for.
+///
+/// A snapshot is a summary an agent reads to orient itself; a memory it needs
+/// in full is one identifier away through [`Request::GetMemory`], which is
+/// where an untruncated body belongs. Without this pair of ceilings a caller
+/// passing `usize::MAX` to both would receive exactly the complete dump this
+/// line forbids.
+const MAX_SNAPSHOT_BODY_CHARS: usize = 2000;
+
 /// How often the background tick answers terminal queries and reaps exited
 /// sessions between requests. Mirrors `run_headless`'s `POLL` in `main.rs`:
 /// short enough that `poll_exits` marks a dead session promptly, long enough
@@ -484,6 +512,8 @@ fn dispatch(
             history,
             limit,
         } => query_memory(runtime, &query, history, limit),
+        Request::GetMemory { memory } => get_memory(runtime, &memory),
+        Request::CurrentMemory { limit, body_chars } => current_memory(runtime, limit, body_chars),
         Request::TakeCheckpoint {
             session,
             objective,
@@ -1069,6 +1099,167 @@ fn event_json(logged: &LoggedEvent) -> serde_json::Value {
     serde_json::Value::Object(fields)
 }
 
+/// A memory-side failure this door may put on the wire, as a message.
+///
+/// `MemoryStoreError` is written for exactly this audience — it names the
+/// memory, both project identifiers, and the operation that failed, and
+/// nothing else. Everything else that can surface from opening the project's
+/// memory is a `database::DatabaseError`, and **every one of its variants
+/// names the database file's absolute path** (`crates/glasshouse/src/
+/// database.rs`'s error enum). That path lies outside the project root and
+/// outside what this door is scoped to, so it does not leave here — a caller
+/// on the far end of a socket cannot repair the file anyway, and the class of
+/// failure is the whole of what it can act on.
+///
+/// Down-cast rather than matched on a string, and `pub(crate)`-invisible
+/// `DatabaseError` is deliberately not named here: this stays correct if a
+/// new error type joins the anyhow chain, because anything that is not a
+/// `MemoryStoreError` is treated as the unsafe case.
+fn memory_error_message(err: &anyhow::Error) -> String {
+    match err.downcast_ref::<glasshouse::memory::MemoryStoreError>() {
+        Some(store_error) => store_error.to_string(),
+        None => "the project's memory database could not be opened".to_owned(),
+    }
+}
+
+/// One selected memory in full — capability map line 1112's `memory.get`.
+///
+/// # The read boundary is the whole point (line 1114)
+///
+/// `memory` is an identifier or an unambiguous prefix of one, and it is the
+/// only caller-supplied value on this path. It cannot name a project: there
+/// is no project field on this door (see `super`'s module doc comment), the
+/// store is opened from the [`Runtime`] this process was started for, and
+/// `MemoryStore::get` compares the row's own `project_id` against the active
+/// one before handing anything back.
+///
+/// A row belonging to another project comes back as
+/// `MemoryStoreError::ForeignProject` — **an error, never an empty answer**.
+/// That distinction is the requirement, not an implementation detail: an
+/// agent reading `null` would conclude the memory does not exist, when what
+/// actually happened is that this project's file holds a row it must not
+/// read. `MemoryStore::resolve_id` is deliberately left unscoped for the same
+/// reason — scoping the prefix lookup by project would turn a foreign row
+/// back into a silent "not found", which is precisely the answer the store's
+/// own doc comment refuses to give.
+fn get_memory(runtime: &Runtime, memory: &str) -> Response {
+    use glasshouse::memory::{MemoryStoreError, ProjectMemory};
+
+    let project = match ProjectMemory::open(runtime) {
+        Ok(project) => project,
+        Err(err) => return Response::err(memory_error_message(&err)),
+    };
+    let store = project.store();
+
+    let id = match store.resolve_id(memory) {
+        Ok(id) => id,
+        Err(err) => return Response::err(err),
+    };
+    match store.get(&id) {
+        Ok(Some(record)) => Response::ok(memory_full_json(&record)),
+        // `resolve_id` found the row and `get` did not, which means it was
+        // deleted between the two statements. `NotFound` rather than a null
+        // result, for [`get_memory`]'s own reason.
+        Ok(None) => Response::err(MemoryStoreError::NotFound { id }),
+        Err(err) => Response::err(err),
+    }
+}
+
+/// A concise snapshot of what this project currently knows — capability map
+/// line 1113's `memory.current`.
+///
+/// Answered from `memory::snapshot::snapshot`, the same producer the TUI's
+/// project overview reads (`shell::build_project_overview_memory`), so the
+/// two cannot disagree about what "current" means. There is no second
+/// snapshot implementation behind this door and there must not be one.
+///
+/// # Bounded on both axes, server-side (line 1115)
+///
+/// A caller's `limit` and `body_chars` are each `min`'d against a constant
+/// here before they reach [`glasshouse::memory::snapshot::SnapshotBudget`],
+/// so they may only ever *lower*
+/// the ceiling. Passing `usize::MAX` to both — the executable form of
+/// "dumping the complete memory database into agent context" — yields the
+/// same bounded response as passing the ceiling itself.
+///
+/// # Sections, not a flattened dump
+///
+/// The response keeps `snapshot`'s own structure: one entry per
+/// `MemoryKind`, present even when empty, each reporting how many entries it
+/// left out. A section that hit its cap says so, and a body that was cut says
+/// so, so a caller can tell "this project has nothing of that kind" from
+/// "there is more of it than you asked for" without a second call.
+fn current_memory(runtime: &Runtime, limit: usize, body_chars: usize) -> Response {
+    use glasshouse::memory::ProjectMemory;
+    use glasshouse::memory::snapshot::{SnapshotBudget, snapshot};
+
+    let project = match ProjectMemory::open(runtime) {
+        Ok(project) => project,
+        Err(err) => return Response::err(memory_error_message(&err)),
+    };
+    let store = project.store();
+
+    let budget = SnapshotBudget::new(
+        limit.min(MAX_SNAPSHOT_SECTION_LIMIT),
+        body_chars.min(MAX_SNAPSHOT_BODY_CHARS),
+    );
+    match snapshot(&store, &budget) {
+        Ok(snapshot) => Response::ok(serde_json::json!({
+            "sections": snapshot
+                .sections
+                .iter()
+                .map(snapshot_section_json)
+                .collect::<Vec<_>>(),
+            // The budget actually applied, not the one asked for, so a caller
+            // that named a larger number learns what it got rather than
+            // inferring it from a section that happens to be short.
+            "budget": {
+                "per_section_limit": budget.per_section_limit,
+                "max_body_chars": budget.max_body_chars,
+            },
+        })),
+        Err(err) => Response::err(err),
+    }
+}
+
+/// One [`glasshouse::memory::snapshot::SnapshotSection`], as JSON.
+fn snapshot_section_json(
+    section: &glasshouse::memory::snapshot::SnapshotSection,
+) -> serde_json::Value {
+    use glasshouse::memory::MemoryKind;
+
+    serde_json::json!({
+        "kind": MemoryKind::as_str(section.kind),
+        "entries": section.entries.iter().map(snapshot_entry_json).collect::<Vec<_>>(),
+        "omitted": section.omitted,
+    })
+}
+
+/// One snapshot entry, as JSON — line 1116's provenance, at the resolution a
+/// snapshot has it.
+///
+/// A `SnapshotEntry` carries the two fields that *locate* a memory —
+/// `source_session_id` and `source_commit` — and not the ten
+/// `DecisionProvenance` fields that explain it, because the snapshot's job is
+/// to be concise (line 1115). They are one [`Request::GetMemory`] away, which
+/// is the division of labour those two lines describe between them: enough
+/// provenance here to know where to look, all of it there.
+fn snapshot_entry_json(entry: &glasshouse::memory::snapshot::SnapshotEntry) -> serde_json::Value {
+    use glasshouse::memory::MemoryAuthority;
+
+    serde_json::json!({
+        "id": entry.id.as_str(),
+        "subject": entry.subject,
+        "body": entry.body,
+        "body_truncated": entry.body_truncated,
+        "authority": entry.authority.map(MemoryAuthority::as_str),
+        "provenance": {
+            "source_session_id": entry.source_session_id,
+            "source_commit": entry.source_commit,
+        },
+    })
+}
+
 // ---------------------------------------------------------------------------
 // The orchestrator wake-up flow — capability map Phase 15, lines 733-739.
 // ---------------------------------------------------------------------------
@@ -1504,11 +1695,22 @@ fn gateway_failure_str(reason: GatewayFailure) -> &'static str {
     }
 }
 
-/// Search this project's durable memory — box 10, and Phase 21F lines
-/// 935/936: the machine door carries each result's authority, validity
-/// state, and — for a memory that may constrain implementation — its
-/// rationale and invalidation conditions, as structured fields rather than
-/// only inside a rendered string.
+/// Search this project's durable memory — box 10, capability map line 1111's
+/// project-scoped `memory.search`, and Phase 21F lines 935/936: the machine
+/// door carries each result's authority, validity state, and — for a memory
+/// that may constrain implementation — its rationale and invalidation
+/// conditions, as structured fields rather than only inside a rendered
+/// string.
+///
+/// # Project scope, and why there is no project argument
+///
+/// Line 1114. The scope is structural: this door is opened for one resolved
+/// [`Runtime`] and no request field names a project (see `super`'s module doc
+/// comment), and `MemoryStore::search` filters on `memories.project_id` in
+/// its own `WHERE` clause underneath that rather than trusting it. The two
+/// are independent, which is the point — see `memory::store`'s own
+/// "Project isolation" section for why the read boundary is not redundant
+/// with the trigger.
 ///
 /// `invariants_and_constraints`/`other` is `main.rs`'s own
 /// `memory_search_grouped` (line 929), the exact search
@@ -1518,9 +1720,18 @@ fn gateway_failure_str(reason: GatewayFailure) -> &'static str {
 /// text is rendered from the already-fetched grouping rather than searched
 /// for a second time.
 fn query_memory(runtime: &Runtime, query: &str, history: bool, limit: usize) -> Response {
+    // Line 1115. The cap is applied here rather than left to the caller's
+    // `limit`, and it is a `min` rather than a rejection: a caller asking for
+    // more than the door will give gets the door's answer, not an error, the
+    // same shape [`project_events`] uses for `MAX_EVENTS_LIMIT`.
+    let limit = limit.min(MAX_MEMORY_LIMIT);
     let grouped = match crate::memory_search_grouped(runtime, query, history, limit) {
         Ok(grouped) => grouped,
-        Err(err) => return Response::err(err),
+        // Through [`memory_error_message`], not `Response::err(err)` directly:
+        // this anyhow chain carries a `database::DatabaseError` when the
+        // project's database cannot be opened, and every variant of that type
+        // names the file's absolute path. See that function.
+        Err(err) => return Response::err(memory_error_message(&err)),
     };
     let report = match crate::render_memory_report(&grouped, query, history) {
         Ok(report) => report,
@@ -1587,10 +1798,113 @@ fn memory_result_json(record: &glasshouse::memory::MemoryRecord) -> serde_json::
         } else {
             None
         },
+        "provenance": provenance_json(record),
         "review": review,
         "last_validated_at": record.last_validated_at,
         "created_at": record.created_at,
     })
+}
+
+/// Everything that lets a caller trace one memory back to where it came from
+/// — capability map line 1116, *"include provenance with machine-retrieved
+/// memory so an agent can verify important claims against source or code."*
+///
+/// Deliberately the vocabulary `tests/memory_provenance.rs` already proves
+/// round-trips, field for field and spelling for spelling — the two
+/// *locating* fields `source_session_id` and `source_commit`, the event
+/// slice, and all ten of Phase 21B's `DecisionProvenance` fields — rather
+/// than a second provenance shape invented for this door. An agent that
+/// wants to check a claim against code has `source_commit`; against the
+/// conversation that produced it, `source_session_id` and `source_events`;
+/// against the reasoning, `rationale`, `evidence` and `source_excerpt`.
+///
+/// Every field is `null` when absent and never `""` or `0` (§71): a decision
+/// nobody recorded a security assumption for is a different fact from one
+/// that recorded there was none, and `MemoryRecord`'s own doc comments say
+/// so field by field.
+///
+/// `rationale` also appears at the top level of [`memory_result_json`], where
+/// Phase 21F line 936 put it; it is repeated rather than moved so that this
+/// change adds a field to the door's answer and removes none.
+///
+/// # Secrets
+///
+/// Nothing here is a credential by construction. `memory::store`'s module
+/// documentation states there is no column for a token, a key, or a provider
+/// secret; the screening is on the producer side, where
+/// `memory::extract::schema::judge` inspects each emitted element **whole**
+/// before any field is read. `source_excerpt` is the sharpest of these
+/// because it is verbatim session text — and it is exactly as screened as
+/// `body`, which this door has carried since Phase 21F. This is a `json!`
+/// over named fields, never a `Debug` format of a struct, so the
+/// `provider/discovery.rs::ProbeRequest` shape cannot reappear here.
+fn provenance_json(record: &glasshouse::memory::MemoryRecord) -> serde_json::Value {
+    use glasshouse::memory::ProjectPhase;
+
+    let provenance = &record.provenance;
+    serde_json::json!({
+        "source_session_id": record.source_session_id,
+        "source_commit": record.source_commit,
+        "source_events": record.source_events.map(|events| {
+            serde_json::json!({ "first": events.first, "last": events.last })
+        }),
+        "project_phase": provenance.project_phase.map(ProjectPhase::as_str),
+        "problem": provenance.problem,
+        "rationale": provenance.rationale,
+        "assumptions": provenance.assumptions,
+        "scale_assumptions": provenance.scale_assumptions,
+        "security_assumptions": provenance.security_assumptions,
+        "compatibility_assumptions": provenance.compatibility_assumptions,
+        "operational_assumptions": provenance.operational_assumptions,
+        "evidence": provenance.evidence,
+        "source_excerpt": provenance.source_excerpt,
+    })
+}
+
+/// One memory with nothing elided — [`Request::GetMemory`]'s answer, and
+/// capability map line 1112's *"in full"*.
+///
+/// [`memory_result_json`] plus what only a single-memory lookup has room to
+/// say: the supersession relationship and the reason for it (line 925), when
+/// the row was last written, whether it is still open work, and — stated
+/// rather than left to be assumed — that this body was **not** cut, which is
+/// the one thing distinguishing it from the same memory seen through
+/// [`Request::CurrentMemory`].
+///
+/// `validity_conditions` and `invalidation_conditions` stay gated on
+/// `may_constrain_implementation`, exactly as in the search answer: "in full"
+/// means nothing is elided, not that a non-binding memory starts being
+/// presented as one that constrains implementation. That gate is Phase 21F
+/// line 936's, and one verb relaxing it would make the door disagree with
+/// itself about the same row.
+fn memory_full_json(record: &glasshouse::memory::MemoryRecord) -> serde_json::Value {
+    let serde_json::Value::Object(mut fields) = memory_result_json(record) else {
+        // Unreachable: `memory_result_json` is a `json!({...})` object
+        // literal. Answering with the search shape rather than unwrapping
+        // keeps an impossible case off this door's panic path all the same —
+        // a panic here would take the whole server down, not one request.
+        return memory_result_json(record);
+    };
+
+    fields.insert(
+        "superseded_by".to_owned(),
+        serde_json::json!(record.superseded_by.as_ref().map(|id| id.as_str())),
+    );
+    fields.insert(
+        "superseded_reason".to_owned(),
+        serde_json::json!(record.superseded_reason),
+    );
+    fields.insert(
+        "open_todo".to_owned(),
+        serde_json::json!(record.is_open_todo()),
+    );
+    fields.insert("body_truncated".to_owned(), serde_json::json!(false));
+    fields.insert(
+        "updated_at".to_owned(),
+        serde_json::json!(record.updated_at),
+    );
+
+    serde_json::Value::Object(fields)
 }
 
 /// The project's current binding memory, rendered for a checkpoint's

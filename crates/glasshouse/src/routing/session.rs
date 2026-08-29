@@ -47,11 +47,13 @@
 use std::time::Instant;
 
 use crate::config::pairing::{ContinuitySource, WarmSession};
-use crate::harness::WireProtocol;
 use crate::harness::pairing::{self, ModelBehaviourFit, ProtocolFit};
+use crate::harness::{Capabilities as HarnessCapabilities, Declared, WireProtocol};
 use crate::integrations::IntegrationId;
 use crate::provider::quota::RemainingCapacityScore;
 
+use super::capability::{self, ResourceFacts};
+use super::classify::HardCapability;
 use super::free::{FreePool, FreeResource};
 use super::{
     Backend, CacheLocality, Contribution, HardConstraint, RoutingExplanation, ToolSemantics,
@@ -214,6 +216,12 @@ pub struct Destination {
     /// lost most of its resolution. The caller reads this off
     /// `crate::provider::Provider`, which already knows every base URL it has.
     provider_protocols: Vec<WireProtocol>,
+    /// Map line 1382: model/resource facts a harness adapter does not
+    /// declare, attached via [`Self::with_resource_facts`]. Defaults to
+    /// [`ResourceFacts::UNVERIFIED`] — the honest floor for a caller that has
+    /// not looked a model's own facts up, matching every other unattached
+    /// `Declared` value in this struct.
+    resource_facts: ResourceFacts,
 }
 
 impl Destination {
@@ -269,6 +277,7 @@ impl Destination {
             provider_protocols: pairing::wire_protocol_from_slug(&protocol)
                 .into_iter()
                 .collect(),
+            resource_facts: ResourceFacts::UNVERIFIED,
         }
     }
 
@@ -290,6 +299,20 @@ impl Destination {
 
     pub fn provider_protocols(&self) -> &[WireProtocol] {
         &self.provider_protocols
+    }
+
+    /// Attach model/resource facts — map line 1382. The default is
+    /// [`ResourceFacts::UNVERIFIED`], the honest floor for a caller that has
+    /// not looked a model's own facts up; see `capability`'s module
+    /// documentation for how this combines with the harness's own
+    /// declaration.
+    pub fn with_resource_facts(mut self, facts: ResourceFacts) -> Self {
+        self.resource_facts = facts;
+        self
+    }
+
+    pub fn resource_facts(&self) -> ResourceFacts {
+        self.resource_facts
     }
 
     /// The stable identifier a user names in an override, and the one a
@@ -339,15 +362,27 @@ impl Destination {
 /// What the work itself requires, as facts a caller states rather than
 /// preferences a router guesses.
 ///
-/// One field today, and it is the one that can actually **reject** a
+/// `needs_tool_calls` is the one field that can actually **reject** a
 /// destination: a task that needs tool calls cannot go somewhere tool calls
 /// are established not to work. Anything a router would only *prefer* belongs
 /// in a contribution, not here — that is design decision 1 ("additive, never
 /// a filter") carried into this phase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// `hard_capabilities` carries `TaskClassification::hard_capabilities()`'s own
+/// output (`super::classify`) so [`capability_fit`] has something to compare
+/// a destination's registry entry against. It is additive only — ruling 4 of
+/// the `GH-ROUTING-CAPABILITY` packet gives capability mismatch exactly one
+/// rejecting exception (a hard capability the resource is *established* to
+/// lack), and that exception is not wired here: nothing in this package
+/// constructs a `HardConstraint::Capability`, so an established-absent axis
+/// still only costs a candidate a contribution, never a rejection.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TaskRequirements {
     /// Whether the work needs the harness's tool-call protocol to work.
     pub needs_tool_calls: bool,
+    /// The hard capability requirements this task implies — see
+    /// `super::classify::TaskClassification::hard_capabilities`.
+    pub hard_capabilities: Vec<HardCapability>,
 }
 
 // ---------------------------------------------------------------------------
@@ -536,8 +571,27 @@ const BOOTSTRAP_COST_WITH_CHECKPOINT: f64 = -0.25;
 const SWITCH_HARNESS_COST: f64 = -0.8;
 const SWITCH_PROVIDER_COST: f64 = -0.3;
 
+/// `GH-ROUTING-CAPABILITY`, box 1391. A resource established to have a task's
+/// required capability — the case a router should prefer.
+const CAPABILITY_ESTABLISHED_PRESENT: f64 = 0.4;
+
+/// The mirror case: a resource established **not** to have a required
+/// capability. Negative, and worse than [`CAPABILITY_UNVERIFIED`] — but this
+/// is additive (ruling 4), so a mismatch costs a candidate something and does
+/// not remove it from consideration. (Ruling 4's one rejecting exception —
+/// a hard capability the resource is *established* to lack — is not wired in
+/// this package; see [`TaskRequirements`]'s own doc comment.)
+const CAPABILITY_ESTABLISHED_ABSENT: f64 = -0.4;
+
+/// Ruling 3's tri-state: nothing established either way scores `0.0`, the
+/// same precedent [`harness_capability_fit`]'s own `ProtocolFit::Unknown` arm
+/// sets — *"declares no protocols, or the route named none — not a `no`"*.
+/// Strictly greater than [`CAPABILITY_ESTABLISHED_ABSENT`], which is exactly
+/// what acceptance test 2 checks.
+const CAPABILITY_UNVERIFIED: f64 = 0.0;
+
 // ---------------------------------------------------------------------------
-// The six contributions. One public function each, so a mutation can zero
+// The seven contributions. One public function each, so a mutation can zero
 // exactly one of them.
 // ---------------------------------------------------------------------------
 
@@ -595,6 +649,93 @@ pub fn harness_capability_fit(
             pairing.model_behaviour(),
         ),
     )
+}
+
+/// Map line 1382, joined to a task's hard capability requirements —
+/// `GH-ROUTING-CAPABILITY`'s package, and `capability::axis_for`'s own
+/// comparison function is what makes this ruling-1-safe: this function never
+/// compares a task's tier to a resource's tier, only a resource's registry
+/// entry to the specific axis a requirement names.
+///
+/// This is `TaskClassification::hard_capabilities`' real production
+/// consumer: nothing else in the shipped binary reads the value that
+/// function returns for anything other than the diagnostic `writeln!` in
+/// `classify::describe`. `requirements.hard_capabilities` is where a caller
+/// of [`SessionRouter::choose`] attaches it (`main.rs` passes
+/// `TaskRequirements::default()` today, which is an empty list and therefore
+/// a `0.0` contribution — this package wires the mechanism; a follow-up
+/// package is what will have `main.rs` actually call
+/// `TaskClassification::hard_capabilities` and populate the field).
+///
+/// Reads `destination.harness()` the same way [`harness_capability_fit`]
+/// does — the identity is already in hand at the point this term is
+/// computed — and combines it with [`Destination::resource_facts`] through
+/// [`capability::ResourceCapabilities::describe`]. No capability value and no
+/// resource identity is matched here: this function only asks the registry a
+/// question and applies the three named constants above, which is 1390's
+/// answer — a new resource, a new harness, or a corrected axis changes
+/// nothing in this function's body.
+pub fn capability_fit(destination: &Destination, requirements: &TaskRequirements) -> Contribution {
+    if requirements.hard_capabilities.is_empty() {
+        return Contribution::new(
+            "capability fit",
+            0.0,
+            "the task named no hard capability requirement, so this resource's capability \
+             description contributes nothing",
+        );
+    }
+
+    let harness_caps = crate::harness::adapter_for(destination.harness())
+        .map(|adapter| adapter.describe().capabilities)
+        .unwrap_or(HarnessCapabilities::UNVERIFIED);
+    let resource =
+        capability::ResourceCapabilities::describe(&harness_caps, destination.resource_facts());
+
+    let mut magnitude = 0.0;
+    let mut notes = Vec::with_capacity(requirements.hard_capabilities.len());
+    for requirement in &requirements.hard_capabilities {
+        let axis = capability::axis_for(*requirement);
+        let (term, note) = match resource.axis(axis) {
+            Declared::Verified {
+                value: true,
+                evidence,
+            } => (
+                CAPABILITY_ESTABLISHED_PRESENT,
+                format!(
+                    "`{}` needs {} and this resource's `{}` is established present ({evidence})",
+                    destination.harness().slug(),
+                    requirement.as_str(),
+                    axis.name(),
+                ),
+            ),
+            Declared::Verified {
+                value: false,
+                evidence,
+            } => (
+                CAPABILITY_ESTABLISHED_ABSENT,
+                format!(
+                    "`{}` needs {} and this resource's `{}` is established **absent** \
+                     ({evidence})",
+                    destination.harness().slug(),
+                    requirement.as_str(),
+                    axis.name(),
+                ),
+            ),
+            Declared::Unverified => (
+                CAPABILITY_UNVERIFIED,
+                format!(
+                    "`{}` needs {} and this resource's `{}` is not established — not a `no`",
+                    destination.harness().slug(),
+                    requirement.as_str(),
+                    axis.name(),
+                ),
+            ),
+        };
+        magnitude += term;
+        notes.push(note);
+    }
+
+    Contribution::new("capability fit", magnitude, notes.join("; "))
 }
 
 /// Line 1596: what an existing session's affinity contributes.
@@ -1313,6 +1454,7 @@ fn score(
 ) -> RoutingExplanation {
     let mut explanation = RoutingExplanation::new();
     explanation.push(harness_capability_fit(destination, inputs.overrides));
+    explanation.push(capability_fit(destination, &inputs.requirements));
     explanation.push(session_affinity(destination));
     explanation.push(prompt_cache_state(destination, current));
     explanation.push(quota_pressure(destination));

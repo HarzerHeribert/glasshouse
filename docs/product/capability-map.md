@@ -1108,12 +1108,12 @@ Phase 25 — Project knowledge view
 
 Phase 26 — Memory query for agents
 
-☐ Expose a project-scoped memory.search operation to Glasshouse-aware agents.
-☐ Expose a project-scoped memory.get operation for retrieving a selected memory in full.
-☐ Expose a project-scoped memory.current operation for retrieving a concise current project snapshot.
-☐ Prevent agent memory tools from querying another project’s memory store.
-☐ Return concise results rather than dumping the complete memory database into agent context.
-☐ Include provenance with machine-retrieved memory so an agent can verify important claims against source or code.
+☑ Expose a project-scoped memory.search operation to Glasshouse-aware agents.
+☑ Expose a project-scoped memory.get operation for retrieving a selected memory in full.
+☑ Expose a project-scoped memory.current operation for retrieving a concise current project snapshot.
+☑ Prevent agent memory tools from querying another project’s memory store.
+☑ Return concise results rather than dumping the complete memory database into agent context.
+☑ Include provenance with machine-retrieved memory so an agent can verify important claims against source or code.
 
 Phase 27 — Context injection
 

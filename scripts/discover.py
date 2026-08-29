@@ -111,6 +111,12 @@ def is_definition_or_doc(line: str, seam: str) -> bool:
     stripped = line.lstrip()
     if stripped.startswith(("///", "//!", "//", "*", "/*")):
         return True
+    # An import names the symbol; it does not call it. `use a::b::seam;`
+    # matches a fully-qualified `literal_re` exactly, so without this an import
+    # alone was enough to report a production caller — the mirror of the
+    # bare-call blind spot below, and wrong in the more dangerous direction.
+    if stripped.startswith("use ") or stripped.startswith("pub use "):
+        return True
     name = seam.rsplit("::", 1)[-1]
     return _declares(line, name)
 
@@ -123,6 +129,25 @@ def find_call_sites(seam: str, src_root: str) -> dict:
     component, since idiomatic Rust calls a trait method as `x.method(...)`
     rather than `Type::method(...)`. The fallback is reported as a heuristic,
     not asserted as equivalent to the literal form.
+
+    **A third form, and it produced a false dead-symbol verdict on 2026-08-29.**
+    A *free function* brought into scope by `use path::to::{name}` and called
+    bare — `snapshot(&store, &budget)` — matches neither of the two forms
+    above: it carries no `::` path and no `.` receiver. `find_call_sites`
+    reported `memory::snapshot::snapshot` as having ZERO non-test call sites
+    while `shell/mod.rs:1357` had been calling it in production since Phase 41,
+    behind a function-local `use` at `shell/mod.rs:1345`. That verdict reached
+    a dispatched packet, which asserted the symbol "has never had a production
+    caller" and told a worker to prove it gained one; the worker re-derived it
+    and returned the claim as a packet error.
+
+    This is the exact failure mode this project spends `cluster-b.py` on in
+    reverse — a false *absence* of a caller manufactures work, where a false
+    presence lets a box close early. `cluster-b.py` never had the bug: it
+    matches a bare-name call. `bare_hits` brings this function to the same
+    standard, and is reported as its own weaker bucket rather than merged into
+    `literal`, because a bare name collides across modules and a reader must be
+    able to see which form the verdict rests on.
 
     **A symbol's own definition and its doc comments are not call sites**, and
     counting them produced a wrong verdict on 2026-08-28: `evaluate_reserve_spend`
@@ -140,9 +165,13 @@ def find_call_sites(seam: str, src_root: str) -> dict:
     method = seam.rsplit("::", 1)[-1]
     literal_re = re.compile(re.escape(seam))
     method_re = re.compile(r"\." + re.escape(method) + r"\(")
+    # A bare call: the name followed by `(`, not preceded by `.` or `::` (those
+    # are the two buckets above) and not part of a longer identifier.
+    bare_re = re.compile(r"(?<![\w.])(?<!::)\b" + re.escape(method) + r"\s*\(")
 
     literal_hits: list[tuple[str, int, str]] = []
     method_hits: list[tuple[str, int, str]] = []
+    bare_hits: list[tuple[str, int, str]] = []
     defn_hits: list[tuple[str, int, str]] = []
 
     for path in sorted(Path(src_root).rglob("*.rs")):
@@ -163,13 +192,25 @@ def find_call_sites(seam: str, src_root: str) -> dict:
                 bucket.append((rel, idx + 1, line.strip()))
             elif method_re.search(line):
                 method_hits.append((rel, idx + 1, line.strip()))
+            elif bare_re.search(line):
+                # `is_definition_or_doc` already rejected the `fn name(`
+                # declaration and every comment form above; what reaches here
+                # is a bare call to a free function in scope via `use`.
+                if not is_definition_or_doc(line, seam):
+                    bare_hits.append((rel, idx + 1, line.strip()))
 
-    return {"literal": literal_hits, "method": method_hits, "definition": defn_hits}
+    return {
+        "literal": literal_hits,
+        "method": method_hits,
+        "bare": bare_hits,
+        "definition": defn_hits,
+    }
 
 
 def report_seam(seam: str, src_root: str) -> None:
     hits = find_call_sites(seam, src_root)
     literal, method = hits["literal"], hits["method"]
+    bare = hits.get("bare", [])
     definition = hits.get("definition", [])
 
     def show_definitions() -> None:
@@ -204,6 +245,24 @@ def report_seam(seam: str, src_root: str) -> None:
         print(
             "Treat this as a lead, not proof — confirm the receiver's type "
             "before crediting a box with this caller."
+        )
+        return
+
+    if bare:
+        name = seam.rsplit("::", 1)[-1]
+        print(
+            f"discover.py: no literal `{seam}` and no `.{name}(` call site "
+            f"found; {len(bare)} non-test bare call(s) of `{name}(` — a free "
+            f"function in scope through a `use` import:"
+        )
+        for rel, lineno, text in bare:
+            print(f"  {rel}:{lineno}: {text}")
+        print(
+            "Treat this as a lead, not proof — a bare name collides across "
+            "modules, so confirm the `use` that brings it into scope before "
+            "crediting a box with this caller. This bucket exists because its "
+            "absence reported `memory::snapshot::snapshot` as uncalled while "
+            "shell/mod.rs:1357 had been calling it since Phase 41."
         )
         return
 

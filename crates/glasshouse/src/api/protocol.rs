@@ -6,6 +6,7 @@
 //! the connection. Nothing here is transport-specific — [`super::unix`] is
 //! the only module that knows this travels over a Unix domain socket.
 
+use glasshouse::memory::snapshot::SnapshotBudget;
 use serde::{Deserialize, Serialize};
 
 fn default_memory_limit() -> usize {
@@ -14,6 +15,18 @@ fn default_memory_limit() -> usize {
 
 fn default_events_limit() -> usize {
     200
+}
+
+/// Read from [`SnapshotBudget::default`] rather than restated, so the door's
+/// default snapshot is the same one every other caller of
+/// `memory::snapshot::snapshot` gets and the two cannot drift apart.
+fn default_snapshot_limit() -> usize {
+    SnapshotBudget::default().per_section_limit
+}
+
+/// As [`default_snapshot_limit`], for the per-entry body cap.
+fn default_snapshot_body_chars() -> usize {
+    SnapshotBudget::default().max_body_chars
 }
 
 /// One control-API call.
@@ -118,13 +131,67 @@ pub enum Request {
         /// The session a completion is delivered into.
         notify: String,
     },
-    /// Search this project's durable memory.
+    /// Search this project's durable memory — capability map line 1111's
+    /// project-scoped `memory.search`, and Phase 21F lines 935/936.
+    ///
+    /// Project-scoped twice over: this door is opened for one already-resolved
+    /// project and carries no field naming another (see `super`'s own doc
+    /// comment), and the query underneath it —
+    /// `memory::search::MemoryStore::search` — filters on
+    /// `memories.project_id` in its own `WHERE` clause rather than trusting
+    /// that.
+    ///
+    /// `limit` is capped at `unix::MAX_MEMORY_LIMIT` regardless of what is
+    /// asked for — line 1115. A caller may lower the ceiling; it cannot raise
+    /// it.
     QueryMemory {
         query: String,
         #[serde(default)]
         history: bool,
         #[serde(default = "default_memory_limit")]
         limit: usize,
+    },
+    /// One selected memory in full — capability map line 1112's
+    /// project-scoped `memory.get`.
+    ///
+    /// The complement of [`Request::QueryMemory`], which ranks and returns
+    /// many, and of [`Request::CurrentMemory`], whose bodies are cut to a
+    /// budget: this returns exactly one memory with nothing elided — its
+    /// whole body, its supersession, and every provenance field Phase 21B
+    /// records, so an agent that found a memory through either of the other
+    /// two verbs has somewhere to go for the rest of it.
+    ///
+    /// Answered through `MemoryStore::get`, which is the module's stated read
+    /// boundary: a row bound to another project is an **error**, never an
+    /// empty answer — see line 1114 and that method's own doc comment.
+    GetMemory {
+        /// A memory identifier, or an unambiguous leading part of one — the
+        /// same prefix rule `glasshouse memory show` uses. There is no
+        /// project component: an identifier names a row, and which project
+        /// that row must belong to is this door's business, not the
+        /// caller's.
+        memory: String,
+    },
+    /// A concise snapshot of what this project currently knows — capability
+    /// map line 1113's project-scoped `memory.current`.
+    ///
+    /// Answered from `memory::snapshot::snapshot` directly, so this door and
+    /// the TUI's project overview cannot disagree about what "current" means:
+    /// active memories only, grouped by kind, most recently updated first.
+    ///
+    /// Bounded on both axes and on every section independently — line 1115's
+    /// *"concise results rather than dumping the complete memory database"*.
+    /// `limit` caps the entries in any one section and `body_chars` caps each
+    /// entry's body; both are capped again server-side
+    /// (`unix::MAX_SNAPSHOT_SECTION_LIMIT`, `unix::MAX_SNAPSHOT_BODY_CHARS`),
+    /// so a caller may lower either ceiling and cannot raise it. Nothing is
+    /// dropped silently: a capped section reports how many entries it left
+    /// out and a cut body says that it was cut.
+    CurrentMemory {
+        #[serde(default = "default_snapshot_limit")]
+        limit: usize,
+        #[serde(default = "default_snapshot_body_chars")]
+        body_chars: usize,
     },
     /// Retrieve a checkpoint — capability map line 66, "retrieve a completed
     /// worker result or checkpoint." A worker has no other durable "result"
