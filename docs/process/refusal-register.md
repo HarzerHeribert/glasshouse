@@ -97,6 +97,7 @@ whose consuming phases are still at zero. **It belongs in Cluster D.**
 | 372 | **stale blocker**: `phase-9a.md:482` says `grep 'fn score\|Score'` is empty; it is not. Nothing selects among launch profiles, so still open |
 | 1313 | latency aggregates have zero production readers; every candidate consumer is in another partition |
 | 531 | **moved here from Cluster B in batch 50.** Missing caller *and* consumer: nothing in production distinguishes a request pool from a token-priced allowance, and no `FreePool` outlives one call. Needs a routing consumer that behaves differently for the two — see Cluster B's note |
+| 930, 934 | **added batch 53, and they were being recommended as cheap.** Phase 21F's two remaining packageable lines qualify an injection that does not exist: *"inject only memories whose scope overlaps the current task"* and *"avoid injecting old ideas merely because they mention the same subsystem"*. **Phase 27, Context injection, is at 0/11.** The consuming seam is real and located — `api/unix.rs:659-661`, where `spawn_session` delivers a natural-language task to a freshly spawned session — but nothing selects memory before it. Package Phase 27 first; these two are its qualifiers and close cheaply afterwards |
 
 ### Cluster E — the provider signal genuinely does not arrive *(in-repo: **NO** — do not package)*
 
@@ -116,6 +117,13 @@ The decisive input is the user's source tree, the agent's plan, or the agent's
 diff. Verified: nothing under `crates/glasshouse/src/` reads the user's tracked
 source or runs their tests. Map line 932 declined this four times and
 `memory/policy.rs:280-295` records the reason.
+
+**932 is inside a nearly-finished phase, which is how it keeps getting
+recommended.** Phase 21F reads as "4 open, 7 closed" and a handoff in batch 52
+offered it as a cheap closure while naming only 930 and 934 as absent from this
+register — true of those two, and not of the line between them. A phase's open
+count says nothing about whether its lines are ours. **Check every open line
+against this register individually, not the phase.**
 
 | lines |
 |---|
