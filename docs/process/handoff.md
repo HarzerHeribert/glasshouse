@@ -6,6 +6,86 @@
 
 Last updated: 2026-08-29 (Europe/Berlin)
 
+## Checkpoint — 2026-08-29, batch 53 dispatched: 757 / 1280 (59%)
+
+**Batch 52's narrative was never written down.** The map moved 742 → 757 and
+this file still opened at batch 51. The closures are recoverable only from the
+commits — `d9f6e75` (748, the control API's event log), `1cf1699` (1822, 1826,
+1856 — migration 15 and the retrieval ledger), `aac08dc` (eight of Phase 37,
+and the first real co-edit reconciliation), with `d57ddd5` fixing migration
+15's last two blast-radius casualties. Recorded here so the gap is visible
+rather than silently inherited.
+
+### The batch-53 premise: stop packaging leaves
+
+Batch 52 handed over three "cheap" candidates. Two were traps, and both were
+findable before dispatch:
+
+- **Line 932** was recommended as part of a nearly-finished Phase 21F. It is
+  **Cluster F** — `memory/policy.rs:280-295` records that this exact line was
+  declined **four times**, because nothing under `crates/glasshouse/src/` reads
+  the user's tracked source. The handoff note said "930, 934 — not in the
+  register", which was true of those two and not of the line between them.
+- **Line 930** ("inject only memories whose scope overlaps the current task")
+  is a leaf of **Phase 27, Context injection, which is at 0/11**. There is no
+  injection path for a scope filter to filter. Closing it first would have
+  built the qualifier before the thing it qualifies.
+
+**The ruling, and it is the user's:** prefer trunks. A phase at 0-closed that
+several register clusters wait on is worth more than three phases with one
+box left.
+
+### Batch 53's four packages, and what makes each a trunk
+
+Each is a **join between two halves that already exist in production and were
+never wired to each other** — the Cluster B shape, at phase scale rather than
+symbol scale.
+
+| package | phase | lines | the measured gap |
+|---|---|---|---|
+| `GH-ROUTING-CAPABILITY` | 34 | 1382–1391 | `hard_capabilities()`'s only production call site is inside a `writeln!` — a task's capability requirements are **printed, never decided on**. Nothing outside `src/harness/` reads `.code_editing`, `.shell_access`, `.browser_use` or `.subagents`; seven adapters declare into the display only |
+| `GH-SESSION-CONTEXT` | 30 | 1158–1165 | `routing/session.rs:616` states the gap in its own doc comment: *"the session store records no turn count, no touched-file set and no task identity"*. Migration 16 |
+| `GH-MEMORY-QUERY-API` | 26 | 1111–1116 | `memory::snapshot::snapshot()` is complete, budgeted, tested — and has **zero production callers**. The door it never had |
+| `GH-WORKLOAD-TIERS` | 34A | 1395–1400, 1404 | production ships three `WorkloadTier` variants; the map defines five. Tier 0 is unrepresentable |
+
+### Three orchestrator rulings this batch owes to its successors
+
+1. **A compaction *count* is not a compaction *event*.** Cluster G blocks
+   lines 310/327 because `LIFECYCLE_EVENT_KINDS`' `CHECK` cannot be widened in
+   place (`database.rs:830`). That blocks a `lifecycle_events` row. It does
+   **not** block a counter column on `sessions`, and
+   `session::lifecycle::precedes_native_compaction` is already firing in
+   production at `main.rs:2587`. Line 1159 is therefore packageable and the
+   register's cluster does not reach it.
+
+2. **Widening an ordered enum turns every equality into a latent defect.**
+   `provider/quota.rs:2317` reads `inputs.tier == WorkloadTier::Heavy`. Add a
+   tier above `Heavy` and the strongest work in the system compares unequal and
+   **falls through to `ReserveDecision::Deny`** — losing exactly the reserve it
+   most justifies. `GH-WORKLOAD-TIERS` converts every such comparison to a
+   threshold and must prove it with a Tier-4 test. Any future variant widening
+   owes the same audit.
+
+3. **`validate_round.py`'s cited-seams check earns its keep on the
+   orchestrator's own packets, not just the workers'.** My first draft of
+   `GH-ROUTING-CAPABILITY` named `RoutingExplanation::contributions()` as the
+   consumer link. It has 14 test call sites and zero production ones — it is a
+   display accessor. The real consumer is `RoutingExplanation::total()`, read
+   at `routing/interactive.rs:1022-1024` where the highest-scoring candidate is
+   chosen. **Run the validator before dispatch even when the packet feels
+   solid**; this one would have shipped a false propagation claim.
+
+### Owed, and why it has not happened yet
+
+`scripts/ci-local.sh --macos --linux --windows-vm` has **not** run since
+`d9f6e75`. Four commits are ungated: `1cf1699`, `aac08dc`, `d57ddd5`,
+`86c8a7f`. It cannot run while workers compile — §40/§85, the gate reports your
+own CPU load as a Linux PTY failure. **Run it at the first quiet window**, and
+remember that for a schema change `blast-radius.sh` green is not sufficient
+evidence: migration 15 broke rollback fixtures in three files and the third was
+found only by the full gate.
+
+
 ## Checkpoint — 2026-08-29, batch 51 landed: 742 / 1280 (58%)
 
 **Eight closures, three phases finished (6, 9F, 45), and four defects found that
