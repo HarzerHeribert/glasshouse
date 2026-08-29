@@ -1413,9 +1413,22 @@ impl<'a> MemoryStore<'a> {
         self.set_status(id, MemoryStatus::Invalidated)
     }
 
-    /// Every memory with the given status, most recently updated first.
+    /// Every memory **of this project** with the given status, most recently
+    /// updated first.
     ///
     /// The ordering is the `memories_by_status_updated` index read directly.
+    ///
+    /// # Why the `project_id` predicate is in the `WHERE` and not a guard
+    ///
+    /// Every other scoped operation here can lean on a leading
+    /// [`MemoryStore::get`], which carries the project check. A listing takes
+    /// no identifier, so there is nothing to guard: the `WHERE` clause is the
+    /// entire boundary. Phase 21G made the same argument for five
+    /// `UPDATE memories` statements — a foreign row planted by a restored
+    /// backup or an older build must not be reachable — and this is the read
+    /// side of it, which is the side that renders another project's memory
+    /// *body* on a user's screen: `main.rs::memory_revalidate_list` prints it,
+    /// and the shell's project-knowledge panel renders it.
     pub fn with_status(
         &self,
         status: MemoryStatus,
@@ -1424,7 +1437,8 @@ impl<'a> MemoryStore<'a> {
         let mut statement = self
             .conn
             .prepare(&format!(
-                "SELECT {ALL_COLUMNS} FROM memories WHERE status = ?1 \
+                "SELECT {ALL_COLUMNS} FROM memories \
+                 WHERE status = ?1 AND project_id = ?3 \
                  ORDER BY updated_at DESC, id ASC LIMIT ?2"
             ))
             .map_err(|source| MemoryStoreError::Sql {
@@ -1433,7 +1447,11 @@ impl<'a> MemoryStore<'a> {
             })?;
         let rows = statement
             .query_map(
-                rusqlite::params![status.as_str(), i64::try_from(limit).unwrap_or(i64::MAX)],
+                rusqlite::params![
+                    status.as_str(),
+                    i64::try_from(limit).unwrap_or(i64::MAX),
+                    &self.project_id,
+                ],
                 row_to_record,
             )
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
@@ -1614,11 +1632,16 @@ impl<'a> MemoryStore<'a> {
     }
 
     /// How many memories this project holds, by status.
+    ///
+    /// Scoped in the `WHERE` clause for the reason
+    /// [`MemoryStore::with_status`] documents: a count takes no identifier, so
+    /// no leading guard stands in front of it, and a foreign row planted in
+    /// this project's file would otherwise be counted as this project's.
     pub fn count(&self, status: MemoryStatus) -> Result<i64, MemoryStoreError> {
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM memories WHERE status = ?1",
-                [status.as_str()],
+                "SELECT COUNT(*) FROM memories WHERE status = ?1 AND project_id = ?2",
+                rusqlite::params![status.as_str(), &self.project_id],
                 |row| row.get(0),
             )
             .map_err(|source| MemoryStoreError::Sql {

@@ -153,3 +153,89 @@ Missing evidence:
 
 - Nothing outstanding for 914–918 and 924.
 - The six open lines each name their missing producer above.
+
+---
+
+## Phases 21E and 21G — batch 49 team-lead pass: 0 of 12 closed, and that is the correct result
+
+An Opus team lead with one read-only subcontractor took twelve lines and closed
+none. Every refusal names its missing producer in current source, checked this
+session rather than inherited. **The package's value is the twelve rulings and
+one live defect it found on the way.**
+
+### The ruling it applied, stated so it can be argued with
+
+> A capability is *Glasshouse's* when its **decisive input exists inside
+> Glasshouse's process boundary.**
+
+Glasshouse sees memory rows, the query text a caller sends, lifecycle events and
+checkpoints. It does not see the user's source tree, the agent's plan, or the
+agent's diff — and that was **verified rather than assumed**: nothing anywhere
+under `crates/glasshouse/src/` reads the user's tracked source or runs their
+tests. Every `read_to_string` is Glasshouse's own config or state, git object
+ids, or `/proc`; `walkdir`/`glob` have no match at all.
+
+That single check disposes of 919, 921, 943 and most of 923 — they require
+reading the repository, which map line 932 already declined four times and
+`memory/policy.rs:280-295` records the reason for.
+
+### The twelve, with the link that fails
+
+| line | verdict | missing link |
+|---|---|---|
+| 919 | premise-invalid | no reader of source or tests exists in the crate |
+| 920 | premise-invalid | no producer for "a requested implementation". `search::contradicts` takes **two `&MemoryRecord`** — both sides are stored memories; no type represents a pending change |
+| 921 | premise-invalid | agent conduct; the only Glasshouse-side claim is negative, and no test would fail if it were removed |
+| 922 | premise-invalid | same missing trigger as 920, **and the offer half is only half-shipped**: `mark_conflicted` ships, but `MemoryStore::resolve_conflict` has **zero non-test callers**. Glasshouse can raise a conflict and cannot resolve one from the binary |
+| 923 | premise-invalid | guard has no producer |
+| 925 | **blocked — and the ledger's stated blocker is wrong** | see below |
+| 943 | premise-invalid | line 932 again, **and both halves fail**: `project_metadata` holds exactly one key, `project_id`, enforced by its own test. There is no project metadata to check against |
+| 944 | premise-invalid | no project-wide lifecycle phase exists. `ProjectPhase` is a fact about **one memory's provenance**, written only by extraction |
+| 945 | premise-invalid | `ReviewReason::ArchitectureDrift` exists with **no constructor anywhere, including tests** — reachable only by a human typing the string |
+| 946 | premise-invalid | identical: `ReviewReason::ProductionIncident`, zero constructors |
+| 947 | premise-invalid | "not validated for a period" has a producer; "about to influence a high-impact change" has none. **A proxy was built and rejected** — scoping to what a `search` just returned means "about to be used", and a caller may be browsing; substituting `high_impact_reason(authority)` swaps a fact about the *memory* for the line's *high-impact change* |
+| 951 | premise-invalid | presupposes automatic revalidation. `ConflictResolver::Automatic` is constructed at exactly one non-test site, behind a human-typed `--automatic` flag. There is no automatic actor to avoid work for |
+
+**Line 925's correction.** `phase-21e.md` recorded it as *"needs a schema
+migration … Red tier."* It does not. `review_reason` is already a persisted
+column in `ALL_COLUMNS`, its `CHECK` constrains only the vocabulary, and
+`supersede`'s `UPDATE` touches `status`, `superseded_by` and `updated_at` only —
+so a reason already on the row survives. The line is smaller than recorded and
+is not Red.
+
+### The defect it found instead — project isolation on the READ side
+
+Not one of the twelve. Found during Phase −1, inside its own expected file.
+
+Phase 21G hardened five `UPDATE memories` statements with `AND project_id = ?N`,
+on the recorded ground that a leading `self.get(id)?` guard *"is one line a
+future edit can drop, and the failure is silent."* **The reads were never
+covered — and a listing query has no guard to drop, because it takes no
+identifier: the `WHERE` clause is the entire boundary.**
+
+- `MemoryStore::with_status` — `SELECT … FROM memories WHERE status = ?1`, with
+  **no project predicate**, and three production callers: `main.rs:2739`
+  (`glasshouse memory revalidate --list`) and `shell/mod.rs:1646,1749` (the
+  project-knowledge panel, whose keyboard route this very batch closed as line
+  234).
+- `MemoryStore::count` — whose doc said *"How many memories **this project**
+  holds"* while the SQL said no such thing.
+
+Proven in the shipped binary in both directions against a planted foreign row:
+before the fix, another project's memory **body** printed verbatim; after,
+`no memory is waiting for review`, with the planted row still present —
+refusing to list is not deleting.
+
+Not remotely reachable: the insert trigger blocks the normal path. This is
+defence in depth against a restored backup, a hand-edited file, or a build
+predating the trigger — the same threat model `project_isolation.rs` uses, and
+the same one Phase 21G's integrator applied to the write side, now applied to
+the side that renders.
+
+Regression evidence: `memory_project_scope::the_review_queue_and_the_status_count_never_reach_a_memory_planted_from_another_project`.
+
+Mutations — three, all killed, one re-run by the orchestrator. Their design is
+worth keeping: `AND project_id = ?3` → `AND ?3 IS NOT NULL` rather than deleting
+the clause, **because deleting it while leaving `?3` bound fails on rusqlite's
+parameter count — a §80 case-4 false KILLED that proves nothing behavioural.**
+Keeping the parameter count identical makes the mutation purely behavioural.
