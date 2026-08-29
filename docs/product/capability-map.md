@@ -1678,7 +1678,7 @@ Fixed architectural requirements
 ☑ Allow the API to retrieve lifecycle state.
 ☑ Allow the API to retrieve current resource capacity and quota telemetry.
 ☑ Allow the API to retrieve the current routing-model selection and health.
-☐ Allow the API to request an inspectable routing recommendation without executing it.
+☑ Allow the API to request an inspectable routing recommendation without executing it.
 ☑ Allow the API to query project memory.
 ☑ Allow the API to request a checkpoint.
 ☑ Authenticate or restrict the local control channel so unrelated local processes cannot casually control active agent sessions.

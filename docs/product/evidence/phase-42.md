@@ -481,3 +481,142 @@ control door is a Unix domain socket and this claims no Windows coverage it
 does not have.
 
 Missing evidence: CI run; no Windows claim is made.
+
+
+---
+
+# Line 1681 — closed 2026-08-29. **Phase 42 is finished, 13 of 13.**
+
+Package `GH-ROUTE-RECOMMEND`; report in `.agent-runtime/report-route-recommend.md`.
+
+A new control-API verb `recommend_route` answers with the destination, its
+score, **every contribution and its evidence string**, the ranked runners-up,
+the hard-constraint rejections, the "what this ranking could not see" caveats,
+and the rendered decision — and writes nothing.
+
+## The refactor is why there is one ranking and not two
+
+`route_report` was one function that loaded config, built the candidate set,
+asked `SessionRouter::choose` and rendered. It is now three:
+`route_recommendation` (the decision, structured),
+`render_route_recommendation` (the text `glasshouse route` prints, byte for
+byte what it printed before), and `route_report` (ask, then print). The door
+calls `route_recommendation` directly.
+
+This is `memory_search_grouped` / `render_memory_report`'s shape, already used
+by the memory door. **All 15 `route_command` tests pass unchanged**, which is
+the evidence that the rendering half is behaviour-preserving — the CLI and the
+door cannot disagree about where work would go.
+
+`RouteRecommendation` is an enum because `choose` answers `None` in two
+different situations the old code flattened into two prose strings a caller
+would have had to parse. The door keys them mechanically.
+
+## "Without executing it" is enforced, not intended
+
+Six mutations, all killed. The two that carry the line:
+
+| mutation | killed by |
+|---|---|
+| the verb records a routing observation | `a_recommendation_executes_nothing_and_records_nothing` |
+| the dispatch arm spawns a session before recommending | the same test, and three others |
+
+The non-execution proof compares the session list, the event log,
+`routing_observations` and harness invocation across one call.
+
+**Mutation (a) SURVIVED on its first run and the worker investigated rather
+than banking it** — the survival was true about the *test*, not about the
+contract, and it was repaired before the verdict was taken. That is §80
+applied correctly, by a second worker, in the same session that added §80
+case 6.
+
+## Orchestrator's ruling
+
+**Closed.** The refactor removes the risk the packet was most worried about —
+two rankings that could disagree — and proves it with the CLI's own unchanged
+test suite rather than by assertion. The non-execution contract is enforced by
+tests that a mutation kills.
+
+**Limits carried forward, from the worker's own list:** the verb takes no
+routing override (`to`/`fresh`/`now`), a deliberate narrowing; error
+diagnostics past the config load collapse to one sentence because every
+`DatabaseError` variant names an absolute path, so a caller cannot tell a
+locked database from a corrupt one; and a credential's *name* does appear in
+quota-pressure evidence strings, exactly as it does in `glasshouse route`'s own
+output — only values and absolute paths are asserted absent.
+
+### Allow the API to request an inspectable routing recommendation without executing it. (line 1681)
+
+Contract: Given a project with more than one routing candidate, when a caller asks the control socket `recommend_route` with a free-form task description, Glasshouse answers with the destination the ranking chose, its score, and every contribution and evidence string behind it — plus the bounded runners-up and what the ranking could not see — while preserving the project's session list, event log and routing-observation table byte-for-byte and never invoking the configured harness.
+
+State: **COMPLETE**
+
+Production evidence:
+- `crates/glasshouse/src/api/protocol.rs` — `Request::RecommendRoute`
+- `crates/glasshouse/src/api/unix.rs` — `recommend_route`
+- `crates/glasshouse/src/api/unix.rs` — `route_destination_json`
+- `crates/glasshouse/src/api/unix.rs` — `contributions_json`
+- `crates/glasshouse/src/api/unix.rs` — `no_route_reason`
+- `crates/glasshouse/src/api/unix.rs` — `MAX_ROUTE_ALTERNATIVES`
+- `crates/glasshouse/src/main.rs` — `route_recommendation`
+- `crates/glasshouse/src/main.rs` — `render_route_recommendation`
+- `crates/glasshouse/src/main.rs` — `routing_moment_from_str`
+- `crates/glasshouse/src/main.rs` — `routing_moment_slug`
+
+Regression evidence:
+- `routing_api::a_recommendation_names_a_destination_and_the_contributions_behind_it`
+- `routing_api::a_recommendation_executes_nothing_and_records_nothing`
+- `routing_api::two_tasks_differing_only_in_text_are_recommended_different_destinations`
+- `routing_api::the_command_and_the_door_recommend_the_same_destination`
+- `routing_api::an_absurd_alternatives_bound_still_comes_back_bounded`
+- `routing_api::an_unrecognised_moment_is_refused_without_echoing_it`
+- `routing_api::no_credential_and_no_path_appears_in_a_routing_recommendation`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| in recommend_route, before `let bound = alternatives.min(MAX_ROUTE_ALTERNATIVES);` insert `if let Ok(ledger) = glasshouse::routing::evidence::EvidenceLedger::open(runtime) { let _ = ledger.record(NewObservation::new("mutant-provider", "mutant-model"), 1_700_000_000); }` | `write-a-routing-observation` | **killed** | `routing_api::a_recommendation_executes_nothing_and_records_nothing` |
+| `"contributions": contributions_json(routed.explanation()),` -> `"contributions": Vec::<serde_json::Value>::new(),` | `drop-the-contributions` | **killed** | `routing_api::a_recommendation_names_a_destination_and_the_contributions_behind_it` |
+| `crate::route_recommendation(runtime, &effective, moment, None, false, false, task)` -> `... , None)` | `door-ignores-the-task-text` | **killed** | `routing_api::two_tasks_differing_only_in_text_are_recommended_different_destinations` |
+| in the alternatives listing, `.take(bound)` -> `.take(usize::MAX)` | `no-server-side-cap` | **killed** | `routing_api::an_absurd_alternatives_bound_still_comes_back_bounded` |
+| the `Request::RecommendRoute` dispatch arm calls `spawn_session(runtime, &store, live, "claude-code", Vec::new(), None, None, injected)` before `recommend_route` | `recommending-also-executes` | **killed** | `routing_api::a_recommendation_executes_nothing_and_records_nothing` |
+| `"caveats": crate::routing_caveats(` -> `"caveats": String::new(), "caveats_unused": crate::routing_caveats(` | `drop-the-caveats` | **killed** | `routing_api::a_recommendation_names_a_destination_and_the_contributions_behind_it` |
+
+> write-a-routing-observation observed: assertion `left == right` failed: a routing recommendation must not write a routing observation: a verb that decides nothing has nothing to observe. NOTE: this SURVIVED on its first run because the test helper called observed_identities(i64::MAX/4, i64::MAX/8, ...) and that method computes earliest = now - window, putting the earliest accepted timestamp above every real one. The test was fixed, not the code.
+
+> drop-the-contributions observed: panicked at routing_api.rs:473 — the capability term is absent, so `no capability term` fires before any evidence can be read
+
+> door-ignores-the-task-text observed: the browser task recommends fresh:codex:direct-codex instead of fresh:claude-code:direct-cc; the_command_and_the_door_recommend_the_same_destination and test 1 fail alongside it
+
+> no-server-side-cap observed: panicked at routing_api.rs:703 — an unbounded ask must be answered at the door's ceiling
+
+> recommending-also-executes observed: the session list and event log both change, and the ranking itself flips to the newly-live session (`session affinity +1.500`), failing three further tests
+
+> drop-the-caveats observed: panicked at routing_api.rs:527 — the response must say that the provider-health term was never read rather than weighed and found equal
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Unix only: the control door is `#[cfg(unix)]` and nothing here is proven on Windows, where `api::serve` still bails.
+- The verb takes no routing override (`to`/`fresh`/`now`) — a deliberate narrowing, stated in the report. If line 1602 is read as binding on the door, that is a follow-up packet.
+- The alternatives listing inherits `Routed::render_overview`'s `skip(1)` rule, which is only correct while no override can move the chosen destination off index 0. Safe today because this verb takes no override.
+- Error diagnostics past the config load collapse to one fixed sentence, because every `database::DatabaseError` variant names the database file's absolute path. A caller cannot tell a locked database from a corrupt one.
+- The non-execution proof covers the session list, the event log, `routing_observations` and harness invocation. A write to some other table would survive it.
+- A credential's *name* does appear in the quota-pressure and provider-health evidence strings, as it does in `glasshouse route`'s own output; only the value and absolute paths are asserted absent.
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **1681** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo build: ok
+- cargo test --test routing_api: 11 passed, 0 failed
+- cargo test --test route_command: 15 passed, 0 failed (unchanged by the refactor)
+- cargo test --test capacity_api: 3 passed, 0 failed
+- cargo test --test api_event_log: 6 passed, 0 failed
+- cargo clippy --all-targets --all-features -- -D warnings: clean
+- cargo fmt --all -- --check: clean
+- scripts/blast-radius.sh: every traced target passed; rustdoc clean
+

@@ -17,6 +17,24 @@ fn default_events_limit() -> usize {
     200
 }
 
+/// Matches `cli.rs`'s own `default_value` for `glasshouse route --moment`, so
+/// a bare [`Request::RecommendRoute`] and a bare `glasshouse route` ask the
+/// router the same question — the agreement capability map line 1681 is only
+/// worth anything if it holds by default rather than only when a caller
+/// remembers to state the moment.
+fn default_routing_moment() -> String {
+    "session-start".to_owned()
+}
+
+/// How many ranked alternatives [`Request::RecommendRoute`] returns when the
+/// caller does not say. Small on purpose: the answer is the destination and
+/// the reasons behind it, and the near misses are context. A caller that
+/// wants the whole ranked field asks for more, up to
+/// `unix::MAX_ROUTE_ALTERNATIVES`.
+fn default_route_alternatives() -> usize {
+    5
+}
+
 /// Read from [`SnapshotBudget::default`] rather than restated, so the door's
 /// default snapshot is the same one every other caller of
 /// `memory::snapshot::snapshot` gets and the two cannot drift apart.
@@ -90,6 +108,47 @@ pub enum Request {
     /// in this project — a degrade to heuristics *is* the health signal this
     /// line asks for; see those functions' own doc comments.
     RoutingModel,
+    /// Where this work would be routed, and why — capability map line 1681,
+    /// *"an inspectable routing recommendation without executing it."*
+    ///
+    /// Read-only, and more strongly so than the rest of this door: it starts
+    /// no session, sends no text, takes no checkpoint, writes no routing
+    /// observation, and mutates no store. The whole verb is
+    /// `main.rs`'s own `route_recommendation` — the same function
+    /// `glasshouse route` is, so the command and the door cannot disagree
+    /// about where work would go (there is one ranking, not two) — rendered
+    /// as JSON rather than as a report.
+    ///
+    /// `task` is the free-form description of the work, classified exactly
+    /// as `glasshouse route --task` classifies it: by keyword, into
+    /// `TaskRequirements`, never executed and never interpolated into a
+    /// command. Absent or blank means the ranking weighs no task
+    /// requirement, byte for byte the no-`--task` behaviour.
+    ///
+    /// `moment` is one of `session-start`, `task-boundary` or `mid-turn`,
+    /// defaulting to `session-start` as the command does.
+    ///
+    /// `alternatives` bounds how many ranked runners-up and rejected
+    /// candidates come back; it is capped server-side at
+    /// `unix::MAX_ROUTE_ALTERNATIVES` regardless of what is asked for, so a
+    /// caller may lower the ceiling and cannot raise it. Every other part of
+    /// the response is bounded by construction: one destination, and one
+    /// contribution per scoring term.
+    ///
+    /// There is deliberately no override here — no `to`, no `fresh`, no
+    /// `now`. Those are a *user* telling the router where to go
+    /// (`glasshouse route`'s own line 1602 flags), and this verb exists to
+    /// ask it a question. Nothing else on this door speaks that vocabulary
+    /// either: [`Request::SpawnSession`] names a harness, not a routing
+    /// override.
+    RecommendRoute {
+        #[serde(default)]
+        task: Option<String>,
+        #[serde(default = "default_routing_moment")]
+        moment: String,
+        #[serde(default = "default_route_alternatives")]
+        alternatives: usize,
+    },
     /// This project's lifecycle events, in Glasshouse's own vocabulary
     /// rather than any one harness's — capability map line 701.
     ///

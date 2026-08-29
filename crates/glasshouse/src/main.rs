@@ -919,23 +919,13 @@ fn routing_override(
     }
 }
 
-/// `glasshouse route` — map lines 1601 and 1602.
+/// `glasshouse route` — map lines 1601 and 1602: the command, which is
+/// [`route_recommendation`] asked and [`render_route_recommendation`]
+/// printed, and nothing else.
 ///
-/// **Decides nothing and starts nothing.** It assembles exactly the inputs
-/// `launch_session` assembles, asks the same `SessionRouter` the same
-/// question, and prints `Routed::render_overview`. That is what makes it a
-/// diagnostic worth reading rather than a second implementation that could
-/// drift: if this and a launch ever disagreed, one of them would be lying,
-/// and there is one function each of them calls.
-///
-/// Two differences from the launch path, both stated in the output rather
-/// than hidden:
-///
-/// 1. it ranks across **every enabled harness**, because a person asking
-///    where work should go has not yet chosen one, whereas a launch has;
-/// 2. it includes sessions that are still **running** (`DestinationScope`),
-///    because "switch to that terminal" is an answer a person can act on and
-///    is not one a second process can carry out.
+/// The moment is parsed here rather than inside the recommendation because
+/// this is where a person's typed spelling arrives, and the message they get
+/// back quotes it.
 fn route_report(
     runtime: &Runtime,
     moment: &str,
@@ -944,23 +934,160 @@ fn route_report(
     now: bool,
     task: Option<&str>,
 ) -> anyhow::Result<String> {
-    use glasshouse::integrations::{IntegrationId, IntegrationKind};
-    use glasshouse::routing::free::FreePool;
-    use glasshouse::routing::session::{RouterInputs, RoutingMoment, SessionRouter};
-
-    let moment = match moment {
-        "session-start" => RoutingMoment::SessionStart,
-        "task-boundary" => RoutingMoment::TaskBoundary,
-        "mid-turn" => RoutingMoment::MidTurn,
-        other => anyhow::bail!(
-            "`{other}` is not a routing moment; use `session-start`, `task-boundary` or \
+    let Some(parsed) = routing_moment_from_str(moment) else {
+        anyhow::bail!(
+            "`{moment}` is not a routing moment; use `session-start`, `task-boundary` or \
              `mid-turn`"
-        ),
+        )
     };
 
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
     let effective = EffectiveConfig::new(&user, project.as_ref());
+
+    let recommendation = route_recommendation(runtime, &effective, parsed, to, fresh, now, task)?;
+    Ok(render_route_recommendation(&recommendation))
+}
+
+/// The three spellings `glasshouse route --moment` accepts and the control
+/// door's `recommend_route` answers in, written down exactly once.
+///
+/// These are **not** `RoutingMoment::as_str`, which is prose for a person
+/// (`"session start"`, with a space) and is what a rendered report prints.
+/// A wire vocabulary a caller sends and gets back has to round-trip, and a
+/// table read in both directions is how the sending spelling and the
+/// answering spelling are kept from drifting apart.
+const ROUTING_MOMENTS: [(&str, glasshouse::routing::session::RoutingMoment); 3] = [
+    (
+        "session-start",
+        glasshouse::routing::session::RoutingMoment::SessionStart,
+    ),
+    (
+        "task-boundary",
+        glasshouse::routing::session::RoutingMoment::TaskBoundary,
+    ),
+    (
+        "mid-turn",
+        glasshouse::routing::session::RoutingMoment::MidTurn,
+    ),
+];
+
+/// [`ROUTING_MOMENTS`], read as a parser.
+///
+/// Answers an `Option` rather than an error because the two callers must
+/// phrase the refusal differently: the command echoes back what the person
+/// typed at their own terminal, and the door — where the string arrived over
+/// a socket — names the three valid spellings without repeating the one it
+/// was handed.
+fn routing_moment_from_str(moment: &str) -> Option<glasshouse::routing::session::RoutingMoment> {
+    ROUTING_MOMENTS
+        .iter()
+        .find(|(spelling, _)| *spelling == moment)
+        .map(|(_, moment)| *moment)
+}
+
+/// [`ROUTING_MOMENTS`], read the other way: the spelling a caller may send
+/// back, for the control door's answer.
+///
+/// Gated to match its only consumer, `api::unix`, for the reason
+/// `api/mod.rs` states about `protocol`: an item reached only from a
+/// platform-gated module is dead code everywhere else, and `-D warnings`
+/// makes that a hard error rather than a warning.
+#[cfg(unix)]
+fn routing_moment_slug(moment: glasshouse::routing::session::RoutingMoment) -> &'static str {
+    ROUTING_MOMENTS
+        .iter()
+        .find(|(_, candidate)| *candidate == moment)
+        .map(|(spelling, _)| *spelling)
+        // Unreachable while the table covers the enum, and an honest fallback
+        // rather than a panic if a variant is ever added without it.
+        .unwrap_or_else(|| moment.as_str())
+}
+
+/// What a routing question was answered with, before anything renders it —
+/// the structured half of [`route_report`], and the whole of what the
+/// control door's `recommend_route` reports (map line 1681).
+///
+/// This exists so there is exactly **one** ranking. `memory_search_grouped`
+/// and `render_memory_report` already have this shape for the memory door:
+/// one function computes, another renders, and the door reads the computed
+/// form rather than parsing the rendered one. A door that asked the router
+/// its own question would be a second implementation of the same policy, and
+/// the two could disagree about where work should go without anything
+/// failing.
+enum RouteRecommendation {
+    /// `SessionRouter::choose` answered. Boxed because the ranking carries
+    /// every candidate it weighed and the other variant carries a word;
+    /// `clippy::large_enum_variant` is right that the difference should not
+    /// be paid by every value of this type.
+    Ranked(Box<RankedRoute>),
+    /// It did not, and [`NoRoute`] says which of its two situations applies.
+    Nowhere(NoRoute),
+}
+
+/// A routing decision together with the two things [`routing_caveats`] needs
+/// in order to say what the ranking could not see.
+struct RankedRoute {
+    routed: glasshouse::routing::session::Routed,
+    /// Every candidate the router was offered, kept because a caveat is
+    /// about the candidate set rather than about the winner.
+    destinations: Vec<glasshouse::routing::session::Destination>,
+    /// The `Destination::id` of every fresh candidate `glasshouse launch`
+    /// would itself refuse — see [`launch_can_resolve_protocol`].
+    refused_by_launch: Vec<String>,
+}
+
+/// Why there is no recommendation.
+///
+/// `SessionRouter::choose` answers `None` in exactly two situations, and they
+/// are different facts about this project rather than one error — which is
+/// why this is an enum a caller can match on rather than a sentence it would
+/// have to parse.
+enum NoRoute {
+    /// No session to continue, and no launch profile to start one under.
+    NoDestination,
+    /// The moment does not take routing (line 1592), and there is no session
+    /// for the work to stay on either.
+    MomentDoesNotRoute(glasshouse::routing::session::RoutingMoment),
+}
+
+/// `glasshouse route`'s decision, and the control door's — map lines 1601,
+/// 1602 and 1681.
+///
+/// **Decides nothing and starts nothing.** It assembles exactly the inputs
+/// `launch_session` assembles, asks the same `SessionRouter` the same
+/// question, and hands back what it answered. That is what makes it a
+/// diagnostic worth reading rather than a second implementation that could
+/// drift: if this and a launch ever disagreed, one of them would be lying,
+/// and there is one function each of them calls.
+///
+/// Nothing on this path writes. It opens the project's session store and
+/// checkpoint store to *read* candidates (`routing_destinations`,
+/// `latest_checkpoint_quality`), and records no session, no event, and no
+/// routing observation — which is the whole of line 1681's *"without
+/// executing it"*, and is asserted over the shipped binary in
+/// `tests/routing_api.rs`.
+///
+/// Two differences from the launch path, both stated in the rendered output
+/// rather than hidden:
+///
+/// 1. it ranks across **every enabled harness**, because a caller asking
+///    where work should go has not yet chosen one, whereas a launch has;
+/// 2. it includes sessions that are still **running** (`DestinationScope`),
+///    because "switch to that terminal" is an answer a person can act on and
+///    is not one a second process can carry out.
+fn route_recommendation(
+    runtime: &Runtime,
+    effective: &EffectiveConfig<'_>,
+    moment: glasshouse::routing::session::RoutingMoment,
+    to: Option<&str>,
+    fresh: bool,
+    now: bool,
+    task: Option<&str>,
+) -> anyhow::Result<RouteRecommendation> {
+    use glasshouse::integrations::{IntegrationId, IntegrationKind};
+    use glasshouse::routing::free::FreePool;
+    use glasshouse::routing::session::{RouterInputs, RoutingMoment, SessionRouter};
 
     let mut destinations = Vec::new();
     // Which of them `glasshouse launch` would refuse, so the report can say so
@@ -973,7 +1100,7 @@ fn route_report(
         .filter(|id| effective.enabled(*id, false).value)
     {
         let everything =
-            routing_destinations(runtime, &effective, harness, DestinationScope::Everything)?;
+            routing_destinations(runtime, effective, harness, DestinationScope::Everything)?;
         refused_by_launch.extend(
             everything
                 .iter()
@@ -1035,24 +1162,46 @@ fn route_report(
     ) else {
         // `choose` answers `None` in exactly two situations, and they are
         // different facts about this project rather than one error.
-        return Ok(if moment.permits_routing() {
+        return Ok(RouteRecommendation::Nowhere(if moment.permits_routing() {
+            NoRoute::NoDestination
+        } else {
+            NoRoute::MomentDoesNotRoute(moment)
+        }));
+    };
+
+    Ok(RouteRecommendation::Ranked(Box::new(RankedRoute {
+        routed,
+        destinations,
+        refused_by_launch,
+    })))
+}
+
+/// [`RouteRecommendation`] as `glasshouse route` prints it — the rendering
+/// half, layered on top of the decision rather than computed beside it.
+fn render_route_recommendation(recommendation: &RouteRecommendation) -> String {
+    match recommendation {
+        RouteRecommendation::Nowhere(NoRoute::NoDestination) => {
             "There is nowhere for this work to go: this project has no session to continue \
              and no launch profile to start one under. `glasshouse doctor` reports which \
              harnesses are installed.\n"
                 .to_owned()
-        } else {
-            format!(
-                "Nothing is routed at a {moment} moment (line 1592), and this project has no \
-                 session for the work to stay on either. Ask at a session start or a task \
-                 boundary, or pass --now to decide here anyway.\n"
-            )
-        });
-    };
-
-    let mut out = routed.render_overview();
-    out.push('\n');
-    out.push_str(&routing_caveats(&routed, &destinations, &refused_by_launch));
-    Ok(out)
+        }
+        RouteRecommendation::Nowhere(NoRoute::MomentDoesNotRoute(moment)) => format!(
+            "Nothing is routed at a {moment} moment (line 1592), and this project has no \
+             session for the work to stay on either. Ask at a session start or a task \
+             boundary, or pass --now to decide here anyway.\n"
+        ),
+        RouteRecommendation::Ranked(ranked) => {
+            let mut out = ranked.routed.render_overview();
+            out.push('\n');
+            out.push_str(&routing_caveats(
+                &ranked.routed,
+                &ranked.destinations,
+                &ranked.refused_by_launch,
+            ));
+            out
+        }
+    }
 }
 
 /// Classify `task`'s free-form description of the work into the
