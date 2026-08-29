@@ -2045,6 +2045,9 @@ Intent and boundaries
 ☐ Consider letting two sessions work on the same file concurrently in isolated buffers, rather than serializing them behind a claim, when both genuinely need it.
 ☐ Treat this as a third option beside queueing and reconcile-later, not a replacement for either, and keep queueing as the default until measurement justifies otherwise.
 ☐ Keep the isolated buffer a real working tree the session can compile and test in, because a change nobody can verify is not an implementation.
+☐ Make convergent co-editing a setting the user can turn off, whose off state is ordinary queueing and remains a coherent way to work.
+☐ Make the coordination mode inspectable per contended file, so a user can see whether a file was queued, co-edited, or reconciled after the fact.
+☐ Record which mode produced each reconciliation, so the two can be compared on real work rather than argued about.
 ☐ Do not build automatic semantic merge; a merged file neither author would accept is worse than a queue.
 ☐ Do not make this part of MVP or a V1 completion requirement.
 

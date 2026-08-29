@@ -3080,3 +3080,62 @@ workers, neither by me**, and the cost was one refused dispatch
 careful worker would have accepted. **Ten consecutive rounds a worker has
 corrected its packet and been right** — that streak is not luck, and it is also
 not a substitute for the gate.
+
+## §77 — convergent co-editing: the protocol this project runs on itself
+
+The user proposed convergent co-editing for Glasshouse (map **Maybe L**,
+`design-decisions.md`) and then asked for the sharper thing: **run it here first,
+and let the measurement decide whether the product ships it.**
+
+That is the right order and it is cheap, because **this project already has the
+expensive half.** Every worker gets an isolated git worktree it can compile and
+test in. A worktree *is* the "pre-implementation buffer" — the only things
+missing are visibility and a barrier.
+
+### Why it is worth trying: the measured cost of the rule it replaces
+
+Batch 45 dispatched seven packets. **Six of them carried a deferral instruction**
+— *"`main.rs` is FORBIDDEN, write the exact patch into your report"* — because a
+file the package needed belonged to another live worker. Each deferral converts
+worker work into orchestrator work at the one point that does not parallelise.
+
+**The contended file is almost always `main.rs`**, and that is not an accident:
+§32 says put the caller's file in the partition, and `main.rs` is where every
+production caller lives. So the contention is structural, and it gets worse with
+every worker added.
+
+### The protocol, in five rules
+
+1. **Two workers may share a file.** Name it in *both* packets as
+   `SHARED FILE`, never in one packet's `FORBIDDEN FILES`.
+2. **Each still works only in its own worktree.** Nothing is written to `main`
+   and nothing is written to the other's tree. Both compile and test normally —
+   this is why the buffer must be a worktree and not a patch file.
+3. **Each packet names the other's worktree path and the exact command** to read
+   its version of the shared file:
+
+       git -C <other-worktree> diff -- <shared file>
+
+4. **Read once, at finalization — not continuously.** Before declaring the shared
+   file done, the worker reads the other's version, adapts its own to fit, and
+   **says in its report what it changed because of what it saw.** Continuous
+   mutual adaptation oscillates against stale state; one look captures most of
+   the value and terminates.
+5. **The barrier is the orchestrator's.** Reconciliation happens only when both
+   have declared that file finished. **If both versions cannot be preserved, it
+   escalates with both visible — a merge neither author wrote is never invented.**
+
+### What must be recorded for the measurement to mean anything
+
+Per contended file: which mode was used (queue / co-edit), whether reconciliation
+needed escalation, whether each worker adapted because of what it saw, and the
+wall-clock against simply queueing. **The honest baseline is that queueing already
+works** — Maybe L ships only if co-editing beats it on real work.
+
+### The trap to watch for, stated in advance
+
+**A worker that reads another's in-progress file may treat it as settled.** It is
+not: the other worker may still change it, and may itself be wrong. The packet
+must say so — *this is an unfinished proposal by a peer, not committed truth* —
+because this project's recurring defect is exactly this shape: a narrow, cited,
+plausible-looking artifact read as more authoritative than it is (§75, §76).
