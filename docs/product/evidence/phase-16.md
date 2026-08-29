@@ -320,3 +320,178 @@ test left as a marker.
 Limits: 745, 746 and 747 remain open on a separate unmade product decision
 (refusal register Cluster K) — a user still cannot *enter* an orchestrated
 worker. This line is about the record, not the access.
+
+
+---
+
+# Lines 746, 747 closed; 745 refused — 2026-08-30
+
+Package `GH-API-CLIENT`; report in `.agent-runtime/report-api-client.md`.
+
+## The gap was a client, and it came from a test file's doc comment
+
+`tests/worker_access.rs` opens by recording that four of Phase 15/16's five
+lines were returned **premise-invalid**, with the reason stated exactly:
+*"**No user surface reaches this door at all.** … `UnixStream::connect`
+appears nowhere in `crates/glasshouse/src/`, and `cli::ApiCommand` has exactly
+one variant, `Serve`."* Glasshouse could **answer** its control socket and could
+not **knock** on it.
+
+Both facts were re-verified before dispatch and both held.
+`src/api/client.rs` is the half that knocks:
+
+    glasshouse api send      --session <ID> --text <TEXT>
+    glasshouse api interrupt --session <ID>
+
+`api/unix.rs` and `api/protocol.rs` were **not touched** and no `Request`
+variant was added — the verbs already existed and were already proven against
+the shipped binary.
+
+**That finding lived only in a test file's module doc.** It was not in the
+refusal register and not in this ledger, so nobody could act on it without
+reading a test they had no reason to open.
+
+## 745 — refused, and the recorded reason is wrong
+
+*"Allow the user to enter any orchestrated worker while it is running."* There
+is no verb on this wire that returns a worker's **output**, so a client built
+from the existing verbs can put input in and cannot show what came back. Adding
+one was outside this packet, and the worker stopped and reported as instructed.
+
+**But the premise underneath 745 is stale, and it is the most useful thing in
+the report.** `phase-16.md` and the register's Cluster K both frame 745 as an
+unmade **Red-tier** design decision — *"the worker becomes `Embedded`"* versus
+*"a pty handed between processes"* — on the grounds that **no read path into a
+running worker exists outside the process that owns it**.
+
+A read path exists **inside** that process, and it has no production caller:
+
+    src/session/api.rs:150
+        pub fn recent_output(&self, id: &SessionId, max_bytes: usize) -> Result<String, ApiError>
+
+It resolves through `SessionApi::resolve`, so it is project-scoped by the same
+seam every other verb uses, and its own test asserts it refuses a foreign
+session (`api.rs:727`). **Its only call sites are in its own `#[cfg(test)]`
+module** — verified by the orchestrator on the integrated tree.
+
+**So 745 is one `Request` variant away, not a Red-tier architecture decision.**
+That is the next package, and it is small.
+
+---
+
+### Allow the user to enter any orchestrated worker while it is running. (line 745)
+
+Contract: Given a running orchestrated worker, when the user asks to enter it, Glasshouse shows them the worker's terminal — which no request on this wire returns.
+
+State: NOT STARTED — worker refused the line; see its reason
+
+Recorded scope limits — stated by the worker, not discovered later:
+- No `Request` variant returns a worker's terminal output, and ruling 1 forbids adding one; the packet's own stop condition was taken.
+- The premise recorded in phase-16.md and refusal-register Cluster K is STALE: `session::api::SessionApi::recent_output` (session/api.rs:150) is a project-scoped read of a live worker's scrollback, inside the process that owns the pty, with NO production caller — its only call sites are its own `#[cfg(test)]` tests. 745 needs one Request variant plus one client verb, not a pty handed between processes.
+- Whether a poll-based read counts as `enter` is a product judgement; `attach.rs`'s objection still stands for a transparent full-terminal attach.
+
+---
+
+### Allow direct user input to an orchestrated worker without requiring the orchestrator as an intermediary. (line 746)
+
+Contract: Given an orchestrated worker running under `glasshouse api serve`, when a person runs `glasshouse api send` from their own terminal, Glasshouse delivers that exact text onto the worker's pseudo-terminal without any agent being consulted or taking a turn, while preserving project scope, the canonical-line refusal, and the absence of any filesystem path in what the person is told.
+
+State: **COMPLETE**
+
+Production evidence:
+- `src/api/client.rs` — `send_message`
+- `src/api/client.rs` — `call`
+- `src/api/client.rs` — `socket_path_for`
+- `src/cli.rs` — `ApiCommand::Send`
+- `src/main.rs` — `run (Command::Api / ApiCommand::Send arm)`
+
+Regression evidence:
+- `worker_access::a_message_sent_by_the_client_reaches_a_real_worker_process`
+- `worker_access::the_client_cannot_reach_another_projects_worker`
+- `worker_access::a_line_over_the_canonical_limit_is_refused_to_the_user_and_the_session_survives`
+- `worker_access::the_client_says_what_went_wrong_without_naming_a_path`
+- `worker_access::the_client_finds_the_door_the_server_actually_bound`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| in send_message: `    )?;` -> `    );` (the call's Result is discarded) | `ignore-the-doors-error` | **killed** | `worker_access::a_line_over_the_canonical_limit_is_refused_to_the_user_and_the_session_survives` |
+| socket_path_for: scan `state_dir().parent()` and return any other project's `control.sock` that exists before computing this project's | `cross-the-project-boundary` | **killed** | `worker_access::the_client_cannot_reach_another_projects_worker` |
+| println! of the delivery line gains ` at {}`, socket_path_for(runtime).display() | `leak-a-path` | **killed** | `worker_access::the_client_says_what_went_wrong_without_naming_a_path` |
+| const MAX_SOCKET_PATH_BYTES: usize = 90; -> = 200; (client always takes the preferred branch) | `drift-the-duplicated-limit-up` | **killed** | `worker_access::a_message_sent_by_the_client_reaches_a_real_worker_process` |
+| const MAX_SOCKET_PATH_BYTES: usize = 90; -> = 20; (client always takes the fallback branch) | `drift-the-duplicated-limit-down` | **killed** | `worker_access::the_client_finds_the_door_the_server_actually_bound` |
+
+> ignore-the-doors-error observed: panicked at worker_access.rs:901 — `a line the terminal cannot take must not be reported as delivered`; also failed the_client_says_what_went_wrong_without_naming_a_path and the_client_cannot_reach_another_projects_worker
+
+> cross-the-project-boundary observed: panicked at worker_access.rs:799 — `a client scoped to beta must not deliver into alpha's worker`; only that test failed, so the mutation is precisely targeted
+
+> leak-a-path observed: panicked at worker_access.rs:1018 — `the `ok` case named a filesystem path`; proves the no-path absence assertion is live rather than vacuous
+
+> drift-the-duplicated-limit-up observed: 4 tests failed; the client looked in the state directory for a door the server had bound in the temp directory
+
+> drift-the-duplicated-limit-down observed: panicked at worker_access.rs:1081; the short-path half found no door because the server had bound in its state directory
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The delivery is recorded as `MessageOrigin::Machine` — session/api.rs:129 hard-wires it — so an orchestrator reading the event log cannot tell a user's intervention from its own message. Bears on already-ticked line 748. Fixing it needs session/api.rs and protocol.rs, both forbidden here.
+- `client::socket_path_for` duplicates the private `unix::socket_path_for`. Proven to agree on BOTH branches against the shipped server, not deduplicated: unix.rs is forbidden. The integrator can make the original `pub(super)` and delete the copy.
+- A read timeout is genuinely ambiguous about whether the text arrived; the message says so rather than guessing.
+- The non-Unix refusal is compile-proven via a cfg flip, never executed on Windows.
+
+---
+
+### Allow the user to interrupt an orchestrated worker directly. (line 747)
+
+Contract: Given an orchestrated worker running under `glasshouse api serve`, when a person runs `glasshouse api interrupt` from their own terminal, a real SIGINT is raised in the worker's own process by a 0x03 on its own terminal, while preserving the session — it still takes input afterwards.
+
+State: **COMPLETE**
+
+Production evidence:
+- `src/api/client.rs` — `interrupt`
+- `src/api/client.rs` — `call`
+- `src/cli.rs` — `ApiCommand::Interrupt`
+- `src/main.rs` — `run (Command::Api / ApiCommand::Interrupt arm)`
+
+Regression evidence:
+- `worker_access::an_interrupt_sent_by_the_client_makes_the_worker_react`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| in interrupt: `"op": "interrupt", "session": session,` -> `"op": "send_message", "session": session, "text": "",` | `interrupt-that-is-only-a-message` | **killed** | `worker_access::an_interrupt_sent_by_the_client_makes_the_worker_react` |
+
+> interrupt-that-is-only-a-message observed: panicked at worker_access.rs:385 — `timed out waiting for the worker to handle a real SIGINT`. Read verbatim per §80 case 5: this is the assertion the test is named for, not a fixture setup guard.
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The reaction is proven by the worker's own SIGINT trap. It proves a signal was raised in that process; it does not prove any particular harness's semantics for handling one.
+- The interrupt is recorded as `MessageOrigin::Machine`, same limit as 746.
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **745** — verdict `refused`. Confirm the worker's reason against current source before recording it.
+- **746** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+- **747** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+
+**Packet errors the worker reported — read these BEFORE its results.**
+Thirteen consecutive rounds a worker corrected its packet and was right:
+- Acceptance test 3 required a boundary refusal `distinguishable from 'no such session'`. It is not satisfiable and should not be: each project has its own database, so another project's session is ABSENT rather than foreign, `ApiError::ForeignProject` is unreachable between two real projects, and saying more would confirm the session exists elsewhere. The test asserts the scoped sentence (`no session `x` in this project`) plus the absence of a `--socket` argument instead.
+- Required mutation (a), `drop the client's project-scope check`, has no site: the client has no project-scope check. Its scope is structural — the socket is a pure function of the resolved project and there is no parameter to aim. Two substitute mutations were run against the mechanism that does carry the boundary; both KILLED.
+- docs/process/refusal-register.md:267 (Cluster K) says of 746 and 747 `there is nothing to send input to, or interrupt, until a user can be in a running worker`. Both halves are now false. STALE — reported, not edited.
+- docs/product/evidence/phase-16.md and refusal-register Cluster K both frame 745 as blocked on a Red-tier pty-ownership decision because no read path into a running worker exists. `SessionApi::recent_output` (session/api.rs:150) is exactly that read path, project-scoped, with no production caller. STALE — reported, not edited.
+- The existing test `the_door_refuses_to_deliver_into_another_projects_worker` passes on `ApiError::NotFound`, never on `ApiError::ForeignProject`, for the same per-project-database reason. Still a real test; not testing the variant its name suggests.
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo build: clean
+- cargo fmt --all -- --check: clean
+- cargo clippy --all-targets --all-features -- -D warnings: clean
+- cargo test --test worker_access: 9 passed
+- cargo test --test api_event_log: 6 passed
+- cargo test --test project_isolation: 7 passed
+- cargo test --test canonical_line_limit: 6 passed
+- cargo test --bin glasshouse: 44 passed
+- scripts/check-doc-boundary.sh: clean
+- scripts/blast-radius.sh: every traced target passed — 40 cargo targets (--lib, 38 integration tests, --bin glasshouse) plus rustdoc clean, exit 0
+- non-Unix path via §18 cfg flip across api/mod.rs and main.rs: cargo clippy --bin glasshouse -- -D warnings clean; both files restored byte-identical
+

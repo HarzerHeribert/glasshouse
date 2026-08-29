@@ -18,6 +18,18 @@
 //! the same error `glasshouse sessions` itself would give for a session no
 //! live process holds).
 //!
+//! **This module has two halves, and only one of them existed until now.**
+//! `unix` answers the door; `client` knocks on it. For Phase 42's whole life
+//! nothing in this repository did the knocking — `UnixStream::connect`
+//! appeared nowhere in `crates/glasshouse/src`, so a transport that could
+//! carry a person's keystrokes into a running worker had no person on either
+//! end of it, and capability map lines 746 and 747 were returned
+//! premise-invalid for exactly that. `glasshouse api send` and `glasshouse
+//! api interrupt` are the missing end. They share nothing with the server but
+//! `protocol`'s wire shape, and they deliberately take **no socket path** —
+//! see `client`'s own doc comment for why that omission is the project
+//! boundary rather than a gap in it.
+//!
 //! **Why a Unix socket, not a subcommand-per-call.** A subcommand-per-call
 //! ("`glasshouse api send-message ...`") is a fresh process per request, and
 //! a fresh process cannot hold the `SessionRuntime` that spawning and
@@ -60,6 +72,16 @@ mod protocol;
 #[cfg(unix)]
 mod unix;
 
+/// Gated to match the transport it speaks over, exactly as `protocol` and
+/// `unix` are. It is the *client* half of this door — the half that connects,
+/// writes one request and reads one answer — and it is separate from `unix`
+/// because that module is the server and the two share nothing but the wire
+/// shape in `protocol`.
+#[cfg(unix)]
+mod client;
+
+#[cfg(unix)]
+pub use client::{interrupt, send_message};
 #[cfg(unix)]
 pub use unix::serve;
 
@@ -68,14 +90,43 @@ pub use unix::serve;
 /// primitives). Refusing loudly here is the honest answer until that
 /// transport exists, rather than a build that silently does nothing on
 /// Windows.
+///
+/// One sentence for all three verbs rather than three near-copies: a client
+/// that could not connect on this platform and a server that could not bind
+/// on it are the *same* missing transport, and a user who reads two different
+/// explanations of one absence has been told there are two problems.
+#[cfg(not(unix))]
+fn no_unix_socket() -> anyhow::Error {
+    anyhow::anyhow!(
+        "glasshouse: the control API needs a Unix domain socket, which this platform does not \
+         have; Windows needs a named-pipe transport that does not exist yet (Phase 42's socket \
+         door is Unix-only)"
+    )
+}
+
+/// See [`no_unix_socket`].
 #[cfg(not(unix))]
 pub fn serve(
     _runtime: &glasshouse::Runtime,
     _socket_override: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "glasshouse: the control API needs a Unix domain socket, which this platform does not \
-         have; Windows needs a named-pipe transport that does not exist yet (Phase 42's socket \
-         door is Unix-only)"
-    )
+    Err(no_unix_socket())
+}
+
+/// See [`no_unix_socket`]. Refused for the same reason `serve` is, and said
+/// the same way: there is no door to knock on here because there is no door
+/// to open here.
+#[cfg(not(unix))]
+pub fn send_message(
+    _runtime: &glasshouse::Runtime,
+    _session: &str,
+    _text: &str,
+) -> anyhow::Result<()> {
+    Err(no_unix_socket())
+}
+
+/// See [`no_unix_socket`].
+#[cfg(not(unix))]
+pub fn interrupt(_runtime: &glasshouse::Runtime, _session: &str) -> anyhow::Result<()> {
+    Err(no_unix_socket())
 }

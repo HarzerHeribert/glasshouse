@@ -258,6 +258,25 @@ batch 50 and it was wrong; the correction is in `phase-47.md`.
 
 ### Cluster K — a decision nobody has made, and a door that records nothing *(in-repo: yes)*
 
+
+**745's entry in this cluster is WRONG, corrected 2026-08-30.** It frames the
+line as an unmade Red-tier decision — *"the worker becomes `Embedded`"* versus
+*"a pty handed between processes"* — on the grounds that no read path into a
+running worker exists outside the process that owns it.
+
+**A read path exists inside that process and has no production caller:**
+`SessionApi::recent_output` (`session/api.rs:150`), project-scoped through
+`SessionApi::resolve`, with its own test asserting it refuses a foreign session
+(`api.rs:727`). Every call site is in its own `#[cfg(test)]` module — verified
+on the integrated tree.
+
+So 745 needs **one `Request` variant** exposing it, not an architecture
+decision. 746 and 747 closed the same day once `api/client.rs` gave the door a
+caller. **That finding lived only in `tests/worker_access.rs`'s module doc**,
+where nobody deciding what to package would look — which is the second time
+this session a decisive fact was recorded somewhere the register does not
+reach.
+
 Batch 51, Phase 15/16. **Ranking these by open-line count keeps recommending
 them; the reason they are open is not effort.**
 

@@ -355,6 +355,17 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             ApiCommand::Serve { socket } => {
                 api::serve(&runtime, socket.clone())?;
             }
+            // The two client verbs. They resolve this project's socket from
+            // `runtime` — the same `--scope`-or-Git-root resolution every
+            // other subcommand here performs — and take no path of their
+            // own; see `cli::ApiCommand::Send` for why that is the security
+            // property rather than an omission.
+            ApiCommand::Send { session, text } => {
+                api::send_message(&runtime, session, text)?;
+            }
+            ApiCommand::Interrupt { session } => {
+                api::interrupt(&runtime, session)?;
+            }
         },
         None => {
             // Setup runs by itself the first time, so a new user does not have

@@ -580,6 +580,42 @@ pub enum ApiCommand {
         #[arg(long, value_name = "PATH")]
         socket: Option<PathBuf>,
     },
+    /// Send one line of text to a session this project's control API is
+    /// running.
+    ///
+    /// Capability map line 746. The direct path from a person's terminal
+    /// into an orchestrated worker's own terminal: no agent is consulted and
+    /// none need be running, because the text is delivered by the process
+    /// that owns the worker's pseudo-terminal, which is `glasshouse api
+    /// serve` itself.
+    ///
+    /// There is deliberately no `--socket` here, unlike `glasshouse api
+    /// serve`. A server may be told where to bind; a client told where to
+    /// connect could be aimed at another project's door, and this door's
+    /// project scope is the door itself. Address another project with
+    /// `--scope`, which changes which project this invocation is rather than
+    /// letting one project reach into another.
+    Send {
+        /// The session to deliver to, as `glasshouse sessions` lists it.
+        #[arg(long, value_name = "ID")]
+        session: String,
+
+        /// The line to deliver. Data, never a command: it is carried as one
+        /// JSON string and is not expanded, interpreted, or given to a shell
+        /// anywhere on its way to the session.
+        #[arg(long, value_name = "TEXT")]
+        text: String,
+    },
+    /// Interrupt a session this project's control API is running.
+    ///
+    /// Capability map line 747. A real interrupt on the session's own
+    /// terminal, not a message asking it to stop. As with `send`, there is
+    /// no `--socket`.
+    Interrupt {
+        /// The session to interrupt, as `glasshouse sessions` lists it.
+        #[arg(long, value_name = "ID")]
+        session: String,
+    },
 }
 
 #[cfg(test)]

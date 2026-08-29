@@ -743,8 +743,8 @@ Phase 16 — Worker transparency
 
 ☑ Ensure every worker created by an orchestrator appears immediately in the normal Glasshouse session list.
 ☐ Allow the user to enter any orchestrated worker while it is running.
-☐ Allow direct user input to an orchestrated worker without requiring the orchestrator as an intermediary.
-☐ Allow the user to interrupt an orchestrated worker directly.
+☑ Allow direct user input to an orchestrated worker without requiring the orchestrator as an intermediary.
+☑ Allow the user to interrupt an orchestrated worker directly.
 ☑ Record user intervention so the orchestrator can be informed that the worker state may have changed.
 ☑ Never implement orchestration workers as hidden in-process LLM calls when a native harness session was requested.
 ☑ Preserve the rule that every worker remains a real session the user can inspect.

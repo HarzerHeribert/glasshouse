@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**803 / 1280 mandatory capabilities (63%)** — 477 open across 63 phases.
+**805 / 1280 mandatory capabilities (63%)** — 475 open across 63 phases.
 
 ## Where the work is
 
@@ -28,6 +28,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 9H | Sticky gateway routing for harness-backed interactive sessions | **1** | 13 | `501` |
 | Phase 9I | Free-pool routing | **1** | 13 | `523` |
 | Phase 15 | Orchestrator wake-up flow | **1** | 7 | `731` |
+| Phase 16 | Worker transparency | **1** | 6 | `742` |
 | Phase 27 | Context injection | **1** | 10 | `1118` |
 | Phase 30 | Session context metadata | **1** | 7 | `1156` |
 | Phase 32B | Quota telemetry sources | **1** | 13 | `1220` |
@@ -40,7 +41,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
 | Phase 46 | Security and contamination tests | **2** | 6 | `1739` |
 | Phase 49 | Configuration | **2** | 14 | `1784` |
-| Phase 16 | Worker transparency | **3** | 4 | `742` |
 | Phase 34A | Workload tiers | **3** | 7 | `1393` |
 | Phase 37 | Basic session-aware router | **3** | 8 | `1590` |
 | Phase 54 | Criteria before deeper cmux coupling | **4** | 0 | `1885` |
@@ -125,6 +125,10 @@ these unwrapped.
 
 - **740** ☐ Preserve the user’s ability to enter and modify a worker session before the orchestrator acts on its result.
 
+### Phase 16 — Worker transparency  (1 open, 6 closed)
+
+- **745** ☐ Allow the user to enter any orchestrated worker while it is running.
+
 ### Phase 27 — Context injection  (1 open, 10 closed)
 
 - **1129** ☐ Avoid injecting memory when retrieval confidence is low.
@@ -180,12 +184,6 @@ these unwrapped.
 
 - **1795** ☐ Allow the user to configure the routing-model fallback chain.
 - **1796** ☐ Allow the user to configure workload-tier ceilings for individual models.
-
-### Phase 16 — Worker transparency  (3 open, 4 closed)
-
-- **745** ☐ Allow the user to enter any orchestrated worker while it is running.
-- **746** ☐ Allow direct user input to an orchestrated worker without requiring the orchestrator as an intermediary.
-- **747** ☐ Allow the user to interrupt an orchestrated worker directly.
 
 ### Phase 34A — Workload tiers  (3 open, 7 closed)
 
