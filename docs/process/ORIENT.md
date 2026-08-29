@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**716 / 1280 mandatory capabilities (56%)** — 564 open across 76 phases.
+**721 / 1280 mandatory capabilities (56%)** — 559 open across 72 phases.
 
 ## Where the work is
 
@@ -22,16 +22,12 @@ closures are usually at the top. Open the map at the line number given.
 
 | phase | title | open | closed | map line |
 |---|---|---|---|---|
-| Phase 3 | TUI shell | **1** | 11 | `219` |
 | Phase 6 | Harness adapter interface | **1** | 12 | `275` |
 | Phase 8 | Codex adapter | **1** | 9 | `313` |
 | Phase 9A | Harness launch profiles | **1** | 25 | `344` |
 | Phase 9H | Sticky gateway routing for harness-backed interactive sessions | **1** | 13 | `501` |
 | Phase 9I | Free-pool routing | **1** | 13 | `523` |
-| Phase 12 | Unified lifecycle event bus | **1** | 7 | `691` |
 | Phase 18 | Raw event recording | **1** | 9 | `765` |
-| Phase 19 | Portable session checkpoints | **1** | 13 | `783` |
-| Phase 21A | Memory authority classes | **1** | 11 | `847` |
 | Phase 32B | Quota telemetry sources | **1** | 13 | `1220` |
 | Phase 41 | Project overview | **1** | 14 | `1648` |
 | Phase 42 | External control API | **1** | 12 | `1666` |
@@ -50,13 +46,13 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 21F | Memory retrieval quality | **4** | 7 | `927` |
 | Phase 54 | Criteria before deeper cmux coupling | **4** | 0 | `1885` |
 | Phase 28 | File-aware memory lookup | **5** | 0 | `1137` |
+| Phase 32F | Protected quota reserve | **5** | 3 | `1285` |
 | Phase 33A | Routing evidence ledger | **5** | 10 | `1327` |
 | Phase 53 | Criteria before adding graph storage | **5** | 0 | `1872` |
 | Phase 21E | Decision ladder and conflict handling | **6** | 6 | `907` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
 | Phase 24 | Memory reranking | **6** | 0 | `1082` |
 | Phase 26 | Memory query for agents | **6** | 0 | `1109` |
-| Phase 32F | Protected quota reserve | **6** | 2 | `1285` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **6** | 0 | `1858` |
 | Phase 31 | Compaction-aware behavior | **7** | 0 | `1167` |
 | Phase 38 | Quota-preserving routing | **7** | 0 | `1604` |
@@ -99,13 +95,13 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 51 | Evaluation hooks | **37** | 0 | `1818` |
 | Phase 21K | Assumption-aware implementation guardrails | **43** | 0 | `992` |
 
-**Fully closed (28):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 4, Phase 5, Phase 9B, Phase 9C, Phase 9D, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 13, Phase 14, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 32, Phase 35, Phase 40, Phase 48.
+**Fully closed (32):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 9B, Phase 9C, Phase 9D, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 19, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 32, Phase 35, Phase 40, Phase 48.
 
 ## The nearly-finished phases, in full
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~528 open lines are not.
+other ~527 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -113,10 +109,6 @@ lines and evidence together. **Do not open the 178 KB map to read them.**
 The number is the map line number, which is also the capability's id.
 `validate_round.py` checks a packet's quotes against the map, so paste
 these unwrapped.
-
-### Phase 3 — TUI shell  (1 open, 11 closed)
-
-- **234** ☐ Allow the user to open a project-memory view from the keyboard.
 
 ### Phase 6 — Harness adapter interface  (1 open, 12 closed)
 
@@ -138,21 +130,9 @@ these unwrapped.
 
 - **531** ☐ Track request-pool limits separately from token-priced limits when a provider exposes request quotas.
 
-### Phase 12 — Unified lifecycle event bus  (1 open, 7 closed)
-
-- **701** ☐ Deliver lifecycle events to the orchestration layer without coupling orchestration to a specific harness.
-
 ### Phase 18 — Raw event recording  (1 open, 9 closed)
 
 - **779** ☐ Record Git commit identifiers associated with memory events when they can be resolved cheaply.
-
-### Phase 19 — Portable session checkpoints  (1 open, 13 closed)
-
-- **802** ☐ Allow Glasshouse to request a checkpoint automatically at selected task boundaries.
-
-### Phase 21A — Memory authority classes  (1 open, 11 closed)
-
-- **862** ☐ Require memory extraction to distinguish a hard requirement from a convenient implementation choice.
 
 ### Phase 32B — Quota telemetry sources  (1 open, 13 closed)
 
@@ -290,10 +270,10 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
+- Checkpoint — 2026-08-29, batch 48 landed: 721 / 1280 (56%)
 - Checkpoint — 2026-08-29, batch 47 landed: 716 / 1280 (56%)
 - Checkpoint — 2026-08-29, batch 45 landed: 710 / 1280 (55%)
 - Checkpoint — 2026-08-28, batch 43 landed: 687 / 1280 (53%)
-- Checkpoint — 2026-08-28, batch 42 landed: 683 / 1280 (53%)
 
 ## Evidence ledger files
 

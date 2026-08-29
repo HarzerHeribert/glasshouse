@@ -6,6 +6,84 @@
 
 Last updated: 2026-08-29 (Europe/Berlin)
 
+## Checkpoint — 2026-08-29, batch 48 landed: 721 / 1280 (56%)
+
+Five capabilities, **four phases finished** (3, 12, 19, 21A). Four editing
+workers plus two recons. Green on all three platforms.
+
+### What landed
+
+| worktree | line(s) | note |
+|---|---|---|
+| `p3-memory-view` | 234 | new overlay; **Phase 3 at 12/12** |
+| `auto-checkpoint` | 802 | **Phase 19 at 14/14** |
+| `api-events` | 701 | **Phase 12 at 8/8** |
+| `reserve-reset` | 1292 | 1291 refused — see below |
+| — (orchestrator) | 862 | no code; **Phase 21A at 12/12** |
+
+### The ruling I got wrong, and how it was caught
+
+Batch 48's own triage section in `phase-32f.md` reported that mutating
+`reset_urgency`'s distant branch changed nothing, and concluded that nothing
+watches distant-reset conservatism. **The mutation was irrelevant.**
+`reset_urgency` is not on the reserve gate's path at all — its only caller is
+capacity scoring, and `evaluate_reserve_spend` compares the thresholds inline.
+
+A SURVIVED verdict there meant *"wrong mutation site"*, not *"unwatched code"*.
+The `test result:` line was honest, the target was right, and the site was
+wrong — a third distinct way to be fooled by a mutation, after a zero-match
+filter and a target that lacks the killing test.
+
+The worker sent to satisfy that bad acceptance bar read the call graph instead
+of obeying it, ran diagnostics on the real gate, and reported both. Mutated
+correctly, the distant branch is killed by three tests and **1292 closes**.
+
+**1291 stays open with an exact blocker.** Disabling the imminent branch changes
+nothing, because the tail falls through to `Allow` whenever
+`cheaper_adequate_resource_exists` is false and the sole production caller
+hardcodes it false. The imminent `Allow` and the default `Allow` are the same
+decision with different reason strings, so "more permissive" cannot be observed.
+Same blocker as 1288–1290, not a separate one.
+
+### A packet premise that was wrong, again mine
+
+`GH-P3-MEMORY-VIEW`'s FEASIBILITY claimed `MemoryKind` has seven variants
+including `Invariant`, and wrote the acceptance test against it. It has six;
+`Invariant` belongs to `MemoryAuthority`. I had read one enum's range into the
+next. The worker led with the correction, refused to add a seventh kind — which
+would have needed a migration for a variant the map never asks for — and built
+the view kind-agnostically, which satisfies the contract as written.
+
+### Windows: green, and the one failure is the known 33% flake
+
+`--windows-vm` run alone: build and MSRV 1.88 pass; `test (windows) / test`
+failed once on
+`session::api::tests::interrupting_through_the_api_is_recorded_as_machine_initiated`,
+a 45-second PTY timeout in a file no worker touched. **This handoff already
+records that test measured at 33%** (1 of 3 on a pre-batch tree). Re-run per the
+two-run rule: **1456 passed, 0 failed.** Not a regression.
+
+**Run `--windows-vm`, not the bare gate.** The bare form prints "Windows was not
+exercised", which is a flag not passed rather than a fact. And do not pipe the
+run through `tail` — batch 48 did, and threw away the failure detail it needed.
+
+### Also closed without code
+
+**862** — `memory/extract/authority.rs`'s own header ends *"That is Phase 21A's
+last line."* Nobody had followed it through. The word doing the work is
+*Require*, enforced at the parse boundary: `declared_authority` is not an
+`Option`, so a memory declining the distinction does not parse.
+
+### Leads left in `.agent-runtime/CONTINUATION.md`
+
+**372** — `phase-9a.md:482` says it is blocked because `grep 'fn score\|Score'`
+is empty. It is not empty any more. §14 still applies: nothing selects among
+launch profiles, so the blocker is gone and the work is not done.
+**290** — blocked on external evidence; `--help` has failed twice and the entry
+says to read a different artifact next.
+**327/310** — need a `CHECK`-constraint widening SQLite cannot do in place.
+Design, not Sonnet.
+
 ## Checkpoint — 2026-08-29, batch 47 landed: 716 / 1280 (56%)
 
 Five capabilities closed, three commits pushed, **two phases finished**
