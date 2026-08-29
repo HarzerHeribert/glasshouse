@@ -27,8 +27,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The compiler is declared once, in Cargo.toml's [workspace.metadata.ci],
+      # and read here the same way the msrv job reads rust-version — so this
+      # job and scripts/ci-local.sh cannot drift onto different compilers.
+      - name: Read the declared toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          version="$(grep -m1 '^toolchain' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "toolchain declared in Cargo.toml: $version"
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.version }}
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
@@ -51,9 +65,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The compiler is declared once, in Cargo.toml's [workspace.metadata.ci],
+      # and read here the same way the msrv job reads rust-version — so this
+      # job and scripts/ci-local.sh cannot drift onto different compilers.
+      - name: Read the declared toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          version="$(grep -m1 '^toolchain' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "toolchain declared in Cargo.toml: $version"
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.toolchain.outputs.version }}
           components: rustfmt, clippy
 
       - name: Cache cargo registry and target

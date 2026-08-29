@@ -27,6 +27,17 @@
 # opt-in because the VM has to be booted by hand and costs this machine's CPU
 # and memory. The summary's closing NOTE says which of those three happened.
 #
+# HOW LONG IT TAKES, AND WHY (measured 2026-08-29, 12-core M-series)
+#   Warm, the whole default gate is ~2–4 minutes and nearly all of it is test
+#   execution: ~80s per platform, of which terminal_loss (24s) and
+#   session_supervision (14s) are timer-bound — identical to 0.1s at load 2.6
+#   and load 5.5. Every compile step is 0–2s warm. A fresh worktree with no
+#   target/ and no Linux volume is a full rebuild on both sides and still
+#   finished in 135s. Seeding a worktree's caches from main (APFS clone of
+#   target/, copy of the Linux volume) was built, proven sound with a planted
+#   failure that FAILed the same test cold and seeded, and then rejected: it
+#   cost 88s to seed and saved 13s. Do not re-try it without new numbers.
+#
 # USAGE
 #   scripts/ci-local.sh              # macOS + Linux  (the default gate)
 #   scripts/ci-local.sh --macos      # native jobs only, fastest
@@ -55,6 +66,11 @@ done
 
 MSRV="$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
 [ -n "$MSRV" ] || { echo "could not read rust-version from Cargo.toml" >&2; exit 2; }
+# The stable compiler, declared once in [workspace.metadata.ci] and read by
+# ci.yml the same way. It pins the Linux image below: `rust:latest` floated,
+# and every bump silently threw away the whole Linux build cache.
+TOOLCHAIN="$(grep -m1 '^toolchain' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+[ -n "$TOOLCHAIN" ] || { echo "could not read [workspace.metadata.ci] toolchain from Cargo.toml" >&2; exit 2; }
 
 RESULTS=()
 FAILED=0
@@ -112,6 +128,13 @@ if [ "$DO_LINUX" -eq 1 ]; then
     TAG="$(printf '%s' "$REPO" | shasum | cut -c1-12)"
     docker volume create "glasshouse-ci-home-$TAG" >/dev/null 2>&1
     docker volume create glasshouse-ci-registry >/dev/null 2>&1
+    # rustup's home, so clippy/rustfmt and the MSRV toolchain install once
+    # rather than on every run (measured ~10s and a download each). Keyed by
+    # the pinned toolchain: an empty named volume is seeded from the image on
+    # first mount, and a volume seeded from rust:1.98 would otherwise keep
+    # serving 1.98 as "default" under a later image. Toolchains are not
+    # source-dependent, so unlike /home/ci this one is shared by every worktree.
+    docker volume create "glasshouse-ci-rustup-$TOOLCHAIN" >/dev/null 2>&1
     # Two things here are not incidental; both were found by this script
     # producing a red on a tree that real ubuntu-latest had passed.
     #
@@ -129,9 +152,10 @@ if [ "$DO_LINUX" -eq 1 ]; then
         -v "$REPO":/src:ro \
         -v "glasshouse-ci-home-$TAG":/home/ci \
         -v glasshouse-ci-registry:/usr/local/cargo/registry \
+        -v "glasshouse-ci-rustup-$TOOLCHAIN":/usr/local/rustup \
         -e CARGO_TERM_COLOR=always \
         -e STEP="$1" \
-        rust:latest bash -c '
+        "rust:$TOOLCHAIN" bash -c '
           set -e
           id -u ci >/dev/null 2>&1 || useradd -m -u 1000 ci
           # Wipe before extracting. `tar -x` writes over a tree, it never

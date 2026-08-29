@@ -9,6 +9,15 @@ rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/HarzerHeribert/glasshouse"
 
+# The compiler both gates build with. Declared once; ci.yml and
+# scripts/ci-local.sh read it with the same grep as `rust-version`, so the
+# GitHub `stable` channel and the local `rust:latest` image — two distribution
+# paths with different lag — can no longer drift onto different compilers, and
+# an image bump can no longer silently invalidate the local Linux build cache.
+# Bump it deliberately, in one commit, like the MSRV.
+[workspace.metadata.ci]
+toolchain = "1.98.0"
+
 [workspace.dependencies]
 anyhow = "1"
 thiserror = "2"
