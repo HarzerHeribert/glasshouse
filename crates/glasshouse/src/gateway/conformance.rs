@@ -72,7 +72,7 @@
 #![cfg(test)]
 
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -803,6 +803,102 @@ fn a_real_forwarded_exchange_reaches_the_routing_evidence_ledger() {
     assert_eq!(
         row.first_byte_at_unix, None,
         "this producer never supplies it — see `crate::routing::evidence`'s own header"
+    );
+}
+
+/// The production case the test above does not cover, and the one the
+/// defect actually mis-attributed: a real exchange dispatched under binding
+/// A that does not *complete* until after a re-bind to B lands. Mutating
+/// `record_routing_observation` back to reading `self.lock().assignment` at
+/// recording time — instead of the dispatch-time snapshot this package
+/// passes in — makes this test fail, because the fixture's response is
+/// stalled long enough for the re-bind below to land while the exchange is
+/// still in flight.
+#[test]
+fn a_rebind_during_an_in_flight_exchange_is_still_attributed_to_the_binding_that_dispatched_it() {
+    use crate::routing::AssignedModel;
+    use crate::routing::evidence::ObservationQuery;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ledger = evidence_ledger_fixture(tmp.path());
+
+    // Stalls before answering, so there is a real window between dispatch
+    // and completion for the test to re-bind into.
+    let fixture = FixtureUpstream::start(|_request, out| {
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = write!(out, "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{{}}");
+        let _ = out.flush();
+        let _ = out.shutdown(Shutdown::Write);
+    });
+    let gateway = gateway_to_with_evidence_ledger(&fixture, Arc::clone(&ledger));
+
+    gateway.routing().bind(
+        "harness-a",
+        ANTHROPIC_MESSAGES,
+        AssignedModel::named("model-a"),
+        gateway.upstream(),
+    );
+
+    let address = gateway.address();
+    let token = gateway.token().expose().to_owned();
+    let in_flight = std::thread::spawn(move || {
+        as_text(&send_and_read(address, &messages_request(&token, "{}")))
+    });
+
+    // The exchange above has been dispatched (it is blocked inside the
+    // fixture's 200ms stall) but has not completed. Re-bind now, before it
+    // does.
+    std::thread::sleep(Duration::from_millis(50));
+    gateway.routing().bind(
+        "harness-b",
+        ANTHROPIC_MESSAGES,
+        AssignedModel::named("model-b"),
+        gateway.upstream(),
+    );
+
+    let response = in_flight.join().expect("the client thread does not panic");
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK"),
+        "the exchange did not complete: {response}"
+    );
+
+    let query_a = ObservationQuery {
+        provider: "fixture",
+        model: "model-a",
+        route: Some(ANTHROPIC_MESSAGES),
+        harness: Some("harness-a"),
+    };
+    let mut attempts = 0;
+    let rows = loop {
+        let rows = ledger.recent(query_a, 10).unwrap();
+        if !rows.is_empty() {
+            break rows;
+        }
+        attempts += 1;
+        assert!(
+            attempts < 200,
+            "no routing observation naming the dispatching binding was recorded within 2s of a \
+             completed exchange"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        rows.len(),
+        1,
+        "the exchange dispatched under binding A must be recorded exactly once, as A"
+    );
+
+    let query_b = ObservationQuery {
+        provider: "fixture",
+        model: "model-b",
+        route: Some(ANTHROPIC_MESSAGES),
+        harness: Some("harness-b"),
+    };
+    assert_eq!(
+        ledger.recent(query_b, 10).unwrap(),
+        Vec::new(),
+        "an exchange dispatched before the re-bind to B must never be attributed to B, even \
+         though B was bound before it completed"
     );
 }
 

@@ -529,6 +529,12 @@ fn accept_loop(
                         // for the provider — the true dispatch instant lives
                         // inside `ingress::forward`, outside this partition.
                         let dispatched_at = crate::provider::cache::now_unix_seconds();
+                        // The assignment as of the same instant, so a bind or
+                        // re-bind that lands while this exchange is in
+                        // flight cannot be attributed to it — see
+                        // `SessionRouting::record_routing_observation`'s own
+                        // doc for the defect this snapshot closes.
+                        let dispatched_assignment = routing.assignment();
                         let (exchange, quota) = ingress::serve(stream, &token, &upstream, &agent);
                         // The exchange is genuinely over here: every byte of
                         // the response has been relayed. Stamped before
@@ -562,6 +568,7 @@ fn accept_loop(
                                 &exchange,
                                 dispatched_at,
                                 completed_at,
+                                dispatched_assignment,
                             );
                         }
                         // Capability map line 1229's gateway half — a passive

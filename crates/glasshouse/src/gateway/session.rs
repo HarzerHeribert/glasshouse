@@ -307,9 +307,19 @@ impl SessionRouting {
     ///   `Unreachable` — the same two outcomes [`Self::observe_exchange`]
     ///   treats as saying something about the backend), because nothing else
     ///   is a measurable turn;
-    /// - a launch profile must already have called [`Self::bind`], because a
-    ///   provider/model identity recorded for an unbound session would be
-    ///   invented rather than observed.
+    /// - `assignment` must be `Some`, because a provider/model identity
+    ///   recorded for an unbound session would be invented rather than
+    ///   observed.
+    ///
+    /// `assignment` is a snapshot the caller took **at dispatch**, not a
+    /// read of whatever [`Self::bind`] or a failover has since made current.
+    /// A connection thread only reaches this call after the exchange is
+    /// already on the wire, and reading `self.lock().assignment` at that
+    /// point would attribute the exchange to a bind or re-bind that happened
+    /// *during* it rather than the one that actually served it — the
+    /// defect this parameter exists to close. So its absence means "there
+    /// was no assignment when this exchange was served", not "there is
+    /// none now".
     ///
     /// `dispatched_at_unix` and `completed_at_unix` come from the accept
     /// loop, the only place in this partition with a timestamp on both sides
@@ -320,6 +330,7 @@ impl SessionRouting {
         exchange: &Exchange,
         dispatched_at_unix: i64,
         completed_at_unix: i64,
+        assignment: Option<Assignment>,
     ) {
         let outcome = match &exchange.outcome {
             Outcome::Forwarded {
@@ -340,7 +351,7 @@ impl SessionRouting {
             return;
         };
 
-        let Some(assignment) = self.lock().assignment.clone() else {
+        let Some(assignment) = assignment else {
             return;
         };
 
