@@ -37,6 +37,16 @@ MODEL="sonnet"; [ "${4:-}" = "--model" ] && MODEL="${5:-sonnet}"
 [ -d "$CWD" ]    || { echo "new-worker: $CWD does not exist"; exit 1; }
 [ -f "$PACKET" ] || { echo "new-worker: packet $PACKET does not exist"; exit 1; }
 
+# The prompt is typed into a harness whose cwd is the WORKER'S WORKTREE, and
+# `.agent-runtime/` is gitignored -- so it does not exist there at all. A
+# relative packet path therefore resolves to nothing on the other side, and the
+# worker stops on its first turn asking where its packet is. Measured
+# 2026-08-29: all three editing workers of batch 47 hit this at once; two of
+# them burned ~100k tokens exploring before the correction arrived. The
+# delivery proof below cannot catch it, because the prompt *did* land -- it was
+# the path inside the prompt that was unusable. Resolve it here, once.
+PACKET="$(cd "$(dirname "$PACKET")" && pwd)/$(basename "$PACKET")"
+
 ws="$(cmux workspace create --name "$NAME" --cwd "$CWD" 2>&1 | grep -oE 'workspace:[0-9]+' | head -1)"
 [ -n "$ws" ] || { echo "new-worker: could not create a workspace"; exit 1; }
 cmux workspace select "$ws" >/dev/null 2>&1

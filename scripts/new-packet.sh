@@ -92,7 +92,13 @@ fi
 MAP="docs/product/capability-map.md"
 OUT_DIR=".agent-runtime"
 OUT="$OUT_DIR/packet-$NAME.md"
-REPORT_REL="$OUT_DIR/report-$NAME.md"
+# ABSOLUTE, and for the same reason the packet path is: an editing worker's
+# cwd is its worktree, where `.agent-runtime/` is gitignored and absent. A
+# relative report path sends the report into the worktree, where the watch --
+# armed on the main checkout's path -- can never see it, and the worker looks
+# like it finished with no report. Both halves of that bug were paid for in
+# batch 47.
+REPORT_REL="$(pwd)/$OUT_DIR/report-$NAME.md"
 TASK_ID="GH-$(printf '%s' "$NAME" | tr '[:lower:]' '[:upper:]')"
 BRANCH="claude/$NAME"
 

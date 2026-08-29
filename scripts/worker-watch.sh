@@ -195,11 +195,38 @@ is_never_started() {
 # This only ever DELAYS an announcement. A worker that has genuinely stopped
 # leaves its tree still, the fingerprint stops moving, and the next quiet read
 # announces as before.
+# The worker's CUMULATIVE TOKEN COUNT, read off the status bar (`· 76k/1M`).
+#
+# Why this is here, and why the §28 worktree signal was not enough. §28's fix --
+# "a pane whose worktree has grown since the last read is working" -- closes the
+# false idle for a worker that is EDITING. It cannot close it for one that is
+# THINKING, and the note that proposed it said so: *"Where it does not help: a
+# worker thinking for a long time without writing."*
+#
+# Measured 2026-08-29, batch 47: `extract-switch`, a tests-only worker, was
+# announced DONE three times while its own screen read
+# `Boondoggling... (3m 48s - 2.6k tokens - thinking with high effort)`. It had
+# written nothing yet, so its worktree fingerprint never moved, and two quiet
+# frames were enough. Acking it to silence the nag ENDED ITS WATCH while it was
+# still working, which is the more expensive half of the bug.
+#
+# The token counter is the signal such a worker cannot fail to emit: it is in
+# the status line every frame, it only ever goes up while the model is running,
+# and it is orthogonal to every spinner glyph -- which is the trap §57's third
+# addendum warns about, where each fix is one more string to enumerate.
+token_reading() {
+  cmux read-screen --surface "$SURFACE" 2>/dev/null \
+    | grep -oE '[0-9]+(\.[0-9]+)?k?/1M' | head -1
+}
+
 worktree_fingerprint() {
-  [ -d "$WORKTREE" ] || { printf 'no-worktree'; return; }
+  local tokens
+  tokens="$(token_reading)"
+  [ -d "$WORKTREE" ] || { printf 'no-worktree-%s' "$tokens"; return; }
   {
     git -C "$WORKTREE" status --porcelain -uall 2>/dev/null
     git -C "$WORKTREE" diff --shortstat 2>/dev/null
+    printf 'tokens:%s' "$tokens"
   } | cksum
 }
 
@@ -271,7 +298,7 @@ while true; do
     quiet=0
     if [ "$growth_noted" -eq 0 ]; then
       growth_noted=1
-      echo "NOTE  '$NAME' pane is quiet but its worktree is still changing — treating it as working (§28). This note fires once."
+      echo "NOTE  '$NAME' pane is quiet but its worktree or its token count is still moving — treating it as working (§28, plus the thinking-worker case). This note fires once."
     fi
     continue
   fi
