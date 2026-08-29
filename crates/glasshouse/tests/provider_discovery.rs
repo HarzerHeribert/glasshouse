@@ -1027,6 +1027,180 @@ fn groqs_own_real_headers_populate_both_native_unit_pools_in_the_shipped_binarys
     );
 }
 
+// ===== Phase 33: resource health, through the shipped binary ===============
+//
+// The health twin of `a_planted_gateway_reading_now_reaches_the_shipped_binarys_report`,
+// above: capability map lines 1311/1321/1322/1324, each proven the same way —
+// a reading planted exactly where `GatewayHealthCache::new` would put it, and
+// the real `Command::Resources` arm asserted against.
+
+/// Wall-clock now, for a test that must plant a cooldown deadline the shipped
+/// binary's own real clock will still see as future (or past) when it runs a
+/// moment later — `resources_report` has no injectable clock, for
+/// `mod@glasshouse::provider::quota`'s own reason.
+fn wall_clock_now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the system clock is after 1970")
+        .as_secs() as i64
+}
+
+fn planted_health_reading(
+    model: &str,
+    consecutive_failures: u32,
+    cooling_down_until_unix: Option<i64>,
+    credential_rejected: bool,
+) -> glasshouse::provider::telemetry::GatewayHealthReading {
+    glasshouse::provider::telemetry::GatewayHealthReading {
+        credential_label: "anyrouter/ANYROUTER_API_KEY".to_owned(),
+        model: model.to_owned(),
+        consecutive_failures,
+        cooling_down_until_unix,
+        credential_rejected,
+    }
+}
+
+/// A resource nothing has been observed about reports `unknown` through the
+/// real `Command::Resources` arm — capability map line 1324's "never invent a
+/// reading" half, with no gateway-health cache present at all.
+#[test]
+fn a_resource_with_no_health_observation_reports_unknown_through_the_shipped_binary() {
+    let fixture = BinaryFixture::new();
+    let stdout = fixture.run(&["resources", "--no-harness"]);
+    assert_eq!(
+        stdout
+            .matches(&format!("health          {UNKNOWN_TELEMETRY}"))
+            .count(),
+        registry().len(),
+        "every resource must report unknown health when no gateway has ever observed one:\n\
+         {stdout}"
+    );
+    assert!(!stdout.contains("paced"), "{stdout}");
+    assert!(!stdout.contains("consecutive failure"), "{stdout}");
+}
+
+/// A planted, healthy reading reaches the real `Command::Resources` arm —
+/// the write side is proven separately, in `gateway::conformance`, over a
+/// real socket; this is the read side, exactly
+/// `a_planted_gateway_reading_now_reaches_the_shipped_binarys_report`'s own
+/// shape for quota.
+#[test]
+fn a_planted_gateway_health_reading_now_reaches_the_shipped_binarys_report() {
+    let fixture = BinaryFixture::new();
+    let health_cache_dir = fixture.config.path().join("gateway-health");
+    let cache = glasshouse::provider::telemetry::GatewayHealthCache::at(&health_cache_dir);
+    cache.store(
+        "anyrouter",
+        &[planted_health_reading(
+            "anyrouter/free-model",
+            0,
+            None,
+            false,
+        )],
+        TELEMETRY_OBSERVED,
+    );
+    assert!(
+        std::fs::read_dir(&health_cache_dir)
+            .expect("GatewayHealthCache::store created its directory")
+            .next()
+            .is_some(),
+        "the planted reading must actually be on disk for this test to mean anything"
+    );
+
+    let stdout = fixture.run(&["resources", "--no-harness"]);
+    let row = stdout
+        .split("\n\n")
+        .find(|block| block.starts_with("anyrouter"))
+        .unwrap_or_else(|| panic!("no anyrouter block in:\n{stdout}"));
+
+    assert!(
+        row.contains("health          anyrouter/free-model") && row.contains(": available"),
+        "the planted reading must reach the report as available:\n{row}"
+    );
+    assert!(
+        !row.contains(&format!("health          {UNKNOWN_TELEMETRY}")),
+        "the planted reading must have reached the report:\n{row}"
+    );
+}
+
+/// Capability map line 1324, through the real binary: a resource cooling
+/// down after real failures is **paced**, never broken. The cooldown is
+/// planted relative to the wall clock the shipped binary will actually read,
+/// since `glasshouse resources` has no injectable "now".
+#[test]
+fn a_cooling_down_resource_is_shown_as_paced_through_the_shipped_binary() {
+    let fixture = BinaryFixture::new();
+    let health_cache_dir = fixture.config.path().join("gateway-health");
+    let cache = glasshouse::provider::telemetry::GatewayHealthCache::at(&health_cache_dir);
+    cache.store(
+        "anyrouter",
+        &[planted_health_reading(
+            "anyrouter/free-model",
+            2,
+            Some(wall_clock_now_unix() + 3600),
+            false,
+        )],
+        TELEMETRY_OBSERVED,
+    );
+
+    let stdout = fixture.run(&["resources", "--no-harness"]);
+    let row = stdout
+        .split("\n\n")
+        .find(|block| block.starts_with("anyrouter"))
+        .unwrap_or_else(|| panic!("no anyrouter block in:\n{stdout}"));
+
+    assert!(
+        row.contains("paced, cooling down until unix"),
+        "a resource an hour from its cooldown deadline must render as paced, not broken:\n{row}"
+    );
+    assert!(
+        row.contains("2 consecutive failure(s)"),
+        "the observed failure count must reach the report:\n{row}"
+    );
+}
+
+/// A corrupt cache file must leave `glasshouse resources` working and simply
+/// carry no health — [`GatewayHealthCache::load`]'s own fail-soft contract,
+/// proven through the real binary rather than only at the type that owns the
+/// read.
+#[test]
+fn a_corrupt_gateway_health_cache_file_leaves_the_shipped_binary_working() {
+    let fixture = BinaryFixture::new();
+    let health_cache_dir = fixture.config.path().join("gateway-health");
+    let cache = glasshouse::provider::telemetry::GatewayHealthCache::at(&health_cache_dir);
+    cache.store(
+        "anyrouter",
+        &[planted_health_reading(
+            "anyrouter/free-model",
+            1,
+            None,
+            false,
+        )],
+        TELEMETRY_OBSERVED,
+    );
+    // `GatewayHealthCache`'s on-disk file name is built from `file_stem`,
+    // which is `pub(crate)` and unreachable from this external test crate —
+    // so the file `store` just created is found by listing the directory
+    // rather than guessing its name.
+    let path = std::fs::read_dir(&health_cache_dir)
+        .expect("the store above created this directory")
+        .next()
+        .expect("the store above wrote exactly one file")
+        .expect("a readable directory entry")
+        .path();
+    std::fs::write(&path, b"not json").expect("overwritten with garbage");
+
+    let stdout = fixture.run(&["resources", "--no-harness"]);
+    let row = stdout
+        .split("\n\n")
+        .find(|block| block.starts_with("anyrouter"))
+        .unwrap_or_else(|| panic!("no anyrouter block in:\n{stdout}"));
+    assert!(
+        row.contains(&format!("health          {UNKNOWN_TELEMETRY}")),
+        "a corrupt cache file must read as no health, not fail the command:\n{row}"
+    );
+}
+
 /// Capability map Phase 33 line 1315 (`python3 scripts/discover.py --phase
 /// 33`): *"Track known quota reset time when it is exposed."* Through the
 /// real `Command::Resources` arm, over the same Groq header set the sibling

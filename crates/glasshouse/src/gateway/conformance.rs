@@ -83,7 +83,7 @@ use super::fixture::{FixtureUpstream, RecordedRequest};
 use super::ingress::{Exchange, Outcome, serve};
 use super::upstream::{Route, Upstream, UpstreamBackend, agent};
 use super::{Gateway, GatewayToken};
-use crate::provider::telemetry::{GatewayQuotaCache, RateLimitHeaders};
+use crate::provider::telemetry::{GatewayHealthCache, GatewayQuotaCache, RateLimitHeaders};
 use crate::secret::{REDACTED, Secret, redact};
 
 /// The three protocols the ingress can serve, spelled as `crate::profile`
@@ -252,6 +252,16 @@ fn gateway_to(fixture: &FixtureUpstream) -> Gateway {
 /// called directly.
 fn gateway_to_with_quota_cache(fixture: &FixtureUpstream, cache: GatewayQuotaCache) -> Gateway {
     Gateway::start_with_quota_cache(upstream_to(fixture), Some(cache))
+        .expect("loopback is bindable")
+}
+
+/// [`gateway_to`], persisting every observed resource's health to `cache` —
+/// capability map lines 1311/1321/1322/1324's own write half, proven the same
+/// way [`gateway_to_with_quota_cache`]'s own callers prove the quota half: a
+/// real socket, a real accept loop, never `SessionRouting::health_readings_for`
+/// called directly.
+fn gateway_to_with_health_cache(fixture: &FixtureUpstream, cache: GatewayHealthCache) -> Gateway {
+    Gateway::start_with_telemetry(upstream_to(fixture), None, None, Some(cache))
         .expect("loopback is bindable")
 }
 
@@ -595,6 +605,83 @@ fn a_real_forwarded_exchanges_rate_limit_headers_are_persisted_for_the_next_proc
     );
 }
 
+// --- capability map lines 1311/1321/1322/1324's gateway half ---------------
+
+/// The write half of the health bridge, proven the identical way
+/// [`a_real_forwarded_exchanges_rate_limit_headers_are_persisted_for_the_next_process`]
+/// proves the quota one: a real socket, a real accept loop, and a real file
+/// read back through [`GatewayHealthCache::load`] rather than the in-memory
+/// [`crate::gateway::session::SessionRouting::health_readings_for`] a lower-
+/// level test could call directly.
+///
+/// Mutating away `gateway/mod.rs`'s `cache.store(&exchange.provider,
+/// &readings, now)` call in the accept loop's connection thread fails this
+/// test rather than a helper's — the write side's own §35 proof.
+///
+/// An assignment must be bound before the request is sent:
+/// `SessionRouting::observe_exchange` records health only for the resource
+/// currently assigned, which is the honest half of Phase 9I line 529 — health
+/// belongs to a credential and a model, and neither is known until something
+/// has bound one.
+#[test]
+fn a_real_forwarded_exchanges_health_is_persisted_for_the_next_process() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let cache = GatewayHealthCache::at(dir.path());
+    let fixture = FixtureUpstream::answering(
+        "HTTP/1.1 200 OK",
+        "content-type: application/json\r\n",
+        "{\"ok\":true}",
+    );
+    let gateway = gateway_to_with_health_cache(&fixture, cache.clone());
+    gateway.routing().bind(
+        ROUTED_HARNESS,
+        ANTHROPIC_MESSAGES,
+        crate::routing::AssignedModel::named(ROUTED_MODEL),
+        gateway.upstream(),
+    );
+    assert!(
+        cache.load("fixture").is_empty(),
+        "a gateway that has forwarded nothing yet must not already have written a reading"
+    );
+
+    let response = as_text(&send_and_read(
+        gateway.address(),
+        &messages_request(gateway.token().expose(), "{}"),
+    ));
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK"),
+        "the exchange did not complete: {response}"
+    );
+
+    // The write happens on the connection thread, after the response is
+    // already on the wire — poll rather than assume it has landed, the same
+    // margin the quota write's own test gives itself.
+    let mut attempts = 0;
+    let readings = loop {
+        let readings = cache.load("fixture");
+        if !readings.is_empty() {
+            break readings;
+        }
+        attempts += 1;
+        assert!(
+            attempts < 200,
+            "no health reading was persisted for `fixture` within 2s of a completed exchange"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+
+    let reading = readings
+        .iter()
+        .find(|r| r.model == ROUTED_MODEL)
+        .unwrap_or_else(|| panic!("no reading for {ROUTED_MODEL} in {readings:?}"));
+    assert_eq!(
+        reading.consecutive_failures, 0,
+        "a real 200 OK exchange must record a healthy resource"
+    );
+    assert_eq!(reading.cooling_down_until_unix, None);
+    assert!(!reading.credential_rejected);
+}
+
 // --- Phase 33A: the routing evidence ledger's gateway producer -------------
 
 /// A real project database plus an [`crate::routing::evidence::EvidenceLedger`]
@@ -628,7 +715,7 @@ fn gateway_to_with_evidence_ledger(
     fixture: &FixtureUpstream,
     ledger: Arc<crate::routing::evidence::EvidenceLedger>,
 ) -> Gateway {
-    Gateway::start_with_telemetry(upstream_to(fixture), None, Some(ledger))
+    Gateway::start_with_telemetry(upstream_to(fixture), None, Some(ledger), None)
         .expect("loopback is bindable")
 }
 
@@ -2223,6 +2310,7 @@ fn routed_gateway_with_evidence(
         three_provider_upstream(first, second, third),
         None,
         Some(ledger),
+        None,
     )
     .expect("loopback is bindable");
     gateway.routing().bind(

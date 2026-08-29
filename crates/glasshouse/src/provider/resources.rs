@@ -48,8 +48,9 @@ use crate::provider::quota::{
 };
 use crate::provider::registry::{ResourceKind, registry};
 use crate::provider::telemetry::{
-    GatewayQuotaCache, HarnessTelemetry, RateLimitHeaders, apply_harness_report,
-    apply_provider_headers, apply_user_configuration, read_harness_plan,
+    GatewayHealthCache, GatewayHealthReading, GatewayQuotaCache, HarnessTelemetry,
+    RateLimitHeaders, apply_harness_report, apply_provider_headers, apply_user_configuration,
+    read_harness_plan,
 };
 
 /// The status interface of a harness that has one, as a command line
@@ -208,6 +209,11 @@ pub fn read_harness_status(harness: IntegrationId, now_unix: i64) -> HarnessTele
 pub struct GatheredTelemetry {
     harness: BTreeMap<&'static str, HarnessTelemetry>,
     providers: BTreeMap<String, (RateLimitHeaders, i64)>,
+    /// Capability map lines 1311/1321/1322/1324's own reading, kept separate
+    /// from `providers` above rather than folded in: quota and health are two
+    /// different facts about a resource, and line 1324 asks that a reader
+    /// never be able to conflate them by construction.
+    health: BTreeMap<String, Vec<GatewayHealthReading>>,
 }
 
 impl GatheredTelemetry {
@@ -282,12 +288,51 @@ impl GatheredTelemetry {
         self
     }
 
+    /// Record what a gateway has observed about a provider's resources'
+    /// health — capability map lines 1311/1321/1322/1324's own seam,
+    /// independent of every quota seam above: a resource's health and its
+    /// quota are two different facts, and line 1324 asks that neither ever
+    /// stand in for the other.
+    pub fn with_provider_health(
+        mut self,
+        provider: impl Into<String>,
+        readings: Vec<GatewayHealthReading>,
+    ) -> Self {
+        self.health.insert(provider.into(), readings);
+        self
+    }
+
+    /// Fold in every resource's health a local gateway has observed and
+    /// persisted to disk — capability map lines 1311/1321/1322/1324's bridge
+    /// across the process boundary between the `glasshouse run`/`glasshouse
+    /// launch` that ran the gateway and this `glasshouse resources`
+    /// invocation, which is never the same process.
+    ///
+    /// A read of [`GatewayHealthCache::load_all`] — no network, no
+    /// subprocess, no credential, exactly [`Self::gather_gateway_quota`]'s
+    /// own cost and [`GatewayHealthCache`]'s own fail-soft contract: a cache
+    /// with nothing in it, or a corrupt file, folds in nothing rather than
+    /// producing an error.
+    pub fn gather_gateway_health(mut self, cache: &GatewayHealthCache) -> Self {
+        for (provider, readings) in cache.load_all() {
+            self = self.with_provider_health(provider, readings);
+        }
+        self
+    }
+
     fn for_harness(&self, harness: IntegrationId) -> Option<&HarnessTelemetry> {
         self.harness.get(harness.slug())
     }
 
     fn for_provider(&self, provider: &str) -> Option<&(RateLimitHeaders, i64)> {
         self.providers.get(provider)
+    }
+
+    /// Every resource's health gathered for `provider`, or an empty slice
+    /// when nothing has been observed — capability map line 1324's "never
+    /// invent a reading" half, at the one place a renderer can ask.
+    fn for_provider_health(&self, provider: &str) -> &[GatewayHealthReading] {
+        self.health.get(provider).map_or(&[], |readings| readings)
     }
 }
 
@@ -391,7 +436,9 @@ pub fn report(
     for kind in registry() {
         let state = observed_capacity(&kind, effective, telemetry, options.now_unix);
         let age_limit = stale_after(&kind, effective);
-        render_resource(&mut out, &kind, &state, age_limit, effective, options);
+        render_resource(
+            &mut out, &kind, &state, age_limit, effective, telemetry, options,
+        );
         out.push('\n');
     }
 
@@ -433,6 +480,23 @@ pub fn capacity_json(
                     "seconds_until_reset": reset_seconds,
                 })
             });
+            let health: Vec<serde_json::Value> = match &kind {
+                ResourceKind::DirectProvider { provider, .. } => telemetry
+                    .for_provider_health(provider)
+                    .iter()
+                    .map(|reading| {
+                        serde_json::json!({
+                            "model": reading.model,
+                            "credential": reading.credential_label,
+                            "consecutive_failures": reading.consecutive_failures,
+                            "cooling_down_until_unix": reading.cooling_down_until_unix,
+                            "credential_rejected": reading.credential_rejected,
+                            "available": reading.is_available(now_unix),
+                        })
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
             serde_json::json!({
                 "resource": kind.label(),
                 "quota_shape": state.model().as_str(),
@@ -441,6 +505,12 @@ pub fn capacity_json(
                 "telemetry_class": state.telemetry_class_str(),
                 "last_observed_at_unix": state.last_observed_at_unix(),
                 "capacity": capacity,
+                // Capability map lines 1311/1321/1322/1324, kept separate
+                // from `capacity` above rather than folded into it — a
+                // resource's health and its quota are two different facts.
+                // An empty list is honest: nothing has been observed, never
+                // a fabricated healthy default.
+                "health": health,
             })
         })
         .collect();
@@ -453,6 +523,7 @@ fn render_resource(
     state: &CapacityState,
     age_limit: QuotaStaleAfterSeconds,
     effective: &EffectiveConfig<'_>,
+    telemetry: &GatheredTelemetry,
     options: ReportOptions,
 ) {
     let _ = writeln!(out, "{}", kind.label());
@@ -463,6 +534,13 @@ fn render_resource(
     // Capability map lines 1227 and 1240: the class of claim this resource's
     // knowledge rests on, in one word, including `unknown`.
     let _ = writeln!(out, "  telemetry       {}", state.telemetry_class_str());
+
+    // Capability map lines 1311/1321/1322/1324: this resource's observed
+    // *health*, kept on its own lines rather than folded into anything
+    // above — a resource cooling down after real failures is not the same
+    // fact as a resource whose quota is low, and line 1324 asks that the two
+    // never be scored as one.
+    render_health(out, kind, telemetry, options);
 
     // Capability map line 1236.
     match state.last_observed_at_unix() {
@@ -584,6 +662,60 @@ fn render_capacity_band(
         effective_value,
         score.dimension()
     );
+}
+
+/// Capability map lines 1311, 1321, 1322 and 1324: what a local gateway has
+/// observed about this resource's health, distinctly from its capacity.
+///
+/// Only [`ResourceKind::DirectProvider`] can have a reading at all — health is
+/// learned per credential and per model behind the Glasshouse gateway
+/// (`crate::routing::free::FreeResource`), keyed by the same provider name
+/// this function is given, exactly [`observed_capacity`]'s own
+/// `telemetry.for_provider(provider)` pattern for quota. A native subscription
+/// or the gateway resource itself never has one, so both print `unknown`
+/// unconditionally, the same as [`describe_plan`] does for a state nothing
+/// filled in.
+///
+/// Never prints anything but `unknown` for a resource nothing has been
+/// observed about — capability map line 1324's second half, "never invent a
+/// reading" — and a cooling-down resource is printed as **paced**, never as
+/// broken: pacing is a scheduling fact, not a verdict on the resource.
+fn render_health(
+    out: &mut String,
+    kind: &ResourceKind,
+    telemetry: &GatheredTelemetry,
+    options: ReportOptions,
+) {
+    let readings: &[GatewayHealthReading] = match kind {
+        ResourceKind::DirectProvider { provider, .. } => telemetry.for_provider_health(provider),
+        _ => &[],
+    };
+    if readings.is_empty() {
+        let _ = writeln!(
+            out,
+            "  health          {UNKNOWN_TELEMETRY} — no gateway exchange has been observed for \
+             this resource"
+        );
+        return;
+    }
+    for reading in readings {
+        let status = if reading.credential_rejected {
+            "credential rejected".to_owned()
+        } else {
+            match reading.cooling_down_until_unix {
+                Some(until) if until > options.now_unix => format!(
+                    "paced, cooling down until unix {until} ({}s)",
+                    until - options.now_unix
+                ),
+                _ => "available".to_owned(),
+            }
+        };
+        let _ = writeln!(
+            out,
+            "  health          {} ({}): {status}, {} consecutive failure(s)",
+            reading.model, reading.credential_label, reading.consecutive_failures
+        );
+    }
 }
 
 /// Capability map lines 1210 and 1211: when this resource's quota window
@@ -1436,6 +1568,216 @@ mod tests {
             options(),
         );
         assert_eq!(without, with);
+    }
+
+    // --- capability map lines 1311/1321/1322/1324: resource health --------
+
+    fn health_reading(
+        model: &str,
+        consecutive_failures: u32,
+        cooling_down_until_unix: Option<i64>,
+        credential_rejected: bool,
+    ) -> crate::provider::telemetry::GatewayHealthReading {
+        crate::provider::telemetry::GatewayHealthReading {
+            credential_label: "anyrouter/ANYROUTER_API_KEY".to_owned(),
+            model: model.to_owned(),
+            consecutive_failures,
+            cooling_down_until_unix,
+            credential_rejected,
+        }
+    }
+
+    /// Capability map line 1324's "never invent a reading" half: a resource
+    /// nothing has been observed about reports `unknown`, never a number and
+    /// never a fabricated "available".
+    #[test]
+    fn a_resource_with_no_health_observation_reports_unknown() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let rendered = report(&effective, &GatheredTelemetry::new(), options());
+        let row = anyrouter_row(&rendered);
+        assert!(
+            row.contains(&format!("health          {UNKNOWN_TELEMETRY}")),
+            "{row}"
+        );
+        assert!(!row.contains("paced"), "{row}");
+        assert!(!row.contains("consecutive failure"), "{row}");
+    }
+
+    /// Capability map line 1324's own point: a resource cooling down after
+    /// real failures is **paced**, not broken — the property a test that
+    /// cannot tell "unknown" from "cooling" from "available" would miss
+    /// entirely.
+    #[test]
+    fn a_cooling_down_resource_is_shown_as_paced_not_broken() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayHealthCache::at(dir.path());
+        cache.store(
+            "anyrouter",
+            &[health_reading(
+                "anyrouter/free-model",
+                3,
+                Some(NOW + 120),
+                false,
+            )],
+            OBSERVED,
+        );
+        let telemetry = GatheredTelemetry::new().gather_gateway_health(&cache);
+
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let row = anyrouter_row(&report(&effective, &telemetry, options()));
+
+        assert!(
+            row.contains("health          anyrouter/free-model")
+                && row.contains("paced, cooling down until unix"),
+            "a resource still cooling down must render as paced: {row}"
+        );
+        assert!(
+            row.contains("3 consecutive failure(s)"),
+            "the observed failure count must reach the report: {row}"
+        );
+        assert!(
+            !row.contains(&format!("health          {UNKNOWN_TELEMETRY}")),
+            "a real observation must not render as unknown: {row}"
+        );
+        assert!(
+            !row.contains("credential rejected"),
+            "a cooldown is not a credential rejection: {row}"
+        );
+    }
+
+    /// The other side of the same property: once a cooldown has elapsed by
+    /// the report's own `now_unix`, the resource reads as available again —
+    /// without a fresh observation, exactly
+    /// [`crate::provider::telemetry::GatewayHealthReading::is_available`]'s
+    /// own contract.
+    #[test]
+    fn an_elapsed_cooldown_reads_as_available_again() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayHealthCache::at(dir.path());
+        cache.store(
+            "anyrouter",
+            &[health_reading(
+                "anyrouter/free-model",
+                2,
+                Some(NOW - 1),
+                false,
+            )],
+            OBSERVED,
+        );
+        let telemetry = GatheredTelemetry::new().gather_gateway_health(&cache);
+
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let row = anyrouter_row(&report(&effective, &telemetry, options()));
+
+        assert!(
+            row.contains(
+                "health          anyrouter/free-model (anyrouter/ANYROUTER_API_KEY): \
+                          available"
+            ),
+            "{row}"
+        );
+        assert!(!row.contains("paced"), "{row}");
+    }
+
+    /// A credential Glasshouse's own gateway had to reject reports that fact
+    /// distinctly from a cooldown — waiting does not fix a revoked key.
+    #[test]
+    fn a_rejected_credential_is_shown_as_rejected_not_paced() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayHealthCache::at(dir.path());
+        cache.store(
+            "anyrouter",
+            &[health_reading("anyrouter/free-model", 1, None, true)],
+            OBSERVED,
+        );
+        let telemetry = GatheredTelemetry::new().gather_gateway_health(&cache);
+
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let row = anyrouter_row(&report(&effective, &telemetry, options()));
+
+        assert!(row.contains("credential rejected"), "{row}");
+        assert!(!row.contains("paced"), "{row}");
+    }
+
+    /// A corrupt cache file must leave `glasshouse resources` working and
+    /// simply carry no health — [`GatewayHealthCache::load`]'s own fail-soft
+    /// contract, proven at the rendering function it feeds.
+    #[test]
+    fn a_corrupt_health_cache_file_leaves_the_report_working_with_no_health() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayHealthCache::at(dir.path());
+        cache.store(
+            "anyrouter",
+            &[health_reading("anyrouter/free-model", 1, None, false)],
+            OBSERVED,
+        );
+        let path = dir.path().join(format!(
+            "{}.json",
+            crate::provider::cache::file_stem("anyrouter")
+        ));
+        std::fs::write(&path, b"not json").expect("overwritten with garbage");
+
+        let telemetry = GatheredTelemetry::new().gather_gateway_health(&cache);
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let row = anyrouter_row(&report(&effective, &telemetry, options()));
+
+        assert!(
+            row.contains(&format!("health          {UNKNOWN_TELEMETRY}")),
+            "a corrupt cache file must read as no health, not fail the report: {row}"
+        );
+    }
+
+    /// [`capacity_json`]'s own twin: health rides beside capacity as a
+    /// separate field, never merged into it, and an unobserved resource's
+    /// list is empty rather than absent or fabricated.
+    #[test]
+    fn capacity_json_carries_health_separately_from_capacity() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayHealthCache::at(dir.path());
+        cache.store(
+            "anyrouter",
+            &[health_reading(
+                "anyrouter/free-model",
+                2,
+                Some(NOW + 60),
+                false,
+            )],
+            OBSERVED,
+        );
+        let telemetry = GatheredTelemetry::new().gather_gateway_health(&cache);
+
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let json = capacity_json(&effective, &telemetry, NOW);
+        let anyrouter = json["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["resource"].as_str().unwrap().starts_with("anyrouter"))
+            .expect("an anyrouter entry");
+
+        let health = anyrouter["health"].as_array().expect("a health array");
+        assert_eq!(health.len(), 1);
+        assert_eq!(health[0]["model"], "anyrouter/free-model");
+        assert_eq!(health[0]["consecutive_failures"], 2);
+        assert_eq!(health[0]["available"], false);
+
+        let gateway_kind = json["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["resource"] == "glasshouse gateway")
+            .expect("the glasshouse gateway entry");
+        assert_eq!(
+            gateway_kind["health"].as_array().expect("a health array"),
+            &Vec::<serde_json::Value>::new(),
+            "a resource kind health cannot apply to must carry an empty list, never null"
+        );
     }
 
     /// An explicit `--probe`'s own reading, folded in after

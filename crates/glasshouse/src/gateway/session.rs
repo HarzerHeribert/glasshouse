@@ -235,6 +235,45 @@ impl SessionRouting {
         self.lock().free.clone()
     }
 
+    /// Every resource's health this gateway has observed for `provider`, as
+    /// [`crate::provider::telemetry::GatewayHealthReading`]s ready to cross
+    /// the process boundary — capability map lines 1311/1321/1322/1324's
+    /// gateway half, called once per exchange from the accept loop,
+    /// symmetric with [`Self::observe_quota_headers`] rather than folded into
+    /// [`Self::observe_exchange`] itself.
+    ///
+    /// `now` and `now_unix` name the same instant in the two clocks this
+    /// crosses between: `now` is what [`FreePool::observe`] measured
+    /// `cooling_down_until` against, and `now_unix` is the wall-clock second
+    /// the caller is about to persist this snapshot under. The remaining
+    /// duration between `cooling_down_until` and `now` is added to
+    /// `now_unix` — never `cooling_down_until` compared against `now_unix`
+    /// directly, which would mix an [`std::time::Instant`], with no fixed
+    /// epoch, into unix-second arithmetic.
+    pub(super) fn health_readings_for(
+        &self,
+        provider: &str,
+        now: Instant,
+        now_unix: i64,
+    ) -> Vec<crate::provider::telemetry::GatewayHealthReading> {
+        self.free_pool()
+            .observed()
+            .into_iter()
+            .filter(|(resource, _)| resource.provider() == provider)
+            .map(
+                |(resource, health)| crate::provider::telemetry::GatewayHealthReading {
+                    credential_label: resource.credential().label(),
+                    model: resource.model().to_owned(),
+                    consecutive_failures: health.consecutive_failures(),
+                    cooling_down_until_unix: health.cooling_down_until().map(|until| {
+                        now_unix + until.saturating_duration_since(now).as_secs() as i64
+                    }),
+                    credential_rejected: health.credential_was_rejected(),
+                },
+            )
+            .collect()
+    }
+
     /// Record what a forwarded response's headers said — capability map line
     /// 1229's gateway half, called once per exchange from the accept loop.
     ///
@@ -948,5 +987,136 @@ mod tests {
             "a credential rotation must never be recorded as an (even unconfirmed) failure-domain \
              change — the failure domain did not move"
         );
+    }
+
+    // --- capability map lines 1311/1321/1322/1324: the health snapshot ----
+
+    /// A provider [`Self::health_readings_for`] was never asked about, and a
+    /// provider it was asked about but that never served an exchange, both
+    /// come back empty — never a fabricated entry for a resource nothing was
+    /// observed about.
+    #[test]
+    fn health_readings_for_an_unobserved_provider_is_empty() {
+        let routing = SessionRouting::new();
+        assert_eq!(
+            routing.health_readings_for("anyrouter", Instant::now(), 1_800_000_000),
+            Vec::new()
+        );
+    }
+
+    /// Two consecutive rate-limit failures — `routing::free`'s own
+    /// `FAILURES_BEFORE_COOLDOWN` threshold, exercised through the real
+    /// production caller [`Self::observe_exchange`] rather than
+    /// `routing::free::ResourceHealth` directly — must reach
+    /// [`Self::health_readings_for`] as a cooldown converted to an absolute
+    /// unix second, and must never leak into a different provider's
+    /// snapshot.
+    #[test]
+    fn health_readings_for_reports_a_real_cooldown_as_an_absolute_unix_deadline_and_only_for_its_own_provider()
+     {
+        let upstream = Upstream::with_failover(vec![upstream_backend("openrouter")])
+            .expect("one backend is not none");
+        let routing = SessionRouting::new();
+        routing.bind(
+            "claude-code",
+            "anthropic-messages",
+            AssignedModel::named("the-routed-model"),
+            &upstream,
+        );
+
+        let now = Instant::now();
+        let now_unix = 1_800_000_000_i64;
+        routing.observe_exchange(
+            &upstream,
+            &rate_limited_exchange("openrouter"),
+            now,
+            None,
+            0,
+        );
+        routing.observe_exchange(
+            &upstream,
+            &rate_limited_exchange("openrouter"),
+            now,
+            None,
+            0,
+        );
+
+        let readings = routing.health_readings_for("openrouter", now, now_unix);
+        let reading = readings
+            .iter()
+            .find(|r| r.model == "the-routed-model")
+            .expect("the bound model must have a health reading after two real failures");
+        assert_eq!(reading.consecutive_failures, 2);
+        assert!(!reading.credential_rejected);
+        let until = reading
+            .cooling_down_until_unix
+            .expect("two consecutive rate-limit failures must trigger a cooldown");
+        assert!(
+            until > now_unix,
+            "a fresh cooldown must read as a deadline still in the future: {until} vs {now_unix}"
+        );
+
+        assert_eq!(
+            routing.health_readings_for("a-different-provider", now, now_unix),
+            Vec::new(),
+            "a provider's own snapshot must never include another provider's resource"
+        );
+    }
+
+    /// A resource that served after failing is healthy again — Phase 9I line
+    /// 534's recovery-from-work half — and [`Self::health_readings_for`]
+    /// reports that as no cooldown at all, not as a deadline already in the
+    /// past.
+    #[test]
+    fn health_readings_for_clears_a_cooldown_once_the_resource_serves_again() {
+        let upstream = Upstream::with_failover(vec![upstream_backend("openrouter")])
+            .expect("one backend is not none");
+        let routing = SessionRouting::new();
+        routing.bind(
+            "claude-code",
+            "anthropic-messages",
+            AssignedModel::named("the-routed-model"),
+            &upstream,
+        );
+
+        let now = Instant::now();
+        routing.observe_exchange(
+            &upstream,
+            &rate_limited_exchange("openrouter"),
+            now,
+            None,
+            0,
+        );
+        routing.observe_exchange(
+            &upstream,
+            &rate_limited_exchange("openrouter"),
+            now,
+            None,
+            0,
+        );
+        routing.observe_exchange(
+            &upstream,
+            &Exchange {
+                outcome: Outcome::Forwarded {
+                    upstream_status: 200,
+                    bytes: 0,
+                },
+                status: 200,
+                provider: "openrouter".to_owned(),
+                protocol: Some("anthropic-messages".to_owned()),
+                host: String::new(),
+            },
+            now,
+            None,
+            0,
+        );
+
+        let readings = routing.health_readings_for("openrouter", now, 1_800_000_000);
+        let reading = readings
+            .iter()
+            .find(|r| r.model == "the-routed-model")
+            .expect("the bound model must still have a health reading");
+        assert_eq!(reading.consecutive_failures, 0);
+        assert_eq!(reading.cooling_down_until_unix, None);
     }
 }

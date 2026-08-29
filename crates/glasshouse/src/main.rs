@@ -548,6 +548,12 @@ fn launch_session(
         // make a read-only data directory or a locked database into "glasshouse
         // will not start".
         evidence_ledger(runtime, std::slice::from_ref(&launch_profile)),
+        // Capability map lines 1311/1321/1322/1324: the durable resource-
+        // health cache, the same additive shape as the quota cache above and
+        // read back by exactly the same `glasshouse resources` invocation.
+        Some(glasshouse::provider::telemetry::GatewayHealthCache::new(
+            runtime.paths(),
+        )),
     ) {
         Ok(gateway) => gateway,
         Err(err) => {
@@ -1080,6 +1086,9 @@ fn resolve_resume_overlay(
             runtime.paths(),
         )),
         evidence_ledger(runtime, std::slice::from_ref(&launch_profile)),
+        Some(glasshouse::provider::telemetry::GatewayHealthCache::new(
+            runtime.paths(),
+        )),
     )?;
     let resolution = glasshouse::profile::Resolution {
         adapter: selection.adapter(),
@@ -2244,6 +2253,9 @@ fn resources_report(
     let mut telemetry = glasshouse::provider::resources::GatheredTelemetry::new();
     telemetry = telemetry.gather_gateway_quota(
         &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths()),
+    );
+    telemetry = telemetry.gather_gateway_health(
+        &glasshouse::provider::telemetry::GatewayHealthCache::new(runtime.paths()),
     );
     if !no_harness {
         telemetry = telemetry.gather_harness_status(now_unix);

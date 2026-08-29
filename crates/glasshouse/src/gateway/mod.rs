@@ -300,7 +300,7 @@ impl Gateway {
         upstream: Upstream,
         quota_cache: Option<crate::provider::telemetry::GatewayQuotaCache>,
     ) -> Result<Self> {
-        Self::start_with_telemetry(upstream, quota_cache, None)
+        Self::start_with_telemetry(upstream, quota_cache, None, None)
     }
 
     /// [`Self::start_with_quota_cache`], with a
@@ -324,12 +324,20 @@ impl Gateway {
     /// cache, and for the identical reason: `main.rs` is this package's
     /// `FORBIDDEN FILES`. See the report for the exact patch.
     ///
+    /// `health_cache` is [`crate::provider::telemetry::GatewayHealthCache`],
+    /// capability map lines 1311/1321/1322/1324's own bridge, additive the
+    /// identical way `quota_cache` is: `None` writes nothing and reproduces
+    /// this function's pre-health-cache behaviour exactly, so every existing
+    /// caller — including every [`super::conformance`] test that does not
+    /// pass one — is unaffected.
+    ///
     /// Private on purpose: reached from outside this module only through
     /// [`start_if_required_with_telemetry`].
     fn start_with_telemetry(
         upstream: Upstream,
         quota_cache: Option<crate::provider::telemetry::GatewayQuotaCache>,
         evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
+        health_cache: Option<crate::provider::telemetry::GatewayHealthCache>,
     ) -> Result<Self> {
         let listener = TcpListener::bind((GATEWAY_INTERFACE, EPHEMERAL_PORT))
             .context("could not bind the local Glasshouse gateway to loopback")?;
@@ -347,6 +355,7 @@ impl Gateway {
         let upstream = Arc::new(upstream);
         let routing = Arc::new(SessionRouting::new());
         let quota_cache = quota_cache.map(Arc::new);
+        let health_cache = health_cache.map(Arc::new);
 
         let accept = std::thread::Builder::new()
             .name("glasshouse-gateway-accept".to_owned())
@@ -357,6 +366,7 @@ impl Gateway {
                 let routing = Arc::clone(&routing);
                 let quota_cache = quota_cache.clone();
                 let evidence_ledger = evidence_ledger.clone();
+                let health_cache = health_cache.clone();
                 move || {
                     accept_loop(
                         listener,
@@ -366,6 +376,7 @@ impl Gateway {
                         routing,
                         quota_cache,
                         evidence_ledger,
+                        health_cache,
                     )
                 }
             })
@@ -474,6 +485,14 @@ impl Drop for Gateway {
 /// connection reset between the handshake and the accept — so the loop
 /// sleeps and tries again rather than dying and leaving a bound port with
 /// nothing behind it.
+///
+/// Eight parameters, all of them either identity (`listener`, `token`), the
+/// two coordination handles (`stop`, `upstream`, `routing`) already threaded
+/// through before this package, or one of three additive, independently
+/// optional telemetry sinks. Grouping the three sinks into a struct would
+/// trade one clippy lint for an abstraction with a single call site and
+/// nothing else to say about itself.
+#[allow(clippy::too_many_arguments)]
 fn accept_loop(
     listener: TcpListener,
     stop: Arc<AtomicBool>,
@@ -482,6 +501,7 @@ fn accept_loop(
     routing: Arc<SessionRouting>,
     quota_cache: Option<Arc<crate::provider::telemetry::GatewayQuotaCache>>,
     evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
+    health_cache: Option<Arc<crate::provider::telemetry::GatewayHealthCache>>,
 ) {
     // One agent for the life of the gateway: it owns the connection pool to
     // the provider, so a warm TLS connection survives from one request to
@@ -498,6 +518,7 @@ fn accept_loop(
                 let routing = Arc::clone(&routing);
                 let quota_cache = quota_cache.clone();
                 let evidence_ledger = evidence_ledger.clone();
+                let health_cache = health_cache.clone();
                 let spawned = std::thread::Builder::new()
                     .name("glasshouse-gateway-exchange".to_owned())
                     .spawn(move || {
@@ -524,10 +545,11 @@ fn accept_loop(
                         // Phase 9J and Phase 33A's one production consumer
                         // reads the very observations this loop's own writes
                         // produce.
+                        let observed_at_instant = std::time::Instant::now();
                         routing.observe_exchange(
                             &upstream,
                             &exchange,
-                            std::time::Instant::now(),
+                            observed_at_instant,
                             evidence_ledger.as_deref(),
                             completed_at,
                         );
@@ -561,6 +583,21 @@ fn accept_loop(
                             cache.store(&exchange.provider, &quota, now);
                         }
                         routing.observe_quota_headers(quota, now);
+                        // Capability map lines 1311/1321/1322/1324's gateway
+                        // half, symmetric with the quota write immediately
+                        // above rather than folded into `observe_exchange`
+                        // itself: the health this exchange just updated is
+                        // read back out of `routing` (already mutated by
+                        // `observe_exchange` above) and persisted for
+                        // whichever provider this exchange named.
+                        if let Some(cache) = &health_cache {
+                            let readings = routing.health_readings_for(
+                                &exchange.provider,
+                                observed_at_instant,
+                                now,
+                            );
+                            cache.store(&exchange.provider, &readings, now);
+                        }
                         exchange.record();
                     });
                 if spawned.is_err() {
@@ -641,24 +678,28 @@ pub fn start_if_required_with_quota_cache(
 
 /// [`start_if_required_with_quota_cache`], with a
 /// [`crate::routing::evidence::EvidenceLedger`] a started gateway records
-/// every bound, provider-reaching exchange to — Phase 33A.
+/// every bound, provider-reaching exchange to — Phase 33A — and a
+/// [`crate::provider::telemetry::GatewayHealthCache`] it persists every
+/// bound exchange's resource health to — capability map lines
+/// 1311/1321/1322/1324.
 ///
-/// **Not called from `crates/glasshouse/src/main.rs` today**, for the exact
-/// reason [`start_if_required_with_quota_cache`]'s own doc gives for the
-/// quota cache: `main.rs` is this package's `FORBIDDEN FILES`. See the
-/// report's `PATCHES ANOTHER PACKAGE MUST APPLY` for the three-line change
-/// that wires a real [`crate::routing::evidence::EvidenceLedger::open`] into
-/// both of `main.rs`'s gateway launch sites.
+/// `crates/glasshouse/src/main.rs` calls this at both of its gateway launch
+/// sites (`launch_session` and the resume path, `overlay_resolution`),
+/// passing a real [`crate::provider::telemetry::GatewayQuotaCache::new`] and
+/// [`crate::provider::telemetry::GatewayHealthCache::new`] built from the
+/// same [`crate::paths::RuntimePaths`] `UserConfig::load(runtime.paths())`
+/// already resolves there.
 pub fn start_if_required_with_telemetry(
     profiles: &[LaunchProfile],
     upstream: impl FnOnce() -> Result<Upstream>,
     quota_cache: Option<crate::provider::telemetry::GatewayQuotaCache>,
     evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
+    health_cache: Option<crate::provider::telemetry::GatewayHealthCache>,
 ) -> Result<Option<Gateway>> {
     if !gateway_is_required(profiles) {
         return Ok(None);
     }
-    Gateway::start_with_telemetry(upstream()?, quota_cache, evidence_ledger).map(Some)
+    Gateway::start_with_telemetry(upstream()?, quota_cache, evidence_ledger, health_cache).map(Some)
 }
 
 #[cfg(test)]

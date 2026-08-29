@@ -1281,6 +1281,362 @@ impl GatewayQuotaCache {
     }
 }
 
+// --- a gateway-observed resource's health, surviving its own process ------
+//
+// Capability map lines 1311, 1321, 1322 and 1324 have a producer
+// (`crate::routing::free::ResourceHealth`, real and complete) and a writer
+// (`crate::gateway::session::SessionRouting::observe_exchange`, folding in
+// every exchange, paid included), and both only ever run inside the
+// `glasshouse run`/`glasshouse launch` process that started the gateway.
+// `glasshouse resources` is a separate invocation with nothing in memory
+// connecting the two — [`GatewayQuotaCache`]'s own gap, one seam over. This
+// is that same connection, built the identical way and for the identical
+// reason: the gateway process writes what it observed, and a later
+// `glasshouse resources` process reads it back.
+
+/// The on-disk format's version — [`GATEWAY_QUOTA_FORMAT_VERSION`]'s own
+/// pattern and the identical reason: a shape change is a cache miss, never a
+/// misread.
+const GATEWAY_HEALTH_FORMAT_VERSION: u32 = 1;
+
+/// One free resource's health, in the shape that crosses the process
+/// boundary — the health twin of `PersistedGatewayReadingFields`.
+///
+/// `cooling_down_until_unix` is a wall-clock deadline, never the
+/// process-local [`std::time::Instant`] `routing::free::ResourceHealth` holds
+/// in memory: an `Instant` has no fixed epoch and cannot be compared across
+/// two processes, so the write side
+/// (`crate::gateway::session::SessionRouting::health_readings_for`)
+/// converts the in-memory remaining duration into an absolute unix second
+/// before this type is ever built, and every reader compares that against
+/// its own `now_unix` instead.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GatewayHealthReading {
+    /// [`crate::routing::CredentialId::label`] — safe to persist and render
+    /// for the reason that method's own doc gives: a provider and a
+    /// reference name, never a secret.
+    pub credential_label: String,
+    pub model: String,
+    pub consecutive_failures: u32,
+    /// `None` means not cooling down as of `observed_at_unix`. Capability
+    /// map line 1324: a resource cooling down is paced, not broken, and this
+    /// field is what lets a reader tell the two apart without inventing a
+    /// verdict.
+    pub cooling_down_until_unix: Option<i64>,
+    pub credential_rejected: bool,
+}
+
+impl GatewayHealthReading {
+    /// Whether this reading says the resource may be scheduled at `now_unix`
+    /// — capability map line 1311, from a reading that has already crossed
+    /// the process boundary. A cooldown that has already elapsed by
+    /// `now_unix` reads as available again without needing a fresh
+    /// observation, exactly as [`crate::routing::free::ResourceHealth::is_available`]
+    /// treats an elapsed in-memory cooldown.
+    pub fn is_available(&self, now_unix: i64) -> bool {
+        if self.credential_rejected {
+            return false;
+        }
+        match self.cooling_down_until_unix {
+            Some(until) => until <= now_unix,
+            None => true,
+        }
+    }
+}
+
+/// One provider's file: every resource's health this gateway has observed for
+/// it, plus what the file itself needs to say about itself —
+/// [`PersistedGatewayReading`]'s own three reasons, unchanged here.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct PersistedGatewayHealth {
+    version: u32,
+    provider: String,
+    observed_at_unix: i64,
+    entries: Vec<GatewayHealthReading>,
+}
+
+/// Where a gateway-observed resource's health is kept between processes —
+/// [`GatewayQuotaCache`]'s own shape, a second per-provider directory under
+/// the same [`crate::paths::RuntimePaths::data_dir`]. `provider/cache.rs`'s
+/// own `crate::provider::cache::file_stem` doc already names this
+/// convention and expects a third user of it; this is that third user.
+///
+/// Never resolved automatically, for the identical reason
+/// [`GatewayQuotaCache`]'s own doc gives: `crate::gateway` has never had a
+/// data directory in scope, and a caller that wants persistence resolves its
+/// own [`crate::paths::RuntimePaths`] and hands this a [`Self::new`] built
+/// from it.
+#[derive(Debug, Clone)]
+pub struct GatewayHealthCache {
+    root: PathBuf,
+}
+
+impl GatewayHealthCache {
+    /// The cache under this installation's data directory — the production
+    /// constructor, exactly [`GatewayQuotaCache::new`]'s own shape.
+    pub fn new(paths: &crate::paths::RuntimePaths) -> Self {
+        Self {
+            root: paths.data_dir().join("gateway-health"),
+        }
+    }
+
+    /// A cache rooted at an explicit directory. For tests, exactly like
+    /// [`GatewayQuotaCache::at`].
+    pub fn at(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    fn path_for(&self, provider: &str) -> PathBuf {
+        self.root.join(format!(
+            "{}.json",
+            crate::provider::cache::file_stem(provider)
+        ))
+    }
+
+    /// Every resource's health this cache holds for `provider`, if the
+    /// gateway has ever forwarded an exchange bound to an assignment on it.
+    ///
+    /// **Returns no error, ever, and reads no network.**
+    /// [`GatewayQuotaCache::load`]'s own contract, for the same reason: every
+    /// way this read can fail — absent, unreadable, truncated, another format
+    /// version, a provider name the file disagrees with — means the same
+    /// thing to a caller, an empty list, never a reason to fail `glasshouse
+    /// resources` and never a reading this cache did not actually observe.
+    pub fn load(&self, provider: &str) -> Vec<GatewayHealthReading> {
+        let path = self.path_for(provider);
+        let Ok(bytes) = std::fs::read(&path) else {
+            return Vec::new();
+        };
+        let Ok(stored) = serde_json::from_slice::<PersistedGatewayHealth>(&bytes) else {
+            return Vec::new();
+        };
+        if stored.version != GATEWAY_HEALTH_FORMAT_VERSION || stored.provider != provider {
+            return Vec::new();
+        }
+        stored.entries
+    }
+
+    /// Every provider this cache currently holds health for —
+    /// [`GatewayQuotaCache::load_all`]'s own shape, for the identical
+    /// consumer: [`crate::provider::resources::GatheredTelemetry::gather_gateway_health`]
+    /// folds these in without being told which providers to ask about.
+    pub fn load_all(&self) -> Vec<(String, Vec<GatewayHealthReading>)> {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(bytes) = std::fs::read(entry.path()) else {
+                continue;
+            };
+            let Ok(stored) = serde_json::from_slice::<PersistedGatewayHealth>(&bytes) else {
+                continue;
+            };
+            if stored.version != GATEWAY_HEALTH_FORMAT_VERSION {
+                continue;
+            }
+            out.push((stored.provider.clone(), stored.entries));
+        }
+        out
+    }
+
+    /// Persist `entries` for `provider`, replacing whatever it had before —
+    /// the gateway's own half of capability map lines 1311/1321/1322/1324.
+    ///
+    /// A no-op when `entries` is empty, mirroring [`GatewayQuotaCache::store`]'s
+    /// own guard: an exchange with nothing bound to an assignment yet (so
+    /// `crate::gateway::session::SessionRouting::health_readings_for` has
+    /// nothing to report for this provider) must not overwrite a real reading
+    /// a previous exchange left on disk.
+    ///
+    /// Best-effort on a write failure — logged, not propagated, for the
+    /// identical reason [`GatewayQuotaCache::store`] gives: the accept loop
+    /// cannot fail a real session's exchange over a full disk.
+    pub fn store(&self, provider: &str, entries: &[GatewayHealthReading], observed_at_unix: i64) {
+        if entries.is_empty() {
+            return;
+        }
+        if let Err(err) = self.try_store(provider, entries, observed_at_unix) {
+            tracing::debug!(
+                provider,
+                error = %err,
+                "could not persist a gateway-observed health reading"
+            );
+        }
+    }
+
+    fn try_store(
+        &self,
+        provider: &str,
+        entries: &[GatewayHealthReading],
+        observed_at_unix: i64,
+    ) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.root)?;
+        let stored = PersistedGatewayHealth {
+            version: GATEWAY_HEALTH_FORMAT_VERSION,
+            provider: provider.to_owned(),
+            observed_at_unix,
+            entries: entries.to_vec(),
+        };
+        let encoded = serde_json::to_vec_pretty(&stored)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        let path = self.path_for(provider);
+        let temporary = path.with_extension("json.writing");
+        std::fs::write(&temporary, &encoded)?;
+        std::fs::rename(&temporary, &path)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod gateway_health_cache_tests {
+    use super::*;
+
+    /// The read side, alone: a cache with nothing written for a provider
+    /// answers with an empty list rather than an error or a fabricated
+    /// healthy default — capability map line 1324's "never invent a reading"
+    /// half, at the type that owns the read.
+    #[test]
+    fn a_provider_with_no_stored_health_reads_as_an_empty_list() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayHealthCache::at(dir.path());
+        assert_eq!(cache.load("anyrouter"), Vec::new());
+        assert_eq!(cache.load_all(), Vec::new());
+    }
+
+    /// The write-then-read round trip, including that a cooldown survives it
+    /// as the absolute unix second it was given — never re-derived from a
+    /// process-local clock on the way back out.
+    #[test]
+    fn a_stored_reading_round_trips_including_a_cooldown_deadline() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayHealthCache::at(dir.path());
+        let entries = vec![GatewayHealthReading {
+            credential_label: "anyrouter/ANYROUTER_API_KEY".to_owned(),
+            model: "anyrouter/free-model".to_owned(),
+            consecutive_failures: 2,
+            cooling_down_until_unix: Some(1_787_800_600),
+            credential_rejected: false,
+        }];
+        cache.store("anyrouter", &entries, 1_787_800_000);
+
+        assert_eq!(cache.load("anyrouter"), entries);
+        assert_eq!(cache.load("groq"), Vec::new());
+        assert_eq!(cache.load_all(), vec![("anyrouter".to_owned(), entries)]);
+    }
+
+    /// [`GatewayHealthCache::store`]'s own guard: an empty slice must not
+    /// clobber a real reading a previous exchange left on disk, mirroring
+    /// [`GatewayQuotaCache::store`]'s identical guard and its own test of it.
+    #[test]
+    fn an_empty_reading_does_not_clear_a_previous_one() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayHealthCache::at(dir.path());
+        let entries = vec![GatewayHealthReading {
+            credential_label: "anyrouter/ANYROUTER_API_KEY".to_owned(),
+            model: "anyrouter/free-model".to_owned(),
+            consecutive_failures: 0,
+            cooling_down_until_unix: None,
+            credential_rejected: false,
+        }];
+        cache.store("anyrouter", &entries, 1_787_800_000);
+        cache.store("anyrouter", &[], 1_787_800_100);
+        assert_eq!(cache.load("anyrouter"), entries);
+    }
+
+    /// A truncated file must read as "nothing observed", never as an error
+    /// that would fail `glasshouse resources` and never as a fabricated
+    /// healthy reading.
+    #[test]
+    fn a_truncated_health_cache_file_reads_as_an_empty_list() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayHealthCache::at(dir.path());
+        cache.store(
+            "anyrouter",
+            &[GatewayHealthReading {
+                credential_label: "anyrouter/ANYROUTER_API_KEY".to_owned(),
+                model: "anyrouter/free-model".to_owned(),
+                consecutive_failures: 1,
+                cooling_down_until_unix: None,
+                credential_rejected: false,
+            }],
+            1_787_800_000,
+        );
+        let path = dir.path().join(format!(
+            "{}.json",
+            crate::provider::cache::file_stem("anyrouter")
+        ));
+        let bytes = std::fs::read(&path).expect("the store above wrote a file");
+        std::fs::write(&path, &bytes[..bytes.len() / 2]).expect("truncated");
+
+        assert_eq!(cache.load("anyrouter"), Vec::new());
+        assert_eq!(cache.load_all(), Vec::new());
+    }
+
+    /// A format version this build does not recognise must read as nothing —
+    /// [`GatewayQuotaCache`]'s own
+    /// `a_reading_stored_by_a_future_incompatible_format_is_ignored_rather_than_misread`
+    /// twin.
+    #[test]
+    fn a_reading_stored_by_a_future_format_version_is_ignored() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayHealthCache::at(dir.path());
+        cache.store(
+            "anyrouter",
+            &[GatewayHealthReading {
+                credential_label: "anyrouter/ANYROUTER_API_KEY".to_owned(),
+                model: "anyrouter/free-model".to_owned(),
+                consecutive_failures: 1,
+                cooling_down_until_unix: None,
+                credential_rejected: false,
+            }],
+            1_787_800_000,
+        );
+        let path = dir.path().join(format!(
+            "{}.json",
+            crate::provider::cache::file_stem("anyrouter")
+        ));
+        let bytes = std::fs::read(&path).expect("the store above wrote a file");
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+        value["version"] = serde_json::json!(99);
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).expect("overwritten");
+
+        assert_eq!(cache.load("anyrouter"), Vec::new());
+    }
+
+    /// [`GatewayHealthReading::is_available`] — the read-side twin of
+    /// [`crate::routing::free::ResourceHealth::is_available`], over a value
+    /// that has already crossed the process boundary rather than the
+    /// in-memory type itself.
+    #[test]
+    fn a_reading_is_available_exactly_when_not_rejected_and_not_still_cooling() {
+        let healthy = GatewayHealthReading {
+            credential_label: "anyrouter/ANYROUTER_API_KEY".to_owned(),
+            model: "anyrouter/free-model".to_owned(),
+            consecutive_failures: 0,
+            cooling_down_until_unix: None,
+            credential_rejected: false,
+        };
+        assert!(healthy.is_available(1_787_800_000));
+
+        let cooling = GatewayHealthReading {
+            cooling_down_until_unix: Some(1_787_800_600),
+            ..healthy.clone()
+        };
+        assert!(!cooling.is_available(1_787_800_000));
+        assert!(
+            cooling.is_available(1_787_800_600),
+            "a cooldown that has just elapsed reads as available again"
+        );
+
+        let rejected = GatewayHealthReading {
+            credential_rejected: true,
+            ..healthy
+        };
+        assert!(!rejected.is_available(1_787_800_000));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
