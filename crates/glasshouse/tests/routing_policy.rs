@@ -129,6 +129,199 @@ mod boundaries {
         );
     }
 
+    /// Capability map line 1319 — *"treat provider-declared Retry-After or
+    /// equivalent cooldown information as authoritative for temporary
+    /// scheduling blocks."* **Authoritative means Glasshouse's own ceiling
+    /// does not apply to it.**
+    ///
+    /// `MAX_COOLDOWN` is documented as *"the longest cooldown Glasshouse will
+    /// impose **by itself**"*, and clamping a provider's stated wait down to
+    /// it is not a ceiling on Glasshouse — it is overriding the provider,
+    /// which is precisely what this line rules out. A provider that says
+    /// "come back in an hour" and is returned to after fifteen minutes has
+    /// not been treated as authoritative.
+    #[test]
+    fn a_providers_declared_wait_is_not_clamped_to_glasshouses_own_ceiling() {
+        let now = Instant::now();
+        let mut pool = FreePool::new();
+        let it = free_resource("openrouter", "free-model");
+        let declared = MAX_COOLDOWN * 4;
+
+        // The premise, asserted before the behaviour (§17): this test is only
+        // about anything at all if the provider's wait really is longer than
+        // the ceiling Glasshouse would otherwise impose.
+        assert!(
+            declared > MAX_COOLDOWN,
+            "sanity: this test exists to cover a declared wait that exceeds MAX_COOLDOWN"
+        );
+
+        pool.observe(
+            &it,
+            WorkloadOutcome::RateLimited {
+                retry_after: Some(declared),
+            },
+            now,
+        );
+
+        assert_eq!(
+            pool.health(&it).cooling_down_until(),
+            Some(now + declared),
+            "the provider's own wait must be recorded as stated, not shortened to Glasshouse's \
+             own ceiling"
+        );
+        assert!(
+            !pool.is_available(&it, now + MAX_COOLDOWN),
+            "at Glasshouse's own ceiling the resource must still be blocked — this is the exact \
+             instant a clamped cooldown would wrongly have released it back for scheduling"
+        );
+        assert!(
+            pool.is_available(&it, now + declared),
+            "at the instant the provider itself named, the resource must be schedulable again"
+        );
+    }
+
+    /// Line 1319 again, at the other end: a declared wait is authoritative
+    /// **from the first failure**, not from the second.
+    ///
+    /// `FAILURES_BEFORE_COOLDOWN` exists because *inventing* a cooldown from
+    /// one ordinary `429` would empty a pool of healthy resources. That
+    /// reasoning is about not knowing how long to wait — and it evaporates
+    /// the moment the provider says how long. Continuing to schedule work
+    /// against a resource that has just told us to hold for 60 seconds is the
+    /// temporary scheduling block this line names, ignored.
+    ///
+    /// The `None` half is the control: it proves the block came from the
+    /// *declaration* and not from some general "one failure now cools down"
+    /// change, which would be a different and unasked-for policy.
+    #[test]
+    fn a_declared_wait_blocks_scheduling_on_the_first_failure_and_an_undeclared_one_does_not() {
+        let now = Instant::now();
+        let declared = Duration::from_secs(60);
+
+        assert!(
+            FAILURES_BEFORE_COOLDOWN > 1,
+            "sanity: with a threshold of one there would be no distinction left to test"
+        );
+
+        // Control: one failure the provider said nothing about does not cool
+        // the resource down. Asserted on `health` rather than
+        // `FreePool::is_available`, because the latter is the conjunction of
+        // health and the credential's allowance, and a rate-limit marks the
+        // allowance empty by a separate path — line 1324's own separation,
+        // and the confounder this assertion has to avoid to mean anything.
+        let mut invented = FreePool::new();
+        let undeclared = free_resource("openrouter", "free-model");
+        invented.observe(
+            &undeclared,
+            WorkloadOutcome::RateLimited { retry_after: None },
+            now,
+        );
+        assert!(
+            invented.health(&undeclared).is_available(now),
+            "one rate-limit with no stated wait must still not cool a resource down — a single \
+             429 on a shared free tier is ordinary"
+        );
+        assert_eq!(
+            invented.health(&undeclared).cooling_down_until(),
+            None,
+            "and it must record no cooldown deadline at all, having been given none"
+        );
+
+        // The behaviour: the same single failure, with the provider's own
+        // answer attached, blocks scheduling for exactly as long as it said.
+        let mut stated = FreePool::new();
+        let it = free_resource("openrouter", "free-model");
+        stated.observe(
+            &it,
+            WorkloadOutcome::RateLimited {
+                retry_after: Some(declared),
+            },
+            now,
+        );
+        assert!(
+            !stated.health(&it).is_available(now),
+            "a provider that stated how long to wait must be obeyed on the first failure, not \
+             after a second one it never asked for"
+        );
+        assert!(
+            !stated.is_available(&it, now + declared - Duration::from_nanos(1)),
+            "the block must hold for the whole of the stated wait"
+        );
+        assert!(
+            stated.is_available(&it, now + declared),
+            "and end exactly when the provider said it would"
+        );
+
+        // The declaration is what makes the block *temporary*, which is the
+        // adjective line 1319 uses. Without one, `observe` marks the
+        // credential's pool empty with no reset instant, and nothing in
+        // production ever clears it — so the undeclared resource is still
+        // unschedulable at the same future instant the declared one has
+        // already recovered at.
+        assert!(
+            !invented.is_available(&undeclared, now + declared),
+            "a rate-limit with no stated wait leaves the credential's pool empty with no reset \
+             instant — see this file's sibling note; it is the provider's own answer that gives \
+             the block an end"
+        );
+    }
+
+    /// Line 1319's *"scheduling blocks"*, at the one scheduling decision this
+    /// crate actually makes with health: credential rotation.
+    ///
+    /// `FreePool::rotate_from` is what `gateway::session::observe_exchange`
+    /// calls when a credential is rate-limited, and it is the production
+    /// consumer that makes a cooldown a *block* rather than a stored number.
+    /// A rotation that hands work to a credential the provider just told us
+    /// to hold has not treated the declaration as authoritative, however
+    /// faithfully the number was recorded.
+    #[test]
+    fn rotation_will_not_hand_work_to_a_credential_the_provider_told_us_to_hold() {
+        let now = Instant::now();
+        let mut pool = FreePool::new();
+        let declared = Duration::from_secs(120);
+
+        let first = env_credential("openrouter");
+        let second = CredentialId::new(
+            "openrouter",
+            SecretRef::Environment {
+                var: "OPENROUTER_SECOND_KEY".to_owned(),
+            },
+        );
+        let model = "free-model";
+        let candidates = vec![first.clone(), second.clone()];
+
+        // The premise: with nothing observed, rotation away from `first`
+        // finds `second`. Without this, the assertion below could pass
+        // because rotation never finds anything at all.
+        assert_eq!(
+            pool.rotate_from(&first, &candidates, model, now),
+            Some(second.clone()),
+            "premise: an unobserved sibling credential is a valid rotation target"
+        );
+
+        // One rate-limit, with the provider's own wait, against the sibling.
+        pool.observe(
+            &FreeResource::new(second.clone(), model),
+            WorkloadOutcome::RateLimited {
+                retry_after: Some(declared),
+            },
+            now,
+        );
+
+        assert_eq!(
+            pool.rotate_from(&first, &candidates, model, now),
+            None,
+            "the only sibling is inside a wait the provider itself declared, so there is nothing \
+             to rotate to — scheduling into that wait is the block line 1319 forbids"
+        );
+        assert_eq!(
+            pool.rotate_from(&first, &candidates, model, now + declared),
+            Some(second),
+            "and once the provider's own wait has elapsed the sibling is a target again"
+        );
+    }
+
     /// `FAILURES_BEFORE_COOLDOWN - 1` failures, then a success, then one more
     /// failure. If the counter did not really reset on success, this third
     /// failure would be the resource's second *recorded* failure and would

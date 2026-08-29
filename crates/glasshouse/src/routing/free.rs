@@ -44,12 +44,19 @@ use std::time::{Duration, Instant};
 use super::CredentialId;
 
 /// How many consecutive rate-limit or capacity failures a resource is given
-/// before it is put in cooldown.
+/// before Glasshouse puts it in a cooldown **of its own invention**.
 ///
 /// Phase 9I line 535 says *"repeatedly"*, and one failure is not repeatedly.
 /// A single 429 on a shared free tier is ordinary — another user's request
 /// arrived first — and cooling a resource down for it would empty a pool of
 /// perfectly good resources during the busiest minute of the day.
+///
+/// **This threshold governs only the invented cooldown.** A provider that
+/// declared its own `Retry-After` is obeyed on the first failure — see
+/// [`ResourceHealth::fail`] and capability map line 1319. The reason for
+/// waiting for a second failure is that the first one does not tell
+/// Glasshouse how long to wait; when the provider says how long, that reason
+/// is gone.
 const FAILURES_BEFORE_COOLDOWN: u32 = 2;
 
 /// The first cooldown a resource gets when the provider did not say how long
@@ -277,9 +284,11 @@ impl ResourceHealth {
     /// Fold in one real outcome.
     ///
     /// The cooldown length is the provider's own `retry_after` when it gave
-    /// one — it knows and we do not — and otherwise a bounded doubling from
-    /// [`BASE_COOLDOWN`], so a resource failing repeatedly is tried less
-    /// often without ever being written off.
+    /// one — it knows and we do not, and capability map line 1319 makes that
+    /// answer authoritative rather than advisory — and otherwise a bounded
+    /// doubling from [`BASE_COOLDOWN`], so a resource failing repeatedly is
+    /// tried less often without ever being written off. [`Self::fail`] has
+    /// the difference between the two, which is more than a length.
     fn observe(&mut self, outcome: WorkloadOutcome, now: Instant) {
         match outcome {
             WorkloadOutcome::Served => {
@@ -304,13 +313,41 @@ impl ResourceHealth {
     }
 
     /// One rate-limit or capacity failure — the two outcomes Phase 9I line
-    /// 535 names — and the cooldown that follows once there have been enough
-    /// of them.
+    /// 535 names — and the cooldown that follows.
+    ///
+    /// **A cooldown a provider declared and one Glasshouse invented are not
+    /// the same kind of fact.** Capability map line 1319 makes the provider's
+    /// own answer *authoritative* for a temporary scheduling block, not
+    /// merely preferred, so the two take different paths here:
+    ///
+    /// - **A declared `retry_after` applies as given, and immediately.**
+    ///   [`FAILURES_BEFORE_COOLDOWN`] exists because *inventing* a cooldown
+    ///   out of one ordinary `429` would empty a pool of perfectly good
+    ///   resources; nothing is invented when the provider stated the wait
+    ///   itself, and scheduling work against a resource that just told us to
+    ///   hold is exactly the block line 1319 forbids. [`MAX_COOLDOWN`] does
+    ///   not apply either — it bounds what Glasshouse imposes *by itself*
+    ///   (see its own doc), never what a provider declared. Clamping a stated
+    ///   one-hour wait down to fifteen minutes is overriding the provider,
+    ///   which is the whole of what this line rules out.
+    /// - **Without one, the bounded doubling from [`BASE_COOLDOWN`] applies**,
+    ///   and only once there have been [`FAILURES_BEFORE_COOLDOWN`] of them.
+    ///   [`Self::backoff`] applies [`MAX_COOLDOWN`] itself, so the ceiling on
+    ///   the invented path is unchanged by the split.
+    ///
+    /// A declared wait that is *shorter* than a cooldown already in place
+    /// shortens it, for the same reason: authoritative means authoritative in
+    /// both directions, and it is the same rule that lets
+    /// [`WorkloadOutcome::Served`] clear a cooldown outright.
     fn fail(&mut self, retry_after: Option<Duration>, now: Instant) {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-        if self.consecutive_failures >= FAILURES_BEFORE_COOLDOWN {
-            let wait = retry_after.unwrap_or_else(|| self.backoff());
-            self.cooling_down_until = Some(now + wait.min(MAX_COOLDOWN));
+        match retry_after {
+            Some(declared) => self.cooling_down_until = Some(now + declared),
+            None => {
+                if self.consecutive_failures >= FAILURES_BEFORE_COOLDOWN {
+                    self.cooling_down_until = Some(now + self.backoff());
+                }
+            }
         }
     }
 

@@ -410,3 +410,71 @@ gateway-only observation across the same process boundary?"* — and it had, onc
 in the module the consumer already calls. **When a propagation link fails, look for
 a sibling signal that already crosses the same boundary before concluding the
 boundary is the problem.**
+
+---
+
+## Phase 33 — batch 49 team-lead pass: 1312 CLOSED, five refused with the failing link named
+
+Run by an Opus team lead with two subcontractors. **One line closed, five
+returned unbuilt** — and four of the five fail Phase −1 at a link that is
+outside the partition or outside the packet's authority, not at "nobody built
+it yet". That distinction is the package's value.
+
+### Line 1312 — track recent request failures for gateway-backed resources. CLOSED.
+
+Contract: Given routing observations recorded for a resource, when Glasshouse
+asks how that resource has recently behaved, failures inside the window count
+against it, failures outside the window do not, and another resource's failures
+never do.
+
+State: COMPLETE
+
+Production evidence: `routing::evidence::EvidenceLedger::summarize`'s windowed,
+identity-filtered query, consumed through `ObservedEvidenceSource`.
+
+Regression evidence (`tests/routing_evidence.rs`):
+- `an_old_failure_does_not_contribute_to_a_recent_failure_rate`
+- `another_resources_failures_are_not_this_resources_failures`
+- `observed_evidence_source_reflects_recorded_failures`
+
+**A §35 hole one level in, found by the subcontractor rather than the lead.**
+The pre-existing `observed_evidence_source_is_reachable_from_outside_the_crate`
+records **only successes**, so a `task_success_rate` that always answered `1.0`
+would pass it — a reachability test that cannot observe the value it is named
+for. The third test above exists because of that.
+
+Mutations — 3/3 killed, all run by the lead, one re-run by the orchestrator:
+
+| mutation | result |
+|---|---|
+| `AND observed_at >= ?6 AND observed_at <= ?7` → `AND ?6 <= ?7` (arity preserved, so a real semantic mutation rather than a binding error) | **killed** — the window test |
+| `WHERE provider = ?1 AND model = ?2` → `AND ?2 = ?2`, anchored on the `context_state = ?5` line so it lands in `summarize` and not in `recent`, which shares the literal | **killed** — the identity test |
+| `.map(\|reading\| 1.0 - reading.value())` → `.map(\|_reading\| 1.0)` | **killed** — `observed_evidence_source_reflects_recorded_failures`, re-run by the orchestrator |
+
+That second mutation is worth keeping: `mutate.sh` refuses a non-unique find,
+and that refusal is what surfaced the collision between `summarize` and
+`recent` sharing a literal. The tool's strictness did the work.
+
+### The five refused, with the failing link
+
+| line | verdict | the link that fails |
+|---|---|---|
+| 1313 recent latency | **blocked-by-partition** | consumer: latency aggregates have **zero** production readers; every candidate lives in `provider/**` or `shell/**` |
+| 1316 rate-limit vs transport | **blocked, no authority** | needs a new persisted outcome value — a migration the packet forbade — or a health surface in `provider/**` |
+| 1317 rate-limit scope | **premise-invalid** | producer: nothing states whether a 429 is provider-wide, model-, account- or pool-specific, and deriving it would be the fabrication the packet forbids |
+| 1319 Retry-After authoritative | **blocked-by-partition** | producer→caller: `gateway/session.rs:614` hardcodes `retry_after: None` |
+| 1325 observation provenance | **premise-invalid** | of the four provenance values the line names, production can only ever emit one |
+
+### 1319's missing wire is one argument, and it is now unblocked
+
+The lead's most useful finding is not the closed line. `gateway/mod.rs:586`
+binds `let (exchange, quota) = ingress::serve(..)`, and `quota` carries the
+provider's own `Retry-After`. `observe_exchange` is called **seventeen lines
+later at `:603`** and is not given it; `gateway/session.rs:614` then hardcodes
+`retry_after: None`. Verified by the orchestrator.
+
+The lead fixed the *rule* 1319 names inside its own partition — a stated
+`Retry-After` is preferred over any cooldown Glasshouse would invent, proven by
+three further mutations — and correctly **did not tick the box**, because the
+provider's value never reaches the rule. `gateway/**` was another worker's that
+round; it is free now, and this is a small, precisely located follow-up.

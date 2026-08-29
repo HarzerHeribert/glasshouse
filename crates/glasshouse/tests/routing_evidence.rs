@@ -72,7 +72,15 @@ fn bootstrap_at(base: &Path, root: &Path) -> Runtime {
 }
 
 fn synthetic_observation(at: i64, outcome: Outcome) -> NewObservation {
-    NewObservation::new("anyrouter", "claude-opus-4-1")
+    synthetic_observation_for("claude-opus-4-1", at, outcome)
+}
+
+/// [`synthetic_observation`], for a model other than the default —
+/// `"claude-opus-4-1"` and `"claude-sonnet-4-5"` sharing every other field so
+/// a test can prove they are two distinct identities, not two names for the
+/// same one.
+fn synthetic_observation_for(model: &str, at: i64, outcome: Outcome) -> NewObservation {
+    NewObservation::new("anyrouter", model)
         .with_route(Some("anthropic-messages"))
         .with_harness(Some("claude-code"))
         .with_timing(Some(at), Some(at + 2))
@@ -188,6 +196,145 @@ fn a_summary_reflects_exactly_the_observations_recorded_in_its_window() {
     );
 }
 
+/// Capability map line 1312's "recent": a failure recorded long before the
+/// summarised window does not lower a failure rate that only covers what is
+/// actually recent, even though the row is never deleted from the table.
+#[test]
+fn an_old_failure_does_not_contribute_to_a_recent_failure_rate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let ledger = EvidenceLedger::open(&fixture.runtime).unwrap();
+
+    for i in 0..MIN_SAMPLE_FOR_SUMMARY {
+        let at = 1_000 + i as i64;
+        ledger
+            .record(synthetic_observation(at, Outcome::Failed), at)
+            .unwrap();
+    }
+    let recent_start = 90_000;
+    for i in 0..MIN_SAMPLE_FOR_SUMMARY {
+        let at = recent_start + i as i64 * 100;
+        ledger
+            .record(synthetic_observation(at, Outcome::Succeeded), at)
+            .unwrap();
+    }
+
+    let query = ObservationQuery {
+        provider: "anyrouter",
+        model: "claude-opus-4-1",
+        route: Some("anthropic-messages"),
+        harness: Some("claude-code"),
+    };
+
+    // Assert the premise (§17) before the absence: both blocks are really
+    // in the table, and the old block is really recorded as failures.
+    let all_rows = ledger.recent(query, 100).unwrap();
+    assert_eq!(
+        all_rows.len(),
+        MIN_SAMPLE_FOR_SUMMARY * 2,
+        "both the old failures and the recent successes were genuinely recorded"
+    );
+    assert_eq!(
+        all_rows
+            .iter()
+            .filter(|o| o.outcome == Some(Outcome::Failed))
+            .count(),
+        MIN_SAMPLE_FOR_SUMMARY,
+        "the old block is genuinely readable back as failures"
+    );
+
+    // A window that starts exactly at the first recent observation and ends
+    // at `now_unix`, containing none of the old failures.
+    let now_unix = recent_start + (MIN_SAMPLE_FOR_SUMMARY as i64 - 1) * 100;
+    let window_seconds = now_unix - recent_start;
+    let summary = ledger
+        .summarize(query, ContextState::Unknown, now_unix, window_seconds)
+        .unwrap();
+
+    let failure_rate = summary.failure_rate.expect("the minimum sample was met");
+    assert_eq!(
+        *failure_rate.value(),
+        0.0,
+        "only the recent successes fall inside the window"
+    );
+    assert_eq!(failure_rate.sample_count(), MIN_SAMPLE_FOR_SUMMARY);
+    let (window_start, _window_end) = failure_rate.window();
+    assert_eq!(window_start, recent_start);
+}
+
+/// Capability map line 1312's "for gateway-backed resources": a summary is
+/// per `(provider, model, route, harness)` identity, not per provider — the
+/// same doctrine `routing::free`'s own header states for health.
+#[test]
+fn another_resources_failures_are_not_this_resources_failures() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let ledger = EvidenceLedger::open(&fixture.runtime).unwrap();
+
+    for i in 0..MIN_SAMPLE_FOR_SUMMARY {
+        let at = 1_000 + i as i64 * 100;
+        ledger
+            .record(synthetic_observation(at, Outcome::Succeeded), at)
+            .unwrap();
+    }
+    for i in 0..MIN_SAMPLE_FOR_SUMMARY {
+        let at = 1_000 + i as i64 * 100;
+        ledger
+            .record(
+                synthetic_observation_for("claude-sonnet-4-5", at, Outcome::Failed),
+                at,
+            )
+            .unwrap();
+    }
+
+    let now_unix = 10_000;
+    let window_seconds = 100_000;
+
+    let sonnet_query = ObservationQuery {
+        provider: "anyrouter",
+        model: "claude-sonnet-4-5",
+        route: Some("anthropic-messages"),
+        harness: Some("claude-code"),
+    };
+    // Assert the premise: the other identity's failures are genuinely
+    // recorded and genuinely visible before asserting this identity can't
+    // see them.
+    let sonnet_summary = ledger
+        .summarize(
+            sonnet_query,
+            ContextState::Unknown,
+            now_unix,
+            window_seconds,
+        )
+        .unwrap();
+    let sonnet_failure_rate = sonnet_summary
+        .failure_rate
+        .expect("the minimum sample was met");
+    assert_eq!(
+        *sonnet_failure_rate.value(),
+        1.0,
+        "every claude-sonnet-4-5 observation recorded was a failure"
+    );
+
+    let opus_query = ObservationQuery {
+        provider: "anyrouter",
+        model: "claude-opus-4-1",
+        route: Some("anthropic-messages"),
+        harness: Some("claude-code"),
+    };
+    let opus_summary = ledger
+        .summarize(opus_query, ContextState::Unknown, now_unix, window_seconds)
+        .unwrap();
+    let opus_failure_rate = opus_summary
+        .failure_rate
+        .expect("the minimum sample was met");
+    assert_eq!(
+        *opus_failure_rate.value(),
+        0.0,
+        "the sonnet identity's failures never contribute to the opus identity's rate"
+    );
+}
+
 /// [`ObservedEvidenceSource`] — design decision 6's replacement for
 /// `NoObservations` — reachable and correct from outside the crate,
 /// against a real [`EvidenceKey`] built the way `crate::config::pairing`
@@ -220,6 +367,54 @@ fn observed_evidence_source_is_reachable_from_outside_the_crate() {
         .observed(&key)
         .expect("five successes must produce evidence");
     assert_eq!(observed.task_success_rate, Some(1.0));
+}
+
+/// The reachability test above only ever records successes, so it cannot
+/// show that a recorded failure moves [`ObservedEvidence::task_success_rate`]
+/// at all — a bug that always reported `1.0` would still pass it. This proves
+/// the fraction actually reflects recorded failures, not just presence.
+#[test]
+fn observed_evidence_source_reflects_recorded_failures() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let ledger = EvidenceLedger::open(&fixture.runtime).unwrap();
+
+    for i in 0..MIN_SAMPLE_FOR_SUMMARY {
+        let at = 1_000 + i as i64 * 100;
+        ledger
+            .record(synthetic_observation(at, Outcome::Succeeded), at)
+            .unwrap();
+    }
+    for i in 0..MIN_SAMPLE_FOR_SUMMARY {
+        let at = 1_000 + (MIN_SAMPLE_FOR_SUMMARY as i64 + i as i64) * 100;
+        ledger
+            .record(synthetic_observation(at, Outcome::Failed), at)
+            .unwrap();
+    }
+
+    let key = EvidenceKey::new(
+        IntegrationId::ClaudeCode,
+        "default",
+        AssignedModel::named("claude-opus-4-1"),
+        ServingRoute {
+            provider: Some("anyrouter".to_owned()),
+            gateway: None,
+            protocol: Some(WireProtocol::AnthropicMessages),
+        },
+    );
+    let source = ObservedEvidenceSource::new(&ledger, 10_000, 100_000);
+    let observed = source
+        .observed(&key)
+        .expect("ten observations must produce evidence");
+    assert_eq!(
+        observed.task_success_rate,
+        Some(0.5),
+        "half of the recorded observations were failures"
+    );
+    assert!(
+        observed.reliable_observation_count > 0,
+        "the recorded observations must actually count toward reliability"
+    );
 }
 
 /// Batch 43's `observed_identities` — the enumeration link batch 42 found

@@ -1309,7 +1309,7 @@ Phase 32G — Provider-aware request-cost estimation
 Phase 33 — Resource health
 
 ☑ Track whether each configured resource is currently available.
-☐ Track recent request failures for gateway-backed resources.
+☑ Track recent request failures for gateway-backed resources.
 ☐ Track recent observed latency for gateway-backed resources where measurable.
 ☑ Track known quota or usage state when a provider or harness exposes it.
 ☑ Track known quota reset time when it is exposed.
