@@ -111,6 +111,43 @@ whose consuming phases are still at zero. **It belongs in Cluster D.**
 | 1216 | reader built and wired; no host has ever sent a window > 60s |
 | 1317 | nothing states whether a 429 is provider-, model-, account- or pool-scoped |
 
+### Cluster L — Glasshouse refuses to parse the thing that carries the signal *(in-repo: the boundary is ours and deliberate — do not package without changing it first)*
+
+**Added batch 53, after a Phase −1 check killed a package before dispatch.**
+Phase 33A ranks as "5 open, 10 closed" in `ORIENT.md`, which reads cheap. It is
+not: three of its five open lines need the gateway to inspect a response
+*stream*, and `gateway::ingress` is explicitly forbidden to.
+
+`gateway/ingress.rs:456-458` states the rule in its own words — the quota
+headers are read *"Headers only … **never the body, which stays a byte stream
+this function never parses**"*. That is capability map line 1229's gateway half
+and it is a decision, not an omission.
+
+Everything downstream is already built and waiting, which is what makes this
+look packageable: `database.rs:1164-1165` has the `first_byte_at` and
+`first_token_at` columns, `routing/evidence.rs:250-251` has the fields as
+`Option<i64>`, and both say so — `database.rs:1119` records that
+*"`first_token_at`/`first_tool_call_at` are NULL from that producer today"* and
+`routing/evidence.rs:42` lists them as **not supplied**. The schema, the struct
+and the documentation are complete. Only the producer is missing, and it is
+missing on purpose.
+
+| line | why it is not ours today |
+|---|---|
+| 1331 | "time to first real token" and "time to first tool call" require reading the stream. **`first_byte_at` is the exception** — first byte is observable without parsing, so a package could honestly close that clause alone |
+| 1332 | *requires* distinguishing whitespace padding, keepalives and reasoning-only deltas from a real token — the definition of parsing the body |
+| 1333 | input/output/cached token counts. Same wall, and it is the same one that made map line 1158 a refusal this batch: `routing_observations`' token columns are documented as not supplied because filling them means parsing a body `ingress` will not parse |
+
+**What would unblock it is a design decision, not a worker.** Either
+`gateway::ingress` gains a bounded, streaming, non-buffering observer that
+counts and timestamps without interpreting content, or these lines stay open
+and should stop being counted as cheap. **Do not package 1331–1333 as wiring.**
+
+1330 and 1334 are *not* in this cluster — identity, purpose, timestamp, tool
+rounds, retries and outcomes need no body inspection. A package scoped to those
+two plus 1331's `first_byte_at` clause is honest and was not attempted this
+batch only because both partitions that touch the gateway were already claimed.
+
 ### Cluster F — outside Glasshouse's process boundary *(in-repo: **NO** — a product boundary, not a gap)*
 
 The decisive input is the user's source tree, the agent's plan, or the agent's
