@@ -3229,3 +3229,46 @@ files, verified by actually doing it and running `cargo check` before restoring.
 **Both defects have the same root as §75 and §76: I wrote a constraint and an
 instruction that could not both be satisfied, and only the worker noticed.**
 Eleven consecutive rounds now.
+
+### §77, addendum — the live trial found two bugs the synthetic test could not
+
+Two Haiku sessions, separate worktrees, one shared file, ~$0.13 each. **The
+synthetic shell test was green and the mechanism was inert.**
+
+**Bug 1 — every worker wrote its claims into its own worktree.**
+`git rev-parse --show-toplevel` answers *"this worktree"*, and each worker runs in
+one. So no worker could see another's claim, and the protocol was silently a
+no-op **across exactly the boundary it exists to cross.** Both agents dutifully
+reported *"no peer diffs"* — it appeared to run correctly and coordinated nothing.
+Fixed by anchoring on `--git-common-dir`, whose parent is the main checkout from
+anywhere. **The synthetic test missed it because it invoked the script from the
+main checkout**, which is the one place the bug does not appear.
+
+**Bug 2 — a worker runs its worktree's *copy* of the script.** After fixing the
+tool in the main checkout, the next trial still failed: the workers ran
+`scripts/coedit.sh` relative to their own tree, which holds the version committed
+when the worktree was created. **An uncommitted fix does not exist for any
+worker.** This is §62's *"a running process is a copy, not a reference"* one layer
+out, and §19's shim lesson in a third costume.
+
+> **So: commit a tool before a worker is told to use it, and refresh worktrees
+> created earlier.** A packet naming `scripts/<tool>` gets whatever that worktree
+> was branched from.
+
+**Third run, both bugs fixed: it worked.** `ada` claimed first and correctly found
+no peer. `bo` claimed second, **read `ada`'s in-progress file across the worktree
+boundary**, identified the heading and section it had written, reasoned that its
+own structure was already compatible, and said so in its report. Barrier opened at
+2/2; both intents reconciled into one file.
+
+**The honest limit of this trial: `bo` did not need to adapt.** The two edits were
+non-overlapping by construction, so it proves the *mechanism* — visibility, the
+barrier, reconciliation — and not the *hard case*, two agents whose changes
+genuinely conflict. That case is still untested, and it is the one Maybe L must
+win on.
+
+**And an operational fact worth knowing: `--permission-mode auto` is not available
+to Haiku.** The session comes up in `accept edits` instead, which does not cover
+Bash, so every `coedit.sh` call prompts. The user authorised
+`--dangerously-skip-permissions` for this trial specifically because it ran in
+throwaway worktrees. **Do not carry that flag to a worker touching real files.**
