@@ -20,7 +20,7 @@
 //!   [`MEMORY_MARKER`] and closes with [`MEMORY_MARKER_END`]. There is no way
 //!   for a caller to emit an injected block without the label, because there
 //!   is no way for a caller to build the text at all.
-//! - **Untrusted text can never contain `[` or `]`.** [`quote`] rewrites both
+//! - **Untrusted text can never contain `[` or `]`.** `quote` rewrites both
 //!   to their round equivalents. Every structural token this module emits —
 //!   the two markers and every entry head — begins with `[`, so a body that
 //!   cannot produce a `[` cannot forge a boundary, cannot close the block
@@ -70,7 +70,7 @@ use super::store::{
 };
 
 /// Opens every injected block. Chosen to be unmistakable in a transcript and
-/// impossible for a memory body to reproduce — see [`quote`].
+/// impossible for a memory body to reproduce — see `quote`.
 pub const MEMORY_MARKER: &str = "[glasshouse:project-memory]";
 
 /// Closes every injected block. Distinct from [`MEMORY_MARKER`] by its `/`,
