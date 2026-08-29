@@ -2483,3 +2483,54 @@ barrier costs versus queueing; and how often mutual visibility caused an agent t
 adapt in a way that turned out wrong. **If it does not beat "queue and serialize"
 on real work, it should not ship** — Maybe I's criteria for file coordination
 already say this and apply unchanged.
+
+## Phase 51's event log: `evaluation_observations`, migration 15
+
+**Decided 2026-08-29. The full design is `docs/product/design-phase51-event-log.md`;
+this is the summary and the corrections it forced to *this* file.**
+
+A **new table**, not a widening of `lifecycle_events` and not a view: `CREATE
+TABLE` plus one index plus migration 11's two project-scope triggers. No
+`ALTER`, no rebuild, no existing `CHECK` touched — and **no new
+`LIFECYCLE_EVENT_KINDS` value**, so map lines 310, 327 and 1316 stay refused on
+exactly the ground the register gives them.
+
+`kind` deliberately carries **no SQL `CHECK`**. Its vocabulary lives in Rust
+with a pinning test, following `response_profile`'s precedent
+(`database.rs:869-875`) rather than `lifecycle_events.kind`'s. Putting a `CHECK`
+on the one column certain to grow would manufacture migration 7's problem on
+purpose — which is what Cluster G is.
+
+It counts *how often*; `routing_observations` measures *how much*. That is why
+there is no `magnitude`/`unit` pair despite four lines wanting one.
+
+**Retention is in the migration, not a follow-up**: 90 days / 100,000 rows,
+trimmed in the writer's own transaction, and deliberately without migration 5's
+append-only `DELETE` trigger.
+
+**It unblocks 7 of Phase 51's 37 lines and closes 3** (1822, 1826, 1856). Twenty
+have no producer and are not schema work. The design bucketed all 37 rather than
+claiming the phase.
+
+### Three corrections this design forced to the text above
+
+1. **This document contradicted itself on 1836/1837** — `:2322-2325` put them in
+   the zero-migration gateway-health cluster while `:2369-2372` routed the
+   quota-history lines through the new table. **Ruling: they belong to the new
+   table**, and the step-1 cluster shrinks to 1851 and 1852.
+2. **"The only readers are `EventLog::all()` and `for_session()`, both full
+   scans" is wrong.** `events/log.rs` has six readers, and `len()` is already a
+   SQL `COUNT(*)`. The accurate claim is *"cannot count by kind within a
+   window"* — one method signature, not a primitive gap.
+3. **1824 does not need the table**; it is answerable from `memories` alone and
+   is a read helper, not an event. **1831 does need a producer** the table does
+   not supply — a home is not a producer.
+
+### An unrelated defect this surfaced, and it is not Phase 51's
+
+**Nothing in Glasshouse prunes anything.** A grep for `fn prune` / `retention` /
+`VACUUM` / `DELETE FROM` across `crates/glasshouse/src` finds no production
+retention path. `memories`, `lifecycle_events` and `routing_observations` grow
+forever, and `lifecycle_events` **cannot be trimmed even deliberately** — its
+`BEFORE DELETE` trigger `RAISE(ABORT)`s (`database.rs:500-512`). That is a
+fourth reason not to fold Phase 51 into it, and it is its own piece of work.
