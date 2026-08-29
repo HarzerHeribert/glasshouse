@@ -465,6 +465,7 @@ mod tests {
                 branch: Some("main".to_owned()),
                 commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             }),
+            working_tree: None,
             handoff: Handoff {
                 objective: "the objective".to_owned(),
                 implementation_state: "the state".to_owned(),

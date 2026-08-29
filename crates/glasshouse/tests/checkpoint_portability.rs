@@ -61,6 +61,7 @@ fn full_checkpoint(session: &str, harness: &str, at: i64) -> Checkpoint {
             branch: Some("main".to_owned()),
             commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
         }),
+        working_tree: None,
         handoff: Handoff {
             objective: "close out the sub-record test packet".to_owned(),
             implementation_state: "the event log tests pass; the checkpoint tests are next"
@@ -172,6 +173,7 @@ fn the_size_bound_holds_from_the_outside_and_a_minimal_checkpoint_is_genuinely_s
         reason: CheckpointReason::TaskBoundary,
         created_at: 1,
         git: None,
+        working_tree: None,
         handoff: Handoff {
             objective: "o".to_owned(),
             implementation_state: "s".to_owned(),
@@ -512,6 +514,101 @@ fn capturing_a_checkpoint_reads_the_repository_it_is_standing_in() {
     assert!(
         outside.git.is_none(),
         "a project that is not a repository must record no position, not a fake one"
+    );
+}
+
+/// **Line 1640 — "include git status and relevant diff references in the
+/// handoff when useful."**
+///
+/// Asserted against `Checkpoint::capture`, for the same reason the position
+/// test above is: a literal built with `working_tree` already filled in
+/// would prove storage and nothing about capture actually reading the
+/// working tree. This builds a real `.git/index` recording one file, changes
+/// that file's size on disk, and checks that `capture` — the one function
+/// both `glasshouse checkpoint save` and a task-boundary checkpoint call —
+/// notices.
+#[test]
+fn capturing_a_checkpoint_reads_the_working_tree_status_of_the_repository_it_is_standing_in() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(root.join(".git/refs/heads")).unwrap();
+    std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(
+        root.join(".git/refs/heads/main"),
+        "0123456789abcdef0123456789abcdef01234567\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("tracked.txt"), "short\n").unwrap();
+
+    // An index recording a size this file no longer has, once the file below
+    // is rewritten longer — a version-2 index with exactly one entry, built
+    // the same way `checkpoint::git`'s own tests build one.
+    let mut index = Vec::new();
+    index.extend_from_slice(b"DIRC");
+    index.extend_from_slice(&2u32.to_be_bytes());
+    index.extend_from_slice(&1u32.to_be_bytes());
+    index.extend_from_slice(&[0u8; 8]); // ctime
+    index.extend_from_slice(&[0u8; 8]); // mtime: never matches, forcing a size check
+    index.extend_from_slice(&[0u8; 4]); // dev
+    index.extend_from_slice(&[0u8; 4]); // ino
+    index.extend_from_slice(&0o100644u32.to_be_bytes()); // mode
+    index.extend_from_slice(&[0u8; 4]); // uid
+    index.extend_from_slice(&[0u8; 4]); // gid
+    index.extend_from_slice(&1u32.to_be_bytes()); // size the index remembers: 1 byte
+    index.extend_from_slice(&[0u8; 20]); // sha1, unread
+    let name = b"tracked.txt";
+    index.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    index.extend_from_slice(name);
+    let entry_len = 62 + name.len();
+    let pad = match entry_len % 8 {
+        0 => 8,
+        rem => 8 - rem,
+    };
+    index.extend(std::iter::repeat_n(0u8, pad));
+    std::fs::write(root.join(".git/index"), &index).unwrap();
+
+    let captured = glasshouse::checkpoint::Checkpoint::capture(
+        &glasshouse::session::SessionId::new("s-1"),
+        "a-harness",
+        glasshouse::checkpoint::CheckpointReason::Manual,
+        1_700_000_000,
+        &root,
+        glasshouse::checkpoint::Handoff {
+            objective: "o".to_owned(),
+            implementation_state: "s".to_owned(),
+            ..Default::default()
+        },
+    );
+
+    let status = captured
+        .working_tree
+        .as_ref()
+        .expect("a checkpoint taken inside a repository must record working-tree status");
+    assert!(
+        status.dirty,
+        "the index disagrees with the file on disk, so this must read dirty"
+    );
+    assert_eq!(status.changed_files, vec!["tracked.txt".to_owned()]);
+
+    // And "when available" is a real condition here too: outside a
+    // repository, capture still succeeds and simply records no status.
+    let bare = tmp.path().join("not-a-repo");
+    std::fs::create_dir_all(&bare).unwrap();
+    let outside = glasshouse::checkpoint::Checkpoint::capture(
+        &glasshouse::session::SessionId::new("s-1"),
+        "a-harness",
+        glasshouse::checkpoint::CheckpointReason::Manual,
+        1_700_000_000,
+        &bare,
+        glasshouse::checkpoint::Handoff {
+            objective: "o".to_owned(),
+            implementation_state: "s".to_owned(),
+            ..Default::default()
+        },
+    );
+    assert!(
+        outside.working_tree.is_none(),
+        "a project with no index must record no status, not a fake one"
     );
 }
 

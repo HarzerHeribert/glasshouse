@@ -96,6 +96,206 @@ impl GitPosition {
     }
 }
 
+/// Whether the working tree holds changes the index does not, read the same
+/// cheap way [`GitPosition::detect`] reads `HEAD`: by opening a small file
+/// directly and parsing it, never by spawning `git`. The reasons are the
+/// module's own — see the module doc.
+///
+/// # What this compares, and what it does not
+///
+/// This compares the **working tree against the index** — unstaged
+/// modifications and deletions of files Git already tracks. It does **not**
+/// compare the index against `HEAD` (staged-but-uncommitted changes), and it
+/// does **not** detect untracked files: both would need Git's object store
+/// (loose objects and packfiles, decompressed and walked as trees) rather
+/// than the two small files this module reads, which is a different and much
+/// larger mechanism than a checkpoint's cheap best-effort status is worth
+/// building. A dirty tree is always reported correctly; a clean tree is
+/// reported only as "no *unstaged* changes found" — real for what it checks,
+/// silent about what it does not.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WorkingTreeStatus {
+    /// Whether any tracked file differs from what the index recorded, or has
+    /// been deleted.
+    pub dirty: bool,
+    /// Paths of the files that differ, relative to the repository root, in
+    /// index order and capped at `MAX_CHANGED_FILES` so an enormous change
+    /// cannot make a checkpoint proportional to its own size. `dirty` stays
+    /// `true` even once the cap is reached; only the *list* stops growing.
+    pub changed_files: Vec<String>,
+}
+
+/// How many changed paths [`WorkingTreeStatus::detect`] records by name.
+///
+/// A checkpoint is a pointer back to the work, not a copy of it — see the
+/// module-level `Checkpoint` doc's "small is a constraint, not an
+/// aspiration". Naming a bounded handful of paths is enough to tell a fresh
+/// session where to look; naming all of them would not tell it anything
+/// more useful and would cost bytes doing it.
+pub(crate) const MAX_CHANGED_FILES: usize = 20;
+
+impl WorkingTreeStatus {
+    /// Read the repository containing `project_root`, or `None`.
+    ///
+    /// `None` covers every way of not being able to answer — no repository,
+    /// no index yet (a repository with nothing ever added), an index format
+    /// this reader does not recognize — because a checkpoint reporting no
+    /// status is honest and a checkpoint guessing one is not.
+    pub fn detect(project_root: &Path) -> Option<Self> {
+        let (git_dir, _common_dir) = resolve_git_dir(project_root)?;
+        // The index is per-worktree, unlike the refs read for `GitPosition`:
+        // each linked worktree stages its own changes independently, so this
+        // is read from `git_dir`, never from the common directory.
+        let bytes = std::fs::read(git_dir.join("index")).ok()?;
+        let entries = parse_index(&bytes)?;
+
+        let mut status = WorkingTreeStatus::default();
+        for entry in entries {
+            if entry_changed(project_root, &entry) {
+                status.dirty = true;
+                if status.changed_files.len() < MAX_CHANGED_FILES {
+                    status.changed_files.push(entry.path);
+                }
+            }
+        }
+        Some(status)
+    }
+}
+
+/// One file the index tracks, with just enough recorded state to tell
+/// whether the working tree still agrees with it.
+struct IndexEntry {
+    path: String,
+    mtime_secs: u32,
+    mtime_nanos: u32,
+    size: u32,
+    /// The index's own file mode, so a submodule (`160000`) can be skipped
+    /// rather than compared against a regular file's metadata and reported
+    /// as changed for a reason that has nothing to do with its content.
+    mode: u32,
+}
+
+/// Whether `entry`'s file, as it stands on disk right now, still matches
+/// what the index recorded.
+///
+/// This is the same *racily* correct check Git itself performs on its fast
+/// path: comparing size and modification time rather than content. It can
+/// theoretically miss a change made and reverted within one filesystem
+/// timer tick without ever changing size — the same limitation Git accepts
+/// for the same reason — but it never reports a change that did not happen.
+fn entry_changed(project_root: &Path, entry: &IndexEntry) -> bool {
+    const GITLINK: u32 = 0o160000;
+    if entry.mode & 0o170000 == GITLINK {
+        // A submodule's "content" is which commit it points to, which this
+        // reader has no cheap way to check; skipping it means never
+        // reporting a false change, at the cost of never reporting a real
+        // one either.
+        return false;
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(project_root.join(&entry.path)) else {
+        // Tracked, and gone: a deletion is exactly the kind of change a
+        // handoff should mention.
+        return true;
+    };
+    if metadata.len() != u64::from(entry.size) {
+        return true;
+    }
+    let Ok(modified) = metadata.modified() else {
+        // A platform that cannot report an mtime at all cannot be compared;
+        // reporting "changed" on every entry, on every checkpoint, on such a
+        // platform would be noise rather than signal.
+        return false;
+    };
+    let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) else {
+        return true;
+    };
+    duration.as_secs() != u64::from(entry.mtime_secs)
+        || duration.subsec_nanos() != entry.mtime_nanos
+}
+
+/// Parse a Git index file far enough to read every entry's path, size and
+/// modification time.
+///
+/// Deliberately narrow: this reads the fixed-length per-entry stat data and
+/// the name that follows it, for format versions 2 and 3, and stops the
+/// moment the declared entry count is reached — the extensions that follow
+/// (the cache-tree, the untracked-file cache, and the rest) are never read,
+/// because nothing here needs them. Version 4's compressed-name entries are
+/// a different byte layout this does not implement; encountering one is
+/// treated the same as any other unreadable index, `None`, rather than
+/// parsed wrongly.
+fn parse_index(bytes: &[u8]) -> Option<Vec<IndexEntry>> {
+    const HEADER: usize = 12;
+    const ENTRY_FIXED: usize = 62;
+    if bytes.len() < HEADER || &bytes[0..4] != b"DIRC" {
+        return None;
+    }
+    let version = u32::from_be_bytes(bytes[4..8].try_into().ok()?);
+    if !(2..=3).contains(&version) {
+        return None;
+    }
+    let count = u32::from_be_bytes(bytes[8..12].try_into().ok()?) as usize;
+
+    let mut entries = Vec::with_capacity(count.min(4096));
+    let mut offset = HEADER;
+    for _ in 0..count {
+        if offset + ENTRY_FIXED > bytes.len() {
+            return None;
+        }
+        let field = |start: usize| -> Option<u32> {
+            bytes
+                .get(offset + start..offset + start + 4)
+                .and_then(|slice| slice.try_into().ok())
+                .map(u32::from_be_bytes)
+        };
+        // Fixed layout: ctime sec/nsec at 0/4, mtime sec/nsec at 8/12, dev at
+        // 16, ino at 20, mode at 24, uid at 28, gid at 32, size at 36, a
+        // 20-byte SHA-1 at 40, flags at 60. Only what this reader needs is
+        // pulled out; ctime, dev, ino, uid and gid are read by nothing here.
+        let mtime_secs = field(8)?;
+        let mtime_nanos = field(12)?;
+        let mode = field(24)?;
+        let size = field(36)?;
+        let flags = u16::from_be_bytes(bytes.get(offset + 60..offset + 62)?.try_into().ok()?);
+
+        let mut name_start = offset + ENTRY_FIXED;
+        // Version 3 may mark an entry "extended", adding a second flags word
+        // before the name; version 2 never sets this bit.
+        if flags & 0x4000 != 0 {
+            name_start += 2;
+        }
+        let name_len = (flags & 0x0FFF) as usize;
+        let name_bytes = if name_len < 0x0FFF {
+            bytes.get(name_start..name_start + name_len)?
+        } else {
+            // A name of 4094 bytes or longer is not length-prefixed; read up
+            // to the next NUL instead.
+            let end = bytes[name_start..].iter().position(|&b| b == 0)?;
+            bytes.get(name_start..name_start + end)?
+        };
+        let path = std::str::from_utf8(name_bytes).ok()?.to_owned();
+
+        // Padding always advances to the next multiple of 8 bytes from the
+        // start of the entry, with at least one NUL byte included even when
+        // the unpadded length already lands on a boundary.
+        let entry_len = name_start - offset + name_bytes.len();
+        let pad_to = match entry_len % 8 {
+            0 => 8,
+            rem => 8 - rem,
+        };
+        offset += entry_len + pad_to;
+
+        entries.push(IndexEntry {
+            path,
+            mtime_secs,
+            mtime_nanos,
+            size,
+            mode,
+        });
+    }
+    Some(entries)
+}
+
 /// The directory holding this checkout's `HEAD`, and the one holding the
 /// repository's shared refs. They are the same directory except in a linked
 /// worktree.
@@ -433,5 +633,209 @@ mod tests {
             }
         };
         git_dir.join("HEAD").is_file()
+    }
+
+    /// Build a version-2 index file byte for byte, so a test can assert
+    /// against a known, exact input rather than one only `git` could have
+    /// produced.
+    ///
+    /// Each entry is `(path, mtime_secs, mtime_nanos, size, mode)`; every
+    /// other stat field the real format carries (ctime, dev, ino, uid, gid,
+    /// the object hash) is written as zero, because [`parse_index`] never
+    /// reads them.
+    fn write_index_v2(entries: &[(&str, u32, u32, u32, u32)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"DIRC");
+        out.extend_from_slice(&2u32.to_be_bytes()); // version
+        out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+
+        for &(path, mtime_secs, mtime_nanos, size, mode) in entries {
+            out.extend_from_slice(&0u32.to_be_bytes()); // ctime secs
+            out.extend_from_slice(&0u32.to_be_bytes()); // ctime nsecs
+            out.extend_from_slice(&mtime_secs.to_be_bytes());
+            out.extend_from_slice(&mtime_nanos.to_be_bytes());
+            out.extend_from_slice(&0u32.to_be_bytes()); // dev
+            out.extend_from_slice(&0u32.to_be_bytes()); // ino
+            out.extend_from_slice(&mode.to_be_bytes());
+            out.extend_from_slice(&0u32.to_be_bytes()); // uid
+            out.extend_from_slice(&0u32.to_be_bytes()); // gid
+            out.extend_from_slice(&size.to_be_bytes());
+            out.extend_from_slice(&[0u8; 20]); // sha1, unread by this parser
+            let name_len = (path.len() as u16).min(0x0FFF);
+            out.extend_from_slice(&name_len.to_be_bytes());
+
+            let entry_start = out.len() - 62;
+            out.extend_from_slice(path.as_bytes());
+            let entry_len = out.len() - entry_start;
+            let pad = match entry_len % 8 {
+                0 => 8,
+                rem => 8 - rem,
+            };
+            out.extend(std::iter::repeat_n(0u8, pad));
+        }
+        out
+    }
+
+    /// A tracked file whose size and modification time still match the
+    /// index is not reported as changed.
+    ///
+    /// The file's real metadata is read back after writing it, rather than a
+    /// value chosen by the test, because filesystem mtime resolution varies
+    /// by platform: asserting against whatever the filesystem actually
+    /// recorded is the only way this is not occasionally flaky.
+    #[test]
+    fn a_file_matching_the_index_is_not_reported_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(&root.join("tracked.txt"), "unchanged\n");
+        let metadata = std::fs::metadata(root.join("tracked.txt")).unwrap();
+        let modified = metadata.modified().unwrap();
+        let since_epoch = modified.duration_since(std::time::UNIX_EPOCH).unwrap();
+
+        let index = write_index_v2(&[(
+            "tracked.txt",
+            since_epoch.as_secs() as u32,
+            since_epoch.subsec_nanos(),
+            metadata.len() as u32,
+            0o100644,
+        )]);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/index"), &index).unwrap();
+
+        let status = WorkingTreeStatus::detect(root).expect("a readable index");
+        assert!(!status.dirty, "reported dirty against a matching file");
+        assert!(status.changed_files.is_empty());
+    }
+
+    /// A tracked file whose size no longer matches the index is reported
+    /// dirty, and named.
+    #[test]
+    fn a_file_whose_size_changed_is_reported_dirty_and_named() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(&root.join("changed.txt"), "now much longer than before\n");
+
+        // The index remembers a size this file no longer has; the actual
+        // recorded mtime does not matter for this assertion; zero is fine.
+        let index = write_index_v2(&[("changed.txt", 0, 0, 1, 0o100644)]);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/index"), &index).unwrap();
+
+        let status = WorkingTreeStatus::detect(root).expect("a readable index");
+        assert!(status.dirty);
+        assert_eq!(status.changed_files, vec!["changed.txt".to_owned()]);
+    }
+
+    /// A tracked file the index still names but that no longer exists on
+    /// disk — a deletion — is reported dirty rather than silently ignored.
+    #[test]
+    fn a_deleted_tracked_file_is_reported_dirty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+
+        let index = write_index_v2(&[("gone.txt", 0, 0, 5, 0o100644)]);
+        std::fs::write(root.join(".git/index"), &index).unwrap();
+
+        let status = WorkingTreeStatus::detect(root).expect("a readable index");
+        assert!(status.dirty);
+        assert_eq!(status.changed_files, vec!["gone.txt".to_owned()]);
+    }
+
+    /// A submodule entry (`160000`, a "gitlink") is never compared against a
+    /// regular file on disk: there normally is no such file, and reporting
+    /// one changed for a reason that has nothing to do with its content
+    /// would be worse than saying nothing.
+    #[test]
+    fn a_submodule_gitlink_is_never_reported_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+
+        let index = write_index_v2(&[("vendor/lib", 0, 0, 0, 0o160000)]);
+        std::fs::write(root.join(".git/index"), &index).unwrap();
+
+        let status = WorkingTreeStatus::detect(root).expect("a readable index");
+        assert!(!status.dirty, "a gitlink entry must never be compared");
+    }
+
+    /// The changed-files list stops growing at the cap, but `dirty` keeps
+    /// reporting the truth: a checkpoint naming twenty files still says the
+    /// tree is dirty even though a twenty-first file also changed.
+    #[test]
+    fn changed_files_is_capped_but_dirty_still_reports_true() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+
+        let entries: Vec<(String, u32, u32, u32, u32)> = (0..(MAX_CHANGED_FILES + 5))
+            .map(|i| (format!("gone{i}.txt"), 0, 0, 5, 0o100644))
+            .collect();
+        let borrowed: Vec<(&str, u32, u32, u32, u32)> = entries
+            .iter()
+            .map(|(path, a, b, c, d)| (path.as_str(), *a, *b, *c, *d))
+            .collect();
+        let index = write_index_v2(&borrowed);
+        std::fs::write(root.join(".git/index"), &index).unwrap();
+
+        let status = WorkingTreeStatus::detect(root).expect("a readable index");
+        assert!(status.dirty);
+        assert_eq!(status.changed_files.len(), MAX_CHANGED_FILES);
+    }
+
+    /// An index this reader does not understand — here, a future format
+    /// version — reads as no status available, never a wrong one.
+    #[test]
+    fn an_unsupported_index_version_yields_no_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let mut header = Vec::new();
+        header.extend_from_slice(b"DIRC");
+        header.extend_from_slice(&4u32.to_be_bytes());
+        header.extend_from_slice(&0u32.to_be_bytes());
+        std::fs::write(root.join(".git/index"), &header).unwrap();
+
+        assert_eq!(WorkingTreeStatus::detect(root), None);
+    }
+
+    /// A repository with no index yet — nothing has ever been added — reads
+    /// as no status available rather than a false "clean".
+    #[test]
+    fn a_repository_with_no_index_yields_no_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        assert_eq!(WorkingTreeStatus::detect(root), None);
+    }
+
+    /// The real repository this test is running in, the same way
+    /// [`the_repository_this_test_runs_in_is_readable`] proves `GitPosition`
+    /// against it: a hand-built fixture only proves the parser against what
+    /// the test author believed an index looks like, and this project's own
+    /// index — normally at a linked worktree, normally with real, ordinary
+    /// changes sitting in it during development — is a fixture nobody
+    /// authored.
+    #[test]
+    fn working_tree_status_reads_the_real_checkout_this_test_runs_in() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("the manifest is two directories below the checkout root")
+            .to_path_buf();
+        if !the_repository_is_actually_readable(&root) {
+            // Same copied-tree case `GitPosition`'s own test guards against.
+            return;
+        }
+
+        let status = WorkingTreeStatus::detect(&root)
+            .expect("this checkout's index is readable, so a status must be readable from it");
+        for path in &status.changed_files {
+            assert!(!path.is_empty());
+            assert!(
+                !path.starts_with('/'),
+                "a changed-file path must be relative to the repository root: {path}"
+            );
+        }
     }
 }

@@ -52,7 +52,7 @@
 pub mod git;
 pub mod store;
 
-pub use git::GitPosition;
+pub use git::{GitPosition, WorkingTreeStatus};
 pub use store::{CheckpointId, CheckpointStore, ProjectCheckpoints, StoreError, Stored};
 
 use serde::{Deserialize, Serialize};
@@ -168,6 +168,11 @@ pub struct Checkpoint {
     pub created_at: i64,
     /// The repository position, when the project is a Git repository at all.
     pub git: Option<GitPosition>,
+    /// Whether the working tree holds changes the index does not, when that
+    /// is knowable at all — see [`WorkingTreeStatus`] for exactly what this
+    /// does and does not compare. Independent of `git`: a `None` here says
+    /// nothing about whether `git` is present, and vice versa.
+    pub working_tree: Option<WorkingTreeStatus>,
     pub handoff: Handoff,
     /// Whether [`Checkpoint::fit`] had to drop anything to meet the bound.
     ///
@@ -205,6 +210,14 @@ struct Document {
     git_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     git_commit: Option<String>,
+    // `git_dirty` is the discriminator for whether a working-tree status was
+    // recorded at all: `None` means unavailable, exactly as an absent `git`
+    // position means unavailable, and `Some(false)` is a real, present
+    // "clean" that must round-trip rather than being treated as empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    git_dirty: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    git_changed_files: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     trimmed: bool,
 }
@@ -246,6 +259,7 @@ impl Checkpoint {
             reason,
             created_at,
             git: GitPosition::detect(project_root),
+            working_tree: WorkingTreeStatus::detect(project_root),
             handoff,
             trimmed: false,
         }
@@ -281,6 +295,10 @@ impl Checkpoint {
             reason,
             created_at: parsed.created_at,
             git: GitPosition::from_parts(parsed.git_branch, parsed.git_commit),
+            working_tree: parsed.git_dirty.map(|dirty| WorkingTreeStatus {
+                dirty,
+                changed_files: parsed.git_changed_files,
+            }),
             handoff: Handoff {
                 objective: parsed.objective,
                 implementation_state: parsed.implementation_state,
@@ -310,6 +328,12 @@ impl Checkpoint {
             next_actions: self.handoff.next_actions.clone(),
             git_branch: self.git.as_ref().and_then(|git| git.branch.clone()),
             git_commit: self.git.as_ref().map(|git| git.commit.clone()),
+            git_dirty: self.working_tree.as_ref().map(|status| status.dirty),
+            git_changed_files: self
+                .working_tree
+                .as_ref()
+                .map(|status| status.changed_files.clone())
+                .unwrap_or_default(),
             trimmed: self.trimmed,
         }
     }
@@ -324,8 +348,9 @@ impl Checkpoint {
     /// state are what a fresh session cannot work without, so they are cut
     /// last and truncated rather than dropped. Failed approaches go first —
     /// they are the largest section in practice and the least costly to
-    /// rediscover — then the file list, then decisions, then the test state,
-    /// then next actions.
+    /// rediscover — then the working tree's changed-file list (Glasshouse
+    /// read it off disk and can read it again), then the file list, then
+    /// decisions, then the test state, then next actions.
     ///
     /// Nothing is ever silently perfect: whatever is dropped sets `trimmed`,
     /// so a reader knows to go and look at the session itself.
@@ -344,6 +369,11 @@ impl Checkpoint {
             &mut self.handoff.next_actions,
         ] {
             for item in list.iter_mut() {
+                clamp(item, &mut self.trimmed);
+            }
+        }
+        if let Some(status) = self.working_tree.as_mut() {
+            for item in status.changed_files.iter_mut() {
                 clamp(item, &mut self.trimmed);
             }
         }
@@ -406,15 +436,44 @@ impl Checkpoint {
         let _ = writeln!(out, "CURRENT STATE");
         let _ = writeln!(out, "{}", self.handoff.implementation_state);
 
-        if let Some(git) = &self.git {
+        if self.git.is_some() || self.working_tree.is_some() {
             let _ = writeln!(out);
+            let _ = writeln!(out, "REPOSITORY");
+        }
+        if let Some(git) = &self.git {
             match &git.branch {
                 Some(branch) => {
-                    let _ = writeln!(out, "REPOSITORY\nbranch {branch}, commit {}", git.commit);
+                    let _ = writeln!(out, "branch {branch}, commit {}", git.commit);
                 }
                 None => {
-                    let _ = writeln!(out, "REPOSITORY\ndetached HEAD at commit {}", git.commit);
+                    let _ = writeln!(out, "detached HEAD at commit {}", git.commit);
                 }
+            }
+        }
+        if let Some(status) = &self.working_tree {
+            if status.dirty {
+                // `changed_files` is capped (`WorkingTreeStatus::detect`'s
+                // own doc), so its length is the true count only when the
+                // cap was not reached — otherwise there is more, unnamed.
+                let count = if status.changed_files.len() < git::MAX_CHANGED_FILES {
+                    status.changed_files.len().to_string()
+                } else {
+                    format!("at least {}", status.changed_files.len())
+                };
+                let _ = writeln!(
+                    out,
+                    "working tree: dirty ({count} file{} changed — run `git diff` to see them)",
+                    if status.changed_files.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
+                );
+                for file in &status.changed_files {
+                    let _ = writeln!(out, "  {file}");
+                }
+            } else {
+                let _ = writeln!(out, "working tree: clean");
             }
         }
 
@@ -469,6 +528,11 @@ impl Checkpoint {
                 .handoff
                 .failed_approaches
                 .pop()
+                .or_else(|| {
+                    self.working_tree
+                        .as_mut()
+                        .and_then(|status| status.changed_files.pop())
+                })
                 .or_else(|| self.handoff.files.pop())
                 .or_else(|| self.handoff.decisions.pop())
                 .or_else(|| self.handoff.test_state.take())
@@ -546,6 +610,10 @@ mod tests {
                 branch: Some("main".to_owned()),
                 commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             }),
+            working_tree: Some(WorkingTreeStatus {
+                dirty: true,
+                changed_files: vec!["src/checkpoint/mod.rs".to_owned()],
+            }),
             handoff: handoff(),
             trimmed: false,
         }
@@ -572,6 +640,7 @@ mod tests {
                 ..Handoff::default()
             },
             git: None,
+            working_tree: None,
             ..checkpoint()
         };
         let rendered = minimal.render();
@@ -583,6 +652,8 @@ mod tests {
             "next_actions",
             "git_branch",
             "git_commit",
+            "git_dirty",
+            "git_changed_files",
             "trimmed",
         ] {
             assert!(
@@ -621,6 +692,8 @@ mod tests {
             "next_actions",
             "git_branch",
             "git_commit",
+            "git_dirty",
+            "git_changed_files",
         ]
         .into_iter()
         .map(str::to_owned)
