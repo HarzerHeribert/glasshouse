@@ -585,6 +585,54 @@ class RealAcceptanceTests(unittest.TestCase):
 
 
 
+
+class ForbiddenBlockIsActuallyParsed(unittest.TestCase):
+    """The sixth "check that matched nothing and reported PASSED".
+
+    `Packet` recognised only `**FORBIDDEN**`, while every real packet in this
+    project writes `## FORBIDDEN FILES`. So every FORBIDDEN list parsed as
+    EMPTY and `check_no_self_contradiction` never fired on a single real
+    packet — hand-written or generated — for an unknown number of rounds.
+
+    These tests exist so it cannot die silently again. They assert the parser
+    SEES the list and that the check ACTS on it, which are two different
+    failures: a parser that reads nothing makes a check vacuous without ever
+    reporting an error.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def _packet(self, forbidden_header: str) -> "vr.Packet":
+        body = (
+            "# PACKET\n\nFEASIBILITY: not applicable -- a parser test.\n\n"
+            "## EXPECTED FILES\n\n**YOURS**\n\n    crates/glasshouse/src/main.rs\n\n"
+            f"{forbidden_header}\n\n    crates/glasshouse/src/main.rs\n"
+        )
+        return vr.Packet(str(write(self.tmp / "p.md", body)))
+
+    def test_markdown_heading_forbidden_block_is_parsed(self):
+        self.assertEqual(len(self._packet("## FORBIDDEN FILES").forbidden), 1)
+
+    def test_bold_forbidden_block_is_still_parsed(self):
+        self.assertEqual(len(self._packet("**FORBIDDEN**").forbidden), 1)
+
+    def test_self_contradiction_fires_on_the_heading_spelling(self):
+        findings = []
+        vr.check_no_self_contradiction([self._packet("## FORBIDDEN FILES")], findings)
+        self.assertEqual(len(findings), 1, "the check must fire on the spelling real packets use")
+
+    def test_a_packet_that_does_not_contradict_itself_is_clean(self):
+        body = (
+            "# PACKET\n\nFEASIBILITY: not applicable -- a parser test.\n\n"
+            "**YOURS**\n\n    crates/glasshouse/src/main.rs\n\n"
+            "## FORBIDDEN FILES\n\n    crates/glasshouse/src/shell/mod.rs\n"
+        )
+        findings = []
+        vr.check_no_self_contradiction(
+            [vr.Packet(str(write(self.tmp / "q.md", body)))], findings)
+        self.assertEqual(findings, [])
+
 class CitedSeams(unittest.TestCase):
     """The cited-seam check, added after batch 45 made the same mistake twice.
 

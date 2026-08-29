@@ -233,7 +233,22 @@ class Packet:
                 for line_no, raw in parse_indented_block(self.lines, idx):
                     pattern, is_new, exc = parse_pattern(raw)
                     self.yours.append((line_no, pattern, is_new, exc))
-            elif re.match(r"^\*\*FORBIDDEN", stripped):
+            # `## FORBIDDEN FILES` as well as `**FORBIDDEN**`.
+            #
+            # The parser matched only the bold spelling, and every real packet
+            # in this project uses the markdown heading — so `FORBIDDEN` lists
+            # parsed as EMPTY and `check_no_self_contradiction` silently never
+            # fired on a single real packet, hand-written or generated. Found by
+            # a worker reading the parser rather than trusting it.
+            #
+            # This is the sixth instance of one shape here: a mechanical check
+            # that matches nothing and reports PASSED (`blind` not zero, §54;
+            # `unknown` not a session id, §67; "0 tests matched" not "tests
+            # passed", §68; your own recommendation not the user's decision,
+            # §70; map check 3 matching only lines that START with a box glyph;
+            # and now this). Every gate check needs its own non-vacuity test —
+            # see `scripts/tests/test_round_tools.py`.
+            elif re.match(r"^(\*\*FORBIDDEN|#{1,4}\s*FORBIDDEN)", stripped):
                 for line_no, raw in parse_indented_block(self.lines, idx):
                     pattern, is_new, exc = parse_pattern(raw)
                     self.forbidden.append((line_no, pattern, is_new, exc))
