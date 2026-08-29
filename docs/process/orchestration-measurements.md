@@ -3532,3 +3532,90 @@ today. It is the correctness of what the orchestrator hands them.** One of the
 three is now mechanically checked (`validate_round.py --strict-seams` /
 `cited-seams`); the other two are still habits, and §76 records that habits fail
 under load.
+
+## 2026-08-29 — the local gate, measured properly, and a cache change rejected on its own numbers
+
+A parallel session timed every step of `scripts/ci-local.sh` with caches warm,
+then tested the one change everybody assumed was the win. **Two of the three
+proposals landed; the big one was rejected by its own measurement.**
+
+### Warm gate: ~3–4 minutes, and the compile caches already work
+
+| leg | step | warm |
+|---|---|---|
+| macOS | fmt, clippy, rustdoc, msrv, doc/evidence checks, script tests | 0–2 s each |
+| macOS | build under `-D warnings` | **0 s** — the flag switch recompiled nothing; cargo keys it correctly |
+| macOS | `cargo test` | 80 s |
+| Linux | tar copy + `chown -R` of the 7.7 GB volume | 1 s |
+| Linux | `rustup component add` ×2 + toolchain install | ~10 s, re-downloaded every run |
+| Linux | build, clippy, msrv | **0 s** |
+| Linux | `cargo test` | ~80–90 s |
+
+**The floor is test execution, not compilation.** Two suites dominate and neither
+is CPU-bound: `terminal_loss` 23.7 s and `session_supervision` 14.1 s.
+
+### The prediction I got wrong, and the retake that corrected it
+
+I argued those two numbers were contaminated because they were sampled at load
+5–6 with ~48 processes live — practice §40's documented trap, which had just
+produced a false Windows FAIL for me in the same session. **The retake at load
+2.6 returned 14.1/14.1 s and 23.7/23.7 s — identical to the loaded sample.**
+
+They are **timer-bound, not load-bound**: `PATIENCE` at 20 s, `SETTLE`, and the
+hangup/keystroke deadlines set them. §40's trap is real for *pass/fail* on pty
+tests and does not generalise to their *duration*. The ~160 s floor stands, and
+the way to move it is shorter deadlines or `nextest` parallelism, not a quieter
+machine.
+
+### Worktree cache seeding: proven sound, then rejected on cost
+
+This is the result worth keeping. The proposal was to seed a new worktree's
+`target/` from `main` with an APFS copy-on-write clone, because worktree gates
+build cold. It was gated behind a four-point non-vacuity proof — a cache change
+to the gate *is* a gate change — and **it passed the proof**:
+
+| run | planted failure present | verdict |
+|---|---|---|
+| cold | yes | FAILed on exactly the planted test, both platforms |
+| seeded | yes | FAILed on exactly the planted test, both platforms |
+| cold | no | PASS |
+| seeded | no | PASS |
+
+Sound. And then rejected, because the numbers did not survive contact:
+
+- cold gate **135 s**, seeded gate **122 s** → saves **13 s**
+- seeding costs **54 s** (APFS clone of an 18 GB `target/`) + **34 s** (Linux
+  volume copy) = **88 s**
+
+**88 seconds spent to save 13.** A cold worktree only costs ~40 s per platform on
+this machine, because the dependency caches were never the problem — the test
+execution floor is. Recorded in `ci-local.sh`'s header so nobody re-proposes it.
+
+**The transferable part: the proof and the cost decision are separate gates, and
+passing the first does not carry the second.** It would have been easy to land a
+sound change that made the gate slower overall. Ask for the measurement even
+after the correctness argument succeeds.
+
+### What did land
+
+- `[workspace.metadata.ci] toolchain = "1.98.0"` in `Cargo.toml`, read by both
+  `ci.yml` and `ci-local.sh`. **Both gates floated independently before this** —
+  `rust:latest` and `dtolnay/rust-toolchain@stable` are different distribution
+  paths with different lag, so the local gate could silently test a different
+  compiler than CI claimed. This is a correctness fix wearing a cache fix's
+  clothes, and it copies the MSRV job's existing "declared once" precedent.
+- rustup home in a `glasshouse-ci-rustup-<version>` volume, shared across
+  worktrees — toolchains are not source-dependent, so this is safe to share.
+
+### The finding that came out of it, and it is a product defect
+
+Four Linux gates produced **two red runs in `gateway::conformance`** on a tree
+whose lib suite otherwise passed twice. Chased to a real mis-attribution bug in
+`record_routing_observation` — see
+`.agent-runtime/defect-routing-observation-misattribution.md`.
+
+**It was never a failing gate.** Batch 45 went green on all three platforms and
+this family is ~50% red on Linux, so that batch simply won its coin flips. A
+parallel session running the gate four times for an unrelated reason found what
+one green run each could not — which is an argument for repeated runs on the
+platform that is not the developer's own.
