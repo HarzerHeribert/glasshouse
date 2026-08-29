@@ -11,6 +11,23 @@
 > each refusing "no production caller" looks like four dead ends; read together
 > it was one hardcoded struct literal.
 
+## This file drifts, and it was audited 2026-08-30
+
+**Seven of its rows were stale** — 1288, 1291, 1319, 930, 934, 748 and 1681 all
+named lines that are now ☑ in the map. A register that lists closed lines as
+refusals is worse than no register: it is read precisely when an orchestrator
+is deciding what *not* to spend a worker on.
+
+Two of the seven were written **the same day they went stale**, by the
+orchestrator who then relied on them. One of those, Cluster L, asserted a
+symbol had no production caller when it had one all along.
+
+**So: re-derive from source before you commit to a phase, and treat the rows
+below as leads rather than findings — including the ones that sound certain.**
+The audit that found these was a read-only recon costing one worker slot
+(`.agent-runtime/report-next-candidates-recon.md`); it is cheap and it should
+be repeated when this file starts feeling authoritative.
+
 ## How to use it
 
 1. **Before writing the handoff**, add every line this batch refused, with the
@@ -40,11 +57,11 @@ Do not let a `no` become a `yes` because the line looks close.
 
 | line | missing link | site |
 |---|---|---|
-| 1288 | `cheaper_adequate_resource_exists: false` hardcoded | `routing/disposable.rs:568` |
+| ~~1288~~ | **CLOSED — removed from this cluster.** `disposable.rs:598` now calls the real `cheaper_adequate_resource_exists` (`:828`); the hardcoded literal is gone |
+| ~~1291~~ | **CLOSED.** Unblocked by 1288; map line is ☑ |
+| ~~1319~~ | **CLOSED.** `gateway/mod.rs:614` now passes the quota through |
 | 1290 | `user_override: false` hardcoded; no producer anywhere sets one | `routing/disposable.rs:568` |
-| 1291 | blocked *by* 1288: with `cheaper_adequate…: false` the function falls through to `Allow`, so the imminent-reset branch is unobservable | `provider/quota.rs:2298` |
 | 1294 | `task_nearly_complete: false` hardcoded | `routing/disposable.rs:568` |
-| 1319 | `quota` carries the provider's `Retry-After`; `observe_exchange` is called 17 lines later without it; `session.rs:614` hardcodes `None` | `gateway/mod.rs:586-603` |
 
 ### Cluster B — a mechanism built, tested, and never installed in production *(in-repo: YES)*
 
@@ -97,7 +114,7 @@ whose consuming phases are still at zero. **It belongs in Cluster D.**
 | 372 | **stale blocker**: `phase-9a.md:482` says `grep 'fn score\|Score'` is empty; it is not. Nothing selects among launch profiles, so still open |
 | 1313 | latency aggregates have zero production readers; every candidate consumer is in another partition |
 | 531 | **moved here from Cluster B in batch 50.** Missing caller *and* consumer: nothing in production distinguishes a request pool from a token-priced allowance, and no `FreePool` outlives one call. Needs a routing consumer that behaves differently for the two — see Cluster B's note |
-| 930, 934 | **added batch 53, and they were being recommended as cheap.** Phase 21F's two remaining packageable lines qualify an injection that does not exist: *"inject only memories whose scope overlaps the current task"* and *"avoid injecting old ideas merely because they mention the same subsystem"*. **Phase 27, Context injection, is at 0/11.** The consuming seam is real and located — `api/unix.rs:659-661`, where `spawn_session` delivers a natural-language task to a freshly spawned session — but nothing selects memory before it. Package Phase 27 first; these two are its qualifiers and close cheaply afterwards |
+| ~~930, 934~~ | **CLOSED the same day this row was written.** Phase 27 landed, `GH-INJECTION-RECALL` closed both behind it. Kept struck through for one batch as the clearest evidence in this file that **a Cluster D row expires the moment its trunk lands** — I wrote this row and did not revisit it |
 
 ### Cluster E — the provider signal genuinely does not arrive *(in-repo: **NO** — do not package)*
 
@@ -248,7 +265,7 @@ them; the reason they are open is not effort.**
 |---|---|
 | 745 | *"enter any orchestrated worker while it is running"* is an **unmade Red-tier product decision**, which `phase-16.md` already recorded. `session::attach` is not its producer: it **spawns rather than adopts** (`attach.rs:107`) and its resume caller refuses a running session by name (`session/store.rs:1838`). Adopting a running session is a different capability from starting one |
 | 746, 747 | follow 745 — there is nothing to send input to, or interrupt, until a user can be *in* a running worker |
-| 748 | blocked on Cluster K's defect below, not on schema. The event kinds exist already: `text_delivered` and `interrupt_delivered` carry an `origin` field (`database.rs:89-101`) |
+| ~~748~~ | **CLOSED.** Map line is ☑; commit `d9f6e75` |
 | 740 | an ordering claim over 745; unreachable while 745 is |
 
 **The defect underneath, and it is bigger than 748.** `glasshouse api serve`
@@ -273,7 +290,7 @@ observable behaviour**. The write path and a read path that bypasses
 - **828, 829** — a worker was asked to close them and declined, correctly: a
   keyword heuristic for "is this an obvious source-code fact" refuses real
   memories and admits fake ones. **Do not re-derive this.**
-- **1681** — no recommendation producer exists to inspect without executing.
+- ~~**1681**~~ — **CLOSED.** `recommend_route` ships (`62473a6`) and **Phase 42 is finished**.
 - **1661** — `max_router_latency_ms` is a configured ceiling, not a measurement.
 - **1745, 1746** — no cmux-metadata path reaches project-scope validation, and
   there is no MCP surface. A grep for "cmux|mcp" hits doc comments and looks
