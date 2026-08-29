@@ -1501,6 +1501,61 @@ fn disposable_candidate_capacity(
         .with_band(band)
 }
 
+/// How long a hook process will wait for the harness to finish writing the
+/// payload it is about to throw away.
+///
+/// # Why draining the payload needs a bound at all
+///
+/// [`report_hook_with`] drains its standard input so that a harness writing a
+/// payload is not left writing into a closed pipe. Copying *to end of input*
+/// is an **unbounded** wait, and the harness is the thing that decides when
+/// that end arrives. A harness that writes nothing and never closes the pipe
+/// parks this process there for as long as it lives — inside the user's
+/// session, on the event Claude Code treats as a gate on the turn. That is
+/// exactly what [`report_hook`]'s own doc comment says may never happen here.
+///
+/// Not hypothetical, and not Windows-specific either, though Windows is where
+/// it was found: reached over an `ssh` channel whose far end never sees end of
+/// input — which is how the local gate's Windows leg runs the suite, and which
+/// its macOS leg avoids only because that one redirects from `/dev/null` — the
+/// six tests that call this function block for ever, and every other test in
+/// the target passes. Measured on both batch 50 and its own base commit, so
+/// the wait is older than the batch that surfaced it.
+///
+/// # Why one second
+///
+/// Shorter than [`EXTRACTION_BOUND`] because there is far less on the other
+/// side of it. The harness writes the payload as it starts this process, so a
+/// live harness is finished before the first database is even open and the
+/// normal cost of this wait is nothing at all. Any wait that reaches the bound
+/// is already the pathological case, and the answer to it is to get on with
+/// the bookkeeping rather than to keep waiting.
+const PAYLOAD_DRAIN_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Run `work` on its own thread and stop waiting for it after `bound`,
+/// reporting whether it finished in time.
+///
+/// # The abandoned thread is deliberate
+///
+/// Nothing here can stop a thread parked in a blocking read, and stopping it
+/// is not the point: the point is that *this* thread may go on without it. The
+/// work is left running, the process finishes what it was doing and exits, and
+/// the operating system closes whatever handle the thread was waiting on.
+///
+/// [`run_extraction_after_turn`] does the same thing by hand rather than
+/// through this, because it needs the extraction's *outcome* back and not
+/// merely the fact that it arrived.
+fn abandon_after(bound: std::time::Duration, work: impl FnOnce() + Send + 'static) -> bool {
+    let (finished, waiter) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        work();
+        // A closed receiver means the bound expired and nobody is listening.
+        // That is a normal outcome here, not an error.
+        let _ = finished.send(());
+    });
+    waiter.recv_timeout(bound).is_ok()
+}
+
 /// [`report_hook`] with the extraction model supplied.
 ///
 /// The model is the one thing on this path that does not exist yet — Phase 39
@@ -1525,7 +1580,20 @@ fn report_hook_with(
     // never deserialized, logged, or stored. See
     // `the_hook_command_never_reads_its_payload` below, and the
     // `docs/product/design-decisions.md` section this function implements.
-    let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+    //
+    // On its own thread, and abandoned at `PAYLOAD_DRAIN_BOUND`, because the
+    // end of that input is the harness's decision and this process may not
+    // wait on it for ever. See the constant for what the unbounded version
+    // did.
+    let drained = abandon_after(PAYLOAD_DRAIN_BOUND, || {
+        let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+    });
+    if !drained {
+        tracing::debug!(
+            bound_ms = PAYLOAD_DRAIN_BOUND.as_millis(),
+            "the harness had not closed this hook's input; going on without it"
+        );
+    }
 
     let outcome = (|| -> anyhow::Result<()> {
         let sessions = ProjectSessions::open(runtime)?;
@@ -4290,6 +4358,64 @@ mod tests {
         let reading_a_field = "fn report_hook(runtime: &Runtime, session: &str, event: &str) {\n    \
                                 tracing::debug!(prompt = \"x\");\n}\n";
         assert!(strip_comments(reading_a_field).contains("prompt"));
+    }
+
+    /// The mechanism that stops the payload drain being an open-ended wait —
+    /// see [`PAYLOAD_DRAIN_BOUND`].
+    ///
+    /// The drain itself cannot be driven from in here: it reads the *process's*
+    /// standard input, and a test that redirected that would redirect it for
+    /// every other test in this binary. What is testable is the bound, and the
+    /// bound is the whole of the fix. The end-to-end observation is recorded
+    /// where it was made: with this process's input held open, the six tests
+    /// that call `report_hook_with` block for ever, on this tree and on its
+    /// base commit alike.
+    ///
+    /// Asserts *both* halves. Waiting is not evidence on its own — a version
+    /// that reported `false` without ever running the work would satisfy the
+    /// first assertion and be useless, which is what the second one is for.
+    #[test]
+    fn work_that_never_finishes_is_abandoned_at_its_bound() {
+        let bound = std::time::Duration::from_millis(200);
+        let started = std::time::Instant::now();
+        let finished = abandon_after(bound, || {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+        let waited = started.elapsed();
+
+        assert!(
+            !finished,
+            "work that sleeps for thirty seconds cannot have finished inside a {bound:?} bound"
+        );
+        assert!(
+            waited < std::time::Duration::from_secs(5),
+            "the caller waited {waited:?} on a {bound:?} bound, so the bound is not what ended \
+             the wait"
+        );
+        assert!(
+            waited >= bound,
+            "waiting {waited:?} means the bound was not what ended the wait either"
+        );
+    }
+
+    /// The other half: work that does finish inside its bound is waited for
+    /// and reported as finished, so the bound never becomes an excuse to skip
+    /// the drain a live harness is in the middle of.
+    #[test]
+    fn work_that_finishes_inside_its_bound_is_waited_for() {
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&done);
+        assert!(
+            abandon_after(std::time::Duration::from_secs(30), move || {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+            "work that returns immediately must be reported as finished"
+        );
+        assert_eq!(
+            done.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the work must actually have run"
+        );
     }
 
     /// The listing's ages, including the case a review flagged: a timestamp in

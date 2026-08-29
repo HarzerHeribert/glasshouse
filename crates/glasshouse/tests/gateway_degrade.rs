@@ -158,6 +158,18 @@ fn send_and_read(address: SocketAddr, raw: &[u8]) -> String {
     let mut out = Vec::new();
     client
         .read_to_end(&mut out)
+        // A Windows server that closes with unread bytes still in its receive
+        // queue sends RST rather than FIN, so the client's read answers
+        // WSAECONNRESET (10054) instead of a clean end of stream — *after*
+        // `out` already holds the whole response. Treating that as end of
+        // stream is not leniency: the bytes are already here, and the
+        // assertions below are what decide whether they are right. Measured on
+        // the ARM64 VM: same tree, same target, one run clean and the next
+        // reset.
+        .or_else(|err| match err.kind() {
+            std::io::ErrorKind::ConnectionReset => Ok(out.len()),
+            _ => Err(err),
+        })
         .expect("the gateway answers and then closes");
     String::from_utf8_lossy(&out).into_owned()
 }

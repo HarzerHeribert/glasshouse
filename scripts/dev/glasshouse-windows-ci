@@ -159,4 +159,9 @@ ssh "${ci_ssh_options[@]}" "$ci_endpoint" \
   'powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\ci\install-source.ps1'
 
 print "Running Windows ARM64 CI mode: $ci_mode"
-ssh "${ci_ssh_options[@]}" "$ci_endpoint" "C:\\ci\\run-glasshouse-ci.cmd $ci_mode"
+# `-n` redirects the remote command's standard input from /dev/null. Without it
+# the far side inherits THIS driver's stdin over the ssh channel, so a test that
+# drains stdin waits for an end of file that never comes when the gate is run
+# from a terminal. macOS already passes `< /dev/null` and the Linux leg runs
+# `docker run` without `-i`; this is the third leg finally saying the same thing.
+ssh -n "${ci_ssh_options[@]}" "$ci_endpoint" "C:\\ci\\run-glasshouse-ci.cmd $ci_mode"
