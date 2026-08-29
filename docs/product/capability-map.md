@@ -1200,7 +1200,7 @@ Phase 32A — Unified quota and capacity model
 ☑ Allow CapacityState to represent request-limited resources.
 ☑ Allow CapacityState to represent credit-limited resources.
 ☑ Allow CapacityState to represent subscription resources with opaque provider-defined limits.
-☐ Allow CapacityState to represent user-defined monetary budgets for metered APIs.
+☑ Allow CapacityState to represent user-defined monetary budgets for metered APIs.
 ☑ Allow CapacityState to represent effectively unlimited local inference separately from remote quota.
 ☐ Track input-token budget independently from output-token budget when the provider exposes separate limits.
 ☐ Track cached-input usage independently when the provider exposes cache telemetry.

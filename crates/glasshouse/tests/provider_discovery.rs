@@ -852,6 +852,90 @@ period = "calendar-month"
     assert!(stdout.contains("provider limit 120s"), "{stdout}");
 }
 
+/// **Capability map line 1203, and the §35 hole the test above leaves.**
+///
+/// The line asks whether a **`CapacityState`** can represent a user-defined
+/// monetary budget for a metered API — so the thing that has to be proven is
+/// that the ceiling reaches the *resource's own capacity state* and is
+/// rendered out of it.
+///
+/// `the_shipped_binary_reads_a_users_own_quota_overrides` above does not
+/// prove that, and measured rather than assumed: replacing
+/// `apply_user_configuration`'s `state = state.with_user_budget(pool)` with a
+/// discard — severing the budget from the capacity model entirely — leaves
+/// `--test provider_discovery` at *38 passed, 0 failed* (2026-08-29). It
+/// survives because every assertion above is satisfied by the
+/// `CONFIGURED QUOTA OVERRIDES` block, which `render_configuration_note`
+/// prints straight from the configuration and would keep printing with the
+/// capacity model dead. That is practice §35 exactly — a caller you can
+/// delete without a test noticing.
+///
+/// This test enters at the same binary and reads the **pool row**, which
+/// exists only because `CapacityState::user_budget` was populated.
+///
+/// It also pins the honesty clause this phase turns on, and the reason
+/// **line 1209 stays open**: the ceiling is `[manual]` and measured, and the
+/// spend against it is `unmeasured (unknown)` in the same row. Glasshouse
+/// counts no money, so the remaining half is not folded, not defaulted to the
+/// ceiling, and not shown as zero.
+#[test]
+fn a_users_own_monetary_budget_reaches_the_shipped_binarys_capacity_state() {
+    let fixture = BinaryFixture::new().with_config(
+        r#"
+[providers.anyrouter]
+template = "anyrouter"
+
+[providers.anyrouter.quota.budget]
+amount_micro_usd = 25000000
+period = "calendar-month"
+"#,
+    );
+    let stdout = fixture.run(&["resources", "--no-harness"]);
+
+    let row = stdout
+        .split("\n\n")
+        .find(|block| block.starts_with("anyrouter"))
+        .unwrap_or_else(|| panic!("no anyrouter block in:\n{stdout}"));
+
+    // The premise, asserted first (practice §17): this is a metered resource,
+    // so its user-budget pool is readable rather than `Inapplicable`, and the
+    // assertions below are about a pool that could have been filled.
+    assert!(
+        row.contains("quota shape     metered balance"),
+        "the premise of this test is a metered resource:\n{row}"
+    );
+
+    let budget = row
+        .lines()
+        .find(|line| line.trim_start().starts_with("user budget"))
+        .unwrap_or_else(|| panic!("no `user budget` pool row in the anyrouter block:\n{row}"));
+
+    // Line 1203: the ceiling reached the capacity state and is rendered out
+    // of it, in the user's own unit, marked as the manual claim it is.
+    assert!(
+        budget.contains("limit 25.000000 USD"),
+        "the configured ceiling must reach the capacity state:\n{budget}"
+    );
+    assert!(budget.contains("[manual]"), "{budget}");
+    assert!(budget.contains("the user's own configuration"), "{budget}");
+
+    // Line 1209, open and visibly so: the spend against the ceiling is not
+    // known, and nothing here implies a balance.
+    assert!(
+        budget.contains("remaining unmeasured (unknown)"),
+        "Glasshouse counts no spend, so the remaining half must stay \
+         explicitly unknown rather than being folded from the ceiling:\n{budget}"
+    );
+
+    // And the row is what satisfied us, not the configuration note: the note
+    // is what the sibling test above reads, and it lives in its own trailing
+    // block with this wording.
+    assert!(
+        !budget.contains("per calendar month"),
+        "this assertion must be reading the pool row, not the note:\n{budget}"
+    );
+}
+
 /// Capability map lines 1210 and 1211, through the binary: `render_windows`
 /// — added this package, and previously nothing in `provider::resources`
 /// rendered a window's start or reset time at all, however a reader filled

@@ -595,3 +595,80 @@ Both checks came back negative — no defect, no widening needed beyond what
 pressure, genuinely invisible to the old minimum). Recorded here because a
 killed hypothesis that killed nothing is still the finding practice §44
 asks for, not a reason to skip stating it.
+
+---
+
+## Phase 32A — batch 49 team-lead pass: 1203 CLOSED, nine lines refused
+
+Run by an Opus team lead with two subcontractors. **One line closed, nine
+returned premise-invalid.** That ratio is the result, not a disappointment: the
+deliverable of this package is nine defensible "nothing produces this" rulings.
+
+### Line 1203 — user-defined monetary budgets. CLOSED.
+
+Contract: Given a user who has configured a spending ceiling for a metered
+provider, when Glasshouse builds that resource's capacity state, the ceiling is
+carried as the user-budget pool's limit — while the *remaining* half stays
+explicitly unmeasured, because Glasshouse counts no spend.
+
+State: COMPLETE
+
+**This orchestrator's packet told the lead the opposite, as established fact.**
+It said `with_user_budget` had two call sites, both `#[cfg(test)]`, and that
+nothing wired the budget into a `CapacityState`. There are three, and the third
+is production:
+
+- producer — `config::MonetaryBudget` / `QuotaOverride::budget`
+  (`config/mod.rs:814-914`), the `[providers.<name>.quota.budget]` table.
+- caller — `provider/resources.rs:370`, in `observed_capacity`.
+- propagation — `provider/telemetry.rs:1017`, in `apply_user_configuration`:
+  `state = state.with_user_budget(pool)`, as a `Measured` `NativeAmount` in USD
+  with `ReadingSource::UserConfiguration`. **That file's first `#[cfg(test)]` is
+  at line 1491**, 474 lines below — verified by the orchestrator.
+- consumer — `render_resource`'s loop over `CapacityState::pools()`; the row
+  renders without `--verbose`.
+
+Proven against the shipped binary. With a 25 USD budget configured, the
+`anyrouter` block renders:
+
+    user budget     remaining unmeasured (unknown), limit 25.000000 USD [manual] from the user's own configuration
+
+That single row is 1203 closed **and** 1209 visibly open — the unit Glasshouse
+can observe is its own dimension; the one it cannot is explicitly unknown.
+
+**A real §35 hole, measured rather than argued.** The pre-existing binary test
+`the_shipped_binary_reads_a_users_own_quota_overrides` does **not** watch this
+wire: severing `with_user_budget` leaves it green (SURVIVED, 38 passed),
+because every assertion it makes is satisfied by the `CONFIGURED QUOTA
+OVERRIDES` block, which `render_configuration_note` prints straight from
+configuration and would keep printing with the capacity model cut.
+
+Regression evidence:
+`provider_discovery::a_users_own_monetary_budget_reaches_the_shipped_binarys_capacity_state`
+— drives the compiled binary, asserts the premise first (`quota shape metered
+balance`, so the pool is readable rather than `Inapplicable`), reads the **pool
+row** rather than the note, and asserts that row does *not* contain the note's
+own wording, so it cannot pass by reading the wrong thing.
+
+Mutation, re-run by the orchestrator: `state = state.with_user_budget(pool)` →
+`let _ = pool;` → **KILLED**, the new test failing at
+`provider_discovery.rs:911`. Not a compile break — `let _ = pool;` compiles,
+and the same mutation SURVIVED the same target before the test existed.
+
+### The nine refused, with the deciding fact
+
+| line | why it is not closeable |
+|---|---|
+| 1205 input/output token split | `TokenBudget::with_input`/`with_output` have test callers only; no header names the split |
+| 1206 cached input | `with_cached_input` test-only; no `RATE_LIMIT_HEADERS` entry contains "cache" |
+| 1208 provider credits | producer writes to a throwaway state, and the one live account read answers `null` |
+| 1209 remaining monetary budget | **nothing in the crate counts money spent** — a product decision, not a gap |
+| 1210 window start | `WindowCapacity::with_started_at` has **one occurrence in the tree: its own definition** |
+| 1212 rolling vs calendar | filled by two different readers; no shipped path holds both |
+| 1213 concurrent limits | `with_max_concurrent_requests` test-only; no concurrency header exists |
+| 1215 tokens per minute | `with_tokens_per_minute` test-only; Groq's ceiling arrives with **no window**, so filing it per-minute would invent the period |
+| 1216 requests per day | reader built and wired to real state; no host has ever sent a window > 60s |
+
+Two rendering rows were added anyway (`tokens/minute`, `max concurrent`), each
+mutation-killed, so the dimensions are visible as unknown rather than absent —
+which is what 32A's own vocabulary demands.

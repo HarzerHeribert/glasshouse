@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**722 / 1280 mandatory capabilities (56%)** — 558 open across 71 phases.
+**723 / 1280 mandatory capabilities (56%)** — 557 open across 71 phases.
 
 ## Where the work is
 
@@ -65,13 +65,13 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 36 | Session affinity | **8** | 0 | `1579` |
 | Phase 47 | Observability without spectacle | **8** | 7 | `1750` |
 | Phase 21J | Implementation review checklist | **9** | 0 | `980` |
+| Phase 32A | Unified quota and capacity model | **9** | 12 | `1196` |
 | Phase 34E | Router economics | **9** | 0 | `1461` |
 | Phase 35C | Capacity-aware tier escalation and downgrade | **9** | 0 | `1556` |
 | Phase 39 | Gateway-backed disposable jobs | **9** | 0 | `1614` |
 | Phase 44 | User control and override | **9** | 0 | `1705` |
 | Phase 17 | cmux optional integration | **10** | 0 | `752` |
 | Phase 21H | Simplicity-first implementation policy | **10** | 0 | `953` |
-| Phase 32A | Unified quota and capacity model | **10** | 11 | `1196` |
 | Phase 32E | Burn rate and exhaustion forecasting | **10** | 0 | `1272` |
 | Phase 32G | Provider-aware request-cost estimation | **10** | 0 | `1296` |
 | Phase 33C | Failure, quota, and route correlation | **10** | 5 | `1362` |
@@ -100,7 +100,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~527 open lines are not.
+other ~526 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -260,6 +260,8 @@ to do, and the orchestrator should follow its own rule.
 - **§78** — two packet defects from one round, and a live check that would have passed falsely
 - **§79** — three findings from integrating six worktrees at once
 - **§80** — the four ways a mutation lies, and all four read as evidence
+- **§81** — never mark a recon's claim "established, do not re-derive"
+- **§82** — a team lead pays when the work is code, not when it is judgement
 
 ## Recent checkpoints
 

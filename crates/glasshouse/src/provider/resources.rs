@@ -827,6 +827,30 @@ fn render_rate_ceilings(out: &mut String, state: &CapacityState, options: Report
             long.describe_source()
         );
     }
+    let tokens_per_minute = rates.tokens_per_minute();
+    if tokens_per_minute.is_measured() || options.verbose {
+        let _ = writeln!(
+            out,
+            "  tokens/minute   {} [{}] {}",
+            tokens_per_minute
+                .value()
+                .map_or_else(|| UNKNOWN_TELEMETRY.to_owned(), render_amount),
+            tokens_per_minute.telemetry_class_str(),
+            tokens_per_minute.describe_source()
+        );
+    }
+    let max_concurrent = rates.max_concurrent_requests();
+    if max_concurrent.is_measured() || options.verbose {
+        let _ = writeln!(
+            out,
+            "  max concurrent  {} [{}] {}",
+            max_concurrent
+                .value()
+                .map_or_else(|| UNKNOWN_TELEMETRY.to_owned(), render_amount),
+            max_concurrent.telemetry_class_str(),
+            max_concurrent.describe_source()
+        );
+    }
 }
 
 /// One quantity, with the two things capability map lines 1227, 1235, 1236
@@ -1261,7 +1285,7 @@ mod tests {
         BudgetPeriod, MonetaryBudget, PremiumReservePercent, ProjectConfig, ProviderConfig,
         QuotaOverride, UserConfig,
     };
-    use crate::provider::quota::{Capacity, NativeAmount, Reading, ReadingSource};
+    use crate::provider::quota::{Capacity, NativeAmount, RateCeilings, Reading, ReadingSource};
     use crate::provider::telemetry::{GatewayQuotaCache, RateLimitHeaders};
 
     const OBSERVED: i64 = 1_787_800_000;
@@ -2339,5 +2363,60 @@ mod tests {
         let name = harness_interface_name(IntegrationId::ClaudeCode, &["auth", "status", "--json"]);
         assert_eq!(name, "claude auth status --json");
         assert!(!name.contains('/'));
+    }
+
+    // --- all four rate ceilings, not only the two something already reads --
+
+    #[test]
+    fn every_rate_ceiling_appears_in_the_verbose_view_including_the_unread_ones() {
+        let state = CapacityState::metered_balance().with_rate_ceilings(RateCeilings::uniform(
+            Capacity::Unmeasured,
+            Capacity::Unmeasured,
+        ));
+        let mut out = String::new();
+        render_rate_ceilings(
+            &mut out,
+            &state,
+            ReportOptions {
+                verbose: true,
+                now_unix: NOW,
+            },
+        );
+
+        // Premise first (practice §17): the two ceilings that already
+        // rendered must still be here, so this could not pass because the
+        // whole function was deleted.
+        assert!(out.contains("requests/minute"), "{out}");
+        assert!(out.contains("long window"), "{out}");
+        assert!(out.contains("tokens/minute"), "{out}");
+        assert!(out.contains("max concurrent"), "{out}");
+    }
+
+    #[test]
+    fn a_measured_tokens_per_minute_ceiling_reaches_the_report() {
+        let rates = RateCeilings::uniform(Capacity::Unmeasured, Capacity::Unmeasured)
+            .with_tokens_per_minute(Capacity::Measured(Reading::new(
+                NativeAmount::whole(40_000, "tokens"),
+                OBSERVED,
+                ReadingSource::LocalObservation("this session's own reading".to_owned()),
+            )));
+        let state = CapacityState::metered_balance().with_rate_ceilings(rates);
+        let mut out = String::new();
+        render_rate_ceilings(&mut out, &state, options());
+
+        assert!(out.contains("tokens/minute"), "{out}");
+        assert!(out.contains("40000 tokens"), "{out}");
+    }
+
+    #[test]
+    fn an_unread_rate_ceiling_is_absent_from_the_non_verbose_view() {
+        let state = CapacityState::metered_balance().with_rate_ceilings(RateCeilings::uniform(
+            Capacity::Unmeasured,
+            Capacity::Unmeasured,
+        ));
+        let mut out = String::new();
+        render_rate_ceilings(&mut out, &state, options());
+
+        assert!(!out.contains("tokens/minute"), "{out}");
     }
 }

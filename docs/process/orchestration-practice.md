@@ -3425,3 +3425,80 @@ banking any verdict, answer three questions the tool cannot answer for you:
 - is the line I mutated on the path the test exercises?
 
 And for a KILLED, one more: **did it fail, or did it merely stop compiling?**
+
+## §81 — never mark a recon's claim "established, do not re-derive"
+
+A packet may hand a worker facts to save it work. **It must not hand it a
+recon's conclusion as settled**, and batch 49 paid for the difference.
+
+`GH-LEAD-CAPACITY`'s packet contained this, under a heading called
+"A HEAD START … ALREADY ESTABLISHED, so do not re-derive it":
+
+> `grep -rn 'with_user_budget'` finds two call sites, **both inside
+> `#[cfg(test)]`**. … But nothing wires it into a `CapacityState`.
+
+There are three call sites. The third, `provider/telemetry.rs:1017`, is
+production — that file's first `#[cfg(test)]` is 474 lines below it. Acting on
+the packet as written would have returned a **closeable capability as
+impossible**, and the packet had explicitly told the lead not to check.
+
+The claim came from a read-only recon two batches earlier. This project already
+measures recons at roughly 65% reliable and already has §75 — *a recon's
+decisive claim is a lead too*. **The defect was not the recon being wrong; it
+was the orchestrator promoting a lead to a fact and then removing the only
+check on it.** §75 says treat a recon claim as a lead; §81 is its corollary:
+you can hand a worker a lead to save it searching, but the moment you write
+"established, do not re-derive", you have converted 65% into 100% by
+declaration.
+
+**What to write instead.** Give the finding, give its provenance, and give the
+check:
+
+> A recon reported X (`report-foo.md`). Treat it as a lead. The check is one
+> command: `grep -n '#\[cfg(test)\]' <file>`, take the **lowest** line, compare
+> against the call site's line number. Confirm before relying on it.
+
+That is what the lead did unprompted, and it is why the box closed.
+
+### The four-second method that catches this class
+
+A call site is production if its line number is **below the file's first
+`#[cfg(test)]`**. `grep -rn <symbol>` alone cannot tell you that, and reading
+"it's in a test module" off a filename is how the wrong count happens:
+
+    grep -n '#\[cfg(test)\]' <file> | head -1     # the boundary
+    grep -n '<symbol>' <file>                     # the call sites
+
+`scripts/discover.py --seam` does this correctly and should be preferred. Use
+the manual form only when the symbol is not a `Type::method` the tool matches.
+
+## §82 — a team lead pays when the work is code, not when it is judgement
+
+`GH-LEAD-CAPACITY` was asked to report whether the lead arrangement paid for
+itself. Its answer, and the measurement behind it, is the most useful thing to
+come out of running four leads at once:
+
+> At ten lines of which nine are rulings, this package did not need a lead. The
+> work is 90% judgement and 10% code, and judgement is the part that cannot be
+> handed down. The arrangement pays when the ratio is the other way round.
+
+Its two subcontractors came out differently, and both results are instructive:
+
+- **The read-only adversarial one paid for itself and found nothing.** Its task
+  was to *break* eight premise-invalid rulings by an independent mechanical
+  pass. Eight "nothing produces this" rulings were the package's entire
+  deliverable, and a recon had already got one wrong inside that very packet —
+  so an independent check on the only thing being sold is cheap insurance
+  whether or not it fires.
+- **The implementing one roughly broke even.** ~80 lines in one function plus
+  three tests: writing the subpacket, seeding the worktree, dispatching,
+  watching, reviewing and re-running its gates cost the lead more context than
+  writing the change would have. What it bought was wall-clock — it ran while
+  the lead did the serial mutation chain, which is §9's "review is serial and
+  worker wall-clock is not" holding at this scale too.
+
+**The rule to take forward.** Before giving a phase to a lead, estimate the
+code-to-judgement ratio. A phase whose lines are mostly *"does a producer exist
+for this"* is an Opus specialist packet with one read-only verifier attached.
+A phase whose lines are mostly *"build this, and this, and this"* is what the
+lead arrangement is for.
