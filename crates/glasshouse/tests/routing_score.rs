@@ -69,6 +69,7 @@ fn the_chosen_candidates_explanation_names_every_real_contribution() {
             &[free("openrouter", "nvidia/nemotron-nano-9b-v2:free")],
             &FreePool::new(),
             Instant::now(),
+            None,
         )
         .expect("a free model is configured");
 
@@ -109,6 +110,7 @@ fn an_automated_run_refuses_a_metered_candidate_rather_than_scoring_it_low() {
             &[metered("openrouter", "an-expensive-model")],
             &FreePool::new(),
             Instant::now(),
+            None,
         )
         .expect_err("an automated run must never spend money without an explicit opt-in");
     assert!(matches!(
@@ -138,6 +140,7 @@ fn a_user_pin_is_reported_as_the_reason_ranking_never_ran() {
             ],
             &FreePool::new(),
             now,
+            None,
         )
         .expect("the pinned resource is available");
     assert_eq!(choice.model(), "pinned-model");
@@ -178,6 +181,7 @@ fn the_reserve_policy_denies_a_distant_reset_on_a_reserve_band_candidate() {
             &[metered("openrouter", "a-reserved-model").with_capacity(capacity)],
             &FreePool::new(),
             Instant::now(),
+            None,
         )
         .expect_err("a distant reset on a Reserve-band candidate must be denied");
     assert!(matches!(err, NoResource::ProtectedReserveDenied { .. }));

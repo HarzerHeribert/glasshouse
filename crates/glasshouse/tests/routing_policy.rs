@@ -563,6 +563,7 @@ mod refusals {
                 )],
                 &FreePool::new(),
                 Instant::now(),
+                None,
             )
             .expect_err("a pin to a model nobody offered must not silently pick something else");
 
@@ -790,6 +791,7 @@ mod policy_divergence {
                 ],
                 &FreePool::new(),
                 now,
+                None,
             )
             .expect("a free candidate is configured and available");
         assert_eq!(

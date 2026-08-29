@@ -44,7 +44,7 @@ use crate::provider::quota::{
     CapacityBand, RemainingCapacityScore, ReserveDecision, ReserveDecisionInputs,
     evaluate_reserve_spend,
 };
-use crate::routing::classify::WorkloadTier;
+use crate::routing::classify::{TaskClassification, WorkloadTier};
 
 /// The kind of bounded internal work a choice is being made for.
 ///
@@ -458,12 +458,21 @@ impl DisposableRouting {
     /// an absent capacity or reset reading contributes `0.0` for every
     /// candidate alike, so scoring never disagrees with it; see
     /// `tests::scoring_never_reorders_the_existing_free_selection`.
+    ///
+    /// `classification` is this job's Phase 35 [`TaskClassification`], when a
+    /// caller has one — [`TaskClassification::conservative_workload_tier`]
+    /// becomes the metered-fallback path's [`WorkloadTier`] (map line 1550's
+    /// `tier` input), replacing the fixed [`WorkloadTier::Leaf`] this policy
+    /// used before a classification existed to ask. `None` keeps that fixed
+    /// [`WorkloadTier::Leaf`] behaviour exactly as it was: a caller with
+    /// nothing to classify is not made to guess.
     pub fn choose(
         &self,
         job: JobKind,
         candidates: &[DisposableCandidate],
         pool: &FreePool,
         now: Instant,
+        classification: Option<&TaskClassification>,
     ) -> Result<DisposableChoice, NoResource> {
         if candidates.is_empty() {
             return Err(NoResource::NothingConfigured);
@@ -562,7 +571,9 @@ impl DisposableRouting {
                     .capacity
                     .band
                     .unwrap_or(CapacityBand::Plenty),
-                tier: WorkloadTier::Leaf,
+                tier: classification
+                    .map(TaskClassification::conservative_workload_tier)
+                    .unwrap_or(WorkloadTier::Leaf),
                 cheaper_adequate_resource_exists: false,
                 user_override: false,
                 seconds_until_reset: candidate.value().capacity.seconds_until_reset,
@@ -811,6 +822,7 @@ mod tests {
                 ],
                 &FreePool::new(),
                 Instant::now(),
+                None,
             )
             .expect("a free model is configured");
 
@@ -833,6 +845,7 @@ mod tests {
                 &[metered("openrouter", "an-expensive-model")],
                 &FreePool::new(),
                 Instant::now(),
+                None,
             )
             .expect_err("a test run must not spend the user's money");
 
@@ -859,6 +872,7 @@ mod tests {
                 &[metered("openrouter", "an-expensive-model")],
                 &FreePool::new(),
                 Instant::now(),
+                None,
             )
             .expect("an explicit opt-in permits it");
         assert_eq!(choice.cost(), Cost::Metered);
@@ -899,6 +913,7 @@ mod tests {
                 &[free("openrouter", "a-free-model")],
                 &FreePool::new(),
                 now,
+                None,
             )
             .expect("configured");
         assert_eq!(asked.reason(), UseReason::UserPreference);
@@ -918,6 +933,7 @@ mod tests {
                 &[first, free("openrouter", "second-free-model")],
                 &pool,
                 now,
+                None,
             )
             .expect("the second free model can serve");
         assert_eq!(fell_back.model(), "second-free-model");
@@ -952,6 +968,7 @@ mod tests {
                 &[pinned, free("openrouter", "another-free-model")],
                 &pool,
                 now,
+                None,
             )
             .expect_err("a pin does not fall back");
         assert!(matches!(err, NoResource::PinnedResourceUnavailable { .. }));
@@ -974,6 +991,7 @@ mod tests {
                 ],
                 &FreePool::new(),
                 Instant::now(),
+                None,
             )
             .expect("one free model is allowed");
         assert_eq!(choice.model(), "allowed-model");
@@ -993,6 +1011,7 @@ mod tests {
                 &[free("openrouter", "a-free-model")],
                 &FreePool::new(),
                 Instant::now(),
+                None,
             )
             .expect("configured");
 
@@ -1045,6 +1064,7 @@ mod tests {
                 &[free("openrouter", "a-free-model").with_capacity(capacity)],
                 &FreePool::new(),
                 Instant::now(),
+                None,
             )
             .expect("configured");
 
@@ -1090,6 +1110,7 @@ mod tests {
                 &[metered("openrouter", "a-reserved-model").with_capacity(denied_capacity)],
                 &FreePool::new(),
                 Instant::now(),
+                None,
             )
             .expect_err("a distant reset on a Reserve-band candidate must be denied");
         assert!(matches!(err, NoResource::ProtectedReserveDenied { .. }));
@@ -1101,6 +1122,7 @@ mod tests {
                 &[metered("openrouter", "an-unread-model")],
                 &FreePool::new(),
                 Instant::now(),
+                None,
             )
             .expect("a candidate nothing has been read about is not withheld by reserve policy");
         assert_eq!(allowed.model(), "an-unread-model");
@@ -1134,8 +1156,64 @@ mod tests {
                 &[metered("openrouter", "plain-metered-model")],
                 &FreePool::new(),
                 Instant::now(),
+                None,
             )
             .expect("no capacity data defaults to the least protective band, so nothing denies it");
         assert_eq!(choice.model(), "plain-metered-model");
+    }
+
+    /// GH-CLASSIFY-CALLER, the fifth link: a real [`TaskClassification`]
+    /// reaching `choose`'s metered-fallback path must change the outcome, not
+    /// merely be accepted and ignored. Reuses the exact Reserve-band,
+    /// distant-reset candidate `the_protected_reserve_policy_gates_the_metered_fallback`
+    /// denies at the fixed [`WorkloadTier::Leaf`] this policy used before a
+    /// classification existed to ask — the same candidate, the same band, the
+    /// same reset, only the classification differs, so any change in the
+    /// outcome is attributable to `classification` alone.
+    ///
+    /// `classify_heuristically`'s two production examples from Phase 35's own
+    /// evidence: "what is a mutex" (leaf, confidence medium, no escalation)
+    /// and "run cargo test and fix whatever fails" (heavy, confidence
+    /// medium) — line 2307/2317 of `provider::quota::evaluate_reserve_spend`
+    /// denies every tier but heavy once a reset is distant, so this is the
+    /// exact boundary a policy stuck on `WorkloadTier::Leaf` could never
+    /// cross.
+    #[test]
+    fn a_real_classification_changes_the_metered_fallback_outcome_at_the_same_call_site() {
+        use crate::provider::quota::CapacityBand;
+        use crate::routing::classify::classify_heuristically;
+
+        let reserve_capacity = || {
+            CandidateCapacity::new()
+                .with_band(Some(CapacityBand::Reserve))
+                .with_seconds_until_reset(Some(7_200))
+        };
+        let routing = DisposableRouting::for_support_work(true, FreePreferences::new());
+
+        let trivial = classify_heuristically("what is a mutex");
+        assert_eq!(trivial.conservative_workload_tier(), WorkloadTier::Leaf);
+        let denied = routing
+            .choose(
+                JobKind::MemoryExtraction,
+                &[metered("openrouter", "a-reserved-model").with_capacity(reserve_capacity())],
+                &FreePool::new(),
+                Instant::now(),
+                Some(&trivial),
+            )
+            .expect_err("a leaf-tier classification must not justify spending the reserve");
+        assert!(matches!(denied, NoResource::ProtectedReserveDenied { .. }));
+
+        let demanding = classify_heuristically("run cargo test and fix whatever fails");
+        assert_eq!(demanding.conservative_workload_tier(), WorkloadTier::Heavy);
+        let allowed = routing
+            .choose(
+                JobKind::MemoryExtraction,
+                &[metered("openrouter", "a-reserved-model").with_capacity(reserve_capacity())],
+                &FreePool::new(),
+                Instant::now(),
+                Some(&demanding),
+            )
+            .expect("a heavy-tier classification justifies spending the reserve (line 1290)");
+        assert_eq!(allowed.model(), "a-reserved-model");
     }
 }

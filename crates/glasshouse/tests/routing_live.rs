@@ -90,6 +90,7 @@ fn glasshouses_own_run_refuses_to_spend_money_and_says_what_would_change_that() 
             &only_metered,
             &FreePool::new(),
             Instant::now(),
+            None,
         )
         .expect_err("an automated Glasshouse run must not choose a metered model");
 
@@ -125,6 +126,7 @@ fn glasshouses_own_run_refuses_to_spend_money_and_says_what_would_change_that() 
             &with_a_free_one,
             &FreePool::new(),
             Instant::now(),
+            None,
         )
         .expect("a configured zero-cost model is exactly what line 539 allows");
     assert_eq!(chosen.cost(), Cost::Free);
@@ -174,6 +176,7 @@ fn a_free_model_answers_through_a_real_gateway_and_its_health_comes_from_that_re
             )],
             &FreePool::new(),
             Instant::now(),
+            None,
         )
         .expect("a free model is configured for this probe");
     assert_eq!(

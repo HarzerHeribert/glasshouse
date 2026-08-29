@@ -432,6 +432,7 @@ fn free_resource_order_disabled_and_pin_round_trip_and_a_stale_pin_degrades_visi
             &[candidate],
             &FreePool::new(),
             std::time::Instant::now(),
+            None,
         )
         .expect_err(
             "a pin naming a provider nobody configured must not silently substitute another \
@@ -545,6 +546,7 @@ fn routing_settings_render_the_disposable_choice_reason_in_the_types_own_words()
                 &candidates,
                 &pool,
                 std::time::Instant::now(),
+                None,
             )
             .expect("configured");
         assert_eq!(choice.reason(), reason);

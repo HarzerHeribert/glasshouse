@@ -28,6 +28,7 @@
 
 use std::time::Instant;
 
+use crate::routing::classify::classify_heuristically;
 use crate::routing::disposable::{
     DisposableCandidate, DisposableChoice, DisposableRouting, JobKind, NoResource,
 };
@@ -59,7 +60,64 @@ impl RoutedNoModel {
     ) -> Self {
         let pool = FreePool::new();
         Self {
-            outcome: routing.choose(job, candidates, &pool, Instant::now()),
+            outcome: routing.choose(job, candidates, &pool, Instant::now(), None),
+        }
+    }
+
+    /// Same as [`Self::new`], but with GH-CLASSIFY-CALLER's fifth link: a
+    /// real [`crate::routing::classify::TaskClassification`] of
+    /// `request_text` reaches the metered-fallback path's `tier` input (map
+    /// line 1550) instead of the fixed
+    /// [`crate::routing::classify::WorkloadTier::Leaf`] [`Self::new`] still
+    /// passes.
+    ///
+    /// `classify_heuristically`, not [`crate::routing::classify::classify`]:
+    /// this caller has no model answer to prefer, the same "no cheap model is
+    /// available" case Phase 35's own production caller (`glasshouse
+    /// classify`) is already built for.
+    ///
+    /// **Not called by `main.rs`, and `JobKind::MemoryExtraction` must not
+    /// call it.** Two things block it, and only the first is about ordering.
+    ///
+    /// *Ordering:* `disposable_extraction_model` builds and calls its model
+    /// closure before `run_extraction_after_turn` reads this session's events
+    /// or builds its chunk, so no text exists at the point the routing
+    /// decision is made. That part is fixable by reordering `main.rs`.
+    ///
+    /// *Semantics — the blocking one:* reordering would hand this constructor
+    /// the **chunk**, which is a transcript of a finished turn, not a request.
+    /// [`crate::routing::classify::classify_heuristically`] is documented as
+    /// classifying *a request*, and the tier it yields feeds
+    /// `evaluate_reserve_spend`, whose distant-reset branch spends protected
+    /// premium reserve only for `WorkloadTier::Heavy`. A transcript of hard
+    /// debugging work is full of the keywords that produce `Heavy` — so
+    /// wiring the chunk here would let a *cheap* extraction job spend the
+    /// reserve because the conversation it is summarising happened to be
+    /// demanding. The tier would vary with conversation topic rather than
+    /// with this job's own demand, which is the opposite of what the gate is
+    /// protecting.
+    ///
+    /// This constructor is therefore correct and ready for a `JobKind` that
+    /// carries a real user request — `Classification`, `Reranking`,
+    /// `Evaluation` — none of which has a production caller today.
+    /// `MemoryExtraction`, the only one that does, is disposable by design and
+    /// keeps [`Self::new`]'s fixed `WorkloadTier::Leaf`.
+    pub fn new_for_request(
+        job: JobKind,
+        request_text: &str,
+        candidates: &[DisposableCandidate],
+        routing: &DisposableRouting,
+    ) -> Self {
+        let classification = classify_heuristically(request_text);
+        let pool = FreePool::new();
+        Self {
+            outcome: routing.choose(
+                job,
+                candidates,
+                &pool,
+                Instant::now(),
+                Some(&classification),
+            ),
         }
     }
 }
