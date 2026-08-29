@@ -320,6 +320,24 @@ def check_cited_seams(packets, findings, src_root, strict):
         print(f"  [cited-seams] {checked} cited symbol(s) checked — {verdict}")
 
 
+
+# Practice §77 / capability-map "Maybe L": two workers MAY share one file, each
+# in its own worktree, reading the other's diff once at finalization. The first
+# time that was actually dispatched, THIS CHECK REFUSED IT — the gate predated
+# the protocol and structurally forbade the thing the protocol exists to enable.
+#
+# A co-edit is allowed only when it is MUTUAL AND DECLARED. Both packets must
+# name the same path with a `COEDIT:` line. One packet declaring it alone is
+# still a collision, and still refused: that is the case where one worker knows
+# it is sharing and the other does not, which is worse than a plain overlap
+# because only one side will run the protocol.
+COEDIT_LINE = re.compile(r"^\s*COEDIT:\s*(\S+)", re.M)
+
+
+def declared_coedits(packet_text: str) -> set[str]:
+    return {m.group(1).strip().strip("`") for m in COEDIT_LINE.finditer(packet_text)}
+
+
 def check_partitions_disjoint(packets: list[Packet], findings: list[Finding]) -> None:
     """Two packets both listing a path in YOURS is the real failure (the same
     file handed to two live workers). A path in A's YOURS also appearing in
@@ -333,12 +351,26 @@ def check_partitions_disjoint(packets: list[Packet], findings: list[Finding]) ->
                     if b_exc is not None and matches_exception(a_pat, b_exc):
                         continue
                     if patterns_overlap(a_pat, b_pat):
+                        a_co = declared_coedits("\n".join(a.lines))
+                        b_co = declared_coedits("\n".join(b.lines))
+                        if a_pat in a_co and a_pat in b_co:
+                            print(f"  [partitions-disjoint] `{a_pat}` is a DECLARED "
+                                  f"CO-EDIT (§77) between {os.path.basename(a.path)} "
+                                  f"and {os.path.basename(b.path)} — allowed")
+                            continue
+                        extra = ""
+                        if a_pat in a_co or a_pat in b_co:
+                            only = a.path if a_pat in a_co else b.path
+                            extra = (f" NOTE: only {os.path.basename(only)} declares "
+                                     f"`COEDIT: {a_pat}`. A co-edit must be mutual — "
+                                     f"one worker running the protocol while the other "
+                                     f"does not is worse than a plain collision.")
                         findings.append(
                             Finding(
                                 "partitions-disjoint",
                                 f"{a.path}:{a_line} claims `{a_pat}` and "
                                 f"{b.path}:{b_line} also claims `{b_pat}` — "
-                                f"colliding path is `{a_pat}`.",
+                                f"colliding path is `{a_pat}`.{extra}",
                             )
                         )
 

@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""Generate docs/process/ORIENT.md — the orchestrator's whole orientation, cheap.
+
+WHY THIS EXISTS
+---------------
+`CLAUDE.md` tells a new orchestrator to read eleven documents. Measured, that is
+about **913 KB / ~228k tokens**, and it is paid at the start of every session
+before any work happens. Every orchestrator so far has quietly improvised around
+it — reading the checkpoint, then grepping the rest on demand — which means the
+project's own scoping rule (`CLAUDE.md`'s "a worker reads only this") is followed
+for workers and ignored for the role that spends the most context.
+
+The information an orchestrator actually needs to *start* is small and entirely
+derivable: where the map stands, which lines are open and in which phase, what
+the last batches learned, and what each practice section is about so it can be
+read by number. That is what this generates, in roughly **4k tokens**.
+
+This does not replace reading. It replaces reading *everything in order to find
+out what to read*. Every section points at the file and line to open next.
+
+Regenerate with `scripts/orient.py`; check freshness in CI with `--check`.
+
+USAGE
+    scripts/orient.py            # rewrite docs/process/ORIENT.md
+    scripts/orient.py --check    # exit 1 if it is stale (for the gate)
+    scripts/orient.py --stdout   # print, do not write
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MAP = os.path.join(REPO, "docs/product/capability-map.md")
+HANDOFF = os.path.join(REPO, "docs/process/handoff.md")
+PRACTICE = os.path.join(REPO, "docs/process/orchestration-practice.md")
+EVIDENCE = os.path.join(REPO, "docs/product/evidence")
+OUT = os.path.join(REPO, "docs/process/ORIENT.md")
+
+# A phase at or below this many open lines can plausibly be finished by one
+# package, so its lines are worth carrying inline. Above it, the phase is a
+# project and its lines are fetched on demand.
+CHEAP_WIN = 3
+
+# A phase header in the map is a bare line, not a markdown heading:
+#   `Phase 34B — Routing-model role`
+PHASE = re.compile(r"^(Phase [0-9]+[A-Z]?|Maybe [A-Z])\s+[—-]\s+(.+?)\s*$")
+# The "Maybe / Experimental" section is out of scope unless mandatory work
+# depends on it, so its lines are counted separately and never presented as work.
+EXPERIMENTAL_HEADER = re.compile(r"^Maybe / Experimental Capabilities\s*$")
+BOX = re.compile(r"^([☐☑])\s+(.*)$")
+SECTION = re.compile(r"^## (§\d+)\s*[—-]\s*(.+?)\s*$")
+CHECKPOINT = re.compile(r"^## (Checkpoint\b.*)$")
+
+
+def read(path: str) -> list[str]:
+    with open(path, encoding="utf-8") as fh:
+        return fh.read().split("\n")
+
+
+def map_state():
+    """Walk the map once: per-phase open/closed counts and open line numbers."""
+    phases, current, experimental = [], None, False
+    for idx, line in enumerate(read(MAP), start=1):
+        if EXPERIMENTAL_HEADER.match(line):
+            experimental = True
+        m = PHASE.match(line)
+        if m:
+            current = {
+                "id": m.group(1),
+                "title": m.group(2),
+                "line": idx,
+                "open": [],
+                "closed": 0,
+                "experimental": experimental or m.group(1).startswith("Maybe"),
+            }
+            phases.append(current)
+            continue
+        b = BOX.match(line)
+        if b and current is not None:
+            if b.group(1) == "☑":
+                current["closed"] += 1
+            else:
+                current["open"].append((idx, b.group(2)))
+    return phases
+
+
+def practice_index() -> list[tuple[str, str]]:
+    return [(m.group(1), m.group(2))
+            for line in read(PRACTICE) if (m := SECTION.match(line))]
+
+
+def recent_checkpoints(limit: int = 4) -> list[str]:
+    out = []
+    for line in read(HANDOFF):
+        m = CHECKPOINT.match(line)
+        if m:
+            out.append(m.group(1))
+            if len(out) == limit:
+                break
+    return out
+
+
+def evidence_index():
+    """Phase id -> filename, so an entry is opened directly, never searched."""
+    rows = []
+    for name in sorted(os.listdir(EVIDENCE)):
+        if name.endswith(".md") and name != "README.md":
+            rows.append(name)
+    return rows
+
+
+def git(*args: str) -> str:
+    try:
+        return subprocess.run(["git", "-C", REPO, *args],
+                              capture_output=True, text=True,
+                              check=True).stdout.strip()
+    except Exception:
+        return ""
+
+
+def render() -> str:
+    phases = map_state()
+    mandatory = [p for p in phases if not p["experimental"]]
+    closed = sum(p["closed"] for p in mandatory)
+    openn = sum(len(p["open"]) for p in mandatory)
+    total = closed + openn
+    pct = round(100 * closed / total) if total else 0
+
+    L: list[str] = []
+    add = L.append
+
+    add("# ORIENT — the orchestrator's starting context, generated")
+    add("")
+    add("> **Generated by `scripts/orient.py`. Do not edit by hand.**")
+    add("> Regenerate after any map or handoff change; `--check` guards it.")
+    add("")
+    add("This exists because `CLAUDE.md`'s eleven-document reading list costs about")
+    add("**228k tokens** and is paid before any work happens. Everything below is")
+    add("derived from those same documents and points at the file and line to open")
+    add("next. **Read this first, then open only what you actually need.**")
+    add("")
+    add(f"**{closed} / {total} mandatory capabilities ({pct}%)** — "
+        f"{openn} open across {len([p for p in mandatory if p['open']])} phases.")
+    add("")
+    add(f"HEAD `{git('rev-parse', '--short', 'HEAD')}` — {git('log', '-1', '--format=%s')}")
+    add("")
+
+    add("## Where the work is")
+    add("")
+    add("Phases with open mandatory lines, fewest-open first — the cheapest")
+    add("closures are usually at the top. Open the map at the line number given.")
+    add("")
+    add("| phase | title | open | closed | map line |")
+    add("|---|---|---|---|---|")
+    for p in sorted((p for p in mandatory if p["open"]),
+                    key=lambda p: (len(p["open"]), p["line"])):
+        add(f"| {p['id']} | {p['title']} | **{len(p['open'])}** | "
+            f"{p['closed']} | `{p['line']}` |")
+    add("")
+
+    done = [p for p in mandatory if not p["open"] and p["closed"]]
+    if done:
+        add(f"**Fully closed ({len(done)}):** " +
+            ", ".join(p["id"] for p in done) + ".")
+        add("")
+
+    add("## The nearly-finished phases, in full")
+    add("")
+    add("Every phase with **three or fewer** open lines, quoted verbatim. These are")
+    add("where a single package finishes a phase, so they are listed here and the")
+    add("other ~%d open lines are not." % sum(len(p["open"]) for p in mandatory
+                                              if len(p["open"]) > CHEAP_WIN))
+    add("")
+    add("For any other phase: `scripts/discover.py --phase <id>` prints its open")
+    add("lines and evidence together. **Do not open the 178 KB map to read them.**")
+    add("")
+    add("The number is the map line number, which is also the capability's id.")
+    add("`validate_round.py` checks a packet's quotes against the map, so paste")
+    add("these unwrapped.")
+    add("")
+    for p in sorted((p for p in mandatory if p["open"] and len(p["open"]) <= CHEAP_WIN),
+                    key=lambda p: (len(p["open"]), p["line"])):
+        add(f"### {p['id']} — {p['title']}  ({len(p['open'])} open, {p['closed']} closed)")
+        add("")
+        for ln, text in p["open"]:
+            add(f"- **{ln}** ☐ {text}")
+        add("")
+
+    add("## Practice sections, by number")
+    add("")
+    add("`docs/process/orchestration-practice.md` is ~176 KB. **Read sections by")
+    add("number, never the whole file** — that is what packets already tell workers")
+    add("to do, and the orchestrator should follow its own rule.")
+    add("")
+    for num, title in practice_index():
+        add(f"- **{num}** — {title}")
+    add("")
+
+    add("## Recent checkpoints")
+    add("")
+    add("Newest first, from `docs/process/handoff.md`. Read the top one in full;")
+    add("the rest are context you probably do not need.")
+    add("")
+    for c in recent_checkpoints():
+        add(f"- {c}")
+    add("")
+
+    add("## Evidence ledger files")
+    add("")
+    add("`docs/product/evidence/` — open the one for the phase you are working,")
+    add("never the directory.")
+    add("")
+    add("    " + "  ".join(evidence_index()))
+    add("")
+
+    add("## The three things that are always true here")
+    add("")
+    add("1. **Phase −1 is a hard gate.** A packet must show every claimed input has")
+    add("   a producer, a caller, a propagation path and an observing consumer in")
+    add("   *current* code. `scripts/validate_round.py` enforces it and is free.")
+    add("2. **A box is ticked only when its evidence entry says so**, and evidence")
+    add("   means a test that fails when the behaviour is removed — not code that")
+    add("   exists and not a worker that said ACCEPT.")
+    add("3. **Workers correct their packets and are usually right.** Thirteen")
+    add("   consecutive rounds, as of batch 45. Read a worker's PACKET ERRORS")
+    add("   section before its results.")
+    return "\n".join(L) + "\n"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--check", action="store_true",
+                    help="exit 1 if ORIENT.md is stale")
+    ap.add_argument("--stdout", action="store_true")
+    args = ap.parse_args()
+
+    text = render()
+    if args.stdout:
+        sys.stdout.write(text)
+        return 0
+    if args.check:
+        try:
+            with open(OUT, encoding="utf-8") as fh:
+                current = fh.read()
+        except FileNotFoundError:
+            print("orient: ORIENT.md is missing — run scripts/orient.py")
+            return 1
+        if current != text:
+            print("orient: ORIENT.md is stale — run scripts/orient.py")
+            return 1
+        print("orient: ORIENT.md is current")
+        return 0
+    with open(OUT, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    approx = len(text) // 4
+    print(f"orient: wrote {os.path.relpath(OUT, REPO)} "
+          f"({len(text)} bytes, ~{approx} tokens)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
