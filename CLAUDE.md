@@ -122,11 +122,24 @@ the backup — failing loudly if the restore does not come back byte-identical.
 A SURVIVED result is the valuable one: it names behaviour no test in the
 command actually watches.
 
-**Integrate with `scripts/integrate.sh <worktree>...`, and read what it prints.**
-It applies each worker's diff, copies the untracked deliverables `git diff`
-cannot see (a tests-only worker has *no* tracked changes — three of batch 45's
-six were invisible), runs fmt, and runs the blast radius. It refuses a dirty
-tree, a non-ancestor base, and any file two worktrees both touched.
+**Integrate with `scripts/integrate.sh <name>...`, and read what it prints.**
+It takes bare worker **names** (`api-routing`), not paths — it builds
+`.worktrees/<name>` itself, and a path argument fails with `MISSING`. It applies
+each worker's diff, copies the untracked deliverables `git diff` cannot see (a
+tests-only worker has *no* tracked changes — three of batch 45's six were
+invisible), runs fmt, and runs the blast radius. It refuses a dirty tree, a
+non-ancestor base, and any file two worktrees both touched.
+
+**Pass every finished worktree in one call. Do not integrate serially.** The
+interactions between patches are the part no worker can see, and they only
+appear once the diffs share a tree — so serial integration hides exactly what
+integration is for. Batch 47 measured both halves of this: adding a non-`Default`
+field to `SessionRecord` broke five struct literals inside *another* worker's
+files, and a schema bump broke eight migration-ladder tests in files no packet
+named. Neither worker could have found either alone; one combined
+`integrate.sh` run surfaced both. Attribution does not suffer, because the tool
+already refuses any file two worktrees both touched, so the patches are
+file-disjoint and the blast radius names the failing target.
 
 **It deliberately stops there.** It never commits, ticks a box, writes evidence,
 or runs a mutation. The mechanics caught nothing on their own in batch 45 —
