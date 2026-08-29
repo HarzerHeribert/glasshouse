@@ -152,6 +152,12 @@ disk**, and seven of Phase 47's eight open lines name data nothing persists.
 **Do not read 1763 as unlocked by 1735.** The orchestrator recorded that during
 batch 50 and it was wrong; the correction is in `phase-47.md`.
 
+### Cluster I — the dependency cannot honour the requirement *(in-repo: yes, but the fix is a dependency decision)*
+
+| line | missing link |
+|---|---|
+| 442 | `keyring` 3.6.3's Secret Service backend can block **up to a year** on an unlock prompt (`dbus-secret-service-4.1.0/src/prompt.rs:42`, `unwrap_or(ONE_YEAR_SECONDS)`); keyring never calls `connect_with_max_prompt_timeout` and a caller cannot reach it. A probe returns `NoEntry` before anything needs unlocking, so `detect()` reports healthy and the **first real credential read freezes the TUI**. Not a runner gap — "when available" has no correct implementation on this dependency. **Next step: does keyring 4.x's `zbus-secret-service-keyring-store` bound the prompt?** |
+
 ## Standing refusals that are decisions, not blockers
 
 - **1323** stays open by the user's own reasoning. Do not re-ask (§70).

@@ -46,13 +46,15 @@
 //!   [`crate::launch::HarnessLaunch`] or [`mod@crate::config`] — the
 //!   dependency points one way, and a harness adapter is handed variable
 //!   *names* rather than a [`Secret`], so it has nothing to leak.
-//! - **It ships one native OS-backed store, not three.** [`SecretStore`] is
-//!   the seam they are added at, one at a time, each with its own evidence.
-//!   The macOS Keychain is here now, in [`mod@native`], because it can be
-//!   proven on the hardware this was written on. Windows Credential Manager
-//!   needs a real user session and the Secret Service needs a session bus;
-//!   neither has been proven, so neither is claimed, and
-//!   [`native::PreferNativeSecretStore`] says out loud in
+//! - **It ships the native OS-backed stores it can prove, and no others.**
+//!   [`SecretStore`] is the seam they are added at, one at a time, each with
+//!   its own evidence. The macOS Keychain and Windows Credential Manager are
+//!   here, in [`mod@native`]; a Secret Service-compatible keyring is not,
+//!   because `keyring` 3.6's backend for it waits on an unlock prompt with
+//!   no way to refuse one, so a locked collection would hang a launch rather
+//!   than fall back — see that module's "Which platforms, and why not the
+//!   third". On a platform with no backend the dependency is not linked at
+//!   all, and [`native::PreferNativeSecretStore`] says out loud in
 //!   [`SecretStore::describe`] which source is actually answering rather
 //!   than degrading to the environment in silence.
 //!
@@ -97,7 +99,7 @@ pub enum SecretRef {
     /// only name Glasshouse has for a provider credential anywhere, and a
     /// store is free to answer it from wherever it keeps credentials. That
     /// is exactly what [`native::PreferNativeSecretStore`] does when it
-    /// prefers the Keychain.
+    /// prefers the operating system's own store.
     Environment { var: String },
     /// Held in the operating system's own credential store, filed under
     /// this service and account.

@@ -187,3 +187,97 @@ Missing evidence:
   one. Accepted as the specialist argued it.
 - Nothing here is reachable from the shipped binary yet, deliberately: a
   profile that can carry a credential is **Phase 9F**.
+
+---
+
+### Phase 9E — Prefer Windows Credential Manager for user-entered provider secrets on Windows when available (line 441)
+
+State: **LOCALLY VERIFIED** — orchestrator ruling, batch 51. **The map box is
+NOT ticked.** This is a claim about Windows and nothing has executed on Windows.
+
+Contract: Given a user-entered provider secret on Windows, when Glasshouse
+stores or reads it, it prefers Windows Credential Manager over the process
+environment and says which store it used — while never linking a store that
+only pretends to secure anything, and falling back observably when the native
+store is unavailable.
+
+Production: `crates/glasshouse/Cargo.toml` enables `windows-native` under
+`[target.'cfg(target_os = "windows")'.dependencies]`, mirroring the macOS
+block; `crates/glasshouse/src/secret/native.rs` now covers macOS and Windows
+through **one** `backend` module, with only `LABEL`, `NATIVE_FIRST_LABEL` and
+`silence_authorization_dialogs` differing per platform, so `classify` stays the
+single choke point between a `keyring::Error` and anything a user sees.
+
+Regression: `crates/glasshouse/tests/secret_native.rs` (7 tests) and
+`secret::native` lib tests (17). The macOS round trips were confirmed **not
+skipping** — re-run with `--nocapture` and grepped for `SKIPPED`, no matches —
+so they really executed against the login keychain, `security` CLI witness
+included.
+
+Mutations — four KILLED by the worker; `drop-the-windows-backend` re-run by the
+orchestrator in the integrated tree, failing
+`the_manifest_never_declares_keyring_without_a_real_backend` at
+`secret_native.rs:127`. That one matters most from a macOS host: it proves the
+manifest guard protects the *Windows* feature specifically. `use
+keyring::macos::default_credential_builder` → `keyring::mock::...` also KILLED
+four tests, proving the mock guard is not decorative.
+
+**Why this is not COMPLETE, stated plainly.** No test in this package has run on
+Windows. The worker said so itself and did not claim otherwise. It went further
+than a `cfg` flip — the Windows arms **type-check against a real
+`aarch64-pc-windows-msvc` target with keyring's Windows backend compiled** —
+but type-checking is not execution.
+
+**What closes it:** one `scripts/ci-local.sh --macos --linux --windows-vm` run
+with these tests green on the VM, plus the worker's mutation `m1`
+(`native: NativeSecretStore::detect()` → `Err(Unavailable::UnsupportedPlatform)`)
+re-run **on Windows**. If m1 SURVIVES there, the Windows store is not being
+reached and that is the finding, not a formality. That run is blocked only by
+the unrelated Windows deadlock now being fixed.
+
+---
+
+### Phase 9E — Prefer a Secret Service-compatible keyring on Linux when available (line 442) — REFUSED, premise-invalid
+
+State: **NOT STARTED.** Returned premise-invalid by the worker and accepted by
+the orchestrator. **The blocker is not the headless runner.** It is that
+`keyring` 3.6.3 cannot honour the words "when available".
+
+Read from the resolved sources, not inferred:
+
+- `keyring-3.6.3/src/secret_service.rs:144` and `:337` reach the bus with the
+  plain `SecretService::connect(session_type)`.
+- `dbus-secret-service-4.1.0/src/lib.rs:209` leaves `timeout: None` for that
+  constructor. `connect_with_max_prompt_timeout` exists and **keyring never
+  calls it**; `SsCredential`'s methods build their own connection internally,
+  so a caller cannot reach it either.
+- `dbus-secret-service-4.1.0/src/prompt.rs:42` —
+  `let timeout = self.timeout.unwrap_or(ONE_YEAR_SECONDS);`
+
+So an unanswered unlock prompt blocks the calling thread for **up to a year**,
+and a locked collection is not an error on the read path: `secret_service.rs:363`
+unlocks every locked match before reading, and `get_collection` (`:493`) unlocks
+before writing. There is no Linux equivalent of
+`SecKeychainSetUserInteractionAllowed(0)` in keyring 3.6.
+
+**And a probe cannot see it coming**, which is what makes this disqualifying
+rather than merely awkward. Probing an account nothing ever writes matches zero
+items, so the probe returns `NoEntry` before anything needs unlocking:
+`detect()` would report the store healthy, `describe()` would print "a Secret
+Service keyring, then the process environment", and the **first real credential
+read would freeze the TUI**. That is the silent-degradation shape this phase
+exists to forbid, inverted.
+
+The Linux dependency was therefore **deliberately not enabled**. Doing so would
+link a store that can hang a launch, on a platform where nothing has executed
+it, and would add `libdbus-1-dev` + `pkg-config` to every Linux build
+(`libdbus-sys 0.2.7`'s `build.rs` panics without them) to gain a capability the
+ledger cannot claim. `native.rs`'s design record now carries this reasoning
+under "Which platforms, and why not the third".
+
+**The one question to answer before 442 is re-attempted:** keyring 4.x
+restructures into `keyring-core` plus per-store crates and its default `v1`
+feature selects `zbus-secret-service-keyring-store`, which is pure Rust and
+would remove the `libdbus-1-dev` requirement. **Whether it bounds the unlock
+prompt is unverified.** The worker stopped rather than turn a bounded packet
+into a dependency-upgrade evaluation, which was the right call.

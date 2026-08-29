@@ -40,17 +40,33 @@ vt100 = "0.16.2"
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
-# macOS is the only platform whose native store Phase 9E can prove, so it is
-# the only platform that depends on `keyring` at all. Two consequences, both
-# deliberate: nothing on Linux or Windows can accidentally link keyring's
-# in-process **mock** store and report it as secure, and neither platform's
-# build grows a dependency for a capability its evidence ledger does not
-# claim. `apple-native` is 3.x's feature name for the Security-framework
-# backend — 4.x's `v1` is a different crate line and does not apply here.
+# `keyring` is declared **per platform, and only where its backend feature is
+# declared with it**. Two consequences, both deliberate: nothing can link
+# keyring's in-process **mock** store and report it as secure, and no
+# platform's build grows a dependency for a capability its evidence ledger
+# does not claim. `apple-native` and `windows-native` are 3.x's feature names
+# for the Security-framework and Credential-Manager backends — 4.x's `v1` is a
+# different crate line and does not apply here.
+#
+# `tests/secret_native.rs` reads this file and fails if a `keyring` line ever
+# appears outside such a section or without such a feature, because the mock is
+# a silent failure rather than a loud one — see `src/secret/native.rs`.
+#
+# **Linux is absent on purpose, and the reason is now stronger than
+# "unproven".** keyring 3.6.3's Secret Service backend reaches the bus through
+# `SecretService::connect`, which leaves `dbus-secret-service`'s prompt
+# timeout unset; that crate then defaults an unanswered unlock prompt to
+# `ONE_YEAR_SECONDS` and blocks the calling thread for it, one second at a
+# time. A locked collection would therefore freeze a launch, which is the
+# exact defect `SecKeychainSetUserInteractionAllowed(0)` exists to prevent on
+# macOS — and keyring 3.6 exposes no equivalent for this backend. It would
+# also add `libdbus-sys`, whose build script requires `libdbus-1-dev` and
+# `pkg-config` on the build host.
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { workspace = true, features = ["apple-native"] }
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
 windows-sys.workspace = true
 
 [dev-dependencies]
