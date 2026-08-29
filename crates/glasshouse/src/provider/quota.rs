@@ -2260,10 +2260,12 @@ pub struct ReserveDecisionInputs {
 ///    Imminent (within [`RESET_IMMINENT_SECONDS`]) makes the policy
 ///    permissive outright; distant ([`RESET_DISTANT_SECONDS`] or further, or
 ///    explicitly known and not imminent) makes it strictly conservative,
-///    denying even a task with no cheaper alternative unless it needs the
-///    heavy tier.
-/// 5. **Tier and alternatives** — lines 1289 and 1290. A heavy-tier task's
-///    requirement justifies spending the reserve; a lighter task may spend
+///    denying even a task with no cheaper alternative unless it needs at
+///    least the heavy tier
+///    ([`crate::routing::classify::WorkloadTier::Heavy`] or
+///    [`crate::routing::classify::WorkloadTier::Frontier`]).
+/// 5. **Tier and alternatives** — lines 1289 and 1290. A task at the heavy
+///    tier or above justifies spending the reserve; a lighter task may spend
 ///    it only when nothing cheaper is adequate.
 pub fn evaluate_reserve_spend(inputs: ReserveDecisionInputs) -> ReserveDecision {
     use crate::routing::classify::WorkloadTier;
@@ -2304,20 +2306,29 @@ pub fn evaluate_reserve_spend(inputs: ReserveDecisionInputs) -> ReserveDecision 
                 ),
             };
         }
-        if seconds >= RESET_DISTANT_SECONDS && inputs.tier != WorkloadTier::Heavy {
+        // `< Heavy`, not `!= Heavy`: a threshold against the tier-3 marker,
+        // so a Tier 4 (`Frontier`) task — one step above `Heavy` — still
+        // reads as "at or above the heavy tier" and is not denied here. An
+        // equality left in place would have compared a Tier 4 task unequal
+        // to `Heavy` and fallen through to `Deny`, denying the reserve to
+        // the strongest work in the system.
+        if seconds >= RESET_DISTANT_SECONDS && inputs.tier < WorkloadTier::Heavy {
             return ReserveDecision::Deny {
                 reason: format!(
                     "the next reset is {seconds}s away, past the reserve policy's distant \
-                     threshold, so only heavy-tier work may spend the reserve"
+                     threshold, so only heavy-tier (tier 3) or stronger work may spend the \
+                     reserve"
                 ),
             };
         }
     }
 
-    if inputs.tier == WorkloadTier::Heavy {
+    // `>= Heavy`, not `== Heavy`, for the same reason as the threshold
+    // above: a Tier 4 task must also justify spending the reserve here.
+    if inputs.tier >= WorkloadTier::Heavy {
         return ReserveDecision::Allow {
-            reason: "the task requires the heavy workload tier, which justifies spending \
-                     protected reserve (line 1290)"
+            reason: "the task requires at least the heavy workload tier (tier 3 or higher), \
+                     which justifies spending protected reserve (line 1290)"
                 .to_owned(),
         };
     }

@@ -89,7 +89,7 @@ impl RoutedNoModel {
     /// [`crate::routing::classify::classify_heuristically`] is documented as
     /// classifying *a request*, and the tier it yields feeds
     /// `evaluate_reserve_spend`, whose distant-reset branch spends protected
-    /// premium reserve only for `WorkloadTier::Heavy`. A transcript of hard
+    /// premium reserve only at `WorkloadTier::Heavy` (tier 3) or above. A transcript of hard
     /// debugging work is full of the keywords that produce `Heavy` — so
     /// wiring the chunk here would let a *cheap* extraction job spend the
     /// reserve because the conversation it is summarising happened to be

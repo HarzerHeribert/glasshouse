@@ -2575,9 +2575,9 @@ fn report_hook_with(
             // A compaction is not a `SessionLifecycle` state and has no
             // `LifecycleEvent`, so it lands here — in the arm for events that
             // translate to nothing — rather than beside the completed-turn
-            // trigger below. That is the whole reason this trigger needs no
-            // migration: nothing is recorded, `observe` has already preserved
-            // the raw observation, and only the trigger fires. See
+            // trigger below. No `lifecycle_events` row is written for it and
+            // none can be: its `kind` is a SQL `CHECK` and `database`'s house
+            // rule refuses to widen one. See
             // `session::lifecycle::precedes_native_compaction`.
             //
             // Gated by the same `memory_extraction` switch as the post-turn
@@ -2585,6 +2585,30 @@ fn report_hook_with(
             // extraction off turned it off, not "off except when the harness
             // compacts".
             if session::lifecycle::precedes_native_compaction(event) {
+                // Capability map line 1159 — *"track the number of observed
+                // compactions for a session when known"* — and this is the
+                // only place in the shipped binary that knows one is coming.
+                //
+                // **Outside the `memory_extraction` gate, deliberately.**
+                // That switch decides whether Glasshouse *does* something
+                // about a compaction; the compaction happened either way, and
+                // a count that silently stopped when a user turned extraction
+                // off would be a number no reader could trust. It is also
+                // ordered first, so a count is recorded even if extraction
+                // takes the full `EXTRACTION_BOUND` and this process is torn
+                // down by the harness while waiting.
+                //
+                // Best-effort: a compaction is the harness's business and a
+                // hook that failed to write a counter must not fail the turn
+                // over it, which is the same stance every other write on this
+                // path takes.
+                if let Err(err) = store.record_observed_compaction(&id) {
+                    tracing::debug!(
+                        error = %err,
+                        session = %id,
+                        "could not count an observed compaction"
+                    );
+                }
                 if memory_extraction_enabled(runtime) {
                     run_extraction(
                         runtime,

@@ -1156,13 +1156,13 @@ Phase 29 — Memory commits
 Phase 30 — Session context metadata
 
 ☐ Track an estimated context-size value for a session when the harness exposes enough information.
-☐ Track the number of observed compactions for a session when known.
-☐ Track the most recent request or turn time for a session.
-☐ Track an estimated prompt-cache state independently from session resumability.
-☐ Represent prompt-cache state as at least hot, warm, cold, or unknown.
-☐ Treat cache-state estimates as advisory when the provider does not expose authoritative cache telemetry.
-☐ Track whether a session has a recent portable checkpoint.
-☐ Track a lightweight task-continuity score or flag describing whether the session is still working on the same task.
+☑ Track the number of observed compactions for a session when known.
+☑ Track the most recent request or turn time for a session.
+☑ Track an estimated prompt-cache state independently from session resumability.
+☑ Represent prompt-cache state as at least hot, warm, cold, or unknown.
+☑ Treat cache-state estimates as advisory when the provider does not expose authoritative cache telemetry.
+☑ Track whether a session has a recent portable checkpoint.
+☑ Track a lightweight task-continuity score or flag describing whether the session is still working on the same task.
 
 Phase 31 — Compaction-aware behavior
 
@@ -1392,16 +1392,16 @@ Phase 34 — Capability registry
 
 Phase 34A — Workload tiers
 
-☐ Define a small ordered workload-tier system that is independent from any specific vendor model name.
-☐ Define Tier 0 as deterministic or trivial work that should not require an LLM when simple rules are sufficient.
-☐ Define Tier 1 as lightweight classification, extraction, reranking, formatting, and simple factual codebase lookup.
-☐ Define Tier 2 as routine coding, bounded debugging, focused review, and small multi-file changes.
-☐ Define Tier 3 as difficult debugging, architecture-sensitive changes, broad refactors, and work requiring strong reasoning or long-lived repository context.
-☐ Define Tier 4 as frontier work where failure cost or reasoning difficulty justifies the strongest available model or warm premium session.
+☑ Define a small ordered workload-tier system that is independent from any specific vendor model name.
+☑ Define Tier 0 as deterministic or trivial work that should not require an LLM when simple rules are sufficient.
+☑ Define Tier 1 as lightweight classification, extraction, reranking, formatting, and simple factual codebase lookup.
+☑ Define Tier 2 as routine coding, bounded debugging, focused review, and small multi-file changes.
+☑ Define Tier 3 as difficult debugging, architecture-sensitive changes, broad refactors, and work requiring strong reasoning or long-lived repository context.
+☑ Define Tier 4 as frontier work where failure cost or reasoning difficulty justifies the strongest available model or warm premium session.
 ☐ Allow workload tiers to express required capabilities independently from raw model intelligence.
 ☐ Allow a task to require a lower reasoning tier but a specific capability such as browser use or a very large context window.
 ☐ Allow a task to require a minimum harness capability even when a cheap raw model would otherwise score highly.
-☐ Keep tier definitions short, inspectable, and configurable rather than encoding opaque proprietary scores.
+☑ Keep tier definitions short, inspectable, and configurable rather than encoding opaque proprietary scores.
 
 Phase 34B — Routing-model role
 

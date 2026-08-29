@@ -127,11 +127,21 @@ pub fn lifecycle_for(event: &str) -> Option<SessionLifecycle> {
 /// compacts was running before and is running after, and there is no
 /// `LifecycleEvent` for it. Answering it through [`event_for`] would mean
 /// inventing one, which would mean a new `database::LIFECYCLE_EVENT_KINDS`
-/// value and a migration to widen a `CHECK` — for a fact nobody asked to
-/// have recorded. So this is a predicate a *trigger* can ask, and the event
-/// stays exactly as observable as it already was: preserved by
-/// [`observe`]'s own [`crate::events::RawObservation`] line, and recorded
-/// nowhere.
+/// value and a migration to widen a `CHECK`, which SQLite cannot do in place
+/// and which `database`'s own house rule refuses. So this is a predicate a
+/// *trigger* can ask, and the event log stays exactly as narrow as it was.
+///
+/// # What is recorded, since map line 1159
+///
+/// A **count**, on the session row: migration 16's
+/// `sessions.observed_compactions`, written by
+/// [`crate::session::SessionStore::record_observed_compaction`] at this
+/// predicate's one production call site. That is a different claim from an
+/// event — it says the compaction has now happened *n* times, not that it
+/// happened at an instant beside everything else that happened — and it is
+/// the one line 1159 asks for. The raw observation is still preserved by
+/// [`observe`]'s own [`crate::events::RawObservation`] line, and no
+/// `lifecycle_events` row is written for it.
 ///
 /// # Why `PostCompact` is not here
 ///

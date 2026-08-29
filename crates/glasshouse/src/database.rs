@@ -79,9 +79,15 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// Glasshouse made whose wisdom is only visible later — see the migration's
 /// own doc comment for why its `kind` carries no `CHECK` and why it is the
 /// first table in this schema that is *deliberately prunable*.
+/// Version 16 adds `sessions.observed_compactions`, Phase 30's count of the
+/// times a harness told Glasshouse it was about to compact its own context —
+/// the one fact in that phase that was observed by the shipped binary and
+/// then written down nowhere. See the migration's own doc comment for why it
+/// is a counter on `sessions` rather than a twelfth `lifecycle_events` kind,
+/// and for why it is the *only* column Phase 30 needed.
 /// Later migrations are appended to [`MIGRATIONS`], and this constant moves
 /// with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 15;
+const SUPPORTED_SCHEMA_VERSION: i64 = 16;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -1576,6 +1582,91 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
         SELECT RAISE(ABORT, 'evaluation observation belongs to a different project');
     END;
     ",
+    // 16: Phase 30's one missing fact — how many times a harness has told
+    // this session it was about to compact its own context.
+    //
+    // # Why this is the only column Phase 30 needed
+    //
+    // The phase asks for eight things about a session's context. Seven of
+    // them were already answerable from what this schema holds, and the
+    // package that closed the phase says so line by line in
+    // `session::store::SessionContext`: the most recent request or turn time
+    // is `sessions.last_activity_at`, already stamped by the single
+    // `UPDATE` that moves a session's lifecycle; a recent portable
+    // checkpoint is `checkpoints.created_at` for the session, which
+    // migration 5 recorded and migration 14 ordered; and a task-continuity
+    // flag is a count of this session's `turn_ended` rows, which the event
+    // log has stored with their `turn_outcome` since migration 5. Adding a
+    // column for any of
+    // those would be a second source of truth for a fact the schema holds
+    // exactly once — migration 15's own objection to copying a token count
+    // out of `routing_observations`, one table over.
+    //
+    // A compaction is the one that had nowhere to live.
+    // `session::lifecycle::precedes_native_compaction` is called on the
+    // production hook path and its answer was, until this migration, used to
+    // fire a trigger and then discarded — its own doc comment said the fact
+    // was "recorded nowhere". So this column is not a convenience: it is the
+    // only durable record that the event happened at all.
+    //
+    // # Why a counter here and not a twelfth `lifecycle_events` kind
+    //
+    // Migration 7's rule, which migration 15 restates as this file's house
+    // rule: `lifecycle_events.kind` carries a `CHECK`, SQLite cannot widen a
+    // `CHECK` in place, and an eleventh value already cost a full table
+    // rebuild of the one table `memories.source_event_first`/`_last`
+    // reference by `seq`. A twelfth is refused outright. `precedes_native_
+    // compaction`'s own documentation reached the same conclusion from the
+    // other side and declined to invent a `LifecycleEvent` for it.
+    //
+    // That refusal blocks an *event row*. It does not block a *column*, and
+    // the two are not the same claim: an event says "this happened at this
+    // instant, in order, beside every other thing that happened"; a counter
+    // says "this has now happened n times". Phase 30's line asks for the
+    // number, not the timeline — *"track the number of observed compactions
+    // for a session when known"* — so the counter is what the line wants and
+    // is also the only one of the two this schema can add.
+    //
+    // # `ALTER TABLE ADD COLUMN`, migration 12's shape
+    //
+    // No table is rebuilt, no existing `CHECK` is altered, no existing row is
+    // touched, and no index is added: nothing orders or filters by this
+    // column, and migration 15's closing note about not adding an index on
+    // speculation applies here with more force, because this one is written
+    // far more often than it is read.
+    //
+    // # NULL, here as everywhere in this schema, and the distinction is the
+    // whole point
+    //
+    // NULL is *"the build that recorded this session was not counting"*. Zero
+    // is *"counted, and no compaction was observed"*. They are different
+    // facts and a router must be able to tell them apart: a session with a
+    // NULL is one whose context history is unknown, and one reading `0` is a
+    // session Glasshouse watched from the start and saw compact nothing. A
+    // `NOT NULL DEFAULT 0` would have collapsed the two and quietly promoted
+    // every session recorded before this migration to "watched, and clean" —
+    // which is exactly the confident wrong answer `sessions.launch_profile`'s
+    // own doc comment (migration 3) refuses to allow.
+    //
+    // So this column is nullable and has no default. `SessionStore::create`
+    // writes `0` for every session *this* build starts, which is what makes
+    // the two states reachable at all, and the increment is
+    // `COALESCE(observed_compactions, 0) + 1` so that a row from an older
+    // build begins counting at its first observation rather than staying
+    // unknowable for ever. What is given up, and it is stated rather than
+    // hidden: for such a row the count is a **lower bound**, because
+    // compactions before the upgrade were never observed by anything. For a
+    // row this build created it is exact.
+    //
+    // # The `CHECK`
+    //
+    // Migration 9's shape for a counted quantity (`process_id > 0`): a
+    // negative number of compactions is not an unrecognised value, it is an
+    // impossible one, and the schema is where that is cheapest to refuse.
+    "
+    ALTER TABLE sessions ADD COLUMN observed_compactions INTEGER
+        CHECK (observed_compactions IS NULL OR observed_compactions >= 0);
+    ",
 ];
 
 pub(crate) const PROJECT_ID_KEY: &str = "project_id";
@@ -2057,7 +2148,12 @@ mod tests {
     /// 15 is one statement. Migration 14 is not: SQLite refuses to drop a
     /// column an index mentions, so its indexes go first, and
     /// `checkpoints_by_session` is put back the way migration 5 left it.
+    /// Migration 16 is one statement for the opposite reason: nothing indexes
+    /// `observed_compactions`, and a column-scoped `CHECK` goes with the
+    /// column it is written on.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        ALTER TABLE sessions DROP COLUMN observed_compactions;
+
         DROP TABLE evaluation_observations;
 
         DROP INDEX checkpoints_by_seq;

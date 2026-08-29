@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████░░░░░░░░░░░░░░░░░` 763 / 1280 mandatory capabilities (59%)
+`████████████████████████░░░░░░░░░░░░░░░░` 777 / 1280 mandatory capabilities (60%)
 
 <details>
 <summary>Per-phase breakdown (38 of 104 phases complete)</summary>
@@ -83,7 +83,7 @@ the authoritative specification and tracks what is done.
 | Phase 27 — Context injection | 0/11 |
 | Phase 28 — File-aware memory lookup | 0/5 |
 | Phase 29 — Memory commits | 0/8 |
-| Phase 30 — Session context metadata | 0/8 |
+| Phase 30 — Session context metadata | 7/8 |
 | Phase 31 — Compaction-aware behavior | 0/7 |
 | Phase 32 — Resource registry | 12/12 ✅ |
 | Phase 32A — Unified quota and capacity model | 12/21 |
@@ -98,7 +98,7 @@ the authoritative specification and tracks what is done.
 | Phase 33B — Reliability-adjusted agent performance | 0/14 |
 | Phase 33C — Failure, quota, and route correlation | 5/15 |
 | Phase 34 — Capability registry | 0/10 |
-| Phase 34A — Workload tiers | 0/10 |
+| Phase 34A — Workload tiers | 7/10 |
 | Phase 34B — Routing-model role | 7/15 |
 | Phase 34C — Automatic routing-model selection | 0/13 |
 | Phase 34D — Router request schema | 0/13 |

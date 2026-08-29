@@ -4842,6 +4842,7 @@ mod tests {
             display_name: None,
             purpose: None,
             source_session_id: None,
+            observed_compactions: None,
         }
     }
 
@@ -5455,6 +5456,7 @@ mod native_input_tests {
             display_name: None,
             purpose: None,
             source_session_id: None,
+            observed_compactions: None,
         };
         let mut state = ShellState::new("p", "/p", "0.1.0", vec![record]);
         state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -5567,6 +5569,7 @@ mod settings_tests {
             display_name: None,
             purpose: None,
             source_session_id: None,
+            observed_compactions: None,
         }
     }
 
@@ -7086,6 +7089,7 @@ mod overview_tests {
             display_name: None,
             purpose: None,
             source_session_id: None,
+            observed_compactions: None,
         }
     }
 

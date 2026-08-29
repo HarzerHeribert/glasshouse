@@ -294,9 +294,9 @@ fn a_search_that_returns_nothing_records_nothing() {
 
 /// **Bookkeeping may not break a search.**
 ///
-/// The table is dropped while `schema_migrations` still says 15, so the next
-/// launch does not rebuild it and every observation write fails at the SQL
-/// layer. The search must still find the memory and still print it: memory
+/// The table is dropped while `schema_migrations` still claims the current
+/// schema version, so the next launch runs no migration, does not rebuild it,
+/// and every observation write fails at the SQL layer. The search must still find the memory and still print it: memory
 /// retrieval is on the user's path and this ledger is not.
 #[test]
 fn a_ledger_that_cannot_be_written_does_not_fail_the_retrieval() {
@@ -324,8 +324,9 @@ fn a_ledger_that_cannot_be_written_does_not_fail_the_retrieval() {
             })
             .unwrap();
         assert_eq!(
-            version, 15,
-            "the database must still claim migration 15, so nothing rebuilds the table"
+            version, 16,
+            "the database must still claim the current schema version, so nothing \
+             rebuilds the table"
         );
     }
 
@@ -772,6 +773,7 @@ fn a_version_fourteen_database_migrates_forward_keeping_every_row() {
         let conn = Connection::open(&db_path).unwrap();
         conn.execute_batch(
             "DROP TABLE evaluation_observations;
+             ALTER TABLE sessions DROP COLUMN observed_compactions;
              DELETE FROM schema_migrations WHERE version >= 15;",
         )
         .unwrap();
@@ -791,7 +793,10 @@ fn a_version_fourteen_database_migrates_forward_keeping_every_row() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(version, 15, "the launch must have applied migration 15");
+    assert_eq!(
+        version, 16,
+        "the launch must have applied migrations 15 and 16"
+    );
 
     let memory = migrated.memory();
     let intact = memory

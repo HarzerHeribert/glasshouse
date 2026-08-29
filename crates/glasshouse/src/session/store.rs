@@ -512,6 +512,22 @@ pub struct SessionRecord {
     /// session has no recorded source," and the column does not distinguish
     /// them.
     pub source_session_id: Option<SessionId>,
+    /// How many times a harness has told Glasshouse it was about to compact
+    /// this session's context — map line 1159, *"when known"*.
+    ///
+    /// `None` means the build that recorded this session was not counting,
+    /// which is a different fact from `Some(0)`, *"counted, and no compaction
+    /// was observed"*. A router that could not tell those apart would read a
+    /// session whose history is unknown as a session with a clean history —
+    /// the same confident wrong answer [`SessionRecord::launch_profile`]'s
+    /// `None` exists to prevent. Every session this build creates starts at
+    /// `Some(0)`; a row from before migration 16 stays `None` until its first
+    /// observed compaction, after which its count is a **lower bound**,
+    /// because nothing observed the compactions that came before the upgrade.
+    ///
+    /// Written only by [`SessionStore::record_observed_compaction`], from the
+    /// one production site that can tell a compaction is coming.
+    pub observed_compactions: Option<i64>,
 }
 
 impl SessionRecord {
@@ -542,6 +558,267 @@ impl SessionRecord {
             SessionLifecycle::Stopped | SessionLifecycle::Closed => SessionDisposition::Closed,
         }
     }
+}
+
+/// The four prompt-cache states map line 1162 requires — *"at least hot,
+/// warm, cold, or unknown"*.
+///
+/// Never constructed directly outside this module: the only way to obtain one
+/// is through [`AdvisoryCacheState`], which is line 1163's requirement made
+/// structural rather than written in a comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheState {
+    /// A provider-side cached prefix is likely to still exist.
+    Hot,
+    /// One may exist. No provider in scope guarantees it this far out.
+    Warm,
+    /// Every published cache lifetime this project knows of has passed.
+    Cold,
+    /// The question could not be answered from what is recorded.
+    Unknown,
+}
+
+impl CacheState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hot => "hot",
+            Self::Warm => "warm",
+            Self::Cold => "cold",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl fmt::Display for CacheState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+/// A prompt-cache state Glasshouse **estimated** — map line 1163's *"treat
+/// cache-state estimates as advisory when the provider does not expose
+/// authoritative cache telemetry."*
+///
+/// # Why this is a wrapper and not a comment on [`CacheState`]
+///
+/// The line is a requirement about how the value may be *used*, and a comment
+/// is not a mechanism. This type's field is private and its only constructors
+/// are [`AdvisoryCacheState::estimate`] and [`AdvisoryCacheState::unknown`],
+/// so no code outside this module can produce an `AdvisoryCacheState::Hot`
+/// from an authority it claims to have. There is no authoritative counterpart
+/// type, and there is no `From<CacheState>`: every cache state in this crate
+/// arrives wrapped in the word "advisory", in every signature that carries
+/// one. That is the whole of line 1163.
+///
+/// # What the estimate is made of, and what it is not
+///
+/// Elapsed time since the session's last recorded activity, and nothing else.
+/// Glasshouse observes neither a provider cache's presence nor its lifetime —
+/// [`crate::routing::session::prompt_cache_state`] says so in its own
+/// evidence string, and `crate::config::pairing`'s warm-session window says
+/// provider caches "expire in minutes". So this is a decay curve over a
+/// published TTL, not a reading, and it is labelled as one.
+///
+/// **It is deliberately not a function of resumability** — map line 1161,
+/// *"independently from session resumability."* Resumability is
+/// [`SessionRecord::disposition`], which is decided by `lifecycle` and
+/// whether a native identifier was recorded; neither is an input here. A
+/// closed session with no native identifier that was active a moment ago is
+/// [`CacheState::Hot`] and not resumable at all, and a resumable session idle
+/// since yesterday is [`CacheState::Cold`]. The independence is structural,
+/// because the inputs do not overlap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdvisoryCacheState(CacheState);
+
+/// How long a provider-side cached prefix is likely to survive, in seconds.
+///
+/// Five minutes is the shortest published default among the providers in
+/// scope, and the one `crate::config::pairing`'s own note is about when it
+/// says such caches "expire in minutes". Inside it, a cached prefix plausibly
+/// still exists.
+const HOT_PROMPT_CACHE_SECONDS: i64 = 5 * 60;
+
+/// How long one might survive, in seconds.
+///
+/// One hour is the longest extended cache lifetime any provider in scope
+/// offers, and it is offered as an option rather than a default. Between
+/// [`HOT_PROMPT_CACHE_SECONDS`] and this, "warm" is the honest word: not the
+/// default lifetime, not past every lifetime.
+///
+/// **Both numbers are reasoning, not measurement**, exactly like the warm
+/// session window they sit beside. The measurement that would change them is
+/// a provider that reports a cache hit; none does, which is the reason this
+/// whole type is advisory.
+const WARM_PROMPT_CACHE_SECONDS: i64 = 60 * 60;
+
+impl AdvisoryCacheState {
+    /// Estimate from how long a session has been idle.
+    ///
+    /// `now` before `last_activity_at` yields [`CacheState::Unknown`] rather
+    /// than a clamp to zero. A clock that steps backwards is real — migration
+    /// 14's own doc comment is about exactly that case — and reporting a
+    /// session as `Hot` because the clock moved would be inventing the one
+    /// answer this type is least entitled to give.
+    pub fn estimate(now: i64, last_activity_at: i64) -> Self {
+        let Some(idle_seconds) = now.checked_sub(last_activity_at) else {
+            return Self(CacheState::Unknown);
+        };
+        if idle_seconds < 0 {
+            return Self(CacheState::Unknown);
+        }
+        Self(if idle_seconds <= HOT_PROMPT_CACHE_SECONDS {
+            CacheState::Hot
+        } else if idle_seconds <= WARM_PROMPT_CACHE_SECONDS {
+            CacheState::Warm
+        } else {
+            CacheState::Cold
+        })
+    }
+
+    /// An estimate that declines to guess.
+    pub fn unknown() -> Self {
+        Self(CacheState::Unknown)
+    }
+
+    /// The estimated state, which is all this type has ever held.
+    pub fn state(self) -> CacheState {
+        self.0
+    }
+}
+
+impl fmt::Display for AdvisoryCacheState {
+    /// Prints the word "estimated" beside the state, so that a value reaching
+    /// a user through a listing carries line 1163 with it rather than relying
+    /// on the reader knowing the type.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} (estimated)", self.0)
+    }
+}
+
+/// Whether a session has a portable checkpoint that still describes where it
+/// is — map line 1164.
+///
+/// # "Recent" is measured against the session, not against the clock
+///
+/// A wall-clock window would need a threshold nobody could defend: a
+/// checkpoint five minutes old is stale if the session did an hour of work in
+/// between, and one from yesterday is current if the session has not moved
+/// since. So the comparison is `checkpoints.created_at` against the session's
+/// own `last_activity_at`, and the answer is a fact about the data rather
+/// than a tuning knob.
+///
+/// Both columns are whole seconds, so a checkpoint written in the same second
+/// as the last recorded activity counts as [`CheckpointRecency::Current`] —
+/// the tie goes to the checkpoint, because within one second the checkpoint
+/// is at least as new as the activity and reporting it stale would be the
+/// answer that costs a user a checkpoint they have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointRecency {
+    /// Nothing has been recorded as happening in this session since this
+    /// checkpoint was written. Seconds since the Unix epoch.
+    Current(i64),
+    /// A checkpoint exists and the session has recorded activity after it.
+    Stale(i64),
+    /// No checkpoint has ever been stored for this session.
+    Never,
+}
+
+impl CheckpointRecency {
+    /// Line 1164's question in one word.
+    pub fn is_current(self) -> bool {
+        matches!(self, Self::Current(_))
+    }
+
+    /// When the newest checkpoint was written, if there is one.
+    pub fn stored_at(self) -> Option<i64> {
+        match self {
+            Self::Current(at) | Self::Stale(at) => Some(at),
+            Self::Never => None,
+        }
+    }
+}
+
+/// A lightweight flag for whether a session is still working on the task it
+/// started — map line 1165.
+///
+/// # What it counts, and why that is the honest signal available
+///
+/// Completed task boundaries this session has crossed, read from its own
+/// `turn_ended` rows in the project event log. `main`'s hook path treats
+/// `TurnEnded { Completed }` as *the* moment a harness says a task finished —
+/// it is what triggers memory extraction and an automatic checkpoint — so the
+/// count is Glasshouse's own record of the boundaries it acted on, not a new
+/// interpretation of anything.
+///
+/// # What it deliberately is not
+///
+/// It says nothing about what the tasks **were**. Phase 36's affinity score
+/// wants same-task work; `crate::routing::session::session_affinity` records
+/// that no producer for task *identity* exists in this build, and this flag
+/// does not become one — two consecutive turns on one feature are
+/// indistinguishable here from two on unrelated ones. Comparing tasks would
+/// mean storing what the task is, and a session record must never hold
+/// transcript content. What this does give a router is the difference between
+/// a session whose whole context is one piece of work and a session carrying
+/// seventeen finished ones, which is a real distinction it could not draw at
+/// all before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskContinuity {
+    /// The event log holds nothing at all for this session, so nothing has
+    /// been observed about its turns — a harness that reports no events, or a
+    /// session that has not run yet. Never confused with `OneTask`: a session
+    /// nobody watched is not a session seen doing one thing.
+    Unknown,
+    /// Work has been observed and no completed task boundary among it.
+    /// Everything this session holds belongs to the one piece of work it
+    /// started.
+    OneTask,
+    /// How many completed task boundaries have been observed. At one or more,
+    /// the task the session began is finished, and its context spans more
+    /// than whatever it is doing now.
+    BoundariesCrossed(i64),
+}
+
+/// What Glasshouse can say about one session's context — Phase 30, read
+/// together so that a caller cannot assemble half of it.
+///
+/// # Line 1158 is absent from this struct on purpose
+///
+/// *"Track an estimated context-size value for a session when the harness
+/// exposes enough information"* — no harness exposes it. The hook path is the
+/// only channel a harness reports through, it carries an event name and
+/// nothing else, and its payload is drained into `io::sink()` unread by
+/// `main`'s own hook handler. The one place in this schema with token counts,
+/// `routing_observations`, has them permanently NULL: its module documentation
+/// states they are "not supplied", because the only producer is the gateway
+/// and the gateway never parses a response body. `HarnessTelemetry`, the
+/// harness-side telemetry seam, carries a plan name and nothing more.
+///
+/// A field here would therefore have to be estimated from something that is
+/// not a context size — message counts, elapsed turns — and a future router
+/// would read it as telemetry. There is no field, and this paragraph is the
+/// record of why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionContext {
+    pub session: SessionId,
+    /// Line 1159. `None` is *"nobody was counting"*, never zero — see
+    /// [`SessionRecord::observed_compactions`].
+    pub observed_compactions: Option<i64>,
+    /// Line 1160, and it is `sessions.last_activity_at` itself rather than a
+    /// second column meaning almost the same thing. Seconds since the Unix
+    /// epoch.
+    ///
+    /// The single `UPDATE` that moves a session's lifecycle stamps it, and
+    /// `main`'s hook handler is what calls that on every translated harness
+    /// event — so `UserPromptSubmit` (a request) and `Stop` (a turn ending)
+    /// both move it, which is exactly the pair the line names.
+    pub last_activity_at: i64,
+    /// Lines 1161, 1162 and 1163.
+    pub prompt_cache: AdvisoryCacheState,
+    /// Line 1164.
+    pub checkpoint: CheckpointRecency,
+    /// Line 1165.
+    pub task_continuity: TaskContinuity,
 }
 
 /// What a caller supplies to start tracking a session.
@@ -853,7 +1130,8 @@ const ALL_COLUMNS: &str = "id, project_id, harness, native_session_id, role, \
                            lifecycle, presentation, created_at, last_activity_at, \
                            launch_profile, backend_resource, model, pairing_class, \
                            protocol, response_profile, response_mechanism, \
-                           display_name, purpose, source_session_id";
+                           display_name, purpose, source_session_id, \
+                           observed_compactions";
 
 /// An open project database plus the sessions inside it.
 ///
@@ -1117,6 +1395,14 @@ impl<'a> SessionStore<'a> {
             display_name: None,
             purpose: None,
             source_session_id: new.source_session_id,
+            // `Some(0)`, never `None`. This build is counting from here on,
+            // and a session it started that has compacted nothing has a
+            // *measured* zero — which is the fact migration 16's nullable
+            // column exists to keep apart from "nobody was counting". A
+            // `None` written here would make the two indistinguishable for
+            // every session Glasshouse ever starts, and the column would then
+            // be carrying no information at all.
+            observed_compactions: Some(0),
         };
 
         self.conn
@@ -1125,9 +1411,10 @@ impl<'a> SessionStore<'a> {
                  role, lifecycle, presentation, created_at, last_activity_at, \
                  launch_profile, backend_resource, model, pairing_class, protocol, \
                  response_profile, response_mechanism, process_id, \
-                 process_started_at, process_host, supervision, source_session_id) \
+                 process_started_at, process_host, supervision, source_session_id, \
+                 observed_compactions) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
-                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                 rusqlite::params![
                     record.id.as_str(),
                     &record.project_id,
@@ -1162,6 +1449,7 @@ impl<'a> SessionStore<'a> {
                         .map(|_| Supervision::Owned)
                         .map(Supervision::as_str),
                     record.source_session_id.as_ref().map(SessionId::as_str),
+                    record.observed_compactions,
                 ],
             )
             .map_err(|source| SessionStoreError::Sql {
@@ -1652,6 +1940,141 @@ impl<'a> SessionStore<'a> {
         )
     }
 
+    /// Count one compaction a harness said it was about to perform — map
+    /// line 1159.
+    ///
+    /// # Why this is a column and not an event
+    ///
+    /// `super::lifecycle::precedes_native_compaction` is the observation, and
+    /// its own documentation explains why a compaction cannot join
+    /// `LIFECYCLE_EVENT_KINDS`: that vocabulary is a SQL `CHECK`, SQLite
+    /// cannot widen one in place, and the eleventh value already cost a full
+    /// rebuild of the table `memories` references by `seq`. Migration 16 says
+    /// the same thing from the schema's side. So the count lives on the
+    /// session row, and the event log is left exactly as narrow as it was.
+    ///
+    /// # `COALESCE`, and what it costs
+    ///
+    /// A row recorded before migration 16 reads `NULL`, meaning *"nobody was
+    /// counting"*. Its first observed compaction moves it to `1` rather than
+    /// leaving it unknowable for ever, so from then on the number is a
+    /// **lower bound** — compactions before the upgrade were observed by
+    /// nothing and cannot be recovered. For a session this build created the
+    /// count is exact, because `create` starts it at a measured `0`.
+    ///
+    /// # It is not activity
+    ///
+    /// `last_activity_at` is untouched, for `rename`'s reason turned around:
+    /// a compaction is the harness reorganising what it holds, not the
+    /// session doing work, and stamping it would move a session up a list
+    /// ordered by when it last ran on the strength of housekeeping.
+    pub fn record_observed_compaction(
+        &self,
+        id: &SessionId,
+    ) -> Result<SessionRecord, SessionStoreError> {
+        self.update(
+            id,
+            "UPDATE sessions \
+             SET observed_compactions = COALESCE(observed_compactions, 0) + 1 \
+             WHERE id = ?1",
+            rusqlite::params![id.as_str()],
+            "count an observed compaction",
+        )
+    }
+
+    /// Everything Phase 30 can say about one session's context, as of now.
+    ///
+    /// `Ok(None)` for a session this project does not have, exactly as
+    /// [`SessionStore::get`] answers.
+    ///
+    /// # Why one function and not five
+    ///
+    /// Four of Phase 30's lines are answered by facts that already existed —
+    /// the session's own activity stamp, its checkpoints, and its turn
+    /// events — and were unreadable together. A caller assembling them itself
+    /// would have to know that "recent checkpoint" is a comparison against
+    /// `last_activity_at` and that a cache state must never be derived from
+    /// resumability; those are the rulings this phase is made of, and they
+    /// belong in one place rather than in each caller. See
+    /// [`SessionContext`], including its paragraph on the line that is
+    /// **not** here.
+    ///
+    /// # It reads two sibling tables, and never writes them
+    ///
+    /// `checkpoints` and `lifecycle_events` are read by `project_id` and
+    /// `session_id` together, so the project boundary
+    /// [`SessionRecord::project_id`] draws is honoured by the query and not
+    /// merely by the caller. Nothing here inserts, updates or deletes, and in
+    /// `lifecycle_events`' case nothing could: migration 5's triggers
+    /// `RAISE(ABORT)` on every write but an insert.
+    ///
+    /// # Nothing here is stored
+    ///
+    /// The cache estimate and the checkpoint verdict are computed at the
+    /// moment they are asked for, on purpose. A stored `hot` is wrong the
+    /// minute after it is written, and a stored copy of
+    /// `checkpoints.created_at` would be a second source of truth for a
+    /// column one table over — migration 15's objection to copying a token
+    /// count, applied to this phase. Only [`SessionRecord::observed_compactions`]
+    /// is durable, because a compaction leaves no trace anywhere else.
+    pub fn context(&self, id: &SessionId) -> Result<Option<SessionContext>, SessionStoreError> {
+        let Some(record) = self.get(id)? else {
+            return Ok(None);
+        };
+        let now = (self.clock)();
+
+        let newest_checkpoint: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MAX(created_at) FROM checkpoints \
+                 WHERE project_id = ?1 AND session_id = ?2",
+                rusqlite::params![&self.project_id, id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(|source| SessionStoreError::Sql {
+                action: "read a session's newest checkpoint",
+                source,
+            })?;
+
+        // `MAX` over no rows is one row holding NULL, so the aggregate below
+        // is read the same way: `COUNT(*)` is `0` and the conditional sum is
+        // `0`, and the two together are what separates "no events at all"
+        // from "events, no boundaries among them".
+        let (observed_events, boundaries): (i64, i64) = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*), \
+                        COALESCE(SUM(CASE WHEN kind = 'turn_ended' \
+                                           AND turn_outcome = 'completed' \
+                                          THEN 1 ELSE 0 END), 0) \
+                   FROM lifecycle_events \
+                  WHERE project_id = ?1 AND session_id = ?2",
+                rusqlite::params![&self.project_id, id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|source| SessionStoreError::Sql {
+                action: "count a session's observed task boundaries",
+                source,
+            })?;
+
+        Ok(Some(SessionContext {
+            session: record.id.clone(),
+            observed_compactions: record.observed_compactions,
+            last_activity_at: record.last_activity_at,
+            prompt_cache: AdvisoryCacheState::estimate(now, record.last_activity_at),
+            checkpoint: match newest_checkpoint {
+                None => CheckpointRecency::Never,
+                Some(at) if at >= record.last_activity_at => CheckpointRecency::Current(at),
+                Some(at) => CheckpointRecency::Stale(at),
+            },
+            task_continuity: match (observed_events, boundaries) {
+                (0, _) => TaskContinuity::Unknown,
+                (_, 0) => TaskContinuity::OneTask,
+                (_, crossed) => TaskContinuity::BoundariesCrossed(crossed),
+            },
+        }))
+    }
+
     /// Give a session a name of the user's own — line 650.
     ///
     /// # The native session identifier is not among the columns named here
@@ -1940,6 +2363,11 @@ fn read_record(row: &Row<'_>) -> Result<SessionRecord, SessionStoreError> {
     // way an enum's stored word can.
     let source_session_id: Option<String> = row.get_unwrap(18);
     let source_session_id = source_session_id.map(SessionId);
+    // Never decoded either, and deliberately read as an `Option` rather than
+    // with a fallback: NULL is a fact this column carries — see
+    // [`SessionRecord::observed_compactions`] — and `unwrap_or(0)` here would
+    // erase it at the one point every reader in the crate passes through.
+    let observed_compactions: Option<i64> = row.get_unwrap(19);
 
     Ok(SessionRecord {
         id,
@@ -1961,6 +2389,7 @@ fn read_record(row: &Row<'_>) -> Result<SessionRecord, SessionStoreError> {
         display_name,
         purpose,
         source_session_id,
+        observed_compactions,
     })
 }
 
@@ -2023,19 +2452,30 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicI64, Ordering};
 
-    /// Undo migration 14, for a rollback fixture that lands above version 5.
+    /// Undo every migration above 13, for a rollback fixture that lands above
+    /// version 5.
     ///
     /// A fixture that claims to be an older database has to undo **every**
     /// migration above the version it claims, not only the one it is about.
-    /// Below version 5 that is free — `checkpoints` did not exist yet, so the
-    /// fixture drops the table and migration 14 meets a fresh one. A fixture
-    /// that lands on 5 or later keeps the table, and without this it fails the
-    /// re-run with `duplicate column name: seq`.
+    /// Below version 5 that is free for `checkpoints` — the table did not
+    /// exist yet, so the fixture drops it and migration 14 meets a fresh one.
+    /// A fixture that lands on 5 or later keeps the table, and without this it
+    /// fails the re-run with `duplicate column name: seq`.
     ///
-    /// SQLite refuses to drop a column an index mentions, so the indexes go
-    /// first, and `checkpoints_by_session` is put back the way migration 5
-    /// left it.
-    const UNDO_MIGRATION_FOURTEEN: &str = "
+    /// **The name was `UNDO_MIGRATION_FOURTEEN` and was wrong by two
+    /// migrations**, which is how `database`'s twin constant explains its own
+    /// name: this is one constant precisely so the next migration has one
+    /// place to be added rather than three copies to miss, and a name saying
+    /// "fourteen" invites a reader to think 15 and 16 are handled somewhere
+    /// else. They are handled here.
+    ///
+    /// SQLite refuses to drop a column an index mentions, so migration 14's
+    /// indexes go first and `checkpoints_by_session` is put back the way
+    /// migration 5 left it. Migration 16's column is indexed by nothing, and a
+    /// column-scoped `CHECK` goes with the column it is written on, so it is
+    /// one statement.
+    const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        ALTER TABLE sessions DROP COLUMN observed_compactions;
         DROP TABLE IF EXISTS evaluation_observations;
         DROP INDEX checkpoints_by_seq;
         DROP INDEX checkpoints_by_session;
@@ -2943,6 +3383,12 @@ mod tests {
                 // holds — never anything a user typed or a provider
                 // returned.
                 "sessions.source_session_id",
+                // Migration 16. A count of compactions Glasshouse observed:
+                // an integer this crate increments by one, constrained
+                // non-negative by the schema, and never given a value from
+                // outside the process. There is no string here for anything
+                // to be typed into.
+                "sessions.observed_compactions",
             ],
             "the project database schema changed; confirm the new column cannot \
              hold a provider credential before updating this list"
@@ -3061,7 +3507,8 @@ mod tests {
         fixture
             .conn
             .execute_batch(
-                "ALTER TABLE sessions DROP COLUMN launch_profile;
+                "ALTER TABLE sessions DROP COLUMN observed_compactions;
+                 ALTER TABLE sessions DROP COLUMN launch_profile;
                  ALTER TABLE sessions DROP COLUMN backend_resource;
                  ALTER TABLE sessions DROP COLUMN model;
                  ALTER TABLE sessions DROP COLUMN pairing_class;
@@ -3093,8 +3540,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 15,
-            "the launch must have applied migrations 3 through 15"
+            version, 16,
+            "the launch must have applied migrations 3 through 16"
         );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
@@ -3282,8 +3729,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 15,
-            "the launch must have applied migrations 2 through 15"
+            version, 16,
+            "the launch must have applied migrations 2 through 16"
         );
 
         let store = SessionStore::new(&reopened).unwrap();
@@ -4202,7 +4649,7 @@ mod tests {
                     // migration 8's sessions columns are dropped below: this
                     // rollback lands on version 7, and `memories` must not
                     // still carry columns a later migration added.
-                    "{UNDO_MIGRATION_FOURTEEN}
+                    "{UNDO_MIGRATIONS_ABOVE_THIRTEEN}
                      ALTER TABLE memories DROP COLUMN superseded_reason;
                      ALTER TABLE memories DROP COLUMN validity_conditions;
                      ALTER TABLE memories DROP COLUMN invalidation_conditions;
@@ -4235,8 +4682,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 15,
-                "the launch must have applied migrations 8 through 15"
+                version, 16,
+                "the launch must have applied migrations 8 through 16"
             );
 
             let after = SessionStore::new(&reopened)
@@ -4350,7 +4797,7 @@ mod tests {
             fixture
                 .conn
                 .execute_batch(&format!(
-                    "{UNDO_MIGRATION_FOURTEEN}
+                    "{UNDO_MIGRATIONS_ABOVE_THIRTEEN}
                      ALTER TABLE sessions DROP COLUMN source_session_id;
                      ALTER TABLE memories DROP COLUMN superseded_reason;
                      DELETE FROM schema_migrations WHERE version >= 12;"
@@ -4364,8 +4811,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 15,
-                "the reopen must have applied migrations 12, 13, 14 and 15"
+                version, 16,
+                "the reopen must have applied migrations 12 through 16"
             );
 
             let after = SessionStore::new(&reopened)

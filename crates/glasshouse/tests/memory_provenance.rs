@@ -702,6 +702,11 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
              ALTER TABLE sessions DROP COLUMN supervision_reason;
              ALTER TABLE sessions DROP COLUMN source_session_id;
 
+             -- Migration 16's column, for the same reason as every other
+             -- `sessions` column above: the re-run would meet a column it had
+             -- already added.
+             ALTER TABLE sessions DROP COLUMN observed_compactions;
+
              DROP TABLE IF EXISTS routing_observations;
 
              -- Migration 15's table, for the same reason: a rollback that
@@ -752,8 +757,8 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
         })
         .unwrap();
     assert_eq!(
-        version, 15,
-        "the launch must have applied migrations 6 through 15"
+        version, 16,
+        "the launch must have applied migrations 6 through 16"
     );
     drop(conn);
 
@@ -968,6 +973,11 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
              ALTER TABLE sessions DROP COLUMN supervision_reason;
              ALTER TABLE sessions DROP COLUMN source_session_id;
 
+             -- Migration 16's column, for the same reason as every other
+             -- `sessions` column above: the re-run would meet a column it had
+             -- already added.
+             ALTER TABLE sessions DROP COLUMN observed_compactions;
+
              DROP TABLE IF EXISTS routing_observations;
 
              -- Migration 15's table, for the same reason: a rollback that
@@ -1017,8 +1027,8 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
         })
         .unwrap();
     assert_eq!(
-        version, 15,
-        "the launch must have applied migrations 7 through 15"
+        version, 16,
+        "the launch must have applied migrations 7 through 16"
     );
     drop(conn);
 

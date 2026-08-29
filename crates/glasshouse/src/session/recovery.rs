@@ -287,6 +287,7 @@ mod tests {
             display_name: None,
             purpose: None,
             source_session_id: None,
+            observed_compactions: None,
         }
     }
 

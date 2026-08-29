@@ -126,6 +126,7 @@ fn record(id: &str, backend_resource: Option<&str>) -> SessionRecord {
         display_name: None,
         purpose: None,
         source_session_id: None,
+        observed_compactions: None,
     }
 }
 

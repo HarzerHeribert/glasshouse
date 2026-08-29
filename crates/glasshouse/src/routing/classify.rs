@@ -64,7 +64,8 @@ impl fmt::Display for Complexity {
 }
 
 /// The coarse workload tier a task requires — Phase 35's "assign a required
-/// workload tier to the task".
+/// workload tier to the task", widened to the map's five-tier system
+/// (capability map lines 1395-1400 and 1404).
 ///
 /// Ordered, so a policy may escalate by moving one step up
 /// ([`WorkloadTier::escalate`]) without a `match` of its own. This is
@@ -75,14 +76,35 @@ impl fmt::Display for Complexity {
 /// named model" apart — collapsing a requirement and a capability into one
 /// scale would let a router compare a task's tier against its own tier and
 /// believe that proved something.
+///
+/// [`Self::Deterministic`] (Tier 0) and [`Self::Frontier`] (Tier 4) have no
+/// producer yet: nothing in this module or its callers currently classifies
+/// a task into either. That is deliberate — this project adds a variant when
+/// its producer lands, never in advance (`src/evaluation/mod.rs:89` states
+/// the same rule for its own enum) — and every consumer of this type must
+/// stay exhaustive over all five so that the day a producer does exist, a
+/// missed call site is a compile error rather than a silent wrong decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WorkloadTier {
-    /// A disposable, free, or local model is expected to be sufficient.
+    /// Tier 0: deterministic or trivial work that should not require an LLM
+    /// when simple rules are sufficient (line 1396).
+    Deterministic,
+    /// Tier 1: lightweight classification, extraction, reranking,
+    /// formatting, and simple factual codebase lookup (line 1397). A
+    /// disposable, free, or local model is expected to be sufficient.
     Leaf,
-    /// An ordinary interactive model.
+    /// Tier 2: routine coding, bounded debugging, focused review, and small
+    /// multi-file changes (line 1398). An ordinary interactive model.
     Standard,
-    /// The strongest configured model the session has.
+    /// Tier 3: difficult debugging, architecture-sensitive changes, broad
+    /// refactors, and work requiring strong reasoning or long-lived
+    /// repository context (line 1399). The strongest configured model the
+    /// session has, short of a Tier 4 need.
     Heavy,
+    /// Tier 4: frontier work where failure cost or reasoning difficulty
+    /// justifies the strongest available model or a warm premium session
+    /// (line 1400).
+    Frontier,
 }
 
 impl WorkloadTier {
@@ -91,16 +113,20 @@ impl WorkloadTier {
     /// it cheaper.
     pub fn escalate(self) -> Self {
         match self {
+            Self::Deterministic => Self::Leaf,
             Self::Leaf => Self::Standard,
-            Self::Standard | Self::Heavy => Self::Heavy,
+            Self::Standard => Self::Heavy,
+            Self::Heavy | Self::Frontier => Self::Frontier,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Deterministic => "deterministic",
             Self::Leaf => "leaf",
             Self::Standard => "standard",
             Self::Heavy => "heavy",
+            Self::Frontier => "frontier",
         }
     }
 }
@@ -504,6 +530,12 @@ pub fn classify_heuristically(request_text: &str) -> TaskClassification {
         WorkloadTier::Leaf
     };
 
+    // `== Leaf`, not a threshold: `workload_tier` was just assigned three
+    // lines above from a match with exactly three arms (Heavy, Standard,
+    // Leaf), so Tier 0 and Tier 4 can never reach here — there is no
+    // top-of-scale boundary for this equality to fall on the wrong side of,
+    // unlike `quota.rs`'s comparisons against a tier supplied by an
+    // arbitrary external caller.
     let safe_for_disposable_model =
         workload_tier == WorkloadTier::Leaf && !needs_repo_context && !likely_multi_turn;
 
@@ -759,10 +791,15 @@ mod tests {
     }
 
     #[test]
-    fn workload_tier_escalation_never_goes_past_heavy() {
-        assert_eq!(WorkloadTier::Heavy.escalate(), WorkloadTier::Heavy);
+    fn workload_tier_escalation_never_goes_past_frontier() {
+        // Heavy was the top before this batch and saturated at itself; now
+        // Frontier is the top and Heavy takes the one-step-up path like
+        // every other non-top variant.
+        assert_eq!(WorkloadTier::Frontier.escalate(), WorkloadTier::Frontier);
+        assert_eq!(WorkloadTier::Heavy.escalate(), WorkloadTier::Frontier);
         assert_eq!(WorkloadTier::Standard.escalate(), WorkloadTier::Heavy);
         assert_eq!(WorkloadTier::Leaf.escalate(), WorkloadTier::Standard);
+        assert_eq!(WorkloadTier::Deterministic.escalate(), WorkloadTier::Leaf);
     }
 
     #[test]
