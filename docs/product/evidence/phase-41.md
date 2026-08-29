@@ -466,3 +466,122 @@ takes no network/model handle), not a runtime behavior a unit test can
 observe. Flagging this as the honest gap: a stronger proof would be a
 compile-time check (e.g. `render` taking no `Runtime`/client argument),
 which already holds structurally but is not asserted anywhere.
+
+
+---
+
+# Line 1661 — closed 2026-08-30. **Phase 41 is finished, 15 of 15.**
+
+Package `GH-OVERVIEW-LATENCY`; report in `.agent-runtime/report-overview-latency.md`.
+
+## This closed one box and unblocked a refusal cluster
+
+Before this package, the routing evidence ledger's latency aggregates had
+**zero production readers**. `EvidenceLedger::recent` had none at all, and
+`summarize`'s single production caller read only `failure_rate` —
+`median_duration_ms`, `tail_duration_ms` and `ewma_duration_ms` had no hits
+tree-wide outside `evidence.rs`. That is why the refusal register's **Cluster D
+holds line 1313**: *"latency aggregates have zero production readers; every
+candidate consumer is in another partition."*
+
+**`shell/mod.rs:1571` now reads `summary.median_duration_ms` in production.**
+The consumer exists. **Re-check 1313 and line 1331's `first_byte_at` clause —
+they may be packageable for the first time.**
+
+That is why this line was worth more than its box: a read-only recon
+(`.agent-runtime/report-next-candidates-recon.md`) had established that **no
+candidate in any free partition passed all four Phase −1 links**, and the
+closest failed on exactly this missing consumer. Building the reader was the
+move that unsticks the area, rather than forcing a package through a gate it
+fails.
+
+## The distinction the tests had to protect
+
+`summarize` returns `Unknown` below a minimum sample, and the overview had to
+render that as visibly different from *fast*. An overview showing `0 ms` where
+the honest answer is "not enough observations yet" would be a fabricated
+measurement in a place a router would later read. `shell/mod.rs:1564`'s own
+comment now carries the distinction between "no observation at all" and
+"`median_duration_ms` absent".
+
+---
+
+### Show the currently selected routing model and its recent latency. (line 1661)
+
+Contract: Given a routing-model resolution EffectiveConfig can compute right now (deterministic heuristics, automatic, or a pinned provider/model still configured), when the project overview opens, Glasshouse names that resolution and, only when it names one exact model, queries the routing evidence ledger for that model's own most recent latency — showing a real figure when enough recent observations exist, an honest 'unknown' below the minimum sample or with none recorded, and 'not applicable' when no single model is selected — while never blocking, panicking, or emptying the rest of the overview if the ledger cannot be opened or queried.
+
+State: **COMPLETE**
+
+Production evidence:
+- `crates/glasshouse/src/routing/evidence.rs` — `EvidenceLedger::summarize_latest_for_model`
+- `crates/glasshouse/src/config/mod.rs` — `EffectiveConfig::routing_model_resolution (pre-existing; first caller for this purpose)`
+- `crates/glasshouse/src/shell/mod.rs` — `build_project_overview_routing`
+- `crates/glasshouse/src/shell/mod.rs` — `routing_resolution_label`
+- `crates/glasshouse/src/shell/mod.rs` — `routing_latency_phrase`
+- `crates/glasshouse/src/shell/mod.rs` — `Action::OpenProjectOverview handler (run loop wiring)`
+- `crates/glasshouse/src/shell/state.rs` — `ProjectOverviewState::routing, ShellState::open_project_overview`
+- `crates/glasshouse/src/shell/view.rs` — `render_project_overview's ROUTING MODEL section`
+
+Regression evidence:
+- `routing::evidence::tests::summarize_latest_for_model_finds_the_real_identity_and_summarizes_it`
+- `routing::evidence::tests::summarize_latest_for_model_is_none_when_nothing_was_ever_observed`
+- `routing::evidence::tests::summarize_latest_for_model_never_blends_a_second_models_observations_in`
+- `routing::evidence::tests::summarize_latest_for_model_uses_the_most_recent_identitys_own_route_and_harness`
+- `routing::evidence::tests::summarize_latest_for_model_never_lets_a_tied_second_models_route_leak_in`
+- `shell::project_overview_routing_tests::no_pinned_routing_model_reports_not_applicable`
+- `shell::project_overview_routing_tests::automatic_routing_reports_not_applicable_latency`
+- `shell::project_overview_routing_tests::a_pinned_model_with_enough_observations_shows_a_real_latency_figure`
+- `shell::project_overview_routing_tests::a_pinned_model_below_the_minimum_sample_shows_unknown_never_zero`
+- `shell::project_overview_routing_tests::a_pinned_model_with_an_empty_ledger_shows_unknown`
+- `shell::project_overview_routing_tests::latency_is_attributed_to_the_selected_model_not_a_second_ones`
+- `shell::project_overview_routing_tests::a_pinned_model_naming_a_vanished_provider_degrades_to_heuristics`
+- `shell::view::tests::the_project_overview_shows_the_routing_line_the_run_loop_handed_it`
+- `shell::view::tests::the_routing_lines_unknown_latency_never_reads_as_zero`
+- `shell::view::tests::the_project_overview_omits_the_routing_section_when_nothing_was_handed_to_it`
+- `tests/observability_views.rs::the_project_overview_routing_line_is_reachable_from_outside_the_crate_and_fits_80_columns`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| routing_latency_phrase's None branch: `"unknown — not enough observations yet".to_owned()` -> `"median 0ms (0 sample(s))".to_owned()` | `render-unknown-as-measured` | **killed** | `shell::project_overview_routing_tests::a_pinned_model_below_the_minimum_sample_shows_unknown_never_zero` |
+| summarize_latest_for_model's identity lookup: `WHERE project_id = ?1 AND provider = ?2 AND model = ?3` -> `WHERE project_id = ?1 AND provider = ?2` | `drop-model-filter` | **SURVIVED — investigate** | `—` |
+| same as above, re-run after adding a test with two models sharing a provider and timestamps but different routes | `drop-model-filter-v2` | **killed** | `routing::evidence::tests::summarize_latest_for_model_never_lets_a_tied_second_models_route_leak_in` |
+
+> render-unknown-as-measured observed: assertion failed: text no longer contained "unknown"; contained the fabricated "median 0ms" instead
+
+> drop-model-filter observed: 21/22 (later 22/22 once the new test existed) routing::evidence tests still passed; every existing two-model fixture gave both models the same route/harness so the dropped filter never changed which row won the LIMIT 1 tie
+
+**A SURVIVING MUTATION IS THE MOST VALUABLE OUTCOME HERE** —
+it names a case where passing tests do not prove the claimed
+behaviour. Do not tick this box; write down what it means.
+
+> drop-model-filter-v2 observed: assertion `left == right` failed at evidence.rs:2111 — the wrong route's identity was picked and returned Some("route-b") instead of Some("route-a")
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The unopenable-ledger / failed-query branches of build_project_overview_routing are structurally correct (no unwrap/panic, one honest line returned) but not exercised by a forced real I/O failure in a test — matches this codebase's existing precedent for build_project_overview_capacity's equivalent config-load failure branches.
+- No shipped-binary (pty) run — matches Phase 41's own line-1650 evidence entry's stated reasoning for the rest of this overlay.
+- The latency shown for a Pinned model is that model's latency in whatever role the gateway has actually used it (interactive sessions included), not literally the routing-classifier's own call latency — routing::classify has no production caller yet, so no observation is ever recorded for a classification call specifically. Documented in the code.
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **1661** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+
+**Packet errors the worker reported — read these BEFORE its results.**
+Thirteen consecutive rounds a worker corrected its packet and was right:
+- docs/product/evidence/phase-41.md's account of line 1661 (NOT STARTED, blocked on Phase 33A/34B/34C) predates EffectiveConfig::routing_model_resolution and its production caller api::unix::routing_model_status (capability map line 1680) already existing — the same 'evidence entry outlived its own truth' shape line 1663's own entry in the same file names and calls a transferable rule. Not edited (evidence ledger is a forbidden file); flagging for the orchestrator to update.
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo build -p glasshouse: clean
+- cargo test -p glasshouse --lib: 1547 passed
+- cargo test -p glasshouse --lib routing::evidence: 22 passed
+- cargo test -p glasshouse --lib shell::: 285 passed
+- cargo test -p glasshouse --test observability_views: 6 passed
+- cargo test -p glasshouse --test routing_evidence: 9 passed
+- cargo clippy -p glasshouse --all-targets --all-features -- -D warnings: clean
+- cargo fmt --all -- --check: clean
+- scripts/blast-radius.sh: every traced target passed (--lib 1547, 27 test binaries, --bin 43, rustdoc clean)
+

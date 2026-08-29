@@ -842,6 +842,76 @@ impl EvidenceLedger {
         })
     }
 
+    /// [`Self::summarize`] for whichever `(route, harness, context_state)`
+    /// this `(provider, model)` was most recently observed under — additive,
+    /// because a caller that only knows a routing selection's provider and
+    /// model from configuration (never its route, harness or context-state
+    /// bucket) cannot build the [`ObservationQuery`] [`Self::summarize`]
+    /// requires, the same gap [`Self::observed_identities`] closed for
+    /// listing rather than summarizing (practice §71). This picks the single
+    /// most recently active identity for the pair and summarizes exactly
+    /// that one — never blended across context states, matching every other
+    /// summary this ledger returns.
+    ///
+    /// `Ok(None)` means no observation exists for this `(provider, model)` at
+    /// all, within the window. That is a different fact from
+    /// [`RoutingSummary`]'s own `None` fields (observed, but below
+    /// [`MIN_SAMPLE_FOR_SUMMARY`]) — a caller that only wants "is there a
+    /// figure to show" can treat both the same way, but one that wants to say
+    /// *why* there is not should keep them apart.
+    pub fn summarize_latest_for_model(
+        &self,
+        provider: &str,
+        model: &str,
+        now_unix: i64,
+        window_seconds: i64,
+    ) -> Result<Option<RoutingSummary>, EvidenceLedgerError> {
+        let earliest = now_unix.saturating_sub(window_seconds);
+        let identity = {
+            let conn = self.lock();
+            conn.query_row(
+                "SELECT route, harness, context_state
+                 FROM routing_observations
+                 WHERE project_id = ?1 AND provider = ?2 AND model = ?3
+                   AND observed_at >= ?4 AND observed_at <= ?5
+                 ORDER BY observed_at DESC
+                 LIMIT 1",
+                params![self.project_id, provider, model, earliest, now_unix],
+                |row| {
+                    let route: Option<String> = row.get(0)?;
+                    let harness: Option<String> = row.get(1)?;
+                    let context_state: String = row.get(2)?;
+                    Ok((route, harness, context_state))
+                },
+            )
+            .optional()
+            .map_err(sql_err(
+                "find the most recently observed identity for a model",
+            ))?
+        };
+        let Some((route, harness, context_text)) = identity else {
+            return Ok(None);
+        };
+        let Some(context_state) = ContextState::from_stored(&context_text) else {
+            return Err(EvidenceLedgerError::UnknownAggregateValue {
+                column: "context_state",
+                value: context_text,
+            });
+        };
+        let query = ObservationQuery {
+            provider,
+            model,
+            route: route.as_deref(),
+            harness: harness.as_deref(),
+        };
+        Ok(Some(self.summarize(
+            query,
+            context_state,
+            now_unix,
+            window_seconds,
+        )?))
+    }
+
     /// The distinct `(provider, model, route, context_state)` identities
     /// this project has actually recorded within the last `window_seconds`,
     /// most recently active first — capability map lines 1762 and 1764, and
@@ -1862,5 +1932,183 @@ mod tests {
                 .iter()
                 .any(|i| i.context_state == ContextState::Unknown)
         );
+    }
+
+    /// Capability map line 1661's own gap: a caller that only knows a
+    /// provider and model from configuration must still get a real
+    /// aggregate, without naming the route/harness/context-state
+    /// [`EvidenceLedger::summarize`] requires.
+    #[test]
+    fn summarize_latest_for_model_finds_the_real_identity_and_summarizes_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let ledger = fixture.ledger();
+
+        for i in 0..MIN_SAMPLE_FOR_SUMMARY {
+            let at = 1_000 + i as i64 * 10;
+            let new = observation("anyrouter", "claude-opus-4-1")
+                .with_timing(Some(at), Some(at + 2))
+                .with_outcome(Outcome::Succeeded);
+            ledger.record(new, at).unwrap();
+        }
+
+        let summary = ledger
+            .summarize_latest_for_model("anyrouter", "claude-opus-4-1", 10_000, 100_000)
+            .unwrap()
+            .expect("an observed model must produce a summary");
+        let median = summary
+            .median_duration_ms
+            .expect("five samples must produce a reading");
+        assert_eq!(*median.value(), 2_000);
+        assert_eq!(summary.provider, "anyrouter");
+        assert_eq!(summary.model, "claude-opus-4-1");
+    }
+
+    /// A model nothing has ever recorded gets `Ok(None)`, distinct from a
+    /// [`RoutingSummary`] whose fields are all `None` below the minimum
+    /// sample — [`a_summary_below_the_minimum_sample_is_unknown`] proves the
+    /// latter.
+    #[test]
+    fn summarize_latest_for_model_is_none_when_nothing_was_ever_observed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let ledger = fixture.ledger();
+
+        let summary = ledger
+            .summarize_latest_for_model("anyrouter", "claude-opus-4-1", 10_000, 100_000)
+            .unwrap();
+        assert!(summary.is_none());
+    }
+
+    /// Ruling 3: attributed to the named model, never a blend with a
+    /// differently-performing sibling.
+    #[test]
+    fn summarize_latest_for_model_never_blends_a_second_models_observations_in() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let ledger = fixture.ledger();
+
+        for i in 0..MIN_SAMPLE_FOR_SUMMARY {
+            let at = 1_000 + i as i64 * 10;
+            ledger
+                .record(
+                    observation("anyrouter", "cheap-model").with_timing(Some(at), Some(at + 2)),
+                    at,
+                )
+                .unwrap();
+        }
+        for i in 0..MIN_SAMPLE_FOR_SUMMARY {
+            let at = 2_000 + i as i64 * 10;
+            ledger
+                .record(
+                    observation("anyrouter", "slow-model").with_timing(Some(at), Some(at + 500)),
+                    at,
+                )
+                .unwrap();
+        }
+
+        let cheap = ledger
+            .summarize_latest_for_model("anyrouter", "cheap-model", 10_000, 100_000)
+            .unwrap()
+            .expect("cheap-model was observed");
+        let slow = ledger
+            .summarize_latest_for_model("anyrouter", "slow-model", 10_000, 100_000)
+            .unwrap()
+            .expect("slow-model was observed");
+        assert_eq!(*cheap.median_duration_ms.unwrap().value(), 2_000);
+        assert_eq!(*slow.median_duration_ms.unwrap().value(), 500_000);
+    }
+
+    /// Picks the most recently active `(route, harness, context_state)`
+    /// bucket rather than the first one it finds — observations recorded
+    /// under a different route earlier must not win over a more recent one
+    /// under the route this project actually uses now.
+    #[test]
+    fn summarize_latest_for_model_uses_the_most_recent_identitys_own_route_and_harness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let ledger = fixture.ledger();
+
+        for i in 0..MIN_SAMPLE_FOR_SUMMARY {
+            let at = 1_000 + i as i64 * 10;
+            ledger
+                .record(
+                    NewObservation::new("anyrouter", "m")
+                        .with_route(Some("old-route"))
+                        .with_harness(Some("old-harness"))
+                        .with_timing(Some(at), Some(at + 2)),
+                    at,
+                )
+                .unwrap();
+        }
+        for i in 0..MIN_SAMPLE_FOR_SUMMARY {
+            let at = 5_000 + i as i64 * 10;
+            ledger
+                .record(
+                    NewObservation::new("anyrouter", "m")
+                        .with_route(Some("new-route"))
+                        .with_harness(Some("new-harness"))
+                        .with_timing(Some(at), Some(at + 900)),
+                    at,
+                )
+                .unwrap();
+        }
+
+        let summary = ledger
+            .summarize_latest_for_model("anyrouter", "m", 10_000, 100_000)
+            .unwrap()
+            .expect("m was observed");
+        assert_eq!(summary.route.as_deref(), Some("new-route"));
+        assert_eq!(
+            *summary.median_duration_ms.unwrap().value(),
+            900_000,
+            "the most recently active identity's own observations must be summarized, \
+             not the older route's"
+        );
+    }
+
+    /// The identity-discovery step must itself filter by `model`: two models
+    /// sharing a provider, observed at the exact same timestamps so they tie
+    /// on `observed_at`, must never let one model's route leak into the
+    /// other's summary — the mutation this proof exists to kill drops
+    /// `AND model = ?3` from that lookup's own `WHERE` clause. Batch
+    /// overview-latency's own mutation run found this SURVIVED against every
+    /// test that gave both models the same route and harness (§80: a
+    /// SURVIVED that means "the fixture never varied the thing the mutation
+    /// touches" reads exactly like one that means "nothing watches this").
+    #[test]
+    fn summarize_latest_for_model_never_lets_a_tied_second_models_route_leak_in() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let ledger = fixture.ledger();
+
+        for i in 0..MIN_SAMPLE_FOR_SUMMARY {
+            let at = 1_000 + i as i64 * 10;
+            ledger
+                .record(
+                    NewObservation::new("anyrouter", "target-model")
+                        .with_route(Some("route-a"))
+                        .with_harness(Some("harness-a"))
+                        .with_timing(Some(at), Some(at + 2)),
+                    at,
+                )
+                .unwrap();
+            ledger
+                .record(
+                    NewObservation::new("anyrouter", "other-model")
+                        .with_route(Some("route-b"))
+                        .with_harness(Some("harness-b"))
+                        .with_timing(Some(at), Some(at + 900)),
+                    at,
+                )
+                .unwrap();
+        }
+
+        let summary = ledger
+            .summarize_latest_for_model("anyrouter", "target-model", 10_000, 100_000)
+            .unwrap()
+            .expect("target-model was observed");
+        assert_eq!(summary.route.as_deref(), Some("route-a"));
+        assert_eq!(*summary.median_duration_ms.unwrap().value(), 2_000);
     }
 }

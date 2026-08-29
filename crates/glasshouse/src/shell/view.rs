@@ -663,8 +663,22 @@ fn render_project_overview(state: &ShellState, frame: &mut Frame, area: Rect) {
         }
     }
     // Line 1661 — the currently selected routing model and its recent
-    // latency — is deliberately absent: Phase 34B has no routing-model role
-    // in this build, so there is nothing here to name.
+    // latency. Built by `shell::build_project_overview_routing`, which always
+    // has something honest to say (a model name, or why there is not one) —
+    // an empty string here means only the test fixtures above that never set
+    // one, never a real overview the run loop opened.
+    if let Some(routing) = state
+        .project_overview()
+        .map(crate::shell::state::ProjectOverviewState::routing)
+        .filter(|line| !line.is_empty())
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "ROUTING MODEL",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(routing.to_owned()));
+    }
 
     if let Some(note) = state.project_overview().and_then(|o| o.memory_note()) {
         lines.push(Line::from(""));
@@ -2945,7 +2959,7 @@ mod tests {
         // "knowledge-graph visualization" is exactly what a `Gauge` or
         // `Sparkline` would be reaching for here.
         state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-        state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), None);
+        state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), String::new(), None);
         screens.push(rendered(&state, 100, 30));
         state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
@@ -3319,7 +3333,7 @@ mod tests {
             state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),
             crate::shell::state::Action::OpenProjectOverview
         );
-        state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), None);
+        state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), String::new(), None);
 
         let text = rendered(&state, 120, 40);
         assert!(text.contains("orchestrator"), "orchestrator row:\n{text}");
@@ -3339,7 +3353,7 @@ mod tests {
     fn the_project_overview_says_so_when_a_section_has_nothing() {
         let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
         state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-        state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), None);
+        state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), String::new(), None);
 
         let text = rendered(&state, 120, 40);
         assert!(text.contains("no session is designated"), "{text}");
@@ -3370,6 +3384,7 @@ mod tests {
                 Vec::new(),
                 0,
                 vec!["  openrouter (remote)  plenty 82% [measured], reset in 3600s".to_owned()],
+                String::new(),
                 None,
             );
 
@@ -3396,6 +3411,7 @@ mod tests {
                 Vec::new(),
                 0,
                 vec!["  some-provider (remote)  capacity unknown".to_owned()],
+                String::new(),
                 None,
             );
 
@@ -3403,6 +3419,84 @@ mod tests {
             assert!(text.contains("capacity unknown"), "width {width}:\n{text}");
             assert!(!text.contains('%'), "width {width}:\n{text}");
         }
+    }
+
+    /// Map line 1661: the run loop's routing line reaches the screen as its
+    /// own labelled section, at a realistic width and a wide one (practice
+    /// §17), and fits an 80-column terminal without corrupting the rest of
+    /// the overview.
+    #[test]
+    fn the_project_overview_shows_the_routing_line_the_run_loop_handed_it() {
+        for (width, height) in [(80, 40), (120, 40), (400, 40)] {
+            let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+            state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+            state.open_project_overview(
+                Vec::new(),
+                Vec::new(),
+                0,
+                Vec::new(),
+                "  routing model  anyrouter:claude-opus-4-1, recent latency median 340ms, \
+                 p95 410ms (12 sample(s))"
+                    .to_owned(),
+                None,
+            );
+
+            let text = rendered(&state, width, height);
+            assert!(text.contains("ROUTING MODEL"), "width {width}:\n{text}");
+            assert!(
+                flattened(&text).contains("anyrouter:claude-opus-4-1"),
+                "width {width}:\n{text}"
+            );
+            assert!(
+                flattened(&text).contains("median 340ms"),
+                "width {width}:\n{text}"
+            );
+        }
+    }
+
+    /// Ruling 1, at the view: an unknown latency reads `unknown`, never a
+    /// fabricated `0ms` — the same honesty rule
+    /// [`an_unknown_resource_never_shows_a_number_at_a_realistic_and_a_wide_width`]
+    /// proves for resources, proven here for the routing line specifically
+    /// because it is a different builder and a different render branch.
+    #[test]
+    fn the_routing_lines_unknown_latency_never_reads_as_zero() {
+        for (width, height) in [(80, 40), (120, 40), (400, 40)] {
+            let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+            state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+            state.open_project_overview(
+                Vec::new(),
+                Vec::new(),
+                0,
+                Vec::new(),
+                "  routing model  anyrouter:claude-opus-4-1, recent latency unknown — not \
+                 enough observations yet"
+                    .to_owned(),
+                None,
+            );
+
+            let text = rendered(&state, width, height);
+            assert!(
+                flattened(&text).contains("recent latency unknown"),
+                "width {width}:\n{text}"
+            );
+            assert!(!text.contains("0ms"), "width {width}:\n{text}");
+            assert!(!text.contains("0 ms"), "width {width}:\n{text}");
+        }
+    }
+
+    /// The routing section is absent when the run loop never set anything —
+    /// the fixtures elsewhere in this module that pass `String::new()`
+    /// because the routing line is not what they are testing, distinct from
+    /// a real overview the run loop opened.
+    #[test]
+    fn the_project_overview_omits_the_routing_section_when_nothing_was_handed_to_it() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), String::new(), None);
+
+        let text = rendered(&state, 120, 40);
+        assert!(!text.contains("ROUTING MODEL"), "{text}");
     }
 
     /// Map lines 1655 and 1656: decisions/constraints and unresolved todos
@@ -3418,6 +3512,7 @@ mod tests {
             vec!["todo: wire the shell into main".to_owned()],
             3,
             Vec::new(),
+            String::new(),
             None,
         );
 
@@ -3449,6 +3544,7 @@ mod tests {
             Vec::new(),
             0,
             Vec::new(),
+            String::new(),
             Some("project memory unavailable: disk full".to_owned()),
         );
 
@@ -3979,6 +4075,7 @@ mod tests {
             vec!["todo: close the rest next round".to_owned()],
             2,
             Vec::new(),
+            String::new(),
             None,
         );
 
@@ -4074,7 +4171,7 @@ mod tests {
     fn the_project_overview_footer_names_its_own_key() {
         let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
         state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-        state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), None);
+        state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), String::new(), None);
         let text = rendered(&state, 120, 40);
         assert!(
             text.contains("esc back to session"),

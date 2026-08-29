@@ -1658,7 +1658,7 @@ Phase 41 — Project overview
 ☑ Show normalized remaining-capacity bands for configured resources.
 ☑ Show whether each displayed capacity value is measured, estimated, manual, or unknown.
 ☑ Show the next known or estimated reset time for constrained resources.
-☐ Show the currently selected routing model and its recent latency.
+☑ Show the currently selected routing model and its recent latency.
 ☑ Show the harness, backend, model, pairing class, and response profile for active sessions when relevant.
 ☑ Show protected premium reserves when they influence routing.
 ☑ Keep the overview factual and derived from stored state rather than generating decorative AI commentary by default.

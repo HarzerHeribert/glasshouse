@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████░░░░░░░░░░░░░░░` 802 / 1280 mandatory capabilities (62%)
+`█████████████████████████░░░░░░░░░░░░░░░` 803 / 1280 mandatory capabilities (62%)
 
 <details>
-<summary>Per-phase breakdown (40 of 104 phases complete)</summary>
+<summary>Per-phase breakdown (41 of 104 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -114,7 +114,7 @@ the authoritative specification and tracks what is done.
 | Phase 38 — Quota-preserving routing | 0/7 |
 | Phase 39 — Gateway-backed disposable jobs | 0/9 |
 | Phase 40 — Fresh-session handoff | 9/9 ✅ |
-| Phase 41 — Project overview | 14/15 |
+| Phase 41 — Project overview | 15/15 ✅ |
 | Phase 42 — External control API | 13/13 ✅ |
 | Phase 43 — MCP surface for orchestrators | 0/10 |
 | Phase 44 — User control and override | 0/9 |

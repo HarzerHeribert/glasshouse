@@ -280,3 +280,51 @@ fn the_route_health_view_is_absent_until_its_key_is_pressed() {
          showing a table of zeroes"
     );
 }
+
+/// Map line 1661, from outside the crate: `ShellState::open_project_overview`,
+/// `ProjectOverviewState::routing` and the "ROUTING MODEL" section they feed
+/// all have to stay `pub` for this view to be reachable at all — the same
+/// concern this file's own header states for `RouteHealthRow`. This suite
+/// cannot call the crate-private `shell::build_project_overview_routing`
+/// (see this file's header), so it hands the line in itself, the same way
+/// every other test here hands in rows it built rather than reading real
+/// disk state.
+///
+/// Asserted at 80 columns specifically for acceptance test 5: the line must
+/// fit a narrow terminal without corrupting the sections around it.
+#[test]
+fn the_project_overview_routing_line_is_reachable_from_outside_the_crate_and_fits_80_columns() {
+    use glasshouse::shell::Action;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    for (width, height) in [(80, 40), (120, 40), (400, 40)] {
+        let mut state = shell();
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),
+            Action::OpenProjectOverview,
+            "`p` is the key that asks for the project overview"
+        );
+        state.open_project_overview(
+            Vec::new(),
+            Vec::new(),
+            0,
+            Vec::new(),
+            "  routing model  anyrouter:claude-opus-4-1, recent latency median 340ms \
+             (5 sample(s))"
+                .to_owned(),
+            None,
+        );
+        assert_eq!(state.overlay(), Some(Overlay::ProjectOverview));
+
+        let text = rendered(&state, width, height);
+        assert!(text.contains("ROUTING MODEL"), "width {width}:\n{text}");
+        assert!(
+            flattened(&text).contains("anyrouter:claude-opus-4-1"),
+            "width {width}:\n{text}"
+        );
+        assert!(
+            flattened(&text).contains("median 340ms"),
+            "width {width}:\n{text}"
+        );
+    }
+}

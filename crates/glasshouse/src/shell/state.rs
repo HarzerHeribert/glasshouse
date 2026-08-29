@@ -409,6 +409,16 @@ pub struct ProjectOverviewState {
     /// [`Self::memory_note`] for the one honest-failure case this section
     /// shares with the memory sections.
     resources: Vec<String>,
+    /// Capability map line 1661: one already-formatted line naming the
+    /// currently selected routing model and its recent latency —
+    /// pre-formatted the same way `resources` is: reading `crate::config`
+    /// and the routing evidence ledger is file I/O this module deliberately
+    /// does not hold, so `shell::build_project_overview_routing` builds the
+    /// text and this struct only carries it. Always present, unlike
+    /// `resources`, which can legitimately be empty — this line always has
+    /// something honest to say, even when that is "not applicable" or
+    /// "unknown".
+    routing: String,
     /// Set when the run loop could not read project memory at all — a
     /// missing or unreadable database, say. The overlay still opens and
     /// still shows sessions; only the memory sections are empty, and this
@@ -431,6 +441,10 @@ impl ProjectOverviewState {
 
     pub fn resources(&self) -> &[String] {
         &self.resources
+    }
+
+    pub fn routing(&self) -> &str {
+        &self.routing
     }
 
     pub fn memory_note(&self) -> Option<&str> {
@@ -1092,6 +1106,7 @@ impl ShellState {
         todos: Vec<String>,
         todos_omitted: usize,
         resources: Vec<String>,
+        routing: String,
         memory_note: Option<String>,
     ) -> Action {
         self.overlay = Some(Overlay::ProjectOverview);
@@ -1100,6 +1115,7 @@ impl ShellState {
             todos,
             todos_omitted,
             resources,
+            routing,
             memory_note,
         });
         Action::Redraw

@@ -221,6 +221,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     },
                     Action::OpenProjectOverview => {
                         let resources = build_project_overview_capacity(runtime);
+                        let routing = build_project_overview_routing(runtime);
                         match build_project_overview_memory(runtime) {
                             Ok(memory) => {
                                 state.open_project_overview(
@@ -228,6 +229,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                                     memory.todos,
                                     memory.todos_omitted,
                                     resources,
+                                    routing,
                                     None,
                                 );
                             }
@@ -241,6 +243,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                                     Vec::new(),
                                     0,
                                     resources,
+                                    routing,
                                     Some(format!("project memory unavailable: {err:#}")),
                                 );
                             }
@@ -1398,9 +1401,10 @@ fn build_project_overview_memory(runtime: &Runtime) -> anyhow::Result<ProjectOve
 /// mirrors the identical `with_resource_reserve` fold
 /// `main.rs::disposable_candidate_capacity` builds for that decision.
 ///
-/// Line 1661 — the currently selected routing model and its recent latency —
-/// is deliberately absent: Phase 34B has no routing-model role in this
-/// build, so there is nothing to name.
+/// Line 1661 is [`build_project_overview_routing`], deliberately a separate
+/// function: that line reads the routing evidence ledger, a project database
+/// this function never opens, and keeping the two split matches every other
+/// section here staying one concern per builder.
 ///
 /// # Cannot fail visibly
 ///
@@ -1450,6 +1454,132 @@ fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// Map line 1661: the routing model currently selected to classify work, and
+/// its most recent observed latency — the first production reader
+/// `crate::routing::evidence::EvidenceLedger::summarize`'s
+/// `median_duration_ms`, `tail_duration_ms` and `ewma_duration_ms` fields
+/// have ever had outside a test (this phase's own evidence entry names the
+/// gap).
+///
+/// # Which model
+///
+/// [`EffectiveConfig::routing_model_resolution`] — the same live,
+/// present-tense answer `api::unix::routing_model_status` already reports for
+/// capability map line 1680 — not the raw stored `RoutingModelChoice` the
+/// Settings overlay's routing row shows. A `Pinned` choice naming a provider
+/// that has since been removed from configuration must not read as
+/// "selected" here, because nothing will actually route through it; the
+/// resolution already carries that degrade.
+///
+/// # Whose latency
+///
+/// Only [`crate::config::RoutingModelResolution::Pinned`] names an exact
+/// `(provider, model)` identity the evidence ledger can be asked about.
+/// `Automatic` and `Heuristics` do not name a single model — Phase 34C's
+/// dynamic choice and the deterministic fallback both classify without one —
+/// so there is no identity to query, and the line says so rather than
+/// showing a project-wide average attributed to a name that did not earn it
+/// (ruling 3: a wrong number wearing a right label).
+///
+/// # Cannot fail visibly
+///
+/// An unopenable ledger or a failed query degrades to one honest line, the
+/// same shape [`build_project_overview_capacity`] already uses — never
+/// panics, never blocks, never empties the rest of the overview.
+fn build_project_overview_routing(runtime: &Runtime) -> String {
+    use crate::config::RoutingModelResolution;
+    use crate::routing::evidence::EvidenceLedger;
+
+    let user = match UserConfig::load(runtime.paths()) {
+        Ok(user) => user,
+        Err(err) => return format!("  routing model  unavailable: {err:#}"),
+    };
+    let project_config = match config::load_project_config(runtime.project()) {
+        Ok(project_config) => project_config,
+        Err(err) => return format!("  routing model  unavailable: {err:#}"),
+    };
+    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+    let resolution = effective.routing_model_resolution().value;
+    let label = routing_resolution_label(&resolution);
+
+    let latency = match &resolution {
+        RoutingModelResolution::Pinned { provider, model } => {
+            let now_unix = crate::provider::cache::now_unix_seconds();
+            match EvidenceLedger::open(runtime) {
+                Ok(ledger) => match ledger.summarize_latest_for_model(
+                    provider,
+                    model,
+                    now_unix,
+                    ROUTE_EVIDENCE_WINDOW_SECONDS,
+                ) {
+                    Ok(summary) => routing_latency_phrase(summary.as_ref()),
+                    Err(err) => format!("unavailable: {err:#}"),
+                },
+                Err(err) => format!("unavailable: {err:#}"),
+            }
+        }
+        RoutingModelResolution::Automatic | RoutingModelResolution::Heuristics(_) => {
+            "not applicable — no single model is selected".to_owned()
+        }
+    };
+
+    format!("  routing model  {label}, recent latency {latency}")
+}
+
+/// The short label for what will actually classify a request right now — the
+/// first pure half of [`build_project_overview_routing`], testable without a
+/// config file. Matches `shell::view::render_routing`'s own word choice for
+/// [`crate::config::RoutingModelChoice::Automatic`]/`Deterministic`/`Pinned`
+/// exactly, so the same state reads the same way in both places, with the
+/// one addition a *resolution* can say that a raw choice cannot: which
+/// fallback, if any, is actually in effect right now.
+fn routing_resolution_label(resolution: &crate::config::RoutingModelResolution) -> String {
+    use crate::config::{RoutingFallback, RoutingModelResolution};
+
+    match resolution {
+        RoutingModelResolution::Automatic => "automatic".to_owned(),
+        RoutingModelResolution::Pinned { provider, model } => format!("{provider}:{model}"),
+        RoutingModelResolution::Heuristics(RoutingFallback::NotConfigured) => {
+            "deterministic heuristics (none configured)".to_owned()
+        }
+        RoutingModelResolution::Heuristics(RoutingFallback::DeterministicChosen) => {
+            "deterministic heuristics".to_owned()
+        }
+        RoutingModelResolution::Heuristics(RoutingFallback::ProviderNotConfigured {
+            provider,
+            ..
+        }) => format!("deterministic heuristics (`{provider}` no longer configured)"),
+    }
+}
+
+/// One phrase naming a queried model's most recent latency, or exactly why
+/// there is none — the second pure half of [`build_project_overview_routing`],
+/// testable directly against a hand-built
+/// [`crate::routing::evidence::RoutingSummary`] rather than only through a
+/// real evidence ledger.
+///
+/// Ruling 1: `None` is never `0`. `summary` being absent (`None` argument, no
+/// observation at all) and `summary.median_duration_ms` being absent (an
+/// observation exists but is below the minimum sample) both read the same
+/// honest "unknown" here — a caller downstream of this line does not need to
+/// tell the two apart, and
+/// [`crate::routing::evidence::EvidenceLedger::summarize_latest_for_model`]'s
+/// own doc comment is where that distinction is kept for one that does.
+fn routing_latency_phrase(summary: Option<&crate::routing::evidence::RoutingSummary>) -> String {
+    let Some(median) = summary.and_then(|s| s.median_duration_ms.as_ref()) else {
+        return "unknown — not enough observations yet".to_owned();
+    };
+    let tail = summary
+        .and_then(|s| s.tail_duration_ms.as_ref())
+        .map(|reading| format!(", p95 {}ms", reading.value()));
+    format!(
+        "median {}ms{} ({} sample(s))",
+        median.value(),
+        tail.unwrap_or_default(),
+        median.sample_count()
+    )
 }
 
 /// One line describing what Glasshouse currently believes about `label`'s
@@ -3759,6 +3889,7 @@ mod project_overview_tests {
             built.todos,
             built.todos_omitted,
             Vec::new(),
+            String::new(),
             None,
         );
 
@@ -4043,6 +4174,219 @@ mod project_overview_capacity_tests {
         );
         assert!(lines[0].contains("82%"), "{lines:?}");
         assert!(lines[0].contains("[measured]"), "{lines:?}");
+    }
+}
+
+/// Map line 1661: [`build_project_overview_routing`] reached through its
+/// real callers — a real routing choice on disk, resolved against real
+/// configured providers, and a real [`crate::routing::evidence::EvidenceLedger`]
+/// with planted observations, not a hand-built `RoutingSummary` a test
+/// constructed itself (practice §35).
+#[cfg(test)]
+mod project_overview_routing_tests {
+    use super::*;
+    use crate::config::{RoutingModelChoice, UserConfig};
+    use crate::routing::evidence::{
+        EvidenceLedger, MIN_SAMPLE_FOR_SUMMARY, NewObservation, Outcome,
+    };
+
+    /// Same bootstrap `project_overview_capacity_tests` uses — an isolated,
+    /// real on-disk project database, not a fixture that reimplements the
+    /// query.
+    fn bootstrapped_runtime() -> (tempfile::TempDir, tempfile::TempDir, crate::Runtime) {
+        use clap::Parser;
+
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join(".git")).unwrap();
+
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+            "--config-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, workspace.path()).unwrap();
+        (data, workspace, runtime)
+    }
+
+    fn pin_routing_model(runtime: &crate::Runtime, provider: &str, model: &str) {
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        user.providers_mut().set(
+            provider,
+            crate::config::ProviderConfig::new("openai-compatible"),
+        );
+        user.routing_mut()
+            .set_model(Some(RoutingModelChoice::Pinned {
+                provider: provider.to_owned(),
+                model: model.to_owned(),
+            }));
+        user.save(runtime.paths()).unwrap();
+    }
+
+    fn plant_observations(
+        runtime: &crate::Runtime,
+        provider: &str,
+        model: &str,
+        count: usize,
+        duration_seconds: i64,
+    ) {
+        let ledger = EvidenceLedger::open(runtime).unwrap();
+        // Real recent timestamps, not a tiny epoch offset: the production
+        // function this test exercises windows against the real clock
+        // (`crate::provider::cache::now_unix_seconds`), so an observation
+        // timestamped near the Unix epoch would fall outside that window and
+        // be silently excluded — every observation here must actually be
+        // "recent" for the same reason the line it feeds is called that.
+        let base = crate::provider::cache::now_unix_seconds() - (count as i64 * 10) - 100;
+        for i in 0..count {
+            let at = base + i as i64 * 10;
+            let new = NewObservation::new(provider, model)
+                .with_route(Some("anthropic-messages"))
+                .with_harness(Some("claude-code"))
+                .with_timing(Some(at), Some(at + duration_seconds))
+                .with_outcome(Outcome::Succeeded);
+            ledger.record(new, at).unwrap();
+        }
+    }
+
+    /// No routing model configured: the default is deterministic, which
+    /// names no single model — the line says so rather than showing a
+    /// project-wide average attributed to a name that did not earn it
+    /// (ruling 3).
+    #[test]
+    fn no_pinned_routing_model_reports_not_applicable() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let line = build_project_overview_routing(&runtime);
+        assert!(line.contains("deterministic heuristics"), "{line}");
+        assert!(line.contains("not applicable"), "{line}");
+    }
+
+    /// [`RoutingModelChoice::Automatic`] names no single model either —
+    /// Phase 34C's dynamic choice has no production caller yet.
+    #[test]
+    fn automatic_routing_reports_not_applicable_latency() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        user.routing_mut()
+            .set_model(Some(RoutingModelChoice::Automatic));
+        user.save(runtime.paths()).unwrap();
+
+        let line = build_project_overview_routing(&runtime);
+        assert!(line.contains("automatic"), "{line}");
+        assert!(line.contains("not applicable"), "{line}");
+    }
+
+    /// Acceptance test 1: with enough observations for the selected model,
+    /// the overview shows a real latency figure.
+    #[test]
+    fn a_pinned_model_with_enough_observations_shows_a_real_latency_figure() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        pin_routing_model(&runtime, "anyrouter", "claude-opus-4-1");
+        plant_observations(
+            &runtime,
+            "anyrouter",
+            "claude-opus-4-1",
+            MIN_SAMPLE_FOR_SUMMARY,
+            2,
+        );
+
+        let line = build_project_overview_routing(&runtime);
+        assert!(line.contains("anyrouter:claude-opus-4-1"), "{line}");
+        assert!(line.contains("median 2000ms"), "{line}");
+        assert!(!line.contains("unknown"), "{line}");
+    }
+
+    /// Acceptance test 2 / ruling 1: below the minimum sample, the line must
+    /// say `unknown` rather than rendering `0ms` — the mutation this proof
+    /// exists to kill is rendering the unknown case as a real zero.
+    #[test]
+    fn a_pinned_model_below_the_minimum_sample_shows_unknown_never_zero() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        pin_routing_model(&runtime, "anyrouter", "claude-opus-4-1");
+        plant_observations(
+            &runtime,
+            "anyrouter",
+            "claude-opus-4-1",
+            MIN_SAMPLE_FOR_SUMMARY - 1,
+            2,
+        );
+
+        let line = build_project_overview_routing(&runtime);
+        assert!(line.contains("unknown"), "{line}");
+        assert!(!line.contains("0ms"), "{line}");
+        assert!(!line.contains("0 ms"), "{line}");
+    }
+
+    /// Acceptance test 4, the empty-ledger half: a pinned model nothing has
+    /// ever recorded an observation for degrades to the same honest
+    /// `unknown`, never a panic or a blocked overview.
+    #[test]
+    fn a_pinned_model_with_an_empty_ledger_shows_unknown() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        pin_routing_model(&runtime, "anyrouter", "claude-opus-4-1");
+
+        let line = build_project_overview_routing(&runtime);
+        assert!(line.contains("anyrouter:claude-opus-4-1"), "{line}");
+        assert!(line.contains("unknown"), "{line}");
+    }
+
+    /// Acceptance test 3 / ruling 3: latency is attributed to the *selected*
+    /// model, never a second, differently-performing model — the mutation
+    /// this proof exists to kill is querying the ledger without the model
+    /// filter.
+    #[test]
+    fn latency_is_attributed_to_the_selected_model_not_a_second_ones() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        pin_routing_model(&runtime, "anyrouter", "fast-model");
+        plant_observations(
+            &runtime,
+            "anyrouter",
+            "fast-model",
+            MIN_SAMPLE_FOR_SUMMARY,
+            2,
+        );
+        plant_observations(
+            &runtime,
+            "anyrouter",
+            "slow-model",
+            MIN_SAMPLE_FOR_SUMMARY,
+            900,
+        );
+
+        let line = build_project_overview_routing(&runtime);
+        assert!(line.contains("anyrouter:fast-model"), "{line}");
+        assert!(line.contains("median 2000ms"), "{line}");
+        assert!(
+            !line.contains("900000"),
+            "the unselected model's latency must not leak into the selected model's line: {line}"
+        );
+    }
+
+    /// A `Pinned` choice naming a provider that has since been removed from
+    /// configuration must not read as "selected" — the resolution degrades
+    /// to heuristics and says so, and there is no identity left to query for
+    /// latency (§36: the caller must exercise the policy for what it is
+    /// actually being asked, not a resolution that no longer holds).
+    #[test]
+    fn a_pinned_model_naming_a_vanished_provider_degrades_to_heuristics() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        user.routing_mut()
+            .set_model(Some(RoutingModelChoice::Pinned {
+                provider: "vanished".to_owned(),
+                model: "m".to_owned(),
+            }));
+        user.save(runtime.paths()).unwrap();
+        // "vanished" is never added to `user.providers_mut()`.
+
+        let line = build_project_overview_routing(&runtime);
+        assert!(line.contains("deterministic heuristics"), "{line}");
+        assert!(line.contains("no longer configured"), "{line}");
+        assert!(line.contains("not applicable"), "{line}");
+        assert!(!line.contains("vanished:m"), "{line}");
     }
 }
 

@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**802 / 1280 mandatory capabilities (63%)** — 478 open across 64 phases.
+**803 / 1280 mandatory capabilities (63%)** — 477 open across 63 phases.
 
 ## Where the work is
 
@@ -32,7 +32,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 30 | Session context metadata | **1** | 7 | `1156` |
 | Phase 32B | Quota telemetry sources | **1** | 13 | `1220` |
 | Phase 32F | Protected quota reserve | **1** | 7 | `1285` |
-| Phase 41 | Project overview | **1** | 14 | `1648` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 9E | Secret storage | **2** | 11 | `432` |
 | Phase 9J | Harness-model pairing model | **2** | 18 | `545` |
@@ -87,7 +86,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 51 | Evaluation hooks | **34** | 3 | `1818` |
 | Phase 21K | Assumption-aware implementation guardrails | **43** | 0 | `992` |
 
-**Fully closed (40):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 26, Phase 32, Phase 34, Phase 35, Phase 40, Phase 42, Phase 45, Phase 48.
+**Fully closed (41):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 26, Phase 32, Phase 34, Phase 35, Phase 40, Phase 41, Phase 42, Phase 45, Phase 48.
 
 ## The nearly-finished phases, in full
 
@@ -141,10 +140,6 @@ these unwrapped.
 ### Phase 32F — Protected quota reserve  (1 open, 7 closed)
 
 - **1294** ☐ Avoid moving an almost-complete high-value task to another session solely because a reserve threshold was crossed.
-
-### Phase 41 — Project overview  (1 open, 14 closed)
-
-- **1661** ☐ Show the currently selected routing model and its recent latency.
 
 ### Phase 9 — Antigravity adapter  (2 open, 5 closed)
 
