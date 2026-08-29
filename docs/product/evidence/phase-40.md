@@ -1,4 +1,4 @@
-# Phase 40 — Fresh-session handoff, 7 of 9 closed
+# Phase 40 — Fresh-session handoff, 8 of 9 closed
 
 Capability map lines 1638–1646. Sonnet implementer packet `GH-HANDOFF-CHECKPOINT`,
 worktree `.worktrees/handoff-checkpoint`; full report in
@@ -150,23 +150,76 @@ class alone was sufficient.
 
 ### Phase 40 — Include relevant project-memory records in the handoff when useful (line 1641)
 
-State: **NOT STARTED — blocked, with a written patch and a verified breakage.**
+Contract: Given a project with binding memory records, when a checkpoint is
+captured and used to bootstrap a fresh session, Glasshouse includes those records
+in the handoff the new harness receives — while never failing the checkpoint
+because memory could not be read, and never inventing records for a project that
+has none.
 
-`Handoff` has no `memory` field. Adding one is not additive: the struct is
-constructed as a literal in two forbidden files, and the worker **verified the
-breakage by doing it** rather than assuming — `cargo check --workspace
---all-targets` failed with `E0063: missing field` at both
-`main.rs::checkpoint_command` and `api/unix.rs::request_checkpoint`.
+State: COMPLETE
 
-What a package for this owes, beyond the field: `Document` mapping, `fit()`'s
-per-item clamp, `shed()`'s pop order (binding memory records are constraints, so
-they should shed after `decisions`, not before), a `RELEVANT MEMORY` section in
-`bootstrap_prompt`, and two judgment calls the worker correctly refused to make
-alone — `MemoryRecord`'s actual text accessor, and whether a failure to open
-`ProjectMemory` should fail the whole checkpoint (it should not).
+Closed 2026-08-29 by `GH-HANDOFF-MEMORY`. The blocker recorded here previously
+was real and is now paid: `Handoff` gained a `memory: Vec<String>` field, which
+breaks the two `Handoff` literals in `main.rs` and `api/unix.rs`. Both were in
+that package's partition precisely so it could fix them.
 
-This is an implementation task, not a patch to apply. See
-`.agent-runtime/report-handoff-checkpoint.md` for the exact diff sketch.
+Production evidence:
+- `crates/glasshouse/src/checkpoint/mod.rs` — `Handoff::memory`, mapped through
+  `Document`/`document()`/`parse()`, clamped by `fit()`, shed by `shed()`, and
+  rendered as a `RELEVANT MEMORY` section by `bootstrap_prompt()`.
+- `crates/glasshouse/src/main.rs` — `binding_memory_lines`, called from
+  `checkpoint_command`'s `Save` arm.
+- `crates/glasshouse/src/api/unix.rs` — the same call in `request_checkpoint`,
+  the second capture site discovered in batch 45.
+
+**Shed order is a decision, not an accident:** memory sheds after `decisions` and
+before `failed_approaches`. Binding records are constraints the next session must
+respect, so they outrank disposable context.
+
+**Failure behaviour is the load-bearing part.** A failure to open `ProjectMemory`
+or read `binding` degrades to an empty list and the checkpoint still saves. A
+checkpoint that refused to save because memory was unavailable would be strictly
+worse than one with no memory section.
+
+Regression evidence:
+- `main.rs::tests::checkpoint_save_carries_binding_project_memory_into_the_handoff`
+  — the production-path test: binding memory reaches the handoff and an
+  unclassified record does not.
+- `checkpoint_portability::a_checkpoint_captured_with_binding_memory_carries_it_into_the_prompt`
+- `checkpoint_portability::a_project_with_no_binding_memory_renders_no_relevant_memory_section`
+  — no empty heading for a project with nothing to say.
+- `checkpoint_portability::a_document_written_before_the_memory_field_existed_still_parses`
+  — older checkpoints keep working.
+- `checkpoint_portability::fit_sheds_memory_only_once_less_protected_content_is_used_up`
+- `binding_memory_lines_degrades_to_empty_when_the_database_cannot_be_opened`
+
+Mutations, both killed:
+
+| mutation | vocabulary | result |
+|---|---|---|
+| `memory: binding_memory_lines(runtime)` → `Vec::new()` | `skip-state-update` | **killed** — `left: [] / right: ["never store secrets in a checkpoint"]` |
+| `ProjectMemory::open` degrade-on-`Err` → `.expect(...)` | `remove-guard` | **killed** — proves "must not fail the checkpoint" is enforced, not merely documented |
+
+**Integrator re-ran the first mutation and it initially SURVIVED — because the
+integrator named the wrong target.** The mutation is in `main.rs`, and
+`--test checkpoint_portability` does not contain `main.rs`'s own tests; re-run as
+`--bin glasshouse` it is killed, with the assertion above. That is practice §68
+inside the mutation step itself, and `scripts/mutate.sh` now prints the
+`test result:` line on every SURVIVED verdict so the reader can see whether the
+command or the code survived.
+
+**Recorded gap, not discovered later.** `api/unix.rs::binding_memory_lines` has
+no test proving its own wiring. It is code-identical to `main.rs`'s copy and
+covered by `cargo check`/`clippy`, and the existing socket-level tests exercise
+`request_checkpoint` end to end — but their fixtures have **no binding memory**,
+so they prove memory is *absent*, not that it would be *present* if seeded. The
+capability is proven at the CLI production path; the API door is asserted by code
+identity. This is the same shape as `phase-33.md`'s accepted `load_all` caveat.
+**Follow-up: seed binding memory into one socket-level fixture.**
+
+Not verified, and outside this package's partition: whether `MemoryRecord.body`
+can legitimately carry a secret at the extraction layer. That boundary lives in
+`memory/**`.
 
 ---
 

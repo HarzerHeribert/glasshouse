@@ -629,6 +629,33 @@ fn memory_result_json(record: &glasshouse::memory::MemoryRecord) -> serde_json::
     })
 }
 
+/// The project's current binding memory, rendered for a checkpoint's
+/// `Handoff::memory` — line 1641.
+///
+/// Identical to `main.rs`'s function of the same name, and duplicated for the
+/// reason [`request_checkpoint`] itself is: opening the project's memory
+/// database or reading its binding records must never fail a checkpoint, so
+/// either failure degrades to an empty list rather than propagating.
+fn binding_memory_lines(runtime: &Runtime) -> Vec<String> {
+    use glasshouse::memory::ProjectMemory;
+
+    let Ok(memory) = ProjectMemory::open(runtime) else {
+        return Vec::new();
+    };
+    let Ok(records) = memory.store().binding(20) else {
+        return Vec::new();
+    };
+    records
+        .into_iter()
+        .map(|record| match record.subject {
+            // Phase 20 allows an absent subject; rendering an empty one would
+            // print a heading nobody wrote.
+            Some(subject) => format!("{subject}: {}", record.body),
+            None => record.body,
+        })
+        .collect()
+}
+
 /// Take a checkpoint — box 11.
 ///
 /// Mirrors `main.rs`'s `CheckpointCommand::Save` arm: the same session
@@ -676,6 +703,7 @@ fn request_checkpoint(
             objective,
             implementation_state,
             decisions,
+            memory: binding_memory_lines(runtime),
             failed_approaches,
             files,
             test_state,

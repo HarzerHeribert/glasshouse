@@ -1638,7 +1638,7 @@ Fixed architectural requirements
 ☑ Allow the router or user to create a fresh session from an existing portable checkpoint.
 ☑ Include the checkpoint as explicit handoff context rather than replaying the complete old conversation.
 ☑ Include current Git status and relevant diff references in the handoff when useful.
-☐ Include relevant project-memory records in the handoff when useful.
+☑ Include relevant project-memory records in the handoff when useful.
 ☑ Allow a Claude session to hand off to Codex.
 ☑ Allow a Codex session to hand off to Claude Code.
 ☑ Allow either session type to hand off to Antigravity when supported.

@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**710 / 1280 mandatory capabilities (55%)** — 570 open across 79 phases.
+**711 / 1280 mandatory capabilities (56%)** — 569 open across 79 phases.
 
 ## Where the work is
 
@@ -35,6 +35,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 21A | Memory authority classes | **1** | 11 | `847` |
 | Phase 32 | Resource registry | **1** | 11 | `1177` |
 | Phase 32B | Quota telemetry sources | **1** | 13 | `1220` |
+| Phase 40 | Fresh-session handoff | **1** | 8 | `1631` |
 | Phase 41 | Project overview | **1** | 14 | `1648` |
 | Phase 7 | Claude Code adapter | **2** | 8 | `296` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
@@ -43,7 +44,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 9J | Harness-model pairing model | **2** | 18 | `545` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
-| Phase 40 | Fresh-session handoff | **2** | 7 | `1631` |
 | Phase 42 | External control API | **2** | 11 | `1666` |
 | Phase 45 | Failure handling | **2** | 7 | `1722` |
 | Phase 46 | Security and contamination tests | **2** | 6 | `1739` |
@@ -169,6 +169,10 @@ these unwrapped.
 
 - **1239** ☐ Treat completely unknown quota as a routing uncertainty rather than as zero or one hundred percent remaining.
 
+### Phase 40 — Fresh-session handoff  (1 open, 8 closed)
+
+- **1646** ☐ Record the handoff relationship between source and destination sessions.
+
 ### Phase 41 — Project overview  (1 open, 14 closed)
 
 - **1661** ☐ Show the currently selected routing model and its recent latency.
@@ -207,11 +211,6 @@ these unwrapped.
 
 - **1263** ☐ Lower the score when user-defined spending budget is close to exhaustion.
 - **1267** ☐ Treat unlimited local inference as high-capacity but still account for measured latency and concurrency.
-
-### Phase 40 — Fresh-session handoff  (2 open, 7 closed)
-
-- **1641** ☐ Include relevant project-memory records in the handoff when useful.
-- **1646** ☐ Record the handoff relationship between source and destination sessions.
 
 ### Phase 42 — External control API  (2 open, 11 closed)
 

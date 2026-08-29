@@ -144,6 +144,11 @@ pub struct Handoff {
     pub implementation_state: String,
     /// Decisions discovered during this task, when there are any.
     pub decisions: Vec<String>,
+    /// The project's current binding memory records — invariants, constraints
+    /// and decisions Phase 21A classifies as rules rather than context — at
+    /// the moment this checkpoint was taken. Line 1641: a fresh session gets
+    /// these without having to query memory for itself before its first turn.
+    pub memory: Vec<String>,
     /// Approaches already tried and abandoned, so the next session does not
     /// spend its first hour repeating them.
     pub failed_approaches: Vec<String>,
@@ -198,6 +203,8 @@ struct Document {
     implementation_state: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     decisions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    memory: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     failed_approaches: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -303,6 +310,7 @@ impl Checkpoint {
                 objective: parsed.objective,
                 implementation_state: parsed.implementation_state,
                 decisions: parsed.decisions,
+                memory: parsed.memory,
                 failed_approaches: parsed.failed_approaches,
                 files: parsed.files,
                 test_state: parsed.test_state,
@@ -322,6 +330,7 @@ impl Checkpoint {
             objective: self.handoff.objective.clone(),
             implementation_state: self.handoff.implementation_state.clone(),
             decisions: self.handoff.decisions.clone(),
+            memory: self.handoff.memory.clone(),
             failed_approaches: self.handoff.failed_approaches.clone(),
             files: self.handoff.files.clone(),
             test_state: self.handoff.test_state.clone(),
@@ -350,7 +359,16 @@ impl Checkpoint {
     /// they are the largest section in practice and the least costly to
     /// rediscover — then the working tree's changed-file list (Glasshouse
     /// read it off disk and can read it again), then the file list, then
-    /// decisions, then the test state, then next actions.
+    /// decisions, then **project memory**, then the test state, then next
+    /// actions.
+    ///
+    /// Project memory sheds right after decisions and before the test state:
+    /// it is never disposable in the way a failed approach or a changed-file
+    /// list is — a binding record is a constraint the next session must not
+    /// silently violate, not a convenience this session happened to jot down
+    /// — but the test state and next actions are what tells a fresh session
+    /// where to resume at all, and those outrank everything else that can be
+    /// given up.
     ///
     /// Nothing is ever silently perfect: whatever is dropped sets `trimmed`,
     /// so a reader knows to go and look at the session itself.
@@ -364,6 +382,7 @@ impl Checkpoint {
         }
         for list in [
             &mut self.handoff.decisions,
+            &mut self.handoff.memory,
             &mut self.handoff.failed_approaches,
             &mut self.handoff.files,
             &mut self.handoff.next_actions,
@@ -478,6 +497,7 @@ impl Checkpoint {
         }
 
         section(&mut out, "DECISIONS ALREADY MADE", &self.handoff.decisions);
+        section(&mut out, "RELEVANT MEMORY", &self.handoff.memory);
         section(
             &mut out,
             "APPROACHES ALREADY TRIED AND ABANDONED — do not repeat these",
@@ -535,6 +555,13 @@ impl Checkpoint {
                 })
                 .or_else(|| self.handoff.files.pop())
                 .or_else(|| self.handoff.decisions.pop())
+                // Project memory sheds only once decisions are gone: a
+                // binding record is a constraint on the next session, not
+                // disposable context, so it outlives everything shed above it
+                // — but the test state and next actions below still matter
+                // more, because those are what tell a fresh session where to
+                // resume at all.
+                .or_else(|| self.handoff.memory.pop())
                 .or_else(|| self.handoff.test_state.take())
                 .or_else(|| self.handoff.next_actions.pop());
             let Some(item) = item else {
@@ -593,6 +620,7 @@ mod tests {
             objective: "close Phase 19".to_owned(),
             implementation_state: "the format exists; storage is next".to_owned(),
             decisions: vec!["JSON, versioned".to_owned()],
+            memory: vec!["the project never stores secrets in checkpoints".to_owned()],
             failed_approaches: vec!["cloning the harness session file".to_owned()],
             files: vec!["checkpoint/mod.rs::Checkpoint".to_owned()],
             test_state: Some("973 passing".to_owned()),
@@ -646,6 +674,7 @@ mod tests {
         let rendered = minimal.render();
         for absent in [
             "decisions",
+            "memory",
             "failed_approaches",
             "files",
             "test_state",
@@ -686,6 +715,7 @@ mod tests {
             "objective",
             "implementation_state",
             "decisions",
+            "memory",
             "failed_approaches",
             "files",
             "test_state",
@@ -733,6 +763,9 @@ mod tests {
                 implementation_state: "s".repeat(50_000),
                 decisions: (0..500)
                     .map(|i| format!("decision {i} {}", "d".repeat(200)))
+                    .collect(),
+                memory: (0..500)
+                    .map(|i| format!("memory {i} {}", "m".repeat(200)))
                     .collect(),
                 failed_approaches: (0..500).map(|i| format!("failed {i}")).collect(),
                 files: (0..500).map(|i| format!("file{i}.rs")).collect(),
@@ -787,6 +820,51 @@ mod tests {
         );
     }
 
+    /// Project memory is a constraint, not disposable context: with enough
+    /// failed approaches, changed files and decisions to cover the whole
+    /// overshoot by themselves, a single memory record is left completely
+    /// untouched — the wrong shed order would have reached into it instead
+    /// and left some of the less-protected content behind.
+    #[test]
+    fn trimming_protects_project_memory_while_less_protected_content_remains() {
+        let trimmed = Checkpoint {
+            handoff: Handoff {
+                objective: "the objective".to_owned(),
+                implementation_state: "the state".to_owned(),
+                failed_approaches: (0..2000).map(|i| format!("failed approach {i}")).collect(),
+                files: (0..2000).map(|i| format!("some/file/{i}.rs")).collect(),
+                decisions: (0..2000).map(|i| format!("decision {i}")).collect(),
+                memory: vec!["a binding constraint that must not be lost lightly".to_owned()],
+                test_state: Some("6 of 6 passing".to_owned()),
+                next_actions: vec!["do the thing".to_owned()],
+            },
+            ..checkpoint()
+        }
+        .fit();
+
+        assert!(trimmed.render().len() <= MAX_BYTES);
+        assert!(
+            trimmed.handoff.decisions.len() < 2000,
+            "nothing was given up at all"
+        );
+        assert_eq!(
+            trimmed.handoff.test_state,
+            Some("6 of 6 passing".to_owned()),
+            "test state must outlive project memory"
+        );
+        assert_eq!(
+            trimmed.handoff.next_actions,
+            vec!["do the thing".to_owned()],
+            "next actions must outlive project memory"
+        );
+        assert_eq!(
+            trimmed.handoff.memory,
+            vec!["a binding constraint that must not be lost lightly".to_owned()],
+            "memory must not be shed while there was still plenty of less-protected \
+             content to give up first"
+        );
+    }
+
     /// A checkpoint that already fits is left exactly alone, and does not
     /// claim to have been trimmed.
     #[test]
@@ -807,6 +885,25 @@ mod tests {
             assert!(value.len() <= len);
             assert!(std::str::from_utf8(value.as_bytes()).is_ok());
         }
+    }
+
+    /// Line 1641: a project's binding memory reaches the prompt under its own
+    /// heading when there is any, and the heading itself is absent — not
+    /// present and empty — when a project has no binding memory at all.
+    #[test]
+    fn the_bootstrap_prompt_includes_relevant_memory_when_present_and_omits_the_section_when_absent()
+     {
+        let with_memory = checkpoint().bootstrap_prompt();
+        assert!(with_memory.contains("RELEVANT MEMORY"));
+        assert!(with_memory.contains("the project never stores secrets in checkpoints"));
+
+        let mut without_memory = checkpoint();
+        without_memory.handoff.memory.clear();
+        let prompt = without_memory.bootstrap_prompt();
+        assert!(
+            !prompt.contains("RELEVANT MEMORY"),
+            "a project with no binding memory must render no section at all:\n{prompt}"
+        );
     }
 
     /// The bootstrap prompt is the artifact that crosses harnesses, so it

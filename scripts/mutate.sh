@@ -201,6 +201,29 @@ PY
     echo "  THIS IS THE MOST VALUABLE OUTCOME: it names behaviour the suite is"
     echo "  not actually watching — e.g. a check that inspects a return code"
     echo "  but never the value it claims to validate."
+    # §68, and the integrator walked straight into it on this tool's second
+    # real use: a SURVIVED verdict from a command that never ran the relevant
+    # test is indistinguishable from a genuine survival. The mutation was in
+    # main.rs and the command said `--test checkpoint_portability`, a target
+    # that does not contain main.rs's own tests; it reported SURVIVED, and
+    # re-running with `--bin glasshouse` reported KILLED.
+    #
+    # So always show what actually ran. A count that looks too small, or a
+    # "0 filtered out" against a whole-suite expectation, is the reader's cue
+    # that the command — not the code — is what survived.
+    local counts
+    counts="$(grep -E '^test result:' "$out")"
+    if [ -n "$counts" ]; then
+      echo
+      echo "  WHAT ACTUALLY RAN — check this before believing the verdict:"
+      printf '    %s\n' "$counts"
+      echo "  If the relevant test is not in there, the COMMAND survived, not"
+      echo "  the code. Re-run naming the target that holds it."
+    else
+      echo
+      echo "  WARNING: no 'test result:' line was produced at all, so it is not"
+      echo "  even established that any test ran. Treat this verdict as void."
+    fi
   fi
 
   # Step 7: always restore, and fail loudly if the restore drifted.

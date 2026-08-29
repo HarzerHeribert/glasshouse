@@ -67,6 +67,7 @@ fn full_checkpoint(session: &str, harness: &str, at: i64) -> Checkpoint {
             implementation_state: "the event log tests pass; the checkpoint tests are next"
                 .to_owned(),
             decisions: vec!["use the sibling idiom for project isolation".to_owned()],
+            memory: vec!["constraint: checkpoints and memory never share a table".to_owned()],
             failed_approaches: vec!["tried mocking the database, discarded it".to_owned()],
             files: vec!["tests/events_log.rs".to_owned()],
             test_state: Some("6 of 6 events_log tests passing".to_owned()),
@@ -119,6 +120,7 @@ fn every_field_survives_a_round_trip_through_a_real_database() {
         read_back.handoff.decisions, original.handoff.decisions,
         "decisions"
     );
+    assert_eq!(read_back.handoff.memory, original.handoff.memory, "memory");
     assert_eq!(
         read_back.handoff.failed_approaches, original.handoff.failed_approaches,
         "failed_approaches"
@@ -375,6 +377,7 @@ fn checkpoint_handoff() -> Handoff {
         objective: "identical objective".to_owned(),
         implementation_state: "identical state".to_owned(),
         decisions: vec!["identical decision".to_owned()],
+        memory: vec!["identical memory record".to_owned()],
         failed_approaches: vec!["identical failed approach".to_owned()],
         files: vec!["identical/file.rs".to_owned()],
         test_state: Some("identical test state".to_owned()),
@@ -609,6 +612,177 @@ fn capturing_a_checkpoint_reads_the_working_tree_status_of_the_repository_it_is_
     assert!(
         outside.working_tree.is_none(),
         "a project with no index must record no status, not a fake one"
+    );
+}
+
+/// Render a project's binding memory the way a checkpoint's `Handoff::memory`
+/// does — `main.rs::binding_memory_lines` and
+/// `api/unix.rs::binding_memory_lines`, verbatim. Kept as its own small
+/// function here rather than imported, for the same reason the two
+/// production copies are not unified: this is a data shape, not a shared
+/// dependency, and three small copies are cheaper than the coupling a fourth
+/// caller across a crate boundary would need.
+fn memory_lines(records: Vec<glasshouse::memory::MemoryRecord>) -> Vec<String> {
+    records
+        .into_iter()
+        .map(|record| match record.subject {
+            Some(subject) => format!("{subject}: {}", record.body),
+            None => record.body,
+        })
+        .collect()
+}
+
+/// 7. **Line 1641 — binding project memory reaches the handoff.** A project
+///    with binding memory records carries them into `Handoff::memory`, and
+///    `bootstrap_prompt()` names them under their own heading.
+#[test]
+fn a_checkpoint_captured_with_binding_memory_carries_it_into_the_prompt() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let memory = ProjectMemory::open(&fixture.runtime).unwrap();
+    memory
+        .store()
+        .record(
+            NewMemory::new(
+                MemoryKind::Constraint,
+                "checkpoints never carry a native session's transcript",
+            )
+            .with_subject(Some("checkpoint format"))
+            .with_authority(Some(glasshouse::memory::MemoryAuthority::Constraint)),
+        )
+        .unwrap();
+
+    let binding = memory.store().binding(20).unwrap();
+    assert_eq!(binding.len(), 1, "the record must be classified as binding");
+    let lines = memory_lines(binding);
+
+    let project_checkpoints =
+        glasshouse::checkpoint::ProjectCheckpoints::open(&fixture.runtime).unwrap();
+    let store = project_checkpoints.store();
+    let mut checkpoint = full_checkpoint("session-a", "a-harness", 1_700_000_000);
+    checkpoint.handoff.memory = lines.clone();
+    let stored = store.save(checkpoint).unwrap();
+
+    let prompt = stored.checkpoint.bootstrap_prompt();
+    assert!(prompt.contains("RELEVANT MEMORY"));
+    for line in &lines {
+        assert!(prompt.contains(line), "{line} missing from:\n{prompt}");
+    }
+}
+
+/// 8. A project with no binding memory produces a prompt with no `RELEVANT
+///    MEMORY` section at all — not an empty heading. Exercised against a real
+///    project that genuinely has zero binding records, not a hand-built empty
+///    `Vec`.
+#[test]
+fn a_project_with_no_binding_memory_renders_no_relevant_memory_section() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    // A memory that exists but was never classified as binding — Phase 21A's
+    // "an unclassified memory is not a rule" — must not appear either.
+    let memory = ProjectMemory::open(&fixture.runtime).unwrap();
+    memory
+        .store()
+        .record(NewMemory::new(
+            MemoryKind::Finding,
+            "the sandbox network is flaky on Tuesdays",
+        ))
+        .unwrap();
+    let binding = memory.store().binding(20).unwrap();
+    assert!(binding.is_empty(), "an unclassified memory must not bind");
+
+    let project_checkpoints =
+        glasshouse::checkpoint::ProjectCheckpoints::open(&fixture.runtime).unwrap();
+    let store = project_checkpoints.store();
+    let mut checkpoint = full_checkpoint("session-a", "a-harness", 1_700_000_000);
+    checkpoint.handoff.memory = memory_lines(binding);
+    let stored = store.save(checkpoint).unwrap();
+
+    let prompt = stored.checkpoint.bootstrap_prompt();
+    assert!(
+        !prompt.contains("RELEVANT MEMORY"),
+        "a project with no binding memory must render no section at all:\n{prompt}"
+    );
+}
+
+/// 9. A checkpoint document written before this field existed still parses —
+///    round-tripping the literal shape `Checkpoint::render` produced prior to
+///    line 1641, with no `memory` key present at all.
+#[test]
+fn a_document_written_before_the_memory_field_existed_still_parses() {
+    let older_document = serde_json::json!({
+        "version": 1,
+        "session": "session-a",
+        "harness": "a-harness",
+        "reason": "manual",
+        "created_at": 1_700_000_000,
+        "objective": "an objective from before line 1641",
+        "implementation_state": "some state",
+    })
+    .to_string();
+
+    let parsed = Checkpoint::parse(&older_document)
+        .expect("a document with no `memory` key must still parse");
+    assert!(
+        parsed.handoff.memory.is_empty(),
+        "an absent `memory` key must default to empty, not fail or fabricate content"
+    );
+}
+
+/// 10. `fit()` sheds memory at the documented point and the result stays
+///     within [`glasshouse::checkpoint::MAX_BYTES`]. Enough decisions, failed
+///     approaches and files are given to cover the whole overshoot by
+///     themselves, so a single surviving memory record proves it was not
+///     touched while there was still less-protected content to give up first
+///     — the wrong shed order would have reached into it instead.
+#[test]
+fn fit_sheds_memory_only_once_less_protected_content_is_used_up() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let project_checkpoints =
+        glasshouse::checkpoint::ProjectCheckpoints::open(&fixture.runtime).unwrap();
+    let store = project_checkpoints.store();
+
+    let checkpoint = Checkpoint {
+        handoff: Handoff {
+            objective: "the objective".to_owned(),
+            implementation_state: "the state".to_owned(),
+            decisions: (0..2000).map(|i| format!("decision {i}")).collect(),
+            memory: vec!["a binding constraint that must not be lost lightly".to_owned()],
+            failed_approaches: (0..2000).map(|i| format!("failed approach {i}")).collect(),
+            files: (0..2000).map(|i| format!("some/file/{i}.rs")).collect(),
+            test_state: Some("6 of 6 passing".to_owned()),
+            next_actions: vec!["do the thing".to_owned()],
+        },
+        ..full_checkpoint("session-a", "a-harness", 1_700_000_000)
+    };
+
+    let stored = store.save(checkpoint).unwrap();
+    assert!(
+        stored.checkpoint.render().len() <= glasshouse::checkpoint::MAX_BYTES,
+        "still {} bytes",
+        stored.checkpoint.render().len()
+    );
+    assert!(stored.checkpoint.trimmed);
+    assert!(
+        stored.checkpoint.handoff.decisions.len() < 2000,
+        "nothing was given up at all"
+    );
+    assert_eq!(
+        stored.checkpoint.handoff.memory,
+        vec!["a binding constraint that must not be lost lightly".to_owned()],
+        "memory must not be shed while there was still plenty of less-protected \
+         content to give up first"
+    );
+    assert_eq!(
+        stored.checkpoint.handoff.test_state,
+        Some("6 of 6 passing".to_owned())
+    );
+    assert_eq!(
+        stored.checkpoint.handoff.next_actions,
+        vec!["do the thing".to_owned()]
     );
 }
 

@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`██████████████████████░░░░░░░░░░░░░░░░░░` 710 / 1280 mandatory capabilities (55%)
+`██████████████████████░░░░░░░░░░░░░░░░░░` 711 / 1280 mandatory capabilities (55%)
 
 <details>
 <summary>Per-phase breakdown (25 of 104 phases complete)</summary>
@@ -113,7 +113,7 @@ the authoritative specification and tracks what is done.
 | Phase 37 — Basic session-aware router | 0/11 |
 | Phase 38 — Quota-preserving routing | 0/7 |
 | Phase 39 — Gateway-backed disposable jobs | 0/9 |
-| Phase 40 — Fresh-session handoff | 7/9 |
+| Phase 40 — Fresh-session handoff | 8/9 |
 | Phase 41 — Project overview | 14/15 |
 | Phase 42 — External control API | 11/13 |
 | Phase 43 — MCP surface for orchestrators | 0/10 |

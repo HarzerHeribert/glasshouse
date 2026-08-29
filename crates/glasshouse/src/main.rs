@@ -1812,6 +1812,7 @@ fn checkpoint_command(runtime: &Runtime, command: &CheckpointCommand) -> anyhow:
                     objective: objective.clone(),
                     implementation_state: state.clone(),
                     decisions: decisions.clone(),
+                    memory: binding_memory_lines(runtime),
                     failed_approaches: failed_approaches.clone(),
                     files: files.clone(),
                     test_state: tests.clone(),
@@ -1861,6 +1862,35 @@ fn checkpoint_command(runtime: &Runtime, command: &CheckpointCommand) -> anyhow:
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The project's current binding memory, rendered for a checkpoint's
+/// `Handoff::memory` — line 1641.
+///
+/// Opening the project's memory database or reading its binding records is
+/// never allowed to fail a checkpoint: a checkpoint with no memory section is
+/// strictly better than no checkpoint at all, so either failure degrades to
+/// an empty list rather than propagating with `?`. `api/unix.rs::request_checkpoint`
+/// carries the identical addition rather than calling through this one — see
+/// its own comment on why that duplication stands.
+fn binding_memory_lines(runtime: &Runtime) -> Vec<String> {
+    use glasshouse::memory::ProjectMemory;
+
+    let Ok(memory) = ProjectMemory::open(runtime) else {
+        return Vec::new();
+    };
+    let Ok(records) = memory.store().binding(20) else {
+        return Vec::new();
+    };
+    records
+        .into_iter()
+        .map(|record| match record.subject {
+            // Phase 20 allows an absent subject; rendering an empty one would
+            // print a heading nobody wrote.
+            Some(subject) => format!("{subject}: {}", record.body),
+            None => record.body,
+        })
+        .collect()
 }
 
 /// The session a checkpoint command means.
@@ -5102,5 +5132,113 @@ mod tests {
             .unwrap();
         assert_eq!(stored.len(), 1, "the memory reached the real store");
         assert_eq!(stored[0].source_session_id.as_deref(), Some("s-1"));
+    }
+
+    /// Line 1641, exercised at the surface a person actually runs. Against
+    /// `checkpoint_command` itself, not a hand-built `Handoff` — a
+    /// `skip-state-update` mutation that quietly replaced
+    /// `binding_memory_lines(runtime)` with `Vec::new()` would be invisible to
+    /// any test that only exercises `Checkpoint`/`Handoff` directly, because
+    /// those never call `ProjectMemory` at all. This is the caller §35 asks
+    /// for: the one the shipped binary actually reaches.
+    #[test]
+    fn checkpoint_save_carries_binding_project_memory_into_the_handoff() {
+        use glasshouse::memory::{MemoryAuthority, MemoryKind, NewMemory, ProjectMemory};
+
+        let fixture = CliFixture::new();
+        let sessions = ProjectSessions::open(&fixture.runtime).unwrap();
+        let session = sessions
+            .store()
+            .create(NewSession::embedded("claude-code"))
+            .unwrap();
+
+        ProjectMemory::open(&fixture.runtime)
+            .unwrap()
+            .store()
+            .record(
+                NewMemory::new(
+                    MemoryKind::Constraint,
+                    "never store secrets in a checkpoint",
+                )
+                .with_authority(Some(MemoryAuthority::Constraint)),
+            )
+            .unwrap();
+        // Present in the project, but never binding — must not leak in.
+        ProjectMemory::open(&fixture.runtime)
+            .unwrap()
+            .store()
+            .record(NewMemory::new(
+                MemoryKind::Finding,
+                "the CI runner is slow on Mondays",
+            ))
+            .unwrap();
+
+        let command = CheckpointCommand::Save {
+            objective: "prove project memory reaches the handoff".to_owned(),
+            state: "wiring checkpoint_command to ProjectMemory".to_owned(),
+            session: Some(session.id.as_str().to_owned()),
+            decisions: Vec::new(),
+            failed_approaches: Vec::new(),
+            files: Vec::new(),
+            tests: None,
+            next_actions: Vec::new(),
+        };
+        let status = checkpoint_command(&fixture.runtime, &command).unwrap();
+        assert_eq!(status, ExitCode::SUCCESS);
+
+        let checkpoints = ProjectCheckpoints::open(&fixture.runtime).unwrap();
+        let stored = checkpoints.store().list().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored[0].checkpoint.handoff.memory,
+            vec!["never store secrets in a checkpoint".to_owned()],
+            "the binding memory must reach the checkpoint's handoff, and the \
+             unclassified one must not"
+        );
+        assert!(
+            stored[0]
+                .checkpoint
+                .bootstrap_prompt()
+                .contains("RELEVANT MEMORY"),
+            "the bootstrap prompt must carry it forward"
+        );
+    }
+
+    /// A checkpoint with no memory section is strictly better than a
+    /// checkpoint that never happened: `binding_memory_lines` degrades to an
+    /// empty list rather than propagating, even when the project's memory
+    /// database cannot be opened at all. Unix-only because the failure is
+    /// forced through a permission bit; the guard itself is not platform
+    /// specific.
+    #[cfg(unix)]
+    #[test]
+    fn binding_memory_lines_degrades_to_empty_when_the_database_cannot_be_opened() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = CliFixture::new();
+        // Force the project database open, so the file exists, then take
+        // away every permission on it — `ProjectMemory::open` must now fail.
+        glasshouse::session::ProjectSessions::open(&fixture.runtime).unwrap();
+        std::fs::set_permissions(
+            fixture.runtime.database_path(),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+
+        let lines = binding_memory_lines(&fixture.runtime);
+
+        assert_eq!(
+            lines,
+            Vec::<String>::new(),
+            "an unopenable database must degrade to no memory, not panic"
+        );
+
+        // Restore permissions so the fixture's own directories can still be
+        // cleaned up on drop.
+        std::fs::set_permissions(
+            fixture.runtime.database_path(),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
     }
 }
