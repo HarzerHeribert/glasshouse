@@ -12,6 +12,10 @@ fn default_memory_limit() -> usize {
     20
 }
 
+fn default_events_limit() -> usize {
+    200
+}
+
 /// One control-API call.
 ///
 /// Every variant is answered against the project the door was opened for —
@@ -73,6 +77,22 @@ pub enum Request {
     /// in this project — a degrade to heuristics *is* the health signal this
     /// line asks for; see those functions' own doc comments.
     RoutingModel,
+    /// This project's lifecycle events, in Glasshouse's own vocabulary
+    /// rather than any one harness's — capability map line 701.
+    ///
+    /// Read-only, like every other request this door answers. Incremental:
+    /// `after` is the log position the caller has already consumed — `0` for
+    /// the start of the log, or a prior response's `head` — and only events
+    /// strictly newer than it come back, oldest first. `limit` bounds how
+    /// many events one call returns; it is capped server-side regardless of
+    /// what is asked for, so a caller cannot pull an unbounded response by
+    /// naming a large number.
+    Events {
+        #[serde(default)]
+        after: i64,
+        #[serde(default = "default_events_limit")]
+        limit: usize,
+    },
     /// Search this project's durable memory.
     QueryMemory {
         query: String,

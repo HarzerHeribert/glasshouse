@@ -12,6 +12,9 @@ use glasshouse::Runtime;
 use glasshouse::checkpoint::store::{ProjectCheckpoints, StoreError as CheckpointStoreError};
 use glasshouse::checkpoint::{Checkpoint, CheckpointReason, Handoff};
 use glasshouse::config::{self, EffectiveConfig, UserConfig};
+use glasshouse::events::{
+    EventLog, GatewayFailure, LifecycleEvent, LoggedEvent, MessageOrigin, TurnOutcome,
+};
 use glasshouse::launch::HarnessLaunch;
 use glasshouse::session::api::{ApiError, SessionApi};
 use glasshouse::session::{
@@ -33,6 +36,13 @@ const DEFAULT_SOCKET_NAME: &str = "control.sock";
 /// so the margin survives a slightly longer project id without needing a
 /// per-platform constant.
 const MAX_SOCKET_PATH_BYTES: usize = 90;
+
+/// The hard ceiling on how many events [`Request::Events`] returns in one
+/// call, regardless of the `limit` a caller asks for — box 701's "bounded
+/// output" requirement. A caller that has fallen behind by more than this
+/// many events gets a `head` past what it can see in this response and
+/// polls again rather than pulling the whole table in one line of JSON.
+const MAX_EVENTS_LIMIT: usize = 1000;
 
 /// How often the background tick answers terminal queries and reaps exited
 /// sessions between requests. Mirrors `run_headless`'s `POLL` in `main.rs`:
@@ -292,6 +302,7 @@ fn dispatch(
         }
         Request::ResourceCapacity => resource_capacity(runtime),
         Request::RoutingModel => routing_model_status(runtime),
+        Request::Events { after, limit } => project_events(runtime, after, limit),
         Request::GetCheckpoint {
             checkpoint,
             document,
@@ -648,6 +659,153 @@ fn describe_layer(layer: config::Layer) -> &'static str {
         config::Layer::Project => "project",
         config::Layer::User => "user",
         config::Layer::Default => "default",
+    }
+}
+
+/// This project's lifecycle events, harness-independent — capability map
+/// line 701.
+///
+/// Incremental the way [`EventLog::observed_since`] itself is: `after` is
+/// the log position the caller has already consumed, and `head` — the log's
+/// current position, returned even when `events` is empty — is what it
+/// hands back next time, so a caller that sees nothing new still has a
+/// cursor rather than only after the first event ever exists. `limit` is
+/// capped at [`MAX_EVENTS_LIMIT`] regardless of what is asked for.
+fn project_events(runtime: &Runtime, after: i64, limit: usize) -> Response {
+    let log = match EventLog::open(runtime) {
+        Ok(log) => log,
+        Err(err) => return Response::err(err.to_string()),
+    };
+
+    let bounded_limit = limit.min(MAX_EVENTS_LIMIT);
+    let events = match log.observed_since(after, bounded_limit) {
+        Ok(events) => events,
+        Err(err) => return Response::err(err.to_string()),
+    };
+    let head = match log.head() {
+        Ok(head) => head,
+        Err(err) => return Response::err(err.to_string()),
+    };
+
+    Response::ok(serde_json::json!({
+        "events": events.iter().map(event_json).collect::<Vec<_>>(),
+        "head": head,
+    }))
+}
+
+/// One logged event, translated for the door.
+///
+/// `kind` is [`LifecycleEvent::kind`]'s own word, never the harness's —
+/// that is what capability map line 701 asks for. The harness that reported
+/// it, when one did, appears only as the `harness` attribute; the harness's
+/// own raw spelling of the event ([`glasshouse::events::Observation::event`])
+/// and every hook payload field stay behind this door, matching the
+/// guarantee `tests/session_hook.rs` already holds for the project database
+/// itself — this handler exposes translated events, not raw adapter
+/// observations. Every payload field a kind does not carry is `null`, never
+/// `0` or `""` (§71).
+fn event_json(logged: &LoggedEvent) -> serde_json::Value {
+    let mut fields = serde_json::Map::new();
+    fields.insert("seq".to_owned(), serde_json::json!(logged.seq));
+    fields.insert(
+        "session".to_owned(),
+        serde_json::json!(logged.session.as_str()),
+    );
+    fields.insert("at".to_owned(), serde_json::json!(logged.at));
+    fields.insert("kind".to_owned(), serde_json::json!(logged.event.kind()));
+    fields.insert(
+        "harness".to_owned(),
+        serde_json::json!(logged.observed.as_ref().map(|o| o.harness.as_str())),
+    );
+    for key in [
+        "outcome",
+        "origin",
+        "bytes",
+        "exit_code",
+        "exit_signal",
+        "resource",
+        "reason",
+        "provider",
+        "model",
+        "cause",
+    ] {
+        fields.insert(key.to_owned(), serde_json::Value::Null);
+    }
+
+    match &logged.event {
+        LifecycleEvent::TurnEnded { outcome } => {
+            fields.insert(
+                "outcome".to_owned(),
+                serde_json::json!(turn_outcome_str(*outcome)),
+            );
+        }
+        LifecycleEvent::TextDelivered { origin, bytes } => {
+            fields.insert(
+                "origin".to_owned(),
+                serde_json::json!(message_origin_str(*origin)),
+            );
+            fields.insert("bytes".to_owned(), serde_json::json!(bytes));
+        }
+        LifecycleEvent::InterruptDelivered { origin } => {
+            fields.insert(
+                "origin".to_owned(),
+                serde_json::json!(message_origin_str(*origin)),
+            );
+        }
+        LifecycleEvent::ProcessExited { exit } => {
+            fields.insert("exit_code".to_owned(), serde_json::json!(exit.code()));
+            fields.insert("exit_signal".to_owned(), serde_json::json!(exit.signal()));
+        }
+        LifecycleEvent::GatewayUnhealthy { resource, reason } => {
+            fields.insert("resource".to_owned(), serde_json::json!(resource));
+            fields.insert(
+                "reason".to_owned(),
+                serde_json::json!(gateway_failure_str(*reason)),
+            );
+        }
+        LifecycleEvent::GatewayBackendChanged {
+            provider,
+            model,
+            cause,
+        } => {
+            fields.insert("provider".to_owned(), serde_json::json!(provider));
+            fields.insert("model".to_owned(), serde_json::json!(model));
+            fields.insert("cause".to_owned(), serde_json::json!(cause));
+        }
+        LifecycleEvent::SessionStarted
+        | LifecycleEvent::SessionResumed
+        | LifecycleEvent::TurnStarted
+        | LifecycleEvent::WaitingForUser
+        | LifecycleEvent::OutputEnded => {}
+    }
+
+    serde_json::Value::Object(fields)
+}
+
+/// Matches `events::log`'s own private `outcome_sql` spelling, duplicated
+/// rather than imported because that one is private to its own module (same
+/// reasoning as [`describe_layer`]).
+fn turn_outcome_str(outcome: TurnOutcome) -> &'static str {
+    match outcome {
+        TurnOutcome::Completed => "completed",
+        TurnOutcome::Failed => "failed",
+    }
+}
+
+/// Matches `events::log`'s own private `origin_sql` spelling.
+fn message_origin_str(origin: MessageOrigin) -> &'static str {
+    match origin {
+        MessageOrigin::UserKeystroke => "user_keystroke",
+        MessageOrigin::Machine => "machine",
+    }
+}
+
+/// Matches `events::log`'s own private `gateway_reason_sql` spelling.
+fn gateway_failure_str(reason: GatewayFailure) -> &'static str {
+    match reason {
+        GatewayFailure::Unreachable => "unreachable",
+        GatewayFailure::TimedOut => "timed_out",
+        GatewayFailure::Rejected => "rejected",
     }
 }
 

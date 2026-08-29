@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`██████████████████████░░░░░░░░░░░░░░░░░░` 720 / 1280 mandatory capabilities (56%)
+`██████████████████████░░░░░░░░░░░░░░░░░░` 721 / 1280 mandatory capabilities (56%)
 
 <details>
-<summary>Per-phase breakdown (31 of 104 phases complete)</summary>
+<summary>Per-phase breakdown (32 of 104 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -54,7 +54,7 @@ the authoritative specification and tracks what is done.
 | Phase 10 — Unified session model | 14/14 ✅ |
 | Phase 10A — Session supervision | 13/13 ✅ |
 | Phase 11 — Session overview | 10/10 ✅ |
-| Phase 12 — Unified lifecycle event bus | 7/8 |
+| Phase 12 — Unified lifecycle event bus | 8/8 ✅ |
 | Phase 13 — Direct session messaging | 7/7 ✅ |
 | Phase 14 — Orchestrator role | 11/11 ✅ |
 | Phase 15 — Orchestrator wake-up flow | 0/8 |

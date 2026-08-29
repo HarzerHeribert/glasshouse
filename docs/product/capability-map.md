@@ -698,7 +698,7 @@ Fixed architectural requirements
 ☑ Define a harness-independent Glasshouse lifecycle-event enum.
 ☑ Record every translated lifecycle event with session ID and timestamp.
 ☑ Deliver lifecycle events to the TUI without blocking the harness process.
-☐ Deliver lifecycle events to the orchestration layer without coupling orchestration to a specific harness.
+☑ Deliver lifecycle events to the orchestration layer without coupling orchestration to a specific harness.
 ☑ Distinguish process exit from successful turn completion.
 ☑ Distinguish waiting-for-user from idle when the harness provides enough information.
 ☑ Preserve raw adapter event payloads in debug logs when useful for troubleshooting.

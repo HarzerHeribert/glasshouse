@@ -152,3 +152,63 @@ Windows for real. Missing: nothing for this line.
 `config/response.rs:725`'s `the_three_automatic_behaviours_disable_independently`
 now covers three of **four** automatic behaviours; `automatic_checkpoint` is the
 fourth and has its own independence test rather than being added to that trio.
+
+---
+
+## Phase 12 line 701 — CLOSED 2026-08-29 (batch 48). Phase 12 is now 8/8.
+
+Contract: Given an orchestrator holding the control door, when it asks for this
+project's lifecycle events, Glasshouse returns them in its own
+harness-independent vocabulary — never returning another project's events,
+never letting a raw adapter payload cross the door, and letting the caller ask
+only for what it has not already seen.
+
+State: COMPLETE
+
+**The ruling this rests on.** "The orchestration layer" is the control API, not
+the TUI and not a future component. Phase 12's own fixed architectural
+requirement says there is *"one normalized core lifecycle-event stream shared
+by the TUI, router, memory, API, and MCP surfaces"*; the TUI sibling (line 700)
+was already closed; and map lines 719-722 define an orchestrator as a session
+given Glasshouse control operations *"through a local tool interface"*, which
+is this door. The event stream was already harness-independent — what was
+missing was the door.
+
+Production evidence:
+- `crates/glasshouse/src/api/protocol.rs` — `Request::Events { after, limit }`.
+- `crates/glasshouse/src/api/unix.rs` — `project_events`, reached from
+  `dispatch`, reading `EventLog::observed_since` and `EventLog::head`.
+- The log already had a production writer: `main.rs` appends on every
+  translated lifecycle event, so this door reads something real rather than a
+  table only tests fill.
+
+**Incremental by construction.** `head` is always the log's true current
+position, even when `events` is empty because `limit` cut the batch, so a
+caller polling with `after = <previous head>` never re-reads and never skips.
+`limit` is capped server-side at `MAX_EVENTS_LIMIT = 1000` whatever the caller
+asks, so a large log cannot produce an unbounded response.
+
+Regression evidence — `crates/glasshouse/tests/events_api.rs`, driving
+`glasshouse api serve` over a real Unix socket:
+- `a_project_with_no_events_returns_an_empty_list_not_an_error` — the premise (§17).
+- `events_recorded_for_a_session_come_back_with_kind_session_and_timestamp`
+- `the_incremental_read_returns_only_what_the_caller_has_not_seen`
+- `no_raw_harness_event_name_appears_in_any_response` — the negative, and the
+  one that matters most: Phase 12 confines raw adapter payloads to debug logs,
+  and `session_hook.rs` already holds the shipped guarantee that no hook
+  payload field reaches the project database. This asserts the same boundary at
+  the door.
+
+Mutation, re-run by the orchestrator:
+
+| mutation | vocabulary | result |
+|---|---|---|
+| the `Request::Events` dispatch arm replaced with a constant `{ "events": [], "head": 0 }` | `skip-state-update` | **killed** — three of four tests failed; only the empty-log premise test survived, **which is correct**: a constant empty response is indistinguishable from the real handler when the log is genuinely empty. |
+
+That last observation is the worker's, and it is the right way to read a
+partial kill — the surviving test is not a gap, it is a test whose premise the
+mutation happens to satisfy.
+
+Platform/external evidence: `#![cfg(unix)]`, matching `capacity_api.rs` and
+`routing_api.rs` — the control door is a Unix domain socket and this claims no
+Windows coverage it does not have. Missing: CI run.
