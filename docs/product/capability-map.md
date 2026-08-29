@@ -776,7 +776,7 @@ Fixed architectural requirements
 ☑ Record lifecycle-hook events that may later be useful for memory extraction.
 ☑ Record machine-initiated orchestration messages.
 ☑ Record detected task-completion boundaries.
-☐ Record Git commit identifiers associated with memory events when they can be resolved cheaply.
+☑ Record Git commit identifiers associated with memory events when they can be resolved cheaply.
 ☑ Keep raw event storage project-scoped.
 ☑ Treat the raw event stream as reconstructable source material rather than directly injecting it into agent prompts.
 

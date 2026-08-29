@@ -212,3 +212,70 @@ mutation happens to satisfy.
 Platform/external evidence: `#![cfg(unix)]`, matching `capacity_api.rs` and
 `routing_api.rs` — the control door is a Unix domain socket and this claims no
 Windows coverage it does not have. Missing: CI run.
+
+---
+
+## Phase 18 line 779 — CLOSED 2026-08-29 (batch 49). Phase 18 is now 10/10.
+
+Contract: Given a person running `glasshouse memory extract` in a project that
+is a Git repository, when memories are extracted, each stored memory records
+the commit the project was at — while a project with no repository still
+extracts normally with no commit recorded.
+
+State: COMPLETE
+
+**Nothing was built. A wire that already existed was finally connected.**
+`MemoryRecord.source_commit`, `NewMemory::with_source_commit`,
+`chunk_for_session`'s `commit` argument, `Extractor`'s
+`.with_source_commit(chunk.commit())` at `memory/extract/mod.rs:502`, and even
+the test asserting the chunk's commit reaches the stored row
+(`memory_extract_schema::every_stored_memory_carries_the_chunks_session_and_commit`)
+were all present. **Both production call sites passed `None`**, so the wire
+carried nothing.
+
+Production evidence:
+- `crates/glasshouse/src/main.rs:2905` — `memory_extract` now resolves
+  `GitPosition::detect(runtime.project().root())` and passes the commit into
+  the chunk.
+- `checkpoint/git.rs:60` — `GitPosition::detect` never fails: no repository, an
+  unreadable HEAD and a missing ref file are all `None`. `checkpoint/mod.rs:251`
+  already documents it as the cheap path — it *"opens two small files"* — and
+  `checkpoint/mod.rs:268` is a shipped caller relying on exactly that. The
+  line's *"when they can be resolved cheaply"* was established by an existing
+  caller, not asserted by this package.
+
+**The hook path was deliberately left alone, and that is the ruling.**
+`main.rs:1721` still passes `None`, and its comment above still explains why: a
+hook process runs while the user's tree is mid-edit, so a commit read there
+would not be *"where the project was when this was learned"*. Verified
+unchanged after integration. Overriding that documented decision would be an
+Opus design call about what a memory's commit means, not a wiring task, and no
+line currently asks for it.
+
+Regression evidence:
+- `main.rs::tests::manual_extraction_in_a_git_repository_records_the_head_commit`
+- the no-repository case extracts normally with `source_commit` unset.
+
+Mutation, re-run by the orchestrator:
+
+| mutation | vocabulary | result |
+|---|---|---|
+| `GitPosition::detect(..).map(\|p\| p.commit)` → `None::<String>` | `skip-state-update` | **killed** against `--bin glasshouse` — `manual_extraction_in_a_git_repository_records_the_head_commit` FAILED: *"the stored memory must carry the repository's head commit"* |
+
+### Two mutation traps this package hit, one of them new
+
+**The packet named the wrong target.** It suggested
+`--test memory_extract_schema`; no test in that file calls `memory_extract`, so
+the mutation **SURVIVED** with 37 tests genuinely passing. The worker
+recognised this as the packet's own warning reproduced on itself, and re-ran
+against `--bin glasshouse`, where the killing test lives.
+
+**A KILLED that meant nothing — and this one is new.** Replacing the call with
+a bare `None` instead of `None::<String>` does not compile, because there is no
+inference anchor. `mutate.sh` reported **KILLED**, and the kill was a compile
+error rather than a behavioural catch. The worker caught it, discarded the
+verdict, and reported only the typed mutation.
+
+That is a **fourth** distinct way a mutation lies, after a filter matching zero
+tests, a target that does not hold the killing test, and a site that is not on
+the path. All four produce a verdict that reads as evidence and is not one.

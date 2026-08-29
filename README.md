@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`██████████████████████░░░░░░░░░░░░░░░░░░` 721 / 1280 mandatory capabilities (56%)
+`██████████████████████░░░░░░░░░░░░░░░░░░` 722 / 1280 mandatory capabilities (56%)
 
 <details>
-<summary>Per-phase breakdown (32 of 104 phases complete)</summary>
+<summary>Per-phase breakdown (33 of 104 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -60,7 +60,7 @@ the authoritative specification and tracks what is done.
 | Phase 15 — Orchestrator wake-up flow | 0/8 |
 | Phase 16 — Worker transparency | 3/7 |
 | Phase 17 — cmux optional integration | 0/10 |
-| Phase 18 — Raw event recording | 9/10 |
+| Phase 18 — Raw event recording | 10/10 ✅ |
 | Phase 19 — Portable session checkpoints | 14/14 ✅ |
 | Phase 20 — Minimal durable project memory | 16/18 |
 | Phase 21 — Memory extraction | 10/13 |

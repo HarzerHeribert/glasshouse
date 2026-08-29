@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use std::io::IsTerminal;
 
+use glasshouse::checkpoint::git::GitPosition;
 use glasshouse::checkpoint::{
     Checkpoint, CheckpointReason, CheckpointStore, Handoff, ProjectCheckpoints, Stored,
 };
@@ -2880,6 +2881,12 @@ fn memory_extract(
     let reply = std::fs::read_to_string(reply_from)
         .with_context(|| format!("read the model reply from {}", reply_from.display()))?;
 
+    // Run from a person's own shell at a moment they chose, unlike the
+    // post-turn hook path: the project's current commit is exactly "where the
+    // project was when this was learned", and cheap to read — see
+    // `GitPosition::detect`.
+    let commit = GitPosition::detect(runtime.project().root()).map(|position| position.commit);
+
     // Two sources, and the difference between them is the provenance.
     //
     // A file of activity is text a person chose, and a memory extracted from
@@ -2895,7 +2902,7 @@ fn memory_extract(
         let events = log.recent_for_session(&id, EVENT_WINDOW)?;
         let read = events.len();
         (
-            chunk_for_session(&id, &events, None, ChunkLimits::default()),
+            chunk_for_session(&id, &events, commit.as_deref(), ChunkLimits::default()),
             format!("{read} recorded events for session {id}"),
         )
     } else {
@@ -2905,7 +2912,7 @@ fn memory_extract(
         (
             SessionChunk::build(
                 session,
-                None::<String>,
+                commit,
                 activity_text.lines().map(str::to_owned),
                 ChunkLimits::default(),
             ),
@@ -5223,6 +5230,107 @@ mod tests {
             .unwrap();
         assert_eq!(stored.len(), 1, "the memory reached the real store");
         assert_eq!(stored[0].source_session_id.as_deref(), Some("s-1"));
+    }
+
+    /// Map line 779, at the surface a person actually runs: `glasshouse
+    /// memory extract` in a real Git repository records the commit the
+    /// project was standing at, resolved with the same
+    /// `GitPosition::detect` reading that a checkpoint uses. The fixture
+    /// hand-writes `HEAD`/`refs` the way `checkpoint/git.rs`'s own tests do,
+    /// rather than shelling out to `git`, and a sanity assertion proves that
+    /// setup actually produces the commit before the extraction runs at all.
+    #[test]
+    fn manual_extraction_in_a_git_repository_records_the_head_commit() {
+        use glasshouse::memory::ProjectMemory;
+        use glasshouse::memory::search::SearchScope;
+
+        const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+        let fixture = CliFixture::new();
+        let git_dir = fixture._workspace.path().join(".git");
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
+        std::fs::write(git_dir.join("refs/heads/main"), format!("{COMMIT}\n")).unwrap();
+        assert_eq!(
+            GitPosition::detect(fixture.runtime.project().root()).map(|position| position.commit),
+            Some(COMMIT.to_owned()),
+            "fixture setup must produce the commit this test checks for"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let activity = dir.path().join("activity.txt");
+        let reply = dir.path().join("reply.json");
+        std::fs::write(&activity, "we settled on a checkpoint format\n").unwrap();
+        std::fs::write(
+            &reply,
+            r#"{"memories":[{"kind":"finding","authority":"historical",
+                 "disposition":"accepted","support":"established",
+                 "confidence":"certain",
+                 "body":"A checkpoint fixture proved the commit round-trips."}]}"#,
+        )
+        .unwrap();
+
+        let report =
+            memory_extract(&fixture.runtime, "s-1", Some(&activity), false, &reply).unwrap();
+        assert!(report.contains("stored 1"), "{report}");
+
+        let stored = ProjectMemory::open(&fixture.runtime)
+            .unwrap()
+            .store()
+            .search("round-trips", SearchScope::Current, 10)
+            .unwrap();
+        assert_eq!(stored.len(), 1, "the memory reached the real store");
+        assert_eq!(
+            stored[0].source_commit.as_deref(),
+            Some(COMMIT),
+            "the stored memory must carry the repository's head commit"
+        );
+    }
+
+    /// The other half of map line 779: a project that is not a Git
+    /// repository still extracts normally, with no commit recorded rather
+    /// than an error. `CliFixture` gives an empty `.git` directory with no
+    /// `HEAD` — the "unreadable HEAD" case `GitPosition::detect` folds into
+    /// the same `None` as "no repository at all".
+    #[test]
+    fn manual_extraction_outside_a_repository_stores_no_commit_and_does_not_error() {
+        use glasshouse::memory::ProjectMemory;
+        use glasshouse::memory::search::SearchScope;
+
+        let fixture = CliFixture::new();
+        assert_eq!(
+            GitPosition::detect(fixture.runtime.project().root()),
+            None,
+            "fixture setup sanity: an empty .git directory has no readable HEAD"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let activity = dir.path().join("activity.txt");
+        let reply = dir.path().join("reply.json");
+        std::fs::write(&activity, "we settled on a checkpoint format\n").unwrap();
+        std::fs::write(
+            &reply,
+            r#"{"memories":[{"kind":"finding","authority":"historical",
+                 "disposition":"accepted","support":"established",
+                 "confidence":"certain",
+                 "body":"A non-repository extraction stores no commit."}]}"#,
+        )
+        .unwrap();
+
+        let report = memory_extract(&fixture.runtime, "s-1", Some(&activity), false, &reply);
+        assert!(
+            report.is_ok(),
+            "extraction outside a repository must not error: {report:?}"
+        );
+        assert!(report.unwrap().contains("stored 1"));
+
+        let stored = ProjectMemory::open(&fixture.runtime)
+            .unwrap()
+            .store()
+            .search("non-repository", SearchScope::Current, 10)
+            .unwrap();
+        assert_eq!(stored.len(), 1, "the memory reached the real store");
+        assert_eq!(stored[0].source_commit, None);
     }
 
     /// Line 1641, exercised at the surface a person actually runs. Against
