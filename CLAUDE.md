@@ -231,6 +231,34 @@ reasoning and the one trap. Start Ox with the normal `ox` TUI—never
 `ox run` or a headless loop. Follow the worker do/don't rules and the safe hook
 protocol rather than personal global routing configuration.
 
+## An orchestrator does not idle, and does not hand off cold
+
+**`scripts/pipeline.sh --watch 600` is not advisory. When it fires, dispatch —
+do not reply to it with a reason.** On 2026-08-29 it fired twice and the
+orchestrator answered both times with a well-argued explanation of why waiting
+was reasonable. Both explanations were wrong, and the user had to say so twice.
+There is always work: `cluster-b.py` finds candidates in seconds, the refusal
+register says which are packageable, and `new-packet.sh` emits a valid packet.
+
+**Reviewing, integrating, ruling and committing are not "being busy".** They are
+what you do *between* dispatches, not instead of them. Two or three workers
+should be running while you do them.
+
+**Hand off HOT.** When the continuity watch fires, the instinct is to finish
+cleanly and leave a tidy empty board. That is backwards: the successor is a
+fresh context that can review anything, and an idle board wastes the whole
+window it takes them to spin up. **Fill the board first, then write the
+checkpoint, then relaunch.** The successor inherits running workers and reviews
+their reports as its first act — which is the cheapest possible start.
+
+**Do not stop for a gate, an integration, or a barrier.** A red gate gets a fix
+worker and the line keeps moving (§84). A co-edit barrier blocks one *file*, not
+the board (§77). An integration blocks nothing.
+
+**The only reasons to leave the board empty** are the user asking you to stop, or
+a defect so central that every candidate package would build on it. Neither has
+happened yet.
+
 ## Every script, because naming only some of them cost a session
 
 **CLAUDE.md named fifteen of these and the repo has twenty-seven.** An
