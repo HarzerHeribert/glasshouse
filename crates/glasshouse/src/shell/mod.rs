@@ -217,28 +217,33 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                             state.set_status(format!("could not open settings: {err:#}"));
                         }
                     },
-                    Action::OpenProjectOverview => match build_project_overview_memory(runtime) {
-                        Ok(memory) => {
-                            state.open_project_overview(
-                                memory.decisions,
-                                memory.todos,
-                                memory.todos_omitted,
-                                None,
-                            );
+                    Action::OpenProjectOverview => {
+                        let resources = build_project_overview_capacity(runtime);
+                        match build_project_overview_memory(runtime) {
+                            Ok(memory) => {
+                                state.open_project_overview(
+                                    memory.decisions,
+                                    memory.todos,
+                                    memory.todos_omitted,
+                                    resources,
+                                    None,
+                                );
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    "could not read project memory for the overview"
+                                );
+                                state.open_project_overview(
+                                    Vec::new(),
+                                    Vec::new(),
+                                    0,
+                                    resources,
+                                    Some(format!("project memory unavailable: {err:#}")),
+                                );
+                            }
                         }
-                        Err(err) => {
-                            tracing::warn!(
-                                error = %err,
-                                "could not read project memory for the overview"
-                            );
-                            state.open_project_overview(
-                                Vec::new(),
-                                Vec::new(),
-                                0,
-                                Some(format!("project memory unavailable: {err:#}")),
-                            );
-                        }
-                    },
+                    }
                     Action::OpenProjectKnowledge => match build_project_knowledge_memory(runtime) {
                         Ok(memory) => {
                             state.open_project_knowledge(
@@ -1342,6 +1347,166 @@ fn build_project_overview_memory(runtime: &Runtime) -> anyhow::Result<ProjectOve
         todos,
         todos_omitted,
     })
+}
+
+/// Map lines 1657, 1658, 1659, 1660 and 1663: what Glasshouse has observed
+/// about this project's own configured resources, one line per resource —
+/// the project overview's condensed sibling of `glasshouse resources`'s full
+/// report, read the same way `main.rs::resources_report` reads it: the same
+/// [`crate::provider::resources::observed_capacity`] over the same on-disk
+/// [`crate::provider::telemetry::GatewayQuotaCache`], no network call.
+///
+/// Scoped to [`EffectiveConfig::provider_names`] rather than the full
+/// [`crate::provider::registry::registry`] catalog: that accessor's own doc
+/// comment says "a provider only exists here because a user or project
+/// explicitly configured one" — exactly the behavioral contract's "configured
+/// resources", and the same set `main.rs::disposable_candidates` already
+/// scores a real routing decision over, which is what makes
+/// [`resource_capacity_line`]'s reserve note more than a hypothetical: it
+/// mirrors the identical `with_resource_reserve` fold
+/// `main.rs::disposable_candidate_capacity` builds for that decision.
+///
+/// Line 1661 — the currently selected routing model and its recent latency —
+/// is deliberately absent: Phase 34B has no routing-model role in this
+/// build, so there is nothing to name.
+///
+/// # Cannot fail visibly
+///
+/// A configuration Glasshouse cannot read becomes one honest line rather
+/// than an empty section blocking the rest of the overlay. Reading
+/// `crate::config` and the gateway-quota cache is file I/O this module
+/// deliberately does not hold in `shell/state.rs` — the same split
+/// [`build_project_overview_memory`] keeps.
+fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
+    use crate::provider::registry::ResourceKind;
+    use crate::provider::resources::{GatheredTelemetry, observed_capacity};
+    use crate::provider::telemetry::GatewayQuotaCache;
+
+    let user = match UserConfig::load(runtime.paths()) {
+        Ok(user) => user,
+        Err(err) => return vec![format!("  resource configuration unavailable: {err:#}")],
+    };
+    let project_config = match config::load_project_config(runtime.project()) {
+        Ok(project_config) => project_config,
+        Err(err) => return vec![format!("  resource configuration unavailable: {err:#}")],
+    };
+    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+
+    let providers = effective.provider_names();
+    if providers.is_empty() {
+        return Vec::new();
+    }
+
+    let now_unix = crate::provider::cache::now_unix_seconds();
+    let telemetry =
+        GatheredTelemetry::new().gather_gateway_quota(&GatewayQuotaCache::new(runtime.paths()));
+    let base_thresholds = effective.capacity_band_thresholds().value;
+
+    providers
+        .into_iter()
+        .map(|provider| {
+            let kind = ResourceKind::from_direct_provider(&provider);
+            let state = observed_capacity(&kind, &effective, &telemetry, now_unix);
+            let reserve_percent = effective.reserve_percent(&provider).value.get();
+            let thresholds = base_thresholds.with_resource_reserve(reserve_percent);
+            resource_capacity_line(
+                &kind.label(),
+                &state,
+                &thresholds,
+                reserve_percent,
+                now_unix,
+            )
+        })
+        .collect()
+}
+
+/// One line describing what Glasshouse currently believes about `label`'s
+/// capacity — the pure formatting half of
+/// [`build_project_overview_capacity`], split out so every case (measured,
+/// estimated, manual, unknown, reset present or absent, reserve engaged or
+/// not) is testable directly against a hand-built
+/// [`crate::provider::quota::CapacityState`] rather than only through real
+/// configuration files and an on-disk cache.
+///
+/// `thresholds` must already carry this resource's own protected reserve —
+/// see `crate::provider::resources`'s private `capacity_band_thresholds_for`,
+/// which this mirrors rather than calls: that function lives in
+/// `provider/resources.rs`, outside this package's partition this round.
+///
+/// # Line 1659, precisely
+///
+/// [`crate::provider::quota::TelemetryClass::Authoritative`] and
+/// [`crate::provider::quota::TelemetryClass::Observed`] both collapse to
+/// `"measured"` here — line 1659 names four words, not the five
+/// [`crate::provider::quota`] itself tracks, and both are real readings
+/// nobody inferred. [`crate::provider::quota::TelemetryClass::Estimated`]
+/// and [`crate::provider::quota::TelemetryClass::Manual`] keep their own
+/// words, and no reading at all is `"unknown"` — never a number.
+///
+/// # Line 1663, precisely
+///
+/// A reserve note is shown only at or below
+/// [`crate::provider::quota::CapacityBand::Reserve`] — the exact boundary
+/// `crate::provider::quota::evaluate_reserve_spend` itself
+/// gates on (`inputs.band > CapacityBand::Reserve` trivially allows every
+/// request; at or below it, the reserve policy actually runs and can deny
+/// one). Above that boundary the reserve has influenced nothing this round,
+/// so nothing about it is shown.
+fn resource_capacity_line(
+    label: &str,
+    state: &crate::provider::quota::CapacityState,
+    thresholds: &crate::provider::quota::CapacityBandThresholds,
+    reserve_percent: u8,
+    now_unix: i64,
+) -> String {
+    use crate::provider::quota::{CapacityBand, TelemetryClass};
+
+    let reset_note = match state.seconds_until_reset(now_unix) {
+        Some(seconds) => format!(", reset in {seconds}s"),
+        None => String::new(),
+    };
+
+    let Some(score) = state.remaining_capacity_score() else {
+        // No pool normalized to a percentage, but the resource's own plan or
+        // rate ceilings may still carry a class worth naming — a manually
+        // configured plan, say. `state.telemetry_class()` answers that;
+        // `None` here is the genuine "unknown" case line 1657/1658 name.
+        let class_word = match state.telemetry_class() {
+            None => "unknown",
+            Some(TelemetryClass::Authoritative | TelemetryClass::Observed) => "measured",
+            Some(TelemetryClass::Estimated) => "estimated",
+            Some(TelemetryClass::Manual) => "manual",
+        };
+        return format!("  {label}  capacity {class_word}{reset_note}");
+    };
+
+    let band = score.band(thresholds);
+    // `RemainingCapacityScore::percent` is only ever `Exact` (this displayed
+    // value came from the provider itself) or `Estimated` (anything weaker
+    // fed into it) — never `Manual` or absent, since a score exists here.
+    // That is line 1659's "measured" vs "estimated" distinction exactly, and
+    // deliberately not `state.telemetry_class()`, which answers the whole
+    // resource's *best* source across every pool and would report
+    // "measured" even when the one number actually shown is an estimate.
+    let (class_word, digits) = match score.percent().exact() {
+        Some(percent) => ("measured", percent),
+        None => (
+            "estimated",
+            score
+                .percent()
+                .estimated()
+                .map(|(percent, _, _)| percent)
+                .expect("a Percentage is always Exact or Estimated"),
+        ),
+    };
+
+    let reserve_note = if band <= CapacityBand::Reserve {
+        format!("; protected reserve {reserve_percent}% is limiting routing here")
+    } else {
+        String::new()
+    };
+
+    format!("  {label}  {band} {digits}% [{class_word}]{reset_note}{reserve_note}")
 }
 
 /// One display line: the memory's kind, and its subject if it has one or its
@@ -3360,7 +3525,13 @@ mod project_overview_tests {
         );
 
         let built = build_project_overview_memory(&runtime).expect("must not fail");
-        state.open_project_overview(built.decisions, built.todos, built.todos_omitted, None);
+        state.open_project_overview(
+            built.decisions,
+            built.todos,
+            built.todos_omitted,
+            Vec::new(),
+            None,
+        );
 
         assert_eq!(state.overlay(), Some(state::Overlay::ProjectOverview));
         let overview = state.project_overview().expect("open");
@@ -3370,6 +3541,279 @@ mod project_overview_tests {
                 .iter()
                 .any(|line| line.contains("never run ci-local beside cargo"))
         );
+    }
+}
+
+/// Phase 41 lines 1657-1660 and 1663: [`resource_capacity_line`]'s honesty
+/// rules, each proven directly against a hand-built
+/// [`crate::provider::quota::CapacityState`] — the same construction
+/// technique `provider::quota`'s own tests use, entirely through public
+/// constructors, so every case is fast and needs no runtime or on-disk
+/// config — plus one test that goes through
+/// [`build_project_overview_capacity`]'s real config-file and
+/// gateway-quota-cache reads, so the formatter is proven reachable from a
+/// real configured provider and not only from a hand-built fixture
+/// (practice §35).
+#[cfg(test)]
+mod project_overview_capacity_tests {
+    use super::*;
+    use crate::provider::quota::{
+        Capacity, CapacityBandThresholds, CapacityState, NativeAmount, Pool, Reading,
+        ReadingSource, WindowCapacity, WindowShape, Windows,
+    };
+
+    const NOW: i64 = 1_800_000_000;
+
+    /// A `requests` pool whose remaining and limit both came from a
+    /// provider's own response header — [`ReadingSource::ResponseHeader`],
+    /// which is the only [`crate::provider::quota::TelemetryClass::Authoritative`]
+    /// producer, so [`crate::provider::quota::Percentage::exact`] answers
+    /// `Some` for it.
+    fn measured_requests_pool(remaining: i64, limit: i64) -> Pool {
+        Pool::unmeasured()
+            .with_limit(Capacity::Measured(Reading::new(
+                NativeAmount::whole(limit, "requests"),
+                NOW,
+                ReadingSource::ResponseHeader("x-ratelimit-limit-requests".to_owned()),
+            )))
+            .with_remaining(Capacity::Measured(Reading::new(
+                NativeAmount::whole(remaining, "requests"),
+                NOW,
+                ReadingSource::ResponseHeader("x-ratelimit-remaining-requests".to_owned()),
+            )))
+    }
+
+    /// The same pool, with `remaining` inferred rather than read from the
+    /// provider — [`ReadingSource::InferredEstimate`], so the combined
+    /// percentage can never be [`crate::provider::quota::Percentage::Exact`].
+    fn estimated_requests_pool(remaining: i64, limit: i64) -> Pool {
+        Pool::unmeasured()
+            .with_limit(Capacity::Measured(Reading::new(
+                NativeAmount::whole(limit, "requests"),
+                NOW,
+                ReadingSource::ResponseHeader("x-ratelimit-limit-requests".to_owned()),
+            )))
+            .with_remaining(Capacity::Measured(Reading::new(
+                NativeAmount::whole(remaining, "requests"),
+                NOW,
+                ReadingSource::InferredEstimate("recent usage".to_owned()),
+            )))
+    }
+
+    fn with_reset(state: CapacityState, seconds_from_now: i64) -> CapacityState {
+        let windows = Windows::uniform(Pool::unmeasured(), Capacity::Unmeasured).with_rolling(
+            WindowCapacity::uniform(
+                WindowShape::Rolling,
+                Pool::unmeasured(),
+                Capacity::Unmeasured,
+            )
+            .with_resets_at(Capacity::Measured(Reading::new(
+                NOW + seconds_from_now,
+                NOW,
+                ReadingSource::ResponseHeader("x-ratelimit-reset-requests".to_owned()),
+            ))),
+        );
+        state.with_windows(windows)
+    }
+
+    /// Map lines 1658 and 1659: a measured reading renders its band and the
+    /// literal word `"measured"`.
+    #[test]
+    fn a_measured_reading_renders_its_band_and_says_measured() {
+        let state = CapacityState::metered_balance().with_requests(measured_requests_pool(82, 100));
+        let line = resource_capacity_line(
+            "openrouter (remote)",
+            &state,
+            &CapacityBandThresholds::DEFAULT,
+            20,
+            NOW,
+        );
+        assert!(line.contains("82%"), "{line}");
+        assert!(line.contains("[measured]"), "{line}");
+        assert!(line.contains("plenty"), "{line}");
+    }
+
+    /// Map line 1659: the same resource with only an estimated reading
+    /// renders the estimate labelled as one, and the two renderings differ —
+    /// the mutation this test kills is `remove-validation` dropping the
+    /// measured/estimated label.
+    #[test]
+    fn a_measured_and_an_estimated_reading_of_the_same_resource_render_differently() {
+        let thresholds = CapacityBandThresholds::DEFAULT;
+        let measured =
+            CapacityState::metered_balance().with_requests(measured_requests_pool(82, 100));
+        let estimated =
+            CapacityState::metered_balance().with_requests(estimated_requests_pool(82, 100));
+
+        let measured_line =
+            resource_capacity_line("openrouter (remote)", &measured, &thresholds, 20, NOW);
+        let estimated_line =
+            resource_capacity_line("openrouter (remote)", &estimated, &thresholds, 20, NOW);
+
+        assert!(measured_line.contains("[measured]"), "{measured_line}");
+        assert!(estimated_line.contains("[estimated]"), "{estimated_line}");
+        assert_ne!(measured_line, estimated_line);
+    }
+
+    /// Map lines 1658 and 1659: a resource with no telemetry at all renders
+    /// `"unknown"` and no number anywhere — the mutation this test kills is
+    /// `accept-stale-state` rendering an unknown capacity as a number.
+    #[test]
+    fn no_telemetry_renders_unknown_with_no_number_at_all() {
+        let state = CapacityState::metered_balance();
+        let line = resource_capacity_line(
+            "openrouter (remote)",
+            &state,
+            &CapacityBandThresholds::DEFAULT,
+            20,
+            NOW,
+        );
+        assert!(line.contains("unknown"), "{line}");
+        assert!(
+            !line.chars().any(|c| c.is_ascii_digit()),
+            "must show no number at all: {line}"
+        );
+    }
+
+    /// Map line 1660: a constrained resource — one whose reset time is
+    /// actually known — renders it.
+    #[test]
+    fn a_constrained_resource_with_a_known_reset_shows_it() {
+        let state = with_reset(
+            CapacityState::metered_balance().with_requests(measured_requests_pool(82, 100)),
+            3600,
+        );
+        let line = resource_capacity_line(
+            "openrouter (remote)",
+            &state,
+            &CapacityBandThresholds::DEFAULT,
+            20,
+            NOW,
+        );
+        assert!(line.contains("reset in 3600s"), "{line}");
+    }
+
+    /// Map line 1660: the same resource with no reset ever read renders
+    /// none — the two renderings the acceptance test asks to differ.
+    #[test]
+    fn an_unconstrained_resource_shows_no_reset() {
+        let state = CapacityState::metered_balance().with_requests(measured_requests_pool(82, 100));
+        let line = resource_capacity_line(
+            "openrouter (remote)",
+            &state,
+            &CapacityBandThresholds::DEFAULT,
+            20,
+            NOW,
+        );
+        assert!(!line.contains("reset"), "{line}");
+    }
+
+    /// Map line 1663: a reserve that currently gates routing — this
+    /// resource's band, folded with its reserve percentage, has crossed into
+    /// [`crate::provider::quota::CapacityBand::Reserve`], the exact boundary
+    /// `crate::provider::quota::evaluate_reserve_spend` itself stops
+    /// trivially allowing at — appears.
+    #[test]
+    fn a_reserve_that_currently_gates_routing_appears() {
+        // 10% is below `CapacityBandThresholds::DEFAULT`'s 15% reserve
+        // boundary, so the band is `Reserve` and the policy actually runs.
+        let state = CapacityState::metered_balance().with_requests(measured_requests_pool(10, 100));
+        let line = resource_capacity_line(
+            "openrouter (remote)",
+            &state,
+            &CapacityBandThresholds::DEFAULT,
+            20,
+            NOW,
+        );
+        assert!(line.contains("protected reserve 20%"), "{line}");
+        assert!(line.contains("limiting routing"), "{line}");
+    }
+
+    /// Map line 1663: a reserve that has influenced nothing — this
+    /// resource's band is well above `Reserve` — does not appear. The
+    /// mutation this test kills is `invert-condition` showing a reserve that
+    /// influenced nothing.
+    #[test]
+    fn a_reserve_that_influences_nothing_does_not_appear() {
+        let state = CapacityState::metered_balance().with_requests(measured_requests_pool(80, 100));
+        let line = resource_capacity_line(
+            "openrouter (remote)",
+            &state,
+            &CapacityBandThresholds::DEFAULT,
+            20,
+            NOW,
+        );
+        assert!(!line.contains("reserve"), "{line}");
+    }
+
+    /// Bootstrap a `Runtime` over fresh, isolated data/config/workspace
+    /// directories, matching `project_overview_tests::bootstrapped_runtime`.
+    fn bootstrapped_runtime() -> (tempfile::TempDir, tempfile::TempDir, crate::Runtime) {
+        use clap::Parser;
+
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join(".git")).unwrap();
+
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+            "--config-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, workspace.path()).unwrap();
+        (data, workspace, runtime)
+    }
+
+    /// A project with no configured provider shows no resource lines rather
+    /// than the full, unconfigured `provider::registry` catalog — the
+    /// behavioral contract's "configured resources", read through
+    /// [`EffectiveConfig::provider_names`].
+    #[test]
+    fn no_configured_providers_yields_no_resource_lines() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let lines = build_project_overview_capacity(&runtime);
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    /// [`build_project_overview_capacity`] reached through its real callers
+    /// — a real configured provider on disk, and a real planted
+    /// [`crate::provider::telemetry::GatewayQuotaCache`] reading, the same
+    /// on-disk bridge `main.rs::resources_report` and
+    /// `main.rs::disposable_candidate_capacity` already read — not a
+    /// hand-built [`crate::provider::quota::CapacityState`] a test
+    /// constructed itself (practice §35).
+    #[test]
+    fn build_project_overview_capacity_reads_a_real_configured_provider_and_a_real_planted_reading()
+    {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        let provider = crate::config::ProviderConfig::new("openai-compatible");
+        user.providers_mut()
+            .set("overview-capacity-test-provider", provider);
+        user.save(runtime.paths()).unwrap();
+
+        let now_unix = crate::provider::cache::now_unix_seconds();
+        crate::provider::telemetry::GatewayQuotaCache::new(runtime.paths()).store(
+            "overview-capacity-test-provider",
+            &crate::provider::telemetry::RateLimitHeaders::read(vec![
+                ("x-ratelimit-limit-requests", "100"),
+                ("x-ratelimit-remaining-requests", "82"),
+            ]),
+            now_unix,
+        );
+
+        let lines = build_project_overview_capacity(&runtime);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("overview-capacity-test-provider"),
+            "{lines:?}"
+        );
+        assert!(lines[0].contains("82%"), "{lines:?}");
+        assert!(lines[0].contains("[measured]"), "{lines:?}");
     }
 }
 

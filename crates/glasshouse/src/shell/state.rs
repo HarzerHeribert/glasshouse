@@ -354,6 +354,16 @@ pub struct ProjectOverviewState {
     /// How many further open todos exist beyond `todos` — Phase 26's
     /// snapshot budget, not a number invented here.
     todos_omitted: usize,
+    /// One already-formatted line per configured resource — capability map
+    /// lines 1657, 1658, 1659, 1660 and 1663. Pre-formatted the same way
+    /// `decisions` and `todos` are: reading `crate::config` and the on-disk
+    /// gateway-quota cache is file I/O this module deliberately does not
+    /// hold, so `shell::build_project_overview_capacity` builds the text and
+    /// this struct only carries it. Empty means no resource is configured
+    /// for this project, not that reading failed silently — see
+    /// [`Self::memory_note`] for the one honest-failure case this section
+    /// shares with the memory sections.
+    resources: Vec<String>,
     /// Set when the run loop could not read project memory at all — a
     /// missing or unreadable database, say. The overlay still opens and
     /// still shows sessions; only the memory sections are empty, and this
@@ -372,6 +382,10 @@ impl ProjectOverviewState {
 
     pub fn todos_omitted(&self) -> usize {
         self.todos_omitted
+    }
+
+    pub fn resources(&self) -> &[String] {
+        &self.resources
     }
 
     pub fn memory_note(&self) -> Option<&str> {
@@ -845,6 +859,7 @@ impl ShellState {
         decisions: Vec<String>,
         todos: Vec<String>,
         todos_omitted: usize,
+        resources: Vec<String>,
         memory_note: Option<String>,
     ) -> Action {
         self.overlay = Some(Overlay::ProjectOverview);
@@ -852,6 +867,7 @@ impl ShellState {
             decisions,
             todos,
             todos_omitted,
+            resources,
             memory_note,
         });
         Action::Redraw

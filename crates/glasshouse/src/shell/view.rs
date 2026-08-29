@@ -644,11 +644,23 @@ fn render_project_overview(state: &ShellState, frame: &mut Frame, area: Rect) {
         "RESOURCE STATE",
         Style::default().add_modifier(Modifier::BOLD),
     )));
-    lines.push(Line::from(Span::styled(
-        "  not tracked in this build: capacity bands, quota pressure, reset \
-         times and routing-model latency are Phase 32A/32B/33/34 work",
-        Style::default().fg(Color::DarkGray),
-    )));
+    let resources = state
+        .project_overview()
+        .map(crate::shell::state::ProjectOverviewState::resources)
+        .unwrap_or_default();
+    if resources.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no resources configured for this project",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for line in resources {
+            lines.push(Line::from(line.clone()));
+        }
+    }
+    // Line 1661 — the currently selected routing model and its recent
+    // latency — is deliberately absent: Phase 34B has no routing-model role
+    // in this build, so there is nothing here to name.
 
     if let Some(note) = state.project_overview().and_then(|o| o.memory_note()) {
         lines.push(Line::from(""));
@@ -2679,7 +2691,7 @@ mod tests {
         // "knowledge-graph visualization" is exactly what a `Gauge` or
         // `Sparkline` would be reaching for here.
         state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-        state.open_project_overview(Vec::new(), Vec::new(), 0, None);
+        state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), None);
         screens.push(rendered(&state, 100, 30));
         state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
@@ -3032,7 +3044,7 @@ mod tests {
             state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),
             crate::shell::state::Action::OpenProjectOverview
         );
-        state.open_project_overview(Vec::new(), Vec::new(), 0, None);
+        state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), None);
 
         let text = rendered(&state, 120, 40);
         assert!(text.contains("orchestrator"), "orchestrator row:\n{text}");
@@ -3052,7 +3064,7 @@ mod tests {
     fn the_project_overview_says_so_when_a_section_has_nothing() {
         let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
         state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-        state.open_project_overview(Vec::new(), Vec::new(), 0, None);
+        state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), None);
 
         let text = rendered(&state, 120, 40);
         assert!(text.contains("no session is designated"), "{text}");
@@ -3061,6 +3073,61 @@ mod tests {
         assert!(text.contains("no completed workers recorded"), "{text}");
         assert!(text.contains("no current binding decisions"), "{text}");
         assert!(text.contains("no open todos"), "{text}");
+        assert!(
+            text.contains("no resources configured for this project"),
+            "{text}"
+        );
+    }
+
+    /// Map lines 1657-1660 and 1663: a resource line the run loop handed in
+    /// reaches the popup — through [`ShellState::open_project_overview`], the
+    /// same call the real run loop makes, not a value the view invents.
+    /// Practice §17: asserted at a realistic width and a wide one, because a
+    /// row truncated off-screen at 120 columns would make a later `!contains`
+    /// absence assertion pass for the wrong reason.
+    #[test]
+    fn the_project_overview_shows_resource_capacity_the_run_loop_handed_it() {
+        for (width, height) in [(120, 40), (400, 40)] {
+            let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+            state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+            state.open_project_overview(
+                Vec::new(),
+                Vec::new(),
+                0,
+                vec!["  openrouter (remote)  plenty 82% [measured], reset in 3600s".to_owned()],
+                None,
+            );
+
+            let text = rendered(&state, width, height);
+            assert!(
+                text.contains("openrouter (remote)"),
+                "resource label, width {width}:\n{text}"
+            );
+            assert!(text.contains("82% [measured]"), "width {width}:\n{text}");
+            assert!(text.contains("reset in 3600s"), "width {width}:\n{text}");
+        }
+    }
+
+    /// Map lines 1658 and 1659: a resource with no telemetry renders
+    /// `"unknown"` and no number at all — asserted at both widths so a
+    /// truncated row cannot make the absence trivially true (practice §17).
+    #[test]
+    fn an_unknown_resource_never_shows_a_number_at_a_realistic_and_a_wide_width() {
+        for (width, height) in [(120, 40), (400, 40)] {
+            let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+            state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+            state.open_project_overview(
+                Vec::new(),
+                Vec::new(),
+                0,
+                vec!["  some-provider (remote)  capacity unknown".to_owned()],
+                None,
+            );
+
+            let text = rendered(&state, width, height);
+            assert!(text.contains("capacity unknown"), "width {width}:\n{text}");
+            assert!(!text.contains('%'), "width {width}:\n{text}");
+        }
     }
 
     /// Map lines 1655 and 1656: decisions/constraints and unresolved todos
@@ -3075,6 +3142,7 @@ mod tests {
             vec!["constraint: never run ci-local beside cargo".to_owned()],
             vec!["todo: wire the shell into main".to_owned()],
             3,
+            Vec::new(),
             None,
         );
 
@@ -3105,6 +3173,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             0,
+            Vec::new(),
             Some("project memory unavailable: disk full".to_owned()),
         );
 
@@ -3515,6 +3584,7 @@ mod tests {
             vec!["decision: ship the six closeable lines".to_owned()],
             vec!["todo: close the rest next round".to_owned()],
             2,
+            Vec::new(),
             None,
         );
 
@@ -3610,7 +3680,7 @@ mod tests {
     fn the_project_overview_footer_names_its_own_key() {
         let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
         state.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-        state.open_project_overview(Vec::new(), Vec::new(), 0, None);
+        state.open_project_overview(Vec::new(), Vec::new(), 0, Vec::new(), None);
         let text = rendered(&state, 120, 40);
         assert!(
             text.contains("esc back to session"),
