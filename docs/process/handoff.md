@@ -6,6 +6,68 @@
 
 Last updated: 2026-08-29 (Europe/Berlin)
 
+## Checkpoint — 2026-08-29, batch 49 landed: 734 / 1280 (57%)
+
+**Four Opus team leads, each running its own subcontractors, 40 capability
+lines in flight.** Thirteen closed. Eight phases fully closed today (2D, 3, 12,
+18, 19, 21A, 32, 40).
+
+### What the leads produced
+
+| lead | phase | closed | the finding worth keeping |
+|---|---|---|---|
+| worker-loop | 15 + 16 | **7** (733–739) | `api::unix::spawn_session` was the **one launch path in the binary installing no lifecycle hooks** — an orchestrator's own worker could finish a turn and leave no trace |
+| placeholders | blocker-resolution | **3** (1288, 1291, 1319) | the root-cause framing paid, measurably — see below |
+| capacity | 32A | **1**, 9 refused | caught an error the orchestrator wrote into its own packet as "established, do not re-derive" |
+| memory-ladder | 21E + 21G | **0**, 12 refused | found a **live project-isolation defect** on the read side |
+
+### The measurement that justifies packaging blockers by root cause
+
+Batch 49 took five lines that four separate phases had refused for "no
+production caller", found they shared **one hardcoded struct literal**, and
+closed three. **1291 closed as a side effect of fixing 1288** and was on no
+plausible task list.
+
+The proof is not rhetorical. The mutation disabling
+`evaluate_reserve_spend`'s imminent-reset branch is recorded in `phase-32f.md`
+as **SURVIVED** — run by the orchestrator, fifteen tests genuinely running.
+Re-run against the same function, unchanged, with only the *caller's* input made
+real: **KILLED**. Nothing about the branch moved; it now decides something.
+
+This is §83, and `docs/process/refusal-register.md` is the artifact that makes
+it repeatable: every refusal with its missing link and one column — is the
+missing thing inside this repository?
+
+### The defect nobody was looking for
+
+`MemoryStore::with_status` selected `WHERE status = ?1` with **no project
+predicate**, and had three production callers — `glasshouse memory revalidate
+--list` and both reads behind the project-knowledge panel, *the panel whose
+keyboard route this same batch closed as line 234*. Against a planted foreign
+row the shipped binary printed another project's memory body verbatim.
+
+Phase 21G had hardened five `UPDATE`s because a `get(id)?` guard is one line a
+future edit can silently drop. **The reads were never covered — and a listing
+query has no guard to drop, because it takes no identifier. The `WHERE` clause
+is the entire boundary.**
+
+### Four new practice sections, all paid for
+
+**§80** four ways a mutation lies — *now five*, the fifth being a KILLED
+delivered through a fixture's own timeout: a **true** verdict credited to
+assertions that never ran, which passes all three of §80's existing checks.
+**§81** never mark a recon's claim "established, do not re-derive" — the
+orchestrator did, and it would have returned a closeable capability as
+impossible. **§82** a lead pays when the work is code, not judgement.
+**§83** gather refusals by root cause.
+
+### The process failure of this batch, and it was the orchestrator's
+
+**The continuity watch was never armed.** The session ran to 81% context and
+was told by the user, not by the machine. `.agent-runtime/continuity-watch.sh`
+exists for exactly this. Arming it is now the first instruction in
+`CONTINUATION.md`.
+
 ## Checkpoint — 2026-08-29, batch 48 landed: 721 / 1280 (56%)
 
 Five capabilities, **four phases finished** (3, 12, 19, 21A). Four editing
