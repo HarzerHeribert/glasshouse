@@ -366,8 +366,8 @@ fn a_version_three_database_gains_the_memory_table_with_its_sessions_intact() {
         })
         .unwrap();
     assert_eq!(
-        version, 12,
-        "the launch must have applied migrations 4, 5, 6, 7, 8, 9, 10, 11 and 12"
+        version, 13,
+        "the launch must have applied migrations 4, 5, 6, 7, 8, 9, 10, 11, 12 and 13"
     );
 
     // The session recorded before the migration is untouched.
@@ -896,7 +896,7 @@ fn every_revalidation_outcome_leaves_the_matching_status() {
         .record(NewMemory::new(MemoryKind::Finding, "successor candidate"))
         .unwrap();
     let result = store
-        .revalidate_superseded(&old.id, &successor.id, ConflictResolver::Reviewed)
+        .revalidate_superseded(&old.id, &successor.id, None, ConflictResolver::Reviewed)
         .unwrap();
     assert_eq!(result.status, MemoryStatus::Superseded);
     assert_eq!(result.superseded_by, Some(successor.id));
@@ -1039,7 +1039,7 @@ fn an_automatic_reviewer_is_refused_a_high_impact_supersession_and_a_reviewed_on
             .unwrap();
 
         let refusal = store
-            .revalidate_superseded(&old.id, &successor.id, ConflictResolver::Automatic)
+            .revalidate_superseded(&old.id, &successor.id, None, ConflictResolver::Automatic)
             .expect_err(&format!(
                 "{binding} is high-impact and needs review to be superseded"
             ));
@@ -1054,7 +1054,7 @@ fn an_automatic_reviewer_is_refused_a_high_impact_supersession_and_a_reviewed_on
         );
 
         let settled = store
-            .revalidate_superseded(&old.id, &successor.id, ConflictResolver::Reviewed)
+            .revalidate_superseded(&old.id, &successor.id, None, ConflictResolver::Reviewed)
             .unwrap();
         assert_eq!(settled.status, MemoryStatus::Superseded);
         assert_eq!(settled.superseded_by, Some(successor.id));
@@ -1079,6 +1079,7 @@ fn an_automatic_reviewer_is_refused_a_high_impact_supersession_and_a_reviewed_on
         .revalidate_superseded(
             &unclassified.id,
             &unclassified_successor.id,
+            None,
             ConflictResolver::Automatic,
         )
         .expect_err("an unclassified authority must fail closed against automatic supersession");
@@ -1092,6 +1093,7 @@ fn an_automatic_reviewer_is_refused_a_high_impact_supersession_and_a_reviewed_on
         .revalidate_superseded(
             &unclassified.id,
             &unclassified_successor.id,
+            None,
             ConflictResolver::Reviewed,
         )
         .unwrap();
@@ -1115,6 +1117,7 @@ fn an_automatic_reviewer_is_refused_a_high_impact_supersession_and_a_reviewed_on
         .revalidate_superseded(
             &ordinary.id,
             &ordinary_successor.id,
+            None,
             ConflictResolver::Automatic,
         )
         .unwrap_or_else(|error| panic!("a preference is not high-impact: {error}"));

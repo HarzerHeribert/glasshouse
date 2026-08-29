@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**734 / 1280 mandatory capabilities (57%)** — 546 open across 71 phases.
+**737 / 1280 mandatory capabilities (58%)** — 543 open across 71 phases.
 
 ## Where the work is
 
@@ -31,6 +31,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32B | Quota telemetry sources | **1** | 13 | `1220` |
 | Phase 41 | Project overview | **1** | 14 | `1648` |
 | Phase 42 | External control API | **1** | 12 | `1666` |
+| Phase 45 | Failure handling | **1** | 8 | `1722` |
 | Phase 7 | Claude Code adapter | **2** | 8 | `296` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 9E | Secret storage | **2** | 11 | `432` |
@@ -38,7 +39,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 9J | Harness-model pairing model | **2** | 18 | `545` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
-| Phase 45 | Failure handling | **2** | 7 | `1722` |
 | Phase 46 | Security and contamination tests | **2** | 6 | `1739` |
 | Phase 49 | Configuration | **2** | 14 | `1784` |
 | Phase 21 | Memory extraction | **3** | 10 | `831` |
@@ -46,10 +46,10 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 16 | Worker transparency | **4** | 3 | `742` |
 | Phase 21F | Memory retrieval quality | **4** | 7 | `927` |
 | Phase 54 | Criteria before deeper cmux coupling | **4** | 0 | `1885` |
+| Phase 21E | Decision ladder and conflict handling | **5** | 7 | `907` |
 | Phase 28 | File-aware memory lookup | **5** | 0 | `1137` |
 | Phase 33A | Routing evidence ledger | **5** | 10 | `1327` |
 | Phase 53 | Criteria before adding graph storage | **5** | 0 | `1872` |
-| Phase 21E | Decision ladder and conflict handling | **6** | 6 | `907` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
 | Phase 24 | Memory reranking | **6** | 0 | `1082` |
 | Phase 26 | Memory query for agents | **6** | 0 | `1109` |
@@ -57,13 +57,13 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 52 | Criteria before adding semantic/vector retrieval | **6** | 0 | `1858` |
 | Phase 31 | Compaction-aware behavior | **7** | 0 | `1167` |
 | Phase 38 | Quota-preserving routing | **7** | 0 | `1604` |
+| Phase 47 | Observability without spectacle | **7** | 8 | `1750` |
 | Phase 50 | Tracked project knowledge as an optional feature | **7** | 0 | `1803` |
 | Phase 29 | Memory commits | **8** | 0 | `1145` |
 | Phase 30 | Session context metadata | **8** | 0 | `1156` |
 | Phase 34B | Routing-model role | **8** | 7 | `1406` |
 | Phase 35D | Routing under subscription pressure | **8** | 0 | `1568` |
 | Phase 36 | Session affinity | **8** | 0 | `1579` |
-| Phase 47 | Observability without spectacle | **8** | 7 | `1750` |
 | Phase 21J | Implementation review checklist | **9** | 0 | `980` |
 | Phase 32A | Unified quota and capacity model | **9** | 12 | `1196` |
 | Phase 34E | Router economics | **9** | 0 | `1461` |
@@ -100,7 +100,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~511 open lines are not.
+other ~509 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -145,6 +145,10 @@ these unwrapped.
 
 - **1681** ☐ Allow the API to request an inspectable routing recommendation without executing it.
 
+### Phase 45 — Failure handling  (1 open, 8 closed)
+
+- **1731** ☐ Preserve the most recent checkpoint after a worker crashes.
+
 ### Phase 7 — Claude Code adapter  (2 open, 8 closed)
 
 - **308** ☐ Detect when Claude Code requires user input or permission through structured events when possible.
@@ -179,11 +183,6 @@ these unwrapped.
 
 - **1263** ☐ Lower the score when user-defined spending budget is close to exhaustion.
 - **1267** ☐ Treat unlimited local inference as high-capacity but still account for measured latency and concurrency.
-
-### Phase 45 — Failure handling  (2 open, 7 closed)
-
-- **1731** ☐ Preserve the most recent checkpoint after a worker crashes.
-- **1735** ☐ Detect gateway failure separately from harness-process failure.
 
 ### Phase 46 — Security and contamination tests  (2 open, 6 closed)
 
@@ -279,10 +278,10 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
+- Checkpoint — 2026-08-29, batch 50 landed: 737 / 1280 (57%)
 - Checkpoint — 2026-08-29, batch 49 landed: 734 / 1280 (57%)
 - Checkpoint — 2026-08-29, batch 48 landed: 721 / 1280 (56%)
 - Checkpoint — 2026-08-29, batch 47 landed: 716 / 1280 (56%)
-- Checkpoint — 2026-08-29, batch 45 landed: 710 / 1280 (55%)
 
 ## Evidence ledger files
 

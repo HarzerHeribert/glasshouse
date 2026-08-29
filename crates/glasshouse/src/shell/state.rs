@@ -99,6 +99,20 @@ pub enum Overlay {
     /// shape as `ProjectKnowledge` — see [`ProjectMemoryState`] for the data
     /// behind it.
     ProjectMemory,
+    /// Phase 47 line 1765: what a local gateway has observed about each free
+    /// resource, with **route health, immediate availability, cadence, quota
+    /// reset and failure-domain evidence kept as five separate concepts** —
+    /// never folded into one status word, which is what the line forbids and
+    /// what `crate::provider::resources`'s own `render_health` does today,
+    /// on a single line, for three of the five.
+    ///
+    /// [`Overlay::RouteEvidence`]'s sibling: that table answers *which*
+    /// identities this gateway has actually routed, this one answers what is
+    /// known right now about whether each of them can serve. Read-only, like
+    /// every overlay above it. See [`RouteHealthState`] for the data behind
+    /// it, and [`RouteHealthRow`] for why "unknown" is a real answer in
+    /// three of the five concepts.
+    RouteHealth,
 }
 
 /// Who currently owns the keyboard.
@@ -250,6 +264,19 @@ pub enum Action {
     /// through its own note rather than refusing to open, the same contract
     /// [`Action::OpenProjectKnowledge`] already keeps. Map line 234.
     OpenProjectMemory,
+    /// Open the route-health view. Reading the two gateway telemetry caches
+    /// (`crate::provider::telemetry::GatewayHealthCache` and
+    /// `GatewayQuotaCache`) is file I/O this module deliberately does not
+    /// hold — the run loop reads them and calls
+    /// [`ShellState::open_route_health`].
+    ///
+    /// **No error arm, unlike [`Action::OpenRouteEvidence`].** Both caches
+    /// are documented as returning no error ever: an absent, unreadable,
+    /// truncated or wrong-version file reads as *nothing observed*, which is
+    /// a complete answer this view can render honestly. There is therefore
+    /// no failure for a note to report, and adding one would be a field
+    /// nothing sets. Phase 47, map line 1765.
+    OpenRouteHealth,
 }
 
 /// A session's screen, as a terminal would have drawn it, ready to draw.
@@ -674,6 +701,117 @@ impl RouteEvidenceState {
     }
 }
 
+/// One observed free resource, with map line 1765's five concepts carried as
+/// **five separate groups of fields** — Phase 47.
+///
+/// Built by `shell::build_route_health_table` from
+/// `crate::provider::telemetry::GatewayHealthCache` and `GatewayQuotaCache`,
+/// the two files a gateway process writes and any later process reads back.
+/// This module holds plain data rather than importing those types directly,
+/// the same split [`RouteEvidenceRow`] keeps from `crate::routing::evidence`.
+///
+/// # Why the fields are grouped and not summarised
+///
+/// Line 1765 asks for route health, immediate availability, cadence, quota
+/// reset and failure-domain evidence *"as separate concepts"*. They are five
+/// different questions with five different answers and five different ways of
+/// being unknown, and collapsing them is not a simplification — it is a lost
+/// distinction:
+///
+/// - a resource can be **healthy** (no failures) and **unavailable** (its
+///   credential was refused);
+/// - it can be **available now** and still have a **cadence** that will stop
+///   it in one more request;
+/// - a **cooldown** Glasshouse imposed and a **quota reset** the provider
+///   stated are different clocks owned by different parties, and neither is
+///   the other's estimate;
+/// - **failure-domain evidence** is about a *pair* of resources and says
+///   nothing about either one alone.
+///
+/// `crate::provider::resources::render_health` currently prints health,
+/// availability and cadence as one `status` word on one line. That is the
+/// shape this row exists not to reproduce.
+///
+/// # "unknown" is a real answer, and it is `None`
+///
+/// Three of the five concepts come from provider-stated headers that most
+/// providers do not send. A `None` here is *"no response ever stated this"*,
+/// never a zero and never a default — the same contract
+/// `crate::provider::telemetry::RateLimitHeaders` keeps field by field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteHealthRow {
+    /// The provider these observations belong to — also the *only* signal
+    /// this build has for `failure_domain` below.
+    pub provider: String,
+    /// `crate::routing::CredentialId::label` — two names, never a secret.
+    pub credential_label: String,
+    pub model: String,
+
+    // --- concept 1: route health -------------------------------------
+    /// How many failures in a row this resource has had **since its last
+    /// success**. A streak, not a total: any success resets it to zero (see
+    /// `crate::routing::free::ResourceHealth::observe`), so the view must
+    /// never present it as a count of everything that ever went wrong.
+    pub consecutive_failures: u32,
+    /// The provider refused the credential itself. A different fact from a
+    /// failure streak, and it is kept separate because waiting does not fix
+    /// it.
+    pub credential_rejected: bool,
+
+    // --- concept 2: immediate availability ---------------------------
+    /// `crate::provider::telemetry::GatewayHealthReading::is_available`, as
+    /// of the moment the run loop built this row. The producer's own
+    /// decision, not a verdict this module re-derives from the two fields
+    /// above — which would be a second spelling of the same rule.
+    pub available_now: bool,
+
+    // --- concept 3: cadence ------------------------------------------
+    /// When Glasshouse's own bounded backoff stops pacing this resource.
+    /// `None` means it is not pacing it. Pacing is a scheduling fact, never
+    /// a verdict on the resource — `render_health`'s own wording, kept.
+    pub cooling_down_until_unix: Option<i64>,
+    /// The request ceiling the provider stated, if it stated one.
+    pub stated_limit: Option<i64>,
+    /// How long the stated ceiling's window is, in seconds, if the provider
+    /// said. `stated_limit` per `stated_window_seconds` is the provider's own
+    /// cadence; either half alone is not.
+    pub stated_window_seconds: Option<i64>,
+
+    // --- concept 4: quota reset --------------------------------------
+    /// When the provider said the current window resets, as a unix second.
+    /// `None` means no response ever carried a reset field — not "it never
+    /// resets", and not "now".
+    pub quota_resets_at_unix: Option<i64>,
+
+    // --- concept 5: failure-domain evidence --------------------------
+    /// `crate::routing::domain::FailureDomain`'s own vocabulary, and never
+    /// `"independent"`: that state is one this build cannot earn, because
+    /// nothing here does the temporal correlation it would need. Spelled by
+    /// `shell::build_route_health_table` from the enum itself so there is
+    /// exactly one spelling of these words in the process.
+    pub failure_domain: String,
+    /// How many *other* observed resources share this one's provider — the
+    /// resources this one is known to fail together with. Zero does not mean
+    /// isolated; it means nothing has been observed that shares its domain.
+    pub failure_domain_peers: usize,
+}
+
+/// The route-health view's own data: every resource a local gateway has
+/// observed, as the run loop read it. See [`ShellState::open_route_health`].
+///
+/// No `note` field, deliberately, unlike [`RouteEvidenceState`] — see
+/// [`Action::OpenRouteHealth`] for why there is no read failure to report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteHealthState {
+    rows: Vec<RouteHealthRow>,
+}
+
+impl RouteHealthState {
+    pub fn rows(&self) -> &[RouteHealthRow] {
+        &self.rows
+    }
+}
+
 /// The abbreviated session identifier the overview shows.
 ///
 /// One definition, shared by the overview's rows and by every status note
@@ -783,6 +921,9 @@ pub struct ShellState {
     /// The route-evidence table's own data, or `None` when it is not open —
     /// the same split as `project_overview` and `project_knowledge`.
     route_evidence: Option<RouteEvidenceState>,
+    /// The route-health view's own data, or `None` when it is not open — the
+    /// same split as `route_evidence`.
+    route_health: Option<RouteHealthState>,
     /// The project-memory view's own data, or `None` when it is not open —
     /// the same split as `project_overview`, `project_knowledge` and
     /// `route_evidence`.
@@ -814,6 +955,7 @@ impl ShellState {
             project_overview: None,
             project_knowledge: None,
             route_evidence: None,
+            route_health: None,
             project_memory: None,
             activity: Vec::new(),
         }
@@ -1029,6 +1171,25 @@ impl ShellState {
         self.route_evidence.as_ref()
     }
 
+    /// Open the route-health view with rows the run loop already read from
+    /// the two gateway telemetry caches. Reading
+    /// `crate::provider::telemetry` is file I/O this module deliberately does
+    /// not hold — see [`Self::open_route_evidence`] for the same split.
+    ///
+    /// Opens on an empty `rows` too: "no gateway exchange has been observed"
+    /// is an honest answer and the one a fresh installation gives, so a view
+    /// that refused to open would be hiding the most common true state.
+    pub fn open_route_health(&mut self, rows: Vec<RouteHealthRow>) -> Action {
+        self.overlay = Some(Overlay::RouteHealth);
+        self.route_health = Some(RouteHealthState { rows });
+        Action::Redraw
+    }
+
+    /// The route-health view's own data, or `None` when it is not open.
+    pub fn route_health(&self) -> Option<&RouteHealthState> {
+        self.route_health.as_ref()
+    }
+
     /// Open the project-memory view with memory the run loop already read
     /// from disk — every kind, at every status, unfiltered. Reading
     /// `crate::memory` is file I/O this module deliberately does not hold —
@@ -1097,6 +1258,7 @@ impl ShellState {
         self.project_overview = None;
         self.project_knowledge = None;
         self.route_evidence = None;
+        self.route_health = None;
         self.project_memory = None;
         Action::Redraw
     }
@@ -1475,6 +1637,12 @@ impl ShellState {
             return self.handle_route_evidence_key(key, had_status);
         }
 
+        // Read-only, exactly like `RouteEvidence` above and for the same
+        // reason: it is a table with nothing on it to act on.
+        if self.overlay == Some(Overlay::RouteHealth) {
+            return self.handle_route_health_key(key, had_status);
+        }
+
         // The same cursor-and-drill-down shape as `ProjectKnowledge` above,
         // over one unfiltered list instead of five curated sections.
         if self.overlay == Some(Overlay::ProjectMemory) {
@@ -1499,6 +1667,12 @@ impl ShellState {
             KeyCode::Char('k') => Action::OpenProjectKnowledge,
             KeyCode::Char('e') => self.open_session_events(),
             KeyCode::Char('r') => Action::OpenRouteEvidence,
+            // `h` for health, and it was free: every other `Char` binding in
+            // this table is listed above and below, and no overlay handler
+            // claims `h` either — the overlay handlers that run instead of
+            // this one claim only their own close key (and, for the two with
+            // a cursor, Up/Down/Enter).
+            KeyCode::Char('h') => Action::OpenRouteHealth,
             // Capital, not lowercase `m`: that letter is already the
             // Overview's own "begin sending text" key (`handle_overview_key`'s
             // `Char('m') if !ctrl`), and giving the same key a second,
@@ -1613,6 +1787,16 @@ impl ShellState {
     fn handle_route_evidence_key(&mut self, key: KeyEvent, had_status: bool) -> Action {
         match key.code {
             KeyCode::Esc | KeyCode::Char('r') => self.close_overlay(),
+            _ => self.handle_control_key(key, had_status),
+        }
+    }
+
+    /// Answer one key while the route-health view is open — the same shape as
+    /// [`Self::handle_route_evidence_key`], for the same reason: nothing here
+    /// is acted on, only shown.
+    fn handle_route_health_key(&mut self, key: KeyEvent, had_status: bool) -> Action {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('h') => self.close_overlay(),
             _ => self.handle_control_key(key, had_status),
         }
     }

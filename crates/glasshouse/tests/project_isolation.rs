@@ -624,6 +624,21 @@ fn assert_foreign_and_untouched<T>(
         status, "active",
         "{label}: a refused call must not have written anything to the planted row"
     );
+    // Read as its own column rather than trusting `status`: migration 13's
+    // `superseded_reason` is operator free text, and a refused call that
+    // nevertheless stamped it would leave this project's words on another
+    // project's row while `status` still said `active`.
+    let reason: Option<String> = conn
+        .query_row(
+            "SELECT superseded_reason FROM memories WHERE id = 'planted-memory'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        reason, None,
+        "{label}: a refused call must not have written a supersession reason to the planted row"
+    );
 }
 
 /// Acceptance test 5: every state-changing `MemoryStore` method
@@ -717,7 +732,15 @@ fn every_revalidation_primitive_refuses_a_memory_planted_from_another_project_an
     );
     assert_foreign_and_untouched(
         &beta,
-        beta_store.revalidate_superseded(&planted, &own.id, ConflictResolver::Reviewed),
+        // Map line 925's reason travels through the same door, so a foreign
+        // row must be refused *with* one — a call that wrote only the reason
+        // across the boundary would be a new leak through an old refusal.
+        beta_store.revalidate_superseded(
+            &planted,
+            &own.id,
+            Some("a reason another project must never receive"),
+            ConflictResolver::Reviewed,
+        ),
         "revalidate_superseded",
     );
     assert_foreign_and_untouched(

@@ -66,6 +66,15 @@ impl Screen {
         let terminal =
             ratatui::Terminal::new(backend).context("could not initialise the terminal")?;
 
+        // Armed here rather than beside the event loop, because this is where
+        // the terminal is actually taken over and the watchdog's question is
+        // "does Glasshouse still owe someone an interface?" rather than "is a
+        // loop running?" — it has to outlast the loop to cover the wind-down
+        // after it. A screen may be acquired, dropped and acquired again (the
+        // wizard handing over to the shell); arming is idempotent, and there
+        // is deliberately no disarm. See `event::arm_hangup_watchdog`.
+        event::arm_hangup_watchdog();
+
         Ok(Self {
             terminal: ManuallyDrop::new(terminal),
             _guard: guard,

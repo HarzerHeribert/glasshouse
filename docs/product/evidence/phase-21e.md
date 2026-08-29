@@ -239,3 +239,94 @@ worth keeping: `AND project_id = ?3` → `AND ?3 IS NOT NULL` rather than deleti
 the clause, **because deleting it while leaving `?3` bound fails on rusqlite's
 parameter count — a §80 case-4 false KILLED that proves nothing behavioural.**
 Keeping the parameter count identical makes the mutation purely behavioural.
+
+---
+
+### Phase 21E — Record why a decision was superseded so future agents do not resurrect it without context (line 925)
+
+State: **COMPLETE** — promoted by the orchestrator, batch 50.
+
+Contract: Given a memory being superseded through the shipped binary, when the
+operator supplies a reason, Glasshouse persists that reason beside the
+successor and shows it to a later reader; when no reason is supplied,
+superseding stays legal and records nothing — while never letting an
+explanation outlive the supersession it explains, and never letting one
+project's words reach another project's row.
+
+**The ledger's recorded blocker was wrong and this is the correction.** The
+entry said 925 "needs a schema migration, Red tier" and that `review_reason`
+was already doing the job. `review_reason` is a six-value CHECK-constrained
+enum meaning *why this memory needs review*, which is not *why it was
+superseded*; and `memory_revalidate` (`main.rs:2770`) **explicitly rejected**
+`--reason` for the `superseded` outcome (*"`superseded` does not take
+--reason"*). A supersession recorded who and which successor, never why.
+
+**Orchestrator ruling, made before dispatch.** Add a nullable `TEXT` column via
+a new `ALTER TABLE memories ADD COLUMN` migration — the shape migration 10
+already used at `database.rs:1027`. Cluster G's house rule
+(`database.rs:830`) forbids **widening a CHECK in place**, which adding a
+column is not; 925 was never blocked by it.
+
+Production: migration **13**, `SUPPORTED_SCHEMA_VERSION` 12 → 13, adding
+`superseded_reason TEXT CHECK (superseded_reason IS NULL OR
+(superseded_reason <> '' AND length(superseded_reason) <= 512))`;
+`MemoryStore::supersede_with_reason`; `revalidate_superseded` carrying an
+`Option<&str>`; `memory_revalidate` accepting `--reason`; and
+`main.rs::write_memory_record` printing it so `memory search --history` hands a
+later agent the context.
+
+Three decisions inside the ruling, each load-bearing:
+
+- **A second door rather than a changed signature.** `supersede(old, new)` is
+  unchanged and delegates. The map says *record why*, not *require why*, and
+  `shell/mod.rs` calls `supersede` in five places and belonged to another
+  worker this round.
+- **Blank text is `None`, and the schema agrees.** `Some("")` and `Some("   ")`
+  trim to `None`; the CHECK refuses `''` outright. A stored empty string would
+  make *"no reason recorded"* and *"a blank reason was recorded"* the same
+  value to every consumer.
+- **The reason is cleared with the successor.** `set_status` moving a memory
+  away from `Superseded` clears `superseded_reason` in the same `CASE` it
+  already used for `superseded_by`. This is behaviour, not tidiness:
+  `superseded_by` has a table-level CHECK and `ALTER TABLE ADD COLUMN` cannot
+  add one, so the store is the only thing keeping the explanation from
+  outliving the supersession.
+
+Regression: `tests/memory_supersede_reason.rs` (new), all three through the
+shipped binary — the reason recorded and shown by `memory search --history`;
+no reason and whitespace-only both storing `NULL`; and the reason cleared when
+a superseded memory is reaffirmed. Migration proof in `database.rs`'s ladder:
+a version-12 database with an **already superseded** memory migrates to 13,
+keeps the row and the supersession, and reads the reason back as `None` — the
+one population this column can never fill in, proved to read as unknown rather
+than as anything invented. The CHECK refuses `''` and 513 characters.
+
+Isolation: `project_isolation.rs`'s acceptance test now passes a reason through
+`revalidate_superseded` and asserts at the raw-connection level that a planted
+foreign row has **no** `superseded_reason`. A refused call that nevertheless
+stamped this project's words onto another project's row would have been a new
+leak through an old refusal, and `status` alone would not have shown it. The
+new column changed no predicate: `supersede_with_reason` keeps
+`AND project_id = ?6`.
+
+Mutations — three KILLED; the third re-run by the orchestrator in the
+integrated tree, failing
+`superseding_with_a_reason_records_it_and_a_later_search_shows_it`:
+
+| mutation | result | note |
+|---|---|---|
+| drop the reason from the UPDATE's parameter list | KILLED | parameter count deliberately unchanged, per batch 49's note that deleting a bound parameter fails on rusqlite arity and produces a §80 case-4 false KILLED |
+| stop rendering the reason in `write_memory_record` | KILLED | **the one that matters** — it proves the *reading* door, which is what makes the column a capability rather than a column |
+| `set_status` keeping a stale reason | KILLED | *"must not keep the explanation of a supersession that no longer holds"* |
+
+§69 in practice: the schema bump broke **eight tests in five files**, five of
+them in files the packet did not name — six migration-rollback batches whose
+`DELETE FROM schema_migrations WHERE version >= N` also deletes row 13, five
+assertions hard-coding `version, 12`, and the whole-schema column list. The
+worker read six of the nine rollback sites correctly and would still have
+shipped the rest; `blast-radius.sh` caught them in one run.
+
+Missing evidence: the reason is **operator free text and is not screened for
+credentials** — the same standing as `memories.body`, `sessions.purpose` and
+`checkpoints.document`, and the same recorded answer: closed on the producer
+side. It is bound as a SQL parameter and never logged.

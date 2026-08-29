@@ -532,7 +532,13 @@ fn launch_session(
     // upstream is a closure, called only after the predicate says yes.
     // The guard lives to the end of this function, so the listener goes away
     // with the instance on every path out.
-    let gateway = match glasshouse::gateway::start_if_required_with_telemetry(
+    //
+    // Map line 1735: the relay is built here, before the gateway, because the
+    // sink has to exist before the thing it writes into does — see
+    // `DegradeRelay`. It is installed below, once the session record and the
+    // event recorder are both real.
+    let degrade_relay = DegradeRelay::new();
+    let gateway = match glasshouse::gateway::start_if_required_with_degrade_sink(
         std::slice::from_ref(&launch_profile),
         || gateway_upstream(&user, project.as_ref(), &effective, &secrets),
         Some(glasshouse::provider::telemetry::GatewayQuotaCache::new(
@@ -555,6 +561,7 @@ fn launch_session(
         Some(glasshouse::provider::telemetry::GatewayHealthCache::new(
             runtime.paths(),
         )),
+        Some(degrade_relay.sink()),
     ) {
         Ok(gateway) => gateway,
         Err(err) => {
@@ -716,8 +723,16 @@ fn launch_session(
     // point, and a log that only knew about one of them would be a log with a
     // hole in it exactly where a user was not using the interactive
     // interface.
-    let events = EventRecorder::open(runtime);
+    let events = Arc::new(EventRecorder::open(runtime));
     events.record(&record.id, LifecycleEvent::SessionStarted);
+
+    // Map line 1735, the other half of `DegradeRelay`: from here on a failed
+    // gateway upstream is recorded against this session, by the gateway's own
+    // thread, while the harness below keeps running. The record is the one
+    // this process owns and its `backend_resource` was written above, so
+    // `degrade_resource` can already tell whether this session was on the
+    // resource that failed.
+    degrade_relay.install(Arc::clone(&events), vec![record.clone()]);
 
     let session = if headless {
         run_headless(&record.id, launch)
@@ -1066,6 +1081,10 @@ fn resolve_resume_overlay(
     // the project's database and its project id, and narrowing to `paths`
     // here would put the ledger out of reach on the resume path alone.
     runtime: &glasshouse::Runtime,
+    // Map line 1735. Built by `resume_session`, which is where the recorder
+    // this eventually writes into is opened; this function only starts the
+    // gateway, so it is a parameter rather than something resolved here.
+    degrade_sink: glasshouse::gateway::DegradeSink,
 ) -> anyhow::Result<(
     glasshouse::profile::LaunchProfile,
     glasshouse::profile::LaunchOverlay,
@@ -1085,7 +1104,7 @@ fn resolve_resume_overlay(
     // credential is never carried across processes, let alone across the gap
     // between the original launch and this resume.
     let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
-    let gateway = glasshouse::gateway::start_if_required_with_telemetry(
+    let gateway = glasshouse::gateway::start_if_required_with_degrade_sink(
         std::slice::from_ref(&launch_profile),
         || gateway_upstream(user, project, effective, &secrets),
         Some(glasshouse::provider::telemetry::GatewayQuotaCache::new(
@@ -1095,6 +1114,7 @@ fn resolve_resume_overlay(
         Some(glasshouse::provider::telemetry::GatewayHealthCache::new(
             runtime.paths(),
         )),
+        Some(degrade_sink),
     )?;
     let resolution = glasshouse::profile::Resolution {
         adapter: selection.adapter(),
@@ -1814,15 +1834,25 @@ fn install_quiet_panic_hook() {
 /// never fail — and it is also on the launch path, where a bookkeeping
 /// failure must not turn into what looks like a harness failure. A project
 /// whose database cannot be opened loses event history and keeps its session.
+/// # Why the log is behind a `Mutex`
+///
+/// [`EventLog`] owns a `rusqlite::Connection`, which is `Send` and **not**
+/// `Sync`. Since [`DegradeRelay`], a recorder is no longer touched only by
+/// the thread that built it: the gateway's own connection thread reports a
+/// failed upstream through it, so `&EventRecorder` crosses a thread boundary
+/// and the type has to be `Sync` to be shared at all. The lock is what makes
+/// it so, and it is uncontended in practice — the two writers are a launch
+/// path making one bookkeeping call at a time and a gateway thread that only
+/// speaks when its upstream has just failed.
 struct EventRecorder {
     bus: EventBus,
-    log: Option<EventLog>,
+    log: Option<Mutex<EventLog>>,
 }
 
 impl EventRecorder {
     fn open(runtime: &Runtime) -> Self {
         let log = match EventLog::open(runtime) {
-            Ok(log) => Some(log),
+            Ok(log) => Some(Mutex::new(log)),
             Err(err) => {
                 tracing::warn!(error = %format!("{err:#}"), "could not open the project event log");
                 None
@@ -1831,6 +1861,48 @@ impl EventRecorder {
         Self {
             bus: EventBus::new(),
             log,
+        }
+    }
+
+    /// Record that one backend resource stopped serving — map line 1735's
+    /// durable half, on the path the shipped binary actually takes.
+    ///
+    /// # Why `degrade_resource` is called rather than reimplemented
+    ///
+    /// Which sessions a failing resource affects is one rule, and it lives in
+    /// [`glasshouse::events::degrade_resource`]: *a session is affected if,
+    /// and only if, its own record says it resolved to this backend
+    /// resource.* Selecting the sessions here instead would be a second copy
+    /// of that rule, and it would leave `degrade_resource` with no production
+    /// caller again — the exact state the evidence ledger refused this line
+    /// in.
+    ///
+    /// # Why it publishes on a bus that keeps nothing
+    ///
+    /// `degrade_resource` publishes each `GatewayUnhealthy` on the bus it is
+    /// given, and the durable write on this path is [`Self::append`], which
+    /// publishes on *this* recorder's bus to mint the record. Handing it
+    /// `self.bus` would mint every event twice. A history of zero makes the
+    /// bus purely the question-asking apparatus: nothing is kept, nothing is
+    /// dropped, and the returned [`glasshouse::events::Degradation`] is the
+    /// answer this method acts on.
+    fn degrade(
+        &self,
+        records: &[SessionRecord],
+        resource: &str,
+        reason: glasshouse::events::GatewayFailure,
+    ) {
+        let selection = EventBus::with_history(0);
+        let degradation =
+            glasshouse::events::degrade_resource(&selection, records, resource, reason);
+        for id in &degradation.affected {
+            self.record(
+                id,
+                LifecycleEvent::GatewayUnhealthy {
+                    resource: degradation.resource.clone(),
+                    reason,
+                },
+            );
         }
     }
 
@@ -1849,8 +1921,187 @@ impl EventRecorder {
         let Some(log) = &self.log else {
             return;
         };
+        let log = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Err(err) = log.append(&recorded, observed.as_ref()) {
             tracing::warn!(session = %id, error = %err, "could not record a lifecycle event");
+        }
+    }
+}
+
+/// The most gateway failures held while there is still nowhere to record
+/// them.
+///
+/// A bound rather than an unbounded queue for the reason every other buffer
+/// in this crate is bounded: the window is meant to be empty, and a window
+/// that is not empty is a defect, not a workload. Anything past this is
+/// counted and reported rather than kept — see [`DegradeRelay::report`].
+const EARLY_GATEWAY_FAILURES: usize = 32;
+
+/// Where a gateway failure is recorded, given that the recorder does not
+/// exist yet when the gateway starts.
+///
+/// # The ownership problem, stated exactly
+///
+/// [`glasshouse::gateway::DegradeSink`] has to be handed to the gateway at
+/// `start_if_required_with_degrade_sink`, and **both** of this binary's
+/// gateway starts happen before anything the sink needs exists:
+/// `launch_session` starts the gateway 184 lines before it opens its
+/// [`EventRecorder`], and it has no `SessionRecord` at all until the store
+/// has created one. So the sink cannot close over a bus and a session list;
+/// there is nothing to close over. This is the handle it closes over
+/// instead, created before the gateway and filled by [`Self::install`] once
+/// both halves exist.
+///
+/// # Why the session records are a snapshot, and whose sessions they are
+///
+/// [`glasshouse::events::degrade_resource`] takes the records it should
+/// consider. This relay is given **the sessions this process owns** — one, on
+/// either path — and not a fresh read of the project's whole session table.
+/// Two reasons, and the second is the load-bearing one:
+///
+/// - reading fresh would mean a `SessionStore` on the gateway's thread, which
+///   means a second open connection held for the life of the session for a
+///   read that fires only when an upstream has failed. §65's Windows hang was
+///   exactly that shape;
+/// - and a gateway is **per instance**. Another Glasshouse process's session
+///   is served by *its* gateway, which does its own detecting. Degrading it
+///   from here would report a failure this process never observed on that
+///   session's behalf. The narrower snapshot is the honest claim.
+///
+/// # Lifetime
+///
+/// The sink holds an `Arc<DegradeRelay>` and the relay holds an
+/// `Arc<EventRecorder>`; neither points back, so there is no cycle to leak.
+/// No thread is started here and none is kept alive: the relay is inert
+/// between calls, and the gateway's own guard is what stops the threads that
+/// call it.
+struct DegradeRelay {
+    state: Mutex<RelayState>,
+}
+
+/// [`DegradeRelay`]'s two lives, in one lock so that a failure arriving
+/// during [`DegradeRelay::install`] cannot be pushed onto a queue that has
+/// just been drained.
+enum RelayState {
+    /// Before the recorder exists. Failures accumulate, with their count.
+    Waiting {
+        held: Vec<(String, glasshouse::events::GatewayFailure)>,
+        /// How many were dropped for exceeding [`EARLY_GATEWAY_FAILURES`].
+        dropped: usize,
+    },
+    /// After it does. Failures are written straight through.
+    Ready {
+        events: Arc<EventRecorder>,
+        records: Vec<SessionRecord>,
+    },
+}
+
+impl DegradeRelay {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(RelayState::Waiting {
+                held: Vec::new(),
+                dropped: 0,
+            }),
+        })
+    }
+
+    fn own(&self) -> std::sync::MutexGuard<'_, RelayState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The sink to start a gateway with.
+    fn sink(self: &Arc<Self>) -> glasshouse::gateway::DegradeSink {
+        let relay = Arc::clone(self);
+        Arc::new(move |resource: &str, reason| relay.report(resource, reason))
+    }
+
+    /// Called by the gateway's own connection thread, once per exchange whose
+    /// outcome says the upstream failed.
+    ///
+    /// A failure that arrives before [`Self::install`] is **held, not
+    /// dropped and not fatal**. Panicking would take down the user's session
+    /// over a telemetry ordering problem, and discarding would make the one
+    /// window this line exists to observe the one window it cannot see. Past
+    /// the bound the failure is counted and named in the log, so even the
+    /// discard leaves a trace.
+    fn report(&self, resource: &str, reason: glasshouse::events::GatewayFailure) {
+        match &mut *self.own() {
+            RelayState::Waiting { held, dropped } => {
+                if held.len() >= EARLY_GATEWAY_FAILURES {
+                    *dropped += 1;
+                    tracing::warn!(
+                        resource,
+                        %reason,
+                        dropped = *dropped,
+                        "a gateway failure arrived before this launch had anywhere to record \
+                         it, and more than {EARLY_GATEWAY_FAILURES} are already waiting"
+                    );
+                    return;
+                }
+                held.push((resource.to_owned(), reason));
+            }
+            RelayState::Ready { events, records } => {
+                events.degrade(records, resource, reason);
+            }
+        }
+    }
+
+    /// Give the relay somewhere to write, and replay anything that arrived
+    /// first.
+    ///
+    /// Called on the launch and resume paths at the first point where both
+    /// the recorder and the session record exist. Nothing before this point
+    /// waits on it: the gateway is already serving.
+    fn install(&self, events: Arc<EventRecorder>, records: Vec<SessionRecord>) {
+        let mut state = self.own();
+        let ready = RelayState::Ready {
+            events: Arc::clone(&events),
+            records: records.clone(),
+        };
+        let RelayState::Waiting { held, dropped } = std::mem::replace(&mut *state, ready) else {
+            // Each path builds its own relay and installs once. A second
+            // install would mean two owners of one gateway's failures.
+            tracing::warn!("a degrade relay was installed twice");
+            return;
+        };
+        if dropped > 0 {
+            tracing::warn!(
+                dropped,
+                "gateway failures were discarded before this launch could record them"
+            );
+        }
+        // Still under the lock: a failure arriving now waits rather than
+        // overtaking the replay, so the log keeps the order the gateway saw.
+        for (resource, reason) in held {
+            events.degrade(&records, &resource, reason);
+        }
+    }
+}
+
+impl Drop for DegradeRelay {
+    /// The last resort against a silent loss: a relay dropped while still
+    /// holding failures is a launch that ended before it could record them —
+    /// a database that would not open, or an early return between the gateway
+    /// and the recorder. Nothing can be written at that point; saying so in
+    /// the log is what stops it from being invisible.
+    fn drop(&mut self) {
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let RelayState::Waiting { held, dropped } = state
+            && (!held.is_empty() || *dropped > 0)
+        {
+            tracing::warn!(
+                held = held.len(),
+                dropped,
+                "this launch ended without ever being able to record a gateway failure"
+            );
         }
     }
 }
@@ -2210,6 +2461,9 @@ fn resume_session(
     // rather than invent" as though it were a fresh launch. The user gets a
     // plain native resume and a line on stderr explaining why, not a session
     // that no longer opens at all.
+    // Map line 1735: built before the gateway `resolve_resume_overlay` starts,
+    // installed below beside the recorder — see `DegradeRelay`.
+    let degrade_relay = DegradeRelay::new();
     let overlay_resolution = record.launch_profile.as_deref().and_then(|name| {
         match resolve_resume_overlay(
             &effective,
@@ -2218,6 +2472,7 @@ fn resume_session(
             &selection,
             name,
             runtime,
+            degrade_relay.sink(),
         ) {
             Ok(resolved) => Some(resolved),
             Err(err) => {
@@ -2290,8 +2545,13 @@ fn resume_session(
     // a second `SessionStarted`, because otherwise a reader has to infer a
     // resume from a session having started twice, and an inference is not a
     // recording.
-    let events = EventRecorder::open(runtime);
+    let events = Arc::new(EventRecorder::open(runtime));
     events.record(&resumable.id, LifecycleEvent::SessionResumed);
+
+    // Map line 1735's resume half. `record` was read from the store above, so
+    // its `backend_resource` is whatever the original launch resolved — which
+    // is exactly the question `degrade_resource` asks of it.
+    degrade_relay.install(Arc::clone(&events), vec![record.clone()]);
 
     let status = match session::attach(launch) {
         Ok(status) => status,
@@ -2557,6 +2817,20 @@ fn write_memory_record(
             "    challenged    {reason} — not returned as settled until resolved"
         )?;
     }
+    // Map line 925: *"record why a decision was superseded so future agents do
+    // not resurrect it without context."* `memory search --history` is where a
+    // superseded memory is read at all, so it is where the context has to
+    // arrive; printing the successor's identifier without the reason is
+    // exactly the resurrection risk the line names.
+    //
+    // Gated on `superseded_reason` alone rather than on the status as well.
+    // `MemoryStore::set_status` clears the column whenever a memory leaves
+    // `Superseded`, so a reason present *is* a supersession in force — unlike
+    // `review_reason` above, which survives its review being resolved and
+    // therefore needs the status to disambiguate it.
+    if let Some(reason) = &record.superseded_reason {
+        writeln!(out, "    superseded    {reason}")?;
+    }
     let session = record.source_session_id.as_deref().unwrap_or("unknown");
     let commit = record.source_commit.as_deref().unwrap_or("unknown");
     let events = record
@@ -2812,12 +3086,14 @@ fn memory_revalidate(
             store.revalidate_needs_review(&resolved, parsed_reason, actor)?
         }
         "superseded" => {
-            if reason.is_some() {
-                anyhow::bail!("`superseded` does not take --reason");
-            }
+            // Map line 925. `--reason` here is the operator's own sentence
+            // about why this decision went, not `needs-review`'s six-value
+            // vocabulary above — a different question with a different answer
+            // type, which is why it is stored in its own column. Optional: a
+            // supersession with nothing to say is still a supersession.
             let by = by.ok_or_else(|| anyhow::anyhow!("`superseded` requires --by <ID>"))?;
             let successor = store.resolve_id(by)?;
-            store.revalidate_superseded(&resolved, &successor, actor)?
+            store.revalidate_superseded(&resolved, &successor, reason, actor)?
         }
         "invalidated" => {
             if by.is_some() || reason.is_some() {
@@ -3659,7 +3935,13 @@ mod tests {
     fn every_gateway_the_binary_starts_is_given_the_evidence_ledger() {
         let code = production_code(include_str!("main.rs"));
 
-        let starts = code.matches("start_if_required_with_telemetry(").count();
+        // Both doors, counted together. `start_if_required_with_degrade_sink`
+        // is `start_if_required_with_telemetry` plus map line 1735's sink and
+        // is what both sites call today; counting only the older name would
+        // have made this test pass with *zero* gateways found, which is the
+        // §68 shape — a filter that matches nothing looks exactly like a pass.
+        let starts = code.matches("start_if_required_with_telemetry(").count()
+            + code.matches("start_if_required_with_degrade_sink(").count();
         // Counts the *gated* form on purpose. An ungated `evidence_ledger(runtime)`
         // is the exact shape that hung six Windows tests for 37 minutes, so this
         // test must not accept it back.
@@ -3681,6 +3963,52 @@ mod tests {
             !code.contains("start_if_required_with_quota_cache("),
             "a call site still uses the pre-Phase-33A entry point, which cannot \
              carry an evidence ledger at all"
+        );
+    }
+
+    /// Map line 1735's structural half: every gateway this binary starts is
+    /// also given somewhere to report a failed upstream.
+    ///
+    /// The same standing and the same limits as the evidence-ledger scan
+    /// above — it proves *presence*, not behaviour, and line 1735 does not
+    /// close on it. `gateway_degrade::the_shipped_binary_records_a_gateway_\
+    /// failure_against_the_session_it_launched` is what closes the line; this
+    /// exists so that a future edit dropping one of the two sites back to
+    /// `None` has something to object, since only one of the two paths has a
+    /// behavioural test.
+    #[test]
+    fn every_gateway_the_binary_starts_is_given_somewhere_to_report_a_failure() {
+        let code = production_code(include_str!("main.rs"));
+
+        let starts = code.matches("start_if_required_with_degrade_sink(").count();
+        // The argument each start is actually given. `launch_session` hands
+        // its relay's sink in directly; the resume path builds the relay in
+        // `resume_session` and passes it down, so the argument at the start
+        // itself is the forwarded parameter.
+        let sinks = code.matches("Some(degrade_relay.sink()),").count()
+            + code.matches("Some(degrade_sink),").count();
+        assert_eq!(
+            starts, 2,
+            "this binary should start a gateway at exactly two sites (launch and \
+             resume); if that changed, this test needs to change with it"
+        );
+        assert_eq!(
+            sinks, starts,
+            "a gateway is started somewhere without a degrade sink, so its \
+             upstream failing would be recorded nowhere — which is the state \
+             map line 1735 was refused in"
+        );
+        assert_eq!(
+            code.matches("DegradeRelay::new()").count(),
+            starts,
+            "each gateway start needs its own relay: two paths sharing one \
+             would report a failure against the other's session"
+        );
+        assert_eq!(
+            code.matches("degrade_relay.install(").count(),
+            starts,
+            "a relay is built and never installed: its sink would hold every \
+             failure and write none of them"
         );
     }
 

@@ -633,6 +633,7 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
              -- the same reason migration 8's do a few blocks down: the
              -- runner resumes from MAX(version), so leaving them behind
              -- re-applies 10 against a table that already has them.
+             ALTER TABLE memories DROP COLUMN superseded_reason;
              ALTER TABLE memories DROP COLUMN validity_conditions;
              ALTER TABLE memories DROP COLUMN invalidation_conditions;
              ALTER TABLE memories DROP COLUMN review_reason;
@@ -734,8 +735,8 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
         })
         .unwrap();
     assert_eq!(
-        version, 12,
-        "the launch must have applied migrations 6, 7, 8, 9, 10, 11 and 12"
+        version, 13,
+        "the launch must have applied migrations 6, 7, 8, 9, 10, 11, 12 and 13"
     );
     drop(conn);
 
@@ -926,6 +927,7 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
              -- sessions columns are dropped below: this rollback lands on
              -- version 6, and `memories` must not still carry columns a
              -- later migration added.
+             ALTER TABLE memories DROP COLUMN superseded_reason;
              ALTER TABLE memories DROP COLUMN validity_conditions;
              ALTER TABLE memories DROP COLUMN invalidation_conditions;
              ALTER TABLE memories DROP COLUMN review_reason;
@@ -981,8 +983,8 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
         })
         .unwrap();
     assert_eq!(
-        version, 12,
-        "the launch must have applied migrations 7, 8, 9, 10, 11 and 12"
+        version, 13,
+        "the launch must have applied migrations 7, 8, 9, 10, 11, 12 and 13"
     );
     drop(conn);
 

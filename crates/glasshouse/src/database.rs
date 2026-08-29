@@ -68,10 +68,13 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// append-oriented ledger of what actually happened on a routed turn — see the
 /// migration's own doc comment for its shape and why it accepts no `UPDATE`.
 /// Version 12 adds `sessions.source_session_id`, Phase 40 line 1646's record of
-/// which session, if any, a session was bootstrapped from.
+/// which session, if any, a session was bootstrapped from. Version 13 adds
+/// `memories.superseded_reason`, map line 925's record of *why* a decision was
+/// superseded — the sentence that stops a future agent resurrecting it without
+/// context.
 /// Later migrations are appended to [`MIGRATIONS`], and this constant moves
 /// with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 12;
+const SUPPORTED_SCHEMA_VERSION: i64 = 13;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -1215,6 +1218,56 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
     "
     ALTER TABLE sessions ADD COLUMN source_session_id TEXT;
     ",
+    // 13: capability map line 925 — "record why a decision was superseded so
+    // future agents do not resurrect it without context."
+    //
+    // # `ALTER TABLE ADD COLUMN`, migration 12's shape
+    //
+    // No table is rebuilt, no existing `CHECK` is altered, no existing row is
+    // touched. Every memory recorded before this migration reads back with no
+    // supersession reason, which is the truth about it.
+    //
+    // # Why not `review_reason`
+    //
+    // `review_reason` is a six-value enumeration meaning *why this memory
+    // needs review*, constrained by migration 10's own `CHECK`. "Why it was
+    // superseded" is a different question with a different answer type — a
+    // person's sentence, not a vocabulary — and reusing the column would
+    // either need that `CHECK` widened, which this file's own house rule
+    // forbids doing in place, or would silently store a value readers of
+    // `review_reason` would have to guess about. Adding a column is neither.
+    //
+    // # No `CHECK` tying it to `status`
+    //
+    // `superseded_by` has one — `CHECK (superseded_by IS NULL OR status =
+    // 'superseded')` — and it is a **table** constraint on the original
+    // `CREATE TABLE`. `ALTER TABLE ADD COLUMN` cannot add a table constraint,
+    // and rebuilding `memories` to gain one would risk the data already in it
+    // for a rule the store already enforces: `MemoryStore::set_status` clears
+    // this column in the same expression it clears `superseded_by`, so the two
+    // cannot drift apart through any door this binary has.
+    //
+    // # The `CHECK` it does get
+    //
+    // Migration 8's shape for operator free text: not empty, and bounded.
+    // Empty is refused because `--reason ""` must not read back as *"a reason
+    // was recorded"* — the store maps it to NULL before it ever gets here, and
+    // this is the constraint that makes that a property of the data rather
+    // than of one caller remembering. The bound is 512 rather than
+    // `display_name`'s 64: this is a sentence explaining a decision, not a
+    // label, and the whole point of the line is that it carries enough context
+    // to stop a resurrection.
+    //
+    // # NULL, here as everywhere in this schema
+    //
+    // NULL is *"no reason was recorded"* — for a memory superseded before this
+    // migration, and for one superseded today without `--reason`, which stays
+    // legal. It is never a placeholder for an empty reason.
+    "
+    ALTER TABLE memories ADD COLUMN superseded_reason TEXT
+        CHECK (superseded_reason IS NULL
+               OR (superseded_reason <> '' AND length(superseded_reason) <= 512));
+    ",
 ];
 
 pub(crate) const PROJECT_ID_KEY: &str = "project_id";
@@ -1803,6 +1856,7 @@ mod tests {
                 "ALTER TABLE sessions DROP COLUMN source_session_id;
                  DROP TABLE routing_observations;
 
+                 ALTER TABLE memories DROP COLUMN superseded_reason;
                  ALTER TABLE memories DROP COLUMN validity_conditions;
                  ALTER TABLE memories DROP COLUMN invalidation_conditions;
                  ALTER TABLE memories DROP COLUMN review_reason;
@@ -1847,6 +1901,127 @@ mod tests {
         );
         assert_eq!(intact.review_reason, None);
         assert_eq!(intact.review_marked_at, None);
+    }
+
+    /// Migration proof (a) for migration 13: a version-12 database opens,
+    /// migrates to 13, and keeps every existing row — including a memory that
+    /// was **already superseded** before the reason column existed.
+    ///
+    /// That last part is the one worth having. A pre-migration supersession is
+    /// the population line 925's column can never fill in, so it has to read
+    /// back as *"no reason recorded"* rather than as anything invented, and
+    /// the supersession itself has to survive intact.
+    #[test]
+    fn a_version_twelve_database_migrates_forward_keeping_a_supersession_it_could_not_explain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let memory = crate::memory::ProjectMemory::open(&fixture.runtime).unwrap();
+        let store = memory.store();
+
+        let old = store
+            .record(crate::memory::NewMemory::new(
+                crate::memory::MemoryKind::Decision,
+                "obsidian decisions predate migration 13",
+            ))
+            .unwrap();
+        let replacement = store
+            .record(crate::memory::NewMemory::new(
+                crate::memory::MemoryKind::Decision,
+                "obsidian's successor",
+            ))
+            .unwrap();
+        let superseded = store.supersede(&old.id, &replacement.id).unwrap();
+        assert_eq!(superseded.superseded_by.as_ref(), Some(&replacement.id));
+        drop(store);
+        drop(memory);
+
+        let db_path = fixture.runtime.database_path();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE memories DROP COLUMN superseded_reason;
+                 DELETE FROM schema_migrations WHERE version >= 13;",
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            schema_version(&db_path),
+            12,
+            "the rollback must land on version 12"
+        );
+
+        // The next launch is an ordinary bootstrap; nothing special is asked
+        // of it, matching the way a real upgrade happens.
+        let migrated = fixture.rebootstrap().unwrap();
+        assert_eq!(
+            schema_version(&migrated.database_path()),
+            SUPPORTED_SCHEMA_VERSION,
+            "the launch must have applied migration 13"
+        );
+
+        let reopened = crate::memory::ProjectMemory::open(&migrated).unwrap();
+        let intact = reopened
+            .store()
+            .get(&old.id)
+            .unwrap()
+            .expect("the pre-migration memory must survive the upgrade");
+        assert_eq!(intact.body, old.body);
+        assert_eq!(
+            intact.status,
+            crate::memory::MemoryStatus::Superseded,
+            "the supersession recorded before the column existed must survive it"
+        );
+        assert_eq!(intact.superseded_by.as_ref(), Some(&replacement.id));
+        assert_eq!(
+            intact.superseded_reason, None,
+            "a supersession recorded before migration 13 has no reason, and must not acquire an \
+             invented one"
+        );
+        // The successor is untouched by any of it.
+        let successor = reopened
+            .store()
+            .get(&replacement.id)
+            .unwrap()
+            .expect("the successor must survive the upgrade");
+        assert_eq!(successor.superseded_reason, None);
+        assert_eq!(successor.status, crate::memory::MemoryStatus::Active);
+    }
+
+    /// Migration proof (b) for migration 13: its `CHECK` refuses an empty
+    /// reason, so `''` can never read back as *"a reason was recorded"* even
+    /// from a hand-edited database.
+    #[test]
+    fn migration_thirteen_rejects_an_empty_supersession_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let memory = crate::memory::ProjectMemory::open(&fixture.runtime).unwrap();
+        let recorded = memory
+            .store()
+            .record(crate::memory::NewMemory::new(
+                crate::memory::MemoryKind::Finding,
+                "onyx needs a supersession reason that is not one",
+            ))
+            .unwrap();
+        drop(memory);
+
+        let conn = Connection::open(fixture.runtime.database_path()).unwrap();
+        assert!(
+            conn.execute(
+                "UPDATE memories SET superseded_reason = '' WHERE id = ?1",
+                [recorded.id.as_str()],
+            )
+            .is_err(),
+            "an empty supersession reason must be rejected by the CHECK constraint"
+        );
+        assert!(
+            conn.execute(
+                "UPDATE memories SET superseded_reason = ?2 WHERE id = ?1",
+                rusqlite::params![recorded.id.as_str(), "x".repeat(513)],
+            )
+            .is_err(),
+            "a supersession reason past the bound must be rejected by the CHECK constraint"
+        );
     }
 
     /// Migration proof (b): migration 10's new `CHECK` rejects a
@@ -1897,6 +2072,7 @@ mod tests {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(
                 "ALTER TABLE sessions DROP COLUMN source_session_id;
+                 ALTER TABLE memories DROP COLUMN superseded_reason;
                  DROP TABLE routing_observations;
                  DELETE FROM schema_migrations WHERE version >= 11;",
             )

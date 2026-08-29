@@ -401,3 +401,163 @@ non-test callers.
 Missing evidence: the five structurally-unavailable columns, which need a
 component that reads the response stream's framing — the same blocker
 `routing/evidence.rs`'s own module header records.
+
+---
+
+### Phase 47 — Show route health, immediate availability, cadence, quota reset, and failure-domain evidence as separate concepts (line 1765)
+
+State: **COMPLETE** — promoted by the orchestrator, batch 50. The worker
+proposed COMPLETE; the ruling and its one recorded limit are the orchestrator's.
+
+Contract: Given a project whose gateway has observed at least one free
+resource, when the user presses `h`, Glasshouse opens a read-only overlay
+rendering route health, immediate availability, cadence, quota reset and
+failure-domain evidence as five separately labelled concepts — printing
+`unknown` rather than a zero for anything no provider stated and never claiming
+independent failure domains — while preserving the default screen and every
+other binding.
+
+**Why this was closeable when seven sibling lines were not.** The shell process
+holds no router and no gateway: `shell::run` (`shell/mod.rs:72`) takes only a
+`&Runtime` and is reached from `main.rs:326`, while the gateway starts at
+`main.rs:535`/`:1088`. A shell debug view can therefore render only what is
+durable on disk. This line's five concepts are, because `gateway/mod.rs`'s
+accept loop writes `GatewayQuotaCache` and `GatewayHealthCache` on every
+forwarded exchange and `glasshouse resources` already reads them back from a
+different process. This view is a second reader of that same seam.
+
+**Why the line was not already satisfied.** The pre-existing consumer,
+`provider::resources::render_health` (`resources.rs:683`), prints route health,
+immediate availability and cadence as **one status word on one line**, quota
+reset from a different function, and failure-domain evidence nowhere. That
+collapse is what line 1765 forbids.
+
+Production: `shell/mod.rs::build_route_health_table` and the
+`Action::OpenRouteHealth` arm; `shell/state.rs::{RouteHealthRow,
+ShellState::open_route_health, handle_route_health_key}` and the `h` binding in
+`handle_control_key`; `shell/view.rs::{render_route_health, describe_deadline}`.
+
+Regression: 6 builder tests in `shell::route_health_tests`, 9 render tests in
+`shell::view::tests`, and 5 external tests in `tests/observability_views.rs`.
+Every render assertion runs at a realistic width and at 400 columns. The
+"no two concepts on one line" check uses the raw buffer rather than the
+flattened one, because it is a claim about lines and flattening would make it
+unfalsifiable.
+
+Mutations — four KILLED, re-run by the orchestrator in the integrated tree:
+
+| mutation | result | killed by |
+|---|---|---|
+| collapse `immediate availability` into `route health` | KILLED | `route_health_keeps_line_1765s_five_concepts_on_separate_lines` |
+| render an unstated cadence as `0 request(s) per 0s` | KILLED | `route_health_says_unknown_rather_than_zero_for_what_no_provider_stated` |
+| `FailureDomain::Unknown` → `Independent` in the builder | KILLED | `two_resources_on_one_provider_are_shared_and_never_independent` |
+| drop the installation-scope header | KILLED | `the_route_health_view_names_its_scope_and_prints_no_secret` |
+
+**RECORDED LIMIT — the run-loop dispatch arm is unwatched.** A fifth mutation,
+`state.open_route_health(build_route_health_table(runtime))` →
+`open_route_health(Vec::new())`, **SURVIVED** against 275 real tests. It is not
+a false survivor: the line is on the production path (pressing `h` in the
+shipped binary reaches it) and no test reaches it, because it lives inside
+`shell::run`'s event loop and **nothing in this tree drives the interactive TUI
+loop**. This is pre-existing and systemic — the `Action::OpenRouteEvidence` arm
+three lines above has the identical gap, as does every other overlay dispatch
+in that `match`.
+
+A structural test was deliberately **not** added to paper over it:
+`main.rs`'s own `every_gateway_the_binary_starts_is_given_the_evidence_ledger`
+records that such tests prove structure and that *"Phase 33A's boxes do not
+close on this test."* The honest fix is a pty harness driving `glasshouse run`'s
+key handling, which would serve every TUI contract in the map rather than this
+one line. **Named as the highest-leverage follow-up package.**
+
+Further limits: the overlay shows installation-wide readings, because both
+caches live under `data_dir()` and not `project_state_dir` — the view labels its
+own scope and a test fails if that label is removed. `failure_domain` is
+computed from the provider grouping rather than `FailureDomain::between`,
+because neither cache stores a `Backend`; `Independent` is unreachable by
+construction.
+
+---
+
+### Phase 47 — lines 1757, 1759, 1760, 1766, 1767 returned premise-invalid (batch 50)
+
+State: **NOT STARTED** for all five. Each was checked to the four-link standard
+against current source and then attacked by an independent read-only
+subcontractor, which found no refutation.
+
+- **1757** — `RoutingExplanation` (`routing/mod.rs:475`) has no durable sink:
+  every production sink is a `tracing` line or an in-memory `Vec`
+  (`gateway/session.rs:498`, `routing/interactive.rs:921`, `main.rs:1736-1751`).
+  The propagation slot is dead too: `ShellState::record_disposable_choice`
+  (`shell/state.rs:1216`) has zero production callers. `shell/view.rs:1793`
+  already renders it when set — the consumer exists, the feed does not.
+  **What would close it:** one durable write of a rationale from
+  `gateway/session.rs` or `memory/extract/disposable.rs`.
+- **1759** — the retrieved set is never recorded. `Extractor::run`
+  (`memory/extract/mod.rs:413`) drops the local `existing` after
+  `Prompt::build`; `ExtractionOutcome` has no field for it (`recorded` is what
+  was *stored*, a different set). `RetrievalResult`'s only production caller
+  renders to a `String` (`main.rs:2425`).
+- **1760** — there is no cache-temperature signal. `grep -rn temperatur
+  crates/glasshouse/src` returns nothing. `NewObservation::with_context_state`
+  (`routing/evidence.rs:328`) has zero non-test callers, so `ContextState`
+  reads `unknown` on 100% of real rows, and `NewObservation` has no setter at
+  all for `cached_input_tokens`.
+- **1766** — two links missing: 1757's absent rationale, and nothing durably
+  records that a routing decision happened at all. Recomputing an explanation
+  in the shell was considered and refused: it would render the factors of a
+  decision that was never made.
+- **1767** — nothing in this codebase computes a correlation.
+  `routing/domain.rs:31` says so in the source, which is why
+  `FailureDomain::Independent` is documented as never produced.
+
+---
+
+### Phase 47 — 1763 and 1769 re-refused in batch 50, with the missing link one layer more precise
+
+State: **NOT STARTED** for both. These supersede the earlier OPEN entries above;
+the conclusions are unchanged and the reasons are sharper.
+
+**1763 — failure counts by class.** The classes are computed and then destroyed
+before anything durable sees them. `routing::free::WorkloadOutcome`
+(`routing/free.rs:173`) has three failure classes and `gateway::session::classify`
+produces one per exchange, but `ResourceHealth` (`routing/free.rs:243`) keeps
+only `consecutive_failures` — **reset to zero on any success**
+(`routing/free.rs:292`) — and a `credential_rejected` bool with no count.
+Separately, `SessionRouting::record_routing_observation`
+(`gateway/session.rs:336-347`) collapses `Outcome::Unreachable` and a non-2xx
+`Forwarded` into one `RoutingOutcome::Failed`.
+
+**An orchestrator error, corrected here so it is not inherited.** On finding
+that `GatewayFailure` (`events/mod.rs:308`) has three variants and that batch
+50 wired `events::degrade_resource` into production for the first time (line
+1735), the orchestrator recorded that 1735 "unlocks 1763". **That is wrong.**
+`session::gateway_failure` (`gateway/session.rs`) maps only
+`Outcome::Unreachable` → `GatewayFailure::Unreachable`; `Forwarded`,
+`Unauthenticated`, `Declined`, `Unrouted`, `ClientGone` and `Idle` all return
+`None`. Every `TimedOut`/`Rejected` construction in the tree sits behind a
+`#[cfg(test)]` boundary (`memory/extract/lifecycle.rs:139`,
+`shell/state.rs:7547`, `events/mod.rs:478`). Production emits exactly **one**
+class, and counts-by-class of one class is not the capability.
+
+**What 1763 actually needs** is therefore a product decision before any code:
+*is a non-2xx `Forwarded` a gateway failure?* The gateway currently says no on
+purpose — `Forwarded` means the gateway did its job and the upstream answered.
+Widening that is a deliberate change to what "gateway failure" means, and the
+packet that takes this line must rule on it rather than assume it.
+
+**1769 — extraction inputs and outputs.** Memory extraction never runs in the
+shell process: `Extractor::run`'s two production callers are `main.rs:1728`
+(the `glasshouse hook` process) and `main.rs:2926` (`glasshouse memory
+extract`), and its `ExtractionOutcome` reaches only `tracing::info!`.
+`database.rs` creates seven tables and none is an extraction record. Closing it
+needs a durable extraction record plus a caller change where extraction
+actually runs.
+
+**One redaction fact worth carrying to whichever packet closes it**, verified
+while refusing rather than assumed: `Prompt` (`memory/extract/mod.rs:145`) is a
+newtype with one constructor and no `From<String>`, and `Prompt::build` scrubs
+`existing` through `credentials::scrub` on the way in. A future extraction
+debug view can show a `Prompt` safely **only because of that constructor** —
+the guarantee is about the `Prompt` type, not about a `SessionChunk` or a raw
+reply, neither of which has an equivalent screen.

@@ -479,6 +479,7 @@ mod ladder_tests {
             source_events: None,
             provenance: Default::default(),
             superseded_by: None,
+            superseded_reason: None,
             validity_conditions: None,
             invalidation_conditions: None,
             review_reason: None,

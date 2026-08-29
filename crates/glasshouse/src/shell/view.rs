@@ -74,6 +74,7 @@ pub fn render(state: &ShellState, frame: &mut Frame) {
         Some(Overlay::SessionEvents) => render_session_events(state, frame, area),
         Some(Overlay::ProjectKnowledge) => render_project_knowledge(state, frame, area),
         Some(Overlay::RouteEvidence) => render_route_evidence(state, frame, area),
+        Some(Overlay::RouteHealth) => render_route_health(state, frame, area),
         Some(Overlay::ProjectMemory) => render_project_memory(state, frame, area),
         None => {}
     }
@@ -331,10 +332,11 @@ fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
         (Mode::Control, Some(Overlay::SessionEvents)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::ProjectKnowledge)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::RouteEvidence)) => "esc back to session   q quit",
+        (Mode::Control, Some(Overlay::RouteHealth)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::ProjectMemory)) => "esc back to session   q quit",
         (Mode::Control, None) => {
             "tab session   enter session   n new   N headless   o overview   p project   \
-             k knowledge   M memory   e events   r routes   q quit"
+             k knowledge   M memory   e events   r routes   h health   q quit"
         }
     };
     let mut spans = vec![Span::styled(hint, Style::default().fg(Color::DarkGray))];
@@ -1081,6 +1083,171 @@ fn describe_window(now: i64, start: i64, end: i64) -> String {
     } else {
         format!("{} – {}", describe_age(now, start), describe_age(now, end))
     }
+}
+
+/// Phase 47, map line 1765: *"show route health, immediate availability,
+/// cadence, quota reset, and failure-domain evidence as separate concepts."*
+///
+/// # The line is about separation, and separation is the whole implementation
+///
+/// Every resource gets **five labelled lines**, one per concept, in the order
+/// the line names them. Nothing here computes a summary word across them,
+/// because the five genuinely disagree in ordinary operation: a resource with
+/// a refused credential is *unavailable* while its failure streak reads zero;
+/// a resource Glasshouse is pacing is *available later* and perfectly healthy;
+/// a provider's quota reset and Glasshouse's own cooldown are two clocks owned
+/// by two parties. `crate::provider::resources::render_health` prints the
+/// first three as one `status` word on one line today — that is the shape this
+/// function exists not to reproduce, and
+/// `route_health_keeps_line_1765s_five_concepts_on_separate_lines` fails if it
+/// ever does.
+///
+/// # Nothing is derived, and "unknown" is printed rather than guessed
+///
+/// Every value comes from a field
+/// [`crate::shell::state::RouteHealthRow`] already carries, which the run loop
+/// read from a cache a gateway process wrote. Three of the five concepts
+/// depend on headers most providers never send, and each of those prints
+/// `unknown` — never `0`, never `never`, never an estimate. A zero would read
+/// as a measurement, which is the thing this phase is named after not doing.
+///
+/// # Two scope facts, both said on screen rather than assumed
+///
+/// The caches are keyed by provider under
+/// [`crate::paths::RuntimePaths::data_dir`], so these readings belong to the
+/// installation, not to this project; the header line says so. And
+/// failure-domain evidence can never read `independent` — see
+/// [`crate::routing::domain::FailureDomain`], whose only producer cannot
+/// return it — so the line says what the absence of evidence does and does
+/// not mean.
+fn render_route_health(state: &ShellState, frame: &mut Frame, area: Rect) {
+    let popup = centered(area, 84, 70);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" route health ")
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines = vec![Line::from(Span::styled(
+        "  observed by this installation's gateways, per provider — not scoped to this project",
+        Style::default().fg(Color::DarkGray),
+    ))];
+
+    let rows = state
+        .route_health()
+        .map(crate::shell::state::RouteHealthState::rows)
+        .unwrap_or_default();
+
+    if rows.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  no gateway exchange has been observed for any resource yet",
+            Style::default().fg(Color::DarkGray),
+        )));
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        return;
+    }
+
+    let now = crate::provider::cache::now_unix_seconds();
+    for row in rows {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  {} / {} ({})",
+                row.provider, row.model, row.credential_label
+            ),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+
+        // 1. Route health. A streak, and it says so: `consecutive_failures`
+        //    resets to zero on any success, so calling it a total would be a
+        //    number more precise than the evidence behind it.
+        lines.push(Line::from(format!(
+            "    route health           {} consecutive failure(s) since the last success; \
+             credential rejected: {}",
+            row.consecutive_failures,
+            yes_no(row.credential_rejected),
+        )));
+
+        // 2. Immediate availability. The producer's own answer, kept apart
+        //    from the health above because the two disagree in both
+        //    directions.
+        lines.push(Line::from(format!(
+            "    immediate availability {}",
+            if row.available_now {
+                "yes — may be scheduled right now"
+            } else {
+                "no — not schedulable right now"
+            }
+        )));
+
+        // 3. Cadence: two pacing facts owned by two parties, neither derived
+        //    from the other.
+        lines.push(Line::from(format!(
+            "    cadence                glasshouse pacing: {}; provider stated: {}",
+            match row.cooling_down_until_unix {
+                Some(until) if until > now =>
+                    format!("cooling down, ends {}", describe_deadline(now, until)),
+                Some(_) => "cooldown elapsed".to_owned(),
+                None => "none".to_owned(),
+            },
+            match (row.stated_limit, row.stated_window_seconds) {
+                (Some(limit), Some(window)) => format!("{limit} request(s) per {window}s"),
+                (Some(limit), None) => format!("{limit} request(s) per an unknown window"),
+                (None, Some(window)) => format!("an unknown ceiling per {window}s"),
+                (None, None) => "unknown".to_owned(),
+            }
+        )));
+
+        // 4. Quota reset: the provider's own clock, on its own line.
+        lines.push(Line::from(format!(
+            "    quota reset            {}",
+            match row.quota_resets_at_unix {
+                Some(at) => format!("{} (unix {at})", describe_deadline(now, at)),
+                None => "unknown — no response has stated one".to_owned(),
+            }
+        )));
+
+        // 5. Failure-domain evidence, in `FailureDomain`'s own vocabulary,
+        //    and never claiming independence.
+        lines.push(Line::from(format!(
+            "    failure domain         {} — {} other observed resource(s) on `{}`; a different \
+             provider is `unknown`, never `independent`",
+            row.failure_domain, row.failure_domain_peers, row.provider,
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// `yes` or `no`, so a boolean fact reads as one rather than as `true`.
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+/// A future instant in words — [`describe_age`]'s forward twin.
+///
+/// Separate from `describe_age` rather than folded into it: that function
+/// treats a timestamp ahead of `now` as a **clock fault**, which is right for
+/// a reading that was supposedly observed in the past and wrong for a deadline
+/// that is supposed to be ahead. One function answering both would have to
+/// guess which it was holding.
+fn describe_deadline(now: i64, at: i64) -> String {
+    let seconds = at.saturating_sub(now);
+    if seconds <= 0 {
+        return "already elapsed".to_owned();
+    }
+    let (count, unit) = match seconds {
+        1..=59 => (seconds, "second"),
+        60..=3_599 => (seconds / 60, "minute"),
+        3_600..=86_399 => (seconds / 3_600, "hour"),
+        _ => (seconds / 86_400, "day"),
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    format!("in {count} {unit}{plural}")
 }
 
 /// How many recently completed workers the project overview shows.
@@ -2688,13 +2855,15 @@ mod tests {
         // hundred columns, the same trade recorded on
         // `the_status_bar_shows_a_note_next_to_the_bindings` below; map line
         // 234's `M memory` pushed it past 120 in turn, so this became 132.
-        let bottom = last_row(&state, 132, 24);
+        // Phase 47 line 1765's `h health` takes the whole row to exactly 140
+        // columns, so this is 142 — measured against the row, not guessed.
+        let bottom = last_row(&state, 142, 24);
         assert!(bottom.contains("tab"), "bindings missing: `{bottom}`");
         assert!(bottom.contains("overview"), "bindings missing: `{bottom}`");
         assert!(bottom.contains("quit"), "bindings missing: `{bottom}`");
 
         state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
-        let bottom = last_row(&state, 132, 24);
+        let bottom = last_row(&state, 142, 24);
         assert!(
             bottom.contains("esc") && bottom.contains("quit"),
             "the overlay's bindings must be shown too: `{bottom}`"
@@ -2721,10 +2890,11 @@ mod tests {
         // 120 columns fit the note alongside the bindings before Phase 47
         // added `e events`, and 132 after; Phase 25's `k knowledge` pushed
         // the row past 132, so this became 150; Phase 47's `r routes`
-        // (batch 43) pushed it past 150, so this is 170 now — the same
+        // (batch 43) pushed it past 150, so this became 170; line 1765's
+        // `h health` adds eleven more columns, so this is 182 — the same
         // margin this test always had, measured against the longer row
         // rather than assumed.
-        let bottom = last_row(&state, 170, 24);
+        let bottom = last_row(&state, 182, 24);
         assert!(
             bottom.contains("only one session"),
             "the note must reach the status bar: `{bottom}`"
@@ -2792,6 +2962,27 @@ mod tests {
             KnowledgeSection::default(),
             None,
         );
+        screens.push(rendered(&state, 100, 30));
+        // Phase 47 line 1771 is a standing property, so every diagnostic
+        // surface added afterwards has to re-prove it. This one is line
+        // 1765's, and a "route health" display is exactly where somebody
+        // would reach for a `Gauge`.
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        state.open_route_health(vec![crate::shell::state::RouteHealthRow {
+            provider: "anyrouter".to_owned(),
+            credential_label: "anyrouter/API_KEY".to_owned(),
+            model: "claude-opus-4-1".to_owned(),
+            consecutive_failures: 2,
+            credential_rejected: false,
+            available_now: true,
+            cooling_down_until_unix: None,
+            stated_limit: Some(300),
+            stated_window_seconds: Some(60),
+            quota_resets_at_unix: None,
+            failure_domain: "unknown".to_owned(),
+            failure_domain_peers: 0,
+        }]);
         screens.push(rendered(&state, 100, 30));
 
         for screen in screens {
@@ -2955,8 +3146,8 @@ mod tests {
     fn the_status_bar_shows_control_mode_bindings_by_default() {
         let state = sample();
         assert_eq!(state.mode(), Mode::Control);
-        // 132, not 100 — see `the_status_bar_always_shows_the_key_bindings`.
-        let bottom = last_row(&state, 132, 24).to_lowercase();
+        // 142, not 100 — see `the_status_bar_always_shows_the_key_bindings`.
+        let bottom = last_row(&state, 142, 24).to_lowercase();
         assert!(!bottom.contains("session mode"), "got: `{bottom}`");
         assert!(bottom.contains("quit"), "got: `{bottom}`");
     }
@@ -4249,6 +4440,299 @@ mod tests {
         assert_eq!(
             state.overlay(),
             Some(crate::shell::state::Overlay::RouteEvidence)
+        );
+
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Action::Redraw
+        );
+        assert_eq!(state.overlay(), None);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 47 line 1765 — route health, immediate availability, cadence,
+    // quota reset and failure-domain evidence as SEPARATE concepts.
+    // -----------------------------------------------------------------
+
+    /// The rendered screen with the popup's own border columns dropped and
+    /// runs of whitespace collapsed, so a phrase the `Wrap` broke across two
+    /// rows can still be asserted on.
+    ///
+    /// Needed because line 1765 wants five *labelled* concepts and the labels
+    /// plus their evidence are longer than a realistic popup is wide. The
+    /// per-line assertions below deliberately use the **raw** text instead —
+    /// "these two concepts are not on the same line" is a claim about lines,
+    /// and flattening would make it unfalsifiable.
+    fn flattened(text: &str) -> String {
+        text.replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// A healthy, available, entirely unstated resource — the state a fresh
+    /// installation actually observes. Every test below starts here and
+    /// overrides only the fields its own case is about, with struct-update
+    /// syntax, so what a case is *testing* is visible at its call site.
+    fn health_row(provider: &str, model: &str) -> crate::shell::state::RouteHealthRow {
+        crate::shell::state::RouteHealthRow {
+            provider: provider.to_owned(),
+            credential_label: format!("{provider}/API_KEY"),
+            model: model.to_owned(),
+            consecutive_failures: 0,
+            credential_rejected: false,
+            available_now: true,
+            cooling_down_until_unix: None,
+            stated_limit: None,
+            stated_window_seconds: None,
+            quota_resets_at_unix: None,
+            failure_domain: "unknown".to_owned(),
+            failure_domain_peers: 0,
+        }
+    }
+
+    /// **Line 1765's whole content.** Five labelled concepts, five separate
+    /// lines, for a resource where they genuinely disagree: healthy (zero
+    /// failures) yet unavailable (credential refused), paced by Glasshouse
+    /// while the provider's own reset is at a different time.
+    ///
+    /// Rendered at a realistic width and a wide one (practice §17), because a
+    /// label that happened to clip off-screen would make this pass for the
+    /// wrong reason.
+    #[test]
+    fn route_health_keeps_line_1765s_five_concepts_on_separate_lines() {
+        let now = crate::provider::cache::now_unix_seconds();
+        for (width, height) in [(120, 40), (400, 40)] {
+            let mut state = sample();
+            state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+            // Never failed, yet unavailable; paced by Glasshouse until a
+            // different instant from the provider's own reset.
+            state.open_route_health(vec![crate::shell::state::RouteHealthRow {
+                credential_rejected: true,
+                available_now: false,
+                cooling_down_until_unix: Some(now + 300),
+                stated_limit: Some(300),
+                stated_window_seconds: Some(60),
+                quota_resets_at_unix: Some(now + 1_800),
+                failure_domain: "shared".to_owned(),
+                failure_domain_peers: 1,
+                ..health_row("anyrouter", "claude-opus-4-1")
+            }]);
+            let text = rendered(&state, width, height);
+
+            for concept in [
+                "route health",
+                "immediate availability",
+                "cadence",
+                "quota reset",
+                "failure domain",
+            ] {
+                assert!(
+                    text.contains(concept),
+                    "line 1765 names `{concept}` and it must be its own labelled \
+                     concept, width {width}:\n{text}"
+                );
+            }
+
+            // Each concept on its own line: no line may carry two of the five
+            // labels, which is exactly what collapsing them would produce.
+            for line in text.lines() {
+                let found = [
+                    "route health",
+                    "immediate availability",
+                    "cadence",
+                    "quota reset",
+                    "failure domain",
+                ]
+                .iter()
+                .filter(|concept| line.contains(*concept))
+                .count();
+                assert!(
+                    found <= 1,
+                    "two of line 1765's concepts were folded onto one line, \
+                     width {width}:\n{line}"
+                );
+            }
+
+            // And the five really do disagree here, which is the point: a
+            // single status word could not have carried all of this.
+            let flat = flattened(&text);
+            assert!(
+                flat.contains("0 consecutive failure(s)"),
+                "the failure streak must be shown as a streak, width {width}:\n{text}"
+            );
+            assert!(
+                flat.contains("credential rejected: yes"),
+                "a refused credential is a health fact of its own, \
+                 width {width}:\n{text}"
+            );
+            assert!(
+                flat.contains("not schedulable right now"),
+                "availability must be its own answer, width {width}:\n{text}"
+            );
+            assert!(
+                flat.contains("300 request(s) per 60s"),
+                "the provider-stated cadence must be shown, width {width}:\n{text}"
+            );
+            assert!(
+                flat.contains("cooling down, ends in 5 minutes"),
+                "glasshouse's own pacing is a separate clock from the \
+                 provider's, width {width}:\n{text}"
+            );
+        }
+    }
+
+    /// **The honesty half.** A provider that has stated no rate-limit headers
+    /// at all — which is most of them — must read `unknown`, never `0` and
+    /// never an invented reset. Line 1765 sits under a phase whose whole
+    /// heading is about not presenting a number the evidence does not carry.
+    #[test]
+    fn route_health_says_unknown_rather_than_zero_for_what_no_provider_stated() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        // The default is the entirely-unstated case, which is the point.
+        state.open_route_health(vec![health_row("openrouter", "some-free-model")]);
+        let text = rendered(&state, 120, 40);
+        let flat = flattened(&text);
+
+        assert!(
+            flat.contains("quota reset unknown — no response has stated one"),
+            "an unstated quota reset must read `unknown`:\n{text}"
+        );
+        assert!(
+            flat.contains("provider stated: unknown"),
+            "an unstated cadence must read `unknown`:\n{text}"
+        );
+        assert!(
+            flat.contains("glasshouse pacing: none"),
+            "no cooldown must read `none`, not an elapsed deadline:\n{text}"
+        );
+        // The three unstated concepts must not have been filled in with a
+        // number: `0` would read as a measurement, which is the whole of what
+        // this phase is named after not doing.
+        for invented in ["quota reset in", "per 0s", "0 request(s)"] {
+            assert!(
+                !flat.contains(invented),
+                "an unstated value was rendered as `{invented}`:\n{text}"
+            );
+        }
+    }
+
+    /// `crate::routing::domain::FailureDomain::Independent` is a state this
+    /// build cannot earn — nothing does the temporal correlation it would
+    /// need — so no fixture, and no future edit, may make this view print it.
+    /// Proved at a wide viewport per practice §17, because an absence
+    /// assertion is only as strong as the screen it renders into.
+    #[test]
+    fn route_health_never_claims_two_resources_are_independent() {
+        for (width, height) in [(120, 40), (400, 40)] {
+            let mut state = sample();
+            state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+            state.open_route_health(vec![
+                crate::shell::state::RouteHealthRow {
+                    consecutive_failures: 2,
+                    failure_domain: "shared".to_owned(),
+                    failure_domain_peers: 1,
+                    ..health_row("anyrouter", "model-a")
+                },
+                health_row("openrouter", "model-b"),
+            ]);
+            let flat = flattened(&rendered(&state, width, height));
+            assert!(
+                flat.contains("never `independent`"),
+                "the view must say what the absence of evidence does not mean, \
+                 width {width}:\n{flat}"
+            );
+            // The only permitted occurrence is inside that refusal.
+            assert_eq!(
+                flat.matches("independent").count(),
+                flat.matches("never `independent`").count(),
+                "`independent` may appear only inside the sentence refusing it, \
+                 width {width}:\n{flat}"
+            );
+        }
+    }
+
+    /// The empty state, which is what a fresh installation actually shows:
+    /// honest words, not a table of zeroes.
+    #[test]
+    fn route_health_says_so_when_no_gateway_exchange_has_been_observed() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        state.open_route_health(Vec::new());
+        let text = rendered(&state, 120, 30);
+        assert!(
+            text.contains("no gateway exchange has been observed"),
+            "an empty cache must say so:\n{text}"
+        );
+    }
+
+    /// The scope label, which is a fact about these caches and not decoration:
+    /// they live under the installation's data directory, keyed by provider,
+    /// so a reading written while a gateway served another project is visible
+    /// here. A view that let a reader assume otherwise would be the spectacle
+    /// this phase is named after.
+    #[test]
+    fn route_health_labels_its_own_installation_wide_scope() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        state.open_route_health(Vec::new());
+        let text = rendered(&state, 120, 30);
+        assert!(
+            text.contains("not scoped to this project"),
+            "the view must name its own scope:\n{text}"
+        );
+    }
+
+    /// Map line 1770 for this overlay: reached only by its own key, never on
+    /// the default screen — at both widths, per practice §17.
+    #[test]
+    fn route_health_is_absent_from_the_default_screen_at_a_realistic_and_a_wide_width() {
+        let state = sample();
+        for (width, height) in [(100, 24), (400, 24)] {
+            let text = rendered(&state, width, height);
+            assert!(
+                !text.contains("immediate availability"),
+                "the default screen must not show the route-health overlay, \
+                 width {width}:\n{text}"
+            );
+        }
+    }
+
+    /// The overlay's own footer, and the control-mode footer advertising `h`.
+    #[test]
+    fn the_route_health_footer_names_its_own_key() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        state.open_route_health(Vec::new());
+        let text = rendered(&state, 132, 24);
+        assert!(
+            text.contains("esc back to session"),
+            "route health footer:\n{text}"
+        );
+
+        let control_text = rendered(&sample(), 132, 24);
+        assert!(
+            control_text.contains("h health"),
+            "control-mode footer must advertise the key:\n{control_text}"
+        );
+    }
+
+    /// `h` opens it and `esc` closes it, the same toggle every other overlay
+    /// key already has.
+    #[test]
+    fn h_opens_and_esc_closes_the_route_health_overlay() {
+        use crate::shell::Action;
+
+        let mut state = sample();
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+            Action::OpenRouteHealth
+        );
+        state.open_route_health(Vec::new());
+        assert_eq!(
+            state.overlay(),
+            Some(crate::shell::state::Overlay::RouteHealth)
         );
 
         assert_eq!(

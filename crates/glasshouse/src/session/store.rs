@@ -2808,6 +2808,7 @@ mod tests {
                 "memories.review_reason",
                 "memories.review_marked_at",
                 "memories.last_validated_at",
+                "memories.superseded_reason",
                 "memories_fts.subject",
                 "memories_fts.body",
                 "memories_fts.rationale",
@@ -3046,8 +3047,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 12,
-            "the launch must have applied migrations 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12"
+            version, 13,
+            "the launch must have applied migrations 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 and 13"
         );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
@@ -3234,8 +3235,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 12,
-            "the launch must have applied migrations 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12"
+            version, 13,
+            "the launch must have applied migrations 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 and 13"
         );
 
         let store = SessionStore::new(&reopened).unwrap();
@@ -4154,7 +4155,8 @@ mod tests {
                     // migration 8's sessions columns are dropped below: this
                     // rollback lands on version 7, and `memories` must not
                     // still carry columns a later migration added.
-                    "ALTER TABLE memories DROP COLUMN validity_conditions;
+                    "ALTER TABLE memories DROP COLUMN superseded_reason;
+                     ALTER TABLE memories DROP COLUMN validity_conditions;
                      ALTER TABLE memories DROP COLUMN invalidation_conditions;
                      ALTER TABLE memories DROP COLUMN review_reason;
                      ALTER TABLE memories DROP COLUMN review_marked_at;
@@ -4184,8 +4186,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 12,
-                "the launch must have applied migrations 8, 9, 10, 11 and 12"
+                version, 13,
+                "the launch must have applied migrations 8, 9, 10, 11, 12 and 13"
             );
 
             let after = SessionStore::new(&reopened)
@@ -4300,6 +4302,7 @@ mod tests {
                 .conn
                 .execute_batch(
                     "ALTER TABLE sessions DROP COLUMN source_session_id;
+                     ALTER TABLE memories DROP COLUMN superseded_reason;
                      DELETE FROM schema_migrations WHERE version >= 12;",
                 )
                 .unwrap();
@@ -4310,7 +4313,10 @@ mod tests {
                     row.get(0)
                 })
                 .unwrap();
-            assert_eq!(version, 12, "the reopen must have applied migration 12");
+            assert_eq!(
+                version, 13,
+                "the reopen must have applied migrations 12 and 13"
+            );
 
             let after = SessionStore::new(&reopened)
                 .unwrap()

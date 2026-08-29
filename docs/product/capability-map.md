@@ -922,7 +922,7 @@ Fixed architectural requirements
 ☐ Surface the conflict and ask whether the older decision should be superseded when the conflict is material and cannot be resolved from current evidence.
 ☐ Allow an implementation agent to supersede an older ordinary decision automatically when current requirements clearly invalidate it and the change is low risk.
 ☑ Require stronger review before superseding security, legal, data-integrity, or externally imposed invariants.
-☐ Record why a decision was superseded so future agents do not resurrect it without context.
+☑ Record why a decision was superseded so future agents do not resurrect it without context.
 
 Phase 21F — Memory retrieval quality
 
@@ -1732,7 +1732,7 @@ Fixed architectural requirements
 ☑ Allow a failed task to be resumed in the same native session when possible.
 ☑ Allow a failed task to be handed off to a fresh session when appropriate.
 ☑ Avoid automatically retrying destructive tasks on another harness without sufficient task-state information.
-☐ Detect gateway failure separately from harness-process failure.
+☑ Detect gateway failure separately from harness-process failure.
 ☑ Degrade unhealthy gateway resources without affecting unrelated native subscriptions.
 ☑ Ensure one failed worker cannot terminate unrelated sessions or the entire Glasshouse instance.
 
@@ -1762,7 +1762,7 @@ Fixed architectural requirements
 ☑ Add an optional compact route-evidence table showing sample count, TTFC, effective TTFC, TTFT, decode throughput, successful rounds per minute, and observation window when available.
 ☐ Show failure counts by class instead of presenting one unexplained error percentage.
 ☑ Show whether latency evidence came from warm, cold, or unknown context.
-☐ Show route health, immediate availability, cadence, quota reset, and failure-domain evidence as separate concepts.
+☑ Show route health, immediate availability, cadence, quota reset, and failure-domain evidence as separate concepts.
 ☐ Show the strongest measured factors behind the most recent routing decision in concise text.
 ☐ Show correlations with their sample size and confidence instead of implying precise independence from sparse data.
 ☑ Keep lifetime token and spend totals out of the default project overview and never present them as achievement counters.

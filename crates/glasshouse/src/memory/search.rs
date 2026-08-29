@@ -118,7 +118,8 @@ const QUALIFIED_COLUMNS: &str = "memories.id, memories.project_id, memories.kind
                                  memories.operational_assumptions, memories.evidence, \
                                  memories.source_excerpt, memories.validity_conditions, \
                                  memories.invalidation_conditions, memories.review_reason, \
-                                 memories.review_marked_at, memories.last_validated_at";
+                                 memories.review_marked_at, memories.last_validated_at, \
+                                 memories.superseded_reason";
 
 /// How many extra candidates a search fetches beyond `limit`, before decay
 /// reordering runs.

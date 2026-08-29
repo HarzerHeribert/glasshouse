@@ -153,6 +153,55 @@ const MAX_CPU_AFTER_HANGUP: f64 = 0.5;
 /// interface is the state under test.
 const SETTLE: Duration = Duration::from_millis(1500);
 
+/// The exit code `shutdown`'s forced path reports, and therefore the one that
+/// says the interface did **not** end itself.
+///
+/// It is the only thing that tells the two outcomes apart from outside: a loop
+/// that noticed its terminal was gone returns through `shell::run` and exits 0,
+/// and one that could not be reached at all is put down by
+/// `tui::event`'s watchdog through the same route a second Ctrl-C takes, which
+/// exits with this. Both leave a dead process behind, which is why "did it
+/// exit?" cannot distinguish them and this file used to check neither.
+const EXIT_FORCED: u32 = 130;
+
+/// How many of [`TRIALS`] may exit through the forced path before the sighted
+/// test calls it a failure.
+///
+/// **A tolerance rather than a zero, because [`EXIT_FORCED`] has two causes
+/// and only one of them is this file's business.**
+///
+/// The one that matters is an interface that did not notice its terminal had
+/// gone and had to be put down. The other is already here and predates
+/// everything in this packet: closing a real terminal delivers `SIGHUP` as
+/// well as a hangup, and a Glasshouse that has already restored its terminal
+/// by the time that signal is dispatched is no longer `TERMINAL_ENGAGED`, so
+/// `shutdown::interpret_signal` reads it as "nothing owns the terminal, leave
+/// immediately" and exits 130 from a run that was in every other respect
+/// clean. That race is *lost by exiting too fast*, which is why it cannot be
+/// designed out from this side and why this file's own header already records
+/// it as reported rather than fixed.
+///
+/// **Measured on the tree before this packet — which has no watchdog at all,
+/// so every one of them is the second cause: 8 forced exits in 350 hangups**,
+/// in a Linux container under 24 spinners, the same load the gate's own flake
+/// lives under. The tree *with* the watchdog measured 15 in 600 over the same
+/// runs, which is the same rate — the watchdog is not what produces these.
+///
+/// At 2.3%, four or more in [`TRIALS`] is a 6-in-10,000 run, while the
+/// mutation that reverts the hangup ordering produces **fifteen out of
+/// fifteen**. So the slack costs the proof nothing.
+const MAX_FORCED: usize = 3;
+
+/// How many times the blinded scenario is run.
+///
+/// Three, where the sighted one needs [`TRIALS`], and the difference is the
+/// point rather than an oversight. That test samples a race — the interface
+/// has to lose it for the defect to appear, which it does on a small fraction
+/// of hangups, so the trial count is the proof (practice §60). This one
+/// *constructs* the losing interleaving, so it fires on every trial on every
+/// tree without the watchdog. Three is repetition, not statistics.
+const BLIND_TRIALS: usize = 3;
+
 /// How many times the scenario is run.
 ///
 /// **The point of the number, not padding.** The defect this file exists for
@@ -278,9 +327,32 @@ const CPU_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 
 #[test]
 fn a_terminal_that_goes_away_ends_the_interface_instead_of_spinning() {
+    let mut forced = Vec::new();
     for trial in 1..=TRIALS {
-        one_terminal_loss(trial);
+        if one_terminal_loss(trial) == Ending::Forced {
+            forced.push(trial);
+        }
     }
+    // Every trial above has already required the process to be *gone*. This
+    // requires the interface to have got there itself, which is the thing the
+    // watchdog would otherwise hide — see [`MAX_FORCED`].
+    assert!(
+        forced.len() <= MAX_FORCED,
+        "{} of {TRIALS} hangups ended with the interface being put down rather than leaving on \
+         its own (trials {forced:?}). One or two of those are the `SIGHUP`-after-restore race \
+         this file's header describes; this many means the loop is not noticing its own terminal \
+         going away.",
+        forced.len(),
+    );
+}
+
+/// How one trial ended, as far as anything outside the process can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// The interface returned through its own exit.
+    Itself,
+    /// Something had to end it: `tui::event`'s watchdog, or the `SIGHUP` race.
+    Forced,
 }
 
 /// One trial: start the interface, let it settle, take its terminal away, and
@@ -288,7 +360,7 @@ fn a_terminal_that_goes_away_ends_the_interface_instead_of_spinning() {
 ///
 /// `trial` appears in every failure message. A race that fails on the eleventh
 /// run and not the first is worth being able to say so about.
-fn one_terminal_loss(trial: usize) {
+fn one_terminal_loss(trial: usize) -> Ending {
     let fixture = Fixture::new();
     let mut child = fixture.start_shell();
 
@@ -327,13 +399,28 @@ fn one_terminal_loss(trial: usize) {
     loop {
         if let Some(status) = child.try_wait() {
             let took = hangup.elapsed();
-            // Not asserting an exit *code*. The interface returns normally,
-            // but on the way out Ratatui's `Terminal` drop tries to show the
-            // cursor and prints to standard error when it cannot — and on a
-            // terminal that has gone away, printing to standard error is
-            // itself a panic. That is Ratatui's business and it happens after
-            // this loop has already returned; the process is gone either way,
-            // which is what was in question.
+            // **The exit code is read rather than asserted on, and that is
+            // what makes this test mean something again.** `tui::event`'s
+            // watchdog guarantees the process dies whatever the interface
+            // does, so **"did it exit?" now passes on a tree whose hangup
+            // detection has been reverted entirely** — the watchdog would put
+            // it down at about a tenth of a second and this test would call
+            // that a pass. What has to be proved is that the interface ended
+            // *itself*, and the only evidence of that from outside is which of
+            // the two routes it left by.
+            //
+            // Not asserted here, because [`EXIT_FORCED`] has a second and
+            // innocent cause and the caller has to count rather than judge:
+            // see [`MAX_FORCED`]. A code that is neither 0 nor forced is not
+            // interesting either way — Ratatui's `Terminal` drop tries to show
+            // the cursor on the way out and panics when it cannot, which on a
+            // terminal that has gone away is an honest 101 and happens after
+            // the loop has already returned.
+            let ending = if status.exit_code() == EXIT_FORCED {
+                Ending::Forced
+            } else {
+                Ending::Itself
+            };
             let cpu = cpu_after
                 .zip(cpu_before)
                 .map(|(after, before)| after - before);
@@ -343,7 +430,7 @@ fn one_terminal_loss(trial: usize) {
                  {:?}s of processor time doing it — a wind-down should cost almost none",
                 cpu.unwrap_or_default(),
             );
-            return;
+            return ending;
         }
 
         if Instant::now() >= next_sample {
@@ -370,6 +457,131 @@ fn one_terminal_loss(trial: usize) {
                  terminal went away, having burned {burned}. A terminal that is gone is an \
                  instruction to stop.\n--- what it had drawn ---\n{}\n--- end ---",
                 child.output()
+            );
+        }
+
+        std::thread::sleep(EXIT_POLL);
+    }
+}
+
+/// The guarantee, as opposed to the rate: a process that cannot see its own
+/// hangup is still ended.
+///
+/// # Why this test exists next to the one above
+///
+/// The test above proves the interface notices a terminal going away. It
+/// cannot prove what happens when it *doesn't*, and that gap is where this
+/// defect has lived twice.
+///
+/// The detection is a check immediately before each hand-off to crossterm, so
+/// the terminal has to die inside the microseconds between that check and
+/// crossterm's own `read` for the interface to be trapped. Measured on a
+/// loaded Linux container, that happened in **1 hangup in 60** on the tree
+/// before this one — a rate to sample, not a state to construct, and a process
+/// that lands in it burns a whole core until somebody notices. Three of the
+/// original four had been doing it for nineteen hours.
+///
+/// So the interleaving is constructed instead. `GLASSHOUSE_TUI_BLIND_TO_HANGUPS`
+/// makes `tui::event::wait_for_terminal` read a hung-up terminal the way the
+/// original defect read it — `POLLIN` set, `POLLHUP` unlooked-at — so the
+/// interface walks into crossterm's unbounded read **every time**. Sampled on
+/// this machine, that is the field stack exactly: every sample in
+/// `FileDesc::read`, under `crossterm::event::poll`, at 97% of a core.
+///
+/// Nothing the interface can do ends that process. What ends it is
+/// `tui::event`'s watchdog, and this is the only test that can say so, because
+/// it is the only one where the interface is guaranteed to have failed.
+#[test]
+fn an_interface_that_cannot_see_a_hangup_is_still_ended() {
+    for trial in 1..=BLIND_TRIALS {
+        one_blinded_terminal_loss(trial);
+    }
+}
+
+/// One trial of the above: start the interface unable to see hangups, let it
+/// settle, take its terminal away, and require it gone anyway.
+fn one_blinded_terminal_loss(trial: usize) {
+    let fixture = Fixture::new();
+    let mut child = fixture.start_shell_with(&[("GLASSHOUSE_TUI_BLIND_TO_HANGUPS", "1")]);
+    child.wait_for_first_frame();
+
+    // The same settle as the sighted test, for the same reason: a Glasshouse
+    // still starting up ends by a different route, and this must exercise the
+    // idle interface the field processes were. See `SETTLE`.
+    let settled = Instant::now() + SETTLE;
+    while Instant::now() < settled {
+        child.drain();
+        std::thread::sleep(READ_POLL);
+    }
+    assert!(
+        child.try_wait().is_none(),
+        "trial {trial}: glasshouse had already exited before its terminal was taken away, \
+         so this run proves nothing\n--- output ---\n{}\n--- end ---",
+        child.output()
+    );
+
+    let cpu_before = child.cpu_seconds();
+    let hangup = Instant::now();
+    child.close_terminal();
+
+    let mut cpu_after = cpu_before;
+    let mut next_sample = hangup + CPU_SAMPLE_INTERVAL;
+    let deadline = hangup + HANGUP_DEADLINE;
+    loop {
+        if let Some(status) = child.try_wait() {
+            let took = hangup.elapsed();
+            // **The one place this file requires the forced code rather than
+            // forbidding it.** A blinded interface cannot leave by itself, so
+            // an exit code of 0 here would not be good news — it would mean
+            // the blindness switch stopped reaching the code it is aimed at
+            // and this test had quietly become a second copy of the one above,
+            // passing while proving nothing. That is the vacuous-test failure
+            // practice §59 records, and this assertion is what would catch it.
+            assert_eq!(
+                status.exit_code(),
+                EXIT_FORCED,
+                "trial {trial}: a blinded interface exited on its own after {took:?}, which it \
+                 cannot do — the switch that is supposed to hide the hangup from it is no longer \
+                 hiding anything, and this test is proving nothing about the watchdog"
+            );
+            let cpu = cpu_after
+                .zip(cpu_before)
+                .map(|(after, before)| after - before);
+            // It spins until the watchdog reaches it, so this is not zero the
+            // way a clean wind-down is — it is bounded, which is the claim.
+            // Measured on this machine: gone in 0.08s to 0.13s over 8 trials.
+            assert!(
+                cpu.is_none_or(|burned| burned <= MAX_CPU_AFTER_HANGUP),
+                "trial {trial}: the watchdog ended the interface after {took:?}, but it burned \
+                 {:?}s of processor time first — the point of ending it is not to let it spin",
+                cpu.unwrap_or_default(),
+            );
+            return;
+        }
+
+        if Instant::now() >= next_sample {
+            next_sample += CPU_SAMPLE_INTERVAL;
+            if let Some(sampled) = child.cpu_seconds() {
+                cpu_after = Some(sampled);
+            }
+        }
+
+        if Instant::now() >= deadline {
+            let cpu = cpu_after
+                .zip(cpu_before)
+                .map(|(after, before)| after - before);
+            let burned = match cpu {
+                Some(seconds) => format!(
+                    "{seconds:.2}s of processor time in {:.2}s of wall clock",
+                    hangup.elapsed().as_secs_f64()
+                ),
+                None => "an unmeasurable amount of processor time".to_owned(),
+            };
+            child.kill();
+            panic!(
+                "trial {trial}: an interface that could not see its terminal go away was still \
+                 running {HANGUP_DEADLINE:?} later, having burned {burned}. This is the exact \
+                 process the field found four of, and nothing outside it ended it."
             );
         }
 
@@ -566,6 +778,15 @@ impl Fixture {
     }
 
     fn start_shell(&self) -> Shell {
+        self.start_shell_with(&[])
+    }
+
+    /// Start the interface with extra environment on top of this process's.
+    ///
+    /// One caller, and it needs it: `tui::event`'s hangup blindness switch is
+    /// the only way to construct the interleaving the watchdog exists for. See
+    /// `an_interface_that_cannot_see_a_hangup_is_still_ended`.
+    fn start_shell_with(&self, extra: &[(&str, &str)]) -> Shell {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 40,
@@ -592,6 +813,10 @@ impl Fixture {
             "--config-dir",
             &self.dir.path().join("config").display().to_string(),
         ]);
+
+        for (key, value) in extra {
+            command.env(key, value);
+        }
 
         let child = pair.slave.spawn_command(command).expect("spawn glasshouse");
         // The last slave descriptor this process holds. Keeping it would keep

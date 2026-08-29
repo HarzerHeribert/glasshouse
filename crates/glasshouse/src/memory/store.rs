@@ -511,6 +511,20 @@ pub struct MemoryRecord {
     /// relationship is known. `None` on a superseded memory means it was
     /// retired without a single identifiable successor.
     pub superseded_by: Option<MemoryId>,
+    /// Map line 925: **why** this memory was superseded, in the words of
+    /// whoever superseded it — *"so future agents do not resurrect it without
+    /// context."*
+    ///
+    /// `None` is *"no reason was recorded"*: a memory superseded before
+    /// migration 13, and one superseded today without `--reason`, which stays
+    /// legal. Never an empty reason — [`MemoryStore::supersede_with_reason`]
+    /// maps blank text to `None` and the schema refuses `''` outright.
+    ///
+    /// Cleared together with [`Self::superseded_by`] whenever a memory leaves
+    /// [`MemoryStatus::Superseded`], because a memory that is current again
+    /// was not replaced, and a leftover explanation of a supersession that no
+    /// longer holds is worse than none.
+    pub superseded_reason: Option<String>,
     /// Phase 21C: the condition under which this memory should still be
     /// treated as true, when the producer knew one. `None` means no
     /// condition was recorded, never "always valid."
@@ -856,7 +870,7 @@ pub(super) const ALL_COLUMNS: &str = "id, project_id, kind, authority, status, s
                                       compatibility_assumptions, operational_assumptions, \
                                       evidence, source_excerpt, validity_conditions, \
                                       invalidation_conditions, review_reason, review_marked_at, \
-                                      last_validated_at";
+                                      last_validated_at, superseded_reason";
 
 /// An open project database plus the memories inside it.
 ///
@@ -1009,6 +1023,7 @@ impl<'a> MemoryStore<'a> {
             source_events: new.source_events,
             provenance: new.provenance,
             superseded_by: None,
+            superseded_reason: None,
             validity_conditions: new.validity_conditions,
             invalidation_conditions: new.invalidation_conditions,
             // A newly recorded memory has never been flagged and never been
@@ -1170,6 +1185,39 @@ impl<'a> MemoryStore<'a> {
         old: &MemoryId,
         replacement: &MemoryId,
     ) -> Result<MemoryRecord, MemoryStoreError> {
+        self.supersede_with_reason(old, replacement, None)
+    }
+
+    /// [`MemoryStore::supersede`], recording **why** — map line 925.
+    ///
+    /// # Why the reason is a separate door rather than a changed signature
+    ///
+    /// Superseding without a reason stays legal and stores `NULL`: the map
+    /// asks that the reason be *recordable*, not that every supersession have
+    /// one, and Phase 22's `superseded_by` is already allowed to be absent for
+    /// the same kind of reason. Callers that have nothing to say keep calling
+    /// [`MemoryStore::supersede`] unchanged.
+    ///
+    /// # What happens to blank text, and why here rather than at the caller
+    ///
+    /// `Some("")` and `Some("   ")` are recorded as `None`. A reason that is
+    /// only whitespace is not a reason, and if it were stored the row would
+    /// read back as *"a reason was recorded"* to every consumer. Migration
+    /// 13's `CHECK` refuses `''` outright, so this is the trim that keeps a
+    /// blank `--reason` from being an error the user cannot act on.
+    ///
+    /// # The reason is operator text and never reaches SQL as text
+    ///
+    /// It is bound as parameter `?4` — never formatted into the statement —
+    /// and it is not logged. The `UPDATE` also keeps its `project_id`
+    /// predicate, so this cannot write across the project boundary even if a
+    /// caller somehow held a foreign identifier.
+    pub fn supersede_with_reason(
+        &self,
+        old: &MemoryId,
+        replacement: &MemoryId,
+        reason: Option<&str>,
+    ) -> Result<MemoryRecord, MemoryStoreError> {
         if old == replacement {
             return Err(MemoryStoreError::SelfSupersession { id: old.clone() });
         }
@@ -1182,14 +1230,22 @@ impl<'a> MemoryStore<'a> {
                 id: replacement.clone(),
             })?;
 
+        let reason = reason.map(str::trim).filter(|text| !text.is_empty());
         self.conn
             .execute(
-                "UPDATE memories SET status = ?2, superseded_by = ?3, updated_at = ?4 \
-                 WHERE id = ?1 AND project_id = ?5",
+                // `superseded_reason` is assigned unconditionally, so a
+                // supersession with no reason **clears** whatever an earlier
+                // one left. A row explaining a supersession that has since
+                // been replaced by a different one would be worse than an
+                // empty column.
+                "UPDATE memories \
+                 SET status = ?2, superseded_by = ?3, superseded_reason = ?4, updated_at = ?5 \
+                 WHERE id = ?1 AND project_id = ?6",
                 rusqlite::params![
                     old.as_str(),
                     MemoryStatus::Superseded.as_str(),
                     replacement.as_str(),
+                    reason,
                     (self.clock)(),
                     &self.project_id,
                 ],
@@ -1214,6 +1270,12 @@ impl<'a> MemoryStore<'a> {
     /// that is active again has not been replaced by anything; the schema's
     /// `CHECK` would refuse the inconsistent row anyway, and clearing it here
     /// means the caller gets the intended state instead of an error.
+    ///
+    /// It clears `superseded_reason` in the same expression, and that is not
+    /// cosmetic: migration 13 could not give the reason a `CHECK` tying it to
+    /// `status` — `ALTER TABLE ADD COLUMN` cannot add a table constraint — so
+    /// this is the one place that keeps *"why it was superseded"* from
+    /// outliving the supersession it explains.
     pub fn set_status(
         &self,
         id: &MemoryId,
@@ -1228,6 +1290,8 @@ impl<'a> MemoryStore<'a> {
                 "UPDATE memories \
                  SET status = ?2, \
                      superseded_by = CASE WHEN ?3 THEN superseded_by ELSE NULL END, \
+                     superseded_reason = \
+                         CASE WHEN ?3 THEN superseded_reason ELSE NULL END, \
                      updated_at = ?4 \
                  WHERE id = ?1 AND project_id = ?5",
                 rusqlite::params![
@@ -1383,11 +1447,18 @@ impl<'a> MemoryStore<'a> {
     }
 
     /// Revalidate a memory as superseded — Phase 21G: replaced by a named
-    /// successor.
+    /// successor, and map line 925's `reason` for *why*.
+    ///
+    /// `reason` is `None` when the operator gave none; see
+    /// [`MemoryStore::supersede_with_reason`] for what is stored then. The
+    /// high-impact gate is asked **before** the reason is looked at, so a
+    /// refused supersession records nothing at all — not even the explanation
+    /// of a supersession that did not happen.
     pub fn revalidate_superseded(
         &self,
         id: &MemoryId,
         replacement: &MemoryId,
+        reason: Option<&str>,
         by: ConflictResolver,
     ) -> Result<MemoryRecord, MemoryStoreError> {
         let record = self
@@ -1395,7 +1466,7 @@ impl<'a> MemoryStore<'a> {
             .ok_or_else(|| MemoryStoreError::NotFound { id: id.clone() })?;
         self.require_reviewed_for_high_impact(&record, by)?;
 
-        self.supersede(id, replacement)
+        self.supersede_with_reason(id, replacement, reason)
     }
 
     /// Revalidate a memory as invalidated — Phase 21G: a known invalidation
@@ -1781,6 +1852,7 @@ pub(super) fn row_to_record(
             source_excerpt: row.get("source_excerpt")?,
         },
         superseded_by: row.get::<_, Option<String>>("superseded_by")?.map(MemoryId),
+        superseded_reason: row.get("superseded_reason")?,
         validity_conditions: row.get("validity_conditions")?,
         invalidation_conditions: row.get("invalidation_conditions")?,
         review_reason,

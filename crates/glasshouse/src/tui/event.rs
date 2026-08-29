@@ -6,6 +6,7 @@
 //! Both land in one [`Event`] stream so the interface has a single loop and a
 //! single place where redraws are decided.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
@@ -231,19 +232,24 @@ impl EventSource {
                 //
                 // **The exposure this leaves is the one that is already
                 // there, not a new one.** The ask further down is preceded by
-                // a `wait_for_terminal` whose `poll(2)` reports `POLLHUP` the
-                // instant the far end closes, so it too is only ever reached
-                // microseconds after a hangup answer; this is the same
-                // instrument, at the same distance, subscribing to nothing so
-                // it cannot wait and cannot consume a keystroke. And it is one
-                // call per tick either way: when this branch delivers, the ask
-                // below never runs, and when it does not, this one has cleared
-                // the flag.
-                if wait_for_terminal(Duration::ZERO, Watch::HangUp)? == Wait::HangUp {
+                // the same guard, so both are only ever reached microseconds
+                // after a hangup answer, and neither can consume a keystroke:
+                // `poll(2)` reads nothing.
+                //
+                // **`Watch::Input` and not `Watch::HangUp`, and that is a fix
+                // rather than a detail** — see [`Watch::HangUp`], which cannot
+                // report a hangup on macOS at all. At a zero timeout there is
+                // nothing for the empty subscription to protect against, since
+                // the call returns whatever the answer is; a `Wait::Ready` here
+                // just means there really is input, which is the case this
+                // branch is for.
+                if wait_for_terminal(Duration::ZERO, Watch::Input)? == Wait::HangUp {
                     crate::shutdown::request_shutdown();
                     return Ok(Event::Shutdown);
                 }
-                if event::poll(Duration::ZERO).context("could not poll for terminal input")? {
+                if in_crossterm(|| event::poll(Duration::ZERO))
+                    .context("could not poll for terminal input")?
+                {
                     match self.take_from_crossterm()? {
                         Some(ev) => return Ok(ev),
                         // An event this interface does not act on. Crossterm
@@ -342,7 +348,30 @@ impl EventSource {
             } else {
                 Duration::ZERO
             };
-            if !event::poll(poll_for).context("could not poll for terminal input")? {
+            // **The same guard branch A carries, at the other hand-off.** Until
+            // this was here, the whole duration of the call below was
+            // unguarded, and a hangup landing inside it wedged crossterm
+            // exactly as the field processes were wedged. `quiet_ticks` keeps
+            // an idle interface away from this call *eventually*; it takes
+            // [`QUIET_TICKS`] ticks to do it, and a probe on this tree
+            // counted **exactly 64 of these calls in every one of 60 trials**
+            // — the warm-up, and nothing after it. So the exposure was not a
+            // vanishing tail, it was the interface's first second, every
+            // time, which is also when a person who has just started
+            // Glasshouse and closed the window is most likely to hang it up.
+            //
+            // `Wait::Unavailable` is skipped because there is no descriptor to
+            // ask about; that platform hands the wait to crossterm entire, and
+            // this module has nothing to say about it.
+            if waited != Wait::Unavailable
+                && wait_for_terminal(Duration::ZERO, Watch::Input)? == Wait::HangUp
+            {
+                crate::shutdown::request_shutdown();
+                return Ok(Event::Shutdown);
+            }
+            if !in_crossterm(|| event::poll(poll_for))
+                .context("could not poll for terminal input")?
+            {
                 if waited == Wait::Ready {
                     // The kernel says this descriptor has bytes on it and
                     // crossterm says it has nothing — and those two answers
@@ -379,7 +408,7 @@ impl EventSource {
     /// Only ever called where a poll has just said there is an event, so the
     /// read cannot block.
     fn take_from_crossterm(&self) -> Result<Option<Event>> {
-        let raw = event::read().context("could not read terminal input")?;
+        let raw = in_crossterm(event::read).context("could not read terminal input")?;
         // A read that succeeded came out of crossterm's parse buffer, and that
         // buffer may hold the rest of a burst. Remembering so is what lets the
         // next pass ask before it waits — see `crossterm_may_hold_more`. Set
@@ -398,6 +427,283 @@ impl EventSource {
         }
         Ok(Some(ev))
     }
+}
+
+/// Whether the interface is inside a call to crossterm, and which one.
+///
+/// Even means the loop is somewhere this module can see and can leave; **odd
+/// means it is inside `crossterm::event::poll` or `crossterm::event::read`**,
+/// which is the one place it may never come back from — see
+/// [`wait_for_terminal`] for why a hung-up descriptor traps crossterm's reader
+/// forever, and [`arm_hangup_watchdog`] for what is done about it.
+///
+/// Counted up rather than toggled on purpose: a watchdog that samples this
+/// twice can then tell "still inside the *same* call" from "inside another
+/// call already", and only the first of those is a process that will never
+/// come back.
+static CROSSTERM_CALL: AtomicU64 = AtomicU64::new(0);
+
+/// Run `call`, marking the interface as inside crossterm for its duration.
+///
+/// A panic inside leaves the count odd. Deliberate rather than overlooked: a
+/// panic in the interface ends the process through
+/// [`crate::shutdown::install_panic_hook`], so there is no later hangup for a
+/// stale odd value to mislead.
+fn in_crossterm<T>(call: impl FnOnce() -> T) -> T {
+    CROSSTERM_CALL.fetch_add(1, Ordering::SeqCst);
+    let out = call();
+    CROSSTERM_CALL.fetch_add(1, Ordering::SeqCst);
+    out
+}
+
+/// How often the watchdog asks whether the terminal is still there.
+///
+/// Six times slower than the interface's own tick, and the reason it is a
+/// number at all rather than a blocking wait is in [`wait_until_hangup`].
+#[cfg(unix)]
+const HANGUP_POLL: Duration = Duration::from_millis(100);
+
+/// How long the same crossterm call must still be in flight, after the
+/// terminal has gone, before it is called wedged.
+///
+/// Three ticks. A crossterm call on a live terminal is microseconds, and a
+/// crossterm call on a dead one is forever — there is no third duration to
+/// confuse this with, so the only thing this has to outlast is the interface
+/// being descheduled, which is why it is measured in ticks rather than in
+/// microseconds.
+#[cfg(unix)]
+const WEDGE_CHECK: Duration = Duration::from_millis(50);
+
+/// How long a hung-up interface that is **not** stuck inside crossterm is
+/// given to leave on its own.
+///
+/// Deliberately generous, and it can afford to be: this branch is for a
+/// process that is winding down rather than spinning, so waiting costs no
+/// processor time at all. The wind-down flushes an event log to SQLite, and
+/// cutting that short to save a second nobody is watching would trade a
+/// resource-exhaustion defect for a data-loss one. The spinning case does not
+/// wait this long — [`WEDGE_CHECK`] proves it and it is put down at once.
+#[cfg(unix)]
+const HANGUP_GRACE: Duration = Duration::from_secs(3);
+
+/// How long each rung of the forced-exit ladder is given before the next.
+#[cfg(unix)]
+const FORCE_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Exit code for the backstop below, matching `shutdown`'s own forced exit so
+/// that a caller cannot tell which of the two ended the process — they mean
+/// the same thing.
+#[cfg(unix)]
+const EXIT_FORCED: i32 = 130;
+
+/// Whether the watchdog thread has already been started.
+#[cfg(unix)]
+static WATCHDOG_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Start watching for the terminal going away, independently of the interface.
+///
+/// # Why a thread, when the loop already detects hangups
+///
+/// Because the loop's detection is a *rate* and this is a *guarantee*, and the
+/// difference is the whole reason this exists.
+///
+/// [`EventSource::next`] checks for a hangup immediately before every hand-off
+/// to crossterm, so the terminal has to die inside the handful of microseconds
+/// between that check and crossterm's own `read` for the interface to be
+/// trapped. That is a much narrower window than the one measured before those
+/// guards existed — but it is still a window, it widens exactly when the
+/// machine is loaded and the thread between the two calls is descheduled, and
+/// **a process that lands in it cannot get itself out**: crossterm's reader
+/// treats a zero-byte read as neither an event nor an error and loops on it
+/// forever, so no timeout, no signal and no flag this process can set will
+/// ever be looked at again.
+///
+/// Nothing inside that loop can end it, so the thing that ends it has to be
+/// outside. This is that thing.
+///
+/// # What it costs, which is nothing
+///
+/// One thread, blocked in a single `poll(2)` with no timeout and **nothing
+/// subscribed to**: `POLLHUP`, `POLLERR` and `POLLNVAL` are reported whatever
+/// is in `events`, so subscribing to nothing leaves exactly one thing that can
+/// wake it. It never reads the descriptor, so it cannot take a keystroke from
+/// the interface, and it is never woken by input, so an ordinary session costs
+/// it exactly one syscall for the whole life of the process.
+///
+/// # And it does not shoot a healthy process
+///
+/// Waking up is not enough to act on: a hangup is also the ordinary way a
+/// session ends, and the interface usually handles it by itself within a tick.
+/// So the watchdog distinguishes two states, and it can, because
+/// [`CROSSTERM_CALL`] tells it which one it is in:
+///
+/// - **inside the same crossterm call [`WEDGE_CHECK`] after the hangup** —
+///   proven stuck, because that call can no longer return. Ended at once,
+///   before it can burn the processor time that made this defect visible.
+/// - **anywhere else** — winding down, or slow. Given [`HANGUP_GRACE`], which
+///   costs nothing because a process in this state is not spinning.
+///
+/// # There is deliberately no way to disarm it
+///
+/// The obvious symmetry — give the terminal back when the screen does — was
+/// written first and then taken out, because it opened two holes and closed
+/// nothing.
+///
+/// The first is the ordinary exit. The interface notices the hangup, returns,
+/// and drops its screen in tens of milliseconds; a watchdog that stopped
+/// caring at that moment would stop caring **before it had even woken up**,
+/// leaving the rest of the wind-down — a database handle, an event log flushed
+/// to SQLite — with nothing watching it. That is the half of "never outlive
+/// the session" the event loop cannot promise on its own.
+///
+/// The second is [`crate::shell`] handing the terminal to the setup wizard and
+/// taking it back, which drops one screen and acquires another. A disarm there
+/// is a window with no owner, for no gain.
+///
+/// And there is nothing on the other side of the trade. Every `Screen` in this
+/// crate is a full-screen interface — the shell, the wizard, the wizard
+/// reopened from the shell — and every one is dropped either to acquire
+/// another or on the way out of the process. There is no Glasshouse that draws
+/// an interface and then has honest work left to do without a terminal, so
+/// "the terminal is gone, stop" never becomes the wrong instruction.
+///
+/// Idempotent, and safe to call for every screen: the thread is started once.
+#[cfg(unix)]
+pub(crate) fn arm_hangup_watchdog() {
+    if WATCHDOG_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let Some(fd) = terminal_fd() else {
+        // No terminal to watch. Nothing to guarantee, and nothing to leak.
+        WATCHDOG_RUNNING.store(false, Ordering::SeqCst);
+        return;
+    };
+    let started = std::thread::Builder::new()
+        .name("glasshouse-hangup-watchdog".to_owned())
+        .spawn(move || watch_for_hangup(fd));
+    if let Err(err) = started {
+        // A process that cannot spawn a thread is in no state to be given a
+        // second one to worry about. The interface's own detection stays, and
+        // this says so rather than pretending the guarantee is in place.
+        tracing::warn!(%err, "could not start the terminal hangup watchdog");
+        WATCHDOG_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// See the Unix implementations. Windows constructs no hangup answer at all
+/// (see [`wait_for_terminal`]), so there is nothing here to watch for and the
+/// platform keeps exactly the behaviour it had.
+#[cfg(not(unix))]
+pub(crate) fn arm_hangup_watchdog() {}
+
+/// The watchdog thread's whole life.
+#[cfg(unix)]
+fn watch_for_hangup(fd: std::os::fd::RawFd) {
+    if !wait_until_hangup(fd) {
+        WATCHDOG_RUNNING.store(false, Ordering::SeqCst);
+        return;
+    }
+    // The ordinary route first, and it is almost always the one that works:
+    // the loop reads this between events and leaves through its own exit.
+    crate::shutdown::request_shutdown();
+
+    let deadline = Instant::now() + HANGUP_GRACE;
+    loop {
+        let seen = CROSSTERM_CALL.load(Ordering::SeqCst);
+        std::thread::sleep(WEDGE_CHECK);
+        // Odd means inside crossterm; unchanged means inside the *same* call.
+        // Both together mean a call that cannot return, on a descriptor that
+        // will never produce another byte.
+        if seen % 2 == 1 && CROSSTERM_CALL.load(Ordering::SeqCst) == seen {
+            break;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    force_down();
+}
+
+/// Wait until the terminal's far end goes away, and say whether it did.
+///
+/// # Why this polls on a timer instead of blocking
+///
+/// Because a blocking hangup-only wait does not exist on both platforms, and
+/// the measurement is in [`Watch::HangUp`]: on macOS a descriptor subscribed
+/// to nothing reports nothing at all, and every mask that does report a hangup
+/// there also reports an ordinary pending keystroke. A watchdog that blocked on
+/// such a mask would be woken by input it must never read — and, having not
+/// read it, woken again immediately, forever. That is a busy-wait, which is the
+/// same defect this file exists to remove.
+///
+/// So it asks instead of waiting: one zero-timeout `poll(2)` every
+/// [`HANGUP_POLL`], sleeping in between. That is ten syscalls a second against
+/// the interface's own sixty, it never reads the descriptor so it can never
+/// take a keystroke, and an idle Glasshouse measures the same 0.3% of a core
+/// with it as without.
+///
+/// The latency it costs is paid only in the case that matters and does not
+/// matter there: the interface's own guards catch a hangup within microseconds
+/// on every ordinary tick, and this exists for the one where the interface can
+/// no longer answer at all — where up to one further [`HANGUP_POLL`] of a
+/// process that is already stuck changes nothing.
+///
+/// Deliberately not [`wait_for_terminal`], which can be told to answer a
+/// hung-up terminal the way the original defect did — see [`blind_to_hangups`].
+/// A watchdog that the acceptance test could blind along with the interface
+/// would prove nothing.
+#[cfg(unix)]
+fn wait_until_hangup(fd: std::os::fd::RawFd) -> bool {
+    loop {
+        let mut watched = libc::pollfd {
+            fd,
+            // Subscribed to, never read from. `poll` inspects; it does not
+            // consume, so the interface's input is untouched — and on macOS
+            // nothing is reported at all without a subscription.
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `watched` is one initialised `pollfd` and the count says so.
+        // `poll` reads `fd`/`events` and writes only `revents`.
+        let ready = unsafe { libc::poll(&mut watched, 1, 0) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return false;
+            }
+        } else if watched.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            return true;
+        }
+        std::thread::sleep(HANGUP_POLL);
+    }
+}
+
+/// End this process, through the route the project already defines for it.
+///
+/// `SIGTERM` rather than a private exit, because `shutdown`'s handler already
+/// knows what forcing Glasshouse down means — run the registered forced-exit
+/// cleanups, restore the terminal, exit — and one definition of that is worth
+/// more than a second one here that would drift. Two of them, because the
+/// handler's first answer is "ask the interface to stop" unless a signal has
+/// already been counted, and an interface stuck inside crossterm is exactly
+/// the one that will not hear it. With no handler installed at all, `SIGTERM`'s
+/// default disposition ends the process on the first.
+///
+/// The exit below is a backstop for a process that answered neither, and
+/// nothing in it can fail. Failing to clean up is survivable; failing to exit
+/// is the defect.
+#[cfg(unix)]
+fn force_down() -> ! {
+    for _ in 0..2 {
+        // SAFETY: `kill` inspects nothing; the pid is this process's own and
+        // `SIGTERM` is a valid signal number.
+        unsafe {
+            libc::kill(std::process::id() as libc::pid_t, libc::SIGTERM);
+        }
+        std::thread::sleep(FORCE_INTERVAL);
+    }
+    crate::shutdown::restore_terminal();
+    std::process::exit(EXIT_FORCED);
 }
 
 /// Which of the terminal's answers one wait is interested in.
@@ -471,9 +777,39 @@ impl EventSource {
 enum Watch {
     /// Input, and a hangup — the ordinary wait.
     Input,
-    /// A hangup and nothing else. `POLLHUP`, `POLLERR` and `POLLNVAL` are
-    /// reported whatever is subscribed to, so subscribing to nothing leaves
-    /// exactly one answer available.
+    /// A hangup and nothing else, on the platform where that is possible.
+    ///
+    /// # This does not work on macOS, and the loop no longer depends on it
+    ///
+    /// "`POLLHUP`, `POLLERR` and `POLLNVAL` are reported whatever is
+    /// subscribed to" is what POSIX says and what this variant was built on.
+    /// **Darwin does not do it.** Measured against a pty whose master had been
+    /// closed, one `poll` per row:
+    ///
+    /// | `events` | macOS `revents` | Linux `revents` |
+    /// |---|---|---|
+    /// | `0` | *nothing, times out* | `POLLERR\|POLLHUP` |
+    /// | `POLLIN` | `POLLIN\|POLLHUP` | `POLLIN\|POLLERR\|POLLHUP` |
+    /// | `POLLPRI` | `POLLPRI\|POLLHUP` | *nothing, times out* |
+    ///
+    /// So on macOS a descriptor must be subscribed to something before any
+    /// `revents` are reported at all — and there is no mask that wakes on a
+    /// hangup and not on input, because `POLLPRI` there also fires for an
+    /// ordinary pending keystroke (measured: `revents = POLLPRI` on a live raw
+    /// terminal with one byte waiting, where Linux times out).
+    ///
+    /// **What follows for each of this variant's two uses.** The zero-timeout
+    /// guards before each hand-off to crossterm no longer use it: they ask
+    /// [`Watch::Input`], which reports the hangup on both platforms and cannot
+    /// wait or consume anything at a zero timeout. The timed wait below still
+    /// does, because there the empty subscription is the whole point — a
+    /// descriptor crossterm has abandoned stays readable, and subscribing to
+    /// `POLLIN` there is the 380,987-waits spin. On macOS that wait degrades to
+    /// a plain sleep for the rest of the tick, which is what it was for; a
+    /// hangup arriving inside it is caught one tick later by the ordinary wait.
+    ///
+    /// Neither of those is what makes the guarantee. [`arm_hangup_watchdog`]
+    /// is, and it does its own `poll` for exactly this reason.
     HangUp,
 }
 
@@ -646,7 +982,9 @@ fn wait_for_terminal(timeout: Duration, watch: Watch) -> Result<Wait> {
     // terminal reports both at once, and reading the `POLLIN` half of that is
     // what spins forever. `POLLERR` and `POLLNVAL` mean the descriptor is
     // unusable, which is the same outcome by a different route.
-    if watched.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+    if watched.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+        && !blind_to_hangups()
+    {
         return Ok(Wait::HangUp);
     }
     Ok(match watch {
@@ -655,6 +993,37 @@ fn wait_for_terminal(timeout: Duration, watch: Watch) -> Result<Wait> {
         // an answer about anything and the caller only wanted the time spent.
         Watch::HangUp => Wait::Idle,
     })
+}
+
+/// Whether this process has been asked to answer a hung-up terminal the way
+/// the original defect did.
+///
+/// # Why a switch exists in shipped code
+///
+/// Because the thing it makes testable cannot be tested any other way, and
+/// this project has already paid once for believing otherwise.
+///
+/// `arm_hangup_watchdog`'s guarantee is that a process trapped inside
+/// crossterm still dies. Getting a process into that state honestly means
+/// winning a race whose window is now microseconds wide: it happened in
+/// roughly one hangup in sixty on a loaded Linux runner, which is a rate to
+/// sample and not a state to construct. A test that waits for it is the
+/// single-trial test practice §60 exists to warn about, wearing the other
+/// face — it would pass by never reaching the case it claims to prove.
+///
+/// So the case is constructed instead. With this set, `wait_for_terminal`
+/// looks past `POLLHUP` and answers `POLLIN` — the exact reading the field
+/// defect made, restored on purpose — and the interface walks into crossterm
+/// with a dead descriptor **every time**. Nothing but the watchdog can end
+/// that process, which is what the acceptance test then requires.
+///
+/// It is read once, it changes nothing unless the variable is present, and
+/// `block_until_hangup` deliberately does not consult it, so the watchdog
+/// cannot be blinded by the same switch that blinds the interface.
+#[cfg(unix)]
+fn blind_to_hangups() -> bool {
+    static BLIND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *BLIND.get_or_init(|| std::env::var_os("GLASSHOUSE_TUI_BLIND_TO_HANGUPS").is_some())
 }
 
 /// The descriptor crossterm reads terminal input from.

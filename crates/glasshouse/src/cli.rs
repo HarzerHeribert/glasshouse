@@ -1026,9 +1026,13 @@ pub enum MemoryCommand {
         #[arg(long, value_name = "ID")]
         by: Option<String>,
 
-        /// Why this still needs review — one of Phase 21C's six review
-        /// reasons. Required for `needs-review`; rejected for every other
-        /// outcome.
+        /// Why. Two different questions, decided by the outcome:
+        ///
+        /// For `needs-review`, one of Phase 21C's six review reasons, and
+        /// required. For `superseded`, your own sentence about why this
+        /// decision went — free text, optional, and recorded so a later agent
+        /// does not resurrect it without the context. Rejected for
+        /// `reaffirmed` and `invalidated`.
         #[arg(long, value_name = "REASON")]
         reason: Option<String>,
 

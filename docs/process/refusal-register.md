@@ -34,7 +34,7 @@ Do not let a `no` become a `yes` because the line looks close.
 
 ---
 
-## Open refusals, as of batch 49
+## Open refusals, as of batch 50
 
 ### Cluster A — a production caller passes an invented constant *(in-repo: YES — being attacked now by `GH-LEAD-PLACEHOLDERS`)*
 
@@ -48,12 +48,36 @@ Do not let a `no` become a `yes` because the line looks close.
 
 ### Cluster B — a mechanism built, tested, and never installed in production *(in-repo: YES)*
 
+**Batch 50 closed two of the four and disproved a third.** The cluster framing
+was right and it paid: 1735 and 925 are done, and 531 turned out to be
+mis-filed. What is left is one row.
+
 | line | missing link |
 |---|---|
-| 1735 | `DegradeSink` threaded through the gateway; `main.rs` calls the plain constructor at both launch sites, so the sink is never `Some`. Blocked on an ownership question: `EventBus` does not exist yet when the gateway starts |
-| 531 | `declare_token_priced` has zero non-test callers, so no token-priced allowance is ever created to track request pools separately *from* |
-| 922 (half) | `MemoryStore::resolve_conflict` has zero non-test callers — Glasshouse can raise a conflict and cannot resolve one from the binary |
-| 925 | **smaller than the ledger records.** `review_reason` is already persisted and `supersede`'s UPDATE leaves it intact; the recorded "needs a schema migration, Red tier" is wrong |
+| 922 (half) | `MemoryStore::resolve_conflict` (`memory/store.rs:1507`) has zero non-test callers. **Re-verified batch 50 and the reason is sharper:** the `memory revalidate` CLI that shipped since does *not* route through it — `revalidate_superseded` (`store.rs:1387`) calls `supersede` (`store.rs:1168`) directly. Glasshouse can raise a conflict and still cannot resolve one from the binary |
+
+**CLOSED and removed:** 1735 (batch 50 — `DegradeRelay` in `main.rs`, a lazily
+filled handle that holds and replays; see `phase-45.md`). 925 (batch 50 —
+migration 13 `superseded_reason`; the recorded "needs a schema migration, Red
+tier" blocker was wrong in a way that mattered, see `phase-21e.md`).
+
+**MOVED OUT — 531 is not a Cluster B line and packaging it as one would have
+manufactured work.** The register recorded "`declare_token_priced` has zero
+non-test callers". True, and not the gap. Verified batch 50 against current
+source: `is_request_pool` (`routing/free.rs:101`) *also* has zero production
+callers — its only caller is `free.rs:769`, inside the `#[cfg(test)]` that
+starts at `free.rs:617` — and the single production allowance read,
+`free.rs:453`, asks `is_exhausted`, which pooled and token-priced credentials
+both answer. Production never distinguishes the two anywhere. And no `FreePool`
+outlives a single call: the only production caller of the routing entry point,
+`memory/extract/disposable.rs:61`, constructs `FreePool::new()` per call and
+drops it — its own doc comment says *"There is no live FreePool to consult
+here ... this caller never makes one."*
+
+So 531 is missing **caller and consumer**, not one link. Closing it honestly
+means building a production consumer that behaves differently for pooled versus
+token-priced credentials, and giving the pool a lifetime — a routing feature
+whose consuming phases are still at zero. **It belongs in Cluster D.**
 
 ### Cluster C — an enum variant with no constructor *(in-repo: YES, but each needs a signal that may not exist)*
 
@@ -72,6 +96,7 @@ Do not let a `no` become a `yes` because the line looks close.
 | 1796 | nothing maps a model to a tier ceiling. **Its recorded blocker is stale** — `WorkloadTier` ships at `routing/classify.rs:79` — but §14 applies: the blocker being gone is not the capability |
 | 372 | **stale blocker**: `phase-9a.md:482` says `grep 'fn score\|Score'` is empty; it is not. Nothing selects among launch profiles, so still open |
 | 1313 | latency aggregates have zero production readers; every candidate consumer is in another partition |
+| 531 | **moved here from Cluster B in batch 50.** Missing caller *and* consumer: nothing in production distinguishes a request pool from a token-priced allowance, and no `FreePool` outlives one call. Needs a routing consumer that behaves differently for the two — see Cluster B's note |
 
 ### Cluster E — the provider signal genuinely does not arrive *(in-repo: **NO** — do not package)*
 
@@ -105,6 +130,27 @@ source or runs their tests. Map line 932 declined this four times and
 | 1325 | of four provenance values the line names, production can emit one |
 
 ---
+
+### Cluster H — a view whose data is never made durable *(in-repo: yes, but each needs a producer first)*
+
+Batch 50, Phase 47. The decisive background fact, verified once and true of all
+of them: `shell::run` (`shell/mod.rs:72`) takes only a `&Runtime` and is reached
+from `main.rs:326`, while the gateway, router and live `FreePool` start only at
+`main.rs:535`/`:1088`. **A shell debug view can render only what is durable on
+disk**, and seven of Phase 47's eight open lines name data nothing persists.
+
+| line | missing link |
+|---|---|
+| 1757 | `RoutingExplanation` (`routing/mod.rs:475`) has no durable sink — every production sink is a `tracing` line or an in-memory `Vec`. The propagation slot is dead too: `ShellState::record_disposable_choice` (`shell/state.rs:1216`) has zero production callers while `shell/view.rs:1793` already renders it |
+| 1759 | the retrieved set is never recorded; `Extractor::run` (`memory/extract/mod.rs:413`) drops `existing` after `Prompt::build` |
+| 1760 | no cache-temperature signal exists at all; `with_context_state` (`routing/evidence.rs:328`) has zero non-test callers and `cached_input_tokens` has no setter |
+| 1763 | **needs a product ruling before code.** Production emits exactly one `GatewayFailure` class: `session::gateway_failure` maps only `Outcome::Unreachable`. Counts-by-class of one class is not the capability. The question is whether a non-2xx `Forwarded` should count as a gateway failure — the gateway currently says no on purpose |
+| 1766 | two links: 1757's absent rationale, and nothing durably records that a decision happened |
+| 1767 | nothing computes a correlation; `routing/domain.rs:31` says so in the source |
+| 1769 | extraction never runs in the shell process; needs a durable extraction record plus a caller change where it does run |
+
+**Do not read 1763 as unlocked by 1735.** The orchestrator recorded that during
+batch 50 and it was wrong; the correction is in `phase-47.md`.
 
 ## Standing refusals that are decisions, not blockers
 

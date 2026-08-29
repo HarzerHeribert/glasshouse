@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`██████████████████████░░░░░░░░░░░░░░░░░░` 734 / 1280 mandatory capabilities (57%)
+`███████████████████████░░░░░░░░░░░░░░░░░` 737 / 1280 mandatory capabilities (57%)
 
 <details>
 <summary>Per-phase breakdown (33 of 104 phases complete)</summary>
@@ -68,7 +68,7 @@ the authoritative specification and tracks what is done.
 | Phase 21B — Decision provenance and assumptions | 11/11 ✅ |
 | Phase 21C — Validity conditions and invalidation | 11/11 ✅ |
 | Phase 21D — Memory age and relevance decay | 9/9 ✅ |
-| Phase 21E — Decision ladder and conflict handling | 6/12 |
+| Phase 21E — Decision ladder and conflict handling | 7/12 |
 | Phase 21F — Memory retrieval quality | 7/11 |
 | Phase 21G — Memory revalidation | 3/9 |
 | Phase 21H — Simplicity-first implementation policy | 0/10 |
@@ -118,9 +118,9 @@ the authoritative specification and tracks what is done.
 | Phase 42 — External control API | 12/13 |
 | Phase 43 — MCP surface for orchestrators | 0/10 |
 | Phase 44 — User control and override | 0/9 |
-| Phase 45 — Failure handling | 7/9 |
+| Phase 45 — Failure handling | 8/9 |
 | Phase 46 — Security and contamination tests | 6/8 |
-| Phase 47 — Observability without spectacle | 7/15 |
+| Phase 47 — Observability without spectacle | 8/15 |
 | Phase 48 — CLI ergonomics | 8/8 ✅ |
 | Phase 49 — Configuration | 14/16 |
 | Phase 50 — Tracked project knowledge as an optional feature | 0/7 |

@@ -57,8 +57,8 @@ pub use state::{
     Action, HarnessRow, IntegrationRow, KnowledgeSection, MemoryDetail, MemoryRow,
     MemorySettingsEdit, Mode, ModelRefresh, Overlay, OverviewState, ProbeKind, ProfileRow,
     ProfileSettingsEdit, ProviderNotice, ProviderProbeIntent, ProviderProbeResult, ProviderRow,
-    ProviderSettingsEdit, ReachabilityCheck, RouteEvidenceRow, RoutingRow, RoutingSettingsEdit,
-    SettingsEdit, ShellState, ViewportGrid,
+    ProviderSettingsEdit, ReachabilityCheck, RouteEvidenceRow, RouteHealthRow, RoutingRow,
+    RoutingSettingsEdit, SettingsEdit, ShellState, ViewportGrid,
 };
 
 /// Open the shell and run it until the user leaves.
@@ -287,6 +287,9 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                             );
                         }
                     },
+                    Action::OpenRouteHealth => {
+                        state.open_route_health(build_route_health_table(runtime));
+                    }
                     Action::OpenProjectMemory => match build_project_memory_view(runtime) {
                         Ok(memory) => {
                             state.open_project_memory(memory, None);
@@ -1827,6 +1830,91 @@ fn build_route_evidence_table(runtime: &Runtime) -> anyhow::Result<Vec<RouteEvid
             }
         })
         .collect())
+}
+
+/// Read what a local gateway has observed about each free resource — Phase 47
+/// map line 1765, *"show route health, immediate availability, cadence, quota
+/// reset, and failure-domain evidence as separate concepts"*.
+///
+/// # Why this can be read from the interactive shell at all
+///
+/// The shell process has no gateway and no router in it: [`run`] takes only a
+/// [`Runtime`], and the gateway is started in `main.rs`'s `launch_session`,
+/// which is a different invocation. So none of this can come from live router
+/// state. It does not have to: `crate::gateway::mod`'s accept loop already
+/// writes both of these caches to disk on every forwarded exchange
+/// (`GatewayQuotaCache::store` and `GatewayHealthCache::store`), for exactly
+/// this reason — `glasshouse resources` is a separate process too, and reads
+/// them back the same way. This is that same seam, used by a second reader.
+///
+/// # Never fails, and that is the caches' own contract
+///
+/// Both loads are documented as returning no error ever: absent, unreadable,
+/// truncated, or written by another format version all mean *nothing was
+/// observed*, which is a complete and honest answer. There is consequently no
+/// note for [`ShellState::open_route_health`] to carry, unlike
+/// [`build_route_evidence_table`], whose ledger really can fail to open.
+///
+/// # Scope: this is installation-wide, and the view says so
+///
+/// Both caches live under [`crate::paths::RuntimePaths::data_dir`], keyed by
+/// provider — **not** under `project_state_dir`. They describe providers, and
+/// providers are configured at the user level, so a reading written while a
+/// gateway served one project is visible to every project's shell. That is
+/// the same scope `glasshouse resources` already prints, and it is labelled
+/// in the view rather than left for a reader to assume. Nothing project-scoped
+/// is read here at all: no project database is opened by this function.
+fn build_route_health_table(runtime: &Runtime) -> Vec<RouteHealthRow> {
+    use crate::provider::telemetry::{GatewayHealthCache, GatewayQuotaCache};
+    use crate::routing::domain::FailureDomain;
+
+    let now_unix = crate::provider::cache::now_unix_seconds();
+    let quota: std::collections::HashMap<
+        String,
+        (crate::provider::telemetry::RateLimitHeaders, i64),
+    > = GatewayQuotaCache::new(runtime.paths())
+        .load_all()
+        .into_iter()
+        .map(|(provider, headers, observed_at)| (provider, (headers, observed_at)))
+        .collect();
+
+    let mut rows = Vec::new();
+    for (provider, readings) in GatewayHealthCache::new(runtime.paths()).load_all() {
+        // Concept 5's only honest signal. `FailureDomain::between` compares
+        // two `Backend`s and neither cache stores one, so what is available
+        // here is the identity that comparison would use — the provider name
+        // — applied to the resources actually observed under it. The
+        // vocabulary comes from the enum itself so this can never drift into
+        // a second spelling, and `Independent` is unreachable by
+        // construction: there is no branch below that produces it.
+        let peers = readings.len().saturating_sub(1);
+        let domain = if peers > 0 {
+            FailureDomain::Shared
+        } else {
+            FailureDomain::Unknown
+        };
+        let stated = quota.get(&provider);
+        for reading in readings {
+            rows.push(RouteHealthRow {
+                provider: provider.clone(),
+                credential_label: reading.credential_label.clone(),
+                model: reading.model.clone(),
+                consecutive_failures: reading.consecutive_failures,
+                credential_rejected: reading.credential_rejected,
+                // The producer's own decision, asked rather than re-derived
+                // from the two fields above.
+                available_now: reading.is_available(now_unix),
+                cooling_down_until_unix: reading.cooling_down_until_unix,
+                stated_limit: stated.and_then(|(headers, _)| headers.limit()),
+                stated_window_seconds: stated.and_then(|(headers, _)| headers.window_seconds()),
+                quota_resets_at_unix: stated
+                    .and_then(|(headers, observed_at)| headers.resets_at_unix(*observed_at)),
+                failure_domain: domain.as_str().to_owned(),
+                failure_domain_peers: peers,
+            });
+        }
+    }
+    rows
 }
 
 /// Build the rows the Settings overlay shows, from a fresh [`Discovery`]
@@ -4628,6 +4716,267 @@ mod route_evidence_tests {
                 .rows()
                 .iter()
                 .any(|row| row.provider == "anyrouter")
+        );
+    }
+}
+
+/// Phase 47 line 1765: the route-health view reads real gateway telemetry
+/// through [`build_route_health_table`] — the production function
+/// `Action::OpenRouteHealth`'s handler calls.
+///
+/// These write through the *production* cache writers
+/// (`GatewayHealthCache::store` and `GatewayQuotaCache::store`, the same two
+/// calls `gateway::mod`'s accept loop makes) and read back through the
+/// production builder, rather than hand-building a `RouteHealthRow`. A test
+/// that constructed the row itself would leave the builder deletable without
+/// anything noticing, which is practice §35's exact failure.
+#[cfg(test)]
+mod route_health_tests {
+    use super::*;
+    use crate::provider::telemetry::{
+        GatewayHealthCache, GatewayHealthReading, GatewayQuotaCache, RateLimitHeaders,
+    };
+
+    /// The same bootstrap `route_evidence_tests` uses. `data_dir` is where
+    /// both telemetry caches live, so pointing it at a temporary directory is
+    /// what keeps these tests from reading the developer's own installation.
+    fn bootstrapped_runtime() -> (tempfile::TempDir, tempfile::TempDir, crate::Runtime) {
+        use clap::Parser;
+
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join(".git")).unwrap();
+
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+            "--config-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, workspace.path()).unwrap();
+        (data, workspace, runtime)
+    }
+
+    fn reading(
+        model: &str,
+        consecutive_failures: u32,
+        cooling_down_until_unix: Option<i64>,
+        credential_rejected: bool,
+    ) -> GatewayHealthReading {
+        GatewayHealthReading {
+            credential_label: "anyrouter/ANYROUTER_API_KEY".to_owned(),
+            model: model.to_owned(),
+            consecutive_failures,
+            cooling_down_until_unix,
+            credential_rejected,
+        }
+    }
+
+    /// A fresh installation has observed nothing, and that is a complete
+    /// answer rather than an error — the caches' own fail-soft contract,
+    /// which is also why this builder returns no `Result`.
+    #[test]
+    fn an_installation_with_no_gateway_telemetry_yields_no_rows() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        assert!(build_route_health_table(&runtime).is_empty());
+    }
+
+    /// The five concepts come back as five *separate* fields, read through
+    /// the production caches. The fixture is deliberately one where they
+    /// disagree — no failures, yet unavailable, and paced — because that is
+    /// the case a single collapsed status word cannot represent.
+    #[test]
+    fn the_five_concepts_survive_the_process_boundary_as_separate_fields() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let now = crate::provider::cache::now_unix_seconds();
+
+        GatewayHealthCache::new(runtime.paths()).store(
+            "anyrouter",
+            &[reading("claude-opus-4-1", 0, Some(now + 300), true)],
+            now,
+        );
+        GatewayQuotaCache::new(runtime.paths()).store(
+            "anyrouter",
+            &RateLimitHeaders::read([
+                ("ratelimit-limit", "300"),
+                ("ratelimit-remaining", "12"),
+                ("ratelimit-reset", "1800"),
+            ]),
+            now,
+        );
+
+        let rows = build_route_health_table(&runtime);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+
+        // 1. route health — a streak and a flag, both preserved.
+        assert_eq!(row.consecutive_failures, 0);
+        assert!(row.credential_rejected);
+        // 2. immediate availability — the producer's own answer, and it
+        //    disagrees with the zero failure streak above.
+        assert!(
+            !row.available_now,
+            "a refused credential is unavailable even with no failure streak"
+        );
+        // 3. cadence — Glasshouse's own pacing and the provider's window,
+        //    two different facts kept apart.
+        assert_eq!(row.cooling_down_until_unix, Some(now + 300));
+        assert_eq!(row.stated_limit, Some(300));
+        assert_eq!(row.stated_window_seconds, None);
+        // 4. quota reset — the provider's own clock, a different instant
+        //    from the cooldown above.
+        assert_eq!(row.quota_resets_at_unix, Some(now + 1_800));
+        assert_ne!(
+            row.quota_resets_at_unix, row.cooling_down_until_unix,
+            "the provider's reset and Glasshouse's cooldown are two clocks"
+        );
+        // 5. failure-domain evidence — one observed resource, so nothing is
+        //    known to share its domain, and never `independent`.
+        assert_eq!(row.failure_domain, "unknown");
+        assert_eq!(row.failure_domain_peers, 0);
+    }
+
+    /// A provider with nothing stated leaves the three provider-sourced
+    /// concepts `None` — the shape the view turns into `unknown`. A default
+    /// of zero here is the defect this assertion exists to catch, because it
+    /// would reach the screen as a measurement.
+    #[test]
+    fn a_provider_that_stated_no_headers_leaves_every_stated_field_none() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let now = crate::provider::cache::now_unix_seconds();
+        GatewayHealthCache::new(runtime.paths()).store(
+            "openrouter",
+            &[reading("some-free-model", 2, None, false)],
+            now,
+        );
+
+        let rows = build_route_health_table(&runtime);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].stated_limit, None);
+        assert_eq!(rows[0].stated_window_seconds, None);
+        assert_eq!(rows[0].quota_resets_at_unix, None);
+        assert_eq!(rows[0].cooling_down_until_unix, None);
+        // Route health is still real: the streak crossed the boundary.
+        assert_eq!(rows[0].consecutive_failures, 2);
+    }
+
+    /// Failure-domain evidence is about a *pair*, and the only signal this
+    /// build has is the provider. Two resources behind one provider are
+    /// `shared`; each is `unknown` with respect to the other provider, and
+    /// nothing anywhere is ever `independent`.
+    #[test]
+    fn two_resources_on_one_provider_are_shared_and_never_independent() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let now = crate::provider::cache::now_unix_seconds();
+        let health = GatewayHealthCache::new(runtime.paths());
+        health.store(
+            "anyrouter",
+            &[
+                reading("model-a", 0, None, false),
+                reading("model-b", 1, None, false),
+            ],
+            now,
+        );
+        health.store("openrouter", &[reading("model-c", 0, None, false)], now);
+
+        let rows = build_route_health_table(&runtime);
+        assert_eq!(rows.len(), 3);
+        for row in &rows {
+            assert_ne!(
+                row.failure_domain, "independent",
+                "nothing in this build can establish independence"
+            );
+        }
+        let anyrouter: Vec<_> = rows.iter().filter(|r| r.provider == "anyrouter").collect();
+        assert_eq!(anyrouter.len(), 2);
+        for row in &anyrouter {
+            assert_eq!(row.failure_domain, "shared");
+            assert_eq!(row.failure_domain_peers, 1);
+        }
+        let lone = rows
+            .iter()
+            .find(|r| r.provider == "openrouter")
+            .expect("openrouter row");
+        assert_eq!(lone.failure_domain, "unknown");
+        assert_eq!(lone.failure_domain_peers, 0);
+    }
+
+    /// The `h` key reaches this builder through the real run-loop action, and
+    /// the overlay carries the rows the builder actually read — not a
+    /// hand-constructed fixture (practice §35).
+    #[test]
+    fn opening_the_route_health_view_shows_real_gateway_telemetry() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let now = crate::provider::cache::now_unix_seconds();
+        GatewayHealthCache::new(runtime.paths()).store(
+            "anyrouter",
+            &[reading("claude-opus-4-1", 3, None, false)],
+            now,
+        );
+
+        let mut state = state::ShellState::new(
+            "glasshouse",
+            runtime.project().display_root(),
+            "test",
+            Vec::new(),
+        );
+        assert_eq!(
+            state.handle_key(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Char('h')
+            )),
+            state::Action::OpenRouteHealth
+        );
+
+        state.open_route_health(build_route_health_table(&runtime));
+
+        assert_eq!(state.overlay(), Some(state::Overlay::RouteHealth));
+        let health = state.route_health().expect("open");
+        let row = health
+            .rows()
+            .iter()
+            .find(|row| row.provider == "anyrouter")
+            .expect("the observed resource must reach the overlay");
+        assert_eq!(row.consecutive_failures, 3);
+    }
+
+    /// The isolation invariant, asserted rather than assumed: this builder
+    /// opens **no project database at all**. It reads two provider-keyed
+    /// cache directories under the installation's data directory, so there is
+    /// no project predicate for it to get wrong — and a future edit that
+    /// started reading project rows here would have to delete this test.
+    #[test]
+    fn the_builder_reads_no_project_scoped_store() {
+        let source = include_str!("mod.rs");
+        let start = source
+            .find("fn build_route_health_table(")
+            .expect("the function must exist");
+        // Ended at the next item at column zero, read with `str::lines` so a
+        // CRLF checkout cannot defeat it (practice §14).
+        let body: String = source[start..]
+            .lines()
+            .skip(1)
+            .take_while(|line| !line.starts_with('}'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for forbidden in [
+            "MemoryStore",
+            "EvidenceLedger",
+            "ProjectSessions",
+            "EventLog",
+            "project_state_dir",
+            "Connection",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "build_route_health_table must not reach a project-scoped store, \
+                 but names `{forbidden}`:\n{body}"
+            );
+        }
+        assert!(
+            body.contains("data_dir") || body.contains("GatewayHealthCache::new"),
+            "the builder must read the installation-wide telemetry caches:\n{body}"
         );
     }
 }

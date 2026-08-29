@@ -791,24 +791,21 @@ pub fn start_if_required_with_telemetry(
 /// `None` reproduces [`start_if_required_with_telemetry`] exactly, the same
 /// additive guarantee every sink on this door already gives.
 ///
-/// **Not called from `crates/glasshouse/src/main.rs` today.** Both of that
-/// file's gateway launch sites (`launch_session` and the resume path,
-/// `overlay_resolution`) still call [`start_if_required_with_telemetry`].
-/// Wiring this in needs a closure built there, from the same `runtime` and
-/// `EventBus` those call sites already have in scope, that calls
-/// [`crate::events::degrade_resource`] with a snapshot of the project's
-/// session records:
+/// `crates/glasshouse/src/main.rs` calls this at **both** of its gateway
+/// launch sites — `launch_session` and the resume path's
+/// `resolve_resume_overlay` — and passes a real sink at each.
 ///
-/// ```text
-/// let bus = /* this launch's EventBus */;
-/// let records = /* SessionStore::list or equivalent, read fresh per call */;
-/// let sink: DegradeSink = Arc::new(move |resource, reason| {
-///     let _ = crate::events::degrade_resource(&bus, &records(), resource, reason);
-/// });
-/// ```
+/// # The ownership answer, because the obvious one does not compile
 ///
-/// `crates/glasshouse/src/main.rs` is this package's `FORBIDDEN FILES`; see
-/// the report.
+/// A sink needs an `EventBus` and a session list, and neither exists when
+/// either site starts its gateway: the launch path opens its `EventRecorder`
+/// 184 lines later, and has no `SessionRecord` at all until the store has
+/// created one. So the sink cannot close over them. `main.rs::DegradeRelay`
+/// is what it closes over instead — a handle created before the gateway and
+/// filled once both halves exist, which holds any failure that arrives in
+/// between and replays it on installation. A failure in that window is
+/// therefore neither a panic nor a silent loss, and nothing on this start
+/// path waits for the recorder to be ready.
 pub fn start_if_required_with_degrade_sink(
     profiles: &[LaunchProfile],
     upstream: impl FnOnce() -> Result<Upstream>,

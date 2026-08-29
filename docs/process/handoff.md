@@ -6,6 +6,118 @@
 
 Last updated: 2026-08-29 (Europe/Berlin)
 
+## Checkpoint — 2026-08-29, batch 50 landed: 737 / 1280 (57%)
+
+**Three workers, three boxes closed, ten lines refused with the missing
+producer named — and two defects found in the process itself.**
+
+| worker | tier | result |
+|---|---|---|
+| gh-ownership | Opus specialist | **1735 + 925 closed.** 5 mutations, all KILLED |
+| gh-phase47 | team lead (+1 read-only subcontractor) | **1765 closed**, 7 refused |
+| gh-tui-spin | Opus specialist | the residual TUI spin — prior hypothesis killed, **a second cross-platform defect found** |
+
+### `--windows-vm` alone runs Windows ONLY — the standing instruction was wrong
+
+`ci-local.sh:54` sets `DO_MAC=1; DO_LINUX=1` **only when `$# -eq 0`**, so any
+flag suppresses the default pair. The previous handoff's *"run
+`scripts/ci-local.sh --windows-vm`, not the bare gate"* therefore ran **3 of 7
+jobs** and skipped macOS and Linux, while printing an all-PASS summary whose
+closing NOTE speaks only about Windows. The NOTE is honest about what it covers
+and silent about what did not run, which is the "silence is not success" shape.
+
+**Use `scripts/ci-local.sh --macos --linux --windows-vm`.**
+
+### The TUI spin: the hypothesis was wrong and there were two defects
+
+The prior worker's window — *a terminal dying between `Wait::Ready` and
+crossterm's `read`* — is **killed**. Instrumentation counted **exactly 64**
+calls into `crossterm::event::poll` in every one of 60 trials and none after:
+the exposure is the `QUIET_TICKS` warm-up second, and the acceptance test's
+1500ms settle sits directly on that 1024ms boundary. That is why the gate loses
+the coin flip on a loaded runner and not on a quiet one.
+
+**The second defect is the serious one: the hangup guard has never worked on
+macOS.** `Watch::HangUp` polls with `events: 0` on the POSIX ground that
+`POLLHUP` is reported whatever is subscribed to. **Darwin does not do it** —
+measured, one `poll` per row, against a pty whose master had been closed:
+
+| `events` | macOS `revents` | Linux `revents` |
+|---|---|---|
+| `0` | *nothing — times out* | `POLLERR\|POLLHUP` |
+| `POLLIN` | `POLLIN\|POLLHUP` | `POLLIN\|POLLERR\|POLLHUP` |
+| `POLLPRI` | `POLLPRI\|POLLHUP` | *nothing — times out* |
+
+The fix is not another narrowing — narrowing is what the last two attempts did
+and each left a rate. The window is guarded at every hand-off *and* made not to
+matter by a watchdog thread outside the loop, plus a
+`GLASSHOUSE_TUI_BLIND_TO_HANGUPS` switch that makes the race **constructible**.
+
+**Read the statistics honestly.** `0 in 600` bounds the rate below 0.5%; the
+before-tree's own measured rate is **0.24%** (1 in 410 loaded Linux trials), so
+the sampling alone cannot show an improvement — roughly 1,600 trials would be
+needed. What carries the claim is the deterministic pair: **10 survivors in 10
+without the watchdog, 0 in 30 with it**, wedge forced every trial. That is the
+difference between "the window is smaller" and "the window does not matter".
+
+**The recorded "2 in 60" was stale** — it predates the `QUIET_TICKS` fix, and
+the orchestrator used it to set a 200-trial acceptance bar that could never have
+distinguished the two trees. Load is the missing ingredient: 0 in 60 unloaded,
+1 in 60 under 24 spinners, with the survivor burning 44% of a core, which is
+exactly a spinning process's share under that load. **A rate without its load is
+not a rate.**
+
+Still open and outside that packet's files: the `SIGHUP`-after-restore race in
+`shutdown.rs` exits 130 on ~2.3% of clean hangups, on this tree and before it.
+
+### Nothing in this tree drives the interactive TUI loop
+
+`gh-phase47`'s one SURVIVED mutation is the run-loop arm
+`Action::OpenRouteHealth => build_route_health_table(runtime)`. It is on the
+production path and no test reaches it, because no harness drives `shell::run`.
+Every overlay dispatch in that `match` has the identical gap.
+
+**A pty harness for the TUI loop is the highest-leverage next package.** It
+serves every TUI contract in the map rather than one line, and it matches this
+project's own measured experience that real defects show up running the shipped
+binary in a real terminal. A structural test was deliberately not added instead:
+`main.rs`'s own guard records that such tests prove structure and that boxes do
+not close on them.
+
+### Three orchestrator packet errors, all caught by workers
+
+1. **Phase 47's premise was wrong.** The packet said these were "eight
+   renderings of data that already exists ... code-heavy and parallelises".
+   Seven render data that does **not** exist; the real ratio is ~85% judgement.
+   Generalised from the phase's evidence file list instead of checking producers
+   per line — §75/§81 one layer up.
+2. **A consumer asserted but never run.** The 925 feasibility block named
+   `glasshouse memory list`; there is no such subcommand. The listing is
+   `memory revalidate --list` and shows only `NeedsReview`, so a superseded
+   memory never appears there. The real reading door is `memory search
+   --history`.
+3. **A stale rate used as an acceptance bar** — see the TUI section.
+
+`tests/gateway_degrade.rs` was also listed `(new)` when it already existed.
+
+### 531 was mis-filed, and finding that out was worth the recon
+
+Cluster B said *"`declare_token_priced` has zero non-test callers"*. True, and
+not the gap: `is_request_pool` also has zero production callers, the single
+production allowance read asks `is_exhausted` — which pooled and token-priced
+both answer — and no `FreePool` outlives one call. **Missing caller and
+consumer, not one link.** It was dropped from the batch before dispatch rather
+than handed to a worker, and moved to Cluster D.
+
+### Next
+
+1. **The pty harness for the TUI loop** — code-heavy, so a lead package (§82).
+2. **1763 needs a product ruling before code**: is a non-2xx `Forwarded` a
+   gateway failure? Production emits exactly one `GatewayFailure` class today.
+   Do **not** read 1763 as unlocked by 1735 — that was an orchestrator error,
+   corrected in `phase-47.md`.
+3. The `shutdown.rs` `SIGHUP`-after-restore race.
+
 ## Checkpoint — 2026-08-29, batch 49 landed: 734 / 1280 (57%)
 
 **Four Opus team leads, each running its own subcontractors, 40 capability
