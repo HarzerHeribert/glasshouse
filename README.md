@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`████████████████████████░░░░░░░░░░░░░░░░` 787 / 1280 mandatory capabilities (61%)
+`████████████████████████░░░░░░░░░░░░░░░░` 797 / 1280 mandatory capabilities (62%)
 
 <details>
 <summary>Per-phase breakdown (39 of 104 phases complete)</summary>
@@ -80,7 +80,7 @@ the authoritative specification and tracks what is done.
 | Phase 24 — Memory reranking | 0/6 |
 | Phase 25 — Project knowledge view | 10/10 ✅ |
 | Phase 26 — Memory query for agents | 6/6 ✅ |
-| Phase 27 — Context injection | 0/11 |
+| Phase 27 — Context injection | 10/11 |
 | Phase 28 — File-aware memory lookup | 0/5 |
 | Phase 29 — Memory commits | 0/8 |
 | Phase 30 — Session context metadata | 7/8 |

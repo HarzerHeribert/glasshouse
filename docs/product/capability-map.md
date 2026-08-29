@@ -1122,17 +1122,17 @@ Fixed architectural requirements
 - Memory injection is selective, relevance-ranked, authority-aware, and budgeted.
 - Glasshouse must not dump the entire memory store into prompts or permanently rewrite native harness system instructions.
 
-☐ Add a context-selection step before Glasshouse automatically sends a routed task to a session.
-☐ Query project memory for memories relevant to the routed task.
-☐ Inject only a bounded set of high-relevance memories into the target session.
-☐ Keep memory injection separate from native harness session history.
+☑ Add a context-selection step before Glasshouse automatically sends a routed task to a session.
+☑ Query project memory for memories relevant to the routed task.
+☑ Inject only a bounded set of high-relevance memories into the target session.
+☑ Keep memory injection separate from native harness session history.
 ☐ Avoid injecting memory when retrieval confidence is low.
-☐ Clearly label injected information as Glasshouse project memory rather than user-authored instructions.
-☐ Include active constraints and relevant failed approaches preferentially when they can prevent repeated mistakes.
-☐ Do not inject stale ordinary decisions as binding instructions when their original assumptions have not been validated against current project state.
-☐ Include authority, validity, and rationale metadata when a memory materially constrains the implementation.
-☐ Prefer a small number of current high-authority memories over a larger collection of historical decisions.
-☐ Avoid repeatedly injecting the same unchanged memory into an already-aware hot session unless needed.
+☑ Clearly label injected information as Glasshouse project memory rather than user-authored instructions.
+☑ Include active constraints and relevant failed approaches preferentially when they can prevent repeated mistakes.
+☑ Do not inject stale ordinary decisions as binding instructions when their original assumptions have not been validated against current project state.
+☑ Include authority, validity, and rationale metadata when a memory materially constrains the implementation.
+☑ Prefer a small number of current high-authority memories over a larger collection of historical decisions.
+☑ Avoid repeatedly injecting the same unchanged memory into an already-aware hot session unless needed.
 
 Phase 28 — File-aware memory lookup
 

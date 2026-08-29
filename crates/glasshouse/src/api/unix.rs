@@ -1,5 +1,6 @@
 //! The Unix domain socket transport and its request handlers.
 
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
@@ -17,6 +18,8 @@ use glasshouse::events::{
     MessageOrigin, TurnOutcome,
 };
 use glasshouse::launch::HarnessLaunch;
+use glasshouse::memory::inject::{self, Injection};
+use glasshouse::memory::{MemoryId, ProjectMemory};
 use glasshouse::session::api::{ApiError, SessionApi};
 use glasshouse::session::{
     NewSession, ProjectSessions, SessionId, SessionLifecycle, SessionPresentation, SessionRole,
@@ -73,6 +76,34 @@ const MAX_SNAPSHOT_SECTION_LIMIT: usize = 50;
 /// line forbids.
 const MAX_SNAPSHOT_BODY_CHARS: usize = 2000;
 
+/// Which of this project's memories each live session has already been sent
+/// — capability map line 1135's *"already-aware hot session"*.
+///
+/// # Why this is in memory and not in the database
+///
+/// A hot session is a session this process holds a pseudo-terminal for. It
+/// exists exactly as long as [`serve`]'s own [`SessionRuntime`] does, and so
+/// does the fact that it has already read a memory: a session that has been
+/// restarted has read nothing, and a `glasshouse` process that is not this
+/// one holds no such session at all (see `super`'s module doc comment). A
+/// durable table would therefore record a claim that outlived the thing it
+/// was about, and would have to be reconciled against a runtime it cannot
+/// see.
+///
+/// Keyed by the session id's string rather than by [`SessionId`] so this map
+/// needs nothing from the session type it does not already have.
+type Injected = Arc<Mutex<HashMap<String, HashSet<MemoryId>>>>;
+
+/// The most memory identifiers remembered per session before this door stops
+/// growing the set.
+///
+/// One delivery carries at most [`inject::MAX_INJECTED_MEMORIES`], so a
+/// session has to be given more than fifty separate tasks, each selecting
+/// entirely different memories, to reach this. Past it, the de-duplication
+/// degrades toward re-injecting rather than toward unbounded growth in a
+/// process that is meant to run for days.
+const MAX_REMEMBERED_INJECTIONS: usize = 256;
+
 /// How often the background tick answers terminal queries and reaps exited
 /// sessions between requests. Mirrors `run_headless`'s `POLL` in `main.rs`:
 /// short enough that `poll_exits` marks a dead session promptly, long enough
@@ -115,6 +146,8 @@ pub fn serve(runtime: &Runtime, socket_override: Option<PathBuf>) -> anyhow::Res
         events,
     )));
     let watches: Arc<Watches> = Arc::new(Mutex::new(Vec::new()));
+    // Line 1135's record, alongside the runtime whose sessions it is about.
+    let injected: Injected = Arc::new(Mutex::new(HashMap::new()));
 
     // Announced here rather than straight after `bind`, because everything
     // above it can still fail — a project database that cannot be opened
@@ -190,8 +223,9 @@ pub fn serve(runtime: &Runtime, socket_override: Option<PathBuf>) -> anyhow::Res
             eprintln!("glasshouse: control API refused a connection: {refusal}");
             continue;
         }
-        if let Err(err) = handle_connection(stream, runtime, &sessions, &live, &watches, &recorder)
-        {
+        if let Err(err) = handle_connection(
+            stream, runtime, &sessions, &live, &watches, &recorder, &injected,
+        ) {
             eprintln!("glasshouse: control API connection error: {err}");
         }
     }
@@ -414,6 +448,7 @@ impl EventRecorder {
 }
 
 /// Read one request line, dispatch it, and write back one response line.
+#[allow(clippy::too_many_arguments)]
 fn handle_connection(
     stream: UnixStream,
     runtime: &Runtime,
@@ -421,6 +456,7 @@ fn handle_connection(
     live: &Mutex<SessionRuntime>,
     watches: &Watches,
     recorder: &EventRecorder,
+    injected: &Injected,
 ) -> anyhow::Result<()> {
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
@@ -428,7 +464,9 @@ fn handle_connection(
     reader.read_line(&mut line)?;
 
     let response = match serde_json::from_str::<Request>(line.trim_end()) {
-        Ok(request) => dispatch(request, runtime, sessions, live, watches, recorder),
+        Ok(request) => dispatch(
+            request, runtime, sessions, live, watches, recorder, injected,
+        ),
         Err(err) => Response::err(format!("malformed request: {err}")),
     };
 
@@ -438,6 +476,7 @@ fn handle_connection(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch(
     request: Request,
     runtime: &Runtime,
@@ -445,6 +484,7 @@ fn dispatch(
     live: &Mutex<SessionRuntime>,
     watches: &Watches,
     recorder: &EventRecorder,
+    injected: &Injected,
 ) -> Response {
     let store = sessions.store();
 
@@ -480,11 +520,34 @@ fn dispatch(
             args,
             role,
             task,
-        } => spawn_session(runtime, &store, live, &harness, args, role.as_deref(), task),
+        } => spawn_session(
+            runtime,
+            &store,
+            live,
+            &harness,
+            args,
+            role.as_deref(),
+            task,
+            injected,
+        ),
+        // Line 1125's *"routed task"* is not only a spawn's own. This verb
+        // is the follow-up half of the same seam — `SessionApi::send_text`,
+        // as `MessageOrigin::Machine`, never as the user (see that type's
+        // doc comment) — so the context-selection step belongs on both or on
+        // neither. It is also the only path on which line 1135 is a real
+        // question: a session is spawned once, and can be given a task many
+        // times.
         Request::SendMessage { session, text } => {
+            let id = SessionId::new(session);
+            // Selected before the runtime lock is taken: opening the
+            // project's memory goes through `database::open`, which can wait
+            // on a busy timeout, and nothing that waits may hold the lock
+            // every live session's I/O runs through.
+            let briefing = select_memory(runtime, &id, &text, injected);
             let mut guard = lock(live);
             let mut api = SessionApi::new(&store, &mut guard);
-            match api.send_text(&SessionId::new(session), &text) {
+            deliver_memory(&mut api, &id, briefing, injected);
+            match api.send_text(&id, &text) {
                 Ok(()) => Response::ok(serde_json::json!({})),
                 Err(err) => Response::err(api_error(err)),
             }
@@ -612,6 +675,7 @@ fn parse_role(role: Option<&str>) -> Result<SessionRole, String> {
 /// a running process this door can message and interrupt — this gives in
 /// full. Argued in the evidence ledger as the deliberate simplification it
 /// is, not an oversight.
+#[allow(clippy::too_many_arguments)]
 fn spawn_session(
     runtime: &Runtime,
     store: &SessionStore<'_>,
@@ -620,6 +684,7 @@ fn spawn_session(
     args: Vec<String>,
     role: Option<&str>,
     task: Option<String>,
+    injected: &Injected,
 ) -> Response {
     let role = match parse_role(role) {
         Ok(role) => role,
@@ -675,6 +740,18 @@ fn spawn_session(
 
     let launch =
         HarnessLaunch::new(selection.executable().clone(), runtime.project()).args(launch_args);
+
+    // Line 1125's context-selection step, between the spawn and the task.
+    // Run here — before the runtime lock, and only when there is a task to
+    // select context *for* — because opening the project's memory goes
+    // through `database::open`, which takes a write transaction under a busy
+    // timeout, and nothing that can wait may hold the lock every live
+    // session's I/O runs through. A spawn with no task selects nothing and
+    // reaches the harness exactly as it did before this phase.
+    let briefing = task
+        .as_deref()
+        .and_then(|task| select_memory(runtime, &record.id, task, injected));
+
     let mut guard = lock(live);
     if let Err(err) = guard.start(record.id.clone(), SessionPresentation::Headless, &launch) {
         return Response::err(err);
@@ -688,6 +765,11 @@ fn spawn_session(
     // separate `send_message`.
     if let Some(task) = task {
         let mut api = SessionApi::new(store, &mut guard);
+        // Before the task, never merged into it: what the caller asked for is
+        // delivered as its own message, byte for byte, and the memory arrives
+        // as a separately labelled one. See `deliver_memory` for why a
+        // failure here is not a failed spawn.
+        deliver_memory(&mut api, &record.id, briefing, injected);
         if let Err(err) = api.send_text(&record.id, &task) {
             return Response::err(format!(
                 "session `{}` was spawned but its task could not be delivered: {err}",
@@ -697,6 +779,110 @@ fn spawn_session(
     }
 
     Response::ok(serde_json::json!({ "session": record.id.as_str() }))
+}
+
+/// Take the injection ledger's lock, ignoring poisoning, for the reason
+/// [`lock`] gives: a panicking handler must not permanently disable a
+/// bookkeeping record that only ever makes deliveries quieter.
+fn lock_injected(
+    injected: &Injected,
+) -> std::sync::MutexGuard<'_, HashMap<String, HashSet<MemoryId>>> {
+    injected
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Choose the project memory a session about to be given `task` should have —
+/// capability map lines 1125-1127 and 1131-1134.
+///
+/// The whole selection lives in [`glasshouse::memory::inject::briefing`],
+/// which is cross-platform and knows nothing about this door; what belongs
+/// here is only the two things this door owns: which project's memory is
+/// being read (the runtime this socket was opened for — there is no request
+/// field naming a project, see `super`'s module doc comment), and what this
+/// session has already been sent.
+///
+/// # Never a reason to fail a delivery
+///
+/// Every failure path returns `None` and logs. A session that starts and
+/// receives its task without memory is strictly better than one that does
+/// not start, and a memory store that cannot be opened is not a reason to
+/// refuse to talk to a worker. The error is logged rather than answered
+/// with, and it never reaches the injected text: `database::DatabaseError`
+/// names the project file's absolute path in every variant, and nothing this
+/// module puts on a session's terminal is built from an error at all.
+fn select_memory(
+    runtime: &Runtime,
+    session: &SessionId,
+    task: &str,
+    injected: &Injected,
+) -> Option<Injection> {
+    let already = lock_injected(injected)
+        .get(session.as_str())
+        .cloned()
+        .unwrap_or_default();
+
+    let project = match ProjectMemory::open(runtime) {
+        Ok(project) => project,
+        Err(err) => {
+            tracing::warn!(
+                session = %session,
+                error = %format!("{err:#}"),
+                "could not open this project's memory to select context for a routed task"
+            );
+            return None;
+        }
+    };
+    match inject::briefing(&project.store(), task, &already) {
+        Ok(briefing) => briefing,
+        Err(err) => {
+            tracing::warn!(
+                session = %session,
+                error = %err,
+                "could not select project memory for a routed task"
+            );
+            None
+        }
+    }
+}
+
+/// Deliver a selected briefing to `session`, and record what it carried.
+///
+/// # Line 1128: a message, not a write into the harness's own history
+///
+/// This goes through [`SessionApi::send_text`] — the same seam
+/// `Request::SendMessage` uses, as [`MessageOrigin::Machine`] — and touches
+/// no harness session file, transcript or resume state. Glasshouse's memory
+/// arrives the way anything else Glasshouse says arrives, which is what
+/// keeps it distinguishable from the harness's own record of the
+/// conversation.
+///
+/// # Injection failure is never a delivery failure
+///
+/// A refused or failed injection is logged and swallowed. The ledger is
+/// updated only on a send that actually succeeded, so a memory that did not
+/// arrive is not recorded as one the session already has.
+fn deliver_memory(
+    api: &mut SessionApi<'_>,
+    session: &SessionId,
+    briefing: Option<Injection>,
+    injected: &Injected,
+) {
+    let Some(briefing) = briefing else { return };
+    if let Err(err) = api.send_text(session, briefing.text()) {
+        tracing::warn!(
+            session = %session,
+            error = %api_error(err),
+            "could not deliver this project's memory to a session; its task is being sent without it"
+        );
+        return;
+    }
+
+    let mut ledger = lock_injected(injected);
+    let seen = ledger.entry(session.as_str().to_owned()).or_default();
+    if seen.len() < MAX_REMEMBERED_INJECTIONS {
+        seen.extend(briefing.memories().iter().cloned());
+    }
 }
 
 /// Write the harness's lifecycle-hook document for a session this door is

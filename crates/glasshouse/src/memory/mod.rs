@@ -16,6 +16,12 @@
 //! ([`admit`]) is deliberately narrow — see [`MemoryRefusal`] — rather than a
 //! stand-in for that judgment.
 //!
+//! [`inject`] is Phase 27's consumer of that half: the step that chooses
+//! which of those memories reach a session Glasshouse is routing a task to,
+//! and labels them so an agent can never mistake a remembered sentence for
+//! something the user just said. It decides nothing about relevance either —
+//! it reuses [`search`]'s ranking rather than ranking again.
+//!
 //! [`extract`] is the other half, and Phase 21 is where the judgment lives: it
 //! bounds and scrubs session activity, asks a model for structured memories,
 //! and validates the reply against a contract. **It is also where the
@@ -37,6 +43,7 @@
 //! folded into another.
 
 pub mod extract;
+pub mod inject;
 mod policy;
 pub mod search;
 pub mod snapshot;
