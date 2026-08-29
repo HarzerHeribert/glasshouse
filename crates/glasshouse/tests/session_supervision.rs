@@ -447,7 +447,14 @@ fn a_launched_session_records_the_process_it_was_started_in() {
     let fixture = Fixture::new(A_HARNESS_THAT_FINISHES);
 
     fixture.run(&["launch", "claude-code", "--headless"]);
-    fixture.run(&["launch", "claude-code", "--headless"]);
+    // `--fresh` because Phase 37 line 1593 gave a bare second launch a real
+    // choice: a warm session this project already has now outranks starting
+    // over, so an unadorned second launch continues the first rather than
+    // recording a second identity. This test's subject is unchanged — two
+    // sessions started in two `glasshouse` processes carry two identities —
+    // and `--fresh` is how a caller asks for exactly that. See
+    // `tests/route_command.rs` for the routing behaviour itself.
+    fixture.run(&["launch", "claude-code", "--headless", "--fresh"]);
 
     let ids = fixture.session_ids();
     assert_eq!(ids.len(), 2, "two launches, two sessions");

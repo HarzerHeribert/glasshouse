@@ -262,7 +262,13 @@ fn a_checkpoint_bootstraps_a_fresh_session_under_a_different_harness_through_the
     ] {
         let before = project.sessions();
 
-        project.launch(&[source_slug]);
+        // `--fresh` because Phase 37 line 1593 lets a bare launch continue a
+        // warm session this project already has, and by the second iteration
+        // this loop has left one behind under `claude-code`. This test is
+        // about a checkpoint bootstrapping a *distinct* source session, which
+        // is exactly what `--fresh` asks for; nothing about lines 1638–1646
+        // changes.
+        project.launch(&[source_slug, "--fresh"]);
 
         let after_source = project.sessions();
         assert_eq!(

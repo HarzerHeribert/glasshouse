@@ -1,0 +1,590 @@
+//! Phase 37 lines 1592–1602 — the session router's **production callers**.
+//!
+//! # Why this file exists at all, and why none of it is a unit test
+//!
+//! `tests/session_router.rs` already proves the ranking: eleven mutations,
+//! eleven killed, every one of the six `Consider X` contributions shown
+//! separating two destinations that differ in that axis alone. Not one of
+//! them can fail on a build where **nothing calls the router**, and that is
+//! exactly this project's most common defect (practice §35: *a caller you can
+//! delete without a test noticing is, to the test suite, not a caller*).
+//!
+//! So every test here runs the shipped binary, and the load-bearing one is
+//! `a_second_launch_continues_the_warm_session_rather_than_starting_another`:
+//! delete `SessionRouter::choose` from `main.rs::launch_session` and it fails,
+//! because a second session record appears where there should be one.
+//!
+//! # How a resume is observed, and why not from the session record
+//!
+//! The fake harness appends its own argv to a file on every invocation,
+//! unconditionally. A fresh launch is `--session-id <uuid>`; a resume is
+//! `--resume <uuid>` — the two adapter invocations Claude Code's own adapter
+//! declares. Recording argv is independent of everything under test, which is
+//! practice §80 case 5's requirement: a mutation must fail the assertion the
+//! test is named for, not the fixture's ability to identify anything.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+/// The fixture's provider credential variable. A name only — nothing here
+/// resolves a value, and the router is handed the *name* for its explanation.
+const CREDENTIAL_VAR: &str = "GLASSHOUSE_ROUTE_TEST_KEY";
+
+/// A project with a fake `claude-code`, a direct-provider profile, and a log
+/// of every argv the harness was ever started with.
+struct Fixture {
+    _tmp: tempfile::TempDir,
+    base: PathBuf,
+    root: PathBuf,
+    argv_log: PathBuf,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().to_path_buf();
+        let root = base.join("workspace");
+        std::fs::create_dir_all(root.join(".git")).expect("create project root");
+        let root = std::fs::canonicalize(&root).expect("canonicalize project root");
+
+        let bin_dir = base.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let argv_log = base.join("argv.log");
+        let harness = install_fake_harness(&bin_dir, &argv_log);
+        let escaped = harness.display().to_string().replace('\\', "\\\\");
+
+        let config_dir = base.join("config");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            format!(
+                "version = 1\n\n\
+                 [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\n\
+                 [providers.route-probe]\ntemplate = \"openrouter\"\n\
+                 credential_env = [\"{CREDENTIAL_VAR}\"]\n\n\
+                 [profiles.direct]\nharness = \"claude-code\"\n\
+                 expected_protocol = \"openai-chat\"\n\n\
+                 [profiles.direct.backend]\nkind = \"direct-provider\"\n\
+                 provider = \"route-probe\"\n\n\
+                 [profiles.metered]\nharness = \"claude-code\"\n\
+                 expected_protocol = \"anthropic-messages\"\n\n\
+                 [profiles.metered.backend]\nkind = \"direct-provider\"\n\
+                 provider = \"route-probe\"\n"
+            ),
+        )
+        .expect("write user config");
+
+        Self {
+            _tmp: tmp,
+            base,
+            root,
+            argv_log,
+        }
+    }
+
+    fn glasshouse(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+            .arg("--scope")
+            .arg(&self.root)
+            .arg("--data-dir")
+            .arg(self.base.join("data"))
+            .arg("--config-dir")
+            .arg(self.base.join("config"))
+            .args(args)
+            .env(CREDENTIAL_VAR, "planted-opaque-route-value-37")
+            .env("PATH", self.base.join("empty-path"))
+            .output()
+            .expect("the glasshouse binary must be runnable")
+    }
+
+    fn stdout(&self, args: &[&str]) -> String {
+        String::from_utf8_lossy(&self.glasshouse(args).stdout).into_owned()
+    }
+
+    fn both_streams(output: &Output) -> String {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    }
+
+    /// Every argv the harness has been started with, oldest first.
+    fn harness_invocations(&self) -> Vec<String> {
+        match std::fs::read_to_string(&self.argv_log) {
+            Ok(log) => log.lines().map(str::to_owned).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// The identifiers `glasshouse sessions` lists, one per recorded session.
+    fn recorded_sessions(&self) -> Vec<String> {
+        let listing = self.stdout(&["sessions"]);
+        if listing.contains("No sessions recorded") {
+            return Vec::new();
+        }
+        listing
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_whitespace().next())
+            .filter(|id| id.len() >= 8)
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+#[cfg(unix)]
+fn install_fake_harness(bin_dir: &Path, argv_log: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join("fake-claude-code");
+    // Exit 0, deliberately: a non-zero exit makes the session `Failed`, and a
+    // failed session is not a warm one — there would be nothing to route back
+    // into, and every test below would pass for the wrong reason.
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+            argv_log.display()
+        ),
+    )
+    .expect("write fake harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+#[cfg(windows)]
+fn install_fake_harness(bin_dir: &Path, argv_log: &Path) -> PathBuf {
+    let path = bin_dir.join("fake-claude-code.cmd");
+    std::fs::write(
+        &path,
+        format!(
+            "@echo off\r\necho %*>>\"{}\"\r\nexit /b 0\r\n",
+            argv_log.display()
+        ),
+    )
+    .expect("write fake harness");
+    path
+}
+
+// --- line 1601: the explanation, and the fact that it decides nothing -------
+
+/// Line 1601. Every contribution the router weighed, the alternatives it did
+/// not choose, and — the half a scoring test cannot assert — that asking the
+/// question started nothing.
+#[test]
+fn route_explains_the_ranking_and_starts_nothing() {
+    let fixture = Fixture::new();
+
+    let report = fixture.stdout(&["route"]);
+    for term in [
+        "harness capability fit",
+        "session affinity",
+        "prompt-cache state",
+        "known quota pressure",
+        "provider health",
+        "switching and bootstrap cost",
+    ] {
+        assert!(
+            report.contains(term),
+            "line 1601 asks for an inspectable explanation, and `{term}` is one of the six \
+             things it weighed:\n{report}"
+        );
+    }
+    assert!(
+        report.contains("alternatives"),
+        "\"why this one\" is unanswerable without \"and what the others scored\":\n{report}"
+    );
+
+    // It decided nothing and started nothing — the whole claim of a
+    // diagnostic, and the one no amount of rendering proves.
+    assert!(
+        fixture.recorded_sessions().is_empty(),
+        "`glasshouse route` must record no session"
+    );
+    assert!(
+        fixture.harness_invocations().is_empty(),
+        "`glasshouse route` must start no harness, and it started {:?}",
+        fixture.harness_invocations()
+    );
+}
+
+/// The `REQUIRED BEHAVIOR` clause a report is easiest to leave out: a project
+/// with nothing to go on still answers, and **says** what it had nothing to go
+/// on rather than presenting silence as agreement.
+#[test]
+fn a_project_with_no_sessions_and_no_telemetry_says_what_it_had_nothing_to_go_on() {
+    let fixture = Fixture::new();
+    let report = fixture.stdout(&["route"]);
+
+    assert!(
+        report.contains("what this ranking could not see"),
+        "an explanation whose silent terms are invisible cannot be told from one that \
+         weighed them and found them equal:\n{report}"
+    );
+    assert!(
+        report.contains("the health pool is filled by a running gateway"),
+        "provider health is 0.0 here because nothing filled the pool, and that is a fact \
+         about this command rather than about the providers:\n{report}"
+    );
+    assert!(
+        report.contains("no quota reading has been cached"),
+        "an unread quota must not read as a quota of zero:\n{report}"
+    );
+    assert!(
+        report.contains("recorded no session that is still warm"),
+        "with no warm session, session affinity separates nothing and the report should say \
+         so:\n{report}"
+    );
+}
+
+// --- §4.1: the input that is easy to drop ----------------------------------
+
+/// **The trap `report-gh-router.md` §4.1 names, as a test.**
+///
+/// `route-probe` is an `openrouter` template, so it serves three protocols;
+/// the `direct` profile routes over `openai-chat`, which Claude Code does not
+/// speak. `ProtocolFit::Compatible` — *"not this protocol, but the provider
+/// serves another one the harness does speak"* — is reachable only because
+/// the caller passes `Destination::with_provider_protocols` every protocol the
+/// provider declares a base URL for.
+///
+/// Drop that one builder call and the destination's protocol list collapses to
+/// the backend's own single entry, `protocol_fit` answers `Incompatible`, and
+/// a hard constraint removes the destination outright. So this test fails in a
+/// very specific way — the profile moves from the ranking into `rejected` —
+/// which is what makes it evidence about item 3 and not about scoring.
+#[test]
+fn a_direct_provider_destination_is_scored_rather_than_rejected_outright() {
+    let fixture = Fixture::new();
+    let report = fixture.stdout(&["route"]);
+
+    let (ranked, rejected) = match report.split_once("\nrejected\n") {
+        Some((ranked, rejected)) => (ranked, rejected),
+        None => (report.as_str(), ""),
+    };
+    assert!(
+        !rejected.contains("fresh:claude-code:direct"),
+        "a provider serving a protocol the harness speaks must be scored, not removed by a \
+         hard constraint — see §4.1, `with_provider_protocols` is what makes \
+         `ProtocolFit::Compatible` reachable:\n{report}"
+    );
+    assert!(
+        ranked.contains("fresh:claude-code:direct"),
+        "the direct-provider profile must appear in the ranking:\n{report}"
+    );
+}
+
+// --- line 1602: the override, on the path that reports and the one that acts
+
+/// Line 1602 on the diagnostic. An override that wins says what it displaced —
+/// a router whose whole product is an explanation must not quietly agree with
+/// whoever asked last.
+#[test]
+fn an_override_wins_and_the_report_says_what_the_ranking_would_have_chosen() {
+    let fixture = Fixture::new();
+
+    let report = fixture.stdout(&["route", "--to", "fresh:claude-code:direct"]);
+    assert!(
+        report.starts_with("destination  fresh:claude-code:direct"),
+        "`--to` must decide the destination:\n{report}"
+    );
+    assert!(
+        report.contains("the ranking would have chosen"),
+        "an override that silently replaced the automatic answer would leave a reader unable \
+         to tell that it had:\n{report}"
+    );
+
+    // And an override naming nothing is refused out loud rather than swallowed.
+    let refused = fixture.stdout(&["route", "--to", "no-such-destination"]);
+    assert!(
+        refused.contains("not one of the destinations offered"),
+        "a user who asked for a destination and silently got another one has been lied \
+         to:\n{refused}"
+    );
+}
+
+// --- line 1592: the boundary gate ------------------------------------------
+
+/// Line 1592: routing is taken at task or session boundaries, and **not**
+/// between turns — with the one thing that lifts it, which is a person asking.
+#[test]
+fn routing_is_not_taken_mid_turn_unless_the_user_asks_for_it() {
+    let fixture = Fixture::new();
+    // A warm session, so there is something for the gate to hold the work on.
+    fixture.glasshouse(&["launch", "claude-code", "--headless"]);
+
+    let held = fixture.stdout(&["route", "--moment", "mid-turn"]);
+    assert!(
+        held.contains("routing is not taken here"),
+        "line 1592 forbids re-deciding between turns:\n{held}"
+    );
+    assert!(
+        held.contains("routing boundary"),
+        "the explanation must name the term that held the work, not merely omit the \
+         others:\n{held}"
+    );
+
+    let decided = fixture.stdout(&["route", "--moment", "mid-turn", "--now"]);
+    assert!(
+        decided.contains("routing was taken here"),
+        "a person asking for a decision mid-turn is the opposite of the blind switching line \
+         1592 forbids, and `--now` is how they ask:\n{decided}"
+    );
+
+    // The other half of line 1592's "task **or** session boundaries": a task
+    // boundary re-decides without anyone having to ask.
+    let boundary = fixture.stdout(&["route", "--moment", "task-boundary"]);
+    assert!(
+        boundary.contains("task boundary — routing was taken here"),
+        "a task boundary is one of the two moments the line names:\n{boundary}"
+    );
+}
+
+// --- line 1597: the term that needs a `from` -------------------------------
+
+/// Line 1597, and the reason it is a *task boundary* test rather than a
+/// session-start one.
+///
+/// `prompt_cache_state` is defined as `CacheLocality::between(from, to)`. At a
+/// session start there is no `from` — the router's own report §4 records that
+/// correction — so the term is honestly inert there and says so. At a task
+/// boundary the work is already somewhere, and the caller has to supply that
+/// somewhere or the term stays inert for a second reason nobody chose.
+///
+/// So: a warm session exists, and the report must show the cache term
+/// *comparing* rather than reporting an absence. Passing `None` for `current`
+/// at this moment puts the session-start wording back and fails this.
+#[test]
+fn at_a_task_boundary_the_cache_term_compares_against_where_the_work_is() {
+    let fixture = Fixture::new();
+    fixture.glasshouse(&["launch", "claude-code", "--headless"]);
+
+    let boundary = fixture.stdout(&["route", "--moment", "task-boundary"]);
+    // The winner's own block only. Alternatives include fresh destinations,
+    // and "a fresh session has no cached prefix" is the right thing to say
+    // about those — the claim here is about the chosen one.
+    let winner = boundary
+        .split("\nalternatives\n")
+        .next()
+        .expect("split always yields at least one part");
+    assert!(
+        winner.contains("prompt-cache state"),
+        "line 1597's term must appear at all:\n{boundary}"
+    );
+    assert!(
+        !winner.contains("a fresh session starts with no cached prefix anywhere"),
+        "that is the session-start wording, and it is what the term degrades to when the \
+         caller supplies no `from` to compare against:\n{boundary}"
+    );
+    assert!(
+        winner.contains("provider-side prompt caching is unaffected"),
+        "at a task boundary the term must be a comparison against where the work is, which \
+         is what supplying `current` buys:\n{boundary}"
+    );
+}
+
+// --- line 1600: the bootstrap half -----------------------------------------
+
+/// Line 1600's bootstrap half. A project with a checkpoint prices a fresh
+/// session differently from one with nothing to boot from, and the caller is
+/// what reads the checkpoint — the router is forbidden to look one up.
+#[test]
+fn a_checkpoint_changes_what_a_fresh_session_costs_to_bootstrap() {
+    let fixture = Fixture::new();
+
+    let before = fixture.stdout(&["route"]);
+    assert!(
+        before.contains("with no checkpoint to boot from"),
+        "with no checkpoint, a fresh session starts from nothing:\n{before}"
+    );
+
+    fixture.glasshouse(&["launch", "claude-code", "--headless"]);
+    let saved = fixture.glasshouse(&[
+        "checkpoint",
+        "save",
+        "--objective",
+        "wire the session router to a production caller",
+        "--state",
+        "the diagnostic exists and the launch path routes",
+        "--next",
+        "run the mutation on the call rather than the callee",
+    ]);
+    assert!(
+        saved.status.success(),
+        "the checkpoint must save:\n{}",
+        Fixture::both_streams(&saved)
+    );
+
+    let after = fixture.stdout(&["route"]);
+    assert!(
+        !after.contains("with no checkpoint to boot from"),
+        "a checkpoint with next actions is exactly what line 1600 prices a bootstrap by, and \
+         `latest_checkpoint_quality` is the caller that reads it:\n{after}"
+    );
+}
+
+// --- 6b: the launch path, and the mutation this whole file is for ----------
+
+/// **The one that fails when `launch_session` stops calling `choose`.**
+///
+/// Line 1593: *prefer an existing relevant session when its affinity outweighs
+/// the benefit of starting a new session.* The first launch leaves a warm,
+/// resumable session behind. The second launch must land in it — one session
+/// record, and a harness started with `--resume`, not `--session-id`.
+///
+/// On a build with the routing call deleted, `launch_session` does what it did
+/// before this batch: mints a second identifier and records a second session.
+/// Both assertions below fail, and they fail on their own terms rather than
+/// through a fixture that could no longer identify anything (§80 case 5).
+#[test]
+fn a_second_launch_continues_the_warm_session_rather_than_starting_another() {
+    let fixture = Fixture::new();
+
+    let first = fixture.glasshouse(&["launch", "claude-code", "--headless"]);
+    assert!(
+        first.status.success(),
+        "the first launch must succeed:\n{}",
+        Fixture::both_streams(&first)
+    );
+    let after_first = fixture.recorded_sessions();
+    assert_eq!(
+        after_first.len(),
+        1,
+        "the first launch records exactly one session"
+    );
+
+    let second = fixture.glasshouse(&["run", "claude-code", "--headless"]);
+    let said = Fixture::both_streams(&second);
+
+    // The behavioural claim first, deliberately. A mutation that removed the
+    // routing call would also remove the announcement below, and a KILLED
+    // credited to a missing *message* would say nothing about where the work
+    // went — practice §80's rule that a verdict must be read for which
+    // assertion produced it.
+    assert_eq!(
+        fixture.recorded_sessions(),
+        after_first,
+        "the second launch must continue the warm session, not record a second one — this is \
+         the assertion that fails when `launch_session` stops calling \
+         `SessionRouter::choose`:\n{said}"
+    );
+
+    let invocations = fixture.harness_invocations();
+    assert_eq!(
+        invocations.len(),
+        2,
+        "the harness must have been started twice:\n{invocations:?}"
+    );
+    assert!(
+        invocations[0].contains("--session-id"),
+        "the first launch starts a new conversation:\n{invocations:?}"
+    );
+    assert!(
+        invocations[1].contains("--resume"),
+        "the second launch must reopen the first session's own conversation, which is what \
+         routing into an existing destination *means*:\n{invocations:?}"
+    );
+
+    // And it said so on the way in, while `--fresh` was still an answer.
+    assert!(
+        said.contains("continuing session"),
+        "a launch that continues an existing session must not do it silently:\n{said}"
+    );
+}
+
+/// Line 1602 on the path that acts rather than the one that reports. The same
+/// flag, meaning the same thing, on the command that starts something.
+#[test]
+fn fresh_overrides_the_ranking_on_the_launch_path() {
+    let fixture = Fixture::new();
+    fixture.glasshouse(&["launch", "claude-code", "--headless"]);
+    assert_eq!(fixture.recorded_sessions().len(), 1);
+
+    let second = fixture.glasshouse(&["launch", "claude-code", "--headless", "--fresh"]);
+    assert!(
+        second.status.success(),
+        "`--fresh` must start a session:\n{}",
+        Fixture::both_streams(&second)
+    );
+    assert_eq!(
+        fixture.recorded_sessions().len(),
+        2,
+        "`--fresh` must start a new session however good the warm one looked"
+    );
+
+    let invocations = fixture.harness_invocations();
+    assert!(
+        invocations.iter().all(|argv| !argv.contains("--resume")),
+        "nothing was resumed under `--fresh`:\n{invocations:?}"
+    );
+}
+
+/// An explicitly named `--profile` is a statement about a **new** session, and
+/// a router that answered it by reopening an old one would be overruling the
+/// person who typed it.
+#[test]
+fn naming_a_profile_explicitly_starts_a_fresh_session_under_it() {
+    let fixture = Fixture::new();
+    fixture.glasshouse(&["launch", "claude-code", "--headless"]);
+    assert_eq!(fixture.recorded_sessions().len(), 1);
+
+    let second = fixture.glasshouse(&[
+        "launch",
+        "claude-code",
+        "--headless",
+        "--profile",
+        "metered",
+    ]);
+    assert!(
+        second.status.success(),
+        "a named profile must start:\n{}",
+        Fixture::both_streams(&second)
+    );
+    assert_eq!(
+        fixture.recorded_sessions().len(),
+        2,
+        "`--profile metered` names the profile a new session runs under"
+    );
+
+    let listing = fixture.stdout(&["sessions"]);
+    assert!(
+        listing.contains("metered"),
+        "and the new session must actually be running that profile:\n{listing}"
+    );
+}
+
+/// `--to` on the launch path takes the same identifiers `glasshouse route`
+/// prints, which is what makes the diagnostic worth reading: an answer can be
+/// pasted into the command that acts.
+#[test]
+fn to_on_the_launch_path_takes_the_identifier_route_printed() {
+    let fixture = Fixture::new();
+
+    let report = fixture.stdout(&["route"]);
+    assert!(
+        report.contains("fresh:claude-code:metered"),
+        "the report must name the destination this test is about to ask for:\n{report}"
+    );
+
+    let launched = fixture.glasshouse(&[
+        "launch",
+        "claude-code",
+        "--headless",
+        "--to",
+        "fresh:claude-code:metered",
+    ]);
+    assert!(
+        launched.status.success(),
+        "an identifier `route` printed must be usable:\n{}",
+        Fixture::both_streams(&launched)
+    );
+
+    let listing = fixture.stdout(&["sessions"]);
+    assert!(
+        listing.contains("metered"),
+        "`--to` must decide which profile the session actually ran under:\n{listing}"
+    );
+}

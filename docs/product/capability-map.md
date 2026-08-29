@@ -1589,17 +1589,17 @@ Phase 36 — Session affinity
 
 Phase 37 — Basic session-aware router
 
-☐ Route at task or session boundaries rather than switching providers blindly on every conversational turn.
-☐ Prefer an existing relevant session when its affinity outweighs the benefit of starting a new session.
+☑ Route at task or session boundaries rather than switching providers blindly on every conversational turn.
+☑ Prefer an existing relevant session when its affinity outweighs the benefit of starting a new session.
 ☐ Prefer a fresh session when existing relevant sessions are cold, bloated, or semantically poor and a good checkpoint exists.
-☐ Consider harness capability fit when choosing a destination.
-☐ Consider session affinity when choosing a destination.
-☐ Consider prompt-cache state when choosing a destination.
+☑ Consider harness capability fit when choosing a destination.
+☑ Consider session affinity when choosing a destination.
+☑ Consider prompt-cache state when choosing a destination.
 ☐ Consider known quota pressure when choosing a destination.
 ☐ Consider provider health when choosing a destination.
-☐ Consider estimated switching and bootstrap cost when choosing a destination.
-☐ Return an inspectable routing explanation in debug or overview mode.
-☐ Allow the user to override every automatic routing choice.
+☑ Consider estimated switching and bootstrap cost when choosing a destination.
+☑ Return an inspectable routing explanation in debug or overview mode.
+☑ Allow the user to override every automatic routing choice.
 
 Phase 38 — Quota-preserving routing
 

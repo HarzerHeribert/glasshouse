@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████░░░░░░░░░░░░░░░░░` 749 / 1280 mandatory capabilities (58%)
+`███████████████████████░░░░░░░░░░░░░░░░░` 757 / 1280 mandatory capabilities (59%)
 
 <details>
 <summary>Per-phase breakdown (37 of 104 phases complete)</summary>
@@ -110,7 +110,7 @@ the authoritative specification and tracks what is done.
 | Phase 35C — Capacity-aware tier escalation and downgrade | 0/9 |
 | Phase 35D — Routing under subscription pressure | 0/8 |
 | Phase 36 — Session affinity | 0/8 |
-| Phase 37 — Basic session-aware router | 0/11 |
+| Phase 37 — Basic session-aware router | 8/11 |
 | Phase 38 — Quota-preserving routing | 0/7 |
 | Phase 39 — Gateway-backed disposable jobs | 0/9 |
 | Phase 40 — Fresh-session handoff | 9/9 ✅ |

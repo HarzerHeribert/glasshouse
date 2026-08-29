@@ -215,6 +215,32 @@ pub enum Command {
         /// The request text to classify.
         text: Vec<String>,
     },
+    /// Show where Glasshouse would send this work, and why.
+    ///
+    /// Ranks every destination — the sessions this project already has and a
+    /// fresh one per launch profile — and prints the contributions behind the
+    /// winner, every alternative's score, and anything a hard constraint
+    /// removed. Decides nothing and starts nothing.
+    ///
+    /// The same ranking runs on `glasshouse launch` and `glasshouse run`,
+    /// which do start something; this is how to see the answer first. The one
+    /// difference is stated in the report: a session that is still *running*
+    /// is a destination a person can act on and not one a second process can
+    /// enter, so it is ranked here and left out there.
+    Route {
+        /// `session-start`, `task-boundary`, or `mid-turn`.
+        #[arg(long, value_name = "MOMENT", default_value = "session-start")]
+        moment: String,
+        /// Send the work to this destination whatever the ranking says.
+        #[arg(long, value_name = "ID")]
+        to: Option<String>,
+        /// Start a fresh session whatever the ranking says.
+        #[arg(long, conflicts_with = "to")]
+        fresh: bool,
+        /// Decide now, even mid-turn.
+        #[arg(long)]
+        now: bool,
+    },
     /// List the sessions Glasshouse has recorded for this project, or act on
     /// one of them.
     ///
@@ -346,6 +372,23 @@ pub enum Command {
         #[arg(long, value_name = "ID")]
         from_checkpoint: Option<String>,
 
+        /// Continue this destination whatever the ranking says, by the
+        /// identifier `glasshouse route` prints.
+        ///
+        /// A recorded session's identifier continues that session; a
+        /// `fresh:<harness>:<profile>` identifier starts a new one under that
+        /// profile.
+        #[arg(long, value_name = "ID")]
+        to: Option<String>,
+
+        /// Start a fresh session whatever the ranking says.
+        ///
+        /// Glasshouse prefers a relevant session this project already has
+        /// when its affinity outweighs starting over. This is how to say no
+        /// to that, once, without changing any configuration.
+        #[arg(long, conflicts_with = "to")]
+        fresh: bool,
+
         /// Run the session with no terminal of its own.
         ///
         /// The harness still runs in a real pseudo-terminal, inside this
@@ -428,6 +471,23 @@ pub enum Command {
         /// Your own `--` arguments still come after it and still win.
         #[arg(long, value_name = "ID")]
         from_checkpoint: Option<String>,
+
+        /// Continue this destination whatever the ranking says, by the
+        /// identifier `glasshouse route` prints.
+        ///
+        /// A recorded session's identifier continues that session; a
+        /// `fresh:<harness>:<profile>` identifier starts a new one under that
+        /// profile.
+        #[arg(long, value_name = "ID")]
+        to: Option<String>,
+
+        /// Start a fresh session whatever the ranking says.
+        ///
+        /// Glasshouse prefers a relevant session this project already has
+        /// when its affinity outweighs starting over. This is how to say no
+        /// to that, once, without changing any configuration.
+        #[arg(long, conflicts_with = "to")]
+        fresh: bool,
 
         /// Run the session with no terminal of its own.
         ///
@@ -567,6 +627,8 @@ mod tests {
             response_role,
             profile,
             from_checkpoint,
+            to,
+            fresh,
             headless,
             harness_args,
         }) = cli.command
@@ -580,6 +642,11 @@ mod tests {
         // communication behaviour untouched.
         assert_eq!(response_profile, None);
         assert_eq!(response_role, None);
+        // Opt-in, like every routing flag: a launch that names neither is
+        // the plain launch it has always been, and the router's automatic
+        // answer stands.
+        assert_eq!(to, None);
+        assert!(!fresh);
         // Opt-in, like `--headless`: a launch that does not name a checkpoint
         // is the plain launch it has always been.
         assert_eq!(from_checkpoint, None);

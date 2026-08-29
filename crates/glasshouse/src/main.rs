@@ -144,6 +144,18 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         Some(Command::Classify { text }) => {
             print!("{}", glasshouse::routing::classify::report(&text.join(" ")));
         }
+        Some(Command::Route {
+            moment,
+            to,
+            fresh,
+            now,
+        }) => match route_report(&runtime, moment, to.as_deref(), *fresh, *now) {
+            Ok(report) => print!("{report}"),
+            Err(err) => {
+                eprintln!("glasshouse: {err:#}");
+                return Ok(ExitCode::FAILURE);
+            }
+        },
         Some(Command::Sessions { command }) => match command {
             // The bare command still lists, which is what every existing
             // caller and every printed identifier assumes.
@@ -190,6 +202,8 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             response_role,
             profile,
             from_checkpoint,
+            to,
+            fresh,
             headless,
             harness_args,
         })
@@ -199,6 +213,8 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             response_role,
             profile,
             from_checkpoint,
+            to,
+            fresh,
             headless,
             harness_args,
         }) => {
@@ -213,8 +229,12 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             return launch_session(
                 &runtime,
                 harness.as_deref(),
-                profile.as_deref(),
-                from_checkpoint.as_deref(),
+                LaunchDestination {
+                    profile: profile.as_deref(),
+                    from_checkpoint: from_checkpoint.as_deref(),
+                    to: to.as_deref(),
+                    fresh: *fresh,
+                },
                 &response,
                 *headless,
                 harness_args,
@@ -224,7 +244,13 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             session,
             harness_args,
         }) => {
-            return resume_session(&runtime, session, harness_args);
+            return resume_session(
+                &runtime,
+                session,
+                harness_args,
+                false,
+                RouteOnResume::AtTaskBoundary,
+            );
         }
         Some(Command::Memory { command }) => match command {
             MemoryCommand::Search {
@@ -408,19 +434,811 @@ fn resolved_gateway_pairing(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 37 — the session router's production callers, map lines 1592–1602.
+//
+// `glasshouse::routing::session` ranks *destinations*, and a destination is
+// something only this file can assemble: it needs this project's session
+// records, this user's launch profiles, the provider table and the quota
+// cache, none of which that module is allowed to reach (its own
+// `the_session_router_cannot_look_a_session_or_a_checkpoint_up` fails the
+// build if it ever tries). So the five inputs are read here, once, and every
+// caller below goes through the same two functions.
+// ---------------------------------------------------------------------------
+
+/// Everything a person typed about **where** this session goes and what it
+/// boots from — the four arguments `launch_session` reads before it resolves
+/// anything.
+///
+/// One type rather than four parameters because they are one statement, and
+/// the router reads all four together: `to` and `fresh` are line 1602's
+/// override outright, and `profile` and `from_checkpoint` are the two ways of
+/// saying "a new session" without using that word (see the override built in
+/// `launch_session`). Separating them would let a caller pass this decision's
+/// profile with last decision's override, which is the same reason
+/// `routing::session::RouterInputs` is one struct.
+#[derive(Debug, Clone, Copy, Default)]
+struct LaunchDestination<'a> {
+    /// `--profile`: the launch profile a **new** session runs under.
+    profile: Option<&'a str>,
+    /// `--from-checkpoint`: the handoff a new session opens with.
+    from_checkpoint: Option<&'a str>,
+    /// `--to`: this destination, whatever the ranking says.
+    to: Option<&'a str>,
+    /// `--fresh`: a new session, whatever the ranking says.
+    fresh: bool,
+}
+
+/// The identifier `--to` takes for "a new session under this profile".
+///
+/// Three parts, and each one is load-bearing. The `fresh:` prefix keeps a
+/// destination that does not exist yet out of the namespace of recorded
+/// session identifiers, which is what `--to` and `RoutingOverride::to`
+/// compare against. The harness slug is there because `glasshouse route`
+/// ranks across every enabled harness and **every one of them has a `native`
+/// profile** — without it, `fresh:native` names between one and ten different
+/// destinations and an override lands on whichever was built first.
+fn fresh_destination_id(harness: glasshouse::integrations::IntegrationId, profile: &str) -> String {
+    format!("fresh:{}:{profile}", harness.slug())
+}
+
+/// Which destinations a caller can actually *use*, which is not the same
+/// question as which ones exist.
+///
+/// `glasshouse route` reports for a person, who can act on "your live session
+/// is the best place for this" by switching to that terminal. A launch cannot:
+/// there is no attach, and `SessionStore::open_for_resume` refuses a session
+/// that is still running. Offering a launch a destination it would then fail
+/// to enter is exactly the "producer with no reachable consumer" shape this
+/// project keeps paying for, so the launch path asks for `Enterable` and the
+/// diagnostic says out loud that it did not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DestinationScope<'a> {
+    /// Every session with warmth to speak of, running ones included, and one
+    /// fresh destination per configured launch profile.
+    Everything,
+    /// What *this* launch could actually enter: the sessions it could resume,
+    /// and exactly **one** fresh destination — the profile this launch would
+    /// have used anyway.
+    ///
+    /// # Why one profile and not all of them
+    ///
+    /// Phase 37 is a **session** router: lines 1593 and 1594 are *"prefer an
+    /// existing relevant session"* against *"prefer a fresh session"*, and
+    /// neither of them is about which launch profile a new session runs
+    /// under. Offering the launch path a fresh destination per profile makes
+    /// it one, and the consequence is not academic: an unadorned `glasshouse
+    /// launch` moved off the implied Native profile onto a configured direct
+    /// provider — a different credential, a different bill, and a pre-flight
+    /// request to a provider the user had not asked for. Two existing tests
+    /// caught it, and they were right.
+    ///
+    /// So the profile stays where it has always come from — `--profile`, or
+    /// Native — and the router decides the thing it is for: whether to start
+    /// that session at all, or continue one this project already has.
+    /// `glasshouse route` still ranks every profile, because a person reading
+    /// a diagnostic is choosing between them and a launch is not.
+    Launchable { profile: &'a str },
+}
+
+/// Every place this project's next piece of work could go, and the current
+/// destination when the caller is standing in one.
+///
+/// Ordered sessions-first, most recently active first, then one fresh
+/// destination per configured launch profile; `SessionRouter::choose` uses the
+/// caller's order as its tiebreaker, and "what you were most recently doing"
+/// is the honest tiebreaker for equal scores.
+fn routing_destinations(
+    runtime: &Runtime,
+    effective: &EffectiveConfig<'_>,
+    harness: glasshouse::integrations::IntegrationId,
+    scope: DestinationScope<'_>,
+) -> anyhow::Result<Vec<glasshouse::routing::session::Destination>> {
+    use glasshouse::routing::session::Destination;
+
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+    let telemetry = glasshouse::provider::resources::GatheredTelemetry::new().gather_gateway_quota(
+        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths()),
+    );
+
+    let mut destinations = Vec::new();
+
+    // 1. The sessions this project already has.
+    let sessions = ProjectSessions::open(runtime)?;
+    let store = sessions.store();
+    for record in store.list()? {
+        // A session on another harness is not a destination for a launch that
+        // has already selected this one, and `resume` reads the harness off
+        // the record rather than ranking across them.
+        if record.harness != harness.slug() {
+            continue;
+        }
+        let Some(warm) = warm_session(&record, now_unix, scope) else {
+            continue;
+        };
+        // The profile the session actually ran under, re-resolved so that its
+        // backend, model and protocol are read the same way a fresh
+        // destination's are. A profile that has since been deleted or renamed
+        // leaves the session itself perfectly resumable, so it falls back to
+        // the harness's implied Native profile rather than dropping the
+        // destination.
+        let profile = record
+            .launch_profile
+            .as_deref()
+            .and_then(|name| effective.launch_profile(name, harness).ok())
+            .map(|layered| layered.value)
+            .unwrap_or_else(|| glasshouse::profile::LaunchProfile::native(harness));
+        let (backend, protocols) = destination_backend(effective, &profile, record.model.clone());
+        destinations.push(
+            with_provider_protocols(
+                Destination::existing(
+                    record.id.as_str(),
+                    harness,
+                    profile.name.clone(),
+                    backend,
+                    warm,
+                ),
+                protocols,
+            )
+            .with_capacity(destination_capacity(
+                &profile, effective, &telemetry, now_unix,
+            )),
+        );
+    }
+
+    // 2. One fresh destination per configured launch profile, each carrying
+    //    what the most recent checkpoint would give it to boot from.
+    let checkpoint = latest_checkpoint_quality(runtime);
+    let offered: Vec<String> = match scope {
+        DestinationScope::Everything => effective.profile_names(),
+        DestinationScope::Launchable { profile } => vec![profile.to_owned()],
+    };
+    for name in offered {
+        let Ok(profile) = effective.launch_profile(&name, harness) else {
+            // A profile configured for another harness is not a destination
+            // for this launch. `launch_profile` already refuses that rather
+            // than substituting, so the skip here is reading its answer.
+            continue;
+        };
+        let profile = profile.value;
+        let (backend, protocols) = destination_backend(effective, &profile, None);
+        destinations.push(
+            with_provider_protocols(
+                Destination::fresh(
+                    fresh_destination_id(harness, &name),
+                    harness,
+                    profile.name.clone(),
+                    backend,
+                    checkpoint,
+                ),
+                protocols,
+            )
+            .with_capacity(destination_capacity(
+                &profile, effective, &telemetry, now_unix,
+            )),
+        );
+    }
+
+    Ok(destinations)
+}
+
+/// Whether a launch under `profile` would get past `glasshouse::profile::resolve`'s
+/// protocol check, which refuses with `Refusal::ProtocolMismatch`.
+///
+/// # Why the launch path has to ask this and the diagnostic does not
+///
+/// The two are asking different questions and both answers are right. The
+/// router's `ProtocolFit::Compatible` means *"not this protocol, but the
+/// provider serves another one the harness does speak"* — a true statement
+/// about whether that provider and that harness can work together at all, and
+/// the reason `Destination::with_provider_protocols` exists. `profile::resolve`
+/// asks something narrower: whether the harness can serve the protocol **this
+/// profile declared**, and it refuses rather than quietly picking a different
+/// one, which is that module's whole discipline.
+///
+/// So a profile can be `Compatible` to the router and refused by the launch,
+/// and offering the launch path a destination it will then refuse would turn a
+/// routing decision into a failed command. The diagnostic keeps ranking it,
+/// because "this provider could serve this harness, but not over the protocol
+/// you configured" is exactly what a person needs to read.
+fn launch_can_resolve_protocol(profile: &glasshouse::profile::LaunchProfile) -> bool {
+    let Some(expected) = profile.expected_protocol else {
+        return true;
+    };
+    glasshouse::harness::adapter_for(profile.harness)
+        .map(|adapter| adapter.describe().backends.protocols)
+        .and_then(|declared| {
+            declared
+                .value()
+                .map(|protocols| protocols.contains(&expected))
+        })
+        .unwrap_or(false)
+}
+
+/// The profile a `fresh:<harness>:<profile>` identifier names, when it names
+/// one for `harness`.
+///
+/// `None` for a recorded session's identifier, and `None` for a fresh
+/// identifier belonging to a different harness — which then reaches the router
+/// as an override naming a destination that was not offered, and is refused
+/// out loud rather than silently reinterpreted.
+fn fresh_destination_profile(
+    id: &str,
+    harness: glasshouse::integrations::IntegrationId,
+) -> Option<&str> {
+    id.strip_prefix("fresh:")?
+        .strip_prefix(harness.slug())?
+        .strip_prefix(':')
+}
+
+/// A session record's warmth, or `None` when it is not a warm session at all.
+///
+/// `SessionDisposition` is what this is read off, exactly as
+/// `config::pairing::WarmSessionState`'s own doc says: `Active` is `Live`,
+/// `Resumable` is `Resumable`, and `Closed` or `Failed` are not warm sessions
+/// and produce nothing rather than a third state.
+fn warm_session(
+    record: &SessionRecord,
+    now_unix: i64,
+    scope: DestinationScope<'_>,
+) -> Option<glasshouse::config::pairing::WarmSession> {
+    use glasshouse::config::pairing::{WarmSession, WarmSessionState};
+
+    let state = match record.disposition() {
+        SessionDisposition::Active if matches!(scope, DestinationScope::Everything) => {
+            WarmSessionState::Live
+        }
+        // Live and unreachable from here — see `DestinationScope`.
+        SessionDisposition::Active => return None,
+        SessionDisposition::Resumable => WarmSessionState::Resumable,
+        SessionDisposition::Closed | SessionDisposition::Failed => return None,
+    };
+    Some(WarmSession {
+        state,
+        idle_seconds: now_unix - record.last_activity_at,
+    })
+}
+
+/// The backend a destination running `profile` would serve on, and every wire
+/// protocol its provider offers.
+///
+/// Two returns rather than one because `Destination::with_provider_protocols`
+/// is a builder step and an **empty** list is not the same as an absent one:
+/// the constructor's default is the backend's own single protocol, and
+/// overwriting that with an empty vector would make `ProtocolFit::Compatible`
+/// unreachable and every non-native destination `Incompatible` — see
+/// `routing::session`'s note on the field. `with_provider_protocols` below is
+/// the one place that distinction is applied.
+///
+/// `recorded_model` is a recorded session's own assigned model, which is a
+/// fact about that session and outranks re-deriving one from the profile.
+///
+/// `Cost` is `Metered` for everything here, and that is not a shortcut: the
+/// session router reads a backend's provider, credential, model and tool
+/// semantics and never its cost, and `Cost::Metered` is the fail-closed value
+/// the rest of this project uses when nobody has marked a model free.
+fn destination_backend(
+    effective: &EffectiveConfig<'_>,
+    profile: &glasshouse::profile::LaunchProfile,
+    recorded_model: Option<glasshouse::routing::AssignedModel>,
+) -> (
+    glasshouse::routing::Backend,
+    Vec<glasshouse::harness::WireProtocol>,
+) {
+    use glasshouse::profile::BackendResource;
+    use glasshouse::routing::{Backend, Cost, CredentialId};
+    use glasshouse::secret::SecretRef;
+
+    let pairing = session_pairing(effective, profile);
+    let model = recorded_model.unwrap_or_else(|| pairing.model().clone());
+    let protocol = pairing
+        .route()
+        .protocol
+        .map(|protocol| protocol.slug().to_owned())
+        .unwrap_or_default();
+
+    let (provider, credential, protocols) = match &profile.backend {
+        BackendResource::DirectProvider { provider } => {
+            match effective.configured_provider(provider) {
+                Ok(resolved) => {
+                    let resolved = resolved.value;
+                    // Line 1595's input: every protocol the provider declares
+                    // a usable base URL for, which is the same filter
+                    // `EffectiveConfig::pairing_queries` applies for
+                    // `glasshouse pairing`.
+                    let protocols = resolved
+                        .protocols
+                        .iter()
+                        .filter(|support| !support.base_url.is_empty())
+                        .map(|support| support.protocol)
+                        .collect();
+                    // The first declared name, and a name only: which key of
+                    // a pool serves is a routing decision one layer down, and
+                    // resolving a value here would put a secret in a
+                    // diagnostic's data path for nothing.
+                    let reference = resolved
+                        .credential_env
+                        .first()
+                        .map(|var| SecretRef::Environment { var: var.clone() })
+                        .unwrap_or_else(|| SecretRef::Environment {
+                            var: format!("{provider}(no credential configured)"),
+                        });
+                    (
+                        provider.clone(),
+                        CredentialId::new(provider.clone(), reference),
+                        protocols,
+                    )
+                }
+                // A profile naming a provider this configuration no longer
+                // has is reported by `launch_profile` on the path that starts
+                // a session; here it is a destination that scores on what is
+                // known about it, which is its harness and its warmth.
+                Err(_) => (
+                    provider.clone(),
+                    CredentialId::new(
+                        provider.clone(),
+                        SecretRef::Environment {
+                            var: format!("{provider}(not configured)"),
+                        },
+                    ),
+                    Vec::new(),
+                ),
+            }
+        }
+        // A Native profile runs on the harness vendor's own sign-in. There is
+        // no Glasshouse credential and inventing an environment variable for
+        // one would be a lie in a report a person reads, so the credential
+        // names the harness's own account — which is a name, like every other
+        // `CredentialId`, and never a value.
+        BackendResource::Native => (
+            profile.harness.slug().to_owned(),
+            CredentialId::new(
+                profile.harness.slug(),
+                SecretRef::OsCredential {
+                    service: profile.harness.slug().to_owned(),
+                    account: "the harness's own sign-in".to_owned(),
+                },
+            ),
+            Vec::new(),
+        ),
+        // A gateway-backed profile is assigned its provider when the session
+        // starts, so the serving provider genuinely is not known here — the
+        // same answer `glasshouse pairing` gives for one.
+        BackendResource::GlasshouseGateway => (
+            "the Glasshouse gateway".to_owned(),
+            CredentialId::new(
+                "the Glasshouse gateway",
+                SecretRef::OsCredential {
+                    service: "glasshouse-gateway".to_owned(),
+                    account: "assigned when the session starts".to_owned(),
+                },
+            ),
+            Vec::new(),
+        ),
+    };
+
+    (
+        Backend::new(
+            provider,
+            protocol,
+            model,
+            credential,
+            Cost::Metered,
+            pairing.tool_semantics(),
+        ),
+        protocols,
+    )
+}
+
+/// Apply line 1595's protocol list, and only when there is one.
+///
+/// See `destination_backend`: an empty list would *remove* the constructor's
+/// default rather than add to it, and §4.1 of the router's own report records
+/// that dropping this step is what makes every non-native destination
+/// `Incompatible` instead of scored.
+fn with_provider_protocols(
+    destination: glasshouse::routing::session::Destination,
+    protocols: Vec<glasshouse::harness::WireProtocol>,
+) -> glasshouse::routing::session::Destination {
+    if protocols.is_empty() {
+        destination
+    } else {
+        destination.with_provider_protocols(protocols)
+    }
+}
+
+/// Line 1598's input, read from the same on-disk quota cache
+/// `glasshouse resources` reads and with no request of its own.
+fn destination_capacity(
+    profile: &glasshouse::profile::LaunchProfile,
+    effective: &EffectiveConfig<'_>,
+    telemetry: &glasshouse::provider::resources::GatheredTelemetry,
+    now_unix: i64,
+) -> Option<glasshouse::provider::quota::RemainingCapacityScore> {
+    use glasshouse::profile::BackendResource;
+    use glasshouse::provider::registry::ResourceKind;
+
+    let kind = match &profile.backend {
+        BackendResource::Native => ResourceKind::NativeSubscription {
+            harness: profile.harness,
+        },
+        BackendResource::DirectProvider { provider } => {
+            ResourceKind::from_direct_provider(provider.clone())
+        }
+        BackendResource::GlasshouseGateway => ResourceKind::GlasshouseGateway,
+    };
+    glasshouse::provider::resources::observed_capacity(&kind, effective, telemetry, now_unix)
+        .remaining_capacity_score()
+}
+
+/// What the most recent checkpoint would give a fresh session to boot from —
+/// line 1600's bootstrap half.
+///
+/// `None` when this project has no checkpoint at all, which is the honest
+/// answer and the one `switching_and_bootstrap_cost` prices as "would start
+/// from nothing". Never an error: a checkpoint store that cannot be opened
+/// must cost a routing input rather than the command.
+fn latest_checkpoint_quality(
+    runtime: &Runtime,
+) -> Option<glasshouse::routing::session::CheckpointQuality> {
+    use glasshouse::routing::session::CheckpointQuality;
+
+    let checkpoints = ProjectCheckpoints::open(runtime).ok()?;
+    let stored = checkpoints.store().latest().ok()??;
+    Some(CheckpointQuality::new(
+        !stored.checkpoint.handoff.next_actions.is_empty(),
+        !stored.checkpoint.trimmed,
+    ))
+}
+
+/// The user's override, from the two flags every routing caller takes.
+///
+/// Line 1602 is *"allow the user to override every automatic routing
+/// choice"*, and the word that makes it checkable is "every": the same two
+/// flags mean the same thing on `route`, on `launch` and on `run`, so a
+/// person who read the diagnostic can paste the identifier straight into the
+/// command that acts.
+fn routing_override(
+    to: Option<&str>,
+    fresh: bool,
+) -> glasshouse::routing::session::RoutingOverride {
+    use glasshouse::routing::session::RoutingOverride;
+
+    match (to, fresh) {
+        (Some(id), _) => RoutingOverride::to(id),
+        (None, true) => RoutingOverride::fresh(),
+        (None, false) => RoutingOverride::none(),
+    }
+}
+
+/// `glasshouse route` — map lines 1601 and 1602.
+///
+/// **Decides nothing and starts nothing.** It assembles exactly the inputs
+/// `launch_session` assembles, asks the same `SessionRouter` the same
+/// question, and prints `Routed::render_overview`. That is what makes it a
+/// diagnostic worth reading rather than a second implementation that could
+/// drift: if this and a launch ever disagreed, one of them would be lying,
+/// and there is one function each of them calls.
+///
+/// Two differences from the launch path, both stated in the output rather
+/// than hidden:
+///
+/// 1. it ranks across **every enabled harness**, because a person asking
+///    where work should go has not yet chosen one, whereas a launch has;
+/// 2. it includes sessions that are still **running** (`DestinationScope`),
+///    because "switch to that terminal" is an answer a person can act on and
+///    is not one a second process can carry out.
+fn route_report(
+    runtime: &Runtime,
+    moment: &str,
+    to: Option<&str>,
+    fresh: bool,
+    now: bool,
+) -> anyhow::Result<String> {
+    use glasshouse::integrations::{IntegrationId, IntegrationKind};
+    use glasshouse::routing::free::FreePool;
+    use glasshouse::routing::session::{
+        RouterInputs, RoutingMoment, SessionRouter, TaskRequirements,
+    };
+
+    let moment = match moment {
+        "session-start" => RoutingMoment::SessionStart,
+        "task-boundary" => RoutingMoment::TaskBoundary,
+        "mid-turn" => RoutingMoment::MidTurn,
+        other => anyhow::bail!(
+            "`{other}` is not a routing moment; use `session-start`, `task-boundary` or \
+             `mid-turn`"
+        ),
+    };
+
+    let user = UserConfig::load(runtime.paths())?;
+    let project = config::load_project_config(runtime.project())?;
+    let effective = EffectiveConfig::new(&user, project.as_ref());
+
+    let mut destinations = Vec::new();
+    // Which of them `glasshouse launch` would refuse, so the report can say so
+    // about the one it recommends — see `launch_can_resolve_protocol`.
+    let mut refused_by_launch: Vec<String> = Vec::new();
+    for harness in IntegrationId::ALL
+        .iter()
+        .copied()
+        .filter(|id| id.kind() == IntegrationKind::Harness)
+        .filter(|id| effective.enabled(*id, false).value)
+    {
+        let everything =
+            routing_destinations(runtime, &effective, harness, DestinationScope::Everything)?;
+        refused_by_launch.extend(
+            everything
+                .iter()
+                .filter(|destination| destination.is_fresh())
+                .filter(|destination| {
+                    effective
+                        .launch_profile(destination.launch_profile(), harness)
+                        .is_ok_and(|profile| !launch_can_resolve_protocol(&profile.value))
+                })
+                .map(|destination| destination.id().to_owned()),
+        );
+        destinations.extend(everything);
+    }
+
+    let overrides = effective.pairing_overrides();
+    // §5 of the router's own report: the live health pool belongs to a running
+    // gateway's session lock, and a command-line diagnostic has no gateway. An
+    // empty pool contributes `0.0` for every destination, which is honest and
+    // inert — and the report says so below rather than letting a reader think
+    // provider health was weighed and found equal.
+    let health = FreePool::new();
+    let inputs = RouterInputs {
+        overrides: &overrides,
+        health: &health,
+        now: std::time::Instant::now(),
+        requirements: TaskRequirements::default(),
+    };
+
+    let mut user_override = routing_override(to, fresh);
+    if now {
+        user_override = user_override.and_route_now();
+    }
+
+    // `current` is what the work is on, and the moment decides whether there
+    // is one. `RoutingMoment::SessionStart`'s own doc is explicit — *"no
+    // session exists yet for this work"* — so `None` there is the type's
+    // answer, not a shortcut. At a task boundary and mid-turn the work is
+    // somewhere, and the most recently active session is the honest reading
+    // of where.
+    //
+    // Load-bearing for line 1597: `prompt_cache_state` is defined as a
+    // comparison `CacheLocality::between(from, to)`, so a caller that never
+    // supplies a `from` has an inert term and an explanation that cannot say
+    // why. This is the `from`.
+    let current = match moment {
+        RoutingMoment::SessionStart => None,
+        RoutingMoment::TaskBoundary | RoutingMoment::MidTurn => destinations
+            .iter()
+            .find(|destination| !destination.is_fresh())
+            .cloned(),
+    };
+
+    let Some(routed) = SessionRouter::with_override(user_override).choose(
+        moment,
+        current.as_ref(),
+        &destinations,
+        &inputs,
+    ) else {
+        // `choose` answers `None` in exactly two situations, and they are
+        // different facts about this project rather than one error.
+        return Ok(if moment.permits_routing() {
+            "There is nowhere for this work to go: this project has no session to continue \
+             and no launch profile to start one under. `glasshouse doctor` reports which \
+             harnesses are installed.\n"
+                .to_owned()
+        } else {
+            format!(
+                "Nothing is routed at a {moment} moment (line 1592), and this project has no \
+                 session for the work to stay on either. Ask at a session start or a task \
+                 boundary, or pass --now to decide here anyway.\n"
+            )
+        });
+    };
+
+    let mut out = routed.render_overview();
+    out.push('\n');
+    out.push_str(&routing_caveats(&routed, &destinations, &refused_by_launch));
+    Ok(out)
+}
+
+/// What the ranking above could not see, said out loud.
+///
+/// A routing explanation whose silent terms are invisible is worse than one
+/// that is short: a reader cannot tell "provider health was equal" from
+/// "provider health was never read". Every line here names an input that
+/// contributed nothing and why.
+fn routing_caveats(
+    routed: &glasshouse::routing::session::Routed,
+    destinations: &[glasshouse::routing::session::Destination],
+    refused_by_launch: &[String],
+) -> String {
+    use glasshouse::routing::session::Continuation;
+    use std::fmt::Write as _;
+
+    let mut out = String::from("what this ranking could not see\n");
+    let _ = writeln!(
+        out,
+        "  provider health   nothing observed — the health pool is filled by a running \
+         gateway, and this command has none, so the term is 0.0 for every destination"
+    );
+    if destinations
+        .iter()
+        .all(|destination| destination.is_fresh())
+    {
+        let _ = writeln!(
+            out,
+            "  session affinity  this project has recorded no session that is still warm, so \
+             every candidate is a fresh start"
+        );
+    }
+    if destinations
+        .iter()
+        .all(|destination| destination.capacity().is_none())
+    {
+        let _ = writeln!(
+            out,
+            "  quota pressure    no quota reading has been cached for any of these providers; \
+             `glasshouse resources --probe <provider>` takes one"
+        );
+    }
+    if refused_by_launch.contains(&routed.chosen().id().to_owned()) {
+        let _ = writeln!(
+            out,
+            "  not launchable    profile `{}` declares a protocol its harness does not speak, \
+             so `glasshouse launch` refuses it — this ranking answers whether the provider \
+             could serve that harness at all, which is a different question",
+            routed.chosen().launch_profile()
+        );
+    }
+    if matches!(
+        routed.chosen().continuation(),
+        Continuation::Existing(warm)
+            if warm.state == glasshouse::config::pairing::WarmSessionState::Live
+    ) {
+        let _ = writeln!(
+            out,
+            "  still running     `{}` is live, so it is the best place for this work and not \
+             one `glasshouse run` can enter — switch to that terminal, or pass `--fresh`",
+            routed.chosen().id()
+        );
+    }
+    out
+}
+
 fn launch_session(
     runtime: &Runtime,
     harness: Option<&str>,
-    profile_name: Option<&str>,
-    from_checkpoint: Option<&str>,
+    destination: LaunchDestination<'_>,
     response: &ResponseRequest,
     headless: bool,
     harness_args: &[String],
 ) -> anyhow::Result<ExitCode> {
+    let LaunchDestination {
+        profile: profile_name,
+        from_checkpoint,
+        to,
+        fresh,
+    } = destination;
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
     let effective = EffectiveConfig::new(&user, project.as_ref());
     let selection = session::select::select(harness, effective)?;
+    // -----------------------------------------------------------------------
+    // Phase 37 lines 1592, 1593 and 1595–1600: **where** this work goes is
+    // decided here, at a session boundary, before a launch profile is
+    // resolved — because the destination is what chooses the profile and not
+    // the other way round.
+    //
+    // This is the production call the router was built for. Everything below
+    // it already worked; what it did not do was ask whether this project
+    // already had a session worth continuing, which is line 1593 in one
+    // sentence. Deleting the `choose` call below must break
+    // `tests/route_command.rs`, and that is the point (practice §35): the
+    // router's own eleven mutations prove its scoring and none of them can
+    // prove that anything calls it.
+    // -----------------------------------------------------------------------
+    // Which profile a *new* session would run under, from the same three
+    // sources it has always come from — with `--to fresh:<harness>:<profile>`
+    // added as a fourth, because an identifier a person pasted out of
+    // `glasshouse route` has to mean the same thing here as it did there.
+    let fresh_profile = to
+        .and_then(|id| fresh_destination_profile(id, selection.id()))
+        .or(profile_name)
+        .unwrap_or(glasshouse::profile::NATIVE_PROFILE_NAME);
+    let destinations = routing_destinations(
+        runtime,
+        &effective,
+        selection.id(),
+        DestinationScope::Launchable {
+            profile: fresh_profile,
+        },
+    )?;
+    let overrides = effective.pairing_overrides();
+    // §5 of the router's report: the health pool a gateway fills does not
+    // exist yet here — the gateway is started further down, and only for a
+    // profile that needs one. An empty pool contributes 0.0 to every
+    // destination rather than a guess.
+    let health = glasshouse::routing::free::FreePool::new();
+    let inputs = glasshouse::routing::session::RouterInputs {
+        overrides: &overrides,
+        health: &health,
+        now: std::time::Instant::now(),
+        requirements: glasshouse::routing::session::TaskRequirements::default(),
+    };
+    // Line 1602 on the path that acts, not only on the one that reports.
+    //
+    // Two of these are the user's flags. The other two are statements they
+    // already made by typing something else, and reading them as anything but
+    // "this launch is a fresh one" would be a router overruling a person:
+    // `--profile` names the profile a *new* session should run under, and
+    // `--from-checkpoint` hands a new session its opening prompt. Neither is
+    // a thing to do to a session that is already going.
+    let user_override = if to.is_some() || fresh {
+        routing_override(to, fresh)
+    } else if from_checkpoint.is_some() {
+        glasshouse::routing::session::RoutingOverride::fresh()
+    } else if let Some(name) = profile_name {
+        glasshouse::routing::session::RoutingOverride::to(fresh_destination_id(
+            selection.id(),
+            name,
+        ))
+    } else {
+        glasshouse::routing::session::RoutingOverride::none()
+    };
+    let routed = glasshouse::routing::session::SessionRouter::with_override(user_override).choose(
+        glasshouse::routing::session::RoutingMoment::SessionStart,
+        None,
+        &destinations,
+        &inputs,
+    );
+
+    // A destination the router chose is announced before anything happens,
+    // never after: a person who did not want their previous session continued
+    // needs to read that on the way in, while `--fresh` is still an answer.
+    if let Some(routed) = &routed {
+        if let Some(refusal) = routed.override_refused() {
+            eprintln!("glasshouse: {refusal}");
+        }
+        if let glasshouse::routing::session::Continuation::Existing(warm) =
+            routed.chosen().continuation()
+        {
+            eprintln!(
+                "glasshouse: continuing session {} ({}, idle {}) rather than starting a new one; \
+                 pass --fresh to start one anyway.",
+                routed.chosen().id(),
+                warm.state,
+                format_age(glasshouse::provider::cache::now_unix_seconds() - warm.idle_seconds)
+            );
+            return resume_session(
+                runtime,
+                routed.chosen().id(),
+                harness_args,
+                headless,
+                RouteOnResume::AlreadyRouted,
+            );
+        }
+    }
+
+    // The chosen fresh destination names the profile this launch resolves.
+    // `routed` is `None` only when there was nowhere at all for the work to
+    // go, which for a fresh launch means no profile resolved for this
+    // harness; the implied Native profile always does, so the fallback below
+    // is unreachable in practice and is written as the same answer this
+    // function gave before the router existed rather than as a panic.
+    let requested_profile = routed
+        .as_ref()
+        .map(|routed| routed.chosen().launch_profile().to_owned())
+        .unwrap_or_else(|| {
+            profile_name
+                .unwrap_or(glasshouse::profile::NATIVE_PROFILE_NAME)
+                .to_owned()
+        });
 
     // Resolve the launch profile *before* anything is recorded or started.
     // A refusal here must cost nothing: no session record, no process. See
@@ -430,8 +1248,7 @@ fn launch_session(
     // Resolved *before* the response profile below, on purpose: line 353's
     // sixth axis lives on this profile, and the response request has to be
     // able to read it.
-    let requested_profile = profile_name.unwrap_or(glasshouse::profile::NATIVE_PROFILE_NAME);
-    let launch_profile = match effective.launch_profile(requested_profile, selection.id()) {
+    let launch_profile = match effective.launch_profile(&requested_profile, selection.id()) {
         Ok(resolved) => resolved.value,
         Err(err) => {
             eprintln!("glasshouse: {err}");
@@ -2629,11 +3446,135 @@ fn one_line(text: &str) -> String {
 /// The harness is then whichever one the record names, not whichever one is
 /// configured now: resuming a Codex conversation in Claude Code would be
 /// nonsense, so a record's own harness is what gets selected.
+/// Line 1592's task-boundary caller, and line 1601's explanation on it.
+///
+/// Prints where the router would have sent this work and what the named
+/// session displaced. Never changes the destination — see `RouteOnResume`.
+/// Everything it needs can fail (the session store, a deleted profile, a quota
+/// cache that will not open), and none of those may cost a person their
+/// resume, so the whole thing is best effort and silent when it has nothing to
+/// say.
+/// **It explains; it does not move the work.** The session was named on the
+/// command line, and a router that answered "somewhere else" would overrule
+/// the most explicit statement a person can make — so the named session goes
+/// in as `RoutingOverride::to`, which is what line 1602 calls a user override,
+/// and the ranking it displaced is printed beside it. Stated as a limit rather
+/// than left to be discovered: **line 1593 is earned on the launch path**,
+/// where the choice is genuinely open, and not here.
+fn report_task_boundary_routing(runtime: &Runtime, session: &str) {
+    use glasshouse::routing::free::FreePool;
+    use glasshouse::routing::session::{
+        RouterInputs, RoutingMoment, RoutingOverride, SessionRouter, TaskRequirements,
+    };
+
+    // Its own scope, and everything it opened is closed before it returns —
+    // see the call site.
+    let Some((id, harness)) = ({
+        let Ok(sessions) = ProjectSessions::open(runtime) else {
+            return;
+        };
+        let store = sessions.store();
+        store
+            .resolve_id(session)
+            .ok()
+            .and_then(|id| store.get(&id).ok().flatten())
+            .map(|record| (record.id.clone(), record.harness.clone()))
+    }) else {
+        return;
+    };
+    let Some(harness) = glasshouse::integrations::IntegrationId::ALL
+        .iter()
+        .copied()
+        .find(|candidate| candidate.slug() == harness)
+    else {
+        return;
+    };
+
+    let Ok(user) = UserConfig::load(runtime.paths()) else {
+        return;
+    };
+    let Ok(project) = config::load_project_config(runtime.project()) else {
+        return;
+    };
+    let effective = EffectiveConfig::new(&user, project.as_ref());
+
+    let Ok(destinations) =
+        routing_destinations(runtime, &effective, harness, DestinationScope::Everything)
+    else {
+        return;
+    };
+    let current = destinations
+        .iter()
+        .find(|destination| destination.id() == id.as_str())
+        .cloned();
+    let overrides = effective.pairing_overrides();
+    let health = FreePool::new();
+    let inputs = RouterInputs {
+        overrides: &overrides,
+        health: &health,
+        now: std::time::Instant::now(),
+        requirements: TaskRequirements::default(),
+    };
+    let Some(routed) = SessionRouter::with_override(RoutingOverride::to(id.as_str())).choose(
+        RoutingMoment::TaskBoundary,
+        current.as_ref(),
+        &destinations,
+        &inputs,
+    ) else {
+        return;
+    };
+    // A ranking that agreed with the user says nothing worth a line on their
+    // terminal; one that would have chosen differently is the whole reason
+    // line 1601 exists.
+    if let Some(automatic) = routed.overrode() {
+        eprintln!(
+            "glasshouse: resuming {} because you named it; the ranking would have chosen `{}` \
+             at this task boundary. `glasshouse route --moment task-boundary` says why.",
+            short_id(&id),
+            automatic
+        );
+    }
+}
+
+/// Whether a resume is the moment a routing decision is taken, or the tail of
+/// one that already was.
+///
+/// `glasshouse resume` is line 1592's **task boundary**: one piece of work
+/// finished and another is beginning, which is exactly when the map allows the
+/// work to move. `launch_session` reaches the same code after having already
+/// decided at a *session* boundary, and routing twice for one launch would
+/// re-decide something nobody asked to have re-decided — the failure mode line
+/// 1592 is written against, one layer up from the per-turn one it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteOnResume {
+    /// Take the task-boundary decision here.
+    AtTaskBoundary,
+    /// The caller already routed; this is the tail of its decision.
+    AlreadyRouted,
+}
+
 fn resume_session(
     runtime: &Runtime,
     session: &str,
     harness_args: &[String],
+    headless: bool,
+    routing: RouteOnResume,
 ) -> anyhow::Result<ExitCode> {
+    // Line 1592's other moment, and it runs **before** this function's own
+    // session store is opened.
+    //
+    // Not a stylistic choice. `routing_destinations` opens a connection to
+    // this project's session database, and practice §65 is the record of what
+    // an extra open handle costs on a path nobody asserts about: SQLite takes
+    // advisory locks on Unix and mandatory `LockFileEx` locks on Windows, so
+    // two live connections to one database in one process is invisible on the
+    // machine this is developed on and a hang on the one it ships to. Running
+    // the routing report to completion first means exactly one connection is
+    // ever live.
+    if routing == RouteOnResume::AtTaskBoundary {
+        report_task_boundary_routing(runtime, session);
+    }
+
     let sessions = ProjectSessions::open(runtime)?;
     let store = sessions.store();
 
@@ -2788,7 +3729,16 @@ fn resume_session(
     // is exactly the question `degrade_resource` asks of it.
     degrade_relay.install(Arc::clone(&events), vec![record.clone()]);
 
-    let status = match session::attach(launch) {
+    // Headless is the caller's statement about *this* process, so it survives
+    // a launch that the router turned into a resume — `glasshouse run
+    // --headless` must not quietly take over the terminal because the best
+    // destination happened to be a session that already existed.
+    let attached = if headless {
+        run_headless(&resumable.id, launch)
+    } else {
+        session::attach(launch)
+    };
+    let status = match attached {
         Ok(status) => status,
         Err(err) => {
             note_lifecycle(&store, &resumable.id, SessionLifecycle::Failed);
@@ -4368,8 +5318,10 @@ mod tests {
         let status = launch_session(
             &runtime,
             Some("claude-code"),
-            Some("gateway"),
-            None,
+            LaunchDestination {
+                profile: Some("gateway"),
+                ..LaunchDestination::default()
+            },
             &ResponseRequest::default(),
             false,
             &[],
@@ -4400,8 +5352,10 @@ mod tests {
         let status = launch_session(
             &runtime,
             Some("claude-code"),
-            Some("yolo"),
-            None,
+            LaunchDestination {
+                profile: Some("yolo"),
+                ..LaunchDestination::default()
+            },
             &ResponseRequest::default(),
             false,
             &[],
