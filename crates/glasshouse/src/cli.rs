@@ -240,6 +240,12 @@ pub enum Command {
         /// Decide now, even mid-turn.
         #[arg(long)]
         now: bool,
+        /// Describe the work, so the ranking can weigh what it actually
+        /// needs (repository access, shell execution, browser interaction)
+        /// instead of nothing. Optional; omitting it leaves routing exactly
+        /// as it behaves today.
+        #[arg(long, value_name = "TEXT")]
+        task: Option<String>,
     },
     /// List the sessions Glasshouse has recorded for this project, or act on
     /// one of them.

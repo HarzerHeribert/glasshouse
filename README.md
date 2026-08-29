@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`████████████████████████░░░░░░░░░░░░░░░░` 777 / 1280 mandatory capabilities (60%)
+`████████████████████████░░░░░░░░░░░░░░░░` 787 / 1280 mandatory capabilities (61%)
 
 <details>
-<summary>Per-phase breakdown (38 of 104 phases complete)</summary>
+<summary>Per-phase breakdown (39 of 104 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -97,7 +97,7 @@ the authoritative specification and tracks what is done.
 | Phase 33A — Routing evidence ledger | 10/15 |
 | Phase 33B — Reliability-adjusted agent performance | 0/14 |
 | Phase 33C — Failure, quota, and route correlation | 5/15 |
-| Phase 34 — Capability registry | 0/10 |
+| Phase 34 — Capability registry | 10/10 ✅ |
 | Phase 34A — Workload tiers | 7/10 |
 | Phase 34B — Routing-model role | 7/15 |
 | Phase 34C — Automatic routing-model selection | 0/13 |

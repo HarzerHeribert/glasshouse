@@ -1379,16 +1379,16 @@ Phase 33C — Failure, quota, and route correlation
 
 Phase 34 — Capability registry
 
-☐ Describe each harness and model resource with a small set of capabilities used for routing.
-☐ Include code-edit capability in the registry.
-☐ Include shell/tool-use capability in the registry.
-☐ Include browser-use capability in the registry.
-☐ Include large-context capability in the registry.
-☐ Include fast-cheap-analysis capability in the registry.
-☐ Include repository-review capability in the registry.
-☐ Include MCP capability in the registry.
-☐ Allow capability descriptions to be updated without changing the core router.
-☐ Keep capability scoring simple and inspectable in the first implementation.
+☑ Describe each harness and model resource with a small set of capabilities used for routing.
+☑ Include code-edit capability in the registry.
+☑ Include shell/tool-use capability in the registry.
+☑ Include browser-use capability in the registry.
+☑ Include large-context capability in the registry.
+☑ Include fast-cheap-analysis capability in the registry.
+☑ Include repository-review capability in the registry.
+☑ Include MCP capability in the registry.
+☑ Allow capability descriptions to be updated without changing the core router.
+☑ Keep capability scoring simple and inspectable in the first implementation.
 
 Phase 34A — Workload tiers
 

@@ -588,3 +588,240 @@ fn to_on_the_launch_path_takes_the_identifier_route_printed() {
         "`--to` must decide which profile the session actually ran under:\n{listing}"
     );
 }
+
+// --- GH-ROUTER-TASK-INPUT: `--task`, and the capability registry it wires --
+//
+// Phase 34's registry (`src/routing/capability.rs`) was built, tested and
+// integrated with all ten of its boxes deliberately held open —
+// `docs/product/evidence/phase-34.md` — because no production entry point
+// ever had request text to classify, so `TaskRequirements::hard_capabilities`
+// was always empty and `capability_fit` always took its first-statement
+// early return. `route_report`'s new `task` parameter is that one missing
+// argument; the tests below are the executable proof it is load-bearing, not
+// only present.
+
+/// Acceptance test 1: the no-`--task` contract. `route` with no `--task`
+/// must render `capability_fit`'s own early-return evidence string —
+/// `TaskRequirements::default()`'s `hard_capabilities` is empty, byte for
+/// byte the same as before this packet, because `src/routing/session.rs` was
+/// not touched to produce it.
+#[test]
+fn omitting_task_leaves_the_capability_term_at_its_pre_packet_default() {
+    let fixture = Fixture::new();
+    let report = fixture.stdout(&["route"]);
+    assert!(
+        report.contains(
+            "+0.000  capability fit — the task named no hard capability requirement, so this \
+             resource's capability description contributes nothing"
+        ),
+        "with no `--task`, the capability term must read exactly the empty-`hard_capabilities` \
+         evidence string `capability_fit` has always produced for `TaskRequirements::default()`:\
+             \n{report}"
+    );
+}
+
+/// Acceptance test 2. A `--task` describing browser work names browser use
+/// in the capability contribution; a `--task` describing plain text work
+/// does not — the same rendered term, driven by what the text says rather
+/// than by whether `--task` was passed at all (that half is test 1's).
+#[test]
+fn a_browser_task_names_browser_interaction_and_a_plain_one_does_not() {
+    let fixture = Fixture::new();
+
+    let browser = fixture.stdout(&[
+        "route",
+        "--task",
+        "open the browser, navigate to the page and take a screenshot",
+    ]);
+    assert!(
+        browser.contains("needs browser interaction"),
+        "a task this heuristic reads as browser work must show up in the capability \
+         contribution's evidence:\n{browser}"
+    );
+
+    let plain = fixture.stdout(&[
+        "route",
+        "--task",
+        "what is the difference between a fresh and an existing session",
+    ]);
+    assert!(
+        !plain.contains("needs browser interaction"),
+        "a task with no browser signal must not claim one:\n{plain}"
+    );
+    assert!(
+        plain.contains("the task named no hard capability requirement"),
+        "a pure question with no repository reference classifies to no hard capability at \
+         all (`classify_heuristically`'s own fail-open case for a question), so the term must \
+         read exactly like the no-`--task` case:\n{plain}"
+    );
+}
+
+/// Acceptance test 5. Empty or whitespace-only `--task` text must behave as
+/// if `--task` were absent — never classified as some default class — so
+/// this asserts byte-for-byte identity with the no-`--task` report, not
+/// merely "no capability was named".
+#[test]
+fn empty_or_whitespace_only_task_text_behaves_as_absent() {
+    let fixture = Fixture::new();
+    let absent = fixture.stdout(&["route"]);
+    let empty = fixture.stdout(&["route", "--task", ""]);
+    let whitespace = fixture.stdout(&["route", "--task", "   \t  "]);
+    assert_eq!(
+        absent, empty,
+        "an empty `--task` must reproduce the no-`--task` report exactly"
+    );
+    assert_eq!(
+        absent, whitespace,
+        "a whitespace-only `--task` must reproduce the no-`--task` report exactly"
+    );
+}
+
+/// A project with two harnesses behind the same provider, differing only in
+/// what map line 1382's registry establishes about `browser-use`:
+/// `claude-code` declares it present (`claude --help`'s `--chrome`); `codex`
+/// declares nothing either way. `direct-codex`'s `expected_protocol` is
+/// `openai-chat`, which Codex does not speak
+/// (`harness::codex::PROTOCOLS = &[WireProtocol::OpenAiResponses]`), so it
+/// scores `ProtocolFit::Compatible` (`+0.4`) where `direct-cc` — no
+/// `expected_protocol`, so its route has none to compare against — scores
+/// `ProtocolFit::Unknown` (`+0.0`). Every other term ties: both fresh, no
+/// checkpoint, no cached quota, no health pool, `moment == SessionStart` so
+/// there is no `current` to price a switch against.
+///
+/// That `+0.4` gap is exactly `CAPABILITY_ESTABLISHED_PRESENT`
+/// (`session.rs`), chosen so a task naming only browser interaction —
+/// phrased as a question so `classify_heuristically` does not also add
+/// repository access, which both harnesses declare present and which would
+/// cancel out — closes it: `direct-cc` gains `+0.4` on the axis `direct-codex`
+/// cannot, exactly erasing the protocol-fit gap.
+struct TwoHarnessFixture {
+    _tmp: tempfile::TempDir,
+    base: PathBuf,
+    root: PathBuf,
+}
+
+impl TwoHarnessFixture {
+    fn new() -> Self {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().to_path_buf();
+        let root = base.join("workspace");
+        std::fs::create_dir_all(root.join(".git")).expect("create project root");
+        let root = std::fs::canonicalize(&root).expect("canonicalize project root");
+
+        let bin_dir = base.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let argv_log = base.join("argv.log");
+        let claude_code = install_named_fake_harness(&bin_dir, "fake-claude-code", &argv_log);
+        let codex = install_named_fake_harness(&bin_dir, "fake-codex", &argv_log);
+        let escape = |p: &Path| p.display().to_string().replace('\\', "\\\\");
+
+        let config_dir = base.join("config");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            format!(
+                "version = 1\n\n\
+                 [integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n\n\
+                 [integrations.codex]\nenabled = true\nexecutable = \"{}\"\n\n\
+                 [providers.route-probe]\ntemplate = \"openrouter\"\n\
+                 credential_env = [\"{CREDENTIAL_VAR}\"]\n\n\
+                 [profiles.direct-cc]\nharness = \"claude-code\"\n\n\
+                 [profiles.direct-cc.backend]\nkind = \"direct-provider\"\n\
+                 provider = \"route-probe\"\n\n\
+                 [profiles.direct-codex]\nharness = \"codex\"\n\
+                 expected_protocol = \"openai-chat\"\n\n\
+                 [profiles.direct-codex.backend]\nkind = \"direct-provider\"\n\
+                 provider = \"route-probe\"\n",
+                escape(&claude_code),
+                escape(&codex),
+            ),
+        )
+        .expect("write user config");
+
+        Self {
+            _tmp: tmp,
+            base,
+            root,
+        }
+    }
+
+    fn stdout(&self, args: &[&str]) -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+            .arg("--scope")
+            .arg(&self.root)
+            .arg("--data-dir")
+            .arg(self.base.join("data"))
+            .arg("--config-dir")
+            .arg(self.base.join("config"))
+            .args(args)
+            .env(CREDENTIAL_VAR, "planted-opaque-route-value-37")
+            .env("PATH", self.base.join("empty-path"))
+            .output()
+            .expect("the glasshouse binary must be runnable");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+}
+
+#[cfg(unix)]
+fn install_named_fake_harness(bin_dir: &Path, name: &str, argv_log: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join(name);
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+            argv_log.display()
+        ),
+    )
+    .expect("write fake harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+#[cfg(windows)]
+fn install_named_fake_harness(bin_dir: &Path, name: &str, argv_log: &Path) -> PathBuf {
+    let path = bin_dir.join(format!("{name}.cmd"));
+    std::fs::write(
+        &path,
+        format!(
+            "@echo off\r\necho %*>>\"{}\"\r\nexit /b 0\r\n",
+            argv_log.display()
+        ),
+    )
+    .expect("write fake harness");
+    path
+}
+
+/// Acceptance test 3, and box 1382's own executable proof: two runs
+/// differing **only** in `--task` text choose differently, because the
+/// registry the task's classification reaches actually separates the two
+/// candidates. Under mutation (a) — `TaskRequirements::default()` at
+/// `route_report`'s call site instead of the derived value — the browser-task
+/// run would score identically to the no-task run and this assertion fails.
+#[test]
+fn a_task_naming_a_capability_flips_which_candidate_the_ranking_prefers() {
+    let fixture = TwoHarnessFixture::new();
+
+    let without_task = fixture.stdout(&["route"]);
+    assert!(
+        without_task.starts_with("destination  fresh:codex:direct-codex"),
+        "without a task, `direct-codex`'s `+0.4` protocol-fit edge over `direct-cc`'s `+0.0` \
+         must be what wins — the fixture's own baseline, verified before the task text can \
+         change anything:\n{without_task}"
+    );
+
+    let with_browser_task = fixture.stdout(&[
+        "route",
+        "--task",
+        "explain what chrome browser screenshot support looks like",
+    ]);
+    assert!(
+        with_browser_task.starts_with("destination  fresh:claude-code:direct-cc"),
+        "a task naming only browser interaction must close `direct-codex`'s protocol-fit \
+         lead with `direct-cc`'s own `+0.4` capability contribution and change which \
+         candidate wins:\n{with_browser_task}"
+    );
+}

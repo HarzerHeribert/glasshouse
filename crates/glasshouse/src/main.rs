@@ -149,7 +149,15 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             to,
             fresh,
             now,
-        }) => match route_report(&runtime, moment, to.as_deref(), *fresh, *now) {
+            task,
+        }) => match route_report(
+            &runtime,
+            moment,
+            to.as_deref(),
+            *fresh,
+            *now,
+            task.as_deref(),
+        ) {
             Ok(report) => print!("{report}"),
             Err(err) => {
                 eprintln!("glasshouse: {err:#}");
@@ -934,12 +942,11 @@ fn route_report(
     to: Option<&str>,
     fresh: bool,
     now: bool,
+    task: Option<&str>,
 ) -> anyhow::Result<String> {
     use glasshouse::integrations::{IntegrationId, IntegrationKind};
     use glasshouse::routing::free::FreePool;
-    use glasshouse::routing::session::{
-        RouterInputs, RoutingMoment, SessionRouter, TaskRequirements,
-    };
+    use glasshouse::routing::session::{RouterInputs, RoutingMoment, SessionRouter};
 
     let moment = match moment {
         "session-start" => RoutingMoment::SessionStart,
@@ -988,11 +995,12 @@ fn route_report(
     // inert — and the report says so below rather than letting a reader think
     // provider health was weighed and found equal.
     let health = FreePool::new();
+    let requirements = task_requirements_from_text(task);
     let inputs = RouterInputs {
         overrides: &overrides,
         health: &health,
         now: std::time::Instant::now(),
-        requirements: TaskRequirements::default(),
+        requirements,
     };
 
     let mut user_override = routing_override(to, fresh);
@@ -1045,6 +1053,38 @@ fn route_report(
     out.push('\n');
     out.push_str(&routing_caveats(&routed, &destinations, &refused_by_launch));
     Ok(out)
+}
+
+/// Classify `task`'s free-form description of the work into the
+/// `TaskRequirements` `RouterInputs` carries — the wire that makes the
+/// capability registry (`routing::capability`) reachable from a production
+/// caller (map lines 1382–1391). Absent or blank text reproduces today's
+/// `TaskRequirements::default()` behaviour byte for byte (ruling 1).
+///
+/// Classification happens here, once, at the entry point — never inside
+/// `SessionRouter` itself (ruling 2), so the router stays something a
+/// classification is handed to and tested against, rather than something
+/// that computes its own input.
+///
+/// `needs_tool_calls` is derived from the same signal fields
+/// `TaskClassification::hard_capabilities` already reads, rather than left
+/// hardcoded `false` (ruling 3): a task this heuristic marks as needing
+/// repository access, shell execution, or browser interaction needs the
+/// harness to act through its tool-call protocol, not only answer in words.
+fn task_requirements_from_text(
+    task: Option<&str>,
+) -> glasshouse::routing::session::TaskRequirements {
+    use glasshouse::routing::classify::classify_heuristically;
+    use glasshouse::routing::session::TaskRequirements;
+
+    let Some(text) = task.map(str::trim).filter(|text| !text.is_empty()) else {
+        return TaskRequirements::default();
+    };
+    let hard_capabilities = classify_heuristically(text).hard_capabilities();
+    TaskRequirements {
+        needs_tool_calls: !hard_capabilities.is_empty(),
+        hard_capabilities,
+    }
 }
 
 /// What the ranking above could not see, said out loud.
@@ -7063,5 +7103,137 @@ mod tests {
             std::fs::Permissions::from_mode(0o600),
         )
         .unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // GH-ROUTER-TASK-INPUT — `task_requirements_from_text` at its real call
+    // site.
+    //
+    // No built-in provider template in this codebase ever declares a
+    // protocol's tool calls `Declared::verified(false, ..)` — every one of
+    // `provider::templates()`'s entries (including the two generic
+    // `openai-compatible`/`anthropic-compatible` templates) uses
+    // `unverified_support`, and `config::pairing::pairing_for_profile` leaves
+    // `tool_calls` at its `Declared::Unverified` default for `Native` and
+    // `GlasshouseGateway` profiles too. So `Backend::tools() ==
+    // ToolSemantics::KnownAbsent` is unreachable through `glasshouse route`'s
+    // compiled-binary path today, and acceptance test 4 cannot be written as
+    // a `tests/route_command.rs` black-box run the way tests 1, 2, 3 and 5
+    // are — see `packet_errors` in this packet's report.
+    //
+    // This proves the same claim the way `tests/session_router.rs` proves
+    // every other hard-constraint gate: by calling `SessionRouter::choose`
+    // directly, through `task_requirements_from_text`, the actual function
+    // `route_report` calls at its `RouterInputs` construction site. Mutation
+    // (b) — hardcoding `needs_tool_calls: false` back into that function —
+    // fails this test, because the `KnownAbsent` destination would stop being
+    // rejected for a task that plainly asks for shell execution.
+    #[test]
+    fn a_task_implying_tool_use_reaches_the_hard_constraint_gate_through_the_real_call_site() {
+        use glasshouse::integrations::IntegrationId;
+        use glasshouse::routing::free::FreePool;
+        use glasshouse::routing::session::{
+            Destination, RouterInputs, RoutingMoment, SessionRouter,
+        };
+        use glasshouse::routing::{AssignedModel, Backend, Cost, CredentialId, ToolSemantics};
+        use glasshouse::secret::SecretRef;
+        use std::time::Instant;
+
+        fn backend_with_tools(tools: ToolSemantics) -> Backend {
+            Backend::new(
+                "anthropic",
+                "anthropic-messages",
+                AssignedModel::named("claude-opus-4"),
+                CredentialId::new(
+                    "anthropic",
+                    SecretRef::Environment {
+                        var: "ANTHROPIC_API_KEY".to_owned(),
+                    },
+                ),
+                Cost::Metered,
+                tools,
+            )
+        }
+
+        let overrides = glasshouse::harness::pairing::PairingOverrides::from_parts(
+            "no configuration",
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        );
+        let health = FreePool::new();
+        let now = Instant::now();
+
+        let known_absent = Destination::fresh(
+            "known-absent",
+            IntegrationId::ClaudeCode,
+            "default",
+            backend_with_tools(ToolSemantics::KnownAbsent),
+            None,
+        );
+        let unverified = Destination::fresh(
+            "unverified",
+            IntegrationId::ClaudeCode,
+            "default",
+            backend_with_tools(ToolSemantics::Unverified),
+            None,
+        );
+
+        // A task this heuristic reads as needing shell execution: the same
+        // call `route_report` makes on real `--task` text.
+        let tool_use_requirements =
+            task_requirements_from_text(Some("run cargo test and fix whatever fails"));
+        assert!(
+            tool_use_requirements.needs_tool_calls,
+            "a task naming shell execution must derive `needs_tool_calls: true`"
+        );
+        let inputs = RouterInputs {
+            overrides: &overrides,
+            health: &health,
+            now,
+            requirements: tool_use_requirements,
+        };
+        let routed = SessionRouter::new()
+            .choose(
+                RoutingMoment::SessionStart,
+                None,
+                &[known_absent.clone(), unverified.clone()],
+                &inputs,
+            )
+            .expect("destinations were offered");
+        assert_eq!(
+            routed.chosen().id(),
+            "unverified",
+            "a task needing tool calls must not be sent where they are established absent"
+        );
+        assert_eq!(routed.rejected().len(), 1);
+        assert_eq!(
+            routed.rejected()[0].1,
+            glasshouse::routing::HardConstraint::ToolSemantics
+        );
+
+        // The absent-`--task` behaviour: `needs_tool_calls` stays `false`,
+        // and the same `known-absent` destination is no longer rejected.
+        let no_task_requirements = task_requirements_from_text(None);
+        assert!(!no_task_requirements.needs_tool_calls);
+        let inputs = RouterInputs {
+            overrides: &overrides,
+            health: &health,
+            now,
+            requirements: no_task_requirements,
+        };
+        let routed = SessionRouter::new()
+            .choose(
+                RoutingMoment::SessionStart,
+                None,
+                &[known_absent, unverified],
+                &inputs,
+            )
+            .expect("destinations were offered");
+        assert!(
+            routed.rejected().is_empty(),
+            "with no task text, nothing needs tool calls, so nothing is rejected on that \
+             ground: {:?}",
+            routed.rejected()
+        );
     }
 }
