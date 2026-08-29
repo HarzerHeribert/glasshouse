@@ -93,6 +93,23 @@ use crate::secret::REDACTED;
 pub use session::SessionRouting;
 pub use upstream::{Route, Upstream, UpstreamBackend, UpstreamError};
 
+/// Told once per exchange whose outcome says the gateway's own upstream
+/// failed — map line 1735, "detect gateway failure separately from harness
+/// process failure" — with the resource's
+/// [`crate::profile::BackendResource::slug`] and which kind of failure it
+/// was.
+///
+/// A closure rather than a direct call to [`crate::events::degrade_resource`]
+/// from inside this module, because that function's
+/// `records: &[crate::session::SessionRecord]` parameter would require
+/// naming `crate::session` here — exactly the import
+/// `tests::the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness`
+/// exists to make impossible (see this module's header). The caller that
+/// builds one closes over an [`crate::events::EventBus`] and a live session
+/// list; this module only ever calls it with a resource name and a
+/// [`crate::events::GatewayFailure`].
+pub type DegradeSink = Arc<dyn Fn(&str, crate::events::GatewayFailure) + Send + Sync>;
+
 /// The only interface a Glasshouse gateway ever binds.
 ///
 /// Named as a constant so that "loopback only" is one greppable fact rather
@@ -339,6 +356,33 @@ impl Gateway {
         evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
         health_cache: Option<crate::provider::telemetry::GatewayHealthCache>,
     ) -> Result<Self> {
+        Self::start_with_degrade_sink(upstream, quota_cache, evidence_ledger, health_cache, None)
+    }
+
+    /// [`Self::start_with_telemetry`], with a [`DegradeSink`] told about every
+    /// exchange whose outcome is a genuine gateway failure — map line 1735.
+    ///
+    /// `None` reproduces [`Self::start_with_telemetry`] exactly, the same
+    /// additive guarantee every sink before it gives: every existing caller,
+    /// including every test in [`super::conformance`], is unaffected.
+    ///
+    /// **Not called from `crates/glasshouse/src/main.rs` today** — the same
+    /// gap this module's other telemetry sinks record, and for the identical
+    /// reason: `main.rs` is this package's `FORBIDDEN FILES`. See the report
+    /// for the closure `main.rs` would need to build there, capturing its own
+    /// `EventBus` and session records so it can call
+    /// [`crate::events::degrade_resource`] itself.
+    ///
+    /// Private on purpose, exactly as [`Self::start_with_telemetry`] is:
+    /// reached from outside this module only through
+    /// [`start_if_required_with_degrade_sink`].
+    fn start_with_degrade_sink(
+        upstream: Upstream,
+        quota_cache: Option<crate::provider::telemetry::GatewayQuotaCache>,
+        evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
+        health_cache: Option<crate::provider::telemetry::GatewayHealthCache>,
+        degrade_sink: Option<DegradeSink>,
+    ) -> Result<Self> {
         let listener = TcpListener::bind((GATEWAY_INTERFACE, EPHEMERAL_PORT))
             .context("could not bind the local Glasshouse gateway to loopback")?;
         // Port 0 was a request, not an address. This is the answer, and it is
@@ -367,6 +411,7 @@ impl Gateway {
                 let quota_cache = quota_cache.clone();
                 let evidence_ledger = evidence_ledger.clone();
                 let health_cache = health_cache.clone();
+                let degrade_sink = degrade_sink.clone();
                 move || {
                     accept_loop(
                         listener,
@@ -377,6 +422,7 @@ impl Gateway {
                         quota_cache,
                         evidence_ledger,
                         health_cache,
+                        degrade_sink,
                     )
                 }
             })
@@ -486,12 +532,12 @@ impl Drop for Gateway {
 /// sleeps and tries again rather than dying and leaving a bound port with
 /// nothing behind it.
 ///
-/// Eight parameters, all of them either identity (`listener`, `token`), the
+/// Nine parameters, all of them either identity (`listener`, `token`), the
 /// two coordination handles (`stop`, `upstream`, `routing`) already threaded
-/// through before this package, or one of three additive, independently
-/// optional telemetry sinks. Grouping the three sinks into a struct would
-/// trade one clippy lint for an abstraction with a single call site and
-/// nothing else to say about itself.
+/// through before this package, or one of four additive, independently
+/// optional telemetry sinks. Grouping the sinks into a struct would trade one
+/// clippy lint for an abstraction with a single call site and nothing else to
+/// say about itself.
 #[allow(clippy::too_many_arguments)]
 fn accept_loop(
     listener: TcpListener,
@@ -502,6 +548,7 @@ fn accept_loop(
     quota_cache: Option<Arc<crate::provider::telemetry::GatewayQuotaCache>>,
     evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
     health_cache: Option<Arc<crate::provider::telemetry::GatewayHealthCache>>,
+    degrade_sink: Option<DegradeSink>,
 ) {
     // One agent for the life of the gateway: it owns the connection pool to
     // the provider, so a warm TLS connection survives from one request to
@@ -519,6 +566,7 @@ fn accept_loop(
                 let quota_cache = quota_cache.clone();
                 let evidence_ledger = evidence_ledger.clone();
                 let health_cache = health_cache.clone();
+                let degrade_sink = degrade_sink.clone();
                 let spawned = std::thread::Builder::new()
                     .name("glasshouse-gateway-exchange".to_owned())
                     .spawn(move || {
@@ -559,6 +607,20 @@ fn accept_loop(
                             evidence_ledger.as_deref(),
                             completed_at,
                         );
+                        // Map line 1735: detect a gateway failure separately
+                        // from a harness process failure. `session::classify`
+                        // above already folded this exchange into routing
+                        // health and failover; this is the same exchange
+                        // asked the opposite-consequence question — not "does
+                        // this session need to move", but "is the resource
+                        // itself unhealthy" — and answered without touching
+                        // any session's lifecycle, because nothing here calls
+                        // anything that could.
+                        if let Some(reason) = session::gateway_failure(&exchange)
+                            && let Some(sink) = &degrade_sink
+                        {
+                            sink(&BackendResource::GlasshouseGateway.slug(), reason);
+                        }
                         // Phase 33A's production producer — see
                         // `crate::gateway::session::SessionRouting::record_routing_observation`
                         // for exactly what this can and cannot supply.
@@ -707,6 +769,53 @@ pub fn start_if_required_with_telemetry(
         return Ok(None);
     }
     Gateway::start_with_telemetry(upstream()?, quota_cache, evidence_ledger, health_cache).map(Some)
+}
+
+/// [`start_if_required_with_telemetry`], with a [`DegradeSink`] a started
+/// gateway calls once per exchange whose outcome is a genuine gateway
+/// failure — map line 1735, "detect gateway failure separately from harness
+/// process failure."
+///
+/// `None` reproduces [`start_if_required_with_telemetry`] exactly, the same
+/// additive guarantee every sink on this door already gives.
+///
+/// **Not called from `crates/glasshouse/src/main.rs` today.** Both of that
+/// file's gateway launch sites (`launch_session` and the resume path,
+/// `overlay_resolution`) still call [`start_if_required_with_telemetry`].
+/// Wiring this in needs a closure built there, from the same `runtime` and
+/// `EventBus` those call sites already have in scope, that calls
+/// [`crate::events::degrade_resource`] with a snapshot of the project's
+/// session records:
+///
+/// ```text
+/// let bus = /* this launch's EventBus */;
+/// let records = /* SessionStore::list or equivalent, read fresh per call */;
+/// let sink: DegradeSink = Arc::new(move |resource, reason| {
+///     let _ = crate::events::degrade_resource(&bus, &records(), resource, reason);
+/// });
+/// ```
+///
+/// `crates/glasshouse/src/main.rs` is this package's `FORBIDDEN FILES`; see
+/// the report.
+pub fn start_if_required_with_degrade_sink(
+    profiles: &[LaunchProfile],
+    upstream: impl FnOnce() -> Result<Upstream>,
+    quota_cache: Option<crate::provider::telemetry::GatewayQuotaCache>,
+    evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
+    health_cache: Option<crate::provider::telemetry::GatewayHealthCache>,
+    degrade_sink: Option<DegradeSink>,
+) -> Result<Option<Gateway>> {
+    if !gateway_is_required(profiles) {
+        return Ok(None);
+    }
+    Gateway::start_with_degrade_sink(
+        upstream()?,
+        quota_cache,
+        evidence_ledger,
+        health_cache,
+        degrade_sink,
+    )
+    .map(Some)
 }
 
 #[cfg(test)]

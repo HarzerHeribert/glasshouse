@@ -646,6 +646,44 @@ fn classify(exchange: &Exchange) -> Option<Observation> {
     }
 }
 
+/// Map line 1735: whether one finished exchange says the gateway's own
+/// upstream failed, separately from anything about the harness process that
+/// sent the request — and separately from [`classify`]'s question, which is
+/// "does this session need to move" rather than "is the resource itself
+/// unhealthy". Called on every exchange, whether or not a session is bound —
+/// a gateway can be serving before any harness has been pointed at it, and
+/// the resource can still be unreachable.
+///
+/// Only [`Outcome::Unreachable`] qualifies. A `Forwarded` exchange reached
+/// the provider and got an answer — even a `4xx` or `5xx` one — which is the
+/// provider or the request being wrong, not the gateway failing to reach it;
+/// mapping that to a gateway failure would be exactly the invented signal the
+/// packet forbids ("a `Forwarded` exchange that merely returned an
+/// application-level error the gateway passed through is not a gateway
+/// failure"). Every other outcome (`Unauthenticated`, `Declined`,
+/// `Unrouted`, `ClientGone`, `Idle`) never reached the provider at all, for
+/// reasons that have nothing to do with the provider's health.
+///
+/// [`crate::events::GatewayFailure::TimedOut`] and
+/// [`crate::events::GatewayFailure::Rejected`] are never produced here:
+/// `ingress::Outcome` has no production path that distinguishes either from
+/// a plain `Unreachable` today — `Outcome::Unreachable`'s own `detail` is a
+/// diagnostic phrase for `tracing`, not a second, finer-grained outcome, and
+/// re-deriving one by matching on that text would be reading `ingress`'s
+/// output more closely than `ingress`'s own module documentation allows this
+/// directory to. `ingress.rs` is this package's `FORBIDDEN FILES`.
+pub(super) fn gateway_failure(exchange: &Exchange) -> Option<crate::events::GatewayFailure> {
+    match &exchange.outcome {
+        Outcome::Unreachable { .. } => Some(crate::events::GatewayFailure::Unreachable),
+        Outcome::Forwarded { .. }
+        | Outcome::Unauthenticated
+        | Outcome::Declined
+        | Outcome::Unrouted
+        | Outcome::ClientGone
+        | Outcome::Idle => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

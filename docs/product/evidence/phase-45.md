@@ -42,3 +42,84 @@ Known limit, recorded rather than hidden:
   (2400 spawns against 24 allocation-churning threads, 0 aborts), and
   mislabelling (`strsignal(6)` really is `SIGABRT`). A ranked list of where to
   look next is in the report.
+
+---
+
+## Phase 45 line 1735 — NOT CLOSED, and the gap is now one named question
+
+Contract: Given a session whose backend is served through the Glasshouse
+gateway, when that gateway's upstream fails, Glasshouse records the failure
+against the resource — while leaving the harness session running, on screen and
+steerable, because a gateway failing is not a harness process failing.
+
+State: **PARTIALLY VERIFIED.** The mechanism is built, wired through the
+gateway's own production path and proven behaviourally. **The shipped binary
+never installs it**, so the box does not close.
+
+**Why this was attempted:** `events::degrade_resource` publishes
+`GatewayUnhealthy` and its doc states this line's contract nearly verbatim —
+*"A gateway failing is not a harness process failing, and the two need opposite
+responses"* — with `implied_state` mapping the event to `None` so a live session
+is not marked failed. `scripts/discover.py --seam degrade_resource` returned
+**zero non-test call sites**. Nothing connected the gateway's own detection to
+it.
+
+What now exists (`GH-GATEWAY-DEGRADE`, integrated):
+- `gateway::session::gateway_failure(&Exchange) -> Option<events::GatewayFailure>`
+  — a pure classifier beside the existing `classify`. **Only
+  `Outcome::Unreachable` maps to a failure.** A `Forwarded` exchange never does,
+  even a 5xx, because an application error the gateway passed through is not a
+  gateway failure.
+- `gateway::DegradeSink` + `start_if_required_with_degrade_sink`, invoked from
+  `accept_loop` immediately after `observe_exchange`.
+
+**A structural constraint the orchestrator's packet did not anticipate, and it
+changed the design.** `gateway/mod.rs`'s header and the existing test
+`the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness` forbid
+every file under `gateway/` from naming `crate::session` in production code.
+`degrade_resource` takes `&[crate::session::SessionRecord]`, so the direct call
+the packet's FEASIBILITY implied is a **compile-provable violation**. The wire
+therefore had to be an opaque callback, built by whoever holds both an
+`EventBus` and the session list — which is exactly the shape `quota_cache`,
+`evidence_ledger` and `health_cache` already have.
+
+Regression evidence:
+- `gateway_degrade::a_real_gateway_failure_degrades_only_the_bound_session_and_moves_no_lifecycle`
+  — against a real gateway, asserting the failure is reported once, names the
+  resource and variant, touches only the bound session, and **moves no
+  lifecycle**.
+
+Mutation, re-run by the orchestrator: deleting the sink invocation in
+`accept_loop` → **killed**, on a real assertion rather than a build break
+(§80's case 4 checked), and the mutated line is the call itself (case 3
+checked).
+
+### Why the box stays open, and the exact question that closes it
+
+`main.rs` calls plain `start_if_required_with_telemetry` at both gateway launch
+sites (`launch_session`, `resolve_resume_overlay`). Neither was touched —
+`main.rs` was that package's `FORBIDDEN FILES`. **So `degrade_sink` is never
+`Some` in the shipped binary and the new branch never fires against a real
+session.** The worker flagged this itself, prominently and against its own
+interest, and declined to guess at the closure. That was correct.
+
+**The orchestrator then found why it is not a five-minute follow-up.**
+`degrade_resource` needs an `EventBus` and a live session list. `EventBus::new()`
+occurs once in `main.rs`, at `:1832`, and **there is no bus in scope anywhere in
+the gateway-launch region** — the gateway is started *before* the session, and
+therefore before the bus exists. A sink built at that point cannot capture a bus
+by value; it needs a lazy handle that can produce the bus and the current
+session list at exchange time, which is a lifetime and ownership question about
+the launch path, not a wiring patch.
+
+**That is the whole remaining gap, and it is Opus-specialist shaped.** Until it
+is answered, this line is a mechanism with no production installation — the same
+shape this ledger refused for 531 and for `degrade_resource` itself, and it is
+refused here for consistency rather than ticked because the work was good.
+
+Note also: `GatewayFailure::TimedOut` and `::Rejected` are never produced.
+`ingress::Outcome` has no production path distinguishing either from
+`Unreachable`; its `detail` is a tracing phrase, not a second outcome, and
+string-matching it would make the gateway a reader of output its own module doc
+forbids it to parse. Recorded as a narrower mapping than the line's wording
+suggests.
