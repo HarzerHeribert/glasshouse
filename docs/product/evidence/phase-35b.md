@@ -339,3 +339,39 @@ Missing evidence:
   and is deduplicated rather than rejected. Well-defined by `cost_of`'s existing
   contract, untested, and flagged by the worker as a candidate for a
   `glasshouse doctor` warning rather than a hard error.
+
+
+---
+
+## Orchestrator ruling — map line 1541, 2026-08-29 (batch 47)
+
+**Inherited unresolved through three orchestrators. Ruling: the tick stands,
+with the residual gap bounded below. Closed — do not re-open it without new
+evidence.**
+
+Verified directly by the orchestrator rather than accepted from a report:
+`EvidenceKey` (`harness/pairing.rs:502`) carries `harness`, `launch_profile`,
+`model` and `route`, but `ObservedEvidenceSource::observed`
+(`routing/evidence.rs:1152`) builds its `ObservationQuery` from provider,
+model, route and harness — **`launch_profile` is read into the key and then
+not used in the query.** The entry above already recorded this; it is
+confirmed, not newly discovered.
+
+**Why the tick is still right.** The line's substantive requirement is that the
+prior decays against real accumulated observations *scoped to a combination*
+rather than globally. That is implemented, production-wired and mutation-proven
+against a real ledger. The missing dimension is not a defect in the decay; it
+is a dimension the ledger cannot express — nothing it stores carries a launch
+profile — so the query cannot filter on what does not exist.
+
+**The residual, stated precisely so nobody has to re-derive it.** Two launch
+profiles that differ in harness, model, provider or protocol are already
+distinct keys and decay separately. The gap is confined to two profiles that
+share *all four* of those and differ only in something the route does not
+capture; those share a prior today. Whether that residual is worth a ledger
+column and a migration is a **Phase 51-shaped question about the event-log
+schema**, not a Phase 35B question, and no phase currently asks for it.
+
+**This is deliberately not a re-tick or an un-tick.** Un-ticking would retire a
+mechanism that works for the case the ledger can actually distinguish; leaving
+the question open a fourth time is what this ruling exists to stop.

@@ -127,7 +127,12 @@ answer for completeness.
   changes the quota domain and not the failure domain, and a provider change
   changes both.
 - **Independent capacity has no producer anywhere in this build.** Phase 32G
-  (request-cost estimation) is 0/10 and Phase 33 (resource health) is 0/15.
+  (request-cost estimation) is 0/10 and Phase 33 (resource health) is **7/15**
+  (corrected 2026-08-29, batch 47; this sentence read "0/15" and was six ticks
+  stale). The correction does not change the claim: none of Phase 33's seven
+  closed lines is a *capacity* producer — they track availability, quota state
+  and degraded/recovered health, a different axis — so independent capacity
+  still has no producer.
 - **Independent failure handling may never be asserted**, because line 1378 —
   in this same phase — forbids treating absent evidence as independence, and
   nothing here establishes it.
@@ -140,3 +145,32 @@ cannot establish. Two unreachable enum variants were offered by the worker and
 structural test proves nothing constructs it, which is load-bearing; a
 `RoutingBenefit::IndependentCapacity` nothing constructs and no test needs would
 be decoration.
+
+
+---
+
+## Orchestrator ruling — map line 1377, 2026-08-29 (batch 47)
+
+**Inherited unresolved through three orchestrators. Ruling: the tick stands,
+and this question is now closed — do not re-open it without new evidence.**
+
+The line asks Glasshouse to record *which* of four things a routing benefit
+came from. `RoutingBenefit` (`routing/interactive.rs:787`) has exactly two
+variants — `UnconfirmedFailureDomainChange` and `DifferentQueueSameUpstream` —
+and `grep -rn IndependentCapacity crates/glasshouse/src/` returns **nothing**:
+the identifier is not constructed, not matched, and not named anywhere in
+production source. Verified directly by the orchestrator, not taken from a
+report.
+
+That is the line satisfied, not evaded. The four categories are alternatives,
+and "merely a different queue onto the same upstream" is one of them and is
+recorded. Refusing to assert independent capacity or independent failure
+handling is required behaviour here — line 1378, in this same phase, forbids
+treating absent evidence as independence. A build that named a category it
+cannot establish would breach 1378 to satisfy 1377.
+
+**What the "PARTIAL" language in this entry meant** was that two of the four
+categories are unproducible. That is a true statement about the build and a
+false reason to doubt the tick, which is why it survived three readings without
+resolving. It is ruling 3 of the sweep's three options: the tick is right and
+the entry describes a clause the box does not require.
