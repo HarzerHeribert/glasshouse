@@ -177,6 +177,15 @@ done
 
 if [ "$delivered" -eq 1 ]; then
   printf '\033[32mnew-worker: %s ACCEPTED the prompt\033[0m — %s %s\n' "$NAME" "$ws" "$surface"
+
+  # Record the dispatch so `pipeline.sh` can count a worker that has no worktree.
+  # A read-only recon runs in the main checkout by design, so worktree-counting
+  # reported it as never dispatched and the board nag fired at an orchestrator
+  # who had just dispatched it. Written only here, after delivery is proven, so
+  # the marker means "this really started" rather than "this was attempted".
+  mkdir -p "$REPO/.agent-runtime/dispatched"
+  printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ws" "$surface" \
+    > "$REPO/.agent-runtime/dispatched/$NAME"
   printf '  arm the watch:  scripts/worker-watch.sh %s %s <report-path>\n' "$NAME" "$surface"
   exit 0
 fi

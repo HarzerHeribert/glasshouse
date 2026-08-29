@@ -46,12 +46,37 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO" || exit 1
 FLOOR="${PIPELINE_FLOOR:-2}"
 
+# A dispatched worker is normally one directory under .worktrees/. A READ-ONLY
+# RECON IS NOT: it works in the main checkout because it edits nothing, so it
+# has no worktree by design (see the --recon packets). Counting worktrees alone
+# therefore reported a running recon as `ready-to-dispatch`, and --watch fired
+# "1 packet(s) already written and never dispatched" at an orchestrator who had
+# just dispatched it. Measured 2026-08-29, twice in one session.
+#
+# That is worse than a miscount. A nag that fires when nothing is wrong is a
+# nag that stops being read, and this script's own header says every line it
+# emits must be actionable. So `dev/new-worker.sh` records a marker on a proven
+# dispatch and `worker-ack.sh` clears it; a worker is live if it has a worktree
+# OR an unacknowledged dispatch marker.
+DISPATCH_DIR=".agent-runtime/dispatched"
+
 snapshot() {
   LIVE=0; LIVE_NAMES=""
   if [ -d .worktrees ]; then
     for d in .worktrees/*/; do
       [ -d "$d" ] || continue
       LIVE=$((LIVE+1)); LIVE_NAMES="$LIVE_NAMES $(basename "$d")"
+    done
+  fi
+  # Worktree-less workers (recon). Skip any that also has a worktree, or the
+  # same worker would be counted twice.
+  if [ -d "$DISPATCH_DIR" ]; then
+    for m in "$DISPATCH_DIR"/*; do
+      [ -f "$m" ] || continue
+      n="$(basename "$m")"
+      [ -d ".worktrees/$n" ] && continue
+      [ -f ".agent-runtime/report-$n.md" ] && continue
+      LIVE=$((LIVE+1)); LIVE_NAMES="$LIVE_NAMES $n"
     done
   fi
   WAITING="$(scripts/worker-ack.sh --list 2>/dev/null | grep -cv 'no workers waiting' || true)"
@@ -67,6 +92,7 @@ snapshot() {
     n="$(basename "$p" .md)"; n="${n#packet-}"
     [ -d ".worktrees/$n" ] && continue
     [ -f ".agent-runtime/report-$n.md" ] && continue
+    [ -f "$DISPATCH_DIR/$n" ] && continue
     READY=$((READY+1)); READY_NAMES="$READY_NAMES $n"
   done
 }

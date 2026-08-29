@@ -43,3 +43,9 @@ if [ -f "$MARKER" ] || [ -f "$DONE_FILE" ]; then
 else
   echo "nothing pending for '$NAME' (already acknowledged, or never reported done)"
 fi
+
+# A dispatch marker (written by dev/new-worker.sh so pipeline.sh can see a
+# worktree-less recon) stops meaning "live" once the worker is acknowledged.
+if [ -n "${1:-}" ] && [ "${1:-}" != "--list" ]; then
+  rm -f "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.agent-runtime/dispatched/$1"
+fi
