@@ -279,10 +279,10 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
+- Checkpoint — 2026-08-29, batch 49 landed: 734 / 1280 (57%)
 - Checkpoint — 2026-08-29, batch 48 landed: 721 / 1280 (56%)
 - Checkpoint — 2026-08-29, batch 47 landed: 716 / 1280 (56%)
 - Checkpoint — 2026-08-29, batch 45 landed: 710 / 1280 (55%)
-- Checkpoint — 2026-08-28, batch 43 landed: 687 / 1280 (53%)
 
 ## Evidence ledger files
 
