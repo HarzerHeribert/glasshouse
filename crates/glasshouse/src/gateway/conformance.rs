@@ -528,9 +528,29 @@ fn a_real_forwarded_exchanges_rate_limit_headers_reach_the_gateway() {
         "the exchange did not complete: {response}"
     );
 
-    let (headers, observed_at) = gateway
-        .quota_headers()
-        .expect("a forwarded response carrying rate-limit headers must reach the gateway");
+    // POLL. `observe_quota_headers` runs on the connection thread AFTER the
+    // response is already on the wire, so `send_and_read` returning 200 OK does
+    // not mean the reading has landed. This test asserted immediately and was
+    // ~50% red on Linux, where scheduling lets the client finish first more
+    // often; it was found by a gate run made for an unrelated reason, never by
+    // a local run on macOS.
+    //
+    // The sibling below already polls and its comment calls this read "a direct
+    // read with no thread hop at all". That belief is what made this test look
+    // safe, and it is wrong: the hop is the connection thread. Comment
+    // corrected there too.
+    let mut attempts = 0;
+    let (headers, observed_at) = loop {
+        if let Some(found) = gateway.quota_headers() {
+            break found;
+        }
+        attempts += 1;
+        assert!(
+            attempts < 200,
+            "a forwarded response carrying rate-limit headers must reach the gateway within 2s"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
     assert_eq!(headers.limit(), Some(7000));
     assert_eq!(headers.remaining(), Some(6999));
     assert_eq!(headers.token_limit(), Some(6000));
@@ -575,12 +595,14 @@ fn a_real_forwarded_exchanges_rate_limit_headers_are_persisted_for_the_next_proc
 
     // The write happens on the connection thread, after the response is
     // already on the wire back to the client above — poll rather than
-    // assume it has landed by the time `send_and_read` returns, the same
-    // margin `an_empty_reading_does_not_clear_a_previous_one` and its
-    // siblings give the in-memory half via `gateway.quota_headers()`
-    // (a direct read with no thread hop at all). A real disk write is the
-    // one step here neither of those has, so it gets an explicit wait
-    // instead of borrowing their zero-wait assumption.
+    // assume it has landed by the time `send_and_read` returns.
+    //
+    // An earlier version of this comment said the in-memory half via
+    // `gateway.quota_headers()` is "a direct read with no thread hop at all".
+    // That was wrong and it cost a ~50%-red Linux test: `observe_quota_headers`
+    // runs on the SAME connection thread, after the response is on the wire, so
+    // the in-memory read has exactly the same race — it is only narrower, not
+    // absent. Those tests poll now too.
     let mut attempts = 0;
     let (headers, observed_at) = loop {
         if let Some(found) = cache.load("fixture") {
