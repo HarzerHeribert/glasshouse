@@ -859,7 +859,7 @@ Fixed architectural requirements
 ☑ Support the authority class hypothesis for a belief that still requires validation.
 ☑ Support the authority class idea for exploratory possibilities that must never be injected as binding instructions.
 ☑ Support the authority class historical for context that is useful for understanding the project but should not direct current implementation.
-☐ Require memory extraction to distinguish a hard requirement from a convenient implementation choice.
+☑ Require memory extraction to distinguish a hard requirement from a convenient implementation choice.
 ☑ Require memory extraction to distinguish an accepted decision from an idea that was merely discussed enthusiastically.
 ☑ Treat uncertain authority classification conservatively and avoid promoting uncertain memories to invariants automatically.
 ☑ Allow users or trusted review agents to promote or demote memory authority explicitly.
