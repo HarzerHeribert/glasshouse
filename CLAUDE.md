@@ -138,6 +138,32 @@ and the user noticed before any mechanism did.
 `scripts/tests/test_launch_prompts.py` fails the gate if a launch prompt loses
 the instruction again — the rule is enforced now rather than written down.
 
+**Keep the pipeline fed, and let `scripts/pipeline.sh` remember it for you.**
+Every other watch in this project fires on a worker *event*. An empty board
+produces no events, so it is quiet in exactly the way that looks like nothing is
+wrong — and on 2026-08-29 an orchestrator sat at one worker with ~90% of the
+tree unclaimed until the user asked why. Arm this in your first turn alongside
+the continuity watch:
+
+    Monitor(command: "scripts/pipeline.sh --watch 600", persistent: true)
+
+It stays silent while two or more workers are live and names the undispatched
+packets when they are not. **The floor is two, not one**: by the time the board
+is empty the refill has already cost wall-clock that parallel work would have
+absorbed. The ceiling is still §74's — past three concurrent editing workers use
+a team lead, because review is what catches a mutation killed by the wrong
+assertion, and review is yours.
+
+**Before choosing what to dispatch, run `scripts/cluster-b.py` and then read
+`docs/process/refusal-register.md` — in that order, and read the register
+before you commit to anything.** The script finds the shape that closed four of
+batch 51's eight lines: production code whose every call site falls after its
+file's `#[cfg(test)]`. The register is what stops you packaging a phase that
+looks open and is not — six of Phase 32A's nine open lines are Cluster E, *"the
+provider signal genuinely does not arrive, do not package"*, and an orchestrator
+recommended that phase anyway by counting open lines instead of reading the
+register first.
+
 **Run practice §16's mutation ritual with `scripts/mutate.sh`, not by hand.**
 It backs up, mutates, touches, runs the given test, and always restores from
 the backup — failing loudly if the restore does not come back byte-identical.
