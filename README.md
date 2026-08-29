@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`████████████████████████░░░░░░░░░░░░░░░░` 797 / 1280 mandatory capabilities (62%)
+`████████████████████████░░░░░░░░░░░░░░░░` 799 / 1280 mandatory capabilities (62%)
 
 <details>
 <summary>Per-phase breakdown (39 of 104 phases complete)</summary>
@@ -69,7 +69,7 @@ the authoritative specification and tracks what is done.
 | Phase 21C — Validity conditions and invalidation | 11/11 ✅ |
 | Phase 21D — Memory age and relevance decay | 9/9 ✅ |
 | Phase 21E — Decision ladder and conflict handling | 7/12 |
-| Phase 21F — Memory retrieval quality | 7/11 |
+| Phase 21F — Memory retrieval quality | 9/11 |
 | Phase 21G — Memory revalidation | 3/9 |
 | Phase 21H — Simplicity-first implementation policy | 0/10 |
 | Phase 21I — Production-aware implementation checks | 0/11 |

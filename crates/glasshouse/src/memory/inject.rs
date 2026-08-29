@@ -228,7 +228,8 @@ pub fn briefing(
     already_injected: &HashSet<MemoryId>,
 ) -> Result<Option<Injection>, MemoryStoreError> {
     let query: String = task.chars().take(MAX_QUERY_CHARS).collect();
-    let grouped = store.search_grouped(&query, SearchScope::Current, CANDIDATE_LIMIT)?;
+    let grouped =
+        store.search_grouped_for_injection(&query, SearchScope::Current, CANDIDATE_LIMIT)?;
 
     let (failed, rest): (Vec<MemoryRecord>, Vec<MemoryRecord>) = grouped
         .other
@@ -246,6 +247,8 @@ pub fn briefing(
         // conflict with another is not settled project knowledge and is not
         // injected as though it were.
         .filter(MemoryRecord::is_current)
+        // Line 934. See `is_unreaffirmed_idea`.
+        .filter(|record| !is_unreaffirmed_idea(record))
         .filter(|record| !already_injected.contains(&record.id))
         .take(MAX_INJECTED_MEMORIES)
         .collect();
@@ -389,6 +392,41 @@ fn render_entry(position: usize, total: usize, record: &MemoryRecord) -> String 
     }
 
     entry
+}
+
+/// Line 934: *"avoid injecting old ideas merely because they mention the same
+/// subsystem."*
+///
+/// Both halves are read off the record rather than judged. **Idea** is
+/// [`MemoryAuthority::Idea`], the class whose own documentation is
+/// *"Exploratory. Must never be injected as a binding instruction."* —
+/// [`MemoryKind`] has no idea variant, so authority is the only place this
+/// project records the distinction. **Old** is `last_validated_at.is_none()`:
+/// nothing has reaffirmed it since it was written down, which is exactly the
+/// stand-in for staleness `standing` already uses for line 1132 and
+/// `policy::phase_penalty` uses for line 933. An idea somebody has
+/// re-confirmed is not an old one and is not excluded here.
+///
+/// # Why this is an exclusion and not a demotion
+///
+/// An injection carries at most [`MAX_INJECTED_MEMORIES`] entries, so ranking
+/// an idea lower is only a refusal to inject it when something else competes
+/// for the slot — and the case the line names is precisely the one where
+/// nothing does: a task mentions a subsystem, the only memories about that
+/// subsystem are old ideas, and they arrive looking like what this project
+/// decided. Demotion cannot express that; membership can.
+///
+/// # The reading this does not take
+///
+/// The line's *"merely because they mention"* could instead be read as a
+/// statement about how *weakly* an idea matched, which would need a relevance
+/// cut — the signal Phase 27 refused to invent for line 1129, and one that
+/// would still not fire for an idea that matched strongly and is still stale.
+/// Reading it off recorded authority and validation costs the case of a
+/// genuinely current idea nobody has reaffirmed; that is the trade, and
+/// reaffirming is the recorded, one-call way out of it.
+fn is_unreaffirmed_idea(record: &MemoryRecord) -> bool {
+    record.authority == Some(MemoryAuthority::Idea) && record.last_validated_at.is_none()
 }
 
 /// Whether a memory's own recorded authority says it may materially

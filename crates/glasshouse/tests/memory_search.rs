@@ -764,3 +764,449 @@ fn recency_does_not_dominate_a_brand_new_idea_never_outranks_an_older_validated_
     );
     assert_eq!(results[1].id, idea.id);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 27 follow-on — the injection query's semantics.
+//
+// `MemoryStore::search_grouped_for_injection` is the retrieval behind context
+// injection. It differs from `MemoryStore::search_grouped` in exactly one
+// thing — the `MATCH` expression — and these tests are about that difference
+// and about the half of it that must NOT change.
+//
+// They live here rather than in `tests/context_injection.rs` because that file
+// is `#![cfg(unix)]` (its door is a Unix socket) and everything in
+// `src/memory/**` has to hold on Windows too.
+// ---------------------------------------------------------------------------
+
+/// The product decision, pinned: the CLI search box and the `query_memory` API
+/// verb keep implicit **AND**. A two-word query must not return a memory
+/// carrying only one of the words.
+///
+/// This is the regression the injection change was shaped to avoid, so it is
+/// asserted on `search` *and* on `search_grouped` — `search_grouped` is the
+/// exact function `main.rs::memory_search_grouped` calls, which is what both
+/// of those doors render from.
+#[test]
+fn the_search_box_still_requires_every_word_of_a_query_to_match() {
+    let fixture = Fixture::new();
+    let project = fixture.open();
+    let store = project.store();
+
+    store
+        .record(
+            NewMemory::new(
+                MemoryKind::Finding,
+                "The kestrel dashboard is rendered from a cached snapshot.",
+            )
+            .with_subject(Some("kestrel dashboard")),
+        )
+        .unwrap();
+    store
+        .record(
+            NewMemory::new(
+                MemoryKind::Finding,
+                "The nightly export is written by a cron job.",
+            )
+            .with_subject(Some("nightly export")),
+        )
+        .unwrap();
+
+    // Each word alone finds its own memory, so the two-word result below is a
+    // conjunction failing rather than an empty table (§80).
+    assert_eq!(
+        store
+            .search("kestrel", SearchScope::Current, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .search("export", SearchScope::Current, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let both = store
+        .search("kestrel export", SearchScope::Current, 10)
+        .unwrap();
+    assert!(
+        both.is_empty(),
+        "the search box ANDs its terms: no memory carries both words, so nothing may come \
+         back — got {both:#?}"
+    );
+
+    let grouped = store
+        .search_grouped("kestrel export", SearchScope::Current, 10)
+        .unwrap();
+    assert!(
+        grouped.invariants_and_constraints.is_empty() && grouped.other.is_empty(),
+        "`search_grouped` is what the CLI and the `query_memory` verb both render from, and it \
+         must AND too: {grouped:#?}"
+    );
+
+    // The control: a memory that really does carry both words is found by the
+    // same two-word query.
+    let both_words = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Constraint,
+                "The kestrel export must never write partial files.",
+            )
+            .with_subject(Some("kestrel export")),
+        )
+        .unwrap();
+    let found = store
+        .search("kestrel export", SearchScope::Current, 10)
+        .unwrap();
+    assert_eq!(
+        found.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+        vec![both_words.id],
+        "a memory carrying both words must still be found by the AND query"
+    );
+}
+
+/// The defect this follow-on exists for: a task written as a sentence
+/// retrieved nothing, because every one of its words had to appear in one
+/// memory. The same sentence now retrieves the memory it is about.
+///
+/// # The two controls, and they are the point (§71, §80)
+///
+/// "Something came back" would pass against a retrieval that returns anything
+/// it can reach, which is exactly the failure a bare `OR` produces. So the
+/// store also holds:
+///
+/// - a **decoy invariant** that shares only the word `the` with the task. It
+///   is not merely less relevant — it sits on a *higher* ladder rung than the
+///   memory that should win, and `MemoryStore::search` sorts by rung before
+///   relevance, so a query that admits it puts it **first**. Measured against
+///   a bare `OR` join on a fifteen-memory corpus, this is precisely what
+///   happened.
+/// - a proof that the decoy is present and retrievable, so its absence from
+///   the prose result is an exclusion rather than an empty table.
+#[test]
+fn a_task_written_as_a_sentence_retrieves_the_memory_it_is_about() {
+    let fixture = Fixture::new();
+    let project = fixture.open();
+    let store = project.store();
+
+    let relevant = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Constraint,
+                "The kestrel export must never write partial files.",
+            )
+            .with_subject(Some("kestrel export"))
+            .with_authority(Some(MemoryAuthority::Constraint)),
+        )
+        .unwrap();
+    let decoy = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Constraint,
+                "A provider key must never be written into a file the harness can read.",
+            )
+            .with_subject(Some("provider secrets"))
+            .with_authority(Some(MemoryAuthority::Invariant)),
+        )
+        .unwrap();
+
+    let task = "Please look at the kestrel export and make sure it cannot write a partial file \
+                when the disk fills up.";
+
+    // Today's semantics, unchanged, still retrieve nothing for this sentence —
+    // which is what makes the assertion below a fix rather than a coincidence.
+    assert!(
+        store
+            .search_grouped(task, SearchScope::Current, 40)
+            .unwrap()
+            .other
+            .is_empty(),
+        "the conjunctive door must still find nothing in a sentence"
+    );
+
+    let grouped = store
+        .search_grouped_for_injection(task, SearchScope::Current, 40)
+        .unwrap();
+    let retrieved: Vec<_> = grouped
+        .invariants_and_constraints
+        .iter()
+        .chain(grouped.other.iter())
+        .map(|record| record.id.clone())
+        .collect();
+
+    assert_eq!(
+        retrieved,
+        vec![relevant.id],
+        "the prose task must retrieve the memory it is about, and only that one"
+    );
+
+    // The decoy is in the table and is findable — its absence above is line
+    // 930 excluding it, not an empty store.
+    let found = store
+        .search("provider secrets", SearchScope::Current, 10)
+        .unwrap();
+    assert_eq!(
+        found.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+        vec![decoy.id],
+        "the decoy must be present and retrievable"
+    );
+}
+
+/// Line 930 — *"inject only memories whose scope overlaps the current
+/// task."*
+///
+/// A memory's scope is the `subject` it recorded. This test makes relevance
+/// and scope disagree on purpose: the excluded memory mentions the task's
+/// words **more often** than the memory that is kept, and is excluded anyway,
+/// because its subject is about something else. That is what distinguishes
+/// this rule from a relevance threshold — a threshold would keep the memory
+/// with the better text match, and this keeps the other one.
+#[test]
+fn line_930_a_memory_whose_subject_is_about_something_else_is_out_of_scope_for_a_prose_task() {
+    let fixture = Fixture::new();
+    let project = fixture.open();
+    let store = project.store();
+
+    let in_scope = store
+        .record(
+            NewMemory::new(MemoryKind::Finding, "It is generated once per release.")
+                .with_subject(Some("kestrel export")),
+        )
+        .unwrap();
+    let out_of_scope = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Finding,
+                "The billing kestrel export report mentions the kestrel export twice more, and \
+                 the kestrel export again here, without being about the kestrel export at all.",
+            )
+            .with_subject(Some("billing invoices")),
+        )
+        .unwrap();
+
+    let task = "Have a look at the kestrel export before the next release goes out.";
+
+    let grouped = store
+        .search_grouped_for_injection(task, SearchScope::Current, 40)
+        .unwrap();
+    let retrieved: Vec<_> = grouped
+        .invariants_and_constraints
+        .iter()
+        .chain(grouped.other.iter())
+        .map(|record| record.id.clone())
+        .collect();
+    assert_eq!(
+        retrieved,
+        vec![in_scope.id],
+        "only the memory whose recorded subject the task names is in scope"
+    );
+
+    // Present, retrievable, and the better text match of the two — so the
+    // exclusion above is the scope rule, not absence and not relevance.
+    let by_text = store
+        .search("kestrel export", SearchScope::Current, 10)
+        .unwrap();
+    assert_eq!(
+        by_text.first().map(|r| r.id.clone()),
+        Some(out_of_scope.id),
+        "the out-of-scope memory must be present, retrievable, and the STRONGER text match"
+    );
+}
+
+/// Injection is strictly more recall, never less: every memory today's
+/// conjunctive query returns is still returned, because that expression is
+/// kept verbatim as one half of the injection query.
+#[test]
+fn a_keyword_task_retrieves_at_least_everything_it_retrieves_today() {
+    let fixture = Fixture::new();
+    let project = fixture.open();
+    let store = project.store();
+
+    // No subject at all: this memory can only ever be reached through the
+    // conjunctive half, which is exactly what "never less" has to protect.
+    let subjectless = store
+        .record(NewMemory::new(
+            MemoryKind::Finding,
+            "The kestrel export is read-only.",
+        ))
+        .unwrap();
+
+    for task in ["kestrel", "kestrel export", "export kestrel"] {
+        let today = store.search(task, SearchScope::Current, 40).unwrap();
+        assert_eq!(
+            today.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+            vec![subjectless.id.clone()],
+            "control: today's query finds it for {task:?}"
+        );
+
+        let grouped = store
+            .search_grouped_for_injection(task, SearchScope::Current, 40)
+            .unwrap();
+        let now: Vec<_> = grouped
+            .invariants_and_constraints
+            .iter()
+            .chain(grouped.other.iter())
+            .map(|record| record.id.clone())
+            .collect();
+        for id in &today {
+            assert!(
+                now.contains(&id.id),
+                "injection must not lose a memory the conjunctive query finds for {task:?}"
+            );
+        }
+    }
+}
+
+/// A task is prose, not FTS5 syntax — and the injection query builds a real
+/// `OR` expression, and a real column filter, out of it. The quoting that
+/// makes that safe has to survive the new join.
+///
+/// Every string below is FTS5 operator syntax, including one that tries to
+/// close the injected column filter and open its own. None may error.
+///
+/// The observable that proves the operators are *inert* rather than merely
+/// harmless is the prefix one: `*` is FTS5's prefix operator, so an
+/// unquoted `kestrel*` would match `kestrelfoo`. Quoted, it matches the word
+/// `kestrel` and nothing else. `OR` and `NEAR` make poor observables here
+/// because a task containing them also contains the words around them, which
+/// are legitimately in scope — the operator acting and the operator being
+/// read as text produce the same result set.
+#[test]
+fn fts5_operators_in_a_task_are_literal_text_to_the_injection_query() {
+    let fixture = Fixture::new();
+    let project = fixture.open();
+    let store = project.store();
+
+    let exact = store
+        .record(
+            NewMemory::new(MemoryKind::Finding, "It runs nightly.")
+                .with_subject(Some("kestrel export")),
+        )
+        .unwrap();
+    store
+        .record(
+            NewMemory::new(MemoryKind::Finding, "It is a different subsystem entirely.")
+                .with_subject(Some("kestrelfoo export")),
+        )
+        .unwrap();
+
+    for task in [
+        "\"",
+        "*",
+        "AND",
+        "OR",
+        "NOT",
+        "NEAR(kestrel, billing)",
+        "a:b",
+        "-x",
+        "kestrel\" OR \"billing",
+        "{subject} : (kestrel)",
+        "^kestrel*",
+        "((((",
+        "kestrel) OR (body : (a",
+    ] {
+        let result = store.search_grouped_for_injection(task, SearchScope::Current, 10);
+        assert!(
+            result.is_ok(),
+            "task {task:?} must not error, got {result:?}"
+        );
+    }
+
+    // A task with nothing alphanumeric in it retrieves nothing, rather than
+    // reaching SQLite with a half-built expression.
+    for task in ["", "   ", "\"\"\"", "*-*", "((("] {
+        let grouped = store
+            .search_grouped_for_injection(task, SearchScope::Current, 10)
+            .unwrap();
+        assert!(
+            grouped.invariants_and_constraints.is_empty() && grouped.other.is_empty(),
+            "task {task:?} has nothing to search for: {grouped:#?}"
+        );
+    }
+
+    // The sharp one: `*` must not act. If it did, `kestrel*` would reach
+    // `kestrelfoo` as well.
+    let grouped = store
+        .search_grouped_for_injection("kestrel*", SearchScope::Current, 10)
+        .unwrap();
+    let retrieved: Vec<_> = grouped
+        .invariants_and_constraints
+        .iter()
+        .chain(grouped.other.iter())
+        .map(|record| record.id.clone())
+        .collect();
+    assert_eq!(
+        retrieved,
+        vec![exact.id],
+        "`*` in a task must be a token boundary, never FTS5's prefix operator: {retrieved:#?}"
+    );
+
+    // ... and the control, so the assertion above is not passing against a
+    // store the query could not reach at all.
+    let control = store
+        .search_grouped_for_injection("kestrelfoo", SearchScope::Current, 10)
+        .unwrap();
+    assert_eq!(
+        control.other.len(),
+        1,
+        "the second memory is present and reachable when a task really names it"
+    );
+}
+
+/// The injection expression is roughly twice the size of the search box's, and
+/// a routed task is caller-supplied text bounded only by
+/// `inject::MAX_QUERY_CHARS` (512 characters). The worst case is not the long
+/// word the existing bound test uses — that is one token — but 512 characters
+/// of *distinct* words, which becomes a `MATCH` expression with hundreds of
+/// `OR` disjuncts and a column filter around half of them.
+///
+/// FTS5 must take it, and the result must still be scoped: the noise words
+/// name no memory's subject, so the one word that does is what decides.
+#[test]
+fn a_task_of_hundreds_of_distinct_words_is_still_a_query_fts5_accepts() {
+    let fixture = Fixture::new();
+    let project = fixture.open();
+    let store = project.store();
+
+    let wanted = store
+        .record(
+            NewMemory::new(MemoryKind::Finding, "It runs nightly.")
+                .with_subject(Some("kestrel export")),
+        )
+        .unwrap();
+    store
+        .record(
+            NewMemory::new(MemoryKind::Finding, "Unrelated, and never named below.")
+                .with_subject(Some("billing invoices")),
+        )
+        .unwrap();
+
+    let mut task = String::from("kestrel");
+    let mut n = 0usize;
+    while task.len() < 512 {
+        task.push_str(&format!(" w{n}"));
+        n += 1;
+    }
+    let task: String = task.chars().take(512).collect();
+    assert!(
+        n > 100,
+        "the task must really carry hundreds of terms, got {n}"
+    );
+
+    let grouped = store
+        .search_grouped_for_injection(&task, SearchScope::Current, 40)
+        .unwrap();
+    let retrieved: Vec<_> = grouped
+        .invariants_and_constraints
+        .iter()
+        .chain(grouped.other.iter())
+        .map(|record| record.id.clone())
+        .collect();
+    assert_eq!(
+        retrieved,
+        vec![wanted.id],
+        "hundreds of terms nothing is about must not widen the scope: {retrieved:#?}"
+    );
+}

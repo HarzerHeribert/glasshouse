@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**797 / 1280 mandatory capabilities (62%)** — 483 open across 65 phases.
+**799 / 1280 mandatory capabilities (62%)** — 481 open across 65 phases.
 
 ## Where the work is
 
@@ -37,6 +37,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 9E | Secret storage | **2** | 11 | `432` |
 | Phase 9J | Harness-model pairing model | **2** | 18 | `545` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
+| Phase 21F | Memory retrieval quality | **2** | 9 | `927` |
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
 | Phase 46 | Security and contamination tests | **2** | 6 | `1739` |
 | Phase 49 | Configuration | **2** | 14 | `1784` |
@@ -44,7 +45,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32F | Protected quota reserve | **3** | 5 | `1285` |
 | Phase 34A | Workload tiers | **3** | 7 | `1393` |
 | Phase 37 | Basic session-aware router | **3** | 8 | `1590` |
-| Phase 21F | Memory retrieval quality | **4** | 7 | `927` |
 | Phase 54 | Criteria before deeper cmux coupling | **4** | 0 | `1885` |
 | Phase 21E | Decision ladder and conflict handling | **5** | 7 | `907` |
 | Phase 28 | File-aware memory lookup | **5** | 0 | `1137` |
@@ -94,7 +94,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~446 open lines are not.
+other ~442 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -166,6 +166,11 @@ these unwrapped.
 
 - **828** ☐ Do not store obvious source-code facts when rereading the source is cheaper and more reliable than maintaining the memory.
 - **829** ☐ Prefer storing information whose rediscovery would require significant exploration or reasoning.
+
+### Phase 21F — Memory retrieval quality  (2 open, 9 closed)
+
+- **932** ☐ Penalize memories whose assumptions conflict with current repository state.
+- **939** ☐ Record false-positive or harmful memory retrievals so the retrieval policy can be evaluated.
 
 ### Phase 32D — Normalized remaining-capacity score  (2 open, 10 closed)
 

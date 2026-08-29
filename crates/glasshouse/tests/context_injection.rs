@@ -37,6 +37,7 @@ use rusqlite::Connection;
 use glasshouse::memory::inject::{
     MAX_INJECTED_BYTES, MAX_INJECTED_MEMORIES, MEMORY_MARKER, MEMORY_MARKER_END,
 };
+use glasshouse::memory::search::SearchScope;
 use glasshouse::memory::{
     DecisionProvenance, MemoryAuthority, MemoryKind, NewMemory, ProjectMemory,
 };
@@ -1131,29 +1132,31 @@ fn a_memory_the_retrieval_put_into_conflict_is_never_injected_as_settled_knowled
 }
 
 // ---------------------------------------------------------------------------
-// A pinned limit, not a passing feature.
+// The limit Phase 27 pinned, inverted — plus lines 930 and 934.
 // ---------------------------------------------------------------------------
 
-/// **This test asserts a limitation on purpose.** It is the executable form of
-/// the finding in this package's report, and it should be *inverted* — same
-/// setup, same viewport, opposite assertion — the day `MemoryStore::search`
-/// grows a non-conjunctive mode. It must not be deleted, and it must not be
-/// "fixed" by weakening its setup.
+/// **The inverted form of Phase 27's pinned limitation.** Same setup, same
+/// viewport, opposite assertion — the inversion that test asked for by name
+/// the day `MemoryStore::search` grew a non-conjunctive mode. It has one, for
+/// injection only: `search_grouped_for_injection`.
 ///
-/// `memory/search.rs::sanitize_query` quotes each token of a query and joins
-/// them with spaces, which FTS5 reads as an implicit **AND**: every word of
-/// the query must appear in the same memory. That is the right default for a
-/// search box, and it is the wrong one for a routed task, because a task
-/// written as a sentence retrieves nothing at all — the memory below is as
-/// relevant as a memory gets and is still not injected.
+/// `sanitize_query` joins its quoted tokens with spaces, which FTS5 reads as
+/// implicit **AND**, so every word of the task had to appear in one memory and
+/// a task written as a sentence retrieved nothing at all. Injection now builds
+/// its own expression — today's conjunctive one `OR`ed with a disjunctive one
+/// restricted to the `subject` column — and the sentence retrieves the memory
+/// it is about.
 ///
-/// The consequence is that this whole step is inert for prose tasks and works
-/// for keyword-shaped ones. Fixing it means changing the query semantics in
-/// `memory/search.rs`, which this package was forbidden to touch, and doing it
-/// here instead would have meant a second retrieval implementation ranking
-/// differently from the one that selects.
+/// # Three spawns, because two would be vacuous (§80)
+///
+/// A keyword-shaped control proves the store is not simply matching
+/// everything. The prose case is the fix. And the third — a sentence about
+/// something else entirely, built from the same common English words — is what
+/// stops this passing against a retrieval that answers every prose task with
+/// whatever it can reach; a bare `OR` join passes the first two and fails the
+/// third.
 #[test]
-fn a_task_written_as_a_sentence_retrieves_nothing_because_the_search_ands_its_terms() {
+fn a_task_written_as_a_sentence_retrieves_the_memory_it_is_about() {
     let fixture = Fixture::new();
     let root = fixture.project_root("alpha");
     let runtime = fixture.runtime(&root);
@@ -1172,29 +1175,226 @@ fn a_task_written_as_a_sentence_retrieves_nothing_because_the_search_ands_its_te
 
     let server = Server::start(&fixture, &root);
 
-    // The control: the same store, a keyword-shaped task, and the memory is
-    // injected. Without this the assertion below would pass against a store
-    // that was simply empty.
+    // The control: a keyword-shaped task, which worked before this change and
+    // must still work — this step only ever adds recall.
     let keyworded = server.spawn_with_task("kestrel export");
     wait_for("the first worker's harness to start", || {
         fixture.argv(&root, &keyworded).is_some()
     });
     let lines = deliveries(&fixture, &root, &keyworded, 2);
-    the_injected_block(&lines);
+    assert!(
+        the_injected_block(&lines).contains("must never write partial files"),
+        "{lines:#?}"
+    );
 
+    // The fix: the same memory, reached by a task nobody wrote as a query.
     let sentence = "Please look at the kestrel export and make sure it cannot write a partial \
                     file when the disk fills up.";
     let prose = server.spawn_with_task(sentence);
     wait_for("the second worker's harness to start", || {
         fixture.argv(&root, &prose).is_some()
     });
-    let prose_lines = deliveries(&fixture, &root, &prose, 1);
-    assert_eq!(
-        fixture.received(&root, &prose).unwrap(),
-        format!("{sentence}\n"),
-        "PINNED LIMITATION: a task written as a sentence retrieves nothing, because \
-         `sanitize_query` ANDs every one of its words. Invert this test when \
-         `MemoryStore::search` grows a non-conjunctive mode; do not delete it."
+    // ONE delivery, not two, and that is practice §80's fifth case rather than
+    // impatience: `deliver_memory` runs before the task is sent, so the first
+    // line is the block whenever a block exists at all. Waiting for two would
+    // make a retrieval that found nothing fail at `deliveries`' own generic
+    // timeout — a true verdict credited to an assertion that never ran — and
+    // the whole point of this test is the assertion below.
+    let first = deliveries(&fixture, &root, &prose, 1);
+    assert!(
+        first[0].contains(MEMORY_MARKER) && first[0].contains("must never write partial files"),
+        "a task written as a sentence must retrieve the memory it is about; the first delivery \
+         was: {first:#?}"
     );
-    assert_eq!(prose_lines.len(), 1, "{prose_lines:#?}");
+
+    let prose_lines = deliveries(&fixture, &root, &prose, 2);
+    the_injected_block(&prose_lines);
+    assert_eq!(
+        prose_lines.iter().filter(|line| *line == sentence).count(),
+        1,
+        "the task must still arrive as its own unaltered delivery: {prose_lines:#?}"
+    );
+
+    // The non-vacuity control: prose of the same shape, about something this
+    // project has no memory of. Every word it shares with the memory above is
+    // a word like `the` or `make`, and sharing those is not scope overlap.
+    let unrelated = "Please look at the release notes and make sure it is up to date before we \
+                     announce anything.";
+    let noise = server.spawn_with_task(unrelated);
+    wait_for("the third worker's harness to start", || {
+        fixture.argv(&root, &noise).is_some()
+    });
+    let noise_lines = deliveries(&fixture, &root, &noise, 1);
+    assert_eq!(
+        fixture.received(&root, &noise).unwrap(),
+        format!("{unrelated}\n"),
+        "a prose task this project has no memory about must inject nothing — retrieving \
+         *something* for every sentence is the failure a bare `OR` join produces"
+    );
+    assert_eq!(noise_lines.len(), 1, "{noise_lines:#?}");
+}
+
+// ---------------------------------------------------------------------------
+// Line 930 — scope overlap with the current task.
+// ---------------------------------------------------------------------------
+
+/// A memory whose recorded subject is about something else is not injected for
+/// a prose task, however well its text happens to match.
+///
+/// # The excluded memory is present, retrievable, and the better match
+///
+/// It is a binding **invariant**, so it sits on a higher ladder rung than the
+/// constraint that should win, and `MemoryStore::search` sorts by rung before
+/// relevance — a query that admits it puts it *first*. Measured against a bare
+/// `OR` join, that is exactly what happened: three unrelated invariants filled
+/// all three slots. So this is not "the decoy ranked lower"; it is the decoy
+/// being out of scope, and the test proves the store can still find it.
+#[test]
+fn line_930_a_memory_out_of_the_tasks_scope_is_not_injected_though_it_is_retrievable() {
+    let fixture = Fixture::new();
+    let root = fixture.project_root("alpha");
+    let runtime = fixture.runtime(&root);
+    let project = ProjectMemory::open(&runtime).unwrap();
+    let store = project.store();
+
+    store
+        .record(
+            NewMemory::new(
+                MemoryKind::Constraint,
+                "The kestrel export must never write partial files.",
+            )
+            .with_subject(Some("kestrel export"))
+            .with_authority(Some(MemoryAuthority::Constraint)),
+        )
+        .unwrap();
+    let out_of_scope = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Constraint,
+                "A provider key must never be written into a file the harness can look at.",
+            )
+            .with_subject(Some("provider secrets"))
+            .with_authority(Some(MemoryAuthority::Invariant)),
+        )
+        .unwrap();
+
+    let server = Server::start(&fixture, &root);
+    let session = server.spawn_with_task(
+        "Please look at the kestrel export and make sure it cannot write a partial file when \
+         the disk fills up.",
+    );
+    wait_for("the worker's harness to start", || {
+        fixture.argv(&root, &session).is_some()
+    });
+
+    let block = the_injected_block(&deliveries(&fixture, &root, &session, 2)).to_owned();
+    assert!(
+        block.contains("must never write partial files"),
+        "the in-scope memory must be injected: {block}"
+    );
+    assert!(
+        !block.contains("provider key"),
+        "a memory whose subject is about something else must not be injected: {block}"
+    );
+    assert!(
+        !block.contains(&out_of_scope.id.as_str()[..12]),
+        "not by id either: {block}"
+    );
+
+    // Present and retrievable — the absence above is line 930 excluding it,
+    // not an empty table (§80).
+    let found = store
+        .search("provider secrets", SearchScope::Current, 10)
+        .unwrap();
+    assert_eq!(
+        found.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+        vec![out_of_scope.id],
+        "the excluded memory must be in the store and findable"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Line 934 — an old idea that merely mentions the same subsystem.
+// ---------------------------------------------------------------------------
+
+/// An idea nobody has reaffirmed is not injected merely because the task names
+/// the subsystem it is about — and reaffirming it puts it back.
+///
+/// # Why the second half is the one that makes this a rule about staleness
+///
+/// Asserting only the exclusion would pass against a filter that drops every
+/// `idea` outright, or every memory of that kind, or one that simply never
+/// matched. The same memory, the same task, the same session shape, with
+/// `last_validated_at` written by `MemoryStore::reaffirm` and nothing else
+/// changed, is injected — so what the filter reads is the recorded validation
+/// state and not the authority alone.
+#[test]
+fn line_934_an_unreaffirmed_idea_is_not_injected_until_it_is_reaffirmed() {
+    let fixture = Fixture::new();
+    let root = fixture.project_root("alpha");
+    let runtime = fixture.runtime(&root);
+    let project = ProjectMemory::open(&runtime).unwrap();
+    let store = project.store();
+
+    // The control that keeps a block on the terminal at all, so "the idea is
+    // absent" is read off a block that exists rather than off silence.
+    store
+        .record(
+            NewMemory::new(
+                MemoryKind::Finding,
+                "The kestrel export writes one file per region.",
+            )
+            .with_subject(Some("kestrel export"))
+            .with_authority(Some(MemoryAuthority::Decision)),
+        )
+        .unwrap();
+    let idea = store
+        .record(
+            NewMemory::new(
+                MemoryKind::Decision,
+                "It might be nice if the kestrel export produced parquet one day.",
+            )
+            .with_subject(Some("kestrel export formats"))
+            .with_authority(Some(MemoryAuthority::Idea)),
+        )
+        .unwrap();
+
+    // Present and retrievable before anything is spawned: the assertions below
+    // are about selection, not about whether the search can see it.
+    let found = store
+        .search("kestrel export", SearchScope::Current, 10)
+        .unwrap();
+    assert!(
+        found.iter().any(|record| record.id == idea.id),
+        "the idea must be retrievable by the very task text used below: {found:#?}"
+    );
+
+    let server = Server::start(&fixture, &root);
+    let before = server.spawn_with_task("kestrel export");
+    wait_for("the first worker's harness to start", || {
+        fixture.argv(&root, &before).is_some()
+    });
+    let block = the_injected_block(&deliveries(&fixture, &root, &before, 2)).to_owned();
+    assert!(
+        block.contains("one file per region"),
+        "the control memory must be injected: {block}"
+    );
+    assert!(
+        !block.contains("parquet"),
+        "an idea nobody has reaffirmed must not take an injection slot merely because the task \
+         names its subsystem: {block}"
+    );
+
+    // The other half: the only thing that changes is the recorded validation
+    // state.
+    store.reaffirm(&idea.id).unwrap();
+    let after = server.spawn_with_task("kestrel export");
+    wait_for("the second worker's harness to start", || {
+        fixture.argv(&root, &after).is_some()
+    });
+    let reaffirmed_block = the_injected_block(&deliveries(&fixture, &root, &after, 2)).to_owned();
+    assert!(
+        reaffirmed_block.contains("parquet"),
+        "a reaffirmed idea is not an old one, and is injected: {reaffirmed_block}"
+    );
 }

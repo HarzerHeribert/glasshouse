@@ -97,6 +97,20 @@ fn is_current_invariant_or_constraint(record: &MemoryRecord) -> bool {
         )
 }
 
+/// Split one relevance-ordered result list the way [`RetrievalResult`]
+/// describes. A stable partition — neither group is re-sorted.
+fn group(records: Vec<MemoryRecord>) -> RetrievalResult {
+    let mut grouped = RetrievalResult::default();
+    for record in records {
+        if is_current_invariant_or_constraint(&record) {
+            grouped.invariants_and_constraints.push(record);
+        } else {
+            grouped.other.push(record);
+        }
+    }
+    grouped
+}
+
 /// Every column of `memories`, qualified by table name.
 ///
 /// [`super::store::ALL_COLUMNS`] cannot be reused here unqualified: this
@@ -173,6 +187,99 @@ fn sanitize_query(text: &str) -> Option<String> {
     }
 }
 
+/// The `memories_fts` column that holds a memory's own statement of what it
+/// is about — see `injection_query`, which uses it as line 930's *scope*.
+const SUBJECT_COLUMN: &str = "subject";
+
+/// Turn a routed task into the FTS5 `MATCH` expression **context injection**
+/// uses, or `None` if nothing in it could be searched for.
+///
+/// The shape is
+///
+/// ```text
+/// ("a" "b" "c") OR ({subject} : ("a" OR "b" OR "c"))
+/// ```
+///
+/// — today's conjunctive query, unchanged, `OR`ed with a disjunctive one
+/// restricted to the `subject` column.
+///
+/// # The left half: nothing that is retrieved today stops being retrieved
+///
+/// `sanitize_query` joins its quoted tokens with spaces, which FTS5 reads as
+/// implicit `AND`: every word must appear in the same memory. That is right
+/// for a search box, where a person adds a word to narrow the result set, and
+/// it is wrong for a routed task, which is prose. *"Please look at the kestrel
+/// export and make sure it cannot write a partial file"* demands that one
+/// memory contain `please` and `look` and `sure` and `up`, so injection
+/// retrieved **nothing** for any task written as a sentence — the limit Phase
+/// 27 closed line 1126 with, named rather than hidden.
+///
+/// That expression is kept verbatim as the left disjunct, so the result set
+/// here is a **superset** of the one the search box gets, by construction
+/// rather than by test: whatever a keyword-shaped task retrieves today it
+/// still retrieves. This step only ever adds recall.
+///
+/// # The right half is line 930, and it is in the query rather than after it
+///
+/// *"Inject only memories whose scope overlaps the current task."* Joining
+/// prose with a bare `OR` makes membership almost free — one incidental word
+/// and a memory is a candidate — and `MemoryStore::search` ranks by
+/// [`LadderRung`] **before** relevance, so the top of a wide candidate set is
+/// this project's highest-authority memories whatever the task was about.
+/// Measured on a fifteen-memory corpus: a bare `OR` answered *"update the
+/// README with the new installation instructions"* with three binding
+/// invariants about pseudo-terminals, secrets and project isolation, matched
+/// on the word `the` alone.
+///
+/// So the added disjunct is restricted to the `subject` column — the field
+/// where a memory records what it is *about*, and the field
+/// [`contradicts`] already treats as a memory's identity when deciding that
+/// two memories concern the same thing. A memory joins the candidate set on
+/// prose only if the task names its subject.
+///
+/// **Why this is not a relevance threshold wearing a different name.** It
+/// reads no score, sorts nothing, and cannot be satisfied by matching the
+/// same word harder; a memory whose body mentions the task's words a hundred
+/// times is still out if its subject is about something else. More to the
+/// point, a relevance threshold would not have worked: in the measurement
+/// above the noise was selected by *rung*, not by score, so no cut on `bm25()`
+/// could have removed it, and a stop-word or corpus-frequency filter could
+/// not either — for the task *"make sure it is up to date"* no term matched
+/// more than 47% of that corpus and every one of the three injected memories
+/// was still irrelevant.
+///
+/// A memory that records **no** subject cannot be judged this way and is not
+/// judged: it matches only through the left disjunct, which is exactly the
+/// behaviour it has today. That is the direction this project's requirement
+/// points — injection is strictly more recall, never less — and it is a real
+/// limit, recorded in `phase-27.md` rather than papered over.
+///
+/// # This is a second expression, not a second retrieval
+///
+/// Phase 27 refused line 1129 partly because a second BM25 query issued from
+/// `inject.rs` *"would be a second retrieval implementation ranking
+/// differently from the one that chose the memories it was scoring."* That
+/// objection is about **ranking**, and nothing here ranks: this function
+/// returns a `MATCH` expression and `MemoryStore::search_matching` — the same
+/// table, the same `bm25()`, the same ladder, the same decay weighting, the
+/// same thin-decision demotion — does the rest for both doors.
+///
+/// # The quoting is inherited, not re-implemented
+///
+/// Every token is built by `sanitize_query` itself and only the join is
+/// changed. A token is alphanumeric-only by construction there, so no quoted
+/// token can contain a space and splitting that output on spaces recovers
+/// exactly the tokens it produced. A task containing `OR`, `NEAR`, `*`, `"`
+/// or `-` is therefore quoted here by the same code that quotes it for the
+/// search box, and the containment property has one home rather than two.
+fn injection_query(text: &str) -> Option<String> {
+    let conjunctive = sanitize_query(text)?;
+    let scoped = conjunctive.split(' ').collect::<Vec<&str>>().join(" OR ");
+    Some(format!(
+        "({conjunctive}) OR ({{{SUBJECT_COLUMN}}} : ({scoped}))"
+    ))
+}
+
 impl<'a> MemoryStore<'a> {
     /// Search this project's memory by free text, ranked by BM25 relevance.
     ///
@@ -234,6 +341,24 @@ impl<'a> MemoryStore<'a> {
         let Some(match_expr) = sanitize_query(text) else {
             return Ok(Vec::new());
         };
+        self.search_matching(&match_expr, scope, limit)
+    }
+
+    /// The whole of [`MemoryStore::search`] except the one line that turns
+    /// free text into a `MATCH` expression.
+    ///
+    /// Split out so that the injection path can vary **only** that line. The
+    /// SQL, the project scoping, the conflict flagging, the ladder, the decay
+    /// weighting, the thin-decision demotion and the truncation are shared
+    /// verbatim — there is exactly one ranking in this crate and both callers
+    /// get it. See `injection_query` for why a second *expression* is not a
+    /// second *retrieval*.
+    fn search_matching(
+        &self,
+        match_expr: &str,
+        scope: SearchScope,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, MemoryStoreError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -341,16 +466,28 @@ impl<'a> MemoryStore<'a> {
         scope: SearchScope,
         limit: usize,
     ) -> Result<RetrievalResult, MemoryStoreError> {
-        let records = self.search(text, scope, limit)?;
-        let mut grouped = RetrievalResult::default();
-        for record in records {
-            if is_current_invariant_or_constraint(&record) {
-                grouped.invariants_and_constraints.push(record);
-            } else {
-                grouped.other.push(record);
-            }
-        }
-        Ok(grouped)
+        Ok(group(self.search(text, scope, limit)?))
+    }
+
+    /// [`MemoryStore::search_grouped`] for a routed task — the retrieval
+    /// behind context injection, and its only caller is
+    /// [`super::inject::briefing`].
+    ///
+    /// Identical to [`MemoryStore::search_grouped`] in every respect except
+    /// the `MATCH` expression, which comes from `injection_query` rather than
+    /// `sanitize_query`: prose is joined with `OR` so that a task written as a
+    /// sentence retrieves at all. See `injection_query` for why the two doors
+    /// differ and why this is not a second ranking.
+    pub fn search_grouped_for_injection(
+        &self,
+        task: &str,
+        scope: SearchScope,
+        limit: usize,
+    ) -> Result<RetrievalResult, MemoryStoreError> {
+        let Some(match_expr) = injection_query(task) else {
+            return Ok(RetrievalResult::default());
+        };
+        Ok(group(self.search_matching(&match_expr, scope, limit)?))
     }
 
     /// Phase 22 line 1063: detect mutually contradictory current memories

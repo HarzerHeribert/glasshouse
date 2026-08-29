@@ -154,3 +154,183 @@ contamination tests are where its evidence belongs. It is also the closest
 existing work to Phase 1 line 110 (*"keep cross-project memory retrieval
 disabled by design rather than relying only on query filters"*), which remains
 unstarted and has no ledger entry.
+
+
+# Phase 21F — lines 930 and 934, closed behind Phase 27
+
+Package `GH-INJECTION-RECALL`, worktree `.worktrees/injection-recall`; report
+in `.agent-runtime/report-injection-recall.md`. Integrated 2026-08-29.
+
+These two were filed as **Cluster D** in the refusal register earlier the same
+batch — qualifiers on an injection that did not exist. Phase 27 built it, so
+they became packageable. **932 remains open and is Cluster F**, declined four
+times; do not re-package it.
+
+## The product decision behind this package
+
+Injection retrieved nothing in production: `sanitize_query` joins quoted
+tokens with spaces, which FTS5 reads as implicit AND, so a prose task demanded
+one memory contain every one of its words. A read-only recon established that
+`sanitize_query` is **one implementation behind three doors** — the CLI search
+box, the `query_memory` API verb, and injection.
+
+**The user chose: injection gets its own query construction; CLI and API keep
+AND.** Verified on the integrated tree — `sanitize_query`'s body is unchanged,
+and `the_search_box_still_requires_every_word_of_a_query_to_match` pins it.
+
+Injection's expression is `("a" "b" "c") OR ({subject} : ("a" OR "b" OR "c"))`.
+The left disjunct is `sanitize_query`'s output **verbatim**, so injection's
+result set is a superset of the search box's **by construction** rather than by
+intention. `MemoryStore::search` was split into `search` and a private
+`search_matching`, so both doors share the SQL, project scoping, conflict
+flagging, ladder, decay weighting and truncation. **One ranking; only the
+expression varies** — which is what keeps this clear of 1129's refusal, whose
+objection was to a second *ranking*.
+
+## The measurement that changed the design, and neither option offered was right
+
+The packet asked whether `bm25()` alone suffices under OR or whether a
+stop-word/frequency filter is needed. The worker measured both on a synthetic
+fifteen-memory corpus driven through `briefing`, and **the answer was neither**:
+
+| task | injected under a bare OR |
+|---|---|
+| *"Please look at the kestrel export and make sure it cannot write a partial file…"* | secrets, project isolation, pty line limit |
+| *"Update the README with the new installation instructions."* | pty line limit, secrets, kestrel export |
+| *"make sure it is up to date"* | project isolation, migrations, kestrel export |
+
+The exactly-relevant memory is crowded out of its own task, and three unrelated
+tasks return the same three memories.
+
+**Why, and this is the part a threshold could not have fixed.**
+`MemoryStore::search` sorts by `LadderRung` **before** the relevance/decay
+weight (Phase 21E, lines 916–918), and `briefing` takes the
+invariants-and-constraints group first (line 1131). Under AND the candidate set
+was already narrow, so ranking by authority was safe. **Under OR, membership
+costs one incidental word, so the top results become this project's
+highest-authority memories whatever was asked.** The noise was never selected
+by score, so no relevance threshold reaches it.
+
+The frequency filter was ruled out by measurement too: the README task injected
+three irrelevant memories with **no term above 47% of the corpus**, and in the
+first row the noise memory matched on `file` and `look` — genuinely
+discriminating words. A minimum-token-length filter keeps `make`, `sure`,
+`look`, `when`, `with`, `that`.
+
+**No stop-word list was imported and no threshold was introduced.**
+
+## 930 — scope is the recorded subject, and it is not a threshold in disguise
+
+A memory's scope is the `subject` it recorded, and it overlaps the task when
+the task names a word of it — expressed as the `{subject}` column filter on the
+added disjunct, so it is **membership in the query, not a filter after it**.
+This is already what the store means by scope: `search::contradicts` uses the
+subject, and only the subject, to decide two memories are about the same thing.
+
+The test that makes the distinction load-bearing seeds a memory saying
+*kestrel export* four times in its **body** under the subject *"billing
+invoices"*. It is asserted to be the **stronger** BM25 match, and it is
+excluded — while a memory whose body says nothing relevant is kept, because its
+subject is *"kestrel export"*. **A threshold keeps the wrong one.**
+
+Measured after the fix, same corpus and tasks: the prose kestrel task injects
+*kestrel export* and *kestrel dashboard*; the README task and *"make sure it is
+up to date"* inject **nothing**; the windows task injects *windows paths*.
+
+---
+
+### Inject only memories whose scope overlaps the current task. (line 930)
+
+Contract: Given a routed task, when Glasshouse selects memory to inject, Glasshouse injects only memories whose recorded subject the task names, while preserving every memory today's conjunctive query already retrieves.
+
+State: **COMPLETE**
+
+Production evidence:
+- `src/memory/search.rs` — `injection_query`
+- `src/memory/search.rs` — `MemoryStore::search_grouped_for_injection`
+- `src/memory/search.rs` — `SUBJECT_COLUMN`
+- `src/memory/inject.rs` — `briefing`
+
+Regression evidence:
+- `context_injection::line_930_a_memory_out_of_the_tasks_scope_is_not_injected_though_it_is_retrievable`
+- `memory_search::line_930_a_memory_whose_subject_is_about_something_else_is_out_of_scope_for_a_prose_task`
+- `context_injection::a_task_written_as_a_sentence_retrieves_the_memory_it_is_about`
+- `memory_search::a_keyword_task_retrieves_at_least_everything_it_retrieves_today`
+- `memory_search::a_task_of_hundreds_of_distinct_words_is_still_a_query_fts5_accepts`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/memory/search.rs: "({conjunctive}) OR ({{{SUBJECT_COLUMN}}} : ({scoped}))" -> "({conjunctive}) OR ({scoped})" | `drop-930s-scope-predicate` | **killed** | `context_injection::line_930_a_memory_out_of_the_tasks_scope_is_not_injected_though_it_is_retrievable` |
+| src/memory/search.rs: .join(" OR "); -> .join(" "); | `revert-the-injection-join-to-and` | **killed** | `context_injection::a_task_written_as_a_sentence_retrieves_the_memory_it_is_about` |
+| src/memory/search.rs: "({conjunctive}) OR ({{{SUBJECT_COLUMN}}} : ({scoped}))" -> "({{{SUBJECT_COLUMN}}} : ({scoped}))" | `drop-the-conjunctive-half-that-guarantees-no-recall-is-lost` | **killed** | `memory_search::a_keyword_task_retrieves_at_least_everything_it_retrieves_today` |
+| src/memory/search.rs: AND memories.project_id = ?2 \ -> AND (?2 IS NOT NULL) \ | `drop-project-scope-on-the-refactored-injection-query` | **killed** | `context_injection::another_projects_memory_never_reaches_an_injected_block` |
+
+> drop-930s-scope-predicate observed: context_injection.rs:1286 `a memory whose subject is about something else must not be injected` — with the column filter gone the block carried the provider-key invariant, which shares only `the`, `file` and `look` with the task
+
+> revert-the-injection-join-to-and observed: context_injection.rs:1204 `a task written as a sentence must retrieve the memory it is about; the first delivery was: [the raw task]`. First run killed at deliveries()'s own timeout instead (§80 case 5); the test was changed to wait for ONE delivery so it fails on its own assertion, and the re-run is the verdict recorded here
+
+> drop-the-conjunctive-half-that-guarantees-no-recall-is-lost observed: memory_search.rs:1054 `injection must not lose a memory the conjunctive query finds for "kestrel"` — a memory with no recorded subject became unreachable, which is the recall regression the left disjunct exists to make impossible
+
+> drop-project-scope-on-the-refactored-injection-query observed: context_injection.rs:630 `another project's memory must never reach an injected block` — re-run because the SQL moved into search_matching during the refactor; Phase 27's isolation proof still holds on the new path, and only that one test failed
+
+Recorded scope limits — stated by the worker, not discovered later:
+- A memory that records NO subject is exempt from the scope rule: it is reachable only through the conjunctive half, which is exactly today's behaviour. Forced by 'strictly more recall, never less'. `subject` is optional in extract::schema, so OR noise can still enter through a subject-less memory.
+- The corpus measurement behind this design is synthetic — fifteen memories of Glasshouse-shaped text. It refutes 'bm25 alone suffices' and 'a frequency filter suffices' by counterexample; it is not a claim about behaviour at very large corpora.
+- Scope is the SUBJECT column only. A memory whose subject is worded differently from the task (`kestrel exports` vs `kestrel export`) does not overlap: the tokenizer is `unicode61` with no stemming, so this is exact-word overlap.
+
+---
+
+### Avoid injecting old ideas merely because they mention the same subsystem. (line 934)
+
+Contract: Given a task that names a subsystem an old idea mentions, when Glasshouse selects memory to inject, Glasshouse omits an Idea-authority memory nothing has reaffirmed, while preserving injection of the same idea once MemoryStore::reaffirm has recorded it.
+
+State: **COMPLETE**
+
+Production evidence:
+- `src/memory/inject.rs` — `is_unreaffirmed_idea`
+- `src/memory/inject.rs` — `briefing`
+
+Regression evidence:
+- `context_injection::line_934_an_unreaffirmed_idea_is_not_injected_until_it_is_reaffirmed`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/memory/inject.rs: record.authority == Some(MemoryAuthority::Idea) && record.last_validated_at.is_none() -> false | `drop-934s-authority-and-validation-predicate` | **killed** | `context_injection::line_934_an_unreaffirmed_idea_is_not_injected_until_it_is_reaffirmed` |
+
+> drop-934s-authority-and-validation-predicate observed: context_injection.rs:1373 `an idea nobody has reaffirmed must not take an injection slot merely because the task names its subsystem` — the parquet idea took a slot beside the control memory
+
+Recorded scope limits — stated by the worker, not discovered later:
+- 'Old' is read as `last_validated_at.is_none()`, following inject::standing (line 1132) and policy::phase_penalty (line 933). A brand-new idea nobody has reaffirmed is therefore excluded too. The alternative reading of 'merely because they mention' needs the relevance signal Phase 27 refused for 1129.
+- Scoped to MemoryAuthority::Idea alone. Hypothesis and Preference are not excluded — the line names ideas, and policy::retrieval_weight already demotes unreaffirmed exploratory-phase memories of every class in the ranking this selection inherits.
+- Proven only at the door, in tests/context_injection.rs, which is #![cfg(unix)]. This predicate has no Windows-runnable test; the 930 and query-semantics mechanisms do, in tests/memory_search.rs.
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **930** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+- **934** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+
+**Packet errors the worker reported — read these BEFORE its results.**
+Thirteen consecutive rounds a worker corrected its packet and was right:
+- ACCEPTANCE TEST 1 asks for a reproduction to be written before the fix; Phase 27 already wrote it, and its doc comment instructs the next worker to INVERT it rather than add another. I inverted it and added the third case the recon flagged as missing (an unrelated sentence of common words asserting NO injection) — without that case a bare OR join passes the inverted test.
+- docs/product/evidence/phase-27.md cites `context_injection::a_task_written_as_a_sentence_retrieves_nothing_because_the_search_ands_its_terms` as regression evidence for line 1126. That test is now `a_task_written_as_a_sentence_retrieves_the_memory_it_is_about` (the rename its own doc comment asked for). docs/product/evidence/** is FORBIDDEN, so the ledger edit and 1126's recorded scope limit are the orchestrator's to close.
+- phase-27.md cites sanitize_query at search.rs:150-170; current source has it at 162-174. The recon flagged this and it is confirmed.
+- The packet's open question offered two answers — bm25 alone, or a bounded frequency/length filter. Measured, NEITHER is sufficient: the noise is selected by LadderRung before relevance is consulted, so no cut on a score removes it. See §2 of the report.
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo build: clean
+- cargo fmt --all -- --check: clean
+- cargo clippy --all-targets --all-features -- -D warnings: clean
+- cargo doc --no-deps: clean
+- cargo test --test context_injection: 13 passed
+- cargo test --test memory_search: 23 passed
+- cargo test --test memory_query_api: 9 passed
+- cargo test --test project_isolation: 7 passed
+- scripts/blast-radius.sh: every traced target passed (26 targets)
+- scripts/check-doc-boundary.sh: clean
+- Windows: NOT RUN — cargo check --target aarch64-pc-windows-msvc fails with std missing for the target, as in phase-27. src/memory/** diff has zero cfg, path, OS-string or line-ending constructs.
+
