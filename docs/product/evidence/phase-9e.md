@@ -281,3 +281,39 @@ feature selects `zbus-secret-service-keyring-store`, which is pure Rust and
 would remove the `libdbus-1-dev` requirement. **Whether it bounds the unlock
 prompt is unverified.** The worker stopped rather than turn a bounded packet
 into a dependency-upgrade evaluation, which was the right call.
+
+#### 441 — Windows ran, and the store still did not open (batch 51, orchestrator)
+
+`scripts/ci-local.sh --windows-vm` on `624205a`: **build PASS, test PASS, msrv
+PASS, zero timeout notices.** The deadlock that blocked Windows evidence is
+gone. And 441 still does not close, for a reason the run made visible:
+
+    Running tests\secret_native.rs
+    SKIPPED: the native secure store would not open in this session
+    SKIPPED: the native secure store would not open in this session
+
+**The Windows Credential Manager never opened.** The VM's CI session is a
+**service session** — `tasklist` reports the CI processes in session `Services`,
+0 — and Credential Manager is per interactive logon. Every test that needs a
+real round trip skipped; what passed was the platform *gating*.
+
+**This is why the box is still not ticked, and the distinction matters.**
+`secret::native::tests::detect_offers_a_native_store_on_exactly_the_platforms_
+with_a_backend` passes on Windows by asserting only that the refusal is not
+`UnsupportedPlatform` — `StoreUnreachable` satisfies it. That is a correct test
+of the gating and it is **not** evidence that Credential Manager works.
+
+**A hazard worth naming for every future platform claim:** these tests skip
+*loudly* — they print `SKIPPED` — which is what `agent-sdlc.md` asks for. But
+cargo still counts them as passing, so the gate summary says
+`PASS test (windows) / test` and a reader who stops there would conclude Windows
+credential storage is proven. It is not. **Read the skips, not the summary.**
+
+**What would close 441:** a Windows runner executing under an interactive logon
+(autologon plus a scheduled task set to run only when a user is logged on, or an
+equivalent), so Credential Manager exists to open. That is a CI-image change,
+not a code change, and it is the only thing standing between this line and
+COMPLETE — the production code, the mutations and the manifest guard are all in
+place and green.
+
+State remains **LOCALLY VERIFIED**.

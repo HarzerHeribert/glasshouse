@@ -3623,3 +3623,33 @@ blocking sense, and a FAIL is a dispatch trigger rather than a stop signal.
 
 **The rule.** A red gate produces two actions in the same turn: a fix packet for
 the defect, and the next package for everything else. Never only the first.
+
+## §85 — `kill $(jobs -p)` is a no-op in a non-interactive shell, and load outlives the experiment
+
+A worker running a deliberate 24-spinner load experiment cleaned up with
+`kill $(jobs -p)`. In a **non-interactive** shell `jobs -p` prints nothing, so
+the kill killed nothing, the command hung on `wait` until its timeout, and the
+spinners outlived the 10-second experiment they were for by **ten minutes**.
+Load average peaked at 120 on a 12-core machine.
+
+**This is §72 and §46 again, one layer down.** Killing a driver does not kill
+the work; closing a pane does not kill its processes; and `jobs -p` in a script
+does not name the jobs you started. Every one of these is the same asymmetry:
+*the handle you are holding is not the thing that is running.*
+
+Record PIDs at spawn (`cmd & pids+=($!)`) and kill those, or install a `trap
+... EXIT`. Never assume a job-control builtin sees your background children in
+a script.
+
+### The half of this that is good news, and it is worth stating
+
+The worker **told the orchestrator unprompted**, with the exact window
+(15:54–16:04) and the advice to treat any overlapping gate FAIL as unattributed.
+A `--windows-vm` run did overlap it — and needed no re-run, because **load
+manufactures false failures, not false passes.** That run came back all-PASS
+with zero timeout notices, which makes it *stronger* evidence than a quiet-machine
+run, not weaker.
+
+**So the attribution rule is directional, and §40 should be read that way:**
+a FAIL under unknown load is unattributed and needs a second run. A PASS under
+known heavy load is the best evidence available and should be kept.

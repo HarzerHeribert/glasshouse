@@ -273,6 +273,7 @@ to do, and the orchestrator should follow its own rule.
 - **§82** — a team lead pays when the work is code, not when it is judgement
 - **§83** — refusals accumulate; gather them by root cause and attack that
 - **§84** — a defect gets its own worker, not the whole line's attention
+- **§85** — `kill $(jobs -p)` is a no-op in a non-interactive shell, and load outlives the experiment
 
 ## Recent checkpoints
 
