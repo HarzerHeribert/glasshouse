@@ -1270,7 +1270,7 @@ fn render_settings(state: &ShellState, frame: &mut Frame, area: Rect) {
         SettingsSection::Providers => render_provider_rows(settings, frame, list_area),
         SettingsSection::LaunchProfiles => render_profile_rows(settings, frame, list_area),
         SettingsSection::Routing => render_routing(settings, frame, list_area),
-        SettingsSection::Memory => render_memory(frame, list_area),
+        SettingsSection::Memory => render_memory(settings, frame, list_area),
     }
 
     if !bottom_lines.is_empty() {
@@ -1751,15 +1751,25 @@ fn free_resource_list_label(entries: &[crate::config::FreeResourceRef]) -> Strin
     }
 }
 
-fn render_memory(frame: &mut Frame, area: Rect) {
+fn render_memory(settings: &SettingsState, frame: &mut Frame, area: Rect) {
+    let memory = settings.memory();
+    let enabled = if memory.memory_extraction {
+        "yes"
+    } else {
+        "no"
+    };
     let lines = vec![
+        Line::from(format!(
+            "  Automatic memory extraction   {enabled} {}",
+            layer_label(memory.memory_extraction_layer)
+        )),
         Line::from(Span::styled(
-            "Project memory is not available in this build.",
-            Style::default().add_modifier(Modifier::BOLD),
+            "    Extracts durable facts from a completed turn into project or user memory.",
+            Style::default().fg(Color::DarkGray),
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "There are no memory settings to save. This section will become editable only when memory exists.",
+            "  space toggle",
             Style::default().fg(Color::DarkGray),
         )),
     ];
@@ -2162,6 +2172,7 @@ mod tests {
             response_mechanism: None,
             display_name: None,
             purpose: None,
+            source_session_id: None,
         }
     }
 
@@ -4068,7 +4079,9 @@ mod settings_tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use super::super::state::{HarnessRow, IntegrationRow, ProfileRow, ProviderRow, RoutingRow};
+    use super::super::state::{
+        HarnessRow, IntegrationRow, MemoryRow, ProfileRow, ProviderRow, RoutingRow,
+    };
     use super::*;
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -4278,8 +4291,10 @@ mod settings_tests {
     }
 
     /// Routing shows every policy with its own provenance and explains the
-    /// conditions on the free-resource preference. Memory is deliberately a
-    /// transparent section with no controls until the feature exists.
+    /// conditions on the free-resource preference. Memory shows its one real
+    /// setting and layer the same way, and a toggle both changes the value
+    /// and promotes its layer to `(user)` — the placeholder "not available"
+    /// text this test used to require is the defect Phase 2D line 190 closes.
     #[test]
     fn routing_and_memory_sections_render_their_complete_honest_states() {
         let routing = RoutingRow::new(
@@ -4296,6 +4311,10 @@ mod settings_tests {
             Layered::new(PremiumReservePercent::try_from(12).unwrap(), Layer::User),
             vec!["my-router".to_owned()],
         );
+        // Premise, per §17: the memory row starts disabled at the project
+        // layer, so a later assertion that a toggle changed it to "yes" and
+        // `(user)` actually proves the toggle did something.
+        let memory = MemoryRow::new(Layered::new(false, Layer::Project));
         let mut state = ShellState::new("glasshouse", "/work/glasshouse", "0.1.0", Vec::new());
         state.open_settings_with_routing(
             harness_rows(),
@@ -4303,6 +4322,7 @@ mod settings_tests {
             provider_rows(),
             profile_rows(),
             routing,
+            memory,
         );
         for _ in 0..4 {
             state.handle_key(press(KeyCode::Tab));
@@ -4327,14 +4347,11 @@ mod settings_tests {
         state.handle_key(press(KeyCode::Tab));
         let memory_text = rendered(&state, 120, 32);
         assert!(memory_text.contains("Memory"), "{memory_text}");
-        assert!(
-            memory_text.contains("not available in this build"),
-            "{memory_text}"
-        );
-        assert!(
-            memory_text.contains("no memory settings to save"),
-            "{memory_text}"
-        );
+        assert!(memory_text.contains("no (project)"), "{memory_text}");
+
+        state.handle_key(press(KeyCode::Char(' ')));
+        let toggled_text = rendered(&state, 120, 32);
+        assert!(toggled_text.contains("yes (user)"), "{toggled_text}");
     }
 
     /// Acceptance 1 (the render half): an empty Providers section shows an

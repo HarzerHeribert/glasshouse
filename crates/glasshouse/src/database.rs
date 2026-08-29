@@ -67,9 +67,11 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// `last_validated_at`). Version 11 adds `routing_observations`, Phase 33A's
 /// append-oriented ledger of what actually happened on a routed turn — see the
 /// migration's own doc comment for its shape and why it accepts no `UPDATE`.
+/// Version 12 adds `sessions.source_session_id`, Phase 40 line 1646's record of
+/// which session, if any, a session was bootstrapped from.
 /// Later migrations are appended to [`MIGRATIONS`], and this constant moves
 /// with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 11;
+const SUPPORTED_SCHEMA_VERSION: i64 = 12;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -1177,6 +1179,42 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
         SELECT RAISE(ABORT, 'routing observation belongs to a different project');
     END;
     ",
+    // 12: Phase 40 line 1646 — which session, if any, a session was
+    // bootstrapped from.
+    //
+    // # `ALTER TABLE ADD COLUMN`, migration 3's shape, for migration 8's
+    // reasons
+    //
+    // No table is rebuilt, no existing `CHECK` is altered, no existing row is
+    // touched.
+    //
+    // # No `CHECK`, and no foreign key
+    //
+    // Unlike `display_name` (migration 8), this column holds a `SessionId`,
+    // not user text, so there is no length or emptiness to police. Unlike a
+    // relational id, it names no `REFERENCES`: a source session can be in
+    // another project (this column does not resolve across the project
+    // boundary — see `session::store`), can already be gone, and the
+    // precedent this follows, `memories.source_session_id` (migration 6), is
+    // itself a bare nullable `TEXT` with no foreign key.
+    //
+    // # NULL, here as everywhere in this schema
+    //
+    // NULL is *"this session was not started from a checkpoint,"* never a
+    // placeholder value. A session recorded before this migration, and any
+    // session started without `--from-checkpoint`, has no source and must
+    // read back as `None` rather than some invented default.
+    //
+    // # One direction only
+    //
+    // This column answers "what did this session come from." It
+    // deliberately does not add an index, a reverse table, or a descendants
+    // column: `SessionStore::list()` already enumerates every session in the
+    // project with no required key, so "what came from this session" is a
+    // filter over an existing enumeration, not a missing capability.
+    "
+    ALTER TABLE sessions ADD COLUMN source_session_id TEXT;
+    ",
 ];
 
 pub(crate) const PROJECT_ID_KEY: &str = "project_id";
@@ -1762,7 +1800,8 @@ mod tests {
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(
-                "DROP TABLE routing_observations;
+                "ALTER TABLE sessions DROP COLUMN source_session_id;
+                 DROP TABLE routing_observations;
 
                  ALTER TABLE memories DROP COLUMN validity_conditions;
                  ALTER TABLE memories DROP COLUMN invalidation_conditions;
@@ -1857,7 +1896,8 @@ mod tests {
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(
-                "DROP TABLE routing_observations;
+                "ALTER TABLE sessions DROP COLUMN source_session_id;
+                 DROP TABLE routing_observations;
                  DELETE FROM schema_migrations WHERE version >= 11;",
             )
             .unwrap();

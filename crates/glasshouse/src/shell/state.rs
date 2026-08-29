@@ -1005,13 +1005,14 @@ impl ShellState {
             providers,
             profiles,
             RoutingRow::defaults(configured_providers),
+            MemoryRow::defaults(),
         )
     }
 
-    /// Open Settings with the fully resolved routing-policy row supplied by
-    /// the run loop. Kept separate from [`ShellState::open_settings`] so
-    /// older in-module callers can construct unrelated settings fixtures
-    /// without repeating routing defaults.
+    /// Open Settings with the fully resolved routing-policy row and memory
+    /// row supplied by the run loop. Kept separate from
+    /// [`ShellState::open_settings`] so older in-module callers can construct
+    /// unrelated settings fixtures without repeating routing/memory defaults.
     pub fn open_settings_with_routing(
         &mut self,
         harnesses: Vec<HarnessRow>,
@@ -1019,6 +1020,7 @@ impl ShellState {
         providers: Vec<ProviderRow>,
         profiles: Vec<ProfileRow>,
         routing: RoutingRow,
+        memory: MemoryRow,
     ) -> Action {
         self.overlay = Some(Overlay::Settings);
         self.settings = Some(SettingsState::new(
@@ -1027,6 +1029,7 @@ impl ShellState {
             providers,
             profiles,
             routing,
+            memory,
         ));
         Action::Redraw
     }
@@ -1048,10 +1051,12 @@ impl ShellState {
             providers,
             profiles,
             RoutingRow::defaults(configured_providers),
+            MemoryRow::defaults(),
         );
     }
 
-    /// Refresh Settings with a freshly resolved routing-policy row.
+    /// Refresh Settings with a freshly resolved routing-policy row and memory
+    /// row.
     pub fn refresh_settings_with_routing(
         &mut self,
         harnesses: Vec<HarnessRow>,
@@ -1059,9 +1064,17 @@ impl ShellState {
         providers: Vec<ProviderRow>,
         profiles: Vec<ProfileRow>,
         routing: RoutingRow,
+        memory: MemoryRow,
     ) {
         if let Some(settings) = self.settings.as_mut() {
-            settings.replace_rows(harnesses, integrations, providers, profiles, routing);
+            settings.replace_rows(
+                harnesses,
+                integrations,
+                providers,
+                profiles,
+                routing,
+                memory,
+            );
         }
     }
 
@@ -1223,6 +1236,12 @@ impl ShellState {
     /// changed at least one of them.
     pub fn settings_routing_edit(&self) -> Option<RoutingSettingsEdit> {
         self.settings.as_ref()?.routing_edit()
+    }
+
+    /// The independently staged Memory field, if this Settings session
+    /// changed it.
+    pub fn settings_memory_edit(&self) -> Option<MemorySettingsEdit> {
+        self.settings.as_ref()?.memory_edit()
     }
 
     /// Replace the session list, keeping the same session presented if it is
@@ -2093,6 +2112,32 @@ impl RoutingRow {
     }
 }
 
+/// The effective Memory section: the automatic post-turn memory-extraction
+/// trigger and the layer that supplied it, matching [`RoutingRow`]'s shape at
+/// one field instead of several. Only `memory_extraction` exists as a
+/// producer today — see the packet's "do not add a second memory setting"
+/// for why this stays this small.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryRow {
+    pub memory_extraction: bool,
+    pub memory_extraction_layer: Layer,
+}
+
+impl MemoryRow {
+    pub fn new(memory_extraction: Layered<bool>) -> Self {
+        Self {
+            memory_extraction: memory_extraction.value,
+            memory_extraction_layer: memory_extraction.layer,
+        }
+    }
+
+    /// Matches [`crate::config::EffectiveConfig::memory_extraction_enabled`]'s
+    /// own default: enabled, at [`Layer::Default`].
+    pub fn defaults() -> Self {
+        Self::new(Layered::new(true, Layer::Default))
+    }
+}
+
 /// One edit made to a [`HarnessRow`] this Settings session, not yet written
 /// anywhere. `None` in a field means that field was never touched this
 /// session; `Some(None)` in `executable` would mean "clear it", though
@@ -2165,6 +2210,19 @@ impl RoutingSettingsEdit {
             && self.free_order.is_none()
             && self.free_disabled.is_none()
             && self.free_pin.is_none()
+    }
+}
+
+/// A staged edit to the Memory section this Settings session, not yet
+/// written anywhere — [`RoutingSettingsEdit`]'s shape at one field.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemorySettingsEdit {
+    pub memory_extraction: Option<bool>,
+}
+
+impl MemorySettingsEdit {
+    pub fn is_empty(&self) -> bool {
+        self.memory_extraction.is_none()
     }
 }
 
@@ -2665,6 +2723,7 @@ pub struct SettingsState {
     providers: Vec<ProviderRow>,
     profiles: Vec<ProfileRow>,
     routing: RoutingRow,
+    memory: MemoryRow,
     selected_harness: usize,
     selected_integration: usize,
     selected_provider: usize,
@@ -2677,6 +2736,7 @@ pub struct SettingsState {
     /// [`ProfileSettingsEdit`].
     profile_edits: HashMap<String, Option<ProfileConfig>>,
     routing_edit: RoutingSettingsEdit,
+    memory_edit: MemorySettingsEdit,
     path_input: Option<SettingsPathInput>,
     /// Whether the `W` confirmation prompt (design decision: "first shows
     /// the exact path to be created and requires a distinct confirmation")
@@ -2722,6 +2782,7 @@ impl SettingsState {
         providers: Vec<ProviderRow>,
         profiles: Vec<ProfileRow>,
         routing: RoutingRow,
+        memory: MemoryRow,
     ) -> Self {
         Self {
             section: SettingsSection::Harnesses,
@@ -2730,6 +2791,7 @@ impl SettingsState {
             providers,
             profiles,
             routing,
+            memory,
             selected_harness: 0,
             selected_integration: 0,
             selected_provider: 0,
@@ -2738,6 +2800,7 @@ impl SettingsState {
             provider_edits: HashMap::new(),
             profile_edits: HashMap::new(),
             routing_edit: RoutingSettingsEdit::default(),
+            memory_edit: MemorySettingsEdit::default(),
             path_input: None,
             confirm_project_write: false,
             confirm_credential_delete: None,
@@ -2772,6 +2835,10 @@ impl SettingsState {
 
     pub fn routing(&self) -> &RoutingRow {
         &self.routing
+    }
+
+    pub fn memory(&self) -> &MemoryRow {
+        &self.memory
     }
 
     /// The most recent disposable-job routing choice, for the Routing
@@ -2968,6 +3035,10 @@ impl SettingsState {
         (!self.routing_edit.is_empty()).then(|| self.routing_edit.clone())
     }
 
+    fn memory_edit(&self) -> Option<MemorySettingsEdit> {
+        (!self.memory_edit.is_empty()).then(|| self.memory_edit.clone())
+    }
+
     /// Replace the rows with freshly loaded ones (after a successful save)
     /// and clear every pending edit. The catalog is fixed-size, so the
     /// cursor is only ever clamped, never reset, and always stays on a real
@@ -2979,6 +3050,7 @@ impl SettingsState {
         providers: Vec<ProviderRow>,
         profiles: Vec<ProfileRow>,
         routing: RoutingRow,
+        memory: MemoryRow,
     ) {
         self.selected_harness = self.selected_harness.min(harnesses.len().saturating_sub(1));
         self.selected_integration = self
@@ -2993,10 +3065,12 @@ impl SettingsState {
         self.providers = providers;
         self.profiles = profiles;
         self.routing = routing;
+        self.memory = memory;
         self.edits.clear();
         self.provider_edits.clear();
         self.profile_edits.clear();
         self.routing_edit = RoutingSettingsEdit::default();
+        self.memory_edit = MemorySettingsEdit::default();
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> SettingsAction {
@@ -3220,6 +3294,12 @@ impl SettingsState {
             }
             KeyCode::Char('n') if self.section == SettingsSection::Routing => {
                 self.start_routing_input(RoutingInputPurpose::FreePin);
+                SettingsAction::Redraw
+            }
+            KeyCode::Char(' ') if self.section == SettingsSection::Memory => {
+                self.memory.memory_extraction = !self.memory.memory_extraction;
+                self.memory.memory_extraction_layer = Layer::User;
+                self.memory_edit.memory_extraction = Some(self.memory.memory_extraction);
                 SettingsAction::Redraw
             }
             _ => SettingsAction::None,
@@ -4375,6 +4455,7 @@ mod tests {
             response_mechanism: None,
             display_name: None,
             purpose: None,
+            source_session_id: None,
         }
     }
 
@@ -4987,6 +5068,7 @@ mod native_input_tests {
             response_mechanism: None,
             display_name: None,
             purpose: None,
+            source_session_id: None,
         };
         let mut state = ShellState::new("p", "/p", "0.1.0", vec![record]);
         state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -5098,6 +5180,7 @@ mod settings_tests {
             response_mechanism: None,
             display_name: None,
             purpose: None,
+            source_session_id: None,
         }
     }
 
@@ -6523,6 +6606,7 @@ mod settings_tests {
             sample_provider_rows(),
             Vec::new(),
             routing,
+            MemoryRow::defaults(),
         );
         for _ in 0..4 {
             state.handle_key(press(KeyCode::Tab));
@@ -6615,6 +6699,7 @@ mod overview_tests {
             response_mechanism: None,
             display_name: None,
             purpose: None,
+            source_session_id: None,
         }
     }
 

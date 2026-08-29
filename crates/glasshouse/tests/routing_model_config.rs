@@ -21,8 +21,8 @@ use clap::Parser;
 use glasshouse::config::{self, EffectiveConfig, Layer, Layered, RoutingModelChoice, UserConfig};
 use glasshouse::onboarding::WizardState;
 use glasshouse::shell::{
-    self, HarnessRow, IntegrationRow, ProfileRow, ProviderRow, RoutingRow, RoutingSettingsEdit,
-    ShellState,
+    self, HarnessRow, IntegrationRow, MemoryRow, ProfileRow, ProviderRow, RoutingRow,
+    RoutingSettingsEdit, ShellState,
 };
 use glasshouse::{Cli, Runtime, bootstrap};
 
@@ -95,7 +95,7 @@ fn routing_model_choice_is_a_distinct_config_surface_persisted_independently() {
         }),
         ..Default::default()
     };
-    shell::save_user_settings_with_routing(&runtime, &[], &[], &[], Some(&edit)).unwrap();
+    shell::save_user_settings_with_routing(&runtime, &[], &[], &[], Some(&edit), None).unwrap();
 
     let after = UserConfig::load(runtime.paths()).unwrap();
     assert_eq!(
@@ -131,7 +131,7 @@ fn pinned_routing_model_accepts_any_provider_and_model_string_including_gpt_5_6_
             }),
             ..Default::default()
         };
-        shell::save_user_settings_with_routing(&runtime, &[], &[], &[], Some(&edit)).unwrap();
+        shell::save_user_settings_with_routing(&runtime, &[], &[], &[], Some(&edit), None).unwrap();
 
         let user = UserConfig::load(runtime.paths()).unwrap();
         let effective = EffectiveConfig::new(&user, None);
@@ -247,6 +247,7 @@ fn the_settings_screen_shows_the_currently_selected_routing_model() {
         Vec::<ProviderRow>::new(),
         Vec::<ProfileRow>::new(),
         routing,
+        MemoryRow::defaults(),
     );
 
     // Harnesses -> Integrations -> Providers -> Launch Profiles -> Routing.

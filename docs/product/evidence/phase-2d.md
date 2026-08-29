@@ -196,3 +196,69 @@ Missing evidence:
   now would ship dead controls — see `docs/product/design-decisions.md`.
 - The settings view has no end-to-end test through the shipped binary. The same
   differential-repaint limit that blocked the multi-session test applies.
+
+---
+
+## Phase 2D line 190 — CLOSED 2026-08-29 (batch 47)
+
+Contract: Given a project whose configuration carries a memory-extraction
+decision at the user or project layer, when the user opens the Settings
+overlay's Memory section, Glasshouse shows the setting's current value and
+which layer it came from, lets the user change it, and persists that change to
+the chosen layer on save — while touching no configuration field the edit did
+not name.
+
+State: COMPLETE
+
+**The section was not missing. It was lying.** `SettingsSection::Memory`, its
+tab and its dispatch all shipped already; `render_memory` rendered *"Project
+memory is not available in this build. There are no memory settings to save."*
+Memory exists — Phase 20 is at 16 closed, `memory/store.rs` ships, extraction
+runs after a completed turn, and `memory_extraction` is a real layered setting.
+That text was true once and had outlived its truth, which is the same failure
+mode this batch swept the evidence ledger for.
+
+Production evidence:
+- `crates/glasshouse/src/shell/mod.rs` — `build_settings` now reads
+  `EffectiveConfig::memory_extraction_enabled()` alongside the routing fields
+  it already read, and `SettingsRows` carries a `MemoryRow`; the two
+  `save_*_settings_with_routing` functions apply a `MemorySettingsEdit`
+  through `UserConfig::set_memory_extraction` /
+  `ProjectConfig::set_memory_extraction`.
+- `crates/glasshouse/src/shell/state.rs` — `MemoryRow` / `MemorySettingsEdit`,
+  value plus `Layer`, mirroring `RoutingRow` / `RoutingSettingsEdit`.
+- `crates/glasshouse/src/shell/view.rs` — `render_memory(settings, ..)` shows
+  the value with `layer_label(..)`. **The placeholder text is deleted.**
+
+`config/mod.rs` was not touched: both setters and the layered reader already
+existed, which is why this package needed no producer work.
+
+Regression evidence:
+- `settings_persistence::memory_edit_persists_to_the_chosen_layer_without_clobbering_sibling_routing_fields`
+- `shell::view::settings_tests::routing_and_memory_sections_render_their_complete_honest_states`
+  — rewritten: it previously *required* the "not available in this build"
+  string, so the old test asserted the defect. It now asserts the premise
+  (§17) that the row starts `no (project)`, then that a toggle renders
+  `yes (user)` — value and layer promotion together.
+
+Mutations, both run by the orchestrator (the worker stalled before its own):
+
+| mutation | vocabulary | result |
+|---|---|---|
+| `render_memory`'s `enabled` ternary → constant `"yes"` | `skip-state-update` | **killed** against `--lib shell::` — `routing_and_memory_sections_render_their_complete_honest_states` FAILED at `view.rs:4345` |
+| the `config.set_memory_extraction(Some(value))` block in `shell/mod.rs` → deleted | `remove-guard` | **killed** against `--test settings_persistence` — `memory_edit_persists_..._without_clobbering_sibling_routing_fields` FAILED at `settings_persistence.rs:330` |
+
+Two mutations because the line has two halves — it renders and it persists, and
+a render-only mutation would leave the persistence unproven.
+
+**Only one memory setting was added, deliberately.** `memory_extraction` is the
+only one with a producer behind it. A second row rendered from nothing would be
+code nothing observes (§65) and would not honestly close the box.
+
+Scope overflow, flagged by the worker: `tests/routing_model_config.rs` (+9/-4),
+forced call-site updates because `save_user_settings_with_routing` and
+`open_settings_with_routing` each gained one parameter — the same shape change
+`RoutingRow` forced on those functions when Routing was added.
+
+Platform/external evidence: no `#[cfg]` added; `settings_persistence.rs` runs
+everywhere. Missing: CI run.

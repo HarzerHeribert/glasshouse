@@ -1,6 +1,6 @@
-//! Phase 40 lines 1638, 1639, 1642, 1643, 1644 and 1645 — a checkpoint's
-//! `--from-checkpoint` launch, exercised through the shipped binary rather
-//! than through the library alone.
+//! Phase 40 lines 1638, 1639, 1642, 1643, 1644, 1645 and 1646 — a
+//! checkpoint's `--from-checkpoint` launch, exercised through the shipped
+//! binary rather than through the library alone.
 //!
 //! # Why this exists beside `checkpoint_portability.rs`
 //!
@@ -281,6 +281,13 @@ fn a_checkpoint_bootstraps_a_fresh_session_under_a_different_harness_through_the
             .find(|record| record.id == source_id)
             .unwrap()
             .clone();
+        // 1646, the negative half: a session started with no
+        // `--from-checkpoint` at all must record no source, never an
+        // invented one.
+        assert_eq!(
+            source_before.source_session_id, None,
+            "[{line}] a session launched without --from-checkpoint recorded a source"
+        );
 
         let marker = format!("HANDOFF-{}", line.split_whitespace().next().unwrap());
         let checkpoint_id = project.checkpoint_save(&[
@@ -315,6 +322,14 @@ fn a_checkpoint_bootstraps_a_fresh_session_under_a_different_harness_through_the
         assert_ne!(
             target_record.id, source_id,
             "[{line}] the fresh session must not be the source session"
+        );
+
+        // 1646: the fresh session records which session it was bootstrapped
+        // from.
+        assert_eq!(
+            target_record.source_session_id,
+            Some(source_id.clone()),
+            "[{line}] the fresh session did not record its source session"
         );
 
         // 1639: an explicit, plain-text, harness-agnostic handoff.

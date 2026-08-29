@@ -187,7 +187,7 @@ Phase 2D — Settings foundation
 ☑ Allow the routing settings to define a maximum marginal cost per routing decision.
 ☑ Allow the routing settings to prefer free resources for routing when they satisfy health and rate-limit requirements.
 ☑ Allow the routing settings to reserve premium subscription capacity below a configurable remaining-capacity threshold.
-☐ Add a Memory settings section.
+☑ Add a Memory settings section.
 ☑ Add an Integrations settings section for optional tools such as cmux.
 ☑ Show whether each harness is detected and enabled.
 ☑ Allow the user to change a harness executable path.
@@ -1643,7 +1643,7 @@ Fixed architectural requirements
 ☑ Allow a Codex session to hand off to Claude Code.
 ☑ Allow either session type to hand off to Antigravity when supported.
 ☑ Preserve the old session as resumable unless the user explicitly closes it.
-☐ Record the handoff relationship between source and destination sessions.
+☑ Record the handoff relationship between source and destination sessions.
 
 Phase 41 — Project overview
 

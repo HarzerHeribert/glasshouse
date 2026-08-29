@@ -10,7 +10,7 @@ use clap::Parser;
 
 use glasshouse::config;
 use glasshouse::integrations::IntegrationId;
-use glasshouse::shell::{self, RoutingSettingsEdit, SettingsEdit};
+use glasshouse::shell::{self, MemorySettingsEdit, RoutingSettingsEdit, SettingsEdit};
 use glasshouse::{Cli, Runtime, bootstrap};
 
 fn runtime_for(workspace: &std::path::Path, data: &std::path::Path) -> Runtime {
@@ -244,7 +244,8 @@ fn routing_edits_persist_to_the_chosen_layer_without_clobbering_siblings() {
         prefer_free: Some(false),
         ..RoutingSettingsEdit::default()
     };
-    shell::save_user_settings_with_routing(&runtime, &[], &[], &[], Some(&user_edit)).unwrap();
+    shell::save_user_settings_with_routing(&runtime, &[], &[], &[], Some(&user_edit), None)
+        .unwrap();
     assert!(
         !runtime
             .project()
@@ -264,9 +265,15 @@ fn routing_edits_persist_to_the_chosen_layer_without_clobbering_siblings() {
         premium_reserve: Some(PremiumReservePercent::try_from(12).unwrap()),
         ..RoutingSettingsEdit::default()
     };
-    let path =
-        shell::save_project_settings_with_routing(&runtime, &[], &[], &[], Some(&project_edit))
-            .unwrap();
+    let path = shell::save_project_settings_with_routing(
+        &runtime,
+        &[],
+        &[],
+        &[],
+        Some(&project_edit),
+        None,
+    )
+    .unwrap();
     assert!(path.is_file());
     let project = config::load_project_config(runtime.project())
         .unwrap()
@@ -280,6 +287,75 @@ fn routing_edits_persist_to_the_chosen_layer_without_clobbering_siblings() {
     assert!(!effective.prefer_free_routing().value);
     assert_eq!(effective.premium_reserve().layer, Layer::Project);
     assert_eq!(effective.premium_reserve().value.get(), 12);
+}
+
+/// Memory follows the same two explicit save paths as every other Settings
+/// section, and its single-field edit must not touch routing config it never
+/// named — the sibling half of the "only the named field" guarantee
+/// `a_save_only_touches_the_fields_an_edit_actually_named` already proves for
+/// harnesses.
+#[test]
+fn memory_edit_persists_to_the_chosen_layer_without_clobbering_sibling_routing_fields() {
+    use glasshouse::config::{EffectiveConfig, Layer, Layered, RoutingModelChoice};
+
+    let workspace = new_workspace();
+    let data = tempfile::tempdir().unwrap();
+    let runtime = runtime_for(workspace.path(), data.path());
+
+    let mut user = config::UserConfig::load(runtime.paths()).unwrap();
+    user.routing_mut()
+        .set_model(Some(RoutingModelChoice::Automatic));
+    user.save(runtime.paths()).unwrap();
+
+    // Premise, per §17: before the edit, this layer has never decided
+    // memory_extraction — or a later assertion that it became `Some(false)`
+    // proves nothing about the edit.
+    let before = config::UserConfig::load(runtime.paths()).unwrap();
+    assert_eq!(before.memory_extraction(), None);
+
+    let user_edit = MemorySettingsEdit {
+        memory_extraction: Some(false),
+    };
+    shell::save_user_settings_with_routing(&runtime, &[], &[], &[], None, Some(&user_edit))
+        .unwrap();
+    assert!(
+        !runtime
+            .project()
+            .display_root()
+            .join(".glasshouse")
+            .exists(),
+        "a user memory save wrote into the project"
+    );
+    let user = config::UserConfig::load(runtime.paths()).unwrap();
+    assert_eq!(user.memory_extraction(), Some(false));
+    assert_eq!(
+        user.routing().model(),
+        Some(&RoutingModelChoice::Automatic),
+        "a memory-only edit must not clobber the routing model it never named"
+    );
+
+    let project_edit = MemorySettingsEdit {
+        memory_extraction: Some(true),
+    };
+    let path = shell::save_project_settings_with_routing(
+        &runtime,
+        &[],
+        &[],
+        &[],
+        None,
+        Some(&project_edit),
+    )
+    .unwrap();
+    assert!(path.is_file());
+    let project = config::load_project_config(runtime.project())
+        .unwrap()
+        .expect("project memory config");
+    let effective = EffectiveConfig::new(&user, Some(&project));
+    assert_eq!(
+        effective.memory_extraction_enabled(),
+        Layered::new(true, Layer::Project),
+        "a project's explicit re-enable must win over the user's disable"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -358,6 +434,35 @@ fn a_config_file_written_before_free_resources_existed_loads_with_empty_preferen
     assert!(preferences.order().is_empty());
     assert!(preferences.disabled().is_empty());
     assert_eq!(preferences.pin(), None);
+}
+
+/// A config file predating the Memory section — same file as Acceptance 3 —
+/// loads without error, with the memory-extraction setting unset at this
+/// layer (`None`) and resolving through `EffectiveConfig` to its documented
+/// default: enabled, at `Layer::Default`.
+#[test]
+fn a_config_file_written_before_the_memory_section_existed_loads_with_the_default() {
+    use glasshouse::config::{EffectiveConfig, Layer, Layered};
+
+    let workspace = new_workspace();
+    let data = tempfile::tempdir().unwrap();
+    let runtime = runtime_for(workspace.path(), data.path());
+
+    std::fs::write(
+        runtime.paths().user_config_file(),
+        "[providers.openrouter]\ntemplate = \"openrouter\"\ncredential_env = [\"OPENROUTER_API_KEY\"]\n",
+    )
+    .unwrap();
+
+    let loaded = config::UserConfig::load(runtime.paths()).expect("must load without error");
+    assert_eq!(loaded.memory_extraction(), None);
+
+    let effective = EffectiveConfig::new(&loaded, None);
+    assert_eq!(
+        effective.memory_extraction_enabled(),
+        Layered::new(true, Layer::Default),
+        "nothing recorded anywhere must resolve to enabled"
+    );
 }
 
 /// Acceptance 4 — the user's order, disabled list and pin round-trip, and a
@@ -571,6 +676,44 @@ fn routing_settings_render_the_disposable_choice_reason_in_the_types_own_words()
             reason.as_str()
         );
     }
+}
+
+/// The Memory section shows the current automatic-memory-extraction setting
+/// and its layer, using the same `layer_label` treatment as every other
+/// section, and an edit both flips the value and promotes its layer to
+/// `(user)`. The "not available in this build" placeholder Phase 2D line 190
+/// leaves behind must be gone.
+#[test]
+fn the_memory_extraction_setting_renders_its_value_and_layer_and_an_edit_changes_both() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use glasshouse::shell::{HarnessRow, ProfileRow, ProviderRow, ShellState};
+
+    let mut state = ShellState::new("p", "/work/p", "0.1.0", Vec::new());
+    state.open_settings(
+        Vec::<HarnessRow>::new(),
+        Vec::new(),
+        Vec::<ProviderRow>::new(),
+        Vec::<ProfileRow>::new(),
+    );
+    // Harnesses -> Integrations -> Providers -> Launch Profiles -> Routing -> Memory.
+    for _ in 0..5 {
+        state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+
+    // Premise, per §17: the row starts enabled at `Layer::Default` — or a
+    // later assertion that a toggle changed it to "no"/`(user)` proves
+    // nothing about the toggle.
+    let text = rendered_settings(&state, 100, 30);
+    assert!(text.contains("Memory"), "{text}");
+    assert!(text.contains("yes (default)"), "{text}");
+    assert!(
+        !text.contains("not available in this build"),
+        "the placeholder text must be gone:\n{text}"
+    );
+
+    state.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    let toggled = rendered_settings(&state, 100, 30);
+    assert!(toggled.contains("no (user)"), "{toggled}");
 }
 
 /// Acceptance 6 — a credential value planted in the environment never

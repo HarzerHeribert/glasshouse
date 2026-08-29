@@ -304,3 +304,91 @@ and none of these contracts makes an OS-specific claim. Linux and macOS both run
 this file in `scripts/ci-local.sh`. Windows runs the rest of the suite but not
 this file; a Windows-native rewrite would need `.bat` argv-dump harnesses and is
 recorded here as the one uncovered platform, not silently omitted.
+
+---
+
+## Phase 40 line 1646 — CLOSED 2026-08-29 (batch 47). Phase 40 is now 9/9.
+
+Contract: Given a session started from a checkpoint recorded by another
+session, when Glasshouse creates the destination session's record, it stores
+which session that checkpoint came from — while leaving every pre-existing
+session row untouched and readable, and never inventing a source for a session
+that was not started from a checkpoint.
+
+State: COMPLETE
+
+**Tiered by recon before dispatch, not guessed.** This line sat one question
+away from Opus-specialist territory (durable state and migrations). A read-only
+recon settled it as ordinary Sonnet work on evidence the orchestrator then
+confirmed directly: `database.rs:830` states the house rule in the schema's own
+words — *"`ALTER TABLE ADD COLUMN`, never a rebuild"* — there are eleven
+existing `ALTER TABLE sessions ADD COLUMN` migrations, and
+`memories.source_session_id` (`database.rs:282`, indexed at `:637`) is the same
+field on another table, already shipping. The recon also killed the cheaper
+hypothesis: the checkpoint is **not** already the join, because a checkpoint can
+be read by `--from-checkpoint` any number of times and nothing records which
+destination sessions actually resulted.
+
+Production evidence:
+- `crates/glasshouse/src/database.rs` — migration 12,
+  `ALTER TABLE sessions ADD COLUMN source_session_id TEXT`, nullable, no
+  `CHECK`, no foreign key. `SUPPORTED_SCHEMA_VERSION` 11 → 12, and
+  `MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize]` means the array
+  length is type-checked against it.
+- `crates/glasshouse/src/session/store.rs` — `SessionRecord::source_session_id`,
+  `NewSession::with_source_session`, `ALL_COLUMNS` and the row mapping.
+- `crates/glasshouse/src/main.rs` — `resolve_bootstrap_prompt` widened from
+  `Result<Option<String>>` to carry the source `SessionId` out beside the
+  prompt, and `launch_session` passes it to `store.create(..)`. The id was
+  always available at that point in program order; it was being discarded at a
+  function boundary.
+
+**NULL means "not started from a checkpoint", never a placeholder.** A session
+recorded before this migration, and any launch without `--from-checkpoint`,
+reads back as `None`.
+
+**One direction only, and this is a decision (§71).** The column answers "what
+did this session come from". No index, no reverse table, no descendants column:
+`SessionStore::list()` already enumerates every session in the project with no
+required key, so "what came from this session" is a filter over an existing
+enumeration, not a missing capability.
+
+Regression evidence — `crates/glasshouse/tests/handoff_lines.rs`, the real
+binary under a real pty across three harness pairs:
+- the positive case, once per harness pair, via the set-difference the 1645
+  check already performs;
+- the negative: a session started without a checkpoint records `None`.
+
+Mutation, re-run by the orchestrator twice — once in the worker's tree and
+again on the integrated tree:
+
+| mutation | vocabulary | result |
+|---|---|---|
+| `.with_source_session(bootstrap.as_ref().map(...))` → `.with_source_session(None)` | `skip-state-update` | **killed** — `a_checkpoint_bootstraps_a_fresh_session_under_a_different_harness_through_the_shipped_binary` FAILED at `handoff_lines.rs:329`: *"[1643 (Codex -> Claude Code)] the fresh session did not record its source session"* |
+
+The `--test handoff_lines` target holds the killing test; checked.
+
+### Two integration findings this line paid for, both the orchestrator's fault
+
+**1. The partition was wrong (§32).** Adding a non-`Default` field to
+`SessionRecord` breaks every struct literal that builds one — including five in
+`shell/state.rs` and `shell/view.rs`, which the packet gave to a *different*
+live worker. The worker found this, ran `cargo build --all-targets` to confirm
+it was exactly five `E0063`s and nothing else, **refused to reach across the
+boundary**, and named the one-line fix. The integrator applied it after both
+diffs were in the same tree. §32's rule — put the caller's file in the
+partition — applies to a field's construction sites, not only to its callers.
+
+**2. The verification commands were too narrow (§69).** The packet named
+`--test handoff_lines`, `--test checkpoint_portability` and `--bin glasshouse`.
+None of those reach the migration-ladder tests, and a schema bump breaks
+**eight** of them: five in `--lib`, two in `memory_provenance`, one in
+`memory_store`. `blast-radius.sh` caught all eight at integration, which is what
+it is for. Seven rollback fixtures wind a database back by deleting
+`schema_migrations` rows while the *columns* stay physically present, so each
+must also drop the new column — the convention was already visible in
+`session/store.rs`, which drops fourteen of them. One fixture (`version 1`)
+drops the whole `sessions` table and needed only its head assertion moved.
+
+Platform/external evidence: SQLite migration, platform-neutral; `handoff_lines.rs`
+keeps whatever gate it had. Missing: CI run.

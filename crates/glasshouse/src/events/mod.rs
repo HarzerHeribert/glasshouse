@@ -752,6 +752,7 @@ mod tests {
             response_mechanism: None,
             display_name: None,
             purpose: None,
+            source_session_id: None,
         }
     }
 

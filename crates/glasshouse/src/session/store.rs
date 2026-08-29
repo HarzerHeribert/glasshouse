@@ -505,6 +505,13 @@ pub struct SessionRecord {
     pub display_name: Option<SessionName>,
     /// A lightweight purpose a person tagged this session with — line 651.
     pub purpose: Option<SessionPurpose>,
+    /// The session this one was bootstrapped from, if it was started with
+    /// `--from-checkpoint` — Phase 40 line 1646. `None` means either a session
+    /// recorded before this column existed, or a session that was never
+    /// started from a checkpoint at all; both are the same fact, "this
+    /// session has no recorded source," and the column does not distinguish
+    /// them.
+    pub source_session_id: Option<SessionId>,
 }
 
 impl SessionRecord {
@@ -569,6 +576,9 @@ pub struct NewSession {
     pub response_profile: Option<ResponseProfile>,
     /// Which mechanism carried that profile.
     pub response_mechanism: Option<ResponseMechanism>,
+    /// The session this one is being bootstrapped from, if this launch is a
+    /// `--from-checkpoint` handoff. See [`SessionRecord::source_session_id`].
+    pub source_session_id: Option<SessionId>,
 }
 
 impl NewSession {
@@ -587,6 +597,7 @@ impl NewSession {
             protocol: None,
             response_profile: None,
             response_mechanism: None,
+            source_session_id: None,
         }
     }
 
@@ -661,6 +672,14 @@ impl NewSession {
         response_mechanism: Option<ResponseMechanism>,
     ) -> Self {
         self.response_mechanism = response_mechanism;
+        self
+    }
+
+    /// Record the session this one was bootstrapped from, if this launch is
+    /// a `--from-checkpoint` handoff. See
+    /// [`SessionRecord::source_session_id`].
+    pub fn with_source_session(mut self, source_session_id: Option<SessionId>) -> Self {
+        self.source_session_id = source_session_id;
         self
     }
 }
@@ -834,7 +853,7 @@ const ALL_COLUMNS: &str = "id, project_id, harness, native_session_id, role, \
                            lifecycle, presentation, created_at, last_activity_at, \
                            launch_profile, backend_resource, model, pairing_class, \
                            protocol, response_profile, response_mechanism, \
-                           display_name, purpose";
+                           display_name, purpose, source_session_id";
 
 /// An open project database plus the sessions inside it.
 ///
@@ -1097,6 +1116,7 @@ impl<'a> SessionStore<'a> {
             // session Glasshouse named itself would be a name nobody chose.
             display_name: None,
             purpose: None,
+            source_session_id: new.source_session_id,
         };
 
         self.conn
@@ -1105,9 +1125,9 @@ impl<'a> SessionStore<'a> {
                  role, lifecycle, presentation, created_at, last_activity_at, \
                  launch_profile, backend_resource, model, pairing_class, protocol, \
                  response_profile, response_mechanism, process_id, \
-                 process_started_at, process_host, supervision) \
+                 process_started_at, process_host, supervision, source_session_id) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
-                 ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 rusqlite::params![
                     record.id.as_str(),
                     &record.project_id,
@@ -1141,6 +1161,7 @@ impl<'a> SessionStore<'a> {
                         .as_ref()
                         .map(|_| Supervision::Owned)
                         .map(Supervision::as_str),
+                    record.source_session_id.as_ref().map(SessionId::as_str),
                 ],
             )
             .map_err(|source| SessionStoreError::Sql {
@@ -1915,6 +1936,10 @@ fn read_record(row: &Row<'_>) -> Result<SessionRecord, SessionStoreError> {
     let purpose = optional(&id, "purpose", row.get_unwrap(17), |value| {
         SessionPurpose::parse(value).ok()
     })?;
+    // Never decoded, only wrapped: an identifier does not fail to parse the
+    // way an enum's stored word can.
+    let source_session_id: Option<String> = row.get_unwrap(18);
+    let source_session_id = source_session_id.map(SessionId);
 
     Ok(SessionRecord {
         id,
@@ -1935,6 +1960,7 @@ fn read_record(row: &Row<'_>) -> Result<SessionRecord, SessionStoreError> {
         response_mechanism,
         display_name,
         purpose,
+        source_session_id,
     })
 }
 
@@ -2867,6 +2893,11 @@ mod tests {
                 "sessions.process_host",
                 "sessions.supervision",
                 "sessions.supervision_reason",
+                // Migration 12. A Glasshouse-generated session identifier —
+                // the same one every other `sessions.id` column already
+                // holds — never anything a user typed or a provider
+                // returned.
+                "sessions.source_session_id",
             ],
             "the project database schema changed; confirm the new column cannot \
              hold a provider credential before updating this list"
@@ -2998,6 +3029,7 @@ mod tests {
                  ALTER TABLE sessions DROP COLUMN process_host;
                  ALTER TABLE sessions DROP COLUMN supervision;
                  ALTER TABLE sessions DROP COLUMN supervision_reason;
+                 ALTER TABLE sessions DROP COLUMN source_session_id;
                  DROP TABLE IF EXISTS memories_fts;
                  DROP TABLE IF EXISTS memories;
                  DROP TABLE IF EXISTS lifecycle_events;
@@ -3014,8 +3046,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 11,
-            "the launch must have applied migrations 3, 4, 5, 6, 7, 8, 9, 10 and 11"
+            version, 12,
+            "the launch must have applied migrations 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12"
         );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
@@ -3202,8 +3234,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 11,
-            "the launch must have applied migrations 2, 3, 4, 5, 6, 7, 8, 9, 10 and 11"
+            version, 12,
+            "the launch must have applied migrations 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12"
         );
 
         let store = SessionStore::new(&reopened).unwrap();
@@ -4139,6 +4171,7 @@ mod tests {
                      ALTER TABLE sessions DROP COLUMN process_host;
                      ALTER TABLE sessions DROP COLUMN supervision;
                      ALTER TABLE sessions DROP COLUMN supervision_reason;
+                     ALTER TABLE sessions DROP COLUMN source_session_id;
                      DROP TABLE IF EXISTS routing_observations;
                  DELETE FROM schema_migrations WHERE version >= 8;",
                 )
@@ -4151,8 +4184,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 11,
-                "the launch must have applied migrations 8, 9, 10 and 11"
+                version, 12,
+                "the launch must have applied migrations 8, 9, 10, 11 and 12"
             );
 
             let after = SessionStore::new(&reopened)
@@ -4197,6 +4230,105 @@ mod tests {
                 Some("survivor")
             );
             assert_eq!(renamed.native_session_id, before.native_session_id);
+        }
+    }
+
+    mod phase_40 {
+        //! Phase 40 line 1646 — which session, if any, a session was
+        //! bootstrapped from.
+        //!
+        //! `main.rs::resolve_bootstrap_prompt` and `launch_session` are
+        //! exercised against the shipped binary in `tests/handoff_lines.rs`
+        //! (the positive case, once per harness pair, and the negative case
+        //! of an ordinary launch). What is here is what only the store can
+        //! answer: that the column round-trips on its own, and that a
+        //! database written before this migration still reads back —
+        //! `upgrading_a_version_7_database_preserves_every_existing_session`'s
+        //! own reasoning, one migration later.
+        use super::*;
+
+        #[test]
+        fn a_recorded_source_session_round_trips() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(tmp.path(), "alpha");
+            let store = fixture.store();
+
+            let source = store.create(NewSession::embedded("claude-code")).unwrap();
+            let target = store
+                .create(NewSession::embedded("codex").with_source_session(Some(source.id.clone())))
+                .unwrap();
+            assert_eq!(target.source_session_id, Some(source.id.clone()));
+
+            let read_back = store.get(&target.id).unwrap().unwrap();
+            assert_eq!(read_back.source_session_id, Some(source.id));
+        }
+
+        /// The negative case, and it matters as much as the positive one: a
+        /// session started without naming a checkpoint must record no
+        /// source, never an invented one.
+        #[test]
+        fn a_session_not_started_from_a_checkpoint_has_no_source() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(tmp.path(), "alpha");
+            let record = fixture
+                .store()
+                .create(NewSession::embedded("claude-code"))
+                .unwrap();
+            assert_eq!(record.source_session_id, None);
+        }
+
+        /// Migration 12 applies to a database created by the previous
+        /// schema, and every existing row survives it unchanged — the same
+        /// contiguous rollback `upgrading_a_version_7_database_preserves_
+        /// every_existing_session` uses, one migration later.
+        #[test]
+        fn upgrading_a_version_11_database_preserves_every_existing_session() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(tmp.path(), "alpha");
+            let store = fixture.store();
+
+            let record = store
+                .create(
+                    NewSession::embedded("claude-code")
+                        .with_role(SessionRole::Worker)
+                        .with_native_session_id(Some("native-pre-12".to_owned())),
+                )
+                .unwrap();
+            let before = store.get(&record.id).unwrap().unwrap();
+
+            fixture
+                .conn
+                .execute_batch(
+                    "ALTER TABLE sessions DROP COLUMN source_session_id;
+                     DELETE FROM schema_migrations WHERE version >= 12;",
+                )
+                .unwrap();
+
+            let reopened = fixture.reopen();
+            let version: i64 = reopened
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(version, 12, "the reopen must have applied migration 12");
+
+            let after = SessionStore::new(&reopened)
+                .unwrap()
+                .get(&record.id)
+                .unwrap()
+                .expect("the pre-migration session must survive");
+
+            assert_eq!(after.id, before.id);
+            assert_eq!(after.harness, before.harness);
+            assert_eq!(after.native_session_id, before.native_session_id);
+            assert_eq!(after.role, before.role);
+            assert_eq!(after.lifecycle, before.lifecycle);
+
+            // A session recorded before migration 12 ran has no recorded
+            // source — a different fact from having been started fresh by a
+            // build that could name one, but the column cannot and must not
+            // distinguish them.
+            assert_eq!(after.source_session_id, None);
         }
     }
 }

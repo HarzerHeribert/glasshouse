@@ -699,6 +699,7 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
              ALTER TABLE sessions DROP COLUMN process_host;
              ALTER TABLE sessions DROP COLUMN supervision;
              ALTER TABLE sessions DROP COLUMN supervision_reason;
+             ALTER TABLE sessions DROP COLUMN source_session_id;
 
              DROP TABLE IF EXISTS routing_observations;
 
@@ -733,8 +734,8 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
         })
         .unwrap();
     assert_eq!(
-        version, 11,
-        "the launch must have applied migrations 6, 7, 8, 9, 10 and 11"
+        version, 12,
+        "the launch must have applied migrations 6, 7, 8, 9, 10, 11 and 12"
     );
     drop(conn);
 
@@ -946,6 +947,7 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
              ALTER TABLE sessions DROP COLUMN process_host;
              ALTER TABLE sessions DROP COLUMN supervision;
              ALTER TABLE sessions DROP COLUMN supervision_reason;
+             ALTER TABLE sessions DROP COLUMN source_session_id;
 
              DROP TABLE IF EXISTS routing_observations;
 
@@ -979,8 +981,8 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
         })
         .unwrap();
     assert_eq!(
-        version, 11,
-        "the launch must have applied migrations 7, 8, 9, 10 and 11"
+        version, 12,
+        "the launch must have applied migrations 7, 8, 9, 10, 11 and 12"
     );
     drop(conn);
 

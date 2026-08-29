@@ -631,7 +631,12 @@ fn launch_session(
             .with_response_profile(Some(response_profile.resolved().profile()))
             .with_response_mechanism(Some(session::session_response_mechanism(
                 response_application.mechanism(),
-            ))),
+            )))
+            // Phase 40 line 1646: the session this one was bootstrapped from,
+            // if this launch is a `--from-checkpoint` handoff. `None` for
+            // every other launch — a session not started from a checkpoint
+            // must never record an invented source.
+            .with_source_session(bootstrap.as_ref().map(|(_, source)| source.clone())),
     )?;
 
     // Read before the harness runs, for a harness that keeps its identifiers
@@ -692,7 +697,7 @@ fn launch_session(
     // A checkpoint's handoff, if one was named, as the harness's opening
     // prompt — exactly where a person typing it after `--` would have put it.
     let launch = match &bootstrap {
-        Some(prompt) => launch.args(std::iter::once(prompt.as_str())),
+        Some((prompt, _)) => launch.args(std::iter::once(prompt.as_str())),
         None => launch,
     };
     // The user's own `--` arguments always come last, so they can win.
@@ -1931,7 +1936,7 @@ fn resolve_checkpoint(
 }
 
 /// The handoff prompt a `--from-checkpoint` launch opens with, if one was
-/// asked for.
+/// asked for, alongside the session the checkpoint was recorded from.
 ///
 /// A named checkpoint that does not exist is an error rather than an empty
 /// prompt: starting a fresh session that silently lost its handoff is the
@@ -1940,7 +1945,7 @@ fn resolve_checkpoint(
 fn resolve_bootstrap_prompt(
     runtime: &Runtime,
     named: Option<&str>,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<(String, SessionId)>> {
     let Some(named) = named else {
         return Ok(None);
     };
@@ -1958,7 +1963,10 @@ fn resolve_bootstrap_prompt(
         recorded_by = %stored.checkpoint.harness,
         "starting a session from a checkpoint"
     );
-    Ok(Some(stored.checkpoint.bootstrap_prompt()))
+    Ok(Some((
+        stored.checkpoint.bootstrap_prompt(),
+        stored.checkpoint.session.clone(),
+    )))
 }
 
 /// The `glasshouse checkpoint list` listing.
