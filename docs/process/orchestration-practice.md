@@ -3502,3 +3502,66 @@ code-to-judgement ratio. A phase whose lines are mostly *"does a producer exist
 for this"* is an Opus specialist packet with one read-only verifier attached.
 A phase whose lines are mostly *"build this, and this, and this"* is what the
 lead arrangement is for.
+
+## §83 — refusals accumulate; gather them by root cause and attack that
+
+By batch 49 this project had a working discipline for refusing a line: check
+Phase −1, name the missing link in current source, record it in the ledger,
+move on. Three batches ran that way and the refusals were individually correct.
+
+**And nothing ever went back for them.** A line came back "premise-invalid
+because X has no producer", the ledger recorded it, and the next batch picked
+different lines. The refusals piled up as a well-written archive of things not
+done. The user's own words for it:
+
+> they are like yeah i did these two and didnt do these 8 because of this and
+> that, but then it kinda gets left at that and no steps are taken to continue
+> and gather these blockers and try to resolve them in a packaged way.
+
+**The refusals are not an archive. They are the input to the next package.**
+
+### They cluster, and the clusters are small
+
+Reading batch 47–49's refusals together rather than per phase, ~20 refused
+lines collapsed into four root causes:
+
+1. **A production caller passing an invented constant** where a real value is
+   already in scope. `routing/disposable.rs:568` hardcodes three fields of
+   `ReserveDecisionInputs` — that one literal `false` is the entire reason
+   **four** lines across Phase 32F are open, and one of them (1291) is open
+   *because* another (`cheaper_adequate_resource_exists`) is false, since the
+   function then falls through to `Allow` and the branch under test becomes
+   unobservable. `gateway/mod.rs` binds the provider's `Retry-After` and calls
+   `observe_exchange` seventeen lines later without it — that is a fifth line.
+2. **A setter with only test callers** — and, crucially, the provider signal
+   that would fill it genuinely does not arrive. Blocked on external reality,
+   not on us. Do not package these as work.
+3. **No consumer, because the consuming phase is at zero.** Waiting, correctly.
+4. **A mechanism with no production installation** — built, tested,
+   mutation-proven, never called from `main.rs`.
+
+**Cause 1 is a package. Cause 2 is not.** The difference is whether the missing
+thing is inside this repository.
+
+### How to run one
+
+Give a lead the *cause*, not the lines, and say so: *"your job is the root
+cause; the boxes are the measure of whether you fixed it, not the task list."*
+Then:
+
+- **State the ruling each field needs** before any code: does Glasshouse
+  actually know this, or would I be inventing a judgement? Expect the fields to
+  answer differently — one true by control flow, one with no producer at all,
+  one premise-invalid for this caller.
+- **Name the characteristic mutation**: restoring the hardcoded constant. If
+  that does not kill a test, the line is not closed however much code moved.
+- **Say that inventing an input is worse than returning the line.** A
+  blocker-resolution package is the exact place where the pressure to
+  manufacture a producer is highest, because the line looks *so close*.
+
+### The check to run at the end of every batch
+
+Before writing the handoff, re-read the batch's refusals **together** and ask
+which share a cause. If two or more do, that cause is the next package. This
+takes minutes and it is the difference between a ledger that records failure
+and one that routes it.

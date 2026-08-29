@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**723 / 1280 mandatory capabilities (56%)** — 557 open across 71 phases.
+**724 / 1280 mandatory capabilities (57%)** — 556 open across 71 phases.
 
 ## Where the work is
 
@@ -54,12 +54,12 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 26 | Memory query for agents | **6** | 0 | `1109` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **6** | 0 | `1858` |
 | Phase 31 | Compaction-aware behavior | **7** | 0 | `1167` |
+| Phase 33 | Resource health | **7** | 8 | `1309` |
 | Phase 38 | Quota-preserving routing | **7** | 0 | `1604` |
 | Phase 50 | Tracked project knowledge as an optional feature | **7** | 0 | `1803` |
 | Phase 15 | Orchestrator wake-up flow | **8** | 0 | `731` |
 | Phase 29 | Memory commits | **8** | 0 | `1145` |
 | Phase 30 | Session context metadata | **8** | 0 | `1156` |
-| Phase 33 | Resource health | **8** | 7 | `1309` |
 | Phase 34B | Routing-model role | **8** | 7 | `1406` |
 | Phase 35D | Routing under subscription pressure | **8** | 0 | `1568` |
 | Phase 36 | Session affinity | **8** | 0 | `1579` |
@@ -100,7 +100,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~526 open lines are not.
+other ~525 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -262,6 +262,7 @@ to do, and the orchestrator should follow its own rule.
 - **§80** — the four ways a mutation lies, and all four read as evidence
 - **§81** — never mark a recon's claim "established, do not re-derive"
 - **§82** — a team lead pays when the work is code, not when it is judgement
+- **§83** — refusals accumulate; gather them by root cause and attack that
 
 ## Recent checkpoints
 
