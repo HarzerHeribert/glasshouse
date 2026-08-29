@@ -221,3 +221,55 @@ call site is expected to be small.
 ## PROBES I NEED RUN
 
 None.
+
+---
+
+## Per-line triage — 2026-08-29 (batch 48). This supersedes the `NOT STARTED, blocked` state above.
+
+**The blocker this file records is stale.** It says `evaluate_reserve_spend`
+"has no production caller in this build". It has exactly one:
+`routing/disposable.rs:568`, inside `DisposableRouting::choose`, reached from
+`RoutedNoModel::new(JobKind::MemoryExtraction, ..)` at `main.rs:1282`. There is
+still **no interactive caller** — `grep -n 'reserve'
+crates/glasshouse/src/routing/interactive.rs` matches nothing — and that, not
+the absence of any caller, is what actually constrains these lines.
+
+Three of the six `ReserveDecisionInputs` fields at `disposable.rs:568` are
+hardcoded literals rather than derived values, which is why the lines differ
+from one another rather than closing as a block.
+
+| line | verdict | why |
+|---|---|---|
+| 1288 avoid spending while cheaper adequate resources exist | **NEEDS DESIGN** | `cheaper_adequate_resource_exists: false` is hardcoded, but `disposable.rs:551-559`'s control flow reaches the metered loop only after every free candidate failed — so the input is true *by construction*. Whether an input that is provably correct by its caller's control flow counts as exercised, or whether the box needs `evaluate_reserve_spend`'s own conditional to see real variance, is an orchestrator ruling nobody has made. |
+| 1289 high-tier consumption | **OPEN, BLOCKED** | the only production caller always supplies `WorkloadTier::Leaf`; the Heavy path needs a `JobKind` that is not `MemoryExtraction`, and none has a production caller. |
+| 1290 user override | **OPEN, BLOCKED** | hardcoded `false`, no CLI or API sets it, and a disposable background job has no live user present to grant one. |
+| 1291 permissive near reset | **OPEN** | `seconds_until_reset` *is* real telemetry here, but no test drives the imminent branch. See the pair below. |
+| 1292 conservative when reset distant | **OPEN — and a recon called this a free tick; it is not** | see below. |
+| 1293 inspectable in routing explanations | **CLOSED, and the map's ☑ is right** | `phase-35b.md` records it COMPLETE. **This file was never updated and still contradicts that.** The map and `phase-35b.md` are correct; this row is the correction. |
+| 1294 never move a nearly-complete task | **OPEN, BLOCKED, and likely premise-invalid for this caller** | hardcoded `false`; the line's premise is *moving a task between sessions*, which describes interactive routing. The disposable path's job is a single bounded extraction call, not a resumable task. |
+
+### 1291 and 1292 are one package, and the acceptance bar is already written
+
+A batch-48 recon reported 1292 as needing only "the tick and a cross-reference,
+not code", on the strength of
+`main.rs::disposable_extraction_model_lets_the_protected_reserve_policy_deny_a_metered_candidate`
+— a real end-to-end test that denies a Reserve-band candidate whose reset is
+7200s away.
+
+**The orchestrator re-ran the mutation before ticking, and it SURVIVED.** In
+`provider/quota.rs::reset_urgency` (`:1892`), flipping the distant branch from
+`0.0` to `1.0` — making a distant reset behave exactly like an imminent one —
+changed nothing. `--bin glasshouse` ran 37 tests including that one; all
+passed. The test denies on the **Reserve band alone**; reset distance is not
+its deciding variable.
+
+So nothing in the suite watches *"more conservative when the next reset is
+distant"*, and the tick would have been unearned. This is §75 for the third
+time: a careful, evidenced, specific recon claim that was still wrong, caught
+only by running the mutation.
+
+**What closes both lines:** one test pair where reset distance is the *only*
+difference — same candidate, same Reserve band, `seconds_until_reset` either
+side of `RESET_IMMINENT_SECONDS` (300) and `RESET_DISTANT_SECONDS` (3600),
+asserting opposite outcomes. The `reset_urgency` mutation above must then kill
+it. Tests only; no mechanism is missing.
