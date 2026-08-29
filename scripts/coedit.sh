@@ -153,6 +153,29 @@ cmd_done() {
   mkdir -p "$d/done"
   date -u '+%Y-%m-%dT%H:%M:%SZ' > "$d/done/$worker"
   printf 'coedit: %s declared DONE on %s\n' "$worker" "$file"
+
+  # A claimant whose diff for this file is EMPTY never edited it, and holding a
+  # barrier for a file you did not touch is pure cost — the peer waits, and the
+  # orchestrator waits, for nothing.
+  #
+  # Found by the first real two-worker trial, 2026-08-29. GH-WORKER-ACCESS
+  # claimed main.rs, read it three times, and every read produced a REFUSAL
+  # rather than an edit, so its diff was empty at `done` time. Its own words:
+  # "I would have finished holding it silently. Your stop hook caught it, not
+  # me."
+  #
+  # This REPORTS and does not auto-release. Releasing is the orchestrator's
+  # (§77 rule 5), and a worker that edited nothing may still have a reason the
+  # barrier should stand. Saying it out loud is what turns a silent cost into a
+  # decision somebody makes.
+  local wt; wt="$(head -1 "$d/claims/$worker" 2>/dev/null)"
+  if [ -n "$wt" ] && [ -d "$wt" ] \
+     && [ -z "$(git -C "$wt" diff -- "$file" 2>/dev/null)" ]; then
+    printf '\033[33mcoedit: %s left %s UNCHANGED\033[0m — it claimed the file and never edited it.\n' "$worker" "$file"
+    printf '  The barrier still counts it. If it had no reason to hold, release it:\n'
+    printf '    scripts/coedit.sh release %s\n' "$file"
+  fi
+
   cmd_status "$file"
 }
 

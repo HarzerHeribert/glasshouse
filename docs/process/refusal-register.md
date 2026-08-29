@@ -164,6 +164,34 @@ batch 50 and it was wrong; the correction is in `phase-47.md`.
 |---|---|
 | 566, 569 | `harness::pairing::classify` derives `PairingClass` from harness + model + corrections and **never from the route**, while every candidate set the binary builds varies **only** by route (`UpstreamBackend` has no model field). So the native-pairing prior is constant across every set Glasshouse ranks, and a constant cannot change a ranking. **Tripwired:** `the_native_pairing_prior_is_constant_across_a_real_session_start_candidate_set` fails the moment `classify` reads the route, and that failure means 566 became reachable |
 
+### Cluster K — a decision nobody has made, and a door that records nothing *(in-repo: yes)*
+
+Batch 51, Phase 15/16. **Ranking these by open-line count keeps recommending
+them; the reason they are open is not effort.**
+
+| line | missing link |
+|---|---|
+| 745 | *"enter any orchestrated worker while it is running"* is an **unmade Red-tier product decision**, which `phase-16.md` already recorded. `session::attach` is not its producer: it **spawns rather than adopts** (`attach.rs:107`) and its resume caller refuses a running session by name (`session/store.rs:1838`). Adopting a running session is a different capability from starting one |
+| 746, 747 | follow 745 — there is nothing to send input to, or interrupt, until a user can be *in* a running worker |
+| 748 | blocked on Cluster K's defect below, not on schema. The event kinds exist already: `text_delivered` and `interrupt_delivered` carry an `origin` field (`database.rs:89-101`) |
+| 740 | an ordering claim over 745; unreachable while 745 is |
+
+**The defect underneath, and it is bigger than 748.** `glasshouse api serve`
+writes **nothing** to the project event log — not interventions, not
+`session_started`, not `process_exited`. `api/unix.rs:84` builds its runtime
+with `SessionRuntime::new()`, a bus with no sink, where `shell/mod.rs:88` calls
+`attach_event_log` first. Measured with a shipped-binary probe plus control:
+`lifecycle_events` is empty.
+
+**And the obvious fix closes nothing** — verified by a SURVIVED mutation.
+Attaching a sink makes rows appear, correctly stamped `machine`, and
+`Request::Events` still returns `[]`, because `observed_since` filters
+`WHERE ... observed_harness IS NOT NULL` (`events/log.rs:376`). So a naive fix
+buys a write-capable SQLite handle held for the door's whole life — §65's
+hazard, on the platform where SQLite's locks are mandatory — and **zero
+observable behaviour**. The write path and a read path that bypasses
+`observed_since` have to be designed together.
+
 ## Standing refusals that are decisions, not blockers
 
 - **1323** stays open by the user's own reasoning. Do not re-ask (§70).
