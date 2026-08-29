@@ -3139,3 +3139,61 @@ not: the other worker may still change it, and may itself be wrong. The packet
 must say so — *this is an unfinished proposal by a peer, not committed truth* —
 because this project's recurring defect is exactly this shape: a narrow, cited,
 plausible-looking artifact read as more authoritative than it is (§75, §76).
+
+## §78 — two packet defects from one round, and a live check that would have passed falsely
+
+### The shim under the binary you are probing
+
+`codex-hooks` was told to verify, against a real Codex, that it accepts
+`PreCompact`/`PostCompact` hooks before wiring them — §23's rule that a control
+must be run against the host it is used to justify. It found something the packet
+did not anticipate and that would have produced a **false pass**:
+
+> *this pane's default `codex` on `PATH` is a cmux shim that execs
+> `cmux-codex-wrapper`, which silently injects `--dangerously-bypass-hook-trust`.
+> Under that flag the hook-review screen never appears at all — hooks just run.*
+
+So the probe would have observed "no review screen, hooks ran fine" and reported
+success, while proving **nothing about whether Codex accepts the declaration** —
+because the flag removes the very gate being tested. The worker located the real
+standalone binary and probed that instead.
+
+Practice §22 already records that cmux's wrapper passes this flag, in a paragraph
+about hooks running unreviewed. **What was not recorded is that it invalidates
+live probes**, and that is the more dangerous half: a bypass flag does not just
+change behaviour, it can *remove the observable* a probe depends on.
+
+**Rule: before a live-binary check, confirm which binary you are running.**
+`command -v <tool>` and, if it resolves into a shim directory, find the real one.
+This is §19's dev-shim lesson from the other side — there the shim resolved to the
+wrong *checkout*; here it resolves to the wrong *invocation*.
+
+### A packet that forbids the files its own evidence lives in
+
+`handoff-checkpoint`'s Half A asked a worker to close six Phase 40 lines whose
+production evidence is `main.rs::launch_session`, `main.rs::resolve_bootstrap_prompt`
+and `session::select::select` — and the same packet's `FORBIDDEN FILES` listed
+`main.rs` and `session/**`, because other workers held them.
+
+**§35 says close a "it has a caller now" box by mutating the call itself.** The
+worker could not: the call lives in a file it was forbidden to touch. It refused
+to read "forbidden to edit" as "forbidden except transiently", closed the six on
+production-path behavioural evidence instead — a new integration test driving the
+**shipped binary** — and **flagged the gap rather than quietly lowering either the
+packet's bar or its own claim.**
+
+That is the right call and the right disclosure. The defect is mine: **a packet
+must not forbid the file a line's evidence depends on.** If the evidence lives in
+a contended file, either the line waits for that file, or the package gets the
+file. Silently pairing "close this line" with "you may not touch where it lives"
+produces exactly this — a worker forced to choose between disobeying and
+under-proving.
+
+It also found, while tracing, a **second production caller of checkpoint capture**
+(`api/unix.rs::request_checkpoint`) that no packet or evidence entry had named —
+which is why adding a field to `Handoff` breaks compilation in two forbidden
+files, verified by actually doing it and running `cargo check` before restoring.
+
+**Both defects have the same root as §75 and §76: I wrote a constraint and an
+instruction that could not both be satisfied, and only the worker noticed.**
+Eleven consecutive rounds now.
