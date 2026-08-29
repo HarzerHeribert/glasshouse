@@ -143,6 +143,36 @@ missing on purpose.
 counts and timestamps without interpreting content, or these lines stay open
 and should stop being counted as cheap. **Do not package 1331–1333 as wiring.**
 
+**Amended the same day, by a read-only recon, and the amendment corrects me
+rather than the cluster.** I wrote above that Phase 33A's ledger looked like
+Cluster B with "no production caller". **That was wrong.**
+`SessionRouting::record_routing_observation` (`gateway/session.rs:327`) is
+called at `gateway/mod.rs:640`, both well before their `#[cfg(test)]`
+boundaries, and the comment above the call site names it *"Phase 33A's
+production producer"*. My grep looked for `.record(` and `RoutingObservation`
+and missed a writer with a different name. **A false absence of a caller
+manufactures work; this one nearly did.**
+
+The corrected picture, per field, from
+`.agent-runtime/report-evidence-ledger-recon.md`:
+
+| line | status |
+|---|---|
+| **1330** | **six of its seven fields already flow** — `provider`, `model`, `route`, `quota_context`, `harness`, `dispatched_at` are all set at `gateway/session.rs:359-365`. **`purpose` is the one field nothing holds**: `NewObservation` has no `with_purpose` builder at all, `new` defaults it to `None`, and nothing in the tree — production or test — ever sets it. A live struct field and a live schema column with **no producer whatsoever**. A `SessionPurpose` exists on `SessionRecord` (`session/store.rs:507`), but whether `SessionRouting` can reach a session identity to look it up is **unverified** — check that before packaging |
+| **1334** | **worse than unwired, and not uniformly.** All four counters are always `NULL`. `tool_rounds` is **above this cluster's line**: `gateway/ingress.rs` serves one HTTP request per connection, and a harness's tool loop spans several, so nothing at this layer has a "round" to count. `retries` and `repairs` — the recon **could not find the concept anywhere in the tree**, which is weaker than unwired; only `Retry-After` *header parsing* exists, which is what the provider said to wait, not a count of Glasshouse's own attempts. `failovers` is the one plausibly countable today |
+
+**The reader side is split and that matters for what "recording" is worth.**
+`EvidenceLedger::recent` has **zero** production callers — every site is in a
+test module or in `gateway/conformance.rs`, itself `cfg(test)`-gated.
+`summarize` has **one** production caller, `ObservedEvidenceSource::observed`
+(`evidence.rs:1163`), reached in production from `gateway/session.rs:478` and
+feeding a real failover ranking — **but it reads only `failure_rate`**. The
+three latency aggregates have **zero hits tree-wide** outside `evidence.rs`,
+which is Cluster D 1313's shape exactly.
+
+So the ledger is written in production and *partly* read in production. It is
+not write-only. **1330 is one honest field away; 1334 is not a wiring job.**
+
 1330 and 1334 are *not* in this cluster — identity, purpose, timestamp, tool
 rounds, retries and outcomes need no body inspection. A package scoped to those
 two plus 1331's `first_byte_at` clause is honest and was not attempted this
