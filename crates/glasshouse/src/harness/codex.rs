@@ -106,10 +106,33 @@ const BACKEND_SELECTION: &[BackendSelection] = &[
     BackendSelection::ChildEnvironment("CODEX_HOME relocates the whole configuration root"),
 ];
 
-/// Codex 0.149.1's complete `codex --help` was read on 2026-08-26. It
-/// documented no output-style, persona, or tone mechanism. The capability map
-/// names "Codex personalities" only as an example, so this is unknown rather
-/// than an invented declaration of support.
+/// Codex has one, `--help` is not where it lives, and it is still
+/// `Unverified` — because half a fact is not a declaration.
+///
+/// The earlier reading concluded from a complete `codex --help` that no
+/// persona or tone mechanism existed. The command was read correctly and the
+/// conclusion was wrong: on 0.150.1, `codex features list` reports
+/// `personality  stable  true`, the binary's own status line reads "Use
+/// /personality to customize how Codex communicates", and its bundled prompt
+/// catalogue carries one overlay per personality (`personality_friendly`,
+/// `personality_pragmatic`) templated into the base instructions at
+/// `{{ personality }}`. The field also sits *beside* `model_reasoning_effort`
+/// and `model_verbosity` in the same settings list rather than inside either,
+/// which is what makes it communication policy and not reasoning effort.
+///
+/// So [`super::CommunicationStyle`]'s `mechanism` half is established. Its
+/// `change` half is not: whether `/personality` re-styles the running
+/// conversation or only one started afterwards cannot be read out of any
+/// artifact this environment offers, and settling it needs an interactive TUI
+/// driven through a real turn. A slash command *looks* like an in-place
+/// mechanism, and recording `InPlace` on that basis is exactly the guess
+/// [`Declared`] exists to make impossible — a wrong `InPlace` here would have
+/// Glasshouse silently fail to apply a profile, and a wrong `NewSession`
+/// would throw away a warm session to apply one it already had.
+///
+/// The experiment that would close this: start `codex`, run `/personality
+/// friendly` mid-conversation, and see whether the *current* thread changes
+/// voice or only the next one does.
 const COMMUNICATION_STYLE: Declared<super::CommunicationStyle> = Declared::Unverified;
 
 /// The `{ "N" = "V", ... }` inline TOML table for `headers`, or `None` when

@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**738 / 1280 mandatory capabilities (58%)** — 542 open across 70 phases.
+**740 / 1280 mandatory capabilities (58%)** — 540 open across 69 phases.
 
 ## Where the work is
 
@@ -22,7 +22,7 @@ closures are usually at the top. Open the map at the line number given.
 
 | phase | title | open | closed | map line |
 |---|---|---|---|---|
-| Phase 6 | Harness adapter interface | **1** | 12 | `275` |
+| Phase 7 | Claude Code adapter | **1** | 9 | `296` |
 | Phase 8 | Codex adapter | **1** | 9 | `313` |
 | Phase 9A | Harness launch profiles | **1** | 25 | `344` |
 | Phase 9H | Sticky gateway routing for harness-backed interactive sessions | **1** | 13 | `501` |
@@ -31,7 +31,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32B | Quota telemetry sources | **1** | 13 | `1220` |
 | Phase 41 | Project overview | **1** | 14 | `1648` |
 | Phase 42 | External control API | **1** | 12 | `1666` |
-| Phase 7 | Claude Code adapter | **2** | 8 | `296` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 9E | Secret storage | **2** | 11 | `432` |
 | Phase 9F | Direct provider launch profiles | **2** | 11 | `453` |
@@ -93,7 +92,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 51 | Evaluation hooks | **37** | 0 | `1818` |
 | Phase 21K | Assumption-aware implementation guardrails | **43** | 0 | `992` |
 
-**Fully closed (34):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 9B, Phase 9C, Phase 9D, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 18, Phase 19, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 32, Phase 35, Phase 40, Phase 45, Phase 48.
+**Fully closed (35):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 9B, Phase 9C, Phase 9D, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 18, Phase 19, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 32, Phase 35, Phase 40, Phase 45, Phase 48.
 
 ## The nearly-finished phases, in full
 
@@ -108,9 +107,9 @@ The number is the map line number, which is also the capability's id.
 `validate_round.py` checks a packet's quotes against the map, so paste
 these unwrapped.
 
-### Phase 6 — Harness adapter interface  (1 open, 12 closed)
+### Phase 7 — Claude Code adapter  (1 open, 9 closed)
 
-- **290** ☐ Make each adapter declare which native communication-style mechanisms it supports and whether changing them requires a new or cleared native session.
+- **310** ☐ Record Claude compaction events when they can be observed reliably.
 
 ### Phase 8 — Codex adapter  (1 open, 9 closed)
 
@@ -143,11 +142,6 @@ these unwrapped.
 ### Phase 42 — External control API  (1 open, 12 closed)
 
 - **1681** ☐ Allow the API to request an inspectable routing recommendation without executing it.
-
-### Phase 7 — Claude Code adapter  (2 open, 8 closed)
-
-- **308** ☐ Detect when Claude Code requires user input or permission through structured events when possible.
-- **310** ☐ Record Claude compaction events when they can be observed reliably.
 
 ### Phase 9 — Antigravity adapter  (2 open, 5 closed)
 

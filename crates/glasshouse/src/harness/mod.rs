@@ -1703,7 +1703,15 @@ mod tests {
                 (IntegrationId::OpenCode, None),
                 (IntegrationId::Cursor, None),
                 (IntegrationId::Pi, None),
-                (IntegrationId::Hermes, None),
+                (
+                    IntegrationId::Hermes,
+                    Some(CommunicationStyle {
+                        mechanism: "personality overlay, selected with `/personality <name>` \
+                                    inside a running session and stored as the \
+                                    `display.personality` configuration key",
+                        change: StyleChange::InPlace,
+                    }),
+                ),
             ],
             "read any changed declaration from the named native artifact before changing this \
              table; unsupported or unobserved style mechanisms must remain unknown"

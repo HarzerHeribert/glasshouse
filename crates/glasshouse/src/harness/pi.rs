@@ -21,10 +21,15 @@ const BACKEND_SELECTION: &[BackendSelection] = &[
     ),
 ];
 
-/// Pi is unavailable on `PATH` in this environment, so no current `--help`
-/// artifact can establish a native communication-style mechanism. Its package
-/// name alone is not evidence, and its prompt flags must not be repurposed as
-/// one by inference.
+/// Pi is still unavailable on `PATH` in this environment — re-checked on
+/// 2026-08-29 with `command -v pi` and a scan of every `PATH` entry, both of
+/// which found nothing — so no current `--help` artifact can establish a
+/// native communication-style mechanism. Its package name alone is not
+/// evidence, and its prompt flags must not be repurposed as one by inference.
+///
+/// This is the one adapter whose `Unverified` means *nothing could be read at
+/// all*, rather than *it was read and nothing qualified*. `Declared` cannot
+/// spell that difference, so it is written down here instead.
 const COMMUNICATION_STYLE: Declared<super::CommunicationStyle> = Declared::Unverified;
 
 impl HarnessAdapter for Pi {

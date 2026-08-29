@@ -221,3 +221,59 @@ Known limit, recorded rather than fixed:
   `PATH`). Only the evidence prose distinguishes them. Nothing consumes the
   distinction today; the first thing that will is a re-probe policy, and it
   will need a structural difference rather than a doc comment.
+
+---
+
+### Phase 6 — Make each adapter declare which native communication-style mechanisms it supports and whether changing them requires a new or cleared native session (line 290)
+
+State: **COMPLETE** — orchestrator ruling, batch 51. **Phase 6 is now fully closed.**
+
+Contract: Given any installed harness, when a user runs `glasshouse doctor`,
+Glasshouse shows which native communication-style mechanism that harness
+supports and whether changing it costs a new session — distinguishing "nothing
+established it" from "there is none", and never claiming a mechanism it cannot
+cite.
+
+**The declaration slot already existed and every adapter filled it with a
+placeholder.** All seven declared `Declared::Unverified`. `Declared`'s own
+documentation is the law this package worked under: `Verified` carries
+`evidence` naming a source *"concrete enough to re-check"*, and `Unverified`
+means *"nothing available in this environment established it. Not 'no', and
+never a guess."* So the deliverable was **establishing**, not filling in.
+
+Result per adapter: Claude Code already `Verified{NewSession}`; **Hermes newly
+`Verified{InPlace}`** — its mechanism found outside `--help`; Codex, Antigravity,
+OpenCode, Cursor and Pi rewritten and **left `Unverified`**, each recording what
+was ruled out rather than merely that nothing was found. Five of seven staying
+`Unverified` is the correct outcome, not a shortfall.
+
+**The consumer was the whole gap, and the orchestrator closed it rather than
+the lead.** `communication_style` was written by all seven adapters and read in
+production by **nothing**: `harness/mod.rs`'s readers are behind `#[cfg(test)]`,
+and every construction in `profile/` and `session/select.rs` is a fixture past
+those files' `#[cfg(test)]` markers. `write_adapter_report` printed vendor,
+resume, session ids, hooks, approvals, capabilities, protocols and model — and
+not this. The lead reported that and stopped rather than build a consumer it had
+not been authorised to design, which was correct.
+
+Production: `integrations/mod.rs::write_adapter_report` now renders a
+`comm style:` row carrying **both** of the line's clauses — the mechanism and
+its session cost — with `Unverified` printing as `unverified` rather than
+collapsing to "none".
+
+Regression: `tests/harness_declarations.rs`, five tests. Three hold properties a
+table cannot: that the dimension cannot silently go dead, that a verified style
+cites something re-checkable, and that an unverified one yields no value. The
+fourth is the consumer test, and it runs the **shipped binary** rather than
+calling `doctor_report` in-process. It deliberately does not assert any
+harness's mechanism text — that would break whenever an adapter learned
+something, which is the opposite of what this dimension is for.
+
+Mutation: `drop-the-comm-style-row` — KILLED, run by the orchestrator, on
+*"every adapter's doctor entry must carry a communication-style row, so a
+declaration nobody reads cannot masquerade as a capability."*
+
+Limit: the `StyleChange` half has no consumer that *acts* on it — everything
+applies styles at launch. The line asks for declaration, which is met; a router
+that avoids giving up a warm session is a routing-phase capability and inventing
+one here would be §35 pointed the other way.

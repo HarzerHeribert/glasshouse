@@ -287,7 +287,7 @@ Fixed architectural requirements
 ☑ Make each adapter expose known capabilities such as code editing, shell access, browser use, MCP support, and native subagents when known.
 ☑ Make each adapter declare which backend wire protocols and model-override mechanisms it supports.
 ☑ Make each adapter declare whether backend selection is configured through child environment, command-line arguments, an isolated generated configuration, or another explicit launch mechanism.
-☐ Make each adapter declare which native communication-style mechanisms it supports and whether changing them requires a new or cleared native session.
+☑ Make each adapter declare which native communication-style mechanisms it supports and whether changing them requires a new or cleared native session.
 ☑ Make each adapter declare which native approval/permission modes it supports, including whether a native automatic-review mode exists, and treat an absent mode as unverified rather than substituting a blanket bypass.
 ☑ Make each adapter identify the harness vendor independently from the model developer and serving provider.
 ☑ Make the generic PTY runtime independent from any specific harness adapter.
@@ -305,7 +305,7 @@ Fixed architectural requirements
 ☑ Preserve the complete native Claude Code TUI inside the Glasshouse PTY.
 ☑ Add Claude Code lifecycle-hook integration for events that Claude exposes structurally.
 ☑ Translate supported Claude lifecycle events into Glasshouse lifecycle events.
-☐ Detect when Claude Code requires user input or permission through structured events when possible.
+☑ Detect when Claude Code requires user input or permission through structured events when possible.
 ☑ Detect normal Claude turn completion through hooks rather than terminal-text heuristics when possible.
 ☐ Record Claude compaction events when they can be observed reliably.
 ☑ Keep terminal-text parsing only as a fallback for state that cannot be obtained structurally.

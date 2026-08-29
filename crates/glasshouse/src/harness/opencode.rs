@@ -103,9 +103,24 @@ const CONFIG_FILE_NAME: &str = "opencode-provider.json";
 /// [`PROTOCOLS`].
 const OPENAI_COMPATIBLE_NPM: &str = "@ai-sdk/openai-compatible";
 
-/// OpenCode 1.18.22's `opencode --help` was read on 2026-08-26. It documents
-/// no native output-style or other communication-style mechanism, so this
-/// stays unknown instead of projecting a generic response profile onto it.
+/// OpenCode 1.18.23's `opencode --help` was re-read on 2026-08-29 and still
+/// documents no native output-style or other communication-style mechanism.
+///
+/// The one candidate is `--agent`, and it is **disqualified rather than
+/// unfound**, which is a stronger statement and worth the distinction.
+/// [`super::CommunicationStyle`] is communication policy only — "not
+/// reasoning effort, not permission mode, and not tool access" — and
+/// `opencode agent list` prints, for the built-in `build` agent, a list of
+/// permission rules (`{"permission": "bash", "pattern": "git push --force*",
+/// "action": "deny"}` among them). Selecting an agent therefore changes the
+/// tool policy in force, so an adapter reaching for it to express a response
+/// profile would be changing what the session may *do* in order to change how
+/// it *talks*. That agents also carry prompt content does not rescue it: the
+/// mechanism is not separable.
+///
+/// A targeted search of the installed bundle for `tone`, `persona`,
+/// `verbosity`, `outputStyle` and `responseStyle` as configuration keys found
+/// none, so nothing narrower exists to declare either.
 const COMMUNICATION_STYLE: Declared<super::CommunicationStyle> = Declared::Unverified;
 
 impl HarnessAdapter for OpenCode {

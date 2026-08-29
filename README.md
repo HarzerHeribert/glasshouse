@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████░░░░░░░░░░░░░░░░░` 738 / 1280 mandatory capabilities (57%)
+`███████████████████████░░░░░░░░░░░░░░░░░` 740 / 1280 mandatory capabilities (57%)
 
 <details>
-<summary>Per-phase breakdown (34 of 104 phases complete)</summary>
+<summary>Per-phase breakdown (35 of 104 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -36,8 +36,8 @@ the authoritative specification and tracks what is done.
 | Phase 3 — TUI shell | 12/12 ✅ |
 | Phase 4 — Generic PTY session runtime | 12/12 ✅ |
 | Phase 5 — Native terminal embedding | 8/8 ✅ |
-| Phase 6 — Harness adapter interface | 12/13 |
-| Phase 7 — Claude Code adapter | 8/10 |
+| Phase 6 — Harness adapter interface | 13/13 ✅ |
+| Phase 7 — Claude Code adapter | 9/10 |
 | Phase 8 — Codex adapter | 9/10 |
 | Phase 9 — Antigravity adapter | 5/7 |
 | Phase 9A — Harness launch profiles | 25/26 |

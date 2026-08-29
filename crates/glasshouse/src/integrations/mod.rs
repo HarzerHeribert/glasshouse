@@ -1155,6 +1155,27 @@ fn write_adapter_report(out: &mut String, adapter: &'static dyn crate::harness::
         None => "unverified".to_string(),
     };
     let _ = writeln!(out, "      model:        {model}");
+
+    // Map line 290: each adapter declares which native communication-style
+    // mechanism it supports **and whether changing it needs a new or cleared
+    // native session**. Both clauses are rendered, because the second is the
+    // one that costs a user a warm session and it is invisible otherwise.
+    //
+    // `Unverified` prints as itself rather than as "none". They are different
+    // claims — `Declared`'s own documentation is that an unverified value is
+    // "not `no`, and never a guess" — and a report that collapsed them would
+    // tell a user a harness has no mechanism when nothing has looked.
+    let communication_style = match described.communication_style.value() {
+        Some(style) => {
+            let change = match style.change {
+                crate::harness::StyleChange::InPlace => "changeable in place",
+                crate::harness::StyleChange::NewSession => "changing it needs a new session",
+            };
+            format!("{} ({change})", style.mechanism)
+        }
+        None => "unverified".to_string(),
+    };
+    let _ = writeln!(out, "      comm style:   {communication_style}");
 }
 
 /// Render every configured provider (Phase 9C/9D), or a note explaining why

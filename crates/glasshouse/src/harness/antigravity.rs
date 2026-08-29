@@ -75,10 +75,26 @@ const BACKEND_SELECTION: &[BackendSelection] = &[BackendSelection::CommandLineAr
     "--model and --project select what a session runs against",
 )];
 
-/// A signed-in Antigravity CLI 1.1.21 `agy --help` was read in full on
-/// 2026-08-26. It documents no native output-style or other
-/// communication-style mechanism, so Glasshouse deliberately records no
-/// inferred support.
+/// A signed-in Antigravity CLI 1.1.21 `agy --help` was re-read in full on
+/// 2026-08-29. It still documents no native output-style or other
+/// communication-style mechanism, so Glasshouse records no inferred support.
+///
+/// Three flags sit close enough to be worth naming as *rejected* rather than
+/// merely absent, because each is disqualified by a different clause of
+/// [`super::CommunicationStyle`]'s rule: `--effort` is reasoning effort by its
+/// own help text ("Reasoning effort for the current CLI session"), `--mode
+/// (accept-edits, plan)` is permission mode, and `--agent` selects an agent —
+/// the same construct that in OpenCode demonstrably carries a permission
+/// policy, and which `agy agent --help` describes no further than "List
+/// available agents". Nothing establishes `--agent` as communication-only, so
+/// it is unestablished rather than either claimed or denied.
+///
+/// The `AGY_CLI_*` environment namespace in the installed binary
+/// (`AGY_CLI_LOGO_STYLE`, `AGY_CLI_DISABLE_MERMAID_ASCII`, and the rest) is
+/// terminal *rendering* — what the CLI draws — and not how the model
+/// communicates. A `ResponseStyle` protobuf type is present too, but it
+/// belongs to a linked-in Google Cloud AI Platform SDK with no surface any
+/// user can reach; a type name in a vendored dependency is not a mechanism.
 const COMMUNICATION_STYLE: Declared<super::CommunicationStyle> = Declared::Unverified;
 
 /// The model family Google produces for Antigravity's own coding

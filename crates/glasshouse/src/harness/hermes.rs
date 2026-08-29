@@ -4,8 +4,9 @@
 //! 2026-08-25 — `hermes --help`, `hermes hooks --help`, and `hermes version`.
 
 use super::{
-    ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, Declared,
-    HarnessAdapter, HarnessDescription, Hooks, Invocation, ModelOverride, SessionIds, Vendor,
+    ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, CommunicationStyle,
+    Declared, HarnessAdapter, HarnessDescription, Hooks, Invocation, ModelOverride, SessionIds,
+    StyleChange, Vendor,
 };
 use crate::integrations::IntegrationId;
 
@@ -35,11 +36,43 @@ const BACKEND_SELECTION: &[BackendSelection] = &[
     ),
 ];
 
-/// Hermes Agent 0.15.1's `hermes --help` was read on 2026-08-26. Its
-/// `--tui` and `--cli` selectors choose terminal presentation, not how the
-/// agent communicates, and no native output-style mechanism is documented.
-/// Glasshouse therefore records an unknown rather than a guess.
-const COMMUNICATION_STYLE: Declared<super::CommunicationStyle> = Declared::Unverified;
+/// Hermes's own personality overlay, and the one declaration in this crate
+/// whose change cost is `InPlace`.
+///
+/// The earlier reading of this line was `Unverified` on the grounds that
+/// `hermes --help` documents no output-style mechanism. That is true and it
+/// was the wrong place to look: Hermes keeps this one in its configuration
+/// and its slash-command table, neither of which `--help` prints. `--tui`
+/// and `--cli` remain what that reading said they were — terminal
+/// presentation, not how the agent communicates.
+///
+/// **Why it qualifies.** `CommunicationStyle` is communication policy only.
+/// `cli.py`'s `_resolve_personality_prompt` builds the overlay from a
+/// `system_prompt`, a `tone` and a `style`, and the `/personality` handler
+/// assigns `self.system_prompt` and nothing else — no toolset, no approval
+/// setting, no reasoning parameter. So it is not the disqualified shape that
+/// OpenCode's and Antigravity's `--agent` turned out to be.
+///
+/// **Why `InPlace` rather than `NewSession`.** Two independent readings, and
+/// they agree. In the interactive session Glasshouse embeds, `/personality`
+/// sets the overlay and clears the cached agent so the next turn rebuilds
+/// with it — while the conversation itself lives on the REPL object's own
+/// `conversation_history`, which that rebuild never touches. In the gateway
+/// path, `_apply_personality_to_session` says the same thing in its own
+/// docstring: it "appl[ies] a personality change to an existing session
+/// without resetting history", takes effect "on the next turn", and returns
+/// `history_reset` false always. Neither path gives up a warm session.
+const COMMUNICATION_STYLE: Declared<CommunicationStyle> = Declared::verified(
+    CommunicationStyle {
+        mechanism: "personality overlay, selected with `/personality <name>` inside a running \
+                    session and stored as the `display.personality` configuration key",
+        change: StyleChange::InPlace,
+    },
+    "Hermes Agent 0.15.1 `hermes --ignore-user-config config show` prints `Personality:` under \
+     `Display`; the installed `hermes_cli/config.py` default `display` block holds \
+     `\"personality\": \"\"`, and `tui_gateway/server.py::_apply_personality_to_session` \
+     documents applying a change to an existing session without resetting its history",
+);
 
 impl HarnessAdapter for Hermes {
     fn id(&self) -> IntegrationId {

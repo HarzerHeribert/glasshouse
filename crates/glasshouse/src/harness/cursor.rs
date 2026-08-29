@@ -23,12 +23,23 @@ const BACKEND_SELECTION: &[BackendSelection] = &[
     ),
 ];
 
-/// Cursor CLI 2026.08.11-e8db854's `cursor-agent --help` was read on
-/// 2026-08-26. Its
-/// `--mode ask` and `--mode plan` are read-only execution modes, not a
-/// communication-style mechanism: using either would weaken a coding session.
-/// No native output-style mechanism was documented, so support remains
-/// unknown.
+/// Cursor CLI 2026.08.11-e8db854's `cursor-agent --help` was re-read on
+/// 2026-08-29 and the earlier reading stands: `--mode ask` and `--mode plan`
+/// are read-only execution modes by their own descriptions, not a
+/// communication-style mechanism, and using either would weaken a coding
+/// session. No native output-style mechanism is documented, so support
+/// remains unknown.
+///
+/// Two near-misses found while re-checking, recorded so the next reader does
+/// not have to rule them out again. `~/.cursor/cli-config.json` carries a
+/// `display.mode` of `"zen" | "standard"`, grouped with `showThinkingBlocks`
+/// and `showStatusIndicators` — terminal chrome, not the model's voice. And
+/// the installed bundle does contain a `persona` field, but only as a
+/// numbered field in a wire-protocol message schema, with no flag, key or
+/// bracket parameter that sets it. `--model` does accept bracket overrides
+/// (`effort`, `context`, `fast`); no documented bracket key names a persona,
+/// and guessing at undocumented syntax is how an adapter launches a session
+/// the harness rejects.
 const COMMUNICATION_STYLE: Declared<super::CommunicationStyle> = Declared::Unverified;
 
 /// The models Cursor CLI's own help documents as values for `--model`.

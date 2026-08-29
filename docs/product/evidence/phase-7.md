@@ -309,3 +309,48 @@ Missing evidence:
 - None. The chain is closed end to end: Glasshouse mints an identifier, hands
   it to the harness, records the same one, and the harness both stores the
   conversation under it and reopens it on demand.
+
+---
+
+### Phase 7 — Detect when Claude Code requires user input or permission through structured events when possible (line 308)
+
+State: **COMPLETE** — orchestrator ruling, batch 51.
+
+Contract: Given a Claude Code session that stops for a permission decision,
+when Claude Code fires its `PermissionRequest` hook, Glasshouse records that
+session as waiting for the user everywhere a reader can see it — and does not
+record an ordinary turn end the same way.
+
+**The production path already existed and was already correct.**
+`session/lifecycle.rs:66` maps `"PermissionRequest" => WaitingForUser`, and
+`PermissionRequest` is in `claude_code.rs`'s `REPORTED_EVENTS`. What did not
+exist was any test entering where Claude Code enters: the four existing
+assertions call `lifecycle_for()` directly, and `lifecycle_for` is not what
+Claude Code runs (§35).
+
+Regression: `tests/adapter_lifecycle.rs` spawns the built binary as
+`glasshouse hook --session <id> --event PermissionRequest` with a payload on
+stdin, exactly as a harness does. **"Observable" is taken as three readers, not
+one row** — the session store every listing reads, the event log an observer
+tailing the project reads, and the disposition deciding whether a session is
+offered as live. A discriminating test sends `Stop` through the same process and
+requires the two to land in different states; without it the first test would
+pass against a build that mapped every report to one state.
+
+Mutation: `drop-permissionrequest-from-reported-events` — KILLED, re-run by the
+orchestrator, failing
+`the_settings_document_glasshouse_installs_subscribes_to_permission_requests`.
+
+**A defect a mutation found in the test itself, worth recording.**
+`claude_code.rs` has two event lists — `HOOK_EVENTS` (what Claude Code supports)
+and `REPORTED_EVENTS` (what Glasshouse subscribes to). The first version of this
+test asserted on the former while claiming to prove the latter: deleting
+`PermissionRequest` from `REPORTED_EVENTS` left it green against a build that
+would never have received a single permission report. That is §80 case 3 — the
+site mutated was not the site the test read — caught by mutation rather than by
+review. Rewritten to go through `hook_installation()` and assert on the rendered
+document bytes.
+
+`scripts/mutate.sh` also refused the naive form of this mutation outright
+(*"find string occurs 2 times, need exactly 1"*), which is the same trap guarded
+mechanically.
