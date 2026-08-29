@@ -1285,10 +1285,10 @@ Phase 32E — Burn rate and exhaustion forecasting
 Phase 32F — Protected quota reserve
 
 ☑ Allow each premium resource to define a protected reserve percentage.
-☐ Avoid spending protected reserve on low-tier work while cheaper adequate resources exist.
+☑ Avoid spending protected reserve on low-tier work while cheaper adequate resources exist.
 ☐ Allow high-tier tasks to consume protected reserve when their capability requirement justifies it.
 ☐ Allow the user to override reserve protection for a specific task or session.
-☐ Allow reserve policy to become more permissive shortly before a known quota reset.
+☑ Allow reserve policy to become more permissive shortly before a known quota reset.
 ☑ Allow reserve policy to become more conservative when the next reset is distant.
 ☑ Keep reserve behavior inspectable in routing explanations.
 ☐ Avoid moving an almost-complete high-value task to another session solely because a reserve threshold was crossed.
@@ -1316,7 +1316,7 @@ Phase 33 — Resource health
 ☐ Track recent rate-limit responses separately from transport or model failures.
 ☐ Track whether a rate-limit failure appears to be provider-wide, model-specific, account-specific, or request-pool-specific when evidence permits.
 ☐ Feed rate-limit events back into the unified capacity estimator.
-☐ Treat provider-declared Retry-After or equivalent cooldown information as authoritative for temporary scheduling blocks.
+☑ Treat provider-declared Retry-After or equivalent cooldown information as authoritative for temporary scheduling blocks.
 ☑ Treat unavailable quota telemetry as unknown rather than inventing a percentage.
 ☑ Allow a resource to be temporarily marked degraded after repeated failures.
 ☑ Allow a degraded resource to recover after successful probes or requests.

@@ -478,3 +478,25 @@ The lead fixed the *rule* 1319 names inside its own partition — a stated
 three further mutations — and correctly **did not tick the box**, because the
 provider's value never reaches the rule. `gateway/**` was another worker's that
 round; it is free now, and this is a small, precisely located follow-up.
+
+---
+
+## Phase 33 line 1319 — CLOSED, batch 49
+
+The gap `phase-33.md` located above is closed: `gateway/session.rs` now reads
+the provider's stated wait out of the rate-limit headers already bound at
+`gateway/mod.rs:586` and passes it into `WorkloadOutcome::RateLimited`, instead
+of hardcoding `None`.
+
+Regression evidence: `tests/gateway_retry_after.rs`, through a real socket.
+
+Mutations, all killed:
+
+| site | change | result |
+|---|---|---|
+| `gateway/mod.rs` the call | `session::stated_retry_after(&quota)` → `None` | killed |
+| `gateway/session.rs` | `retry_after: stated_retry_after` → `retry_after: None` | killed |
+| `gateway/session.rs` | `.retry_after_seconds()` → `.or(Some(60))`, inventing a wait | killed — `one_rate_limit_with_no_stated_wait_blocks_nothing` |
+
+That third mutation is the important one: it proves Glasshouse does not
+substitute a default when the provider stated nothing. `None` stays a fact.

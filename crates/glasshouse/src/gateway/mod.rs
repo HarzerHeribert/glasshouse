@@ -600,12 +600,24 @@ fn accept_loop(
                         // reads the very observations this loop's own writes
                         // produce.
                         let observed_at_instant = std::time::Instant::now();
+                        // Capability map line 1319's missing wire. `quota` is
+                        // this very response's own rate-limit headers, bound
+                        // seventeen lines above and — before this — used only
+                        // for capacity telemetry further down. A provider that
+                        // answered `429` and said how long to wait has stated
+                        // a temporary scheduling block, and
+                        // `routing::free::ResourceHealth::fail` treats a
+                        // stated wait as authoritative rather than as one more
+                        // failure to count. `session::stated_retry_after`
+                        // narrows the headers to that one duration; nothing
+                        // else from them travels into a routing decision.
                         routing.observe_exchange(
                             &upstream,
                             &exchange,
                             observed_at_instant,
                             evidence_ledger.as_deref(),
                             completed_at,
+                            session::stated_retry_after(&quota),
                         );
                         // Map line 1735: detect a gateway failure separately
                         // from a harness process failure. `session::classify`

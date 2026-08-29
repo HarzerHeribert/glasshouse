@@ -352,3 +352,80 @@ window actually flips a `Deny` into an `Allow` — the same blocker that holds
 branch's reason string cites *"(line 1292)"* and the `user_override` branch
 cites *"(line 1291)"*. Both are one line off — imminent-permissive is 1291,
 override is 1290.
+
+---
+
+## 1288 and 1291 — CLOSED by the blocker-resolution package, batch 49
+
+**The measurement this package exists to justify.** The mutation disabling
+`evaluate_reserve_spend`'s imminent-reset branch (`quota.rs:2298`) is recorded
+above as **SURVIVED**, run by the orchestrator with fifteen tests genuinely
+running. Re-run against the same function, unchanged, after fixing only the
+*caller's* input:
+
+    mutation disable-the-imminent-reset-branch: KILLED
+    line_1291_an_imminent_reset_makes_the_policy_spend_a_reserve_it_would_otherwise_keep
+
+Nothing about the branch moved. What moved is that it now decides something.
+**1291 closed as a side effect of fixing 1288** and was on nobody's task list —
+a line-at-a-time pass would have re-derived the same SURVIVED verdict and
+returned it blocked for a third time.
+
+### `cheaper_adequate_resource_exists` became real, and the definition was not invented
+
+The obvious reading of "cheaper" is money, and Glasshouse has no price model —
+`Cost` is `Free | Metered` and never compares two metered models. On that
+reading 1288 is premise-invalid and would have been refused a fourth time.
+
+**The correct reading was in the field's own doc comment**, written by Phase
+32F: *"Whether a resource outside the reserve band could adequately serve this
+task instead."* "Cheaper" is denominated in reserve capacity, not money, and
+`CapacityBand` is `Ord` with `Exhausted` lowest precisely so a policy can ask
+that as a comparison. Only reading the placeholder and its consumer together
+surfaced it.
+
+The input is now: does another eligible metered candidate have a **read** band
+above `Reserve`? Every part is observed or configured — `capacity.band` comes
+from `main.rs::disposable_candidate_capacity`, built per provider from
+`observed_capacity` and that provider's own `EffectiveConfig::reserve_percent`.
+
+Three refusals inside the ruling, each a place it could have become an invention:
+
+1. **An unread band is not a cheaper resource.** Only `Some(band) > Reserve`
+   counts; `None` might be deep in its own reserve. Deliberately the opposite
+   default from `choose`'s `unwrap_or(CapacityBand::Plenty)` one field away,
+   and both are the same rule: an unobserved band never withholds a resource
+   and never withholds another one either.
+2. **Free candidates are not consulted** — reaching the metered loop already
+   proved none can serve.
+3. **"Adequately" is inherited, not introduced** — this module has no
+   per-candidate capability model and did not gain one.
+
+**Recorded limit:** thresholds are per provider, so two models of one provider
+always share a band and the branch fires only across providers.
+
+Mutations, all killed, one re-run by the orchestrator:
+
+| site | change | result |
+|---|---|---|
+| `disposable.rs` the call | `cheaper_adequate_resource_exists(&metered, index)` → `false` | killed — both 1288 and 1291 tests |
+| `quota.rs:2298` | imminent branch disabled | **killed — the mutation this file records as SURVIVED** |
+| `disposable.rs` | `band > Reserve` → `band >= Reserve` | killed |
+| `disposable.rs` | `.is_some_and(..)` → `.is_none_or(..)` (an unread band counts) | killed |
+
+### 1290 and 1294 stay refused
+
+- **1290** — no producer anywhere sets a user override, and a disposable
+  background job has no live user present to grant one.
+- **1294** — premise-invalid *for this caller*: no progress model exists, and
+  this decision does not move tasks between sessions.
+
+### Where the root-cause framing did NOT pay, recorded honestly
+
+The lead's own finding: **"hardcoded constant" is a symptom class, not a
+cause.** Site A's three constants were three different problems wearing one
+shape — one had a producer nobody had looked for, one has no producer at all,
+one describes something this caller does not do. And 1319 (site B) was one
+argument in one file exactly as `phase-33.md` described it; bundling it here
+made it no smaller. It was included because the partition was free, not because
+the framing helped.

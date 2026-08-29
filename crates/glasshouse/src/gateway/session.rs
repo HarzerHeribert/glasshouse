@@ -27,7 +27,7 @@
 //! between two providers.
 
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // `PairingOverrides` comes from `crate::config::pairing`'s own `pub use`, not
 // from `crate::harness::pairing` directly — this module must never name
@@ -393,6 +393,13 @@ impl SessionRouting {
     /// [`crate::routing::interactive::InteractiveRouting::on_provider_failure`]'s
     /// own doc): with nothing to weigh, every survivor ties and the first one
     /// found wins, the same as before this package.
+    ///
+    /// `stated_retry_after` is what **the provider itself said** about how
+    /// long to wait, read off this same response's headers by
+    /// [`stated_retry_after`] — capability map line 1319. `None` means the
+    /// provider said nothing, and it must stay `None` all the way down: the
+    /// free pool's own bounded backoff is what applies then, and a wait
+    /// nobody stated is not a fact to record.
     pub(super) fn observe_exchange(
         &self,
         upstream: &Upstream,
@@ -400,8 +407,9 @@ impl SessionRouting {
         now: Instant,
         ledger: Option<&EvidenceLedger>,
         now_unix: i64,
+        stated_retry_after: Option<Duration>,
     ) {
-        let Some(observation) = classify(exchange) else {
+        let Some(observation) = classify(exchange, stated_retry_after) else {
             // Nothing reached the provider — an unauthenticated caller, a
             // malformed head, a target belonging to no protocol. Recording
             // health for a request the provider never saw would be inventing
@@ -572,6 +580,36 @@ fn model_key(model: &AssignedModel) -> String {
     model.label().to_owned()
 }
 
+/// The wait **the provider itself declared** on one response, as a duration —
+/// capability map line 1319's producer end, narrowed to the one fact the
+/// decision is allowed to carry.
+///
+/// # Why the whole [`RateLimitHeaders`] does not travel further than this
+///
+/// A `Retry-After` is a duration and nothing else. The rest of that value —
+/// limits, remaining counts, reset instants, the header names it was read
+/// from — is capacity telemetry with its own destination
+/// ([`SessionRouting::observe_quota_headers`] and the on-disk quota cache),
+/// and a scheduling block has no business seeing it. So this is where the
+/// narrowing happens, once, at the boundary between the two.
+///
+/// # `None` stays `None`
+///
+/// The provider saying nothing is not the same fact as the provider saying
+/// zero, and neither is a reason to invent a number: with no stated wait,
+/// [`crate::routing::free::ResourceHealth::fail`]'s own bounded backoff is
+/// what applies, after the failures it requires. `RateLimitHeaders` has
+/// already dropped anything that was not a non-negative integer (see
+/// [`RateLimitHeaders::read`]), and [`u64::try_from`] is the second, local
+/// refusal rather than a clamp — a negative wait is a header this code does
+/// not understand, not a zero-second one.
+pub(super) fn stated_retry_after(headers: &RateLimitHeaders) -> Option<Duration> {
+    headers
+        .retry_after_seconds()
+        .and_then(|seconds| u64::try_from(seconds).ok())
+        .map(Duration::from_secs)
+}
+
 /// What one exchange says, or `None` when it never reached the provider.
 ///
 /// The one place an HTTP status becomes a routing fact. Phase 9H line 512
@@ -582,7 +620,16 @@ fn model_key(model: &AssignedModel) -> String {
 /// - any other `4xx` is the harness's own request being wrong, and the
 ///   provider that answered it is healthy — sending the same malformed
 ///   request somewhere else would fail there too.
-fn classify(exchange: &Exchange) -> Option<Observation> {
+///
+/// `stated_retry_after` is the wait the provider declared on **this**
+/// response, and it is used by exactly one arm — the `429`. A `Retry-After`
+/// on any other status is not folded in anywhere, because
+/// [`crate::routing::free::WorkloadOutcome`] keeps a rate-limit refusal, a
+/// credential rejection and a transport failure apart on purpose, and only
+/// the first of the three is a *temporary scheduling block* capability map
+/// line 1319 speaks about. Widening it would blur exactly the distinction
+/// that type exists to hold.
+fn classify(exchange: &Exchange, stated_retry_after: Option<Duration>) -> Option<Observation> {
     match &exchange.outcome {
         Outcome::Forwarded {
             upstream_status, ..
@@ -604,14 +651,19 @@ fn classify(exchange: &Exchange) -> Option<Observation> {
             },
             429 => Observation {
                 workload: WorkloadOutcome::RateLimited {
-                    // Left `None` here, not because headers are unreadable —
-                    // `ingress::forward` now reads this allowlist for
-                    // capability map line 1229's gateway half — but because
-                    // wiring `retry-after` into a routing decision is Phase
-                    // 9H/9I's own scope and outside this package's
-                    // partition. Without one, the free pool's own bounded
-                    // backoff applies.
-                    retry_after: None,
+                    // Capability map line 1319. The provider's own answer,
+                    // read off this very response by `ingress::forward` and
+                    // carried here by the accept loop — *authoritative* for a
+                    // temporary scheduling block, which is why
+                    // `routing::free::ResourceHealth::fail` applies a stated
+                    // wait immediately and unclamped while an invented one
+                    // still has to earn `FAILURES_BEFORE_COOLDOWN`.
+                    //
+                    // `None` when the provider stated nothing, and it stays
+                    // `None`: the free pool's own bounded backoff is the
+                    // honest fallback, and a wait nobody declared is not one
+                    // to invent here.
+                    retry_after: stated_retry_after,
                 },
                 failure: ProviderFailure::from_status(429),
             },
@@ -842,6 +894,7 @@ mod tests {
             Instant::now(),
             Some(&ledger),
             now_unix,
+            None,
         );
 
         assert_eq!(
@@ -877,6 +930,7 @@ mod tests {
             Instant::now(),
             None,
             0,
+            None,
         );
 
         assert_eq!(
@@ -947,6 +1001,7 @@ mod tests {
                 Instant::now(),
                 None,
                 0,
+                None,
             );
         });
 
@@ -1010,6 +1065,7 @@ mod tests {
             Instant::now(),
             None,
             0,
+            None,
         );
 
         let changes = routing.changes();
@@ -1081,6 +1137,7 @@ mod tests {
             now,
             None,
             0,
+            None,
         );
         routing.observe_exchange(
             &upstream,
@@ -1088,6 +1145,7 @@ mod tests {
             now,
             None,
             0,
+            None,
         );
 
         let readings = routing.health_readings_for("openrouter", now, now_unix);
@@ -1135,6 +1193,7 @@ mod tests {
             now,
             None,
             0,
+            None,
         );
         routing.observe_exchange(
             &upstream,
@@ -1142,6 +1201,7 @@ mod tests {
             now,
             None,
             0,
+            None,
         );
         routing.observe_exchange(
             &upstream,
@@ -1158,6 +1218,7 @@ mod tests {
             now,
             None,
             0,
+            None,
         );
 
         let readings = routing.health_readings_for("openrouter", now, 1_800_000_000);

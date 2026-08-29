@@ -244,6 +244,22 @@ impl DisposableCandidate {
         self.cost
     }
 
+    /// Whether a *read* band puts this resource outside its protected
+    /// reserve, so that spending it costs nobody's reserve — the predicate
+    /// [`cheaper_adequate_resource_exists`] is built from.
+    ///
+    /// `None` is **not** outside the reserve here. That is deliberately the
+    /// opposite of [`DisposableRouting::choose`]'s own
+    /// `unwrap_or(CapacityBand::Plenty)` one field away, and both are the same
+    /// rule applied to the two different questions being asked: an unread
+    /// resource is never *withheld* by a band nobody observed, and it is never
+    /// *offered* as the reason to withhold another one either.
+    fn is_outside_reserve(&self) -> bool {
+        self.capacity
+            .band
+            .is_some_and(|band| band > CapacityBand::Reserve)
+    }
+
     fn as_free_resource(&self) -> FreeResource {
         FreeResource::new(self.credential.clone(), self.model.clone())
     }
@@ -554,17 +570,22 @@ impl DisposableRouting {
         // was ever configured or every one of them was withheld; both read
         // the same to a caller (line 539's refusal either way).
         //
-        // Every free resource is gone or absent by this point — Phase 32F's
-        // own "cheaper adequate resource" question is answered `false` for
-        // whichever metered candidate is considered next, because reaching
-        // this line already proved there was none.
+        // Every free resource is gone or absent by this point, which answers
+        // the *free* half of Phase 32F's "cheaper adequate resource" question
+        // — reaching this line already proved there was none. The metered
+        // half is the one this loop still has to ask, and
+        // [`cheaper_adequate_resource_exists`] asks it.
+        let metered: Vec<&EligibleCandidate<DisposableCandidate>> = eligible
+            .iter()
+            .filter(|candidate| !candidate.value().cost().is_free())
+            .collect();
         let mut denied_reasons = Vec::new();
         let mut best: Option<(
             &EligibleCandidate<DisposableCandidate>,
             RoutingExplanation,
             f64,
         )> = None;
-        for candidate in eligible.iter().filter(|c| !c.value().cost().is_free()) {
+        for (index, candidate) in metered.iter().copied().enumerate() {
             let decision = evaluate_reserve_spend(ReserveDecisionInputs {
                 band: candidate
                     .value()
@@ -574,7 +595,7 @@ impl DisposableRouting {
                 tier: classification
                     .map(TaskClassification::conservative_workload_tier)
                     .unwrap_or(WorkloadTier::Leaf),
-                cheaper_adequate_resource_exists: false,
+                cheaper_adequate_resource_exists: cheaper_adequate_resource_exists(&metered, index),
                 user_override: false,
                 seconds_until_reset: candidate.value().capacity.seconds_until_reset,
                 task_nearly_complete: false,
@@ -757,6 +778,61 @@ impl DisposableRouting {
             explanation,
         }
     }
+}
+
+/// Whether a resource *other than* `metered[index]` could serve this job
+/// without spending anybody's protected reserve — capability map line 1288's
+/// input to [`evaluate_reserve_spend`], and the only way that line's own
+/// branch is reachable from production.
+///
+/// # "Cheaper" is read here, not invented
+///
+/// The question sounds like it needs a price list, and Glasshouse has none:
+/// [`Cost`] knows only free-or-metered and never compares two metered models
+/// against each other. But
+/// [`ReserveDecisionInputs::cheaper_adequate_resource_exists`] states its own
+/// meaning, in the phase that owns the policy — *"whether a resource outside
+/// the reserve band could adequately serve this task instead"*. So "cheaper"
+/// is already denominated in the currency this policy protects, which is
+/// reserve capacity rather than money, and [`CapacityBand`] is [`Ord`] with
+/// [`CapacityBand::Exhausted`] lowest precisely so a policy can ask that as a
+/// comparison. Reading that definition is the whole of this function.
+///
+/// # An unknown band is not a cheaper resource
+///
+/// Only a candidate whose band has actually been *read* counts. A metered
+/// resource nothing has been observed about may be deep in its own protected
+/// reserve for all Glasshouse knows, and denying a spend on the strength of
+/// it would invent exactly the judgement this input exists to avoid.
+/// [`CandidateCapacity::band`]'s own `None` already refuses to withhold a
+/// resource by a band never observed; this is the same refusal pointed the
+/// other way, at the resource being offered as an alternative.
+///
+/// # Free candidates are not consulted, and that is not an omission
+///
+/// Reaching [`DisposableRouting::choose`]'s metered loop has already proved
+/// no free resource can serve: that loop returns on the first available one,
+/// and [`FreePreferences::arrange`] has already dropped the ones the user
+/// disabled. A resource that cannot serve now is not one that "could
+/// adequately serve this task instead".
+///
+/// # What "adequately" leans on
+///
+/// This module has no per-candidate capability model, and does not acquire
+/// one here: every eligible candidate is a model the user configured for this
+/// provider that survived [`apply_hard_constraints`]. Treating those as
+/// interchangeable for a bounded internal job is the assumption the free loop
+/// above already ships — it returns the first *available* candidate in the
+/// user's own order, never the most capable one — and this function inherits
+/// it rather than introducing it.
+fn cheaper_adequate_resource_exists(
+    metered: &[&EligibleCandidate<DisposableCandidate>],
+    index: usize,
+) -> bool {
+    metered
+        .iter()
+        .enumerate()
+        .any(|(other, candidate)| other != index && candidate.value().is_outside_reserve())
 }
 
 #[cfg(test)]
@@ -1229,6 +1305,295 @@ mod tests {
                 "a reset at RESET_DISTANT_SECONDS denies the same Reserve-band candidate (line 1292)",
             );
         assert!(matches!(denied, NoResource::ProtectedReserveDenied { .. }));
+    }
+
+    /// Two metered candidates whose *bands* differ, built so that the one in
+    /// the protected reserve would otherwise **win** — the fixture the two
+    /// tests below share.
+    ///
+    /// # Why the reserved candidate is the better-scoring one, and why that
+    /// is not a contrived configuration
+    ///
+    /// `score` never reads `band`; the magnitude it reads is
+    /// `remaining_capacity`. The two are genuinely independent inputs,
+    /// because a band is a percentage compared against **that provider's own
+    /// thresholds** — `EffectiveConfig::reserve_percent(provider)` — and
+    /// `phase-32d`/`phase-32f` already ruled that a user may widen one
+    /// provider's reserve past the global `Tight` boundary as a legitimate
+    /// policy. So "60% left, and that is inside the reserve its owner asked
+    /// for" beside "30% left, and that is plenty by its owner's thresholds"
+    /// is exactly the configuration those rulings describe, not an invention
+    /// of this test.
+    ///
+    /// It matters because it is what makes the tests non-vacuous: without
+    /// the reserve gate the higher-scoring reserved candidate is chosen, so
+    /// any test that saw the *other* one chosen has watched the gate act and
+    /// not the scorer.
+    fn reserved_and_unreserved_pair(
+        reserved_reset: Option<i64>,
+    ) -> (DisposableCandidate, DisposableCandidate) {
+        use crate::provider::quota::{
+            Capacity, CapacityBand, CapacityState, NativeAmount, Pool, Reading, ReadingSource,
+        };
+
+        const OBSERVED: i64 = 1_800_000_000;
+        let percent_remaining = |value: i64| {
+            let measured = |amount: i64| {
+                Capacity::Measured(Reading::new(
+                    NativeAmount::whole(amount, "tokens"),
+                    OBSERVED,
+                    ReadingSource::ResponseHeader("x-ratelimit".to_owned()),
+                ))
+            };
+            CapacityState::metered_balance()
+                .with_credits(
+                    Pool::inapplicable()
+                        .with_remaining(measured(value))
+                        .with_limit(measured(100)),
+                )
+                .remaining_capacity_score()
+                .expect("both halves of the credits pool are measured")
+        };
+
+        let reserved = metered("openrouter", "a-reserved-model").with_capacity(
+            CandidateCapacity::new()
+                .with_band(Some(CapacityBand::Reserve))
+                .with_remaining_capacity(Some(percent_remaining(60)))
+                .with_seconds_until_reset(reserved_reset),
+        );
+        let unreserved = metered("anyrouter", "a-plentiful-model").with_capacity(
+            CandidateCapacity::new()
+                .with_band(Some(CapacityBand::Plenty))
+                .with_remaining_capacity(Some(percent_remaining(30))),
+        );
+        (reserved, unreserved)
+    }
+
+    /// Capability map line 1288 — *"avoid spending protected reserve on
+    /// low-tier work while cheaper adequate resources exist"* — at the one
+    /// production caller of `evaluate_reserve_spend`.
+    ///
+    /// The whole line lives in one input, and that input was a hardcoded
+    /// `false` until this package: with it, the policy's
+    /// cheaper-alternative branch is unreachable from production, and the
+    /// line is not a missing mechanism but an unfed one.
+    ///
+    /// **Premise first (§17), and it is the same candidate both times.** A
+    /// Reserve-band candidate *alone* is allowed — nothing cheaper exists, so
+    /// spending the reserve is the least-bad option — and is chosen. Put an
+    /// unreserved candidate beside it and the reserved one is refused, so the
+    /// unreserved one is chosen instead, although it scores strictly lower.
+    /// Only the presence of the sibling moved.
+    ///
+    /// Deleting this test loses the only proof that
+    /// `cheaper_adequate_resource_exists` carries a real value; restoring the
+    /// constant must fail it.
+    #[test]
+    fn line_1288_an_unreserved_sibling_denies_the_reserve_to_low_tier_work() {
+        let routing = DisposableRouting::for_support_work(true, FreePreferences::new());
+        let (reserved, unreserved) = reserved_and_unreserved_pair(None);
+
+        let alone = routing
+            .choose(
+                JobKind::MemoryExtraction,
+                std::slice::from_ref(&reserved),
+                &FreePool::new(),
+                Instant::now(),
+                None,
+            )
+            .expect("with nothing cheaper available, spending the reserve is the least-bad option");
+        assert_eq!(
+            alone.model(),
+            "a-reserved-model",
+            "the premise: this candidate is chosen when it is the only one"
+        );
+
+        let beside_a_cheaper_one = routing
+            .choose(
+                JobKind::MemoryExtraction,
+                &[reserved.clone(), unreserved.clone()],
+                &FreePool::new(),
+                Instant::now(),
+                None,
+            )
+            .expect("the unreserved candidate can serve, so the job is not refused");
+        assert_eq!(
+            beside_a_cheaper_one.model(),
+            "a-plentiful-model",
+            "a resource outside its protected reserve is adequate and cheaper in the currency \
+             this policy protects, so leaf-tier work must not spend the reserve (line 1288)"
+        );
+        assert!(
+            beside_a_cheaper_one
+                .explanation()
+                .contributions()
+                .iter()
+                .any(|c| c.name() == "protected-reserve policy" && c.evidence().contains("allowed")),
+            "the chosen candidate still records the reserve decision that let it through"
+        );
+
+        // The order of the candidate list must not decide this: the same two
+        // resources the other way round answer the same.
+        let reversed = routing
+            .choose(
+                JobKind::MemoryExtraction,
+                &[unreserved, reserved],
+                &FreePool::new(),
+                Instant::now(),
+                None,
+            )
+            .expect("the unreserved candidate can serve, whichever end of the list it is on");
+        assert_eq!(reversed.model(), "a-plentiful-model");
+    }
+
+    /// The two ways a sibling is **not** a cheaper adequate resource, which
+    /// are the two ways the change for line 1288 could have made the policy
+    /// refuse work it should do.
+    ///
+    /// - **Equally reserved.** Two candidates both inside their protected
+    ///   reserve are not alternatives to each other. If they were, a user
+    ///   whose every metered resource is in its reserve band would get
+    ///   `ProtectedReserveDenied` for all of them instead of the least-bad
+    ///   spend `evaluate_reserve_spend`'s tail is written to allow. A
+    ///   `>=` where the predicate says `>` produces exactly that, and this
+    ///   test is what catches it.
+    /// - **Unread.** A resource nothing has been observed about may be deep
+    ///   in its own reserve; withholding a spend on the strength of it would
+    ///   invent the judgement the input exists to avoid. `None` is not
+    ///   "outside the reserve" — deliberately the opposite of `choose`'s own
+    ///   `unwrap_or(CapacityBand::Plenty)` for the candidate *being judged*,
+    ///   and both are the same refusal to let an unobserved band decide
+    ///   anything.
+    #[test]
+    fn an_equally_reserved_or_unread_sibling_is_not_a_cheaper_alternative() {
+        use crate::provider::quota::CapacityBand;
+
+        let routing = DisposableRouting::for_support_work(true, FreePreferences::new());
+        let (reserved, _) = reserved_and_unreserved_pair(None);
+        let also_reserved = metered("anyrouter", "another-reserved-model")
+            .with_capacity(CandidateCapacity::new().with_band(Some(CapacityBand::Reserve)));
+        let unread = metered("anyrouter", "an-unread-model");
+
+        assert_eq!(
+            routing
+                .choose(
+                    JobKind::MemoryExtraction,
+                    &[reserved.clone(), also_reserved],
+                    &FreePool::new(),
+                    Instant::now(),
+                    None,
+                )
+                .expect(
+                    "when every metered resource is inside its reserve, spending one is still \
+                     the least-bad option — they are not alternatives to each other"
+                )
+                .model(),
+            "a-reserved-model",
+            "the better-scoring reserved candidate is chosen, and neither denies the other"
+        );
+
+        assert_eq!(
+            routing
+                .choose(
+                    JobKind::MemoryExtraction,
+                    &[reserved, unread],
+                    &FreePool::new(),
+                    Instant::now(),
+                    None,
+                )
+                .expect("a candidate nothing has been read about denies nothing")
+                .model(),
+            "a-reserved-model",
+            "an unobserved band is not evidence that a cheaper adequate resource exists"
+        );
+    }
+
+    /// Capability map line 1291 — *"allow reserve policy to become more
+    /// permissive shortly before a known quota reset"* — which needs line
+    /// 1288's input to be observable at all.
+    ///
+    /// `phase-32f.md` recorded exactly why this line stayed open after its
+    /// own mechanism was built and tested: `evaluate_reserve_spend`'s tail
+    /// denies only when `cheaper_adequate_resource_exists`, and otherwise
+    /// falls through to `Allow`, so with that input nailed to `false` the
+    /// imminent-reset branch's `Allow` and the default `Allow` were **the
+    /// same decision** and "more permissive" could not be seen. Disabling
+    /// the branch outright changed nothing; the orchestrator ran that
+    /// mutation and it SURVIVED.
+    ///
+    /// With a real sibling the two decisions come apart. Same pair of
+    /// candidates, same bands, same scores: at a reset the policy calls
+    /// imminent the reserved candidate is spent, and at a reset it does not
+    /// the cheaper one is taken instead. **Reset distance is the only field
+    /// that moves**, asserted below rather than claimed.
+    ///
+    /// The far case is deliberately *between* [`RESET_IMMINENT_SECONDS`] and
+    /// [`RESET_DISTANT_SECONDS`], so that the denial comes from line 1288's
+    /// branch and not from the distant-reset branch
+    /// `reset_distance_alone_flips_the_protected_reserve_decision` already
+    /// covers — two different lines, kept apart.
+    #[test]
+    fn line_1291_an_imminent_reset_makes_the_policy_spend_a_reserve_it_would_otherwise_keep() {
+        use crate::provider::quota::{RESET_DISTANT_SECONDS, RESET_IMMINENT_SECONDS};
+
+        let (imminent, unreserved) = reserved_and_unreserved_pair(Some(RESET_IMMINENT_SECONDS));
+        let midway = (RESET_IMMINENT_SECONDS + RESET_DISTANT_SECONDS) / 2;
+        let (not_imminent, _) = reserved_and_unreserved_pair(Some(midway));
+
+        // Assert the premise (§17): the reserved candidate's two forms differ
+        // in `seconds_until_reset` and in nothing else — strip that one field
+        // from both and they are the same candidate, so band, capacity score
+        // and identity have provably not moved.
+        assert_ne!(imminent, not_imminent);
+        assert_eq!(
+            imminent
+                .clone()
+                .with_capacity(imminent.capacity.clone().with_seconds_until_reset(None)),
+            not_imminent
+                .clone()
+                .with_capacity(not_imminent.capacity.clone().with_seconds_until_reset(None)),
+            "only seconds_until_reset may differ between the two reserved candidates"
+        );
+        assert!(
+            midway > RESET_IMMINENT_SECONDS && midway < RESET_DISTANT_SECONDS,
+            "the far case must fall short of the distant-reset branch, so that this test is \
+             about line 1291 and not about line 1292"
+        );
+
+        let routing = DisposableRouting::for_support_work(true, FreePreferences::new());
+
+        let spent = routing
+            .choose(
+                JobKind::MemoryExtraction,
+                &[imminent, unreserved.clone()],
+                &FreePool::new(),
+                Instant::now(),
+                None,
+            )
+            .expect("configured");
+        assert_eq!(
+            spent.model(),
+            "a-reserved-model",
+            "conserving buys little when the quota is about to reset, so the policy becomes \
+             permissive and spends the reserve (line 1291)"
+        );
+
+        let kept = routing
+            .choose(
+                JobKind::MemoryExtraction,
+                &[not_imminent, unreserved],
+                &FreePool::new(),
+                Instant::now(),
+                None,
+            )
+            .expect("configured");
+        assert_eq!(
+            kept.model(),
+            "a-plentiful-model",
+            "with the same cheaper sibling and a reset that is not imminent, the reserve is \
+             kept — which is what makes the case above 'more permissive' rather than 'always \
+             permissive'"
+        );
     }
 
     /// GH-CLASSIFY-CALLER, the fifth link: a real [`TaskClassification`]

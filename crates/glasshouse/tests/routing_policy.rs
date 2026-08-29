@@ -198,10 +198,17 @@ mod boundaries {
         let now = Instant::now();
         let declared = Duration::from_secs(60);
 
-        assert!(
-            FAILURES_BEFORE_COOLDOWN > 1,
-            "sanity: with a threshold of one there would be no distinction left to test"
-        );
+        // A `const` block, not a plain `assert!`: the operands are both
+        // compile-time constants, so this is a fact about the build and not
+        // about this run, and `clippy::assertions_on_constants` correctly
+        // refuses the runtime form. Written this way the check happens at
+        // compile time and the sanity condition is kept rather than dropped.
+        const {
+            assert!(
+                FAILURES_BEFORE_COOLDOWN > 1,
+                "sanity: with a threshold of one there would be no distinction left to test"
+            );
+        }
 
         // Control: one failure the provider said nothing about does not cool
         // the resource down. Asserted on `health` rather than
