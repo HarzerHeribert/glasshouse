@@ -3364,3 +3364,64 @@ old fixed `Leaf` exactly — and the constructor's doc comment now states why
 `MemoryExtraction` must never call it, so the next agent does not rediscover the
 patch and apply it. **When you refuse a wiring, write the refusal where the wiring
 would be attempted, not only in the handoff.**
+
+## §80 — the four ways a mutation lies, and all four read as evidence
+
+`scripts/mutate.sh` exists because §16's ritual was six manual steps with an
+unenforced restore. It removed the mechanical risk and left the interpretive
+one, which is larger: **a verdict that is not about the code you meant to
+test.** Four distinct failures were paid for in one day (batches 47–49), each
+producing a KILLED or SURVIVED that reads exactly like real evidence.
+
+**1. A filter matching zero tests → false SURVIVED.**
+`mutate.sh --test` prepends `cargo test` itself and treats every following
+token as a separate cargo argument. Quoting the whole command —
+`--test 'cargo test -p glasshouse --test foo'` — passes it as a **single
+test-name filter**, which matches nothing in any target and reports every
+target as passing. That is §68's own trap reproduced inside the tool built to
+guard against §68. **Two workers found this independently in one round**, both
+by reading the `test result:` line, which shows `0 passed … N filtered out`.
+
+Correct form, unquoted: `--test -p glasshouse --test foo`.
+
+**2. A target that does not hold the killing test → false SURVIVED.**
+Recorded in `phase-40.md`: a `main.rs` mutation run against
+`--test checkpoint_portability` survived, because `main.rs`'s own `#[cfg(test)]`
+tests live in `--bin glasshouse`. This is why `mutate.sh` prints the
+`test result:` line on every SURVIVED — so the reader can see whether the
+**command** survived or the **code** did.
+
+**3. A site that is not on the path → false SURVIVED, and this one is the
+hardest to see.** Batch 48 mutated `provider::quota::reset_urgency` to test the
+protected-reserve gate and concluded, from a clean SURVIVED with 37 tests
+genuinely running, that nothing watched distant-reset conservatism. The verdict
+was honest, the target was right, the `test result:` line was fine — and
+`reset_urgency` is **not called by `evaluate_reserve_spend` at all**. Its only
+caller is capacity scoring; the gate compares the thresholds inline.
+
+The other three are caught by reading the tool's output. **This one is caught
+only by reading the call graph**, and a SURVIVED that means "irrelevant
+mutation" is indistinguishable from one that means "unwatched behaviour". Before
+believing a SURVIVED, confirm the site you mutated is reached by the path you
+are testing.
+
+**4. A replacement that does not compile → false KILLED.**
+Replacing `GitPosition::detect(..).map(|p| p.commit)` with a bare `None` fails
+type inference. The build breaks, the test command fails, and `mutate.sh`
+reports **KILLED**. Nothing behavioural was proven. The worker who hit this
+discarded the verdict and re-ran with `None::<String>`, which is a real
+mutation and was genuinely killed.
+
+This is the only one of the four that produces a *false positive* — it hands
+you evidence you did not earn, which is worse than being told nothing.
+
+### The reading rule
+
+A SURVIVED is the valuable outcome and the one to distrust hardest. Before
+banking any verdict, answer three questions the tool cannot answer for you:
+
+- did the command run the test that should have died? (`test result:`)
+- is that test in the target I named?
+- is the line I mutated on the path the test exercises?
+
+And for a KILLED, one more: **did it fail, or did it merely stop compiling?**

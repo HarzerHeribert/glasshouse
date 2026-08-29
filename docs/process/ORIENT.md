@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**721 / 1280 mandatory capabilities (56%)** — 559 open across 72 phases.
+**722 / 1280 mandatory capabilities (56%)** — 558 open across 71 phases.
 
 ## Where the work is
 
@@ -27,7 +27,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 9A | Harness launch profiles | **1** | 25 | `344` |
 | Phase 9H | Sticky gateway routing for harness-backed interactive sessions | **1** | 13 | `501` |
 | Phase 9I | Free-pool routing | **1** | 13 | `523` |
-| Phase 18 | Raw event recording | **1** | 9 | `765` |
 | Phase 32B | Quota telemetry sources | **1** | 13 | `1220` |
 | Phase 41 | Project overview | **1** | 14 | `1648` |
 | Phase 42 | External control API | **1** | 12 | `1666` |
@@ -95,7 +94,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 51 | Evaluation hooks | **37** | 0 | `1818` |
 | Phase 21K | Assumption-aware implementation guardrails | **43** | 0 | `992` |
 
-**Fully closed (32):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 9B, Phase 9C, Phase 9D, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 19, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 32, Phase 35, Phase 40, Phase 48.
+**Fully closed (33):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 9B, Phase 9C, Phase 9D, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 18, Phase 19, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 32, Phase 35, Phase 40, Phase 48.
 
 ## The nearly-finished phases, in full
 
@@ -129,10 +128,6 @@ these unwrapped.
 ### Phase 9I — Free-pool routing  (1 open, 13 closed)
 
 - **531** ☐ Track request-pool limits separately from token-priced limits when a provider exposes request quotas.
-
-### Phase 18 — Raw event recording  (1 open, 9 closed)
-
-- **779** ☐ Record Git commit identifiers associated with memory events when they can be resolved cheaply.
 
 ### Phase 32B — Quota telemetry sources  (1 open, 13 closed)
 
@@ -264,6 +259,7 @@ to do, and the orchestrator should follow its own rule.
 - **§77** — convergent co-editing: the protocol this project runs on itself
 - **§78** — two packet defects from one round, and a live check that would have passed falsely
 - **§79** — three findings from integrating six worktrees at once
+- **§80** — the four ways a mutation lies, and all four read as evidence
 
 ## Recent checkpoints
 
