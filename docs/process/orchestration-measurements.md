@@ -3481,3 +3481,54 @@ and a CLOSABLE verdict is a **lead, not a closure** — batch 43 declined two of
 four proposed closures, and batch 44 re-opened a box that had been ticked for a
 round. **34 candidates is 34 things to verify, not 34 boxes.** The orchestrator
 already declined one of them (`1395`) on the recon's own contradicting evidence.
+
+### Batch 45's implementation half — eight workers, and the review ceiling held
+
+| worker | kind | cost | diff | claims |
+|---|---|---|---|---|
+| `health-cache` | implementer | ~$12.15 | +1207/-21 | 1311, 1321, 1322, 1324 |
+| `phase-41-overview` | implementer | ~$9.91 | +561/-31 | 1657-1660, 1663 |
+| `handoff-checkpoint` | implementer | ~$9.76 | +581/-6 | 1638-1640, 1642-1645 |
+| `proof-router` | proof, tests only | ~$3.82 | 1 test file | 1413-1418, 1424 |
+| `classify-caller` | implementer | ~$3.00 | +125/-3 | none by design |
+| `codex-hooks` | implementer | ~$1.89 | +61/-11 | none — wiring |
+| `compaction-events` | implementer | ~$1.50 | **none** | **refused, correctly** |
+| six recons | read-only | ~$11 | none | 255 lines assessed |
+
+**Roughly $53 of worker compute against an orchestrator that stopped at 69%
+context.** `RL7` finished the round at **2%** — the 20x plan meant quota was never
+the constraint, for the first time in this project's history.
+
+### The three numbers worth carrying forward
+
+**1. A recon's CLOSABLE is ~65% reliable, measured.** `recon-router` reported
+eleven lines closable; `proof-router` tested each and **seven survived**. That is
+the first time this project has put a number on it, and it justifies the proof
+package as a standing tier: cheap, `src/**` forbidden, and it converts leads into
+either mutation-proven closures or documented refusals.
+
+**2. Six of seven implementation packets carried a deferral instruction**, because
+a file they needed belonged to another live worker. That is the measured cost of
+strict file partitioning and the reason §77's convergent co-editing is worth
+trying.
+
+**3. The review ceiling is a limit on diffs, not workers.** Six read-only recons
+were read, ruled on and consolidated inside a single orchestrator turn without
+collision. Five implementers produced ~2,500 lines that are still parked
+un-integrated at handoff — which is exactly §9's ceiling doing what it does. **The
+operative rule: two or three diffs, plus as many read-only workers as there is
+gated ground.**
+
+### The round's real defect rate was the orchestrator's
+
+**Three packet defects, all mine, all caught by workers, none by me** (§75, §76,
+§78): a recon's claim promoted into a producer link, a cited symbol with zero
+non-test call sites, and a packet that forbade the file its own evidence lived in.
+**Eleven consecutive rounds a worker has corrected its packet and been right.**
+
+That streak is the strongest signal in this ledger, and it points somewhere
+uncomfortable: **the bottleneck is not worker quality, and it stopped being quota
+today. It is the correctness of what the orchestrator hands them.** One of the
+three is now mechanically checked (`validate_round.py --strict-seams` /
+`cited-seams`); the other two are still habits, and §76 records that habits fail
+under load.
