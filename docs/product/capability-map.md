@@ -1180,7 +1180,7 @@ Fixed architectural requirements
 
 - Subscriptions, metered APIs, free pools, local inference, and gateways are normalized through one resource model without pretending that their native quota semantics are identical.
 
-☐ Create a registry describing model resources available to Glasshouse.
+☑ Create a registry describing model resources available to Glasshouse.
 ☑ Represent native subscriptions separately from API-key or gateway resources.
 ☑ Represent local inference resources separately from remote resources.
 ☑ Allow the registry to describe Claude Code subscription capacity.

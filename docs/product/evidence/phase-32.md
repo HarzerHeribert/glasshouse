@@ -243,3 +243,58 @@ for this line because `database.rs`, `config/mod.rs` and
 proves the negative at the schema level, which is the "wide" render the
 packet's Pass 2 (practice §17) asks for: a pinned enumeration of every
 column, not a sample of rendered output that could be truncated.
+
+---
+
+## Phase 32 line 1183 — CLOSED 2026-08-29 (batch 47)
+
+**This discharges the "enumeration-caller caveat" the per-line disposition
+above recorded.** That entry already read *"CLOSED, with the enumeration-caller
+caveat"*, and named what would discharge it: *"a `glasshouse resource list`-shaped
+surface or a `doctor` integration would close it; both are outside this
+package's files."* Both now exist. Found by the second-pass ledger sweep, which
+correctly refused to call it closeable and left the ruling here.
+
+Contract: Given a Glasshouse installation, when something asks what model
+resources Glasshouse can describe, it gets the full enumeration — native
+subscriptions, direct providers, local runtimes and the gateway — as a
+registry of resource *kinds*, independent of what any one user has configured.
+
+State: COMPLETE
+
+Production evidence:
+- `crates/glasshouse/src/provider/registry.rs:241` — `registry()`, building
+  `ResourceKind::NativeSubscription` per harness, one entry per
+  `provider::templates` entry, and `ResourceKind::GlasshouseGateway`.
+- `crates/glasshouse/src/provider/resources.rs:436` and `:465` — the
+  `glasshouse resources` report iterates the whole registry, in production.
+- `crates/glasshouse/src/main.rs` — `status_report` reads it for
+  `glasshouse status`.
+
+The caveat's own words were "nothing in the shipped binary currently prints
+'here is everything Glasshouse can describe'". Two things now do.
+
+Regression evidence:
+- `provider::resources::tests::capacity_json_carries_health_separately_from_capacity`
+  and `::every_resource_in_the_report_names_its_telemetry_class` — the latter
+  drives the report over the **whole** registry rather than a sample, and
+  asserts `registry().len()`.
+- `tests/provider_discovery.rs:781` — `glasshouse resources --no-harness`
+  through the shipped binary.
+
+Mutation, run by the orchestrator:
+
+| mutation | vocabulary | result |
+|---|---|---|
+| `out.push(ResourceKind::GlasshouseGateway);` → deleted (`registry.rs:254`) | `skip-state-update` | **killed** against `--lib`; `capacity_json_carries_health_separately_from_capacity` FAILED at `resources.rs:1775` |
+
+**A recorded limit, found by running the mutation twice rather than once.**
+The same mutation **SURVIVED** `--test provider_discovery`, and its
+`test result:` line confirms that was not a void verdict — 38 tests really
+ran. So registry *membership* is watched at lib level and is **not** watched
+by the binary-level `provider_discovery` suite: dropping a whole resource kind
+changes `glasshouse resources`' output and no end-to-end test notices. That
+does not block this line, which asks for the registry to exist and describe
+resources, but it is the honest boundary of what the binary-level evidence
+proves, and it is the kind of thing a future line about the *report's*
+completeness would need to close.
