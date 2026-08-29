@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**711 / 1280 mandatory capabilities (56%)** — 569 open across 79 phases.
+**716 / 1280 mandatory capabilities (56%)** — 564 open across 76 phases.
 
 ## Where the work is
 
@@ -22,7 +22,6 @@ closures are usually at the top. Open the map at the line number given.
 
 | phase | title | open | closed | map line |
 |---|---|---|---|---|
-| Phase 2D | Settings foundation | **1** | 19 | `178` |
 | Phase 3 | TUI shell | **1** | 11 | `219` |
 | Phase 6 | Harness adapter interface | **1** | 12 | `275` |
 | Phase 8 | Codex adapter | **1** | 9 | `313` |
@@ -33,10 +32,9 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 18 | Raw event recording | **1** | 9 | `765` |
 | Phase 19 | Portable session checkpoints | **1** | 13 | `783` |
 | Phase 21A | Memory authority classes | **1** | 11 | `847` |
-| Phase 32 | Resource registry | **1** | 11 | `1177` |
 | Phase 32B | Quota telemetry sources | **1** | 13 | `1220` |
-| Phase 40 | Fresh-session handoff | **1** | 8 | `1631` |
 | Phase 41 | Project overview | **1** | 14 | `1648` |
+| Phase 42 | External control API | **1** | 12 | `1666` |
 | Phase 7 | Claude Code adapter | **2** | 8 | `296` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 9E | Secret storage | **2** | 11 | `432` |
@@ -44,11 +42,10 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 9J | Harness-model pairing model | **2** | 18 | `545` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
-| Phase 42 | External control API | **2** | 11 | `1666` |
 | Phase 45 | Failure handling | **2** | 7 | `1722` |
 | Phase 46 | Security and contamination tests | **2** | 6 | `1739` |
+| Phase 49 | Configuration | **2** | 14 | `1784` |
 | Phase 21 | Memory extraction | **3** | 10 | `831` |
-| Phase 49 | Configuration | **3** | 13 | `1784` |
 | Phase 16 | Worker transparency | **4** | 3 | `742` |
 | Phase 21F | Memory retrieval quality | **4** | 7 | `927` |
 | Phase 54 | Criteria before deeper cmux coupling | **4** | 0 | `1885` |
@@ -102,7 +99,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 51 | Evaluation hooks | **37** | 0 | `1818` |
 | Phase 21K | Assumption-aware implementation guardrails | **43** | 0 | `992` |
 
-**Fully closed (25):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2, Phase 4, Phase 5, Phase 9B, Phase 9C, Phase 9D, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 13, Phase 14, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 35, Phase 48.
+**Fully closed (28):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 4, Phase 5, Phase 9B, Phase 9C, Phase 9D, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 13, Phase 14, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 32, Phase 35, Phase 40, Phase 48.
 
 ## The nearly-finished phases, in full
 
@@ -116,10 +113,6 @@ lines and evidence together. **Do not open the 178 KB map to read them.**
 The number is the map line number, which is also the capability's id.
 `validate_round.py` checks a packet's quotes against the map, so paste
 these unwrapped.
-
-### Phase 2D — Settings foundation  (1 open, 19 closed)
-
-- **190** ☐ Add a Memory settings section.
 
 ### Phase 3 — TUI shell  (1 open, 11 closed)
 
@@ -161,21 +154,17 @@ these unwrapped.
 
 - **862** ☐ Require memory extraction to distinguish a hard requirement from a convenient implementation choice.
 
-### Phase 32 — Resource registry  (1 open, 11 closed)
-
-- **1183** ☐ Create a registry describing model resources available to Glasshouse.
-
 ### Phase 32B — Quota telemetry sources  (1 open, 13 closed)
 
 - **1239** ☐ Treat completely unknown quota as a routing uncertainty rather than as zero or one hundred percent remaining.
 
-### Phase 40 — Fresh-session handoff  (1 open, 8 closed)
-
-- **1646** ☐ Record the handoff relationship between source and destination sessions.
-
 ### Phase 41 — Project overview  (1 open, 14 closed)
 
 - **1661** ☐ Show the currently selected routing model and its recent latency.
+
+### Phase 42 — External control API  (1 open, 12 closed)
+
+- **1681** ☐ Allow the API to request an inspectable routing recommendation without executing it.
 
 ### Phase 7 — Claude Code adapter  (2 open, 8 closed)
 
@@ -212,11 +201,6 @@ these unwrapped.
 - **1263** ☐ Lower the score when user-defined spending budget is close to exhaustion.
 - **1267** ☐ Treat unlimited local inference as high-capacity but still account for measured latency and concurrency.
 
-### Phase 42 — External control API  (2 open, 11 closed)
-
-- **1680** ☐ Allow the API to retrieve the current routing-model selection and health.
-- **1681** ☐ Allow the API to request an inspectable routing recommendation without executing it.
-
 ### Phase 45 — Failure handling  (2 open, 7 closed)
 
 - **1731** ☐ Preserve the most recent checkpoint after a worker crashes.
@@ -227,17 +211,16 @@ these unwrapped.
 - **1745** ☐ Add automated tests proving cmux session metadata cannot bypass project-scope validation.
 - **1746** ☐ Add automated tests proving MCP operations remain bound to the active project.
 
+### Phase 49 — Configuration  (2 open, 14 closed)
+
+- **1795** ☐ Allow the user to configure the routing-model fallback chain.
+- **1796** ☐ Allow the user to configure workload-tier ceilings for individual models.
+
 ### Phase 21 — Memory extraction  (3 open, 10 closed)
 
 - **834** ☐ Allow a configurable cheap or local model to perform memory extraction.
 - **842** ☐ Allow memory extraction to run after task completion.
 - **843** ☐ Allow memory extraction to run before or around native prompt compaction.
-
-### Phase 49 — Configuration  (3 open, 13 closed)
-
-- **1791** ☐ Allow automatic routing and memory extraction to be disabled independently.
-- **1795** ☐ Allow the user to configure the routing-model fallback chain.
-- **1796** ☐ Allow the user to configure workload-tier ceilings for individual models.
 
 ## Practice sections, by number
 
@@ -307,10 +290,10 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
+- Checkpoint — 2026-08-29, batch 47 landed: 716 / 1280 (56%)
 - Checkpoint — 2026-08-29, batch 45 landed: 710 / 1280 (55%)
 - Checkpoint — 2026-08-28, batch 43 landed: 687 / 1280 (53%)
 - Checkpoint — 2026-08-28, batch 42 landed: 683 / 1280 (53%)
-- Checkpoint — 2026-08-28, batch 41 landed: 680 / 1280 (53%)
 
 ## Evidence ledger files
 

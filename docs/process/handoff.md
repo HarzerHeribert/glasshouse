@@ -6,6 +6,112 @@
 
 Last updated: 2026-08-29 (Europe/Berlin)
 
+## Checkpoint — 2026-08-29, batch 47 landed: 716 / 1280 (56%)
+
+Five capabilities closed, three commits pushed, **two phases finished**
+(Phase 32 at 12/12, Phase 40 at 9/9). Six workers dispatched, four editing and
+two read-only, plus a seventh recon and the freebuff side task.
+
+### What landed
+
+| worktree | lines closed | note |
+|---|---|---|
+| `api-routing` | 1680 | first production caller of a producer nothing had ever asked a question |
+| `extract-switch` | 1791 | tests only; no production code — the switch already worked, nothing proved it |
+| `mem-settings` | 190 | the section existed and lied; the old test asserted the defect |
+| `session-record` | 1646 | migration 12; finishes Phase 40 |
+| — (orchestrator) | 1183 | no code: a caveat in `phase-32.md` had expired |
+
+Recons: `ledger-sweep`, `ledger-sweep-2`, `session-link` (tiered 1646 before it
+was dispatched), `freebuff`.
+
+### Rulings owed and paid
+
+**1377 and 1541** were ticked with `PARTIAL` entries and had been inherited
+through three orchestrators. Both ruled: **tick stands**, both recorded as
+closed with the reasoning, so a fourth reading is not needed. 1377's entry also
+carried a statistic six ticks stale (Phase 33 is 7/15, not 0/15) — corrected;
+the claim it supports survives.
+
+**1183** — `phase-32.md` already said "CLOSED, with the enumeration-caller
+caveat" and named what would discharge it. Two surfaces now do. Closed on the
+existing mechanism, no code written.
+
+### Three lines refused at the Phase −1 gate, and why that is the win
+
+- **1745, 1746** (Phase 46's last two). `CMUX_*` is read **only** in
+  `integrations/mod.rs` for presence detection, and MCP appears only in doc
+  comments. No cmux-metadata path reaches project-scope validation and there is
+  no MCP surface. The evidence entry's blocker is **current, not stale** — a
+  grep for "cmux|mcp" hits doc comments and would have sent a worker to write
+  tests proving a surface that does not exist.
+- **1239** — its consumer belongs to routing phases still at zero. Same shape
+  as 1661, which a previous orchestrator killed.
+- **1681** — no recommendation producer exists to inspect;
+  `routing/disposable.rs:469` is the only chooser and it chooses by executing.
+
+### Two leads for the next batch, from the sweeps
+
+- **1293 / 1288–1294** — `evaluate_reserve_spend`'s "no production caller"
+  blocker is gone (`routing/disposable.rs:568`), but that caller is on the
+  *disposable* path and the lines may mean the interactive one. Needs a read.
+- **566 / 569** (Phase 9J) — `phase-49.md:352`'s "nothing ranks candidates at
+  all" was made false the next day by `routing/interactive.rs::score_candidate`.
+  Whether the prior is *positive-initial* and whether a warm session can
+  outweigh it are unchecked.
+- **1203 / 1209** — the config field named as the blocker now exists, but a
+  different real blocker replaced it: nothing wires `QuotaOverride::budget`
+  into a `CapacityState`. Stale *reason*, not a stale open state.
+
+### Tooling: five defects, four of them mine, all fixed in `a84424b` and after
+
+1. **`.agent-runtime/` is gitignored, so a packet does not exist in a worker
+   worktree.** All three editing workers stopped on it at once; two burned
+   ~100k tokens exploring first. `new-worker.sh` now resolves the packet path
+   to an absolute one. The delivery proof could not catch this — the prompt
+   landed; the path inside it was unusable.
+2. **Same bug, other direction:** `new-packet.sh` emitted a relative
+   `REPORT TO`, which lands a report in the worktree where the watch cannot see
+   it. Now absolute. It still happened once *with* an absolute path, because a
+   worker shortened it — worth watching.
+3. **`worker-watch.sh` false idle on a thinking worker.** §28's growth guard is
+   present and cannot help a tests-only worker that has written nothing. The
+   token counter now folds into the fingerprint; it fired correctly within
+   minutes of landing.
+4. **Acking a worker ends its watch.** Ack was used to silence a stale nag on a
+   worker that was still running, and its watch died. Ack only what is finished.
+5. **`evidence_from_report.py` and `new-packet.sh` disagreed about the facts
+   block.** Four workers were asked for one and all four invented a flat
+   `key: value` form; the tool refused every one with `missing top-level lines`.
+   The schema lived only in the consuming script's docstring, which workers are
+   told not to read. `new-packet.sh` now emits it. The script was also not
+   executable despite `CLAUDE.md` invoking it directly.
+
+Two more, not fixed: `mutate.sh` anchors to its own checkout, so a worktree
+mutation needs that worktree's own copy (`./scripts/mutate.sh`); and
+`integrate.sh` takes worker **names**, not paths, which `CLAUDE.md`'s
+`<worktree>...` does not convey.
+
+### The packet defect two workers found independently
+
+Four packets wrote `--test 'cargo test -p glasshouse --test X'`. `mutate.sh`
+prepends `cargo test` itself and treats everything after `--test` as separate
+arguments, so the quoted form is **a single test-name filter matching zero
+tests** — a SURVIVED verdict indistinguishable from a real one. That is §68's
+trap inside the tool that exists to guard against §68. Both workers caught it by
+reading the `test result:` line, exactly as instructed. Unquoted form:
+`--test -p glasshouse --test X`.
+
+### One rescue
+
+`session-record` edited the **main checkout** rather than its worktree, because
+the packet gave it absolute main-checkout paths for its packet and its input
+recon and it stayed there. Caught by a `git status` during an unrelated
+mutation. Work captured as a patch, applied into its worktree, main restored
+with `git restore -- crates/`; the resulting diffstat matched the worker's own
+`+207/-12` exactly, so nothing was lost. **Do not point a worker at absolute
+main-checkout paths for anything but reading.**
+
 ## Checkpoint — 2026-08-29, batch 45 landed: 710 / 1280 (55%)
 
 **Green on all three platforms.** macOS and Linux through `scripts/ci-local.sh`;
