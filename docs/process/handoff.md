@@ -6,6 +6,92 @@
 
 Last updated: 2026-08-29 (Europe/Berlin)
 
+## Checkpoint — 2026-08-29, batch 51 landed: 742 / 1280 (58%)
+
+**Eight closures, three phases finished (6, 9F, 45), and four defects found that
+no box asked for.** Nine workers ran across the batch.
+
+### Closed
+
+| line | phase | what it needed |
+|---|---|---|
+| 1735 | 45 | a lazily-filled owner for a sink `main.rs` never passed |
+| 925 | 21E | migration 13; the CLI rejected `--reason` outright |
+| 1765 | 47 | a route-health overlay keeping five concepts separate |
+| 1731 | 45 | **evidence, not code** — and establishing that came first |
+| 290 | 6 | a consumer; seven adapters declared into a void |
+| 308 | 7 | a test entering where Claude Code enters |
+| 468 | 9F | a production caller for a probe that had none |
+| 469 | 9F | **no code** — enforced a step earlier than the map's wording |
+
+441 is **LOCALLY VERIFIED and deliberately unticked**: Windows ran, and
+`secret_native.rs` printed `SKIPPED: the native secure store would not open in
+this session` twice, because the VM's CI session is a **service** session and
+Credential Manager is per interactive logon. Closing it is a CI-image change.
+
+### The pattern worth grepping for
+
+**Four of eight closures were Cluster B — a mechanism built, tested, and never
+given a production caller.** 1735, 925, 468, and 531 (which turned out to be
+missing a consumer too, and was dropped before dispatch rather than handed to a
+worker). The reliable tell is a symbol whose every call site falls after its
+file's `#[cfg(test)]` line. That grep found more closable work this batch than
+reading the map did.
+
+### Four defects the boxes did not ask for
+
+1. **The Windows deadlock was never batch 50's, and I said it was.** Corrected
+   in `624205a`. `report_hook_with` opened with an unbounded
+   `std::io::copy(stdin, sink)`; the six hanging tests were exactly its six
+   callers. It is a **production** hang — `glasshouse hook` runs in the user's
+   session and Claude Code gates a turn on the Stop hook's exit. It reproduced
+   on `01843eb` under a held-open stdin, which is what settled attribution.
+   Windows was the only leg that never redirected stdin; `ssh -n` fixes that.
+2. **`most recent checkpoint` is a coin flip inside a second.** `latest_for`
+   orders by `created_at DESC, id DESC` with whole-second timestamps and a
+   `randomblob(16)` id: of 200 pairs, 199 shared a second and **86 resolved to
+   the older one**. Reaches `checkpoint show`, `--from-checkpoint latest` and
+   the automatic carry-forward. `GH-CHECKPOINT-ORDER` is on it.
+3. **The Secret Service backend can block for a year.** `keyring` 3.6.3 never
+   calls the bounded constructor and `prompt.rs:42` is
+   `unwrap_or(ONE_YEAR_SECONDS)`. A probe cannot see it coming, so `detect()`
+   reports healthy and the first real credential read freezes the TUI. 442
+   refused; register Cluster I.
+4. **The hangup guard never worked on macOS.** `Watch::HangUp` polls with
+   `events: 0`, and Darwin does not report `POLLHUP` for that. Measured table in
+   `report-gh-tui-spin.md`.
+
+### On reading the gate
+
+**`--windows-vm` alone runs Windows ONLY** — `ci-local.sh:54` applies its
+macOS+Linux default only when `$# -eq 0`. Use
+`scripts/ci-local.sh --macos --linux --windows-vm`.
+
+**And read the skips, not the summary.** `PASS test (windows) / test` was true
+while every test that needed a real credential store printed SKIPPED. Loud skips
+are what `agent-sdlc.md` asks for and cargo still counts them as passes.
+
+### My own errors, because the pattern is consistent
+
+Four packets carried a claim I had not re-measured: two acceptance bars set from
+rates that no longer described the tree (2-in-60 predating a fix; a Linux
+container's 2.3% that is 0.25% on macOS), a consumer asserted without running it
+(`glasshouse memory list` does not exist), and a FEASIBILITY block naming a
+producer that is not on the crash path at all. **Workers caught all four.** The
+habit to break is reasoning from recorded numbers instead of re-deriving them —
+§81 one level up, and it is mine rather than a recon's.
+
+### Next
+
+1. `GH-CHECKPOINT-ORDER` is live on defect 2.
+2. **1763 needs a product ruling before code**: production emits exactly one
+   `GatewayFailure` class, so counts-by-class of one class is not the
+   capability. Is a non-2xx `Forwarded` a gateway failure? The gateway says no
+   on purpose. **Do not read 1763 as unlocked by 1735** — that was my error,
+   corrected in `phase-47.md`.
+3. 441 needs an interactively-logged-on Windows runner.
+4. 514 has no session-migration mechanism at all; it is a build, not an install.
+
 ## Checkpoint — 2026-08-29, batch 50 landed: 737 / 1280 (57%)
 
 **Three workers, three boxes closed, ten lines refused with the missing
