@@ -272,3 +272,48 @@ and the automatic task-boundary carry-forward. The fix needs a monotonic column,
 which is `database.rs`'s migration ladder and was outside this packet's files —
 **documented on the function and reported rather than smuggled in.** Next
 package.
+
+#### The `latest` coin flip is FIXED (batch 51, `GH-CHECKPOINT-ORDER`)
+
+The entry above recorded this defect as open. It is closed.
+
+**The worker refused the packet's numbers and re-measured**, which was right:
+the packet said ~43% from 200 pairs; four runs of 200 gave **414 wrong
+resolutions in 800 real-clock pairs — 51.8%**, over 798 pairs that shared a
+second. My figure was low.
+
+It also built the probe in two forms, because §59 asks for the *state* and not
+the event: one pins the clock so every pair is in the state under test on any
+machine at any load, and one uses the real clock and *measures* how often the
+state arises. The first is why the regression test is deterministic rather than
+a sampled race.
+
+Fix: **migration 14**, `ALTER TABLE checkpoints ADD COLUMN seq INTEGER NOT
+NULL`, backfilled from `created_at` order, stamped at insert as `MAX(seq)+1`
+inside the write lock. `latest`, `latest_for` and `list` order by `seq DESC`.
+Pre-migration rows keep the between-second ordering that was always correct and
+recover no within-second ordering, because none was ever recorded — the right
+answer rather than an invented one.
+
+Six mutations, all KILLED on named assertions. Two are worth naming: mutation 4
+stamps `0` instead of `MAX(seq)+1`, which mutates the **producer** rather than
+the `ORDER BY` and so proves the stamp is watched and not merely the sort
+(§35); mutation 6 turns the counter into a read-then-INSERT, killed by
+`two_writers_racing_never_stamp_the_same_write_order` — *"two writers stamped
+the same write order 1 times; the counter was read outside the write lock"*.
+`restore-the-random-tiebreak` was re-run by the orchestrator in the integrated
+tree: KILLED by three tests including
+`a_clock_that_steps_backwards_does_not_resurrect_an_older_checkpoint`.
+
+**An orchestrator ruling this needed.** The packet's stop condition said "no
+more than an added column plus an index"; the worker used a `DROP INDEX` and two
+`CREATE INDEX`, flagged it explicitly, and offered the two lines to cut.
+**Accepted.** That stop condition is a fence around table *rebuilds* — the
+data-loss hazard `database.rs:835` refuses — and an index holds no data of its
+own, so dropping one cannot lose a row. The old `(session_id, created_at DESC)`
+index would otherwise have been dead weight *and* left `latest_for` degrading
+from seek-one to seek-and-sort.
+
+§69 bit as predicted: seven failing tests in four files the packet did not name,
+all migration-rollback fixtures and hard-coded schema versions. `blast-radius.sh`
+named them; they were fixed rather than read and judged unaffected.

@@ -71,10 +71,13 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// which session, if any, a session was bootstrapped from. Version 13 adds
 /// `memories.superseded_reason`, map line 925's record of *why* a decision was
 /// superseded — the sentence that stops a future agent resurrecting it without
-/// context.
+/// context. Version 14 adds `checkpoints.seq`, the order checkpoints were
+/// written in — `created_at` is whole seconds, so two written inside one
+/// second were previously separated by a coin flip on a random identifier, and
+/// *"the most recent checkpoint"* was wrong about half the time.
 /// Later migrations are appended to [`MIGRATIONS`], and this constant moves
 /// with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 13;
+const SUPPORTED_SCHEMA_VERSION: i64 = 14;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -1268,6 +1271,86 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
         CHECK (superseded_reason IS NULL
                OR (superseded_reason <> '' AND length(superseded_reason) <= 512));
     ",
+    // 14: the order checkpoints were actually written in, because
+    // `created_at` cannot carry it.
+    //
+    // # The defect this closes, measured
+    //
+    // `CheckpointStore::latest_for` and `::latest` ordered by
+    // `created_at DESC, id DESC`. `created_at` is whole seconds and `id` is
+    // `lower(hex(randomblob(16)))`, so two checkpoints written inside one
+    // second tie on the first key and are separated by a **coin flip on a
+    // random identifier**. Measured through the real store over 800
+    // back-to-back pairs, 798 of which shared a second: **414 resolved to the
+    // older checkpoint** — 52%, which is what a fair coin looks like.
+    //
+    // That is not an internal tidiness problem. `latest` is what
+    // `glasshouse checkpoint show`, `glasshouse launch --from-checkpoint
+    // latest` and the automatic task-boundary carry-forward resolve through,
+    // so a user resuming from *"the latest checkpoint"* got the wrong one
+    // about half the time whenever two landed in the same second — and a
+    // manual `checkpoint save` beside the task-boundary checkpoint
+    // `shell::checkpoint_task_boundaries` takes does exactly that.
+    //
+    // # Why a counter and not a finer clock
+    //
+    // Sub-second timestamps would shrink the window and not close it, and
+    // they would make the answer depend on the wall clock going forwards.
+    // It does not: a clock that steps backwards — NTP, a suspended laptop, a
+    // container starting with a bad time — would then make an older
+    // checkpoint win, which is the same defect with a rarer trigger. `seq` is
+    // *"how many checkpoints this project had written before this one"*, and
+    // it has nothing to do with what time it was.
+    //
+    // # `ALTER TABLE ADD COLUMN`, migration 8's shape
+    //
+    // Migration 7's rule stands: a table is never rebuilt, because rebuilding
+    // risks the rows already in it. Nothing here needs one. An added column
+    // cannot be `NOT NULL` without a constant default, so it gets `DEFAULT 0`
+    // — and 0 is deliberately outside the range the backfill assigns (1..n)
+    // and outside the range `CheckpointStore::save` assigns (n+1 upwards), so
+    // a row reading 0 is exactly *"written by something that did not go
+    // through `save`"* and sorts as the oldest thing in the table rather than
+    // silently winning.
+    //
+    // # What the backfill can and cannot recover
+    //
+    // Existing rows are ranked by `(created_at ASC, id ASC)`. The
+    // between-second order was always recorded and is preserved exactly. The
+    // within-second order **was never recorded anywhere**, so it cannot be
+    // recovered and is not invented: rows tied on `created_at` keep the order
+    // `id ASC` gave them, which is the order the old query already reported
+    // for them. A database that migrates therefore answers every old question
+    // exactly as it did before, and every new one correctly.
+    //
+    // # The indexes
+    //
+    // `checkpoints_by_session` is redefined on `(session_id, seq DESC)` so
+    // `latest_for` keeps its seek-and-take-one shape rather than sorting the
+    // session's rows; the `(session_id, created_at DESC)` it replaces is
+    // indexing a key nothing orders by any more. `checkpoints_by_seq` is new
+    // and serves `latest` and `list`, which previously had no index at all.
+    // An index holds no data of its own, so dropping one is not the rebuild
+    // migration 7 refuses — every row survives untouched, which is what
+    // `a_version_thirteen_database_migrates_forward_keeping_the_order_it_could_record`
+    // proves.
+    "
+    ALTER TABLE checkpoints ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;
+
+    UPDATE checkpoints SET seq = (
+        SELECT COUNT(*) FROM checkpoints AS earlier
+         WHERE earlier.created_at < checkpoints.created_at
+            OR (earlier.created_at = checkpoints.created_at
+                AND earlier.id <= checkpoints.id)
+    );
+
+    DROP INDEX checkpoints_by_session;
+    CREATE INDEX checkpoints_by_session
+        ON checkpoints (session_id, seq DESC);
+
+    CREATE INDEX checkpoints_by_seq
+        ON checkpoints (seq DESC);
+    ",
 ];
 
 pub(crate) const PROJECT_ID_KEY: &str = "project_id";
@@ -1734,6 +1817,26 @@ mod tests {
         }
     }
 
+    /// Undo migration 14, for a fixture that claims to be an older database.
+    ///
+    /// A rollback fixture has to undo **every** migration above the version it
+    /// claims to be, not only the one it is about. Migration 14 arrived after
+    /// three of these were written, and each of them failed the re-run with
+    /// `duplicate column name: seq` until it was added here — which is why
+    /// this is one constant rather than three copies for the next migration to
+    /// miss.
+    ///
+    /// SQLite refuses to drop a column an index mentions, so the indexes go
+    /// first, and `checkpoints_by_session` is put back the way migration 5
+    /// left it.
+    const UNDO_MIGRATION_FOURTEEN: &str = "
+        DROP INDEX checkpoints_by_seq;
+        DROP INDEX checkpoints_by_session;
+        ALTER TABLE checkpoints DROP COLUMN seq;
+        CREATE INDEX checkpoints_by_session
+            ON checkpoints (session_id, created_at DESC);
+    ";
+
     fn stored_project_id(db_path: &Path) -> String {
         let conn = Connection::open(db_path).unwrap();
         conn.query_row(
@@ -1852,8 +1955,9 @@ mod tests {
         let db_path = fixture.runtime.database_path();
         {
             let conn = Connection::open(&db_path).unwrap();
-            conn.execute_batch(
-                "ALTER TABLE sessions DROP COLUMN source_session_id;
+            conn.execute_batch(&format!(
+                "{UNDO_MIGRATION_FOURTEEN}
+                 ALTER TABLE sessions DROP COLUMN source_session_id;
                  DROP TABLE routing_observations;
 
                  ALTER TABLE memories DROP COLUMN superseded_reason;
@@ -1863,8 +1967,8 @@ mod tests {
                  ALTER TABLE memories DROP COLUMN review_marked_at;
                  ALTER TABLE memories DROP COLUMN last_validated_at;
 
-                 DELETE FROM schema_migrations WHERE version >= 10;",
-            )
+                 DELETE FROM schema_migrations WHERE version >= 10;"
+            ))
             .unwrap();
         }
 
@@ -1938,10 +2042,11 @@ mod tests {
         let db_path = fixture.runtime.database_path();
         {
             let conn = Connection::open(&db_path).unwrap();
-            conn.execute_batch(
-                "ALTER TABLE memories DROP COLUMN superseded_reason;
-                 DELETE FROM schema_migrations WHERE version >= 13;",
-            )
+            conn.execute_batch(&format!(
+                "{UNDO_MIGRATION_FOURTEEN}
+                 ALTER TABLE memories DROP COLUMN superseded_reason;
+                 DELETE FROM schema_migrations WHERE version >= 13;"
+            ))
             .unwrap();
         }
 
@@ -1986,6 +2091,144 @@ mod tests {
             .expect("the successor must survive the upgrade");
         assert_eq!(successor.superseded_reason, None);
         assert_eq!(successor.status, crate::memory::MemoryStatus::Active);
+    }
+
+    /// Migration proof for migration 14: a version-13 database opens, migrates
+    /// to 14, and keeps every checkpoint it had — in the order it could
+    /// actually record, and admitting the order it never could.
+    ///
+    /// The three checkpoints are written into **two seconds**: two into the
+    /// first and one into the second. That split is the whole test. The
+    /// between-second order was recorded in `created_at` and must survive
+    /// exactly; the within-second order was recorded nowhere, so the backfill
+    /// cannot recover it and must not invent it — what it owes instead is the
+    /// answer the old query already gave, which is `id` order, so that a
+    /// database that migrates does not silently change an answer it had
+    /// already given the user.
+    #[test]
+    fn a_version_thirteen_database_migrates_forward_keeping_the_order_it_could_record() {
+        use crate::checkpoint::{CheckpointReason, ProjectCheckpoints};
+        use crate::session::SessionId;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let session = SessionId::new("session-a");
+
+        // Two in the first second, one in the second — through `save`, so the
+        // rows are exactly what a version-13 build would have left behind
+        // apart from the column that is about to be removed.
+        let checkpoints = ProjectCheckpoints::open(&fixture.runtime).unwrap();
+        let store = checkpoints.store();
+        let earlier_a = store
+            .save(sample_checkpoint(&session, 1_000, CheckpointReason::Manual))
+            .unwrap();
+        let earlier_b = store
+            .save(sample_checkpoint(&session, 1_000, CheckpointReason::Manual))
+            .unwrap();
+        let later = store
+            .save(sample_checkpoint(
+                &session,
+                2_000,
+                CheckpointReason::TaskBoundary,
+            ))
+            .unwrap();
+        drop(store);
+        drop(checkpoints);
+
+        let db_path = fixture.runtime.database_path();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(&format!(
+                "{UNDO_MIGRATION_FOURTEEN}
+                 DELETE FROM schema_migrations WHERE version >= 14;"
+            ))
+            .unwrap();
+        }
+        assert_eq!(
+            schema_version(&db_path),
+            13,
+            "the rollback must land on version 13"
+        );
+
+        let migrated = fixture.rebootstrap().unwrap();
+        assert_eq!(
+            schema_version(&migrated.database_path()),
+            SUPPORTED_SCHEMA_VERSION,
+            "the launch must have applied migration 14"
+        );
+
+        let reopened = ProjectCheckpoints::open(&migrated).unwrap();
+        let store = reopened.store();
+
+        // Nothing was lost, and every document still parses.
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 3, "the migration must keep every checkpoint");
+
+        // The between-second order survives: the later checkpoint is still
+        // the later one, both in the listing and in the resolution.
+        assert_eq!(
+            store.latest_for(&session).unwrap().unwrap().id,
+            later.id,
+            "a checkpoint written a second after the others must still resolve as the latest"
+        );
+        assert_eq!(store.latest().unwrap().unwrap().id, later.id);
+        assert_eq!(listed[0].id, later.id);
+
+        // The within-second order is the one the old query reported — `id`
+        // order — because nothing else about it was ever recorded. Asserting
+        // that rather than a write order is the honest claim: the two rows
+        // tied on `created_at`, and this is what the migration promises for
+        // them.
+        let mut tied = [earlier_a.id.clone(), earlier_b.id.clone()];
+        tied.sort();
+        assert_eq!(
+            [listed[2].id.clone(), listed[1].id.clone()],
+            tied,
+            "rows tied on created_at must keep the order the old query gave them"
+        );
+
+        // And a checkpoint written *after* the migration outranks every
+        // backfilled row, which is what stops the counter restarting inside
+        // the population it just numbered.
+        let after = store
+            .save(sample_checkpoint(
+                &session,
+                // Deliberately *earlier* than everything already stored: the
+                // counter is a write order, not a clock reading, so a clock
+                // that stepped backwards must not resurrect an older row.
+                500,
+                CheckpointReason::Manual,
+            ))
+            .unwrap();
+        assert_eq!(
+            store.latest_for(&session).unwrap().unwrap().id,
+            after.id,
+            "the checkpoint written last must win even when its timestamp is the oldest"
+        );
+        assert_eq!(store.latest().unwrap().unwrap().id, after.id);
+    }
+
+    /// A checkpoint with just enough in it to render, parse and be told apart.
+    fn sample_checkpoint(
+        session: &crate::session::SessionId,
+        at: i64,
+        reason: crate::checkpoint::CheckpointReason,
+    ) -> crate::checkpoint::Checkpoint {
+        crate::checkpoint::Checkpoint {
+            session: session.clone(),
+            harness: "a-harness".to_owned(),
+            reason,
+            created_at: at,
+            git: None,
+            working_tree: None,
+            handoff: crate::checkpoint::Handoff {
+                objective: format!("the objective at {at}"),
+                implementation_state: "the state".to_owned(),
+                next_actions: vec!["carry on".to_owned()],
+                ..crate::checkpoint::Handoff::default()
+            },
+            trimmed: false,
+        }
     }
 
     /// Migration proof (b) for migration 13: its `CHECK` refuses an empty
@@ -2070,12 +2313,13 @@ mod tests {
         let db_path = fixture.runtime.database_path();
         {
             let conn = Connection::open(&db_path).unwrap();
-            conn.execute_batch(
-                "ALTER TABLE sessions DROP COLUMN source_session_id;
+            conn.execute_batch(&format!(
+                "{UNDO_MIGRATION_FOURTEEN}
+                 ALTER TABLE sessions DROP COLUMN source_session_id;
                  ALTER TABLE memories DROP COLUMN superseded_reason;
                  DROP TABLE routing_observations;
-                 DELETE FROM schema_migrations WHERE version >= 11;",
-            )
+                 DELETE FROM schema_migrations WHERE version >= 11;"
+            ))
             .unwrap();
         }
 

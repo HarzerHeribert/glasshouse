@@ -704,6 +704,18 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
 
              DROP TABLE IF EXISTS routing_observations;
 
+             -- Migration 14's column, for the same reason: this rollback
+             -- lands above version 5, so `checkpoints` survives it and the
+             -- re-run would meet a column it had already added. SQLite
+             -- refuses to drop a column an index mentions, so the indexes go
+             -- first and `checkpoints_by_session` is put back the way
+             -- migration 5 left it.
+             DROP INDEX checkpoints_by_seq;
+             DROP INDEX checkpoints_by_session;
+             ALTER TABLE checkpoints DROP COLUMN seq;
+             CREATE INDEX checkpoints_by_session
+                 ON checkpoints (session_id, created_at DESC);
+
              DELETE FROM schema_migrations WHERE version >= 6;",
         )
         .unwrap();
@@ -735,8 +747,8 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
         })
         .unwrap();
     assert_eq!(
-        version, 13,
-        "the launch must have applied migrations 6, 7, 8, 9, 10, 11, 12 and 13"
+        version, 14,
+        "the launch must have applied migrations 6, 7, 8, 9, 10, 11, 12, 13 and 14"
     );
     drop(conn);
 
@@ -953,6 +965,18 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
 
              DROP TABLE IF EXISTS routing_observations;
 
+             -- Migration 14's column, for the same reason: this rollback
+             -- lands above version 5, so `checkpoints` survives it and the
+             -- re-run would meet a column it had already added. SQLite
+             -- refuses to drop a column an index mentions, so the indexes go
+             -- first and `checkpoints_by_session` is put back the way
+             -- migration 5 left it.
+             DROP INDEX checkpoints_by_seq;
+             DROP INDEX checkpoints_by_session;
+             ALTER TABLE checkpoints DROP COLUMN seq;
+             CREATE INDEX checkpoints_by_session
+                 ON checkpoints (session_id, created_at DESC);
+
              DELETE FROM schema_migrations WHERE version >= 7;",
         )
         .unwrap();
@@ -983,8 +1007,8 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
         })
         .unwrap();
     assert_eq!(
-        version, 13,
-        "the launch must have applied migrations 7, 8, 9, 10, 11, 12 and 13"
+        version, 14,
+        "the launch must have applied migrations 7, 8, 9, 10, 11, 12, 13 and 14"
     );
     drop(conn);
 

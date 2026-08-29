@@ -1182,3 +1182,358 @@ fn a_restarted_worker_can_still_reach_the_checkpoint_it_had_before_it_crashed() 
 
     live.close(&id).expect("close the session");
 }
+
+// -------------------------------------------------------------------------
+// "The most recent checkpoint" inside one second.
+//
+// `created_at` is whole seconds, so two checkpoints written back to back
+// nearly always tie on it. What breaks the tie decides what
+// `glasshouse checkpoint show`, `--from-checkpoint latest` and the
+// task-boundary carry-forward hand the user, so the tie is not a detail of
+// the store — it is the answer.
+//
+// These are **rate** tests, not single-pair tests (§60). One ordered pair
+// against a coin flip passes half the time and proves nothing.
+// -------------------------------------------------------------------------
+
+/// How many back-to-back pairs each resolution probe writes.
+///
+/// Sized so that "0 wrong" means something: against a defect that resolves
+/// wrongly about half the time within a second, 200 independent pairs put the
+/// chance of a clean run by luck at 2^-200. Read the other way, a clean run
+/// of 200 bounds the residual wrong-resolution rate at roughly 1.5% with 95%
+/// confidence (the rule of three, 3/200).
+const RESOLUTION_PAIRS: usize = 200;
+
+/// Two checkpoints written into the same second, and the second one wins.
+///
+/// The clock is pinned rather than raced, so this reproduces the *state* the
+/// defect lives in — two rows with equal `created_at` — on any machine, at
+/// any load, with no timing assumption at all (§59). The sibling test below
+/// takes the real clock and measures how often that state arises on its own.
+#[test]
+fn the_second_of_two_checkpoints_written_in_one_second_is_the_most_recent() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "same-second");
+    let pinned: glasshouse::session::store::Clock = std::sync::Arc::new(|| 1_700_000_000);
+    let project = glasshouse::checkpoint::ProjectCheckpoints::open_with_clock(
+        &fixture.runtime,
+        std::sync::Arc::clone(&pinned),
+    )
+    .expect("open the project checkpoints");
+    let store = project.store();
+
+    let mut wrong_for_session = 0usize;
+    let mut wrong_overall = 0usize;
+    let mut last_written = None;
+
+    for pair in 0..RESOLUTION_PAIRS {
+        let session = SessionId::new(format!("session-{pair}"));
+        let first = store
+            .save(checkpoint_before_the_crash(&session, store.now()))
+            .expect("save the first checkpoint of the pair");
+        let second = store
+            .save(checkpoint_before_the_crash(&session, store.now()))
+            .expect("save the second checkpoint of the pair");
+        assert_eq!(
+            first.checkpoint.created_at, second.checkpoint.created_at,
+            "the pinned clock must put both checkpoints of pair {pair} in one second"
+        );
+        assert_ne!(first.id, second.id, "each save must get its own identifier");
+
+        let latest = store
+            .latest_for(&session)
+            .expect("resolve the session's most recent checkpoint")
+            .expect("the session has two checkpoints");
+        if latest.id != second.id {
+            wrong_for_session += 1;
+        }
+        let overall = store
+            .latest()
+            .expect("resolve the project's most recent checkpoint")
+            .expect("the project has checkpoints");
+        if overall.id != second.id {
+            wrong_overall += 1;
+        }
+        last_written = Some(second);
+    }
+
+    assert_eq!(
+        wrong_for_session, 0,
+        "`latest_for` returned the older checkpoint of a same-second pair in \
+         {wrong_for_session} of {RESOLUTION_PAIRS} pairs; inside one second it \
+         must still be the one written second"
+    );
+    assert_eq!(
+        wrong_overall, 0,
+        "`latest` returned the older checkpoint of a same-second pair in \
+         {wrong_overall} of {RESOLUTION_PAIRS} pairs"
+    );
+
+    // And the listing agrees with the resolution, rather than ordering one way
+    // while `latest` answers another.
+    let listed = store.list().expect("list every checkpoint");
+    assert_eq!(listed.len(), RESOLUTION_PAIRS * 2);
+    assert_eq!(
+        listed.first().map(|s| &s.id),
+        last_written.as_ref().map(|s| &s.id),
+        "the listing's first row must be the checkpoint `latest` resolves to"
+    );
+}
+
+/// The same claim through the real clock, which is how the defect was found.
+///
+/// This one measures rather than pins: it records how many of the pairs
+/// actually landed in one second, and refuses to pass if too few did — a run
+/// where every pair straddled a second boundary would be ordered correctly by
+/// `created_at` alone and would prove nothing about the tie.
+#[test]
+fn back_to_back_checkpoints_resolve_to_the_one_written_second() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "back-to-back");
+    let project = glasshouse::checkpoint::ProjectCheckpoints::open(&fixture.runtime)
+        .expect("open the project checkpoints");
+    let store = project.store();
+
+    let mut shared_a_second = 0usize;
+    let mut wrong = 0usize;
+
+    for pair in 0..RESOLUTION_PAIRS {
+        let session = SessionId::new(format!("session-{pair}"));
+        let first = store
+            .save(checkpoint_before_the_crash(&session, store.now()))
+            .expect("save the first checkpoint of the pair");
+        let second = store
+            .save(checkpoint_before_the_crash(&session, store.now()))
+            .expect("save the second checkpoint of the pair");
+        if first.checkpoint.created_at == second.checkpoint.created_at {
+            shared_a_second += 1;
+        }
+        let latest = store
+            .latest_for(&session)
+            .expect("resolve the session's most recent checkpoint")
+            .expect("the session has two checkpoints");
+        if latest.id != second.id {
+            wrong += 1;
+        }
+    }
+
+    // Non-vacuity, and deliberately lenient: a machine slow enough to put
+    // fewer than half of these pairs in one second is a machine on which every
+    // other test in this file has already timed out.
+    assert!(
+        shared_a_second * 2 >= RESOLUTION_PAIRS,
+        "only {shared_a_second} of {RESOLUTION_PAIRS} pairs landed in one second, \
+         so this run never entered the state under test"
+    );
+    assert_eq!(
+        wrong, 0,
+        "`latest_for` resolved to the older checkpoint in {wrong} of \
+         {RESOLUTION_PAIRS} back-to-back pairs, {shared_a_second} of which \
+         shared a second"
+    );
+}
+
+/// The counter is a write order, not a clock reading.
+///
+/// A clock that steps backwards is ordinary — NTP correcting a drift, a laptop
+/// resuming, a container starting with a bad time. Under the old ordering the
+/// checkpoint written second would then lose by a whole second rather than by
+/// a coin flip, which is the same defect with a rarer trigger and a longer
+/// reach. This drives the clock deliberately backwards and requires the last
+/// write to win anyway.
+#[test]
+fn a_clock_that_steps_backwards_does_not_resurrect_an_older_checkpoint() {
+    use std::sync::Mutex;
+
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "backwards-clock");
+
+    // 3000, then 2000, then 1000: every write is stamped *earlier* than the
+    // one before it.
+    let readings = std::sync::Arc::new(Mutex::new(vec![1_000i64, 2_000, 3_000]));
+    let stepping: glasshouse::session::store::Clock = {
+        let readings = std::sync::Arc::clone(&readings);
+        std::sync::Arc::new(move || readings.lock().unwrap().pop().unwrap_or(1_000))
+    };
+    let project =
+        glasshouse::checkpoint::ProjectCheckpoints::open_with_clock(&fixture.runtime, stepping)
+            .expect("open the project checkpoints");
+    let store = project.store();
+    let session = SessionId::new("session-a");
+
+    let first = store
+        .save(checkpoint_before_the_crash(&session, store.now()))
+        .expect("save the first checkpoint");
+    let second = store
+        .save(checkpoint_before_the_crash(&session, store.now()))
+        .expect("save the second checkpoint");
+    let third = store
+        .save(checkpoint_before_the_crash(&session, store.now()))
+        .expect("save the third checkpoint");
+
+    assert!(
+        third.checkpoint.created_at < second.checkpoint.created_at
+            && second.checkpoint.created_at < first.checkpoint.created_at,
+        "the fixture must actually have stepped the clock backwards: {}, {}, {}",
+        first.checkpoint.created_at,
+        second.checkpoint.created_at,
+        third.checkpoint.created_at
+    );
+
+    assert_eq!(
+        store.latest_for(&session).unwrap().unwrap().id,
+        third.id,
+        "the checkpoint written last must win even though its timestamp is the oldest"
+    );
+    assert_eq!(store.latest().unwrap().unwrap().id, third.id);
+    assert_eq!(
+        store
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect::<Vec<_>>(),
+        vec![third.id, second.id, first.id],
+        "the listing must be write order too, not clock order"
+    );
+}
+
+/// Ordering by a project-wide counter must not widen what `latest` can see.
+///
+/// `latest` has no `WHERE` clause — its scope is the database file, one per
+/// project, and the counter is now the only thing it orders by. So the claim
+/// worth proving is that two projects number their checkpoints independently
+/// and neither can be handed the other's, including when the *other* project's
+/// checkpoint is the one written most recently in wall-clock terms.
+#[test]
+fn one_projects_counter_never_reaches_another_projects_checkpoints() {
+    let tmp = tempdir();
+    let alpha = Fixture::new(tmp.path(), "alpha");
+    let beta = Fixture::new(tmp.path(), "beta");
+
+    let alpha_project =
+        glasshouse::checkpoint::ProjectCheckpoints::open(&alpha.runtime).expect("open alpha");
+    let beta_project =
+        glasshouse::checkpoint::ProjectCheckpoints::open(&beta.runtime).expect("open beta");
+
+    // Alpha writes three; beta writes one, last, so beta's is the newest by
+    // any clock and alpha's counter has run further.
+    let alpha_store = alpha_project.store();
+    let shared = SessionId::new("session-a");
+    let mut alpha_ids = Vec::new();
+    for _ in 0..3 {
+        alpha_ids.push(
+            alpha_store
+                .save(checkpoint_before_the_crash(&shared, alpha_store.now()))
+                .expect("save an alpha checkpoint")
+                .id,
+        );
+    }
+    let beta_store = beta_project.store();
+    let beta_only = beta_store
+        .save(checkpoint_before_the_crash(&shared, beta_store.now()))
+        .expect("save the beta checkpoint");
+
+    assert_eq!(
+        alpha_store.latest().unwrap().unwrap().id,
+        *alpha_ids.last().unwrap(),
+        "alpha's latest must be alpha's own last write, not beta's newer one"
+    );
+    assert_eq!(
+        beta_store.latest().unwrap().unwrap().id,
+        beta_only.id,
+        "beta's latest must be its only checkpoint"
+    );
+    assert_eq!(alpha_store.list().unwrap().len(), 3);
+    assert_eq!(beta_store.list().unwrap().len(), 1);
+
+    // The same session identifier exists in both projects, which is the case
+    // a widened predicate would get wrong.
+    assert_eq!(
+        beta_store.latest_for(&shared).unwrap().unwrap().id,
+        beta_only.id,
+        "a session name shared between projects must resolve inside its own project"
+    );
+    assert!(
+        !alpha_ids.contains(&beta_store.latest_for(&shared).unwrap().unwrap().id),
+        "no alpha checkpoint may be reachable from beta"
+    );
+}
+
+/// Two processes writing checkpoints at once never get the same number.
+///
+/// The counter is `MAX(seq) + 1`, and read-then-write is the classic shape of
+/// a lost update. It is computed **inside** the `INSERT` rather than in Rust
+/// for exactly that reason: SQLite takes the database's write lock at the
+/// start of a writing statement, so the subquery reads under the same lock
+/// that will do the write, and `database::open` gives every connection a
+/// five-second busy timeout so the loser waits rather than failing.
+///
+/// That is a claim about SQLite's locking, so it is measured rather than
+/// asserted. Two connections in two threads interleave 100 saves each; a
+/// counter read outside the lock would collide almost immediately, and a
+/// collision is visible as two rows sharing a `seq` — which is the state in
+/// which `latest` becomes a coin flip again.
+#[test]
+fn two_writers_racing_never_stamp_the_same_write_order() {
+    const PER_WRITER: usize = 100;
+
+    let tmp = tempdir();
+    let base = tmp.path().to_path_buf();
+    // Bootstrap once up front, so the threads race on `save` and not on the
+    // first-launch migration, which has its own test.
+    let fixture = Fixture::new(&base, "racing-writers");
+
+    // Both writers open their own connection first and then start together.
+    // Without the barrier the second thread's bootstrap can finish after the
+    // first has already written everything, and the test would pass on a race
+    // that never happened.
+    let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let writers: Vec<_> = ["writer-a", "writer-b"]
+        .into_iter()
+        .map(|name| {
+            let base = base.clone();
+            let start = std::sync::Arc::clone(&start);
+            std::thread::spawn(move || {
+                let fixture = Fixture::new(&base, "racing-writers");
+                let project = glasshouse::checkpoint::ProjectCheckpoints::open(&fixture.runtime)
+                    .expect("open the project checkpoints");
+                let store = project.store();
+                let session = SessionId::new(name);
+                start.wait();
+                for _ in 0..PER_WRITER {
+                    store
+                        .save(checkpoint_before_the_crash(&session, store.now()))
+                        .expect("a racing save must not fail");
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().expect("a writer thread panicked");
+    }
+
+    let conn = fixture.checkpoints();
+    let (rows, distinct, highest): (i64, i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT seq), MAX(seq) FROM checkpoints",
+            [],
+            |row| Ok((row.get_unwrap(0), row.get_unwrap(1), row.get_unwrap(2))),
+        )
+        .unwrap();
+
+    let expected = (PER_WRITER * 2) as i64;
+    assert_eq!(rows, expected, "every save must have landed");
+    assert_eq!(
+        distinct,
+        expected,
+        "two writers stamped the same write order {} times; the counter was read \
+         outside the write lock",
+        expected - distinct
+    );
+    assert_eq!(
+        highest, expected,
+        "the counter must run 1..{expected} with no gaps and no restarts"
+    );
+}

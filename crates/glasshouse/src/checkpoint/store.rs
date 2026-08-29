@@ -217,10 +217,18 @@ impl<'a> CheckpointStore<'a> {
             });
         }
 
+        // `seq` is computed inside the statement rather than read first and
+        // passed in. SQLite takes the write lock at the start of an `INSERT`,
+        // before the subquery reads, so `MAX(seq) + 1` is evaluated under the
+        // same lock that will do the write and two concurrent writers cannot
+        // both see the same maximum. A read-then-insert from Rust would have
+        // exactly that race, and the window would be small enough to never
+        // show up in a test.
         self.conn
             .execute(
                 "INSERT INTO checkpoints (id, project_id, session_id, created_at, \
-                 reason, document) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 reason, document, seq) VALUES (?1, ?2, ?3, ?4, ?5, ?6, \
+                 (SELECT COALESCE(MAX(seq), 0) + 1 FROM checkpoints))",
                 rusqlite::params![
                     id.as_str(),
                     &self.project_id,
@@ -273,38 +281,35 @@ impl<'a> CheckpointStore<'a> {
     /// process in `tests/checkpoint_portability.rs`, both for a worker that
     /// died and for one that was put back afterwards.
     ///
-    /// # "Most recent" is only decided to the second, and inside a second it
-    /// is a coin flip
+    /// # "Most recent" is write order, not clock order
     ///
     /// `created_at` comes from [`CheckpointStore::now`], which is
-    /// `session::store::system_clock` and reads **whole seconds**. Two
-    /// checkpoints written in the same second therefore tie, and the tie is
-    /// broken by `id DESC` on an identifier that is 16 bytes of
-    /// `randomblob` — so the answer is whichever random identifier sorted
-    /// higher, not whichever was written last.
+    /// `session::store::system_clock` and reads **whole seconds**, so it
+    /// cannot separate two checkpoints written inside one second — and a
+    /// manual `glasshouse checkpoint save` beside the task-boundary
+    /// checkpoint `shell::checkpoint_task_boundaries` takes lands there
+    /// easily. Until schema version 14 the tie was broken by `id DESC` on
+    /// 16 bytes of `randomblob`, which is a coin flip: measured over 800
+    /// back-to-back pairs through this function, 798 of which shared a
+    /// second, **414 resolved to the older checkpoint**.
     ///
-    /// Measured, not reasoned: **of 200 back-to-back pairs through this
-    /// function, 199 shared a second and 86 of those resolved to the older
-    /// checkpoint.** It is reachable from the shipped binary — a
-    /// `glasshouse checkpoint save` and the task-boundary checkpoint that
-    /// `shell::checkpoint_task_boundaries` takes when the turn ends land in
-    /// the same second easily — and it reaches the user through
-    /// `glasshouse checkpoint show`, `--from-checkpoint latest`, and
-    /// [`CheckpointStore::latest`], which orders the same way.
+    /// The order is now `checkpoints.seq DESC`, a counter stamped by
+    /// [`CheckpointStore::save`] inside the insert. It is a write count and
+    /// not a time, so a clock that steps backwards — NTP, a resumed laptop —
+    /// cannot make an older checkpoint win either. `id DESC` remains only as
+    /// a last tiebreak for rows that never went through `save` and so carry
+    /// the schema default of 0; those sort oldest, together, in a stable
+    /// order.
     ///
-    /// **Recorded rather than worked around.** Making this a total order
-    /// needs something monotonic in the row, which means a column, which
-    /// means the migration ladder in `crate::database` — and the three
-    /// alternatives that stay inside this file all lie: stamping a
-    /// `created_at` past the wall clock, rejection-sampling identifiers until
-    /// they happen to sort, or ordering on a field the query cannot see. What
-    /// the automatic path loses when it happens is the repository reading
-    /// rather than the handoff, because a task-boundary checkpoint carries the
-    /// previous handoff forward unchanged.
+    /// Rows written before version 14 were backfilled from
+    /// `(created_at, id)`, so their between-second order is exactly what it
+    /// always was and their within-second order is what the old query
+    /// reported — see migration 14, which says why nothing better is
+    /// available for them.
     pub fn latest_for(&self, session: &SessionId) -> Result<Option<Stored>, StoreError> {
         self.first(
             "SELECT id, document FROM checkpoints WHERE session_id = ?1 \
-             ORDER BY created_at DESC, id DESC LIMIT 1",
+             ORDER BY seq DESC, id DESC LIMIT 1",
             &[&session.as_str()],
         )
     }
@@ -313,21 +318,27 @@ impl<'a> CheckpointStore<'a> {
     /// belongs to.
     ///
     /// This is what `glasshouse checkpoint show` and
-    /// `glasshouse launch --from-checkpoint latest` resolve, and it carries
-    /// [`CheckpointStore::latest_for`]'s same-second tie exactly — see that
-    /// function's own doc, which has the measurement.
+    /// `glasshouse launch --from-checkpoint latest` resolve, and it orders
+    /// the same way [`CheckpointStore::latest_for`] does — see that
+    /// function's own doc, which has the measurement. The counter is stamped
+    /// per project rather than per session, so this is a total order across
+    /// every session's checkpoints and not a merge of several.
     pub fn latest(&self) -> Result<Option<Stored>, StoreError> {
         self.first(
-            "SELECT id, document FROM checkpoints ORDER BY created_at DESC, id DESC LIMIT 1",
+            "SELECT id, document FROM checkpoints ORDER BY seq DESC, id DESC LIMIT 1",
             &[],
         )
     }
 
     /// Every checkpoint in the project, most recent first.
+    ///
+    /// The same order [`CheckpointStore::latest`] resolves, so the head of
+    /// this list and the answer to *"the latest one"* can never be different
+    /// checkpoints.
     pub fn list(&self) -> Result<Vec<Stored>, StoreError> {
         let mut statement = self
             .conn
-            .prepare("SELECT id, document FROM checkpoints ORDER BY created_at DESC, id DESC")
+            .prepare("SELECT id, document FROM checkpoints ORDER BY seq DESC, id DESC")
             .map_err(|source| StoreError::Sql {
                 action: "prepare the checkpoint list",
                 source,

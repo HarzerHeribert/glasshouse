@@ -2023,6 +2023,26 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicI64, Ordering};
 
+    /// Undo migration 14, for a rollback fixture that lands above version 5.
+    ///
+    /// A fixture that claims to be an older database has to undo **every**
+    /// migration above the version it claims, not only the one it is about.
+    /// Below version 5 that is free — `checkpoints` did not exist yet, so the
+    /// fixture drops the table and migration 14 meets a fresh one. A fixture
+    /// that lands on 5 or later keeps the table, and without this it fails the
+    /// re-run with `duplicate column name: seq`.
+    ///
+    /// SQLite refuses to drop a column an index mentions, so the indexes go
+    /// first, and `checkpoints_by_session` is put back the way migration 5
+    /// left it.
+    const UNDO_MIGRATION_FOURTEEN: &str = "
+        DROP INDEX checkpoints_by_seq;
+        DROP INDEX checkpoints_by_session;
+        ALTER TABLE checkpoints DROP COLUMN seq;
+        CREATE INDEX checkpoints_by_session
+            ON checkpoints (session_id, created_at DESC);
+    ";
+
     /// A bootstrapped project with an open connection to its database, which
     /// is what every caller of this module will have.
     struct Fixture {
@@ -2753,6 +2773,10 @@ mod tests {
                 "checkpoints.created_at",
                 "checkpoints.reason",
                 "checkpoints.document",
+                // Migration 14. A counter of how many checkpoints this project
+                // had written before this one — an integer with no free text
+                // anywhere near it.
+                "checkpoints.seq",
                 "lifecycle_events.seq",
                 "lifecycle_events.project_id",
                 "lifecycle_events.session_id",
@@ -3047,8 +3071,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 13,
-            "the launch must have applied migrations 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 and 13"
+            version, 14,
+            "the launch must have applied migrations 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 and 14"
         );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
@@ -3235,8 +3259,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 13,
-            "the launch must have applied migrations 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 and 13"
+            version, 14,
+            "the launch must have applied migrations 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 and 14"
         );
 
         let store = SessionStore::new(&reopened).unwrap();
@@ -4150,12 +4174,13 @@ mod tests {
 
             fixture
                 .conn
-                .execute_batch(
+                .execute_batch(&format!(
                     // Migration 10's columns go first, for the same reason
                     // migration 8's sessions columns are dropped below: this
                     // rollback lands on version 7, and `memories` must not
                     // still carry columns a later migration added.
-                    "ALTER TABLE memories DROP COLUMN superseded_reason;
+                    "{UNDO_MIGRATION_FOURTEEN}
+                     ALTER TABLE memories DROP COLUMN superseded_reason;
                      ALTER TABLE memories DROP COLUMN validity_conditions;
                      ALTER TABLE memories DROP COLUMN invalidation_conditions;
                      ALTER TABLE memories DROP COLUMN review_reason;
@@ -4175,8 +4200,8 @@ mod tests {
                      ALTER TABLE sessions DROP COLUMN supervision_reason;
                      ALTER TABLE sessions DROP COLUMN source_session_id;
                      DROP TABLE IF EXISTS routing_observations;
-                 DELETE FROM schema_migrations WHERE version >= 8;",
-                )
+                 DELETE FROM schema_migrations WHERE version >= 8;"
+                ))
                 .unwrap();
 
             let reopened = fixture.reopen();
@@ -4186,8 +4211,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 13,
-                "the launch must have applied migrations 8, 9, 10, 11, 12 and 13"
+                version, 14,
+                "the launch must have applied migrations 8, 9, 10, 11, 12, 13 and 14"
             );
 
             let after = SessionStore::new(&reopened)
@@ -4300,11 +4325,12 @@ mod tests {
 
             fixture
                 .conn
-                .execute_batch(
-                    "ALTER TABLE sessions DROP COLUMN source_session_id;
+                .execute_batch(&format!(
+                    "{UNDO_MIGRATION_FOURTEEN}
+                     ALTER TABLE sessions DROP COLUMN source_session_id;
                      ALTER TABLE memories DROP COLUMN superseded_reason;
-                     DELETE FROM schema_migrations WHERE version >= 12;",
-                )
+                     DELETE FROM schema_migrations WHERE version >= 12;"
+                ))
                 .unwrap();
 
             let reopened = fixture.reopen();
@@ -4314,8 +4340,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 13,
-                "the reopen must have applied migrations 12 and 13"
+                version, 14,
+                "the reopen must have applied migrations 12, 13 and 14"
             );
 
             let after = SessionStore::new(&reopened)
