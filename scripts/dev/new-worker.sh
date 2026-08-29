@@ -31,6 +31,10 @@
 #   scripts/dev/new-worker.sh <name> <cwd> <packet-path> [--model sonnet]
 set -uo pipefail
 
+# The checkout this script lives in, resolved from its own location so the
+# paths it hands a worker are right from any worktree. See the prompt below.
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 NAME="${1:?worker name}"; CWD="${2:?working directory}"; PACKET="${3:?packet path}"
 MODEL="sonnet"; [ "${4:-}" = "--model" ] && MODEL="${5:-sonnet}"
 
@@ -46,6 +50,22 @@ MODEL="sonnet"; [ "${4:-}" = "--model" ] && MODEL="${5:-sonnet}"
 # delivery proof below cannot catch it, because the prompt *did* land -- it was
 # the path inside the prompt that was unusable. Resolve it here, once.
 PACKET="$(cd "$(dirname "$PACKET")" && pwd)/$(basename "$PACKET")"
+
+ARM="FIRST, before reading anything: arm your continuity watch, or you will run out of context mid-package with nothing to show for it. Run Monitor(command: \"${REPO}/scripts/continuity-watch.sh --role worker\", persistent: true). It finds your session itself; if it prints CONTINUITY NOT ARMED, pass --session with the last path component of your scratchpad directory and run it again. THEN:"
+PROMPT="${ARM} Read ${PACKET} now and follow it exactly. Read ONLY the files its 'READ ONLY THIS' section names - reading more is the documented way workers waste context. Do not commit. Write your report to the path the packet's REPORT TO section gives."
+# `--print-prompt` builds the prompt and exits, launching nothing.
+#
+# It exists so `scripts/tests/test_launch_prompts.py` can assert on the prompt
+# a worker would ACTUALLY receive rather than on how this file spells it. The
+# first version of that test read these lines as text and was fooled by a
+# mutation that emptied ARM while leaving the words in a trailing comment —
+# SURVIVED, on a check that looked thorough. Assert on the product, not the
+# source.
+if [ "${PRINT_PROMPT:-}" = 1 ] || [ "${4:-}" = "--print-prompt" ]; then
+  printf '%s\n' "$PROMPT"
+  exit 0
+fi
+
 
 ws="$(cmux workspace create --name "$NAME" --cwd "$CWD" 2>&1 | grep -oE 'workspace:[0-9]+' | head -1)"
 [ -n "$ws" ] || { echo "new-worker: could not create a workspace"; exit 1; }
@@ -119,8 +139,27 @@ for _ in $(seq 1 30); do
   cmux read-screen --surface "$surface" 2>/dev/null | grep -q 'auto mode on\|⏵⏵' && break
 done
 
-# 3. type the prompt in, then submit
-PROMPT="Read ${PACKET} now and follow it exactly. Read ONLY the files its 'READ ONLY THIS' section names - reading more is the documented way workers waste context. Do not commit. Write your report to the path the packet's REPORT TO section gives."
+# 3. type the prompt in (built above), then submit
+# THE FIRST INSTRUCTION IS THE WATCH, and that is deliberate.
+#
+# Until 2026-08-29 this prompt did not arm one, and nothing else did either:
+# the arming instruction had been added to the ORCHESTRATOR's relaunch prompt
+# only, so it reached a session only if a previous session already had a watch
+# — a fix that could not bootstrap itself and never reached a worker at all.
+# Measured that day: three Opus workers, two hours in, 33% context each, and
+# not one watch between them. The orchestrator's own `worker-watch.sh` watches
+# the PANE from the orchestrator's session; it reports that a worker went
+# quiet, which is exactly what a worker that died of context looks like, and
+# it cannot tell the worker anything.
+#
+# ABSOLUTE, not relative. The documented recipe was
+# `.agent-runtime/continuity-watch.sh`, and `.agent-runtime/` exists only in
+# the main checkout — so it resolved in 1 of 64 worktrees and failed with exit
+# 127 in the other 63, while the pane looked armed. $REPO is the checkout this
+# script lives in, so the path is right from any worktree.
+#
+# `scripts/tests/test_launch_prompts.py` fails the gate if this line loses the
+# instruction again.
 cmux send --surface "$surface" "$PROMPT" >/dev/null
 sleep 1
 cmux send-key --surface "$surface" Enter >/dev/null

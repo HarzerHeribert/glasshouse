@@ -116,6 +116,28 @@ task's actual substance.
 It reminds until you run `scripts/worker-ack.sh <name>`. Before starting new
 work, run `scripts/worker-ack.sh --list` and clear anything waiting.
 
+**That watch is yours, not the worker's, and it is not a continuity watch.** It
+reads the worker's *pane* from your session and tells *you* the pane went
+quiet — which is exactly what a worker that died of context looks like, and it
+cannot tell the worker anything. So every long-running session, this one
+included, also arms its own:
+
+    Monitor(command: "<repo>/scripts/continuity-watch.sh --role orchestrator",
+            persistent: true)
+
+`--role worker` is the other half, and `scripts/dev/new-worker.sh` now puts
+that in the launch prompt itself, so a worker arms it before it reads anything.
+The script finds its own session by branch and refuses out loud rather than
+watching the wrong one. **Arm yours in your first turn** — and pass an absolute
+path: `.agent-runtime/` exists only in the main checkout, so the relative form
+that used to be documented here failed with exit 127 in 63 of 64 worktrees
+while the pane looked armed.
+
+Measured 2026-08-29: three Opus workers, two hours in, no watch between them,
+and the user noticed before any mechanism did.
+`scripts/tests/test_launch_prompts.py` fails the gate if a launch prompt loses
+the instruction again — the rule is enforced now rather than written down.
+
 **Run practice §16's mutation ritual with `scripts/mutate.sh`, not by hand.**
 It backs up, mutates, touches, runs the given test, and always restores from
 the backup — failing loudly if the restore does not come back byte-identical.
