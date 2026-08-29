@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`██████████████████████░░░░░░░░░░░░░░░░░░` 711 / 1280 mandatory capabilities (55%)
+`██████████████████████░░░░░░░░░░░░░░░░░░` 716 / 1280 mandatory capabilities (55%)
 
 <details>
-<summary>Per-phase breakdown (25 of 104 phases complete)</summary>
+<summary>Per-phase breakdown (28 of 104 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -31,7 +31,7 @@ the authoritative specification and tracks what is done.
 | Phase 2A — Cross-platform runtime | 16/16 ✅ |
 | Phase 2B — Agent and tool auto-detection | 16/16 ✅ |
 | Phase 2C — First-run onboarding | 19/19 ✅ |
-| Phase 2D — Settings foundation | 19/20 |
+| Phase 2D — Settings foundation | 20/20 ✅ |
 | Phase 2 — Persistent project state | 10/10 ✅ |
 | Phase 3 — TUI shell | 11/12 |
 | Phase 4 — Generic PTY session runtime | 12/12 ✅ |
@@ -85,7 +85,7 @@ the authoritative specification and tracks what is done.
 | Phase 29 — Memory commits | 0/8 |
 | Phase 30 — Session context metadata | 0/8 |
 | Phase 31 — Compaction-aware behavior | 0/7 |
-| Phase 32 — Resource registry | 11/12 |
+| Phase 32 — Resource registry | 12/12 ✅ |
 | Phase 32A — Unified quota and capacity model | 11/21 |
 | Phase 32B — Quota telemetry sources | 13/14 |
 | Phase 32C — Subscription capacity estimation | 0/12 |
@@ -113,16 +113,16 @@ the authoritative specification and tracks what is done.
 | Phase 37 — Basic session-aware router | 0/11 |
 | Phase 38 — Quota-preserving routing | 0/7 |
 | Phase 39 — Gateway-backed disposable jobs | 0/9 |
-| Phase 40 — Fresh-session handoff | 8/9 |
+| Phase 40 — Fresh-session handoff | 9/9 ✅ |
 | Phase 41 — Project overview | 14/15 |
-| Phase 42 — External control API | 11/13 |
+| Phase 42 — External control API | 12/13 |
 | Phase 43 — MCP surface for orchestrators | 0/10 |
 | Phase 44 — User control and override | 0/9 |
 | Phase 45 — Failure handling | 7/9 |
 | Phase 46 — Security and contamination tests | 6/8 |
 | Phase 47 — Observability without spectacle | 7/15 |
 | Phase 48 — CLI ergonomics | 8/8 ✅ |
-| Phase 49 — Configuration | 13/16 |
+| Phase 49 — Configuration | 14/16 |
 | Phase 50 — Tracked project knowledge as an optional feature | 0/7 |
 | Phase 51 — Evaluation hooks | 0/37 |
 | Phase 52 — Criteria before adding semantic/vector retrieval | 0/6 |
