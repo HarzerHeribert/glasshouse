@@ -704,6 +704,11 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
 
              DROP TABLE IF EXISTS routing_observations;
 
+             -- Migration 15's table, for the same reason: a rollback that
+             -- leaves it in place meets `table evaluation_observations
+             -- already exists` on the re-run.
+             DROP TABLE IF EXISTS evaluation_observations;
+
              -- Migration 14's column, for the same reason: this rollback
              -- lands above version 5, so `checkpoints` survives it and the
              -- re-run would meet a column it had already added. SQLite
@@ -747,8 +752,8 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
         })
         .unwrap();
     assert_eq!(
-        version, 14,
-        "the launch must have applied migrations 6, 7, 8, 9, 10, 11, 12, 13 and 14"
+        version, 15,
+        "the launch must have applied migrations 6 through 15"
     );
     drop(conn);
 
@@ -965,6 +970,11 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
 
              DROP TABLE IF EXISTS routing_observations;
 
+             -- Migration 15's table, for the same reason: a rollback that
+             -- leaves it in place meets `table evaluation_observations
+             -- already exists` on the re-run.
+             DROP TABLE IF EXISTS evaluation_observations;
+
              -- Migration 14's column, for the same reason: this rollback
              -- lands above version 5, so `checkpoints` survives it and the
              -- re-run would meet a column it had already added. SQLite
@@ -1007,8 +1017,8 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
         })
         .unwrap();
     assert_eq!(
-        version, 14,
-        "the launch must have applied migrations 7, 8, 9, 10, 11, 12, 13 and 14"
+        version, 15,
+        "the launch must have applied migrations 7 through 15"
     );
     drop(conn);
 

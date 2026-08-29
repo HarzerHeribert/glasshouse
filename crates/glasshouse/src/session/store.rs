@@ -2036,6 +2036,7 @@ mod tests {
     /// first, and `checkpoints_by_session` is put back the way migration 5
     /// left it.
     const UNDO_MIGRATION_FOURTEEN: &str = "
+        DROP TABLE IF EXISTS evaluation_observations;
         DROP INDEX checkpoints_by_seq;
         DROP INDEX checkpoints_by_session;
         ALTER TABLE checkpoints DROP COLUMN seq;
@@ -2777,6 +2778,25 @@ mod tests {
                 // had written before this one — an integer with no free text
                 // anywhere near it.
                 "checkpoints.seq",
+                // Migration 15. Every one confirmed unable to hold a provider
+                // credential: `seq`/`observed_at`/`routing_seq` are integers,
+                // `project_id` is the project hash every table already
+                // carries, `kind`/`outcome` come from an exhaustive Rust match
+                // at the single writer, `subject` from a two-value scope enum,
+                // `session_id`/`memory_id` are identifiers, and `feature`,
+                // `arm` and `detail` have no production writer at all.
+                "evaluation_observations.seq",
+                "evaluation_observations.project_id",
+                "evaluation_observations.observed_at",
+                "evaluation_observations.kind",
+                "evaluation_observations.outcome",
+                "evaluation_observations.subject",
+                "evaluation_observations.session_id",
+                "evaluation_observations.feature",
+                "evaluation_observations.arm",
+                "evaluation_observations.memory_id",
+                "evaluation_observations.routing_seq",
+                "evaluation_observations.detail",
                 "lifecycle_events.seq",
                 "lifecycle_events.project_id",
                 "lifecycle_events.session_id",
@@ -2958,6 +2978,7 @@ mod tests {
             tables,
             vec![
                 "checkpoints",
+                "evaluation_observations",
                 "lifecycle_events",
                 "memories",
                 "memories_fts",
@@ -3060,6 +3081,7 @@ mod tests {
                  DROP TABLE IF EXISTS lifecycle_events;
                  DROP TABLE IF EXISTS checkpoints;
                  DROP TABLE IF EXISTS routing_observations;
+                 DROP TABLE IF EXISTS evaluation_observations;
                  DELETE FROM schema_migrations WHERE version >= 3;",
             )
             .unwrap();
@@ -3071,8 +3093,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 14,
-            "the launch must have applied migrations 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 and 14"
+            version, 15,
+            "the launch must have applied migrations 3 through 15"
         );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
@@ -3247,6 +3269,7 @@ mod tests {
                  DROP TABLE IF EXISTS lifecycle_events;
                  DROP TABLE IF EXISTS checkpoints;
                  DROP TABLE IF EXISTS routing_observations;
+                 DROP TABLE IF EXISTS evaluation_observations;
                  DELETE FROM schema_migrations WHERE version >= 2;",
             )
             .unwrap();
@@ -3259,8 +3282,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 14,
-            "the launch must have applied migrations 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 and 14"
+            version, 15,
+            "the launch must have applied migrations 2 through 15"
         );
 
         let store = SessionStore::new(&reopened).unwrap();
@@ -4200,6 +4223,7 @@ mod tests {
                      ALTER TABLE sessions DROP COLUMN supervision_reason;
                      ALTER TABLE sessions DROP COLUMN source_session_id;
                      DROP TABLE IF EXISTS routing_observations;
+                 DROP TABLE IF EXISTS evaluation_observations;
                  DELETE FROM schema_migrations WHERE version >= 8;"
                 ))
                 .unwrap();
@@ -4211,8 +4235,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 14,
-                "the launch must have applied migrations 8, 9, 10, 11, 12, 13 and 14"
+                version, 15,
+                "the launch must have applied migrations 8 through 15"
             );
 
             let after = SessionStore::new(&reopened)
@@ -4340,8 +4364,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 14,
-                "the reopen must have applied migrations 12, 13 and 14"
+                version, 15,
+                "the reopen must have applied migrations 12, 13, 14 and 15"
             );
 
             let after = SessionStore::new(&reopened)

@@ -75,9 +75,13 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// written in — `created_at` is whole seconds, so two written inside one
 /// second were previously separated by a coin flip on a random identifier, and
 /// *"the most recent checkpoint"* was wrong about half the time.
+/// Version 15 adds `evaluation_observations`, Phase 51's record of a decision
+/// Glasshouse made whose wisdom is only visible later — see the migration's
+/// own doc comment for why its `kind` carries no `CHECK` and why it is the
+/// first table in this schema that is *deliberately prunable*.
 /// Later migrations are appended to [`MIGRATIONS`], and this constant moves
 /// with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 14;
+const SUPPORTED_SCHEMA_VERSION: i64 = 15;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -99,6 +103,24 @@ pub(crate) const LIFECYCLE_EVENT_KINDS: [&str; 11] = [
     "gateway_unhealthy",
     "gateway_backend_changed",
 ];
+
+/// The `evaluation_observations.kind` values this build writes.
+///
+/// **Deliberately not a SQL `CHECK`.** Migration 15's own doc comment argues
+/// this at length: `lifecycle_events.kind`'s `CHECK` is exactly why an
+/// eleventh value cost a full table rebuild (migration 7) and a twelfth is
+/// refused outright by this file's house rule, and Phase 51 is the phase whose
+/// vocabulary is guaranteed to grow. So the vocabulary lives in Rust —
+/// [`crate::evaluation::EvaluationKind`], an exhaustive `match` at the single
+/// writer, and this constant pinned against it by a test — which is where
+/// [`LIFECYCLE_EVENT_KINDS`]'s own doc comment says the real guarantee already
+/// lives. `response_profile` (migration 8) is the precedent for a column with
+/// no `CHECK` at all.
+///
+/// One entry, because this package lands one producer. Variants are added as
+/// producers land, never in advance: an enum written before its writers is the
+/// same mistake as a table written before its counts.
+pub(crate) const EVALUATION_KINDS: [&str; 1] = ["memory_retrieved"];
 
 /// The largest checkpoint the project database will store, in bytes.
 ///
@@ -1351,6 +1373,209 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
     CREATE INDEX checkpoints_by_seq
         ON checkpoints (seq DESC);
     ",
+    // 15: Phase 51's evaluation ledger — one row per decision Glasshouse made
+    // whose wisdom is only visible later, written at the moment of the
+    // decision.
+    //
+    // # What it is for, and the one question it does not answer
+    //
+    // Glasshouse can already answer questions about what it *is* — a memory's
+    // status, a session's mechanism — and cannot answer questions about what
+    // it *did*. A retrieval happens inside one function call, changes what the
+    // user gets, and is gone. Phase 51's verb in 26 of its 37 lines is
+    // *"measure how often"*, and nothing can count what was never written
+    // down. This table answers *how often*, over a window, split by arm.
+    //
+    // It deliberately answers nothing about *how much*: cost, tokens and
+    // latency belong to `routing_observations` (migration 11), and a column
+    // for any of them here would be a second source of truth for a fact that
+    // ledger already models. `routing_seq` is how a row points at the
+    // observation that measured a turn instead of copying it.
+    //
+    // # A new table, for migration 11's own reasons one level up
+    //
+    // Not a widening of `lifecycle_events`. All eleven values in
+    // [`LIFECYCLE_EVENT_KINDS`] are things that happened *to a session's
+    // process or its harness*; these are decisions *Glasshouse* made, and
+    // `crate::events`'s own module doc keeps that stream narrow on purpose.
+    // Widening its `kind` would also be a third rebuild of the one table
+    // `memories.source_event_first`/`_last` reference by `seq` — the hazard
+    // migration 7 documents and the house rule below refuses. And, decisively:
+    // `lifecycle_events` has three triggers that `RAISE(ABORT)` on every
+    // `UPDATE` and every `DELETE`, so anything folded into it is permanent by
+    // construction, and this table *must* be prunable (see "Retention").
+    //
+    // Not a view either: the rows a view would project — *a retrieval
+    // happened* — are not stored anywhere. `memory_search_grouped` returns its
+    // result and forgets, which is precisely and only what this table adds.
+    //
+    // # Why `kind` has no `CHECK`, and why that is not a lapse
+    //
+    // A `CHECK (kind IN (...))` is what `lifecycle_events` has, and it is why
+    // map lines 310, 327 and 1316 are refused today: SQLite cannot widen a
+    // `CHECK` in place, so an eleventh value cost a full table rebuild and a
+    // twelfth is forbidden by the house rule at the top of migration 8. Phase
+    // 51 is the phase whose vocabulary is *guaranteed* to grow — every future
+    // measurable feature wants a new kind — so putting a SQL vocabulary here
+    // would be manufacturing migration 7's problem deliberately, in the one
+    // table most certain to need widening.
+    //
+    // The house already has the answer twice. [`LIFECYCLE_EVENT_KINDS`] exists
+    // because the SQL `CHECK` was not trusted alone — its own doc says the
+    // Rust constant plus a pinning test is what actually catches drift — and
+    // `response_profile` (migration 8) gets no `CHECK` at all, on the stated
+    // ground that pinning its combinations "would be a vocabulary this file
+    // has no business holding". This column is `response_profile`'s case:
+    // [`EVALUATION_KINDS`] beside an exhaustive `match` at the single writer,
+    // pinned by a test that inserts every pair the enum can produce through
+    // the real schema. What is given up is that a hand-written `INSERT` at a
+    // `sqlite3` prompt can store nonsense; that is true of `response_profile`
+    // today and has not hurt. `CHECK (kind <> '')` is kept because an empty
+    // kind is not an unrecognised vocabulary, it is a missing one.
+    //
+    // `outcome` is the same case for a sharper reason: its vocabulary is *per
+    // kind* — `helped`/`stale` for a retrieval, `preferred`/`displaced` for a
+    // route — so a single global `CHECK` would be two vocabularies in one
+    // column, which is the first objection this migration makes to widening
+    // `lifecycle_events` at all.
+    //
+    // # `outcome` is the one column that is `NOT NULL DEFAULT 'unknown'`
+    //
+    // Migration 11's argument for `context_state`, verbatim: every other
+    // column's NULL means *"not recorded"*, but a row that does not say how it
+    // turned out must not be countable as *"turned out badly"*.
+    // `DEFAULT 'unknown'` makes that automatic for any future insert path that
+    // forgets to think about it, and it is what lets a rate report an honest
+    // denominator with an honest unknown bucket instead of a flattering ratio.
+    //
+    // # Outcomes learned later are new rows, never an `UPDATE`
+    //
+    // A retrieval is recorded when it happens; whether it helped may only be
+    // knowable a turn later. The answer is a second row with the same
+    // `memory_id` and a later `observed_at`. This is migration 11's
+    // "append-oriented is a property of the code as much as the schema":
+    // `crate::evaluation`'s store offers `record` and reads, and no method
+    // that edits a recorded observation. A measurement edited in place is a
+    // falsified measurement.
+    //
+    // # Retention, which is part of this migration's contract
+    //
+    // **The three ledgers before this one grow forever, and this one has the
+    // highest write rate.** `lifecycle_events` cannot be trimmed even
+    // deliberately, and `routing_observations`' own doc comment anticipates
+    // "some future retention policy" that was never written.
+    //
+    // So migration 5's three append-only triggers are **deliberately not
+    // copied here** — they are exactly what makes `lifecycle_events`
+    // unprunable, and repeating them would be repeating a known defect.
+    // Migration 11's two project-scope triggers are copied exactly, and they
+    // are the only ones. That is the load-bearing difference between the two
+    // precedents, and it is why this table is named `evaluation_observations`
+    // and not `evaluation_events`: the name should pull a future author toward
+    // migration 11's prunable ledger and away from migration 5's permanent
+    // stream. The bounds themselves (90 days, 100,000 rows, trimmed
+    // oldest-first in the writer's own transaction) live with the writer, in
+    // [`crate::evaluation::Retention`].
+    //
+    // `AUTOINCREMENT` means a `seq` is never reused after a delete, so pruning
+    // can never make one row's identity come to mean another's — which is what
+    // makes a prunable ledger safe to point at.
+    //
+    // # Two triggers, migration 11's pair, unchanged
+    //
+    // `IS NOT` rather than `<>`, so a missing binding row aborts the write
+    // instead of the comparison evaluating to NULL and letting it through.
+    // This is the structural half of map line 1856's *"keep evaluation data
+    // local and project-scoped"*; the other half — that nothing exports it —
+    // is a property of which functions exist in `crate::evaluation`, not of
+    // the schema, and is recorded there.
+    //
+    // # Bare ids, no `REFERENCES`
+    //
+    // `memory_id` and `routing_seq` are migration 12's rule: a bare nullable
+    // reference, no foreign key. A pointed-at row may be pruned or may never
+    // have existed, and a read that cannot resolve one must report that rather
+    // than lose the observation.
+    //
+    // # One index, and the second one is an experiment, not an omission
+    //
+    // `(kind, observed_at)` serves the shape every Phase 51 line reduces to:
+    // how many rows of one kind fell in a window. An A/B split adds
+    // `feature`/`arm` to the `WHERE`, which this index does not cover — do not
+    // add `(feature, arm, kind, observed_at)` on speculation; fill the table
+    // to its retention ceiling, read `EXPLAIN QUERY PLAN`, and add it if and
+    // only if the plan is a scan and the scan is slow.
+    "
+    CREATE TABLE evaluation_observations (
+        seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id   TEXT    NOT NULL,
+        observed_at  INTEGER NOT NULL,
+
+        -- What was decided. NOT a SQL vocabulary — see this migration's own
+        -- 'Why `kind` has no CHECK' above.
+        kind         TEXT    NOT NULL CHECK (kind <> ''),
+
+        -- How it turned out, as far as was known when this row was written.
+        -- Never silently absent: migration 11's `context_state` argument.
+        outcome      TEXT    NOT NULL DEFAULT 'unknown' CHECK (outcome <> ''),
+
+        -- What it was about, in the vocabulary of `kind`. Free text, never a
+        -- count key on its own.
+        subject      TEXT,
+
+        -- The session the decision was made for, when it was made for one.
+        session_id   TEXT,
+
+        -- The A/B half. Two columns, never one joined string: migration 8's
+        -- 'remain separately represented' rule. Their pairing is the table
+        -- constraint at the bottom, because SQLite accepts no column
+        -- definition after the first table constraint.
+        feature      TEXT,
+        arm          TEXT,
+
+        -- Provenance: the row in the ledger that owns the measurement, so this
+        -- table never copies one. Bare ids, no REFERENCES — migration 12's
+        -- rule.
+        memory_id    TEXT,
+        routing_seq  INTEGER,
+
+        -- The sentence a human reads after a count surprises them. Never
+        -- parsed, never a WHERE key. `gateway_cause` (migration 7) is the
+        -- precedent.
+        detail       TEXT,
+
+        -- An A/B arm without its feature is an arm of nothing, and a feature
+        -- without its arm is a switch with no side recorded. Neither is a fact
+        -- a count could use.
+        CHECK ((feature IS NULL) = (arm IS NULL))
+    );
+
+    -- The one access pattern this table exists for: how many rows of one kind
+    -- fell in a window. Everything Phase 51 asks is a filter on this index
+    -- plus a GROUP BY outcome.
+    CREATE INDEX evaluation_observations_by_kind_time
+        ON evaluation_observations (kind, observed_at);
+
+    CREATE TRIGGER evaluation_observations_reject_foreign_project_insert
+    BEFORE INSERT ON evaluation_observations
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'evaluation observation belongs to a different project');
+    END;
+
+    CREATE TRIGGER evaluation_observations_reject_foreign_project_update
+    BEFORE UPDATE OF project_id ON evaluation_observations
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'evaluation observation belongs to a different project');
+    END;
+    ",
 ];
 
 pub(crate) const PROJECT_ID_KEY: &str = "project_id";
@@ -1817,19 +2042,24 @@ mod tests {
         }
     }
 
-    /// Undo migration 14, for a fixture that claims to be an older database.
+    /// Undo every migration above 13, for a fixture that claims to be an older
+    /// database.
     ///
     /// A rollback fixture has to undo **every** migration above the version it
     /// claims to be, not only the one it is about. Migration 14 arrived after
     /// three of these were written, and each of them failed the re-run with
     /// `duplicate column name: seq` until it was added here — which is why
     /// this is one constant rather than three copies for the next migration to
-    /// miss.
+    /// miss. Migration 15 was appended for the same reason and cost nothing,
+    /// which is the point of the constant existing.
     ///
-    /// SQLite refuses to drop a column an index mentions, so the indexes go
-    /// first, and `checkpoints_by_session` is put back the way migration 5
-    /// left it.
-    const UNDO_MIGRATION_FOURTEEN: &str = "
+    /// Dropping a table takes its indexes and triggers with it, so migration
+    /// 15 is one statement. Migration 14 is not: SQLite refuses to drop a
+    /// column an index mentions, so its indexes go first, and
+    /// `checkpoints_by_session` is put back the way migration 5 left it.
+    const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        DROP TABLE evaluation_observations;
+
         DROP INDEX checkpoints_by_seq;
         DROP INDEX checkpoints_by_session;
         ALTER TABLE checkpoints DROP COLUMN seq;
@@ -1956,7 +2186,7 @@ mod tests {
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(&format!(
-                "{UNDO_MIGRATION_FOURTEEN}
+                "{UNDO_MIGRATIONS_ABOVE_THIRTEEN}
                  ALTER TABLE sessions DROP COLUMN source_session_id;
                  DROP TABLE routing_observations;
 
@@ -2043,7 +2273,7 @@ mod tests {
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(&format!(
-                "{UNDO_MIGRATION_FOURTEEN}
+                "{UNDO_MIGRATIONS_ABOVE_THIRTEEN}
                  ALTER TABLE memories DROP COLUMN superseded_reason;
                  DELETE FROM schema_migrations WHERE version >= 13;"
             ))
@@ -2139,7 +2369,7 @@ mod tests {
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(&format!(
-                "{UNDO_MIGRATION_FOURTEEN}
+                "{UNDO_MIGRATIONS_ABOVE_THIRTEEN}
                  DELETE FROM schema_migrations WHERE version >= 14;"
             ))
             .unwrap();
@@ -2314,7 +2544,7 @@ mod tests {
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(&format!(
-                "{UNDO_MIGRATION_FOURTEEN}
+                "{UNDO_MIGRATIONS_ABOVE_THIRTEEN}
                  ALTER TABLE sessions DROP COLUMN source_session_id;
                  ALTER TABLE memories DROP COLUMN superseded_reason;
                  DROP TABLE routing_observations;

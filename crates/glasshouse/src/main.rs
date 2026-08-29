@@ -2927,8 +2927,33 @@ fn memory_search_grouped(
         SearchScope::Current
     };
 
-    let memory = ProjectMemory::open(runtime)?;
-    Ok(memory.store().search_grouped(query, scope, limit)?)
+    // The memory connection is opened, used and dropped before the evaluation
+    // ledger opens its own. Two SQLite handles held over each other on one
+    // file is practice §65's Windows hang, and there is no reason to hold both
+    // here: the search is finished before the observation is written.
+    let grouped = {
+        let memory = ProjectMemory::open(runtime)?;
+        memory.store().search_grouped(query, scope, limit)?
+    };
+
+    // Phase 51 lines 1822 and 1826: a retrieval is an ephemeral decision that
+    // changes what the user gets and otherwise leaves no trace, so this is the
+    // one place it becomes countable. One row per returned memory, carrying
+    // `memory_id` and nothing of the memory itself; whether a memory was stale
+    // is read later by joining `memories`, not judged here. This records and
+    // never fails: bookkeeping does not get to break a search.
+    glasshouse::evaluation::record_memory_retrieval(
+        runtime,
+        glasshouse::evaluation::RetrievalScope::from_history_flag(history),
+        grouped
+            .invariants_and_constraints
+            .iter()
+            .chain(grouped.other.iter())
+            .map(|record| record.id.as_str()),
+        glasshouse::evaluation::now_unix(),
+    );
+
+    Ok(grouped)
 }
 
 /// Render a memory search the way `session_report` renders sessions: the

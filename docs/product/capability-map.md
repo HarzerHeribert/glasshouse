@@ -1819,11 +1819,11 @@ Phase 51 — Evaluation hooks
 
 ☐ Measure how many repository exploration operations occur before and after relevant project memory exists.
 ☐ Measure how often retrieved memory is actually useful to the receiving agent.
-☐ Measure how often stale or incorrect memory is retrieved.
+☑ Measure how often stale or incorrect memory is retrieved.
 ☐ Measure how often an old decision causes an agent to add unnecessary implementation complexity.
 ☐ Measure how often revalidation correctly identifies a decision whose original assumptions no longer hold.
 ☐ Measure how often agents challenge a remembered decision and whether the challenge was justified.
-☐ Measure how often superseded memories are incorrectly resurfaced as current guidance.
+☑ Measure how often superseded memories are incorrectly resurfaced as current guidance.
 ☐ Measure whether production-aware checks catch expensive query patterns or scaling assumptions before deployment.
 ☐ Measure how often one harness successfully continues work from another harness’s checkpoint.
 ☐ Measure how often automatic routing is overridden by the user.
@@ -1853,7 +1853,7 @@ Phase 51 — Evaluation hooks
 ☐ Measure how much scarce capacity is consumed by probes and whether passive observations can replace them.
 ☐ Measure how often sparse, stale, or incorrectly segmented evidence causes a poor routing decision.
 ☐ Measure estimated versus actual marginal token or request consumption when telemetry permits.
-☐ Keep evaluation data local and project-scoped unless the user explicitly exports it.
+☑ Keep evaluation data local and project-scoped unless the user explicitly exports it.
 
 Phase 52 — Criteria before adding semantic/vector retrieval
 
