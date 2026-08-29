@@ -1,26 +1,53 @@
 # Claude Code project instructions
 
-Glasshouse uses a spec-to-evidence, multi-harness development process. Before
-working as the primary orchestrator, read these files completely in this order:
+Glasshouse uses a spec-to-evidence, multi-harness development process.
 
-1. `docs/product/capability-map.md`
-2. `docs/process/handoff.md`
-3. `docs/process/agent-sdlc.md`
-4. `docs/process/worker-capabilities.md`
-5. `docs/process/harness-hook-protocol.md`
-6. `docs/product/evidence/`
-7. `docs/process/orchestrator-prompt.md`
-8. `docs/product/design-decisions.md`
-9. `docs/process/orchestration-practice.md`
-10. `docs/process/orchestration-measurements.md`
-11. `docs/process/assurance-economics.md`
+## The orchestrator's reading, and why it is no longer eleven documents
+
+**Start here, in this order:**
+
+1. `.agent-runtime/CONTINUATION.md` — the previous session's exact checkpoint
+2. `docs/process/ORIENT.md` — **generated** by `scripts/orient.py`: where the
+   map stands, every phase ranked by open lines, the nearly-finished phases
+   quoted in full, the practice index to read **by number**, and the recent
+   checkpoints. Regenerate it with `scripts/orient.py` after any map or handoff
+   change; `--check` fails if it is stale.
+3. `docs/process/agent-sdlc.md` and `docs/process/worker-capabilities.md` —
+   the proof process and the model-tier boundaries. Short, and both load-bearing.
+
+**That is roughly 15,000 tokens and it is enough to start.**
+
+**Then read on demand, never end to end:**
+
+- `docs/product/capability-map.md` — **authoritative**, and 178 KB. `ORIENT.md`
+  carries the open lines for nearly-finished phases; for any other phase use
+  `scripts/discover.py --phase <id>`. Open the map itself to quote a specific
+  line, not to find out what is open.
+- `docs/process/orchestration-practice.md` — 176 KB. **Read sections by number.**
+  `ORIENT.md` has the index with one-line summaries.
+- `docs/product/evidence/phase-<id>.md` — the entry for the phase in hand.
+- `docs/process/assurance-economics.md` — before writing a packet; **Phase −1 is
+  a hard gate** (see below).
+- `docs/process/orchestration-measurements.md`, `docs/product/design-decisions.md`,
+  `docs/process/harness-hook-protocol.md`, `docs/process/orchestrator-prompt.md`
+  — when the task actually reaches them.
+
+**Why this changed.** The old list said "read these eleven completely" and cost
+about **228,000 tokens**, paid before any work happened. Every orchestrator so
+far quietly improvised around it — reading the checkpoint, then grepping — which
+meant this file enforced its own scoping rule on workers and exempted the role
+that spends the most context. Measured 2026-08-29: `ORIENT.md` is **4,900
+tokens**, a 46× cut, and it is derived from the same documents. Nothing was
+deleted; the difference is that you now open a document because you need it
+rather than to discover whether you do.
 
 ## If you are a worker, this list is not yours
 
-The eleven documents above are the **orchestrator's** reading, and reading them
-costs about 175,000 tokens. A worker that reads them spends more context
-orienting than working — measured: a four-box package used 288k tokens, over
-half of it on documents it did not need.
+The documents above are the **orchestrator's** reading. A worker that works
+through them spends more context orienting than working — measured: a four-box
+package used 288k tokens, over half of it on documents it did not need. **A
+worker should not read `ORIENT.md` either**: it is a map of work the worker was
+not asked to choose between.
 
 **A worker reads only this**, and its packet names anything extra:
 
@@ -76,10 +103,44 @@ premise-invalid.** Two packets on 2026-08-28 failed this and cost ~$30 of worker
 compute that no downstream optimization could recover. `scripts/validate_round.py`
 enforces it, so the check is free.
 
+**Start every packet with `scripts/new-packet.sh <name> [--recon]
+[--lines N,M] [--worktree]`** rather than hand-writing one. It emits a
+skeleton that already passes `validate_round.py` — the correct
+`READ ONLY THIS` scoping, a `FEASIBILITY` block in the one-line form that
+does not shadow itself, and box lines quoted verbatim and unwrapped from
+`--lines` — so the only edit-and-revalidate cycle left is the one for the
+task's actual substance.
+
 **Every worker gets a nagging watch, armed in the same turn it is started:**
 `Monitor(command: "scripts/worker-watch.sh <name> <surface> <report>", persistent: true)`.
 It reminds until you run `scripts/worker-ack.sh <name>`. Before starting new
 work, run `scripts/worker-ack.sh --list` and clear anything waiting.
+
+**Run practice §16's mutation ritual with `scripts/mutate.sh`, not by hand.**
+It backs up, mutates, touches, runs the given test, and always restores from
+the backup — failing loudly if the restore does not come back byte-identical.
+A SURVIVED result is the valuable one: it names behaviour no test in the
+command actually watches.
+
+**Before the gate, run `scripts/blast-radius.sh`.** It maps the files you changed
+to the cargo test targets that could break, and runs them. Practice §79 exists
+because a worker ran §69's grep, the grep correctly named the affected file, and
+the worker then *read* that file and judged it unaffected — costing a full gate
+cycle for something one eight-second test run catches. Once a grep names a file,
+run its tests; do not read them and decide.
+
+**Dispatch with `scripts/dev/new-worker.sh <name> <cwd> <packet>`.** It creates
+the pane, launches the harness, types the prompt in, and **proves the prompt
+landed** before returning. Passing a prompt as a command-line argument silently
+does not work here, and `cmux identify --workspace X` reports the *app's*
+focused surface rather than that workspace's — both cost real time on
+2026-08-29, one of them by typing a launch command into the user's own pane.
+
+**Turn a worker's report into a ledger draft with
+`scripts/evidence_from_report.py`.** Workers emit a ```glasshouse-facts``` block;
+the script renders the mechanical part of the evidence entry. It decides nothing
+— it emits `⟨RULING REQUIRED⟩` and lists what you still owe. **No script may put
+a box in a state that would authorise ticking it.**
 
 `scripts/dev/` holds the dev shims, symlinked onto `PATH`: `glasshouse` runs
 the binary this repo builds, and `agy-gh` starts an Antigravity leaf worker
