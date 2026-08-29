@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`██████████████████████░░░░░░░░░░░░░░░░░░` 717 / 1280 mandatory capabilities (56%)
+`██████████████████████░░░░░░░░░░░░░░░░░░` 720 / 1280 mandatory capabilities (56%)
 
 <details>
-<summary>Per-phase breakdown (29 of 104 phases complete)</summary>
+<summary>Per-phase breakdown (31 of 104 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -33,7 +33,7 @@ the authoritative specification and tracks what is done.
 | Phase 2C — First-run onboarding | 19/19 ✅ |
 | Phase 2D — Settings foundation | 20/20 ✅ |
 | Phase 2 — Persistent project state | 10/10 ✅ |
-| Phase 3 — TUI shell | 11/12 |
+| Phase 3 — TUI shell | 12/12 ✅ |
 | Phase 4 — Generic PTY session runtime | 12/12 ✅ |
 | Phase 5 — Native terminal embedding | 8/8 ✅ |
 | Phase 6 — Harness adapter interface | 12/13 |
@@ -61,7 +61,7 @@ the authoritative specification and tracks what is done.
 | Phase 16 — Worker transparency | 3/7 |
 | Phase 17 — cmux optional integration | 0/10 |
 | Phase 18 — Raw event recording | 9/10 |
-| Phase 19 — Portable session checkpoints | 13/14 |
+| Phase 19 — Portable session checkpoints | 14/14 ✅ |
 | Phase 20 — Minimal durable project memory | 16/18 |
 | Phase 21 — Memory extraction | 10/13 |
 | Phase 21A — Memory authority classes | 12/12 ✅ |
@@ -91,7 +91,7 @@ the authoritative specification and tracks what is done.
 | Phase 32C — Subscription capacity estimation | 0/12 |
 | Phase 32D — Normalized remaining-capacity score | 10/12 |
 | Phase 32E — Burn rate and exhaustion forecasting | 0/10 |
-| Phase 32F — Protected quota reserve | 2/8 |
+| Phase 32F — Protected quota reserve | 3/8 |
 | Phase 32G — Provider-aware request-cost estimation | 0/10 |
 | Phase 33 — Resource health | 7/15 |
 | Phase 33A — Routing evidence ledger | 10/15 |

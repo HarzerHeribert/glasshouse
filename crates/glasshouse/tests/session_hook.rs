@@ -15,6 +15,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use glasshouse::checkpoint::{Checkpoint, CheckpointReason, Handoff, ProjectCheckpoints, Stored};
 use glasshouse::config::UserConfig;
 use glasshouse::events::{EventLog, LifecycleEvent, TurnOutcome};
 use glasshouse::session::{NewSession, ProjectSessions, SessionId, SessionLifecycle};
@@ -525,5 +526,177 @@ fn memory_extraction_disabled_in_user_config_is_not_attempted_while_the_hook_sti
                 outcome: TurnOutcome::Completed
             }),
         "the turn's own closing event must still be recorded even with extraction off: {recorded:?}"
+    );
+}
+
+/// A handoff a "user" authored before any automatic checkpoint runs — the
+/// content an automatic checkpoint carries forward, never invents.
+fn stub_handoff() -> Handoff {
+    Handoff {
+        objective: "close map line 802".to_owned(),
+        implementation_state: "wiring the automatic-checkpoint trigger".to_owned(),
+        decisions: vec!["mirror the memory_extraction switch".to_owned()],
+        memory: Vec::new(),
+        failed_approaches: Vec::new(),
+        files: vec!["crates/glasshouse/src/main.rs".to_owned()],
+        test_state: Some("session_hook tests pending".to_owned()),
+        next_actions: vec!["run the mutation".to_owned()],
+    }
+}
+
+/// Seed a manual checkpoint for `id`, the way a user's own `glasshouse
+/// checkpoint save` would: an automatic checkpoint has nothing to carry
+/// forward, and takes none, without one.
+fn seed_checkpoint(runtime: &Runtime, id: &SessionId, harness: &str) -> Stored {
+    let project_checkpoints = ProjectCheckpoints::open(runtime).unwrap();
+    let store = project_checkpoints.store();
+    store
+        .save(Checkpoint::capture(
+            id,
+            harness,
+            CheckpointReason::Manual,
+            store.now(),
+            runtime.project().root(),
+            stub_handoff(),
+        ))
+        .unwrap()
+}
+
+/// Every checkpoint this project holds for one session, most recent first.
+fn checkpoints_for(runtime: &Runtime, id: &SessionId) -> Vec<Stored> {
+    let project_checkpoints = ProjectCheckpoints::open(runtime).unwrap();
+    project_checkpoints
+        .store()
+        .list()
+        .unwrap()
+        .into_iter()
+        .filter(|stored| &stored.checkpoint.session == id)
+        .collect()
+}
+
+/// Map line 802's premise (§17): with the setting on — the default, so no
+/// `automatic_checkpoint` key is written at all — a `Stop` for a completed
+/// turn leaves behind a checkpoint that did not exist before, carrying
+/// forward the handoff of the checkpoint the session already had. Asserted
+/// on the stored checkpoint itself, not on an absence a no-op would also
+/// produce.
+///
+/// This is the control for
+/// [`automatic_checkpoint_disabled_in_user_config_is_not_attempted_while_the_hook_still_records_the_turn`]:
+/// without it, that test's silence would be indistinguishable from a hook
+/// that never takes an automatic checkpoint at all.
+#[test]
+fn automatic_checkpoint_left_enabled_takes_a_checkpoint_after_a_completed_turn() {
+    let fixture = Fixture::new();
+    let id = running_session(&fixture, "codex");
+    let seeded = seed_checkpoint(&fixture.runtime, &id, "codex");
+
+    assert!(fixture.hook(id.as_str(), "Stop", &payload()).success());
+
+    let after = checkpoints_for(&fixture.runtime, &id);
+    assert_eq!(
+        after.len(),
+        2,
+        "a completed turn with automatic checkpoints on must leave behind one \
+         new checkpoint beside the seeded one: {after:?}"
+    );
+    let taken = after
+        .iter()
+        .find(|stored| stored.id != seeded.id)
+        .expect("a checkpoint that did not exist before the hook ran");
+    assert_eq!(
+        taken.checkpoint.reason,
+        CheckpointReason::TaskBoundary,
+        "an automatic checkpoint must record why it was taken"
+    );
+    assert_eq!(
+        taken.checkpoint.handoff, seeded.checkpoint.handoff,
+        "an automatic checkpoint carries the existing handoff forward rather than inventing one"
+    );
+}
+
+/// Map line 802, the line itself. `automatic_checkpoint = false` planted in
+/// the user config layer — through
+/// [`UserConfig::set_automatic_checkpoint`] and [`UserConfig::save`], so this
+/// test breaks if the key is ever renamed — makes
+/// `automatic_checkpoint_enabled(runtime)` false, and the same completed turn
+/// the premise test above drives leaves no new checkpoint behind.
+///
+/// The lifecycle event is still recorded: this proves the switch turned off
+/// checkpoints specifically, not that the hook did nothing at all.
+#[test]
+fn automatic_checkpoint_disabled_in_user_config_is_not_attempted_while_the_hook_still_records_the_turn()
+ {
+    let fixture = Fixture::new();
+    let id = running_session(&fixture, "codex");
+    let seeded = seed_checkpoint(&fixture.runtime, &id, "codex");
+
+    let mut user = UserConfig::load(fixture.runtime.paths())
+        .expect("a fresh fixture has no config file yet, which loads as the default");
+    user.set_automatic_checkpoint(Some(false));
+    user.save(fixture.runtime.paths())
+        .expect("the user config layer must be writable in the fixture's own tempdir");
+
+    let before = fixture.log().len().unwrap();
+
+    assert!(fixture.hook(id.as_str(), "Stop", &payload()).success());
+
+    let after = checkpoints_for(&fixture.runtime, &id);
+    assert_eq!(
+        after.len(),
+        1,
+        "no checkpoint should be taken while automatic_checkpoint=false: {after:?}"
+    );
+    assert_eq!(
+        after[0].id, seeded.id,
+        "the only checkpoint must still be the seeded one"
+    );
+
+    // The switch turned off checkpoints, not the hook: the turn's own closing
+    // event is still recorded for this session.
+    let recorded = fixture.log().for_session(&id).unwrap();
+    assert_eq!(
+        recorded.len() as u64,
+        fixture.log().len().unwrap() - before,
+        "the hook recorded something for a different session"
+    );
+    assert!(
+        recorded.iter().any(|event| event.event
+            == LifecycleEvent::TurnEnded {
+                outcome: TurnOutcome::Completed
+            }),
+        "the turn's own closing event must still be recorded even with checkpoints off: {recorded:?}"
+    );
+}
+
+/// The two switches are independent: memory extraction disabled must not
+/// disable automatic checkpoints. `automatic_checkpoint` is left at its
+/// default (enabled) while `memory_extraction = false` is planted in the
+/// user config layer, and the same completed turn still leaves behind a new
+/// `task_boundary` checkpoint.
+#[test]
+fn automatic_checkpoint_still_runs_when_memory_extraction_is_disabled() {
+    let fixture = Fixture::new();
+    let id = running_session(&fixture, "codex");
+    let seeded = seed_checkpoint(&fixture.runtime, &id, "codex");
+
+    let mut user = UserConfig::load(fixture.runtime.paths())
+        .expect("a fresh fixture has no config file yet, which loads as the default");
+    user.set_memory_extraction(Some(false));
+    user.save(fixture.runtime.paths())
+        .expect("the user config layer must be writable in the fixture's own tempdir");
+
+    assert!(fixture.hook(id.as_str(), "Stop", &payload()).success());
+
+    let after = checkpoints_for(&fixture.runtime, &id);
+    assert_eq!(
+        after.len(),
+        2,
+        "checkpoints must still be taken with memory extraction off: {after:?}"
+    );
+    assert!(
+        after.iter().any(|stored| stored.id != seeded.id
+            && stored.checkpoint.reason == CheckpointReason::TaskBoundary),
+        "an automatic checkpoint must still appear when only memory extraction is disabled: {after:?}"
     );
 }

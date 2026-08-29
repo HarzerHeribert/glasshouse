@@ -1212,6 +1212,77 @@ fn memory_extraction_enabled(runtime: &Runtime) -> bool {
         .value
 }
 
+/// Phase 19: whether Glasshouse may take a checkpoint automatically at a
+/// task boundary — see
+/// [`glasshouse::config::EffectiveConfig::automatic_checkpoint_enabled`].
+///
+/// A configuration Glasshouse cannot read defaults to enabled, matching
+/// [`memory_extraction_enabled`]'s own fallback and for the same reason: a
+/// broken config file must not silently and permanently turn off a working
+/// capability, and this trigger already tolerates every other failure
+/// non-fatally (see [`checkpoint_after_turn`]'s own doc comment).
+fn automatic_checkpoint_enabled(runtime: &Runtime) -> bool {
+    let Ok(user) = UserConfig::load(runtime.paths()) else {
+        return true;
+    };
+    let project = config::load_project_config(runtime.project()).unwrap_or(None);
+    EffectiveConfig::new(&user, project.as_ref())
+        .automatic_checkpoint_enabled()
+        .value
+}
+
+/// Take an automatic checkpoint for `id` at a task boundary, after a
+/// completed turn.
+///
+/// # Nothing here can hurt the session
+///
+/// Matching [`run_extraction_after_turn`]'s own policy for its neighbour: a
+/// checkpoint that cannot be taken is logged and this returns. It never
+/// propagates an error to [`report_hook_with`] and never blocks past a
+/// synchronous read of a couple of small files and one write — there is no
+/// model call here, so there is nothing to bound with a thread and a
+/// timeout the way extraction needs.
+///
+/// # What it carries forward
+///
+/// A checkpoint's objective, state and next actions are authored —
+/// Glasshouse does not know them and will not guess them from a session's
+/// terminal output, for the same reason nothing else in this codebase reads
+/// state out of scrollback. So this carries forward the handoff from the
+/// session's most recent checkpoint, restamped with the current time and the
+/// repository's current position — the same shape
+/// `shell::checkpoint_task_boundaries` already uses in the interactive shell,
+/// for the same reason. A session that has never had a checkpoint taken gets
+/// nothing here, silently: there is no handoff to carry forward and nothing
+/// honest to invent.
+fn checkpoint_after_turn(runtime: &Runtime, id: &SessionId, harness: &str) {
+    let outcome = (|| -> anyhow::Result<()> {
+        let checkpoints = ProjectCheckpoints::open(runtime)?;
+        let store = checkpoints.store();
+        let Some(previous) = store.latest_for(id)? else {
+            return Ok(());
+        };
+        let refreshed = Checkpoint::capture(
+            id,
+            harness,
+            CheckpointReason::TaskBoundary,
+            store.now(),
+            runtime.project().root(),
+            previous.checkpoint.handoff.clone(),
+        );
+        store.save(refreshed)?;
+        Ok(())
+    })();
+
+    if let Err(err) = outcome {
+        tracing::warn!(
+            session = %id,
+            error = %format!("{err:#}"),
+            "could not take an automatic checkpoint"
+        );
+    }
+}
+
 /// Phase 9I lines 530, 531 and 540's production caller: route this
 /// extraction through `glasshouse::routing::disposable::DisposableRouting`
 /// over the free models the user has actually configured, and report the
@@ -1480,26 +1551,38 @@ fn report_hook_with(
         );
 
         // Phase 21: *allow memory extraction to run after task completion.*
+        // Phase 19: *allow Glasshouse to request a checkpoint automatically
+        // at selected task boundaries.*
         //
         // This is the one place a harness tells Glasshouse that a task
         // finished, and `TurnEnded { Completed }` is the only event that
         // carries that claim — `session::lifecycle::event_for` is its single
         // construction site, and a source-scanning test fails if a second one
-        // appears. So this is where the trigger belongs.
+        // appears. So this is where both triggers belong.
         //
         // Ordered **after** the event is recorded, on purpose: the log is the
         // material extraction reads, and a turn's own closing event should be
         // in it. Ordered **before** the state change for no reason at all
-        // beyond it reading better; `run_extraction_after_turn` cannot fail
-        // in a way the rest of this function could notice.
+        // beyond it reading better; neither `run_extraction_after_turn` nor
+        // `checkpoint_after_turn` can fail in a way the rest of this function
+        // could notice.
+        //
+        // The two triggers are gated independently — `memory_extraction` and
+        // `automatic_checkpoint` are separate config fields, read by separate
+        // `EffectiveConfig` methods — so turning one off leaves the other
+        // exactly as it was.
         if matches!(
             translated,
             LifecycleEvent::TurnEnded {
                 outcome: TurnOutcome::Completed
             }
-        ) && memory_extraction_enabled(runtime)
-        {
-            run_extraction_after_turn(runtime, &id, model());
+        ) {
+            if memory_extraction_enabled(runtime) {
+                run_extraction_after_turn(runtime, &id, model());
+            }
+            if automatic_checkpoint_enabled(runtime) {
+                checkpoint_after_turn(runtime, &id, &record.harness);
+            }
         }
 
         let Some(next) = translated.implied_state() else {

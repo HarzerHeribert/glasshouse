@@ -24,8 +24,8 @@ use crate::session::{
 };
 
 use super::state::{
-    KnowledgeSection, Mode, Overlay, OverviewState, ProbeKind, ProviderRow, SettingsPathInputView,
-    SettingsSection, SettingsState, ShellState, ViewportGrid, format_usd,
+    KnowledgeSection, MemoryDetail, Mode, Overlay, OverviewState, ProbeKind, ProviderRow,
+    SettingsPathInputView, SettingsSection, SettingsState, ShellState, ViewportGrid, format_usd,
 };
 
 /// The shell's fixed vertical chrome: title, root, session bar, viewport,
@@ -74,6 +74,7 @@ pub fn render(state: &ShellState, frame: &mut Frame) {
         Some(Overlay::SessionEvents) => render_session_events(state, frame, area),
         Some(Overlay::ProjectKnowledge) => render_project_knowledge(state, frame, area),
         Some(Overlay::RouteEvidence) => render_route_evidence(state, frame, area),
+        Some(Overlay::ProjectMemory) => render_project_memory(state, frame, area),
         None => {}
     }
 }
@@ -330,9 +331,10 @@ fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
         (Mode::Control, Some(Overlay::SessionEvents)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::ProjectKnowledge)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::RouteEvidence)) => "esc back to session   q quit",
+        (Mode::Control, Some(Overlay::ProjectMemory)) => "esc back to session   q quit",
         (Mode::Control, None) => {
             "tab session   enter session   n new   N headless   o overview   p project   \
-             k knowledge   e events   r routes   q quit"
+             k knowledge   M memory   e events   r routes   q quit"
         }
     };
     let mut spans = vec![Span::styled(hint, Style::default().fg(Color::DarkGray))];
@@ -771,7 +773,11 @@ fn render_project_knowledge(state: &ShellState, frame: &mut Frame, area: Rect) {
     frame.render_widget(block, popup);
 
     if showing_detail {
-        render_knowledge_detail(knowledge, frame, inner);
+        render_memory_detail_popup(
+            knowledge.and_then(super::state::ProjectKnowledgeState::selected),
+            frame,
+            inner,
+        );
         return;
     }
 
@@ -840,13 +846,18 @@ fn render_project_knowledge(state: &ShellState, frame: &mut Frame, area: Rect) {
 /// said honestly as "not recorded" rather than left blank when the producer
 /// never captured one (`MemoryDetail`'s own doc comment). `lifecycle` is
 /// never absent, so it never gets that treatment.
-fn render_knowledge_detail(
-    knowledge: Option<&super::state::ProjectKnowledgeState>,
+///
+/// Shared by [`render_project_knowledge`] and [`render_project_memory`] —
+/// both popups show the same fields for the same reason: this function
+/// takes the already-selected `(line, detail)` pair rather than either
+/// overlay's own state type, so neither has to import the other's.
+fn render_memory_detail_popup(
+    selected: Option<(&str, &MemoryDetail)>,
     frame: &mut Frame,
     inner: Rect,
 ) {
     let mut lines = Vec::new();
-    match knowledge.and_then(super::state::ProjectKnowledgeState::selected) {
+    match selected {
         Some((text, detail)) => {
             lines.push(Line::from(Span::styled(
                 text.to_owned(),
@@ -919,6 +930,67 @@ fn push_knowledge_section(
             Style::default().fg(Color::DarkGray),
         )));
     }
+}
+
+/// Map line 234: the project's raw memory — every kind, at every status,
+/// unfiltered — the `M` key opens.
+///
+/// [`render_project_knowledge`]'s sibling with the five labelled, curated
+/// sections collapsed into the one list [`push_knowledge_section`] already
+/// knows how to draw: this overlay answers "what does this project
+/// remember", not "what has this project learned", so there is nothing here
+/// to group by status or kind. Deliberately plain text, the same map line
+/// 1107 rule `render_project_knowledge` follows — see
+/// `the_project_memory_view_renders_no_decorative_graph_glyphs` below.
+fn render_project_memory(state: &ShellState, frame: &mut Frame, area: Rect) {
+    let popup = centered(area, 84, 78);
+    frame.render_widget(Clear, popup);
+
+    let memory = state.project_memory();
+    let showing_detail = memory.is_some_and(super::state::ProjectMemoryState::detail_open);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(if showing_detail {
+            " memory detail "
+        } else {
+            " project memory "
+        })
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if showing_detail {
+        render_memory_detail_popup(
+            memory.and_then(super::state::ProjectMemoryState::selected),
+            frame,
+            inner,
+        );
+        return;
+    }
+
+    let mut lines = Vec::new();
+    let cursor = memory.map(super::state::ProjectMemoryState::cursor);
+    let mut index = 0usize;
+
+    push_knowledge_section(
+        &mut lines,
+        "MEMORY",
+        memory.map(super::state::ProjectMemoryState::memory),
+        "no memory recorded for this project",
+        cursor,
+        &mut index,
+    );
+
+    if let Some(note) = memory.and_then(super::state::ProjectMemoryState::memory_note) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            note.to_owned(),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// Phase 47, map lines 1762 and 1764: a compact table of the distinct
@@ -2143,7 +2215,6 @@ fn truncate_start(text: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::state::MemoryDetail;
     use super::*;
     use crate::session::{
         SessionId, SessionLifecycle, SessionPresentation, SessionRecord, SessionRole,
@@ -2613,16 +2684,17 @@ mod tests {
     #[test]
     fn the_status_bar_always_shows_the_key_bindings() {
         let mut state = sample();
-        // 120, not 100: Phase 25's `k knowledge` binding took the row past a
+        // 132, not 120: Phase 25's `k knowledge` binding took the row past a
         // hundred columns, the same trade recorded on
-        // `the_status_bar_shows_a_note_next_to_the_bindings` below.
-        let bottom = last_row(&state, 120, 24);
+        // `the_status_bar_shows_a_note_next_to_the_bindings` below; map line
+        // 234's `M memory` pushed it past 120 in turn, so this became 132.
+        let bottom = last_row(&state, 132, 24);
         assert!(bottom.contains("tab"), "bindings missing: `{bottom}`");
         assert!(bottom.contains("overview"), "bindings missing: `{bottom}`");
         assert!(bottom.contains("quit"), "bindings missing: `{bottom}`");
 
         state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
-        let bottom = last_row(&state, 120, 24);
+        let bottom = last_row(&state, 132, 24);
         assert!(
             bottom.contains("esc") && bottom.contains("quit"),
             "the overlay's bindings must be shown too: `{bottom}`"
@@ -2883,8 +2955,8 @@ mod tests {
     fn the_status_bar_shows_control_mode_bindings_by_default() {
         let state = sample();
         assert_eq!(state.mode(), Mode::Control);
-        // 120, not 100 — see `the_status_bar_always_shows_the_key_bindings`.
-        let bottom = last_row(&state, 120, 24).to_lowercase();
+        // 132, not 100 — see `the_status_bar_always_shows_the_key_bindings`.
+        let bottom = last_row(&state, 132, 24).to_lowercase();
         assert!(!bottom.contains("session mode"), "got: `{bottom}`");
         assert!(bottom.contains("quit"), "got: `{bottom}`");
     }
@@ -3570,6 +3642,125 @@ mod tests {
         let text = rendered(&state, 120, 40);
         assert!(text.contains("project knowledge"), "{text}");
         assert!(text.contains("adopt the drill-down view"), "{text}");
+    }
+
+    /// Map line 234, through the production key path: pressing `M` opens the
+    /// project-memory view — the same assert-the-premise-first shape
+    /// (practice §17) `the_project_knowledge_view_shows_active_decisions_in_their_own_section`
+    /// uses, checked here first as "not open before the press" — and it
+    /// shows a record's kind and status on the line, the one thing
+    /// `ProjectKnowledge`'s curated sections never have to say because their
+    /// section membership already implies both.
+    #[test]
+    fn the_m_key_opens_the_project_memory_view_showing_kind_and_status() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        assert_eq!(
+            state.overlay(),
+            None,
+            "must not already be open before the key is pressed"
+        );
+
+        state.handle_key(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::NONE));
+        state.open_project_memory(
+            one_entry("[active] finding: the local gate must run alone"),
+            None,
+        );
+
+        assert_eq!(state.overlay(), Some(Overlay::ProjectMemory));
+        let text = rendered(&state, 120, 40);
+        assert!(text.contains("finding:"), "{text}");
+        assert!(text.contains("[active]"), "{text}");
+        assert!(text.contains("the local gate must run alone"), "{text}");
+    }
+
+    /// Map line 234's empty-state half: a project with nothing recorded says
+    /// so honestly rather than rendering an empty list — the same rule
+    /// `the_project_knowledge_view_says_so_when_every_section_is_empty`
+    /// proves for its sibling.
+    #[test]
+    fn the_project_memory_view_says_so_when_there_is_nothing_recorded() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::NONE));
+        state.open_project_memory(KnowledgeSection::default(), None);
+
+        let text = rendered(&state, 120, 40);
+        assert!(
+            text.contains("no memory recorded for this project"),
+            "{text}"
+        );
+    }
+
+    /// A project-memory-view read failure still opens the overlay with an
+    /// honest note — the same contract
+    /// `a_project_knowledge_read_failure_still_opens_with_an_honest_note`
+    /// keeps for its sibling, and never fails the shell.
+    #[test]
+    fn a_project_memory_view_read_failure_still_opens_with_an_honest_note() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::NONE));
+        state.open_project_memory(
+            KnowledgeSection::default(),
+            Some("project memory unavailable: disk full".to_owned()),
+        );
+
+        let text = rendered(&state, 120, 40);
+        assert!(
+            text.contains("project memory unavailable: disk full"),
+            "{text}"
+        );
+    }
+
+    /// Esc closes the project-memory detail popup and returns to the entry
+    /// list without closing the overlay — the same shape
+    /// `esc_closes_the_memory_detail_popup_without_closing_the_knowledge_view`
+    /// proves for `ProjectKnowledge`.
+    #[test]
+    fn esc_closes_the_project_memory_detail_popup_without_closing_the_view() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::NONE));
+        state.open_project_memory(one_entry("[active] decision: adopt the memory view"), None);
+
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(rendered(&state, 120, 40).contains("memory detail"));
+
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let text = rendered(&state, 120, 40);
+        assert!(text.contains("project memory"), "{text}");
+        assert!(text.contains("adopt the memory view"), "{text}");
+    }
+
+    /// Map line 1107, the same rule
+    /// `the_project_knowledge_view_renders_no_decorative_graph_glyphs`
+    /// proves for its sibling: plain text, no decorative node graph, at a
+    /// realistic width and a wide one (practice §17).
+    #[test]
+    fn the_project_memory_view_renders_no_decorative_graph_glyphs() {
+        let mut state = ShellState::new("glasshouse", "/work", "0.1.0", vec![lone_session()]);
+        state.handle_key(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::NONE));
+        state.open_project_memory(one_entry("[active] finding: no cycles here"), None);
+
+        let graph_glyphs = [
+            '●', '○', '◆', '◇', '■', '□', '▲', '▼', '→', '←', '↑', '↓', '↔', '↕',
+        ];
+        for (width, height) in [(120, 40), (400, 60)] {
+            let text = rendered(&state, width, height);
+            for glyph in graph_glyphs {
+                assert!(
+                    !text.contains(glyph),
+                    "map line 1107: no decorative graph glyph `{glyph}`, width {width}:\n{text}"
+                );
+            }
+        }
+    }
+
+    /// Map line 234's keyboard-reachability half: a keyboard-reachable view
+    /// nobody is told about is not reachable in the sense the line means, so
+    /// the footer must advertise `M`.
+    #[test]
+    fn the_footer_advertises_the_project_memory_key() {
+        let state = sample();
+        let bottom = last_row(&state, 132, 24);
+        assert!(bottom.contains("M memory"), "bindings missing: `{bottom}`");
     }
 
     /// Map line 1768: the project overview must never show a lifetime token

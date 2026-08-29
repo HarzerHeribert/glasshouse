@@ -87,6 +87,18 @@ pub enum Overlay {
     /// [`Overlay::SessionEvents`]. See [`RouteEvidenceState`] for the data
     /// behind it.
     RouteEvidence,
+    /// The project's raw memory — every [`crate::memory::MemoryKind`], at
+    /// every [`crate::memory::MemoryStatus`], unfiltered and ungrouped. Map
+    /// line 234: "allow the user to open a project-memory view from the
+    /// keyboard." [`Overlay::ProjectKnowledge`]'s sibling: that overlay
+    /// answers "what has this project learned" through five curated,
+    /// status-filtered sections; this one answers "what does this project
+    /// remember" and includes kinds `ProjectKnowledge` never has a section
+    /// for — [`crate::memory::MemoryKind::Finding`] — as well as records at
+    /// statuses `ProjectKnowledge` filters out. Same cursor-and-drill-down
+    /// shape as `ProjectKnowledge` — see [`ProjectMemoryState`] for the data
+    /// behind it.
+    ProjectMemory,
 }
 
 /// Who currently owns the keyboard.
@@ -232,6 +244,12 @@ pub enum Action {
     /// [`Action::OpenProjectOverview`] and [`Action::OpenProjectKnowledge`]
     /// already keep. Phase 47, map lines 1762 and 1764.
     OpenRouteEvidence,
+    /// Open the project-memory view. Reading project memory is file I/O this
+    /// module deliberately does not hold — the run loop reads it and calls
+    /// [`ShellState::open_project_memory`], reporting a read failure back
+    /// through its own note rather than refusing to open, the same contract
+    /// [`Action::OpenProjectKnowledge`] already keeps. Map line 234.
+    OpenProjectMemory,
 }
 
 /// A session's screen, as a terminal would have drawn it, ready to draw.
@@ -538,6 +556,73 @@ impl ProjectKnowledgeState {
     }
 }
 
+/// The project-memory view's own data: every [`crate::memory::MemoryKind`]'s
+/// records, at every [`crate::memory::MemoryStatus`], unfiltered and
+/// ungrouped into one list — map line 234. [`ProjectKnowledgeState`]'s
+/// sibling with the filtering removed: this view is "what does this project
+/// remember," not "what has this project learned," so nothing here is
+/// dropped for being superseded, resolved, or a kind
+/// [`ProjectKnowledgeState`] has no section for. See
+/// [`ShellState::open_project_memory`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectMemoryState {
+    memory: KnowledgeSection,
+    /// Set when the run loop could not read project memory at all. The
+    /// overlay still opens with an honest, empty section rather than
+    /// refusing to show anything — the same contract
+    /// [`ProjectKnowledgeState::memory_note`] keeps.
+    memory_note: Option<String>,
+    /// Index into [`Self::memory`]'s entries — the same cursor idiom
+    /// [`ProjectKnowledgeState::cursor`] uses, over one section instead of
+    /// five. Meaningless when there are no entries at all; every accessor
+    /// guards for that rather than trusting it.
+    cursor: usize,
+    /// Whether the detail popup for the entry under [`Self::cursor`] is
+    /// currently shown — the same independent flag
+    /// [`ProjectKnowledgeState::detail_open`] is, for the same reason.
+    detail_open: bool,
+}
+
+impl ProjectMemoryState {
+    /// Every memory record read for this view, most recently updated first.
+    pub fn memory(&self) -> &KnowledgeSection {
+        &self.memory
+    }
+
+    pub fn memory_note(&self) -> Option<&str> {
+        self.memory_note.as_deref()
+    }
+
+    /// How many selectable entries exist.
+    pub fn total_entries(&self) -> usize {
+        self.memory.lines.len()
+    }
+
+    /// Which entry the cursor is on, meaningless when [`Self::total_entries`]
+    /// is zero.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Whether the detail popup for the entry under the cursor is open.
+    pub fn detail_open(&self) -> bool {
+        self.detail_open
+    }
+
+    /// The entry under the cursor — its display line and its
+    /// [`MemoryDetail`] — or `None` when nothing is selectable. The same
+    /// shape [`ProjectKnowledgeState::selected`] returns, over the one
+    /// section this view has instead of five.
+    pub fn selected(&self) -> Option<(&str, &MemoryDetail)> {
+        self.memory
+            .lines
+            .iter()
+            .zip(self.memory.details.iter())
+            .map(|(line, detail)| (line.as_str(), detail))
+            .nth(self.cursor)
+    }
+}
+
 /// One observed routing identity for the route-evidence table — Phase 47,
 /// map lines 1762 and 1764. Built by `shell::build_route_evidence_table`
 /// from `crate::routing::evidence::EvidenceLedger::observed_identities`'s own
@@ -698,6 +783,10 @@ pub struct ShellState {
     /// The route-evidence table's own data, or `None` when it is not open —
     /// the same split as `project_overview` and `project_knowledge`.
     route_evidence: Option<RouteEvidenceState>,
+    /// The project-memory view's own data, or `None` when it is not open —
+    /// the same split as `project_overview`, `project_knowledge` and
+    /// `route_evidence`.
+    project_memory: Option<ProjectMemoryState>,
     /// Recent lifecycle events, newest first, bounded at [`ACTIVITY_ROWS`].
     /// See [`ShellState::note_events`].
     activity: Vec<RecordedEvent>,
@@ -725,6 +814,7 @@ impl ShellState {
             project_overview: None,
             project_knowledge: None,
             route_evidence: None,
+            project_memory: None,
             activity: Vec::new(),
         }
     }
@@ -939,6 +1029,35 @@ impl ShellState {
         self.route_evidence.as_ref()
     }
 
+    /// Open the project-memory view with memory the run loop already read
+    /// from disk — every kind, at every status, unfiltered. Reading
+    /// `crate::memory` is file I/O this module deliberately does not hold —
+    /// see [`Self::open_project_overview`] for the same split. Map line 234.
+    ///
+    /// Opens even when `memory_note` is `Some`: a project whose memory
+    /// database could not be read still gets an honest, empty view rather
+    /// than no view at all — the same contract
+    /// [`Self::open_project_knowledge`] keeps.
+    pub fn open_project_memory(
+        &mut self,
+        memory: KnowledgeSection,
+        memory_note: Option<String>,
+    ) -> Action {
+        self.overlay = Some(Overlay::ProjectMemory);
+        self.project_memory = Some(ProjectMemoryState {
+            memory,
+            memory_note,
+            cursor: 0,
+            detail_open: false,
+        });
+        Action::Redraw
+    }
+
+    /// The project-memory view's own data, or `None` when it is not open.
+    pub fn project_memory(&self) -> Option<&ProjectMemoryState> {
+        self.project_memory.as_ref()
+    }
+
     /// Open the presented session's recent-lifecycle-events overlay — map
     /// line 1758.
     ///
@@ -978,6 +1097,7 @@ impl ShellState {
         self.project_overview = None;
         self.project_knowledge = None;
         self.route_evidence = None;
+        self.project_memory = None;
         Action::Redraw
     }
 
@@ -1355,6 +1475,12 @@ impl ShellState {
             return self.handle_route_evidence_key(key, had_status);
         }
 
+        // The same cursor-and-drill-down shape as `ProjectKnowledge` above,
+        // over one unfiltered list instead of five curated sections.
+        if self.overlay == Some(Overlay::ProjectMemory) {
+            return self.handle_project_memory_key(key, had_status);
+        }
+
         self.handle_control_key(key, had_status)
     }
 
@@ -1373,6 +1499,12 @@ impl ShellState {
             KeyCode::Char('k') => Action::OpenProjectKnowledge,
             KeyCode::Char('e') => self.open_session_events(),
             KeyCode::Char('r') => Action::OpenRouteEvidence,
+            // Capital, not lowercase `m`: that letter is already the
+            // Overview's own "begin sending text" key (`handle_overview_key`'s
+            // `Char('m') if !ctrl`), and giving the same key a second,
+            // context-dependent meaning would be confusing even though the
+            // two never overlap at runtime.
+            KeyCode::Char('M') => Action::OpenProjectMemory,
             KeyCode::Enter | KeyCode::Char('i') => self.enter_session_mode(),
             KeyCode::Char('n') => Action::StartSession,
             // Shift-N is the same session `n` starts, minus the viewport —
@@ -1559,6 +1691,76 @@ impl ShellState {
     fn close_knowledge_detail(&mut self) -> Action {
         if let Some(knowledge) = self.project_knowledge.as_mut() {
             knowledge.detail_open = false;
+        }
+        Action::Redraw
+    }
+
+    /// Answer one key while the project-memory view is open — the same
+    /// shape as [`Self::handle_project_knowledge_key`], over one unfiltered
+    /// list instead of five curated sections.
+    fn handle_project_memory_key(&mut self, key: KeyEvent, had_status: bool) -> Action {
+        if self
+            .project_memory
+            .as_ref()
+            .is_some_and(ProjectMemoryState::detail_open)
+        {
+            return match key.code {
+                KeyCode::Esc => self.close_memory_detail(),
+                _ => Action::None,
+            };
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('M') => self.close_overlay(),
+            KeyCode::Up => self.move_memory_cursor(-1),
+            KeyCode::Down => self.move_memory_cursor(1),
+            KeyCode::Enter => self.open_memory_detail(),
+            _ => self.handle_control_key(key, had_status),
+        }
+    }
+
+    /// Move the project-memory cursor, wrapping — the same ring
+    /// [`Self::move_knowledge_cursor`] is, for the same reason.
+    fn move_memory_cursor(&mut self, delta: isize) -> Action {
+        let total = self
+            .project_memory
+            .as_ref()
+            .map(ProjectMemoryState::total_entries)
+            .unwrap_or(0);
+        if total == 0 {
+            self.set_status("nothing to select in the project-memory view");
+            return Action::Redraw;
+        }
+        if let Some(memory) = self.project_memory.as_mut() {
+            memory.cursor = (memory.cursor as isize + delta).rem_euclid(total as isize) as usize;
+        }
+        Action::Redraw
+    }
+
+    /// Open the detail popup for the entry under the cursor. A project with
+    /// nothing recorded yet has nothing to select, so this refuses rather
+    /// than opening a detail popup with nothing in it — the same rule
+    /// [`Self::open_knowledge_detail`] follows.
+    fn open_memory_detail(&mut self) -> Action {
+        let has_selection = self
+            .project_memory
+            .as_ref()
+            .is_some_and(|memory| memory.total_entries() > 0);
+        if !has_selection {
+            self.set_status("nothing selected to inspect");
+            return Action::Redraw;
+        }
+        if let Some(memory) = self.project_memory.as_mut() {
+            memory.detail_open = true;
+        }
+        Action::Redraw
+    }
+
+    /// Close the detail popup, returning to the entry list — the cursor is
+    /// left exactly where it was, the same rule
+    /// [`Self::close_knowledge_detail`] follows.
+    fn close_memory_detail(&mut self) -> Action {
+        if let Some(memory) = self.project_memory.as_mut() {
+            memory.detail_open = false;
         }
         Action::Redraw
     }

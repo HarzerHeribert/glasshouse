@@ -287,6 +287,21 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                             );
                         }
                     },
+                    Action::OpenProjectMemory => match build_project_memory_view(runtime) {
+                        Ok(memory) => {
+                            state.open_project_memory(memory, None);
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                "could not read project memory for the project-memory view"
+                            );
+                            state.open_project_memory(
+                                KnowledgeSection::default(),
+                                Some(format!("project memory unavailable: {err:#}")),
+                            );
+                        }
+                    },
                     Action::SaveUserSettings => {
                         let harness_edits = state.settings_edits();
                         let provider_edits = state.settings_provider_edits();
@@ -1691,6 +1706,80 @@ fn knowledge_detail(record: &crate::memory::MemoryRecord) -> MemoryDetail {
         source_commit: record.source_commit.clone(),
         lifecycle: record.status.to_string(),
     }
+}
+
+/// One display line for the project-memory view: [`knowledge_line`]'s
+/// kind-and-text line, prefixed with the memory's lifecycle status.
+///
+/// [`build_project_knowledge_memory`]'s five sections each already imply a
+/// single status by construction — the active-decisions section is
+/// `is_current`, the todos section is `is_open_work`, and so on — so
+/// `knowledge_line` alone is enough there: which section an entry is in
+/// already says its status. This view has exactly one list spanning every
+/// [`crate::memory::MemoryStatus`] at once, so the status has to be said on
+/// the line rather than implied by where the entry sits — map line 234's
+/// "at least its kind and its status".
+fn memory_view_line(record: &crate::memory::MemoryRecord) -> String {
+    format!("[{}] {}", record.status, knowledge_line(record))
+}
+
+/// Every memory record in this project — every
+/// [`crate::memory::MemoryKind`], at every [`crate::memory::MemoryStatus`],
+/// most recently updated first — for [`state::Action::OpenProjectMemory`].
+/// Map line 234.
+///
+/// [`build_project_knowledge_memory`]'s unfiltered sibling: that function
+/// calls [`knowledge_section`] once per curated kind, each restricted to a
+/// status predicate that makes it "current knowledge". This view has no
+/// predicate and no per-kind split — every kind, including
+/// [`crate::memory::MemoryKind::Finding`], which `build_project_knowledge_memory`
+/// never queries for at all, and every status, including one
+/// `is_current`/`is_open_work` would drop. Reading `crate::memory` is file
+/// I/O this module deliberately does not hold in `shell/state.rs` — the same
+/// split [`build_project_knowledge_memory`] keeps.
+fn build_project_memory_view(runtime: &Runtime) -> anyhow::Result<KnowledgeSection> {
+    use crate::memory::{MemoryKind, MemoryStatus, ProjectMemory};
+
+    let memory = ProjectMemory::open(runtime)?;
+    let store = memory.store();
+
+    let by_status: Vec<Vec<crate::memory::MemoryRecord>> = MemoryStatus::ALL
+        .iter()
+        .copied()
+        .map(|status| store.with_status(status, PROJECT_KNOWLEDGE_FETCH_LIMIT))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Every kind this project's memory has — the whole point of this view
+    // next to `ProjectKnowledge`'s curated sections. `MemoryStatus::ALL`
+    // above already returns every kind at each status; this keeps the
+    // inclusion explicit rather than resting on the absence of a filter.
+    let kinds: &[MemoryKind] = MemoryKind::ALL;
+    let mut matched: Vec<crate::memory::MemoryRecord> = by_status
+        .into_iter()
+        .flatten()
+        .filter(|record| kinds.contains(&record.kind))
+        .collect();
+    matched.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+    });
+
+    let omitted = matched
+        .len()
+        .saturating_sub(PROJECT_KNOWLEDGE_SECTION_LIMIT);
+    let shown: Vec<crate::memory::MemoryRecord> = matched
+        .into_iter()
+        .take(PROJECT_KNOWLEDGE_SECTION_LIMIT)
+        .collect();
+    let lines = shown.iter().map(memory_view_line).collect();
+    let details = shown.iter().map(knowledge_detail).collect();
+
+    Ok(KnowledgeSection {
+        lines,
+        details,
+        omitted,
+    })
 }
 
 /// How many identities [`build_route_evidence_table`] shows — the same
@@ -4227,6 +4316,167 @@ mod project_knowledge_tests {
         assert_eq!(detail.source_session, None);
         assert_eq!(detail.source_commit, None);
         assert_eq!(detail.lifecycle, MemoryStatus::Active.to_string());
+    }
+}
+
+/// Map line 234: the project-memory view reads every kind of durable
+/// project memory, at every status, through [`build_project_memory_view`] —
+/// the production function `Action::OpenProjectMemory`'s handler calls, not
+/// a helper that re-implements the query (practice §35).
+#[cfg(test)]
+mod project_memory_tests {
+    use super::*;
+    use crate::memory::{MemoryKind, MemoryStatus, NewMemory, ProjectMemory};
+
+    /// Same bootstrap `project_knowledge_tests` uses — an isolated, real
+    /// on-disk project database, not a fixture that reimplements the query.
+    fn bootstrapped_runtime() -> (tempfile::TempDir, tempfile::TempDir, crate::Runtime) {
+        use clap::Parser;
+
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join(".git")).unwrap();
+
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+            "--config-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, workspace.path()).unwrap();
+        (data, workspace, runtime)
+    }
+
+    /// A project with no memory at all gets one empty, honest section — not
+    /// an error.
+    #[test]
+    fn a_project_with_no_memory_yet_reports_an_empty_section_not_an_error() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let memory = build_project_memory_view(&runtime).expect("must not fail");
+        assert!(memory.lines.is_empty());
+        assert_eq!(memory.omitted, 0);
+    }
+
+    /// The whole point of this view next to `ProjectKnowledge`: a `Finding`
+    /// record has no section in `build_project_knowledge_memory` at all, but
+    /// it must appear here.
+    #[test]
+    fn a_finding_record_appears_in_the_project_memory_view() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let memory = ProjectMemory::open(&runtime).expect("open");
+        memory
+            .store()
+            .record(NewMemory::new(
+                MemoryKind::Finding,
+                "the local gate must run alone",
+            ))
+            .unwrap();
+
+        let built = build_project_memory_view(&runtime).expect("must not fail");
+        assert!(
+            built
+                .lines
+                .iter()
+                .any(|line| line.contains("the local gate must run alone")),
+            "{:?}",
+            built.lines
+        );
+
+        let knowledge = build_project_knowledge_memory(&runtime).expect("must not fail");
+        for section in [
+            &knowledge.decisions,
+            &knowledge.constraints,
+            &knowledge.features,
+            &knowledge.failed_attempts,
+            &knowledge.todos,
+        ] {
+            assert!(
+                section
+                    .lines
+                    .iter()
+                    .all(|line| !line.contains("the local gate must run alone")),
+                "a Finding must not reach any ProjectKnowledge section: {:?}",
+                section.lines
+            );
+        }
+    }
+
+    /// Unlike `build_project_knowledge_memory`'s five sections, this view is
+    /// not filtered by status: a superseded decision — invisible to the
+    /// active-decisions section — is still shown here, with its status said
+    /// on the line rather than implied by which section it is in.
+    #[test]
+    fn a_superseded_record_still_appears_here_with_its_status_on_the_line() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let memory = ProjectMemory::open(&runtime).expect("open");
+        let store = memory.store();
+
+        let old = store
+            .record(NewMemory::new(
+                MemoryKind::Decision,
+                "ship the old approach",
+            ))
+            .unwrap();
+        let new = store
+            .record(NewMemory::new(
+                MemoryKind::Decision,
+                "ship the replacement approach",
+            ))
+            .unwrap();
+        store.supersede(&old.id, &new.id).unwrap();
+
+        let built = build_project_memory_view(&runtime).expect("must not fail");
+        let old_line = built
+            .lines
+            .iter()
+            .find(|line| line.contains("ship the old approach"))
+            .expect("the superseded decision must still be shown");
+        assert!(
+            old_line.contains(&format!("[{}]", MemoryStatus::Superseded)),
+            "its status must be said on the line: {old_line}"
+        );
+    }
+
+    /// The `M` key opens the overlay through the real run-loop action, and
+    /// the overlay carries the memory the run loop read — not a
+    /// hand-constructed fixture.
+    #[test]
+    fn opening_the_project_memory_view_shows_real_memory() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let memory = ProjectMemory::open(&runtime).expect("open");
+        memory
+            .store()
+            .record(NewMemory::new(MemoryKind::Finding, "placeholder"))
+            .unwrap();
+
+        let mut state = state::ShellState::new(
+            "glasshouse",
+            runtime.project().display_root(),
+            "test",
+            Vec::new(),
+        );
+        assert_eq!(
+            state.handle_key(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Char('M')
+            )),
+            state::Action::OpenProjectMemory
+        );
+
+        let built = build_project_memory_view(&runtime).expect("must not fail");
+        state.open_project_memory(built, None);
+
+        assert_eq!(state.overlay(), Some(state::Overlay::ProjectMemory));
+        let shown = state.project_memory().expect("open");
+        assert!(
+            shown
+                .memory()
+                .lines
+                .iter()
+                .any(|line| line.contains("placeholder"))
+        );
     }
 }
 

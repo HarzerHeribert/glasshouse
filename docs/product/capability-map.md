@@ -231,7 +231,7 @@ Fixed architectural requirements
 ☑ Allow the user to move to the previous session with a keyboard shortcut.
 ☑ Allow the user to move to the next session with a keyboard shortcut.
 ☑ Allow the user to open a session overview from the keyboard.
-☐ Allow the user to open a project-memory view from the keyboard.
+☑ Allow the user to open a project-memory view from the keyboard.
 ☑ Allow the user to return from Glasshouse overlays to the active native session without terminating it.
 ☑ Preserve terminal resize events and propagate the new dimensions to the active embedded terminal.
 ☑ Keep the visual design text-first and avoid decorative graph visualizations that do not expose actionable state.
@@ -799,7 +799,7 @@ Fixed architectural requirements
 ☑ Keep checkpoints deliberately small enough to bootstrap a fresh session cheaply.
 ☑ Store checkpoints separately from durable project memory.
 ☑ Allow the user to request a checkpoint manually for the active session.
-☐ Allow Glasshouse to request a checkpoint automatically at selected task boundaries.
+☑ Allow Glasshouse to request a checkpoint automatically at selected task boundaries.
 ☑ Allow a checkpoint created by one harness to bootstrap a fresh session in another harness.
 
 Phase 20 — Minimal durable project memory
@@ -1289,7 +1289,7 @@ Phase 32F — Protected quota reserve
 ☐ Allow high-tier tasks to consume protected reserve when their capability requirement justifies it.
 ☐ Allow the user to override reserve protection for a specific task or session.
 ☐ Allow reserve policy to become more permissive shortly before a known quota reset.
-☐ Allow reserve policy to become more conservative when the next reset is distant.
+☑ Allow reserve policy to become more conservative when the next reset is distant.
 ☑ Keep reserve behavior inspectable in routing explanations.
 ☐ Avoid moving an almost-complete high-value task to another session solely because a reserve threshold was crossed.
 

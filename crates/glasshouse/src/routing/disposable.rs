@@ -1162,6 +1162,75 @@ mod tests {
         assert_eq!(choice.model(), "plain-metered-model");
     }
 
+    /// GH-RESERVE-RESET, map lines 1291 and 1292: reset distance, not the
+    /// band alone, decides the outcome. `the_protected_reserve_policy_gates_the_metered_fallback`
+    /// only ever drives a distant reset, so nothing in the suite watched the
+    /// imminent branch of `evaluate_reserve_spend` before this test — the
+    /// orchestrator proved that gap by mutating `reset_urgency`'s distant arm
+    /// from `0.0` to `1.0` and watching 37 tests, including that one, stay
+    /// green.
+    ///
+    /// Both candidates share the same Reserve band, the same model identity
+    /// and the same everything else `evaluate_reserve_spend` reads; only
+    /// `seconds_until_reset` moves from [`RESET_IMMINENT_SECONDS`] to
+    /// [`RESET_DISTANT_SECONDS`] (referenced by name per §17's premise
+    /// discipline, not copied as a literal, so a change to either constant
+    /// moves this test with it).
+    #[test]
+    fn reset_distance_alone_flips_the_protected_reserve_decision() {
+        use crate::provider::quota::{CapacityBand, RESET_DISTANT_SECONDS, RESET_IMMINENT_SECONDS};
+
+        let base = CandidateCapacity::new().with_band(Some(CapacityBand::Reserve));
+        let imminent_capacity = base
+            .clone()
+            .with_seconds_until_reset(Some(RESET_IMMINENT_SECONDS));
+        let distant_capacity = base
+            .clone()
+            .with_seconds_until_reset(Some(RESET_DISTANT_SECONDS));
+
+        // Assert the premise (§17): the two inputs actually differ, and the
+        // only thing they differ in is `seconds_until_reset` — strip that one
+        // field back out of each and they become equal, so the band (and
+        // every other field `evaluate_reserve_spend` could read) never moved.
+        assert_ne!(
+            imminent_capacity, distant_capacity,
+            "the two capacities must actually differ for this test to prove anything"
+        );
+        assert_eq!(
+            imminent_capacity.clone().with_seconds_until_reset(None),
+            distant_capacity.clone().with_seconds_until_reset(None),
+            "band and every other field besides seconds_until_reset must be identical"
+        );
+
+        let routing = DisposableRouting::for_support_work(true, FreePreferences::new());
+
+        let allowed = routing
+            .choose(
+                JobKind::MemoryExtraction,
+                &[metered("openrouter", "same-reserved-model").with_capacity(imminent_capacity)],
+                &FreePool::new(),
+                Instant::now(),
+                None,
+            )
+            .expect(
+                "a reset within RESET_IMMINENT_SECONDS permits spending the reserve (line 1291)",
+            );
+        assert_eq!(allowed.model(), "same-reserved-model");
+
+        let denied = routing
+            .choose(
+                JobKind::MemoryExtraction,
+                &[metered("openrouter", "same-reserved-model").with_capacity(distant_capacity)],
+                &FreePool::new(),
+                Instant::now(),
+                None,
+            )
+            .expect_err(
+                "a reset at RESET_DISTANT_SECONDS denies the same Reserve-band candidate (line 1292)",
+            );
+        assert!(matches!(denied, NoResource::ProtectedReserveDenied { .. }));
+    }
+
     /// GH-CLASSIFY-CALLER, the fifth link: a real [`TaskClassification`]
     /// reaching `choose`'s metered-fallback path must change the outcome, not
     /// merely be accepted and ignored. Reuses the exact Reserve-band,

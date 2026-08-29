@@ -327,3 +327,66 @@ Platform/external evidence:
 Missing evidence:
 - Mechanical rather than aesthetic: the test proves no block-element widget is
   drawn, not that the layout is well judged.
+
+---
+
+## Phase 3 line 234 — CLOSED 2026-08-29 (batch 48). Phase 3 is now 12/12.
+
+Contract: Given a project with durable memory records, when the user presses
+the project-memory key from the shell, Glasshouse opens a view of that
+project's memory — including record kinds and statuses the knowledge overlay
+does not show — while never displaying another project's records and never
+failing the shell when memory cannot be read.
+
+State: COMPLETE
+
+**The gap was not "no view exists".** `Overlay::ProjectKnowledge` is opened by
+`k` and is built from memory records — but `knowledge_section` is called for
+five kinds only (`shell/mod.rs:1584-1599`, `record.kind == kind`), each with a
+status filter. A `MemoryKind::Finding` record, and any record at a status those
+filters drop, was unreachable from every keyboard-reachable surface.
+
+Production evidence:
+- `crates/glasshouse/src/shell/state.rs` — a new overlay and its `Action`,
+  opened by `M`, closed by `Esc` and by the same key, following
+  `ProjectKnowledge`'s shipped pattern.
+- `crates/glasshouse/src/shell/mod.rs` — builds the view over `MemoryKind::ALL`
+  and every status, reusing `knowledge_detail`'s existing `MemoryDetail`
+  mapping rather than a second one.
+- `crates/glasshouse/src/shell/view.rs` — renders it, and the status bar
+  advertises the key.
+
+**`ProjectKnowledge` was deliberately not widened.** It is Phase 25's curated
+knowledge view, constrained by map lines 1098-1107; changing its shape to serve
+a Phase 3 line would have altered a shipped, spec-constrained surface. The
+decision was made in the packet, not by the worker.
+
+Regression evidence:
+- `shell::project_memory_tests::a_finding_record_appears_in_the_project_memory_view`
+  — the test that distinguishes this view from `ProjectKnowledge`.
+- `shell::project_memory_tests::opening_the_project_memory_view_shows_real_memory`
+- `..::the_project_memory_view_says_so_when_there_is_nothing_recorded` — the
+  honest empty state.
+- `the_status_bar_always_shows_the_key_bindings` — the key is advertised; a
+  view nobody is told about is not keyboard-reachable in the sense the line
+  means.
+
+Mutation, re-run by the orchestrator:
+
+| mutation | vocabulary | result |
+|---|---|---|
+| the view's `MemoryKind::ALL` narrowed to `ProjectKnowledge`'s own five kinds, dropping `Finding` | `skip-state-update` | **killed** — `a_finding_record_appears_in_the_project_memory_view` and `opening_the_project_memory_view_shows_real_memory` both FAILED under `--lib shell::` |
+
+**A packet error the worker caught, and it was the orchestrator's.** The packet
+claimed `MemoryKind` has seven variants including `Invariant`, and wrote the
+acceptance test against that. `MemoryKind` has **six**; `Invariant` belongs to
+`MemoryAuthority`, a different field on `MemoryRecord` describing how binding a
+memory is rather than what kind of thing it is. The orchestrator had read one
+enum's range into the next. The worker refused to add a seventh kind — which
+would have needed a schema migration for a variant the map never asks for —
+said so first in its report, and built the view kind-agnostically instead, which
+satisfies the contract as written. Fifteenth consecutive round in which a
+worker corrected its packet.
+
+Platform/external evidence: no `#[cfg]` added; the shell suite runs on Windows
+for real on the ARM64 VM. Missing: nothing for this line.

@@ -273,3 +273,82 @@ difference — same candidate, same Reserve band, `seconds_until_reset` either
 side of `RESET_IMMINENT_SECONDS` (300) and `RESET_DISTANT_SECONDS` (3600),
 asserting opposite outcomes. The `reset_urgency` mutation above must then kill
 it. Tests only; no mechanism is missing.
+
+---
+
+## CORRECTION to the section above, and lines 1291/1292 ruled — 2026-08-29 (batch 48)
+
+**The batch-48 triage section above mutated the wrong function, and its
+conclusion about 1292 was wrong. This corrects it.**
+
+That section reported: *"flipping `reset_urgency`'s distant branch from `0.0` to
+`1.0` changed nothing … nothing in the suite watches 'more conservative when
+the next reset is distant'."* The mutation ran, 37 tests ran, and the verdict
+was still meaningless — because **`reset_urgency` is not on the reserve gate's
+path at all.**
+
+- `provider::quota::reset_urgency` (`quota.rs:1892`) has exactly one caller,
+  `quota.rs:1865`, in the capacity-scoring path.
+- `evaluate_reserve_spend` (`quota.rs:2268`) does **not** call it. It compares
+  `RESET_IMMINENT_SECONDS` and `RESET_DISTANT_SECONDS` inline, at `quota.rs:2298`
+  and `:2307`.
+
+So a SURVIVED verdict there meant *"this mutation was irrelevant to the gate"*,
+not *"the gate is unwatched"*. That is the same trap as a filter matching zero
+tests, wearing different clothes: the `test result:` line was honest, the target
+was right, and the **mutation site** was wrong. Found by the worker sent to
+satisfy the bad acceptance bar, which read the call graph instead of obeying it.
+
+### Line 1292 — CLOSED
+
+Contract: Given a metered candidate in the protected reserve band and no
+cheaper adequate resource, when the next quota reset is distant, reserve policy
+denies the spend for anything below the heavy tier.
+
+State: COMPLETE
+
+Production evidence: `provider::quota::evaluate_reserve_spend`, `quota.rs:2307`
+— `if seconds >= RESET_DISTANT_SECONDS && inputs.tier != WorkloadTier::Heavy`
+→ `Deny`. Reached in production through `routing/disposable.rs:568` inside
+`DisposableRouting::choose`, where `seconds_until_reset` is **real telemetry**
+(`candidate.value().capacity.seconds_until_reset`), unlike three hardcoded
+sibling fields.
+
+Regression evidence: `routing::disposable::tests::reset_distance_alone_flips_the_protected_reserve_decision`
+— same candidate, same Reserve band, `seconds_until_reset` the only field that
+moves, referenced by constant name rather than literal. Premise asserted per
+§17 by comparing the two `CandidateCapacity` values for inequality and then for
+equality once the field is stripped from both, so a reader can see nothing else
+changed.
+
+Mutation, run by the orchestrator on the correct site this time:
+
+| mutation | vocabulary | result |
+|---|---|---|
+| `quota.rs:2307`'s distant-deny condition disabled (`if false && ..`) | `remove-guard` | **killed** — three tests failed: `the_protected_reserve_policy_gates_the_metered_fallback`, `a_real_classification_changes_the_metered_fallback_outcome_at_the_same_call_site`, and the new `reset_distance_alone_flips_the_protected_reserve_decision` |
+
+### Line 1291 — STAYS OPEN, and the blocker is now named exactly
+
+The imminent branch exists (`quota.rs:2298`: a reset within
+`RESET_IMMINENT_SECONDS` → `Allow`), and the new test shows `choose()` allows at
+that distance. **But disabling that branch entirely changes nothing** —
+verified by the orchestrator, SURVIVED with 15 tests genuinely run (not a void
+filter).
+
+The reason is structural, not a missing test. `evaluate_reserve_spend`'s tail
+(`quota.rs:2325-2337`) denies only when `cheaper_adequate_resource_exists`, and
+otherwise falls through to `Allow`. The sole production caller hardcodes
+`cheaper_adequate_resource_exists: false` (`disposable.rs:568`). So in
+production the imminent branch's `Allow` and the default `Allow` are **the same
+decision**, differing only in their reason string.
+
+"Become **more permissive** shortly before a reset" therefore cannot be
+observed: the policy was already permissive. Closing 1291 needs a caller that
+supplies a real `cheaper_adequate_resource_exists: true`, so that the imminent
+window actually flips a `Deny` into an `Allow` — the same blocker that holds
+1288, 1289 and 1290, not a separate one.
+
+**A mis-citation to fix when someone next edits that function:** the imminent
+branch's reason string cites *"(line 1292)"* and the `user_override` branch
+cites *"(line 1291)"*. Both are one line off — imminent-permissive is 1291,
+override is 1290.

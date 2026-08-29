@@ -2101,6 +2101,18 @@ pub struct UserConfig {
     /// `tests::the_three_automatic_behaviours_disable_independently`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     memory_extraction: Option<bool>,
+    /// Whether Glasshouse may take a checkpoint automatically at a task
+    /// boundary (Phase 19 line 802), without being asked. `None` means
+    /// "never decided" and resolves to enabled, for the same reason
+    /// [`Self::memory_extraction`] stays an `Option` rather than a plain
+    /// `bool`.
+    ///
+    /// Independent of [`Self::memory_extraction`] and every other automatic
+    /// behaviour by construction — this is its own field, read by
+    /// [`EffectiveConfig::automatic_checkpoint_enabled`] alone, so disabling
+    /// memory extraction never disables this and vice versa.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    automatic_checkpoint: Option<bool>,
 }
 
 impl Default for UserConfig {
@@ -2115,6 +2127,7 @@ impl Default for UserConfig {
             pairing: pairing::PairingConfig::default(),
             response: response::ResponseConfig::default(),
             memory_extraction: None,
+            automatic_checkpoint: None,
         }
     }
 }
@@ -2191,6 +2204,17 @@ impl UserConfig {
         self
     }
 
+    /// This layer's recorded decision on automatic task-boundary
+    /// checkpoints, or `None` for "never decided". See the field's own doc.
+    pub fn automatic_checkpoint(&self) -> Option<bool> {
+        self.automatic_checkpoint
+    }
+
+    pub fn set_automatic_checkpoint(&mut self, enabled: Option<bool>) -> &mut Self {
+        self.automatic_checkpoint = enabled;
+        self
+    }
+
     /// Load the user-level configuration file named by `paths`.
     ///
     /// A missing file is not an error: it returns [`UserConfig::default`]
@@ -2260,6 +2284,13 @@ pub struct ProjectConfig {
     /// for how the two layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     memory_extraction: Option<bool>,
+    /// A project may override the user's decision on automatic
+    /// task-boundary checkpoints — see [`UserConfig::automatic_checkpoint`]
+    /// for the field this mirrors and
+    /// [`EffectiveConfig::automatic_checkpoint_enabled`] for how the two
+    /// layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    automatic_checkpoint: Option<bool>,
 }
 
 impl Default for ProjectConfig {
@@ -2273,6 +2304,7 @@ impl Default for ProjectConfig {
             pairing: pairing::PairingConfig::default(),
             response: response::ResponseConfig::default(),
             memory_extraction: None,
+            automatic_checkpoint: None,
         }
     }
 }
@@ -2338,6 +2370,18 @@ impl ProjectConfig {
 
     pub fn set_memory_extraction(&mut self, enabled: Option<bool>) -> &mut Self {
         self.memory_extraction = enabled;
+        self
+    }
+
+    /// This layer's recorded decision on automatic task-boundary
+    /// checkpoints, or `None` for "never decided". See
+    /// [`UserConfig::automatic_checkpoint`].
+    pub fn automatic_checkpoint(&self) -> Option<bool> {
+        self.automatic_checkpoint
+    }
+
+    pub fn set_automatic_checkpoint(&mut self, enabled: Option<bool>) -> &mut Self {
+        self.automatic_checkpoint = enabled;
         self
     }
 }
@@ -2636,6 +2680,24 @@ impl<'a> EffectiveConfig<'a> {
             return Layered::new(value, Layer::Project);
         }
         if let Some(value) = self.user.memory_extraction() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(true, Layer::Default)
+    }
+
+    /// Whether Glasshouse may take a checkpoint automatically at a task
+    /// boundary (Phase 19 line 802), reporting which layer decided it.
+    /// Project first, then user, then [`Layer::Default`], matching
+    /// [`Self::memory_extraction_enabled`]'s own layering.
+    ///
+    /// Deliberately independent of [`Self::memory_extraction_enabled`] and
+    /// every other automatic behaviour: each reads its own field, so
+    /// disabling one never disables another.
+    pub fn automatic_checkpoint_enabled(&self) -> Layered<bool> {
+        if let Some(value) = self.project.and_then(ProjectConfig::automatic_checkpoint) {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.automatic_checkpoint() {
             return Layered::new(value, Layer::User);
         }
         Layered::new(true, Layer::Default)
@@ -5165,6 +5227,70 @@ mod tests {
             Layered::new(false, Layer::User),
             "a project that recorded nothing must fall through to the user layer"
         );
+    }
+
+    #[test]
+    fn automatic_checkpoint_enabled_layers_project_over_user_over_default() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.automatic_checkpoint_enabled(),
+            Layered::new(true, Layer::Default),
+            "nothing recorded anywhere must resolve to enabled"
+        );
+
+        let mut user = UserConfig::default();
+        user.set_automatic_checkpoint(Some(false));
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.automatic_checkpoint_enabled(),
+            Layered::new(false, Layer::User)
+        );
+
+        let mut project = ProjectConfig::default();
+        project.set_automatic_checkpoint(Some(true));
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        assert_eq!(
+            effective.automatic_checkpoint_enabled(),
+            Layered::new(true, Layer::Project),
+            "a project's explicit re-enable must win over the user's disable"
+        );
+
+        let silent_project = ProjectConfig::default();
+        let effective = EffectiveConfig::new(&user, Some(&silent_project));
+        assert_eq!(
+            effective.automatic_checkpoint_enabled(),
+            Layered::new(false, Layer::User),
+            "a project that recorded nothing must fall through to the user layer"
+        );
+    }
+
+    /// The independence half of the automatic-checkpoint switch:
+    /// [`EffectiveConfig::automatic_checkpoint_enabled`] must depend only on
+    /// its own field, never on [`UserConfig::memory_extraction`] or any other
+    /// automatic behaviour, and vice versa.
+    #[test]
+    fn automatic_checkpoint_and_memory_extraction_disable_independently() {
+        for (checkpoint_off, memory_off) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut user = UserConfig::default();
+            user.set_automatic_checkpoint(Some(!checkpoint_off));
+            user.set_memory_extraction(Some(!memory_off));
+
+            let effective = EffectiveConfig::new(&user, None);
+
+            assert_eq!(
+                effective.automatic_checkpoint_enabled().value,
+                !checkpoint_off,
+                "checkpoint state must depend only on its own field, case {checkpoint_off} {memory_off}"
+            );
+            assert_eq!(
+                effective.memory_extraction_enabled().value,
+                !memory_off,
+                "memory-extraction state must depend only on its own field, case {checkpoint_off} {memory_off}"
+            );
+        }
     }
 
     /// A pin is two names — a key into `ProviderTable` and a model name —
