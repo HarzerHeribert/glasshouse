@@ -89,7 +89,37 @@ package scoped the new way — six lines against one selector.
   `launch_session`'s path. **It becomes a good package the day classification is
   wired into launch.**
 
-### The defect the probe found, now fixed — and the packet's cause was wrong
+### THE RESUME DEFECT IS NOT FIXED — `e66909c` does not hold, proven 2026-08-30
+
+**`GH-RESUME-PROBE` drove a real Codex through stop → resume → hook, twice, and
+the defect is still there.** Do not trust `e66909c`'s commit message or the
+paragraph below it; both were written before this probe ran.
+
+**And the cause is a THIRD thing, which neither the fix's packet nor the probe's
+packet enumerated.** The lifecycle write *lands* — `begin_resume` really does
+move the record to `running`, watched with a raw `sqlite3` poller that opens no
+Glasshouse process. Then **supervision reverts it to `stopped`, inside the
+resumed session's own `glasshouse hook` process, about 1.5 ms before that hook's
+own state change is refused.**
+
+So it is neither *"the write did not land"* nor *"the write landed and the hook
+was refused"*. It is **the write landed, a third writer took it back, and the
+hook was then refused for the state that writer restored.** Net effect is
+identical to the original defect: a live, working, resumed Codex reads
+`stopped`/`resumable` and every hook it sends is dropped. **Two trials out of
+two, macOS.**
+
+`e66909c` is not wrong to have landed — `begin_resume` is sound and its store
+tests hold. It is **insufficient**, and the missing piece is supervision, which
+no test in that package could see because every test that can reach a resume
+calls `begin_resume` directly.
+
+**This is the strongest argument in this project's history for the end-to-end
+probe.** Six acceptance tests passed, two store mutations were killed, a
+source-scanning test held the wiring, the full blast radius was green, and the
+product did not work. The probe cost a few dollars.
+
+### The superseded account, kept because its §58 finding still stands
 
 A resumed session kept `lifecycle = stopped` forever, so **every hook it sent
 was silently discarded**. My packet blamed `may_apply`. There were **two**
