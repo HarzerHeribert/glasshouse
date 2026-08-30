@@ -916,3 +916,54 @@ puts *"broaden product scope"* under the orchestrator's **Do not**.
 the user, and 1702/1703 are the two lines that make it one.** Recorded here so
 the next orchestrator ranking phases by open-line count does not spend a round
 discovering this again.
+
+
+## NOT a refusal — 1161–1165 un-ticked, and the repair is ~30 lines
+
+**`GH-PHASE30-AUDIT`, 2026-08-30.** Recorded here so the next orchestrator does
+not read five freshly-opened lines as a phase that failed. They are open because
+they were **wrongly ticked**, and they are among the cheapest closes on the
+board.
+
+`SessionStore::context` (`session/store.rs:2020`) is the sole construction site
+of every value 1161–1165 name, and it has **zero production callers** — all
+fourteen are in `tests/session_context.rs`. `session_detail`
+(`main.rs:5795-5857`) renders eighteen fields and never calls it, and
+`CheckpointRecency::is_current` (`store.rs:727`) has no caller anywhere, not
+even a test. Confirmed by the orchestrator directly before un-ticking.
+
+**The repair, already scoped:** one `store.context(&id)` call in
+`session_detail`, four render lines, and `Display` for `CheckpointRecency` and
+`TaskContinuity` (`AdvisoryCacheState` has one already, and it prints
+`"hot (estimated)"`, which carries 1163 by itself). ≈30 lines, two files, no new
+type, no migration. The regression test belongs in `tests/session_model.rs`,
+which already drives the real binary and has a `field(&report, label)` helper
+for `glasshouse sessions show`; deleting the `store.context` call must fail it,
+so the mutation lands on the **call** (§35).
+
+**Two cautions for that package.** `main.rs` is contended — use `coedit.sh`.
+And production prompt-cache reasoning already exists under a *different*
+vocabulary: `routing::session::prompt_cache_state` (`routing/session.rs:800`,
+called at `:1459` from `main.rs:1354`) speaks `Preserved`/`Lost`/`LikelyLost`
+about a comparison **between two backends**, for lines 1596/1597. Do not
+introduce a second user-visible cache vocabulary that disagrees with it.
+
+### The generalisable finding, and it is the third instance
+
+The package that shipped these five **found this exact defect in inherited code
+and did not turn the test on itself.** Its own `packet_errors` says
+`SessionStore::touch` has *"NO production caller at all — all four call sites
+are tests … `touch` is a Cluster B candidate"*. Correct, and still true. It
+never asked the same question about `SessionStore::context`, which it was
+shipping in the same diff, and no reviewer asked it either.
+
+**So: when a report names a Cluster B candidate in inherited code, ask the same
+question about the code that report is shipping.** That is now the cheapest
+known way to catch this class, and it has produced un-ticks twice —
+1455/1456 on 2026-08-30 morning, 1161–1165 the same evening.
+
+**And the review that would have caught it was already written down.**
+`phase-30.md`'s own REVIEW section says, for each of these five: *"verdict
+`closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's
+packet does not bind the integrator)."* The step exists, it was owed, and it was
+skipped.

@@ -5,6 +5,74 @@ Capability map lines 1158–1165. Package `GH-SESSION-CONTEXT`, worktree
 Integrated 2026-08-29 with `GH-WORKLOAD-TIERS` in one `integrate.sh` run.
 **Migration 16.**
 
+## UN-TICKED 2026-08-30 — 1161–1165 REFUTED by `GH-PHASE30-AUDIT`
+
+**All five boxes were ticked over a mechanism nothing in the shipped binary
+runs.** `SessionStore::context` (`session/store.rs:2020`) is the sole
+construction site of every value these lines ask for, and it has **zero
+production callers**: all fourteen are in `tests/session_context.rs`.
+`SessionContext` appears in `crates/glasshouse/src/` only at its definition
+(`:802`), that constructor (`:2060`), a doc comment (`:1999`), the re-export
+(`session/mod.rs:61`) and one unrelated comment (`database.rs:1633`).
+Independently confirmed by the orchestrator before un-ticking, along with two
+sharper facts: `session_detail` (`main.rs:5795-5857`) renders eighteen fields
+and never calls `store.context`, and `CheckpointRecency::is_current`
+(`store.rs:727`) — the method whose own doc comment calls itself *"Line 1164's
+question in one word"* — **has no caller anywhere in the repository, not even a
+test.**
+
+**The decisive argument, of the two the audit was required to make.** A
+defensible reading says *track* means *persist the inputs*, and on that reading
+1161 is honest because `last_activity_at` is durably written. It fails on one
+point: **that is line 1160's production evidence, not 1161's.** 1160 is *"Track
+the most recent request or turn time"* and is ticked on exactly that write. If
+persisting `last_activity_at` also closes 1161, the two lines are one line — and
+this entry's own per-line evidence shows they were not believed to be, since it
+names `AdvisoryCacheState::estimate` for 1161 and
+`SessionStore::write_lifecycle_locked` for 1160. The reading also proves too
+much: any pure function over a persisted column would close any box phrased
+"track X", with no wiring at all.
+
+For 1164 and 1165 the inputs genuinely are written in production
+(`checkpoints.created_at`; `turn_ended` rows) — but both lines ask for a
+**derived verdict**, and a timestamp is not a *"whether"* and a table of rows is
+not a *"flag"*. The derivation is the requirement and the derivation never runs.
+For 1162 and 1163 the reading does not apply at all: they constrain a
+representation and a treatment, and both need a value to exist first.
+
+**The review this entry itself asked for was never done.** Its REVIEW section
+says, for each of these five: *"verdict `closed`. Re-run one decisive mutation
+yourself, then rule (§79: a worker's packet does not bind the integrator)."*
+That step is where this would have been caught, and it was skipped.
+
+**And the test that would have caught it was in the same report.** This
+package's own `packet_errors` correctly found that `SessionStore::touch` has no
+production caller — *"all four call sites are tests … `touch` is a Cluster B
+candidate"* — applying exactly the right test to code it inherited, and never
+turning it on the function it was shipping. No reviewer turned it there either,
+because the reasoning read as diligence.
+
+**The repair is small and is not a redesign: ≈30 lines across two files.** One
+`store.context(&id)` call in `session_detail` plus four render lines, and
+`Display` impls for `CheckpointRecency` and `TaskContinuity` (`AdvisoryCacheState`
+already has one at `:689`, and it prints `"hot (estimated)"`, which carries 1163
+into the output by itself). No new type, no schema change, no migration. The
+regression test belongs in `tests/session_model.rs`, which already drives the
+real binary and has a `field(&report, label)` helper for
+`glasshouse sessions show` — deleting the `store.context` call must fail it,
+which is the §35 shape: the mutation lands on the **call**.
+
+**Caution for that package:** production prompt-cache reasoning already exists
+under a *different* vocabulary — `routing::session::prompt_cache_state`
+(`routing/session.rs:800`, called at `:1459`, reached from `main.rs:1354`) speaks
+`Preserved`/`Lost`/`LikelyLost` about a comparison *between two backends*, for
+lines 1596/1597. The repair must not introduce a second user-visible cache
+vocabulary that disagrees with it.
+
+The code these lines describe is careful, well-reasoned, and correct in what it
+computes. It is only not run. **SCAFFOLDED** is the honest state:
+*"supporting code exists, but production behavior is absent or unproven."*
+
 ## The ruling that makes this entry short
 
 The packet asked for migration 16 and left the per-line shape open. The worker
@@ -165,7 +233,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 Contract: Given a session, when Glasshouse estimates its prompt-cache state, the estimate is a function of elapsed time alone, while preserving complete independence from whether the session can be resumed.
 
-State: **COMPLETE**
+State: **SCAFFOLDED**
 
 Production evidence:
 - `src/session/store.rs` — `AdvisoryCacheState::estimate`
@@ -190,7 +258,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 Contract: Given a prompt-cache estimate, when it is represented, Glasshouse offers hot, warm, cold and unknown as distinct states, while preserving unknown as a real answer rather than a stand-in for cold.
 
-State: **COMPLETE**
+State: **SCAFFOLDED**
 
 Production evidence:
 - `src/session/store.rs` — `CacheState`
@@ -215,7 +283,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 Contract: Given that no provider exposes authoritative cache telemetry, when Glasshouse produces a cache-state estimate, the value is advisory in its type, while preserving the impossibility of any caller asserting a cache state it did not estimate.
 
-State: **COMPLETE**
+State: **SCAFFOLDED**
 
 Production evidence:
 - `src/session/store.rs` — `AdvisoryCacheState (private field; estimate and unknown are the only constructors; no From<CacheState>)`
@@ -239,7 +307,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 Contract: Given a session, when a caller asks whether it has a recent portable checkpoint, Glasshouse answers from the newest stored checkpoint's time against the session's own last activity, while preserving the checkpoint document as the single source of what a checkpoint contains.
 
-State: **COMPLETE**
+State: **SCAFFOLDED**
 
 Production evidence:
 - `src/session/store.rs` — `CheckpointRecency`
@@ -265,7 +333,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 Contract: Given a session, when a caller asks whether it is still working on the same task, Glasshouse answers with a three-state flag counting the completed task boundaries it observed, while preserving the rule that no transcript content and no task identity enters a session record.
 
-State: **COMPLETE**
+State: **SCAFFOLDED**
 
 Production evidence:
 - `src/session/store.rs` — `TaskContinuity`

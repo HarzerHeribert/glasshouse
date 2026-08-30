@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████░░░░░░░░░░░░░░░` 813 / 1280 mandatory capabilities (63%)
+`█████████████████████████░░░░░░░░░░░░░░░` 808 / 1280 mandatory capabilities (63%)
 
 <details>
 <summary>Per-phase breakdown (42 of 104 phases complete)</summary>
@@ -83,7 +83,7 @@ the authoritative specification and tracks what is done.
 | Phase 27 — Context injection | 10/11 |
 | Phase 28 — File-aware memory lookup | 0/5 |
 | Phase 29 — Memory commits | 0/8 |
-| Phase 30 — Session context metadata | 7/8 |
+| Phase 30 — Session context metadata | 2/8 |
 | Phase 31 — Compaction-aware behavior | 0/7 |
 | Phase 32 — Resource registry | 12/12 ✅ |
 | Phase 32A — Unified quota and capacity model | 12/21 |

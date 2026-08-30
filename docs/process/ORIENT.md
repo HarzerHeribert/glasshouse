@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**813 / 1280 mandatory capabilities (64%)** — 467 open across 62 phases.
+**808 / 1280 mandatory capabilities (63%)** — 472 open across 62 phases.
 
 ## Where the work is
 
@@ -29,7 +29,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 9I | Free-pool routing | **1** | 13 | `523` |
 | Phase 15 | Orchestrator wake-up flow | **1** | 7 | `731` |
 | Phase 27 | Context injection | **1** | 10 | `1118` |
-| Phase 30 | Session context metadata | **1** | 7 | `1156` |
 | Phase 32B | Quota telemetry sources | **1** | 13 | `1220` |
 | Phase 32F | Protected quota reserve | **1** | 7 | `1285` |
 | Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
@@ -50,6 +49,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 33A | Routing evidence ledger | **5** | 10 | `1327` |
 | Phase 53 | Criteria before adding graph storage | **5** | 0 | `1872` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
+| Phase 30 | Session context metadata | **6** | 2 | `1156` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **6** | 0 | `1858` |
 | Phase 31 | Compaction-aware behavior | **7** | 0 | `1167` |
 | Phase 38 | Quota-preserving routing | **7** | 0 | `1604` |
@@ -91,7 +91,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~437 open lines are not.
+other ~443 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -127,10 +127,6 @@ these unwrapped.
 ### Phase 27 — Context injection  (1 open, 10 closed)
 
 - **1129** ☐ Avoid injecting memory when retrieval confidence is low.
-
-### Phase 30 — Session context metadata  (1 open, 7 closed)
-
-- **1158** ☐ Track an estimated context-size value for a session when the harness exposes enough information.
 
 ### Phase 32B — Quota telemetry sources  (1 open, 13 closed)
 
