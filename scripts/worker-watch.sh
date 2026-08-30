@@ -25,10 +25,26 @@
 # worker you will forget.
 set -u
 
-NAME="${1:?usage: worker-watch.sh <name> <surface-ref> <report-path> [nag-seconds]}"
-SURFACE="${2:?missing surface ref}"
-REPORT="${3:?missing report path}"
-NAG="${4:-180}"
+# WORKER_WATCH_TEST_SOURCE=1 lets scripts/tests/test_worker_watch.py `source`
+# this file to call its pure pane-classification functions (is_busy_screen,
+# is_never_started, has_worker_output, last_words_from) directly against
+# synthetic screens, without a real worker name/surface/report and without
+# starting the watch loop at the bottom of the file. A real invocation is
+# unaffected -- this only relaxes which arguments are required and adds one
+# early-return guard right before the loop starts (search TEST_SOURCE below).
+TEST_SOURCE="${WORKER_WATCH_TEST_SOURCE:-0}"
+
+if [ "$TEST_SOURCE" = "1" ]; then
+  NAME="${1:-test-worker}"
+  SURFACE="${2:-test-surface}"
+  REPORT="${3:-/dev/null}"
+  NAG="${4:-180}"
+else
+  NAME="${1:?usage: worker-watch.sh <name> <surface-ref> <report-path> [nag-seconds]}"
+  SURFACE="${2:?missing surface ref}"
+  REPORT="${3:?missing report path}"
+  NAG="${4:-180}"
+fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Where this worker's worktree lives, for the growth signal below. Defaults to
@@ -169,11 +185,28 @@ is_busy_screen() {
 # produces OUTPUT in the pane body; a worker that did not shows only the
 # startup banner and an empty prompt. So never-started == no worker output at
 # all, once the banner, the prompt line, the rules, the blanks and the status
-# bar are filtered out — the same filter last_words_from already applies, so
-# there is exactly one filter list to keep current, not two.
+# bar are filtered out.
+#
+# NOT the same filter as last_words_from. Measured 2026-08-30: three workers
+# launched by new-worker.sh were flagged NEVER STARTED ~20 times each, all
+# false — every one was mid-tool-call (its very first action is the ARM
+# instruction's Monitor call), and a pane doing that shows only a `⎿` tool
+# line, nothing else. last_words_from strips `⎿` lines on purpose, because
+# quoting a truncated tool result as the worker's "last words" is unreadable
+# — but that same strip, reused here, threw away the one thing on screen that
+# proved the worker had started. Detecting "did anything happen" and
+# rendering "what did it last say" are different questions; they now have
+# different filters, and this one keeps the `⎿` line.
+STARTUP_ONLY_RE='^\s*$|^─+$|^\s*❯\s*$|^\s*/rc\s*$|auto mode on|^\s*Opus |^\s*Sonnet |[░█]{6}|Tip: Use|remote-control is active'
+
+has_worker_output() {
+  local screen="$1"
+  printf '%s\n' "$screen" | grep -vE "$STARTUP_ONLY_RE" | grep -q .
+}
+
 is_never_started() {
   local screen="$1"
-  [ -z "$(last_words_from "$screen")" ]
+  ! has_worker_output "$screen"
 }
 
 # §28's growth signal: a worktree that changed since the last read is being
@@ -230,10 +263,25 @@ worktree_fingerprint() {
   } | cksum
 }
 
+if [ "$TEST_SOURCE" = "1" ]; then
+  # Test source: functions are defined, nothing else runs. See TEST_SOURCE
+  # above.
+  return 0 2>/dev/null || exit 0
+fi
+
 quiet=0
 announced=0
 announced_kind=""   # "done" or "never-started"
 growth_noted=0
+# Latched true the moment ANY real evidence of activity is seen for this
+# worker: a busy pane, worktree growth, or a retraction (below). Once true it
+# stays true for the life of this watch process — a worker cannot un-start.
+# Without this, a worker that was correctly retracted from a false
+# NEVER STARTED could still hit a second quiet-and-empty read later (idle
+# between tool calls looks the same on screen as idle before the first one)
+# and get flagged NEVER STARTED again, with no new evidence that the claim is
+# true the second time.
+ever_started=0
 last_fingerprint="$(worktree_fingerprint)"
 
 while true; do
@@ -253,6 +301,7 @@ while true; do
       announced=0
       announced_kind=""
       quiet=0
+      ever_started=1
       rm -f "$MARKER"
       echo "NOTE  '$NAME' started producing output after being flagged NEVER STARTED — resuming normal watch"
       continue
@@ -287,6 +336,7 @@ while true; do
   # separates 'finished' from 'died before it ever spoke'.
   if is_busy; then
     quiet=0
+    ever_started=1
     last_fingerprint="$(worktree_fingerprint)"
     continue
   fi
@@ -296,6 +346,7 @@ while true; do
   if [ "$fingerprint" != "$last_fingerprint" ]; then
     last_fingerprint="$fingerprint"
     quiet=0
+    ever_started=1
     if [ "$growth_noted" -eq 0 ]; then
       growth_noted=1
       echo "NOTE  '$NAME' pane is quiet but its worktree or its token count is still moving — treating it as working (§28, plus the thinking-worker case). This note fires once."
@@ -308,11 +359,40 @@ while true; do
   # Two consecutive quiet reads before believing it. One catches the gap
   # between a worker's tool calls and cries wolf.
   if [ "$quiet" -ge 2 ]; then
+    # One read serves the busy recheck below, the never-started test, and the
+    # message either branch feeds.
+    quiet_screen="$(cmux read-screen --surface "$SURFACE" 2>/dev/null)"
+    if [ -z "$quiet_screen" ]; then
+      # §54: a failed or empty read means "cannot see this pane right now,"
+      # not "the pane is empty." Collapsing the two would let a transient
+      # cmux hiccup announce, confidently, that the prompt never landed. Skip
+      # this tick without touching quiet/announced state; the next read is
+      # 20s away.
+      continue
+    fi
+    # Re-check busy-ness on THIS SAME screen, immediately before deciding.
+    # `is_busy` above read the pane at the top of this iteration — a
+    # different moment, one or two more `cmux read-screen` calls back — and
+    # only that earlier read fed the quiet counter. Deciding never-started
+    # from a later, un-rechecked read let a pane that had since started
+    # producing output (e.g. its first spinner appearing) still read as
+    # silent. The retraction path below already trusts is_busy_screen as the
+    # authority for "is this worker actually working"; the pre-announce path
+    # now does too, on the exact screen it is about to act on.
+    if is_busy_screen "$quiet_screen"; then
+      quiet=0
+      ever_started=1
+      last_fingerprint="$(worktree_fingerprint)"
+      continue
+    fi
     date +%s > "$MARKER"
     announced=1
-    # One read serves both the never-started test and the message it feeds.
-    quiet_screen="$(cmux read-screen --surface "$SURFACE" 2>/dev/null)"
-    if is_never_started "$quiet_screen"; then
+    # ever_started latches once real activity has ever been seen (busy,
+    # worktree growth, or a prior retraction — see where each is set above).
+    # A worker that has already proven it started cannot un-start, so a
+    # later quiet-and-empty read is read as ordinary idleness, not as
+    # evidence the prompt never landed a second time.
+    if [ "$ever_started" -eq 0 ] && is_never_started "$quiet_screen"; then
       announced_kind="never-started"
       echo "WORKER NEVER STARTED: '$NAME' — the prompt did not land; re-send it (surface $SURFACE)"
     else

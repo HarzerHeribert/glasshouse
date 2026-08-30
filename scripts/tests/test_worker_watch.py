@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""The busy/idle classifier in `worker-watch.sh`, against real captured panes.
+"""The busy/idle/never-started classifier in `worker-watch.sh`, against real
+captured panes and, for the loop-level behaviour, the real script itself.
 
 WHY THIS EXISTS
 ---------------
@@ -12,15 +13,30 @@ list the glyph the pane happened to be drawing.
 A false idle is not a harmless notification. Acknowledging one ends the watch,
 so nothing is armed for when the worker really does finish (practice §57).
 
+On 2026-08-30 the same shape hit the OTHER quiet signal: three workers were
+flagged `WORKER NEVER STARTED` roughly 20 times each, right after
+`new-worker.sh` had already proven their prompt landed. Every worker's first
+action, per the ARM instruction, is a Monitor tool call — and a pane mid-tool-
+call shows only a `⎿` line, nothing else. `is_never_started` reused
+`last_words_from`'s filter, which strips `⎿` lines on purpose (they are
+unreadable quoted as "last words"), so the one thing on screen that proved the
+worker had started was thrown away before the never-started check ever saw it.
+
 Every sample below is a real capture or a faithful reduction of one. When a
 future pane state fools the watch again, add the capture here first.
 """
+import os
 import re
+import select
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 WATCH = Path(__file__).resolve().parents[1] / "worker-watch.sh"
+REPO = WATCH.parent.parent
 
 
 def _re(name: str) -> str:
@@ -35,6 +51,20 @@ def is_busy(screen: str) -> bool:
     if re.search(_re("DONE_RE"), screen):
         return False
     return bool(re.search(_re("BUSY_RE"), screen))
+
+
+def is_never_started(screen: str) -> bool:
+    """Mirrors has_worker_output()/is_never_started() in the real script:
+    strip everything that is pure startup boilerplate and see if anything
+    is left. Extracted from the script's own STARTUP_ONLY_RE rather than
+    hand-duplicated, the same way is_busy() above uses DONE_RE/BUSY_RE — a
+    version of worker-watch.sh that has not been fixed yet defines no such
+    variable, and _re() fails loudly rather than silently comparing against
+    a filter this test invented.
+    """
+    boilerplate = _re("STARTUP_ONLY_RE")
+    remaining = [ln for ln in screen.split("\n") if not re.search(boilerplate, ln)]
+    return not any(remaining)
 
 
 BUSY = {
@@ -76,6 +106,161 @@ IDLE = {
         "eneas ➜ ~/projects/glasshouse  main ❯",
 }
 
+# The real fixture for the 2026-08-30 defect: only a `⎿` tool-call line above
+# the boilerplate. Neither busy (BUSY_RE deliberately excludes a leading `⎿`)
+# nor -- before this fix -- distinguishable from true silence.
+MID_TOOL_CALL_SCREEN = (
+    "Tip: Use /help for more information\n"
+    "❯ \n"
+    "  ⎿  Running Monitor(description: \"Worker continuity watch\")…\n"
+    "  Sonnet 5 · high  · worker            5h 21% 3h01m\n"
+    "  ░░░░░░░░░░░░░░░░░░░░░░░░╎░░░ 0% · 0/1M            ~$0.00"
+)
+
+# The case the signal exists for: nothing but the startup banner.
+TRULY_NEVER_STARTED_SCREEN = (
+    "Tip: Use /help for more information\n"
+    "❯ \n"
+    "  Sonnet 5 · high  · worker            5h 21% 3h01m\n"
+    "  ░░░░░░░░░░░░░░░░░░░░░░░░╎░░░ 0% · 0/1M            ~$0.00"
+)
+
+BUSY_SCREEN = (
+    "Tip: Use /help for more information\n"
+    "❯ \n"
+    "  ✻ Flowing… (12s)\n"
+    "  Sonnet 5 · high  · worker            5h 21% 3h01m\n"
+    "  ░░░░░░░░░░░░░░░░░░░░░░░░╎░░░ 0% · 0/1M            ~$0.00"
+)
+
+
+def _readline_timeout(stream, deadline):
+    remaining = deadline - time.time()
+    if remaining <= 0:
+        return None
+    r, _, _ = select.select([stream], [], [], remaining)
+    if not r:
+        return None
+    return stream.readline()
+
+
+def _wait_for(proc, lines, pattern, timeout):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        line = _readline_timeout(proc.stdout, deadline)
+        if line is None:
+            continue
+        if line == "":
+            return False  # EOF: process exited
+        lines.append(line.rstrip("\n"))
+        if re.search(pattern, line):
+            return True
+    return False
+
+
+def run_lifecycle_integration():
+    """Drives the REAL worker-watch.sh as a subprocess, against a fake `cmux`
+    and a fake `sleep` (the loop's only sleep call, so this is safe to shadow
+    globally) so a full cold-start -> announce -> retract -> re-quiet cycle
+    finishes in a couple of seconds of wall clock instead of minutes.
+
+    Covers acceptance tests 2, 3 and 4: the true alarm still fires on a
+    genuinely empty pane, a worker already retracted from NEVER STARTED does
+    not get flagged again with no new evidence, and WORKER DONE still fires
+    for that same worker once it goes quiet for a second, unrelated reason.
+    """
+    failures = []
+    all_lines = []
+    fake_bin = Path(tempfile.mkdtemp(prefix="ww-fakebin-"))
+    screen_file = fake_bin / "screen.txt"
+    screen_file.write_text(TRULY_NEVER_STARTED_SCREEN)
+
+    (fake_bin / "cmux").write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "read-screen" ]; then cat "{screen}" 2>/dev/null; fi\n'
+        "exit 0\n".format(screen=screen_file)
+    )
+    (fake_bin / "cmux").chmod(0o755)
+    # The only sleep in worker-watch.sh's loop is `sleep 20`; shadowing it
+    # unconditionally is safe and turns a minutes-long real cycle into one
+    # that finishes in well under a second.
+    (fake_bin / "sleep").write_text("#!/bin/sh\nexec /bin/sleep 0.05\n")
+    (fake_bin / "sleep").chmod(0o755)
+
+    name = f"selftest-{os.getpid()}"
+    idle_dir = REPO / ".agent-runtime" / "idle"
+    done_dir = REPO / ".agent-runtime" / "done"
+    marker = idle_dir / name
+    done_file = done_dir / name
+    report = Path(tempfile.gettempdir()) / f"ww-report-{os.getpid()}.md"
+
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+
+    proc = subprocess.Popen(
+        ["bash", str(WATCH), name, "test-surface", str(report), "2"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
+    )
+    try:
+        # Test 2: the true alarm still fires.
+        if not _wait_for(proc, all_lines, "WORKER NEVER STARTED", 10):
+            failures.append(
+                "WORKER NEVER STARTED did not fire for a genuinely empty pane "
+                "(the case the signal exists for)"
+            )
+            return failures, all_lines
+
+        # The pane starts producing output -- must retract.
+        screen_file.write_text(BUSY_SCREEN)
+        if not _wait_for(proc, all_lines, "resuming normal watch", 10):
+            failures.append(
+                "the NEVER STARTED alarm did not retract once the pane started "
+                "producing output"
+            )
+            return failures, all_lines
+
+        # Test 3: the pane goes quiet-and-empty-looking again, with no new
+        # evidence the prompt failed a second time. The same alarm must not
+        # re-fire; the worker already proved it started.
+        screen_file.write_text(TRULY_NEVER_STARTED_SCREEN)
+        deadline = time.time() + 6
+        saw_done = False
+        while time.time() < deadline:
+            line = _readline_timeout(proc.stdout, deadline)
+            if line is None:
+                continue
+            if line == "":
+                break
+            all_lines.append(line.rstrip("\n"))
+            if "WORKER NEVER STARTED" in line:
+                failures.append(
+                    "NEVER STARTED re-fired for a worker already retracted "
+                    f"once, with no new evidence: {line.strip()!r}"
+                )
+                break
+            # Test 4: the other signals are unchanged -- a worker gone quiet
+            # for an ordinary reason after having started must still be
+            # reported, just not as NEVER STARTED.
+            if "WORKER DONE" in line:
+                saw_done = True
+                break
+        if not failures and not saw_done:
+            failures.append(
+                "after retraction, a worker gone quiet again produced neither "
+                "signal -- it should have read as WORKER DONE"
+            )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        marker.unlink(missing_ok=True)
+        done_file.unlink(missing_ok=True)
+        shutil.rmtree(fake_bin, ignore_errors=True)
+
+    return failures, all_lines
+
 
 def main() -> int:
     failures = []
@@ -92,6 +277,34 @@ def main() -> int:
                 f"    matched {hit.group(0) if hit else '?'!r} in {screen!r}"
             )
 
+    # Test 1: the false alarm, reproduced then fixed. A pane mid-tool-call —
+    # the state that misfired for three real workers on 2026-08-30 — must not
+    # read as never-started. On main, before STARTUP_ONLY_RE existed,
+    # is_never_started reused last_words_from's filter (which strips `⎿`
+    # lines), so this assertion fails there: _re("STARTUP_ONLY_RE") raises.
+    if is_never_started(MID_TOOL_CALL_SCREEN):
+        failures.append(
+            "should NOT read as never-started — a pane mid-tool-call (only a "
+            "`⎿` line on screen) is running, not silent\n"
+            f"    {MID_TOOL_CALL_SCREEN!r}"
+        )
+    # The same fixture is also not BUSY (BUSY_RE deliberately excludes a
+    # leading `⎿`) -- this is exactly the gap the defect lived in: neither
+    # check recognised it as activity.
+    if is_busy(MID_TOOL_CALL_SCREEN):
+        failures.append(
+            "test fixture assumption broke: a `⎿` tool-call line now reads as "
+            "BUSY_RE-busy, so it no longer exercises the never-started gap"
+        )
+
+    # Test 2 (classification half; the lifecycle half runs below): the case
+    # the signal was written for must still fire.
+    if not is_never_started(TRULY_NEVER_STARTED_SCREEN):
+        failures.append(
+            "should read as never-started — nothing but the startup banner "
+            f"is on screen\n    {TRULY_NEVER_STARTED_SCREEN!r}"
+        )
+
     # The announcement has to carry the pane's own last line. Both false idles
     # would have been obvious from the notification alone if it had.
     text = WATCH.read_text()
@@ -102,15 +315,24 @@ def main() -> int:
             "visible without opening it"
         )
 
+    lifecycle_failures, lifecycle_lines = run_lifecycle_integration()
+    failures.extend(lifecycle_failures)
+
     if failures:
         print(f"test_worker_watch: {len(failures)} failure(s)", file=sys.stderr)
         for f in failures:
             print(f"  - {f}", file=sys.stderr)
+        if lifecycle_failures:
+            print("  lifecycle transcript:", file=sys.stderr)
+            for ln in lifecycle_lines:
+                print(f"    {ln}", file=sys.stderr)
         return 1
 
     print(
-        f"test_worker_watch: ok — {len(BUSY)} busy and {len(IDLE)} idle "
-        "pane captures classified correctly"
+        f"test_worker_watch: ok — {len(BUSY)} busy and {len(IDLE)} idle pane "
+        "captures classified correctly, the mid-tool-call false alarm no "
+        "longer fires, the true never-started alarm still fires and does not "
+        "repeat after retraction"
     )
     return 0
 
