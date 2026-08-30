@@ -426,3 +426,53 @@ ladder-rung/decay ordering. Both are live production code. **It needs a
 regression test and a mutation, not an implementation**: raise or delete the
 `.take(...)` and check whether anything in `context_injection.rs` asserts an
 injected-count ceiling. That is the whole package.
+
+
+## Phases 9K and 47 — 18 lines checked, ZERO reachable, 2026-08-30
+
+`GH-CLOSED-PHASES-RECON` tested a deliberate hypothesis: **open lines sitting
+beside many closed ones should be open for smaller reasons.** Phase 9K is 26
+closed / 11 open and Phase 47 is 8 closed / 7 open — the two most-closed phases
+with work left.
+
+**The hypothesis is refuted for both. Not one of the 18 is `REACHABLE`.**
+
+### The reason, and it generalises to the whole map
+
+> *"Every line that closed did so by reading something **already** durable on
+> disk — session events already logged, gateway caches already written by a
+> different process — rather than by adding a new producer. The seven still open
+> all require a **new** durable producer first. The producers that already exist
+> were the ones that closed the map's easy lines. What is left is producers that
+> do not exist yet."*
+
+**So "look where the producers already exist" is exhausted as a search
+heuristic.** A phase being mostly closed is now evidence *against* its
+remainder being cheap, not for it. Plan the next batches around building a
+producer, not around finding an unwired one.
+
+| lines | missing link |
+|---|---|
+| 616, 622 | **Cluster Q.** 616 (*"avoid repeatedly injecting an unchanged response contract on every turn"*) — `harness::response::apply` (`harness/response.rs:322`) is called exactly **once**, from `session/select.rs::install_session_document` off the launch path; no per-turn call site exists. 622 (*"do not run a second language model to rewrite every final answer"*) — every production `fn complete(` belongs to memory extraction (`memory/extract/{mod.rs:237,model.rs:308,disposable.rs:136}`), none touches a final answer, and `rewrite\|RewritePass\|PostProcess\|second_pass` returns zero hits. |
+| 619, 620, 618 (part) | One missing in-session surface, shared. |
+| 623 | A standalone missing surface. |
+| 627–630 | **One shared root**: a measurement channel four lines all wait on, which does not exist. Attack the channel, not the four lines (§83). |
+| Phase 47's seven (all) | **Cluster H, uniformly** — every signal ends at a `tracing` line or an in-memory `Vec`; the machinery producing them either runs in a separate process invocation (extraction) or never makes anything durable. Re-derivation added no member and removed none. |
+
+### A RULING, because the recon named the temptation
+
+The recon observed that 616 and 622 are "closeable with a test rather than a
+feature" — a source-scanning guard asserting the forbidden path stays absent.
+
+**Do not do that. That is exactly how 1455 and 1456 were closed and un-ticked.**
+A guard test over an absent capability is worth having as a **tripwire**, and a
+tripwire does **not** tick a box. Both lines stay open, in Cluster Q.
+
+### The one correction, and the cheapest partial close in either phase
+
+**`phase-9k.md`'s claim about line 618 is stale.** It records "no reader outside
+`harness/mod.rs`"; `glasshouse doctor` now reads `StyleChange` in production
+(`integrations/mod.rs:1168-1178`, wired via `fc16943`). **Two of the line's
+three terms are closed**; only the cache-invalidation variant remains — one enum
+variant plus one adapter declaration. That is the smallest remaining gap in
+either phase, and the only thing here worth packaging soon.

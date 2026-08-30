@@ -519,3 +519,32 @@ never opens the user's conversation databases. **One such guard closes 622**, an
 it belongs with whoever next holds `profile/**`.
 
 Ticking it without one would be recording a promise that no longer has a keeper.
+
+---
+
+# Correction to line 618's blocker — 2026-08-30
+
+`GH-CLOSED-PHASES-RECON` re-derived this file's claim against current source
+(§81) rather than accepting it, and it is **stale**.
+
+This entry records *"no reader outside `harness/mod.rs`"* for line 618. That was
+true when written. **`glasshouse doctor` now reads `StyleChange` in production**
+— `integrations/mod.rs:1168-1178`, wired by `fc16943`.
+
+**Two of line 618's three terms are therefore closed.** Only the
+cache-invalidation variant remains: one enum variant plus one adapter
+declaration. Across Phase 9K's eleven open lines and Phase 47's seven, this is
+the smallest remaining gap the recon found — and the only one it judged worth
+packaging soon.
+
+**The rest of 9K is not cheap**, which was the recon's headline and is recorded
+in the refusal register: 616 and 622 are Cluster Q (vacuous restraints over
+capabilities that do not exist), 619/620 and half of 618 share one missing
+in-session surface, 623 is a standalone missing surface, and **627–630 all wait
+on a single measurement channel that does not exist** — attack the channel, not
+the four lines (§83).
+
+**Do not close 616 or 622 with a source-scanning guard test.** The recon noted
+they are "closeable with a test rather than a feature"; that is exactly how map
+lines 1455 and 1456 were closed and then un-ticked the same week. A guard over
+an absent capability is a useful **tripwire** and does not tick a box.
