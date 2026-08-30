@@ -378,7 +378,17 @@ def check_partitions_disjoint(packets: list[Packet], findings: list[Finding]) ->
                                   f"CO-EDIT (§77) between {os.path.basename(a.path)} "
                                   f"and {os.path.basename(b.path)} — allowed")
                             continue
-                        extra = ""
+                        # Name the sanctioned escape. §77's whole history is
+                        # people not finding it: an orchestrator once queued a
+                        # package behind main.rs for a full round with
+                        # coedit.sh sitting unread. A refusal that does not say
+                        # "there is a protocol for this" teaches the reader to
+                        # split the partition instead, which is the wrong fix
+                        # for a structurally contended file.
+                        extra = (" If both workers genuinely need this file, that is a §77 "
+                                 f"co-edit: add `COEDIT: {a_pat}` to BOTH packets and run "
+                                 "`scripts/coedit.sh claim` in each worker. Declaring it in "
+                                 "only one is still refused.")
                         if a_pat in a_co or a_pat in b_co:
                             only = a.path if a_pat in a_co else b.path
                             extra = (f" NOTE: only {os.path.basename(only)} declares "
