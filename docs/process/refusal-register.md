@@ -918,7 +918,7 @@ the next orchestrator ranking phases by open-line count does not spend a round
 discovering this again.
 
 
-## NOT a refusal — 1161–1165 un-ticked, and the repair is ~30 lines
+## ~~NOT a refusal — 1161–1165 un-ticked~~ — CLOSED the same day, 2026-08-30
 
 **`GH-PHASE30-AUDIT`, 2026-08-30.** Recorded here so the next orchestrator does
 not read five freshly-opened lines as a phase that failed. They are open because
@@ -940,6 +940,12 @@ type, no migration. The regression test belongs in `tests/session_model.rs`,
 which already drives the real binary and has a `field(&report, label)` helper
 for `glasshouse sessions show`; deleting the `store.context` call must fail it,
 so the mutation lands on the **call** (§35).
+
+**RESOLVED.** `GH-SESSION-CONTEXT-DOOR` made the repair in 34 lines of
+`main.rs` and 32 of `store.rs`, and all five are ticked again — this time on
+tests that drive the real binary through `glasshouse sessions show`, with the
+delete-the-call mutation KILLED. Kept here because the *pattern* below is the
+transferable part, not because the lines are still open.
 
 **Two cautions for that package.** `main.rs` is contended — use `coedit.sh`.
 And production prompt-cache reasoning already exists under a *different*

@@ -22,7 +22,7 @@ use clap::Parser;
 // so on Windows they are unused imports and `-D warnings` refuses them.
 #[cfg(unix)]
 use glasshouse::pty::{PtyProcess, TerminalCommand};
-use glasshouse::session::{ProjectSessions, SessionId};
+use glasshouse::session::{NewSession, ProjectSessions, SessionId};
 use glasshouse::{Cli, Runtime};
 
 /// A project with its own data and config roots and a fake installed harness.
@@ -424,6 +424,100 @@ fn a_launched_session_records_seven_facts_and_the_binary_shows_them_apart() {
         "Claude Code is assigned an identifier up front"
     );
     assert_ne!(native, id.as_str());
+}
+
+/// Lines 1161-1165, through `glasshouse sessions show`.
+///
+/// `SessionStore::context` (`session/store.rs:2020`) computes every one of
+/// these facts and, before this package, was called from nowhere but its own
+/// module's tests — see `docs/product/evidence/phase-30.md`'s 2026-08-30
+/// entry. This enters through `session_detail`, the only production caller,
+/// so deleting its `store.context(&id)` call fails this test rather than
+/// leaving a helper that calls the store directly (the §35 shape).
+///
+/// A headless launch already crosses `launch_session`'s own
+/// `events.record(SessionStarted)` and `events.record(ProcessExited)` calls,
+/// so this session's event log is never empty — it honestly reads `one task`,
+/// not `unknown`. [`an_unlaunched_sessions_context_reads_as_absence_not_a_guess`]
+/// covers the `unknown` case, which needs a session that never reached those.
+#[test]
+fn session_show_reports_cache_checkpoint_and_task_continuity_honestly() {
+    let fixture = Fixture::new(PROBE_PROFILE);
+    fixture.run(&["launch", "claude-code", "--headless"]);
+    let id = fixture.only_session();
+
+    // Freshly launched, no checkpoint has ever been taken.
+    let shown = fixture.run(&["sessions", "show", id.as_str()]);
+    let cache = field(&shown, "prompt cache");
+    assert!(
+        cache.contains("estimated"),
+        "the cache line must say it is an estimate (line 1163), got `{cache}`"
+    );
+    assert_eq!(
+        field(&shown, "checkpoint"),
+        "never",
+        "no checkpoint exists yet, so this must read `never` — not `stale` and not a date"
+    );
+    assert_eq!(
+        field(&shown, "task continuity"),
+        "one task",
+        "a session started and exited with no completed-turn hook is one task \
+         start to finish"
+    );
+
+    // A checkpoint taken now is at least as new as this session's own launch
+    // activity, so it must read as current — proving the line is a live
+    // derivation and not a fixed placeholder.
+    fixture.run(&[
+        "checkpoint",
+        "save",
+        "--session",
+        id.as_str(),
+        "--objective",
+        "prove line 1164 renders a real checkpoint",
+        "--state",
+        "took a checkpoint through the CLI",
+    ]);
+    let shown = fixture.run(&["sessions", "show", id.as_str()]);
+    assert_eq!(field(&shown, "checkpoint"), "current");
+}
+
+/// Lines 1161-1165, for a session that exists but has never launched.
+///
+/// A session created directly through the store, with no launch and no
+/// harness event, is the literal case `TaskContinuity`'s own doc comment in
+/// `session/store.rs` names: "a harness that reports no events, or a session
+/// that has not run yet". It is the only way to reach `unknown` in this
+/// build: `launch_session` (`main.rs`) records `SessionStarted` immediately
+/// after creating the record, so any session that actually ran always has at
+/// least one event.
+#[test]
+fn an_unlaunched_sessions_context_reads_as_absence_not_a_guess() {
+    let fixture = Fixture::new(PROBE_PROFILE);
+    let runtime = fixture.runtime_for(&fixture.root);
+    let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+    let record = sessions
+        .store()
+        .create(NewSession::embedded("claude-code"))
+        .expect("create a bare session record, with no launch and no events");
+
+    let shown = fixture.run(&["sessions", "show", record.id.as_str()]);
+
+    let cache = field(&shown, "prompt cache");
+    assert!(
+        cache.contains("estimated"),
+        "the cache line must say it is an estimate (line 1163), got `{cache}`"
+    );
+    assert_eq!(
+        field(&shown, "checkpoint"),
+        "never",
+        "no checkpoint exists, so this must read `never` — not `stale` and not a date"
+    );
+    assert_eq!(
+        field(&shown, "task continuity"),
+        "unknown",
+        "a session with no recorded events must read `unknown` — not `one task`"
+    );
 }
 
 /// Line 650, typed at the binary.

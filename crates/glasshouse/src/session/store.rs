@@ -736,6 +736,23 @@ impl CheckpointRecency {
             Self::Never => None,
         }
     }
+
+    /// A bare word, with no timestamp. `Never` prints as `"never"`, not a
+    /// date and not `"stale"` — the two readings that would make "no
+    /// checkpoint exists" indistinguishable from "one exists and is old".
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Current(_) => "current",
+            Self::Stale(_) => "stale",
+            Self::Never => "never",
+        }
+    }
+}
+
+impl fmt::Display for CheckpointRecency {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.as_str())
+    }
 }
 
 /// A lightweight flag for whether a session is still working on the task it
@@ -777,6 +794,21 @@ pub enum TaskContinuity {
     /// the task the session began is finished, and its context spans more
     /// than whatever it is doing now.
     BoundariesCrossed(i64),
+}
+
+impl fmt::Display for TaskContinuity {
+    /// `Unknown` prints as `"unknown"`, never as `"one task"` — a harness
+    /// that has reported nothing is not a session seen doing one thing, and
+    /// this rendering must not read as a signal either way. See this type's
+    /// own doc comment.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown => f.pad("unknown"),
+            Self::OneTask => f.pad("one task"),
+            Self::BoundariesCrossed(1) => f.pad("1 task completed"),
+            Self::BoundariesCrossed(n) => write!(f, "{n} tasks completed"),
+        }
+    }
 }
 
 /// What Glasshouse can say about one session's context — Phase 30, read

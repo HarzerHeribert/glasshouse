@@ -6039,6 +6039,40 @@ fn session_detail(runtime: &Runtime, session: &str) -> anyhow::Result<String> {
     );
     line("created", &format_age(record.created_at));
     line("last activity", &format_age(record.last_activity_at));
+
+    // Phase 30, lines 1159 and 1161-1165. `store.context` is the sole
+    // producer of these facts (`session/store.rs::SessionStore::context`);
+    // before this call it had no caller outside that module's own tests, so
+    // every value it computes was correct and unreachable. A read failure
+    // collapses to the same "-" the fields above use for nothing recorded,
+    // exactly like `context()`'s own `Ok(None)` case — a session detail
+    // report must finish even when this extra context cannot be read.
+    let context = store.context(&id).ok().flatten();
+    line(
+        "compactions",
+        &context
+            .as_ref()
+            .and_then(|c| c.observed_compactions)
+            .map_or_else(|| "-".to_string(), |n| n.to_string()),
+    );
+    line(
+        "prompt cache",
+        &context
+            .as_ref()
+            .map_or_else(|| "-".to_string(), |c| c.prompt_cache.to_string()),
+    );
+    line(
+        "checkpoint",
+        &context
+            .as_ref()
+            .map_or_else(|| "-".to_string(), |c| c.checkpoint.to_string()),
+    );
+    line(
+        "task continuity",
+        &context
+            .as_ref()
+            .map_or_else(|| "-".to_string(), |c| c.task_continuity.to_string()),
+    );
     Ok(out)
 }
 

@@ -1158,11 +1158,11 @@ Phase 30 — Session context metadata
 ☐ Track an estimated context-size value for a session when the harness exposes enough information.
 ☑ Track the number of observed compactions for a session when known.
 ☑ Track the most recent request or turn time for a session.
-☐ Track an estimated prompt-cache state independently from session resumability.
-☐ Represent prompt-cache state as at least hot, warm, cold, or unknown.
-☐ Treat cache-state estimates as advisory when the provider does not expose authoritative cache telemetry.
-☐ Track whether a session has a recent portable checkpoint.
-☐ Track a lightweight task-continuity score or flag describing whether the session is still working on the same task.
+☑ Track an estimated prompt-cache state independently from session resumability.
+☑ Represent prompt-cache state as at least hot, warm, cold, or unknown.
+☑ Treat cache-state estimates as advisory when the provider does not expose authoritative cache telemetry.
+☑ Track whether a session has a recent portable checkpoint.
+☑ Track a lightweight task-continuity score or flag describing whether the session is still working on the same task.
 
 Phase 31 — Compaction-aware behavior
 

@@ -73,6 +73,46 @@ The code these lines describe is careful, well-reasoned, and correct in what it
 computes. It is only not run. **SCAFFOLDED** is the honest state:
 *"supporting code exists, but production behavior is absent or unproven."*
 
+## RE-CLOSED 2026-08-30, same day — the repair was one call
+
+`GH-SESSION-CONTEXT-DOOR`. The five lines were un-ticked hours earlier because
+`SessionStore::context` had fourteen callers and all fourteen were tests. **The
+code was never wrong; it was never run.** It runs now.
+
+`session_detail` calls `store.context(&id)` and renders four labelled lines
+alongside the eighteen it already printed. `CheckpointRecency` and
+`TaskContinuity` gained `Display`; `AdvisoryCacheState` already had one printing
+`"{} (estimated)"`, and that word is what carries **1163** to a user. No new
+type, no schema change, no migration — 34 lines in `main.rs` and 32 in
+`store.rs`.
+
+**The regression evidence is the part that matters, because it is what was
+wrong before.** The tests live in `tests/session_model.rs`, which drives the
+**real binary** through `glasshouse sessions show` and reads values back with
+its `field(&report, label)` helper. The old tests entered at
+`store.context(&id)` — the seam nothing in the shipped binary reached — which
+is exactly why they passed while the product did nothing.
+
+**The characteristic mutation is the one that proves the repair:** delete the
+`store.context(&id)` call from `session_detail`. It is **KILLED** by
+`session_show_reports_cache_checkpoint_and_task_continuity_honestly` and
+`an_unlaunched_sessions_context_reads_as_absence_not_a_guess`, observing *"the
+cache line must say it is an estimate (line 1163), got `-`"*. Under the old
+arrangement that deletion changed nothing any test could see. It lands on the
+**call** now (§35).
+
+A second mutation renders `CheckpointRecency::Never` as `Stale`, and dies on
+*"no checkpoint exists, so this must read `never` — not `stale` and not a
+date."*
+
+Absent values render `-`, matching the eighteen lines above them: a session
+with no context row reads as absence, never as a fabricated `0` or `hot`.
+
+**The other cache vocabulary was left alone.**
+`routing::session::prompt_cache_state` speaks `Preserved`/`Lost`/`LikelyLost`
+about a comparison between two backends, for lines 1596/1597. It is a different
+quantity and was neither renamed nor unified.
+
 ## The ruling that makes this entry short
 
 The packet asked for migration 16 and left the per-line shape open. The worker
@@ -233,7 +273,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 Contract: Given a session, when Glasshouse estimates its prompt-cache state, the estimate is a function of elapsed time alone, while preserving complete independence from whether the session can be resumed.
 
-State: **SCAFFOLDED**
+State: **COMPLETE**
 
 Production evidence:
 - `src/session/store.rs` — `AdvisoryCacheState::estimate`
@@ -258,7 +298,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 Contract: Given a prompt-cache estimate, when it is represented, Glasshouse offers hot, warm, cold and unknown as distinct states, while preserving unknown as a real answer rather than a stand-in for cold.
 
-State: **SCAFFOLDED**
+State: **COMPLETE**
 
 Production evidence:
 - `src/session/store.rs` — `CacheState`
@@ -283,7 +323,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 Contract: Given that no provider exposes authoritative cache telemetry, when Glasshouse produces a cache-state estimate, the value is advisory in its type, while preserving the impossibility of any caller asserting a cache state it did not estimate.
 
-State: **SCAFFOLDED**
+State: **COMPLETE**
 
 Production evidence:
 - `src/session/store.rs` — `AdvisoryCacheState (private field; estimate and unknown are the only constructors; no From<CacheState>)`
@@ -307,7 +347,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 Contract: Given a session, when a caller asks whether it has a recent portable checkpoint, Glasshouse answers from the newest stored checkpoint's time against the session's own last activity, while preserving the checkpoint document as the single source of what a checkpoint contains.
 
-State: **SCAFFOLDED**
+State: **COMPLETE**
 
 Production evidence:
 - `src/session/store.rs` — `CheckpointRecency`
@@ -333,7 +373,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 Contract: Given a session, when a caller asks whether it is still working on the same task, Glasshouse answers with a three-state flag counting the completed task boundaries it observed, while preserving the rule that no transcript content and no task identity enters a session record.
 
-State: **SCAFFOLDED**
+State: **COMPLETE**
 
 Production evidence:
 - `src/session/store.rs` — `TaskContinuity`
