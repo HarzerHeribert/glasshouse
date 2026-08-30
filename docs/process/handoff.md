@@ -82,11 +82,24 @@ history was silently lost and the pane-reading fallback masked it.
 cache. All fixed on `git rev-parse --git-common-dir`, which is invariant across
 worktrees.
 
+### The gate is GREEN at `717c6f9` — 16 legs, 0 FAIL
+
+Run after all five code commits landed, including **73 Windows test targets on
+the real ARM64 VM**. It stayed clean with one worker running alongside it, so
+§40's "run it alone" cost nothing this time — one observation, not a licence.
+
 ### Next exact action
 
-1. **The board is EMPTY and that was deliberate**: the gate needs a quiet
-   machine (§40) and five code commits had landed since the last run. **Dispatch
-   before anything else.**
+1. **Two workers are live, both implementation.** `codex-compaction-probe`
+   (327, one real Codex `/compact` away) and `gateway-first-byte` (1331).
+
+5. **`gateway-first-byte` carries a ruling you owe when it reports.** Line 1331
+   names five timestamps; a non-parsing relay can honestly observe three.
+   `first_token_at` and `first_tool_call_at` stay `NULL` because finding a token
+   boundary means parsing a body `gateway::ingress` is designed never to read —
+   a deliberate product boundary, not a gap. **Decide whether three of five
+   satisfies *"when the protocol exposes them"*.** The packet forbids the worker
+   from deciding it.
 2. **327 is one probe from closing.** Its reader landed as a side effect of
    `session-context-door` — `glasshouse sessions show` now prints the
    compaction count (`main.rs:6052`). The recorded ruling says the per-session
