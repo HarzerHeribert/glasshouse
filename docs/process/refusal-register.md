@@ -60,7 +60,7 @@ Do not let a `no` become a `yes` because the line looks close.
 | ~~1288~~ | **CLOSED — removed from this cluster.** `disposable.rs:598` now calls the real `cheaper_adequate_resource_exists` (`:828`); the hardcoded literal is gone |
 | ~~1291~~ | **CLOSED.** Unblocked by 1288; map line is ☑ |
 | ~~1319~~ | **CLOSED.** `gateway/mod.rs:614` now passes the quota through |
-| 1290 | `user_override: false` hardcoded; no producer anywhere sets one | `routing/disposable.rs:568` |
+| ~~1290~~ | **CLOSED 2026-08-30** by `GH-RESERVE-INPUTS`. `user_override` is now set by `ReserveOverride`, a *scope* rather than a switch — there is no spelling of it that means every session |
 | 1294 | `task_nearly_complete: false` hardcoded | `routing/disposable.rs:568` |
 
 ### Cluster B — a mechanism built, tested, and never installed in production *(in-repo: YES)*
@@ -284,8 +284,8 @@ them; the reason they are open is not effort.**
 
 | line | missing link |
 |---|---|
-| 745 | *"enter any orchestrated worker while it is running"* is an **unmade Red-tier product decision**, which `phase-16.md` already recorded. `session::attach` is not its producer: it **spawns rather than adopts** (`attach.rs:107`) and its resume caller refuses a running session by name (`session/store.rs:1838`). Adopting a running session is a different capability from starting one |
-| 746, 747 | follow 745 — there is nothing to send input to, or interrupt, until a user can be *in* a running worker |
+| ~~745~~ | **CLOSED 2026-08-30** by `GH-WORKER-READ` (`glasshouse api read`). It was never a Red-tier decision: `SessionApi::recent_output` existed all along — see the correction above |
+| ~~746, 747~~ | **CLOSED 2026-08-30** by `GH-API-CLIENT` (`glasshouse api send` / `api interrupt`). **Phase 16 is finished** |
 | ~~748~~ | **CLOSED.** Map line is ☑; commit `d9f6e75` |
 | 740 | an ordering claim over 745; unreachable while 745 is |
 
@@ -312,7 +312,7 @@ observable behaviour**. The write path and a read path that bypasses
   keyword heuristic for "is this an obvious source-code fact" refuses real
   memories and admits fake ones. **Do not re-derive this.**
 - ~~**1681**~~ — **CLOSED.** `recommend_route` ships (`62473a6`) and **Phase 42 is finished**.
-- **1661** — `max_router_latency_ms` is a configured ceiling, not a measurement.
+- ~~**1661**~~ — **CLOSED 2026-08-30** by `GH-OVERVIEW-LATENCY`. The overview reads `median_duration_ms` from the evidence ledger, which is a measurement rather than a configured ceiling; the objection was about the wrong field.
 - **1745, 1746** — no cmux-metadata path reaches project-scope validation, and
   there is no MCP surface. A grep for "cmux|mcp" hits doc comments and looks
   like a lead.
