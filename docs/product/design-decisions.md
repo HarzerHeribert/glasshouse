@@ -2534,3 +2534,55 @@ retention path. `memories`, `lifecycle_events` and `routing_observations` grow
 forever, and `lifecycle_events` **cannot be trimmed even deliberately** — its
 `BEFORE DELETE` trigger `RAISE(ABORT)`s (`database.rs:500-512`). That is a
 fourth reason not to fold Phase 51 into it, and it is its own piece of work.
+
+---
+
+## Workload tier comes from measured model capability, not from task guesswork
+### Decided by the user, 2026-08-30
+
+**The question.** Phase 34D's lines 1457/1459 need a task's workload tier and
+confidence to reach a consumer. `classify_heuristically` computes both and
+`task_requirements_from_text` discards them, and **nothing in `SessionRouter`
+reads a tier today** — so closing those lines meant deciding what a tier should
+*do*. Three options were put: leave it blocked, weight destinations by tier
+inside `SessionRouter`, or build the schema for a routing model that does not
+exist yet.
+
+**The answer was none of the three as framed.** In the user's words:
+
+> a tier should be assigned by model capability and answering quality. this has
+> to me be measured long term but i would start by assigning from official
+> benchmarks which test how good a model is by tasks and add a classifier
+> [that] can determine task at hand and router routes intelligently to model by
+> task at hand.
+
+**What this settles.**
+
+1. **A tier is a property of a model, not a guess about a task.** The current
+   `WorkloadTier` is a *task requirement* (`classify.rs`'s own doc comment is
+   careful about that, and refuses to merge the two scales). What the user is
+   asking for is the other half: a **model capability rating**, per task kind.
+2. **Seed it from published benchmarks, per task type.** Not one scalar
+   "intelligence" — a model that is strong at code edit and weak at long-context
+   retrieval must be representable as exactly that. This is Phase **34F**
+   ("Model capability and tier calibration") rather than 34D.
+3. **Measure long term and let measurement win.** The benchmark seed is a
+   starting prior, not the truth. Glasshouse already has the machinery for the
+   measured half: `routing_observations` records real outcomes per
+   `(provider, model, route, harness)` and `EvidenceLedger::summarize`
+   aggregates it — that is the same ledger the project overview now reads.
+4. **The router matches task kind to model rating.** That is the
+   "routes intelligently to model by task at hand" clause, and it is the
+   consumer 1457/1459 were missing.
+
+**What this does NOT authorise.** Building the tier weighting inside
+`SessionRouter` as a bare heuristic to close two boxes. That was option 2 and
+the user did not take it. The consumer has to be a real capability rating with a
+real source, or the lines stay open.
+
+**Where the work goes.** Phase 34F is the home; Phase 34D's 1457/1459 close
+behind it. A first package is a model-capability table keyed by
+`(model, task kind)` seeded from published benchmarks, with the schema shaped so
+the measured half can replace the seed per entry rather than wholesale — because
+the seed and the measurement will disagree, and the design has to say which wins
+and when.
