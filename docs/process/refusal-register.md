@@ -1071,3 +1071,58 @@ remaining two timestamps have no honest producer.
 `docs/product/evidence/phase-33a.md` records the entry as **PARTIALLY
 VERIFIED**, which is the state `agent-sdlc.md` defines for exactly this: one
 contract clause proven, another required clause missing.
+
+
+## Phase 34C's remaining filters — six refused, and every one names its producer
+
+`GH-ROUTING-FILTERS`, 2026-08-30. **0 closed / 1 open / 6 refused, zero files
+changed.** Read that as the phase being honestly mapped, not as a failed
+package: the sibling package closed 1431, 1433 and 1443 against the same
+selector hours earlier, and what is left genuinely lacks signals.
+
+**Grouped by root cause (§83), because six paragraphs would hide that there are
+only four reasons.**
+
+- **1435 (latency) and 1436 (cost) — the qualifier has no reading.**
+  `RouterLatencyMs` has exactly two consumers, both in the settings overlay, and
+  **no routing decision reads it**; `cost_micro_usd` has no production producer
+  at all. Same ground that refused 1437 and 1438. **Do not package either
+  without building the reading first.**
+- **1432 (structured-output reliability) — not represented on a candidate.**
+  The concept does not exist on the type `choose` ranks. A build, not a join.
+- **1439 (cheap metered over unreliable free) — fails on the price half.** It
+  needs both a reliability signal and a price comparison, and the price side is
+  1436's missing producer.
+- **1441 and 1442 — one missing producer, shared.** Nothing retains the last
+  automatic pick: `automatic_classification_choice` is a pure function of its
+  inputs and re-runs `choose` in full every call, and `classify` is a fresh
+  process each time. 1441 needs a prior choice to *reconsider*; 1442 needs one
+  to *hold onto*.
+
+### The distinction that keeps these honest, and it is reusable
+
+**1434 is `open`, not closed, and the reason generalises.** The RPM-headroom
+figure **does** reach `choose` — but it is read in exactly one place, `score()`'s
+normalized-capacity contribution, which affects **ranking, never eligibility**.
+Every place `choose` actually removes a candidate ignores it. *"A candidate at
+0% headroom is scored lowest but is never excluded, which is a different claim
+from the line's 'filter'."*
+
+**A signal that reaches a decision is not the same as a signal the decision acts
+on.** Check which one a line asks for before crediting it.
+
+The worker also refused the tempting close on 1441, unprompted: crediting it
+with *"every call already recomputes against live health"* would prove the
+inputs are current, **not** that a prior pick is being re-evaluated.
+
+### A packet defect, recorded against the orchestrator
+
+**That packet anchored its worker toward refusal.** It pre-judged 1435 and 1436,
+told the worker to *"expect"* 1439 to fail on price, and pre-framed 1441/1442 as
+one missing mechanism. §44 says a packet's hypothesis is an anchor and must be
+labelled killable; that one was not.
+
+The verdicts survive scrutiny on their own `file:line` evidence — the 1441
+reasoning in particular was reached against the packet's framing rather than
+along it — but **the next packet on contested ground must say plainly that
+disagreeing with it is a good outcome.** `GH-ROUTING-STICKINESS` says so.
