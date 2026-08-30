@@ -4,7 +4,95 @@
 > here is a product requirement. Capability requirements live only in
 > `docs/product/capability-map.md`.
 
-Last updated: 2026-08-29 (Europe/Berlin)
+Last updated: 2026-08-30 (Europe/Berlin)
+
+## Checkpoint — 2026-08-30, batch 54: 810 / 1280 (63%)
+
+**Net +1 box, and that undersells it: one closed, two un-ticked after audit, and
+three phases moved from "cheap-looking" to "recorded as refused".**
+
+### The gate's two red jobs were the FIXTURE, not the product
+
+The previous checkpoint recorded, as established fact, that *"on Linux,
+`glasshouse api interrupt` kills the worker instead of interrupting it — a
+person interrupting a running worker loses the whole session."* **That was
+wrong, and the correction is the batch's best finding.**
+
+`worker_access.rs`'s `#!/bin/sh` harness read input with
+`while IFS= read -r line`, which ends on any non-zero return. Shells disagree
+about an interrupted `read`: **bash** (macOS `/bin/sh`) restarts it and returns
+0; **dash** (Ubuntu's, and the gate container's) returns 1; **ksh** returns 258.
+The trap fired everywhere and the *loop* then ended everywhere except bash — so
+the harness exited and the next `api send` was answered *"session … has already
+exited"*. The fixture was an interrupt test on macOS and a kill test on Linux.
+
+Windows was the same class: the test waited for a `^C` echo, which is
+unobservable in both directions — it cannot tell "nothing arrived" from
+"everything arrived and cmd.exe ate the echo". Two `pty_smoke` tests proving a
+real `CTRL_C_EVENT` reached a real Windows child **passed in the same run**.
+
+**The transferable rule: when a test fails on one platform and passes on
+another, suspect the fixture before the product — especially when a
+neighbouring test already proves the same mechanism works there.**
+
+### An adversarial audit re-opened two boxes shipped the day before
+
+`GH-EVIDENCE-AUDIT` was dispatched with one job: attack the four boxes
+`GH-ROUTER-INPUT-PROOF` closed. **1455 and 1456 are REFUTED and un-ticked.**
+Nothing in this build constructs a request to a routing model, so *"avoid
+sending repository contents to the router"* passes vacuously. The original entry
+**named that exact hazard and then ruled against it**, and its stated proof
+condition could not be performed — every widening of the router input is `E0063`,
+which `mutate.sh` reports as KILLED and §80 case 4 requires discarding.
+
+The map agrees with the auditor: 34B's `1425` is the same claim about the
+routing model and is open, and 34D's defining line `1447` is open. **Four
+sub-clauses of a schema were closed while the line defining that schema stayed
+open.** Full reasoning in `phase-34d.md`.
+
+**So: an evidence entry that names a hazard and then rules against it should be
+re-read, not trusted. Dispatching a verifier with no stake in the outcome found
+it in one pass, and no reviewer had, because the reasoning read as diligence.**
+
+### 922 closed, and it was a live defect
+
+An ordinary `glasshouse memory search` calls `mark_conflicted` in production;
+`is_current` answers `false` for `Conflicted`; and `resolve_conflict` — fully
+built and tested — had **zero production callers**. A search could strand two
+memories permanently with no way back from the binary. `glasshouse memory
+conflicts` and `memory resolve <id> active|superseded` close it, reusing
+`with_status` and `resolve_conflict` unmodified.
+
+### Three packages killed at Phase −1 BEFORE dispatch — all now in the register
+
+`ORIENT.md`'s open-line ranking recommended each of these and each is refused.
+New clusters M, N, O, P in `docs/process/refusal-register.md`:
+
+- **1263/1267** — no spend counter and no latency reader exist. `evidence.rs:66`:
+  *"`cost_micro_usd`: not supplied"*, and the product prints *"Glasshouse does
+  not count spend against this"* to the user.
+- **566/569** — the native-pairing prior is **constant across every candidate
+  set the binary can build**, with a self-maintaining tripwire test already in
+  place. A signal constant on the set being ranked cannot change the ranking.
+- **1475–1485 (all of Phase 34F)** — no benchmark ingestion of any kind exists.
+- **1294** — left Cluster A entirely; the source itself refuses it.
+
+**Two tooling defects found and one fixed.** `continuity-watch.sh` dropped the
+session id from the relaunch recipe, collapsing the fire-once lock to a shared
+`.relaunch-unknown-context.lock` — fixed, with both halves mutation-tested.
+`blast-radius.sh` `cd`s to its own checkout, so a worker running the main copy
+from a worktree gets *"no changed .rs files"* and **exit 0** — a verification
+tool reporting success about the wrong tree. `GH-BLAST-RADIUS-TREE` is fixing it.
+
+### Next action
+
+**Run `scripts/ci-local.sh --macos --linux --windows-vm` when the board quiets.**
+GitHub CI is still non-functional (§27 — runs fail in 4-5s at setup), so the
+local mirror is the only verification of the interrupt fix, and **both of the
+failures it fixes are non-macOS**. Do not run it beside a compiling worker (§40).
+
+Live: `quota-health-routing` (1598/1599, expect a split verdict — 1599 may be
+refused for Cluster N's reason) and `blast-radius-tree`.
 
 ## Checkpoint — 2026-08-29, batch 53 dispatched: 757 / 1280 (59%)
 
