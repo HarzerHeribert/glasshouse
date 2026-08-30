@@ -7,7 +7,10 @@
 //!
 //! The **hook catalogue** below was re-read from Codex 0.150.1 on 2026-08-30
 //! and had gained one event; see `HOOK_EVENTS` and
-//! [`CATALOGUE_OBSERVED_VERSION`]. The rollout-header evidence on
+//! [`CATALOGUE_OBSERVED_VERSION`]. It was **re-read again from Codex 0.151.0
+//! on 2026-08-30**, the same day, after the provenance test caught the
+//! version drift: all twelve events, in the same order, with the same
+//! descriptions — nothing changed. The rollout-header evidence on
 //! [`Codex::read_session_record`] is still the 0.149.0 reading and is
 //! deliberately not restamped — it was never re-derived.
 
@@ -58,6 +61,31 @@ pub struct Codex;
 /// both spelling and position, which is what the 2026-08-30 runtime probe of
 /// map line 327 rested on.
 ///
+/// **Re-read again from 0.151.0 on 2026-08-30** (the provenance test caught
+/// the drift the same day it was installed). All twelve events, same
+/// spelling, same order, same descriptions — nothing moved this time:
+///
+/// ```text
+///   Event                 Installed   Active      Review      Description
+///   PreToolUse            0           0           0           Before a tool executes
+///   PermissionRequest     3           2           1           When permission is requested
+///   PostToolUse           2           2           0           After a tool executes
+///   PreCompact            1           0           1           Before context compaction
+///   PostCompact           1           0           1           After context compaction
+///   SessionStart          3           2           1           When a new session starts
+///   SessionEnd            1           0           1           Right before a session ends
+///   UserPromptSubmit      3           2           1           When the user submits a prompt
+///   SubagentStart         0           0           0           When a subagent is created
+///   SubagentStop          0           0           0           Right before a subagent ends its turn
+///   Stop                  3           2           1           Right before Codex ends its turn
+///   Interrupt             0           0           0           Right before an interrupted turn is aborted
+/// ```
+///
+/// The screen grew a fourth `Review` column since 0.150.1 (splitting what was
+/// one `Active` count into `Active` + pending-`Review`), which is a rendering
+/// change, not a catalogue change — it does not affect `HOOK_EVENTS` or
+/// [`REPORTED_EVENTS`].
+///
 /// That earlier revision listed ten events in `snake_case`, taken from the
 /// `[hooks.state."<path>:<event>:0:0"]` keys in `config.toml`. Those keys are
 /// real, but they are the spelling Codex uses to *record trust*, not the
@@ -95,7 +123,7 @@ const HOOK_EVENTS: &[&str] = &[
 /// `HOOK_EVENTS` with what it shows, and move this constant — in that
 /// order. Bumping the constant alone is the one edit that makes the check
 /// worthless.
-pub const CATALOGUE_OBSERVED_VERSION: &str = "0.150.1";
+pub const CATALOGUE_OBSERVED_VERSION: &str = "0.151.0";
 /// The events Glasshouse asks Codex to report.
 ///
 /// A subset of [`HOOK_EVENTS`], deliberately not the remaining per-tool
