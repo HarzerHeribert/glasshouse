@@ -169,3 +169,68 @@ and the code holds it (the free loop returns on the first available candidate in
 but **nothing would fail if a future change broke it**. That is §49's
 "doc-comment lines counted as call sites" in a new costume, and it is a Green
 packet for somebody.
+
+---
+
+# Line 1434 — closed 2026-08-30; 1441 and 1442 built but NOT wired
+
+Package `GH-ROUTING-STICKINESS`.
+
+## 1434 — CLOSED
+
+State: **COMPLETE**
+
+*"Filter automatic candidates by minimum requests-per-minute headroom when
+known."*
+
+The signal already reached `DisposableRouting::choose`; what was missing was an
+**eliminating** consumer. `GH-ROUTING-FILTERS` established the distinction and
+it is the reusable part: the RPM figure was read in exactly one place —
+`score()`'s ranking contribution — while every place `choose` *removed* a
+candidate ignored it. A candidate at 0% headroom was ranked last and never
+excluded, which is a different claim from the line's word *"filter"*.
+
+`has_no_known_headroom` (`routing/disposable.rs:285`) is now called inside
+`choose` immediately after `apply_hard_constraints`, before the free/metered
+split, and `choose`'s ordered doc comment was renumbered to name it as step 2.
+
+**The load-bearing part is the honesty rule, and it was reused rather than
+invented.** `has_no_known_headroom` returns `false` for `None`: a candidate
+nothing is known about is never removed. That is the **identical** rule
+`CandidateCapacity`'s own doc and `score()`'s `None` arm
+(`routing/disposable.rs:826-830`) already stated for the scoring path — this
+package applied it to elimination rather than writing a second rule that could
+drift. Eliminating on absence would turn *"we have no telemetry"* into *"this
+provider is full"*.
+
+Mutation: make the elimination step also drop candidates with an absent
+reading — **KILLED** by
+`an_absent_capacity_reading_never_eliminates_a_candidate`, and by every other
+test in the target, since the mutation eliminates every candidate the file's
+helpers build without a capacity reading.
+
+## 1441 and 1442 — OPEN, and this is a deliberate Cluster B
+
+State: **SCAFFOLDED**, and it must not be read as anything more.
+
+The mechanism they need **is built and tested**: an on-disk
+`RoutingStickyCache` (`provider/telemetry.rs`, following `GatewayQuotaCache`'s
+shape — no migration) and
+`DisposableRouting::choose_for_automatic_classification`
+(`routing/disposable.rs`), with tests covering the retained pick, the health
+re-check, and a missing or corrupt record deciding fresh.
+
+**Nothing in the shipped binary calls it.** `main.rs::automatic_classification_choice`
+still calls `choose` directly. The packet forbade `main.rs` — it was held by
+another worker — and the worker correctly stopped at the boundary and named the
+insertion point rather than taking an unclaimed file.
+
+**This is the exact shape that un-ticked five boxes earlier the same day**: code
+that is correct, tested, and never run. It is recorded here as `SCAFFOLDED`
+rather than quietly left to look finished, and **1441/1442 must not be ticked
+until the call site lands.** The follow-up is one call site in
+`automatic_classification_choice`.
+
+**The invariant the wiring must preserve**, already enforced by the built code
+and its tests: *a retained pick is never returned without re-checking its
+health.* Stickiness must not outlive the healthiness it was predicated on.

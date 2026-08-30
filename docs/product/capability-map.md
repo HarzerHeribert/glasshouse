@@ -1431,7 +1431,7 @@ Phase 34C — Automatic routing-model selection
 ☑ Let routing_model = auto choose among configured resources dynamically.
 ☐ Filter automatic candidates by required structured-output reliability.
 ☑ Filter automatic candidates by current provider health.
-☐ Filter automatic candidates by minimum requests-per-minute headroom when known.
+☑ Filter automatic candidates by minimum requests-per-minute headroom when known.
 ☐ Filter automatic candidates by maximum acceptable routing latency.
 ☐ Filter automatic candidates by maximum marginal routing cost.
 ☐ Prefer currently free candidates after capability and latency requirements are satisfied.

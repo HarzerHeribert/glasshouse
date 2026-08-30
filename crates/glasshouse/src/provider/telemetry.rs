@@ -245,7 +245,11 @@ pub struct RateLimitHeaders {
 }
 
 /// One minute, in seconds — the window a requests-per-minute ceiling means.
-const MINUTE_SECONDS: i64 = 60;
+///
+/// `pub(crate)`, not private: `routing::disposable`'s automatic-classification
+/// stickiness window ties itself to this same figure rather than inventing a
+/// second one — see its own doc comment.
+pub(crate) const MINUTE_SECONDS: i64 = 60;
 
 impl RateLimitHeaders {
     /// Read whichever of [`RATE_LIMIT_HEADERS`] are present.
@@ -1279,6 +1283,208 @@ impl GatewayQuotaCache {
         std::fs::write(&temporary, &encoded)?;
         std::fs::rename(&temporary, &path)?;
         Ok(())
+    }
+}
+
+// --- automatic classification's retained pick, surviving its own process --
+//
+// Capability map lines 1441 and 1442. `glasshouse classify` is a fresh
+// process every time (`routing::disposable`'s own module doc: the disposable
+// policy "re-decides every time"), so keeping a recent pick to avoid
+// unnecessary provider churn needs the same kind of cross-process record
+// [`GatewayQuotaCache`] already is — same shape, one real difference. See
+// [`RoutingStickyCache`]'s own doc for why it is project-scoped and
+// [`GatewayQuotaCache`] deliberately is not.
+
+/// The on-disk format's version for a retained automatic-classification
+/// pick — [`GATEWAY_QUOTA_FORMAT_VERSION`]'s own pattern: a shape change is a
+/// cache miss, never a misread.
+const ROUTING_STICKY_FORMAT_VERSION: u32 = 1;
+
+/// One resource `glasshouse classify`'s automatic mode chose, and when —
+/// capability map lines 1441 and 1442's own state.
+///
+/// Exactly three fields, and REQUIRED BEHAVIOR item 4 names them: a provider
+/// name, a model name, a time. No credential, key or URL — this record is not
+/// a secret, but it is project state, so it holds only what a later process
+/// needs to decide whether to reuse the pick.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RetainedPick {
+    pub provider: String,
+    pub model: String,
+    pub chosen_at_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct PersistedRoutingPick {
+    version: u32,
+    #[serde(flatten)]
+    pick: RetainedPick,
+}
+
+/// Where automatic classification's most recently chosen resource is kept
+/// between `glasshouse classify` processes — capability map lines 1441 and
+/// 1442.
+///
+/// **Project-scoped**, unlike [`GatewayQuotaCache`] a few lines above: a rate
+/// limit belongs to the account a credential names, but which resource
+/// automatic mode last picked is a property of *this project's* own recent
+/// activity — REQUIRED BEHAVIOR item 1 says a pick must never leak between
+/// projects. So this is rooted at
+/// [`crate::paths::RuntimePaths::project_state_dir`], not
+/// [`crate::paths::RuntimePaths::data_dir`], the one difference from
+/// [`GatewayQuotaCache`]'s own placement.
+///
+/// Everything else is [`GatewayQuotaCache`]'s shape, deliberately: a single
+/// JSON file, write-to-a-temporary-file-then-rename so a crash mid-write
+/// cannot leave [`Self::load`] a half-written file to trip over, and every
+/// read failure — absent, unreadable, truncated, wrong version — answers
+/// `None` rather than an error, so a caller never fails a classification over
+/// a missing or corrupt cache (REQUIRED BEHAVIOR item 2).
+#[derive(Debug, Clone)]
+pub struct RoutingStickyCache {
+    path: PathBuf,
+}
+
+impl RoutingStickyCache {
+    /// The cache for one project, under this installation's data directory —
+    /// the production constructor, for a caller that already resolved
+    /// [`crate::paths::RuntimePaths`] and a project identifier.
+    pub fn new(paths: &crate::paths::RuntimePaths, project_id: &str) -> Self {
+        Self {
+            path: paths
+                .project_state_dir(project_id)
+                .join("routing-sticky.json"),
+        }
+    }
+
+    /// A cache rooted at an explicit file. For tests, exactly like
+    /// [`GatewayQuotaCache::at`].
+    pub fn at(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// The retained pick, if this cache holds one this process can trust the
+    /// shape of.
+    ///
+    /// **Returns no error, ever, and reads no network** — [`GatewayQuotaCache::load`]'s
+    /// own contract, for the same reason.
+    pub fn load(&self) -> Option<RetainedPick> {
+        let bytes = std::fs::read(&self.path).ok()?;
+        let stored: PersistedRoutingPick = serde_json::from_slice(&bytes).ok()?;
+        if stored.version != ROUTING_STICKY_FORMAT_VERSION {
+            return None;
+        }
+        Some(stored.pick)
+    }
+
+    /// Persist `pick`, replacing whatever this cache had before.
+    ///
+    /// Best-effort on a write failure — logged, not propagated
+    /// (REQUIRED BEHAVIOR item 2): the caller this is built for must not fail
+    /// a classification over a full disk or a permissions problem, any more
+    /// than [`GatewayQuotaCache::store`]'s own caller may.
+    pub fn store(&self, pick: &RetainedPick) {
+        if let Err(err) = self.try_store(pick) {
+            tracing::debug!(
+                error = %err,
+                "could not persist automatic classification's retained pick"
+            );
+        }
+    }
+
+    fn try_store(&self, pick: &RetainedPick) -> std::io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let stored = PersistedRoutingPick {
+            version: ROUTING_STICKY_FORMAT_VERSION,
+            pick: pick.clone(),
+        };
+        let encoded = serde_json::to_vec_pretty(&stored)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        let temporary = self.path.with_extension("json.writing");
+        std::fs::write(&temporary, &encoded)?;
+        std::fs::rename(&temporary, &self.path)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod routing_sticky_cache_tests {
+    use super::*;
+
+    fn pick(provider: &str, model: &str, chosen_at_unix: i64) -> RetainedPick {
+        RetainedPick {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            chosen_at_unix,
+        }
+    }
+
+    #[test]
+    fn a_stored_pick_comes_back_unchanged() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = RoutingStickyCache::at(dir.path().join("routing-sticky.json"));
+        let written = pick("groq", "kimi-k2", 1_800_000_000);
+        cache.store(&written);
+        assert_eq!(cache.load(), Some(written));
+    }
+
+    /// Acceptance test 5 (part one): a project that has never stored a pick
+    /// is a miss, never an error — [`GatewayQuotaCache::load`]'s own
+    /// contract, mirrored here.
+    #[test]
+    fn a_project_with_no_persisted_pick_is_a_miss_rather_than_an_error() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = RoutingStickyCache::at(dir.path().join("routing-sticky.json"));
+        assert!(cache.load().is_none());
+    }
+
+    #[test]
+    fn storing_again_replaces_the_previous_pick() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = RoutingStickyCache::at(dir.path().join("routing-sticky.json"));
+        cache.store(&pick("groq", "kimi-k2", 1_800_000_000));
+        cache.store(&pick("nous", "hermes-4", 1_800_000_060));
+        assert_eq!(cache.load(), Some(pick("nous", "hermes-4", 1_800_000_060)));
+    }
+
+    /// A file written by a future format version is a miss, not a misread —
+    /// [`GatewayQuotaCache`]'s own contract, mirrored here.
+    #[test]
+    fn a_future_format_version_is_ignored_rather_than_misread() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("routing-sticky.json");
+        let cache = RoutingStickyCache::at(&path);
+        cache.store(&pick("groq", "kimi-k2", 1_800_000_000));
+        let bytes = std::fs::read(&path).expect("written above");
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+        value["version"] = serde_json::json!(99);
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).expect("overwritten");
+        assert!(cache.load().is_none());
+    }
+
+    /// Acceptance test 5 (part two): a corrupted or partially written file is
+    /// a miss, not a panic — the same crash-mid-write case
+    /// [`crate::provider::cache::ModelCache::store`]'s own doc names.
+    #[test]
+    fn a_truncated_file_is_a_miss_rather_than_a_panic() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("routing-sticky.json");
+        std::fs::write(&path, b"{\"version\": 1, \"provider\": \"gro").unwrap();
+        assert!(RoutingStickyCache::at(&path).load().is_none());
+    }
+
+    /// A missing parent directory must not make a first write fail — nothing
+    /// creates `project_state_dir` before the first sticky pick is stored.
+    #[test]
+    fn the_first_write_creates_its_own_parent_directory() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("nested").join("routing-sticky.json");
+        let cache = RoutingStickyCache::at(&path);
+        cache.store(&pick("groq", "kimi-k2", 1_800_000_000));
+        assert_eq!(cache.load(), Some(pick("groq", "kimi-k2", 1_800_000_000)));
     }
 }
 

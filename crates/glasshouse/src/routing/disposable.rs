@@ -45,6 +45,7 @@ use crate::provider::quota::{
     CapacityBand, RemainingCapacityScore, ReserveDecision, ReserveDecisionInputs,
     evaluate_reserve_spend,
 };
+use crate::provider::telemetry::RetainedPick;
 use crate::routing::classify::{TaskClassification, WorkloadTier};
 
 /// The kind of bounded internal work a choice is being made for.
@@ -270,6 +271,25 @@ impl DisposableCandidate {
     }
 }
 
+/// Map line 1434: whether `candidate` is known to have no headroom left on
+/// whichever dimension `crate::provider::quota::CapacityState::remaining_capacity_score`
+/// found tightest — the reading `candidate.capacity.remaining_capacity`
+/// carries, which may be bound by requests-per-minute or another dimension
+/// depending on what that call found.
+///
+/// `false` whenever nothing is known (`None`): an unread candidate is not a
+/// candidate known to be exhausted, and eliminating on absence would turn "we
+/// have no telemetry" into "this provider is full" — precisely what
+/// [`CandidateCapacity`]'s own doc comment already refuses for the *scoring*
+/// path, and this is the same rule applied to elimination.
+fn has_no_known_headroom(candidate: &DisposableCandidate) -> bool {
+    candidate
+        .capacity
+        .remaining_capacity
+        .as_ref()
+        .is_some_and(|score| score.fraction() <= 0.0)
+}
+
 /// The resource one disposable job was routed to, and why.
 ///
 /// **No public fields, and no conversion to or from
@@ -479,6 +499,34 @@ impl ReserveOverride {
     }
 }
 
+/// How long automatic classification's retained pick may be reused before a
+/// fresh decision is required — map line 1442's "a short period", which
+/// names no figure.
+///
+/// Tied to something that already exists rather than invented: one
+/// requests-per-minute ceiling window, `crate::provider::telemetry::MINUTE_SECONDS`
+/// — the same period this build already treats as the unit one rate-limit
+/// reading governs (`provider::quota::CapacityState::remaining_capacity_score`'s
+/// own requests-per-minute pairing). A pick should not outlive the window the
+/// capacity reading that justified choosing it is itself scoped to.
+pub const AUTOMATIC_CLASSIFICATION_STICKY_WINDOW_SECONDS: i64 =
+    crate::provider::telemetry::MINUTE_SECONDS;
+
+/// One outcome of [`DisposableRouting::choose_for_automatic_classification`]
+/// — map lines 1441 and 1442.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AutomaticClassificationDecision {
+    /// The retained pick was reused: still inside the window, still naming a
+    /// candidate this call was given, and still healthy. [`DisposableRouting::choose`]
+    /// did not run.
+    Retained(RetainedPick),
+    /// A fresh decision was made — no usable retained pick, the window had
+    /// elapsed, or the retained resource's health had turned against it.
+    /// Carries both the ordinary [`DisposableChoice`] and the
+    /// [`RetainedPick`] a caller should persist for the next call.
+    Fresh(DisposableChoice, RetainedPick),
+}
+
 /// The routing policy for bounded internal jobs.
 #[derive(Debug, Clone)]
 pub struct DisposableRouting {
@@ -569,18 +617,33 @@ impl DisposableRouting {
     ///    because line 568 calls a user's own opt-in rule exactly that. A
     ///    candidate that fails this is unrepresentable to the scorer below,
     ///    not merely given a large negative weight.
-    /// 2. **A pinned free resource wins outright** (line 536, 1552). If it
+    /// 2. **Zero-headroom candidates are removed, not merely ranked last**
+    ///    (map line 1434). A candidate whose [`CandidateCapacity`], carried on
+    ///    [`DisposableCandidate::with_capacity`], is *known* to read zero
+    ///    remaining headroom — no requests-per-minute (or other bound
+    ///    dimension) capacity left — cannot serve, so it is dropped here,
+    ///    before either the free loop or the metered-fallback loop below ever
+    ///    sees it. An **absent** reading never eliminates: nothing being known
+    ///    about a candidate is not the same claim as "this candidate is
+    ///    exhausted", and turning "no telemetry" into "full" is the
+    ///    fabrication this project refuses everywhere else — see
+    ///    `tests/routing_disposable_tier.rs`'s
+    ///    `an_absent_capacity_reading_never_eliminates_a_candidate`.
+    ///    Removing rather than scoring low also means this step runs *before*
+    ///    the free loop below walks the user's own order, so a candidate that
+    ///    survives is never reordered by it — only ever removed outright.
+    /// 3. **A pinned free resource wins outright** (line 536, 1552). If it
     ///    cannot serve, the job fails rather than silently going elsewhere —
     ///    a pin is a hard rule, never a scored preference, the same design
     ///    decision Phase 9J's `PairingPreference::Pin` already made.
-    /// 3. **Free resources, in the user's own order**, skipping disabled ones
+    /// 4. **Free resources, in the user's own order**, skipping disabled ones
     ///    (line 536) and any whose health or allowance says it cannot serve
     ///    right now (lines 529, 535, 538). This is line 530's "prefer free
     ///    models for bounded Glasshouse support work", and line 531 falls out
     ///    of it: a model is in this list because the user marked it free, so
     ///    an explicitly configured free model such as a Nemotron variant
     ///    participates without this function knowing any model's name.
-    /// 4. **A metered resource**, only when [`MeteredUse`] permits it
+    /// 5. **A metered resource**, only when [`MeteredUse`] permits it
     ///    (line 539) *and* Phase 32F's protected-reserve policy allows
     ///    spending it (line 1550) — ranked by this policy's own `score`
     ///    when more than one survives the reserve gate.
@@ -622,6 +685,16 @@ impl DisposableRouting {
                 Err(HardConstraint::UserConstraint)
             }
         });
+
+        // Map line 1434, step 2 of the order documented above: a candidate
+        // whose remaining capacity is *known* and reads zero headroom is
+        // removed here, before it can be the free loop's first-available
+        // pick or the metered loop's best-scored one. `has_no_known_headroom`
+        // treats an absent reading as `false` on purpose — see its own doc.
+        let eligible: Vec<EligibleCandidate<DisposableCandidate>> = eligible
+            .into_iter()
+            .filter(|candidate| !has_no_known_headroom(candidate.value()))
+            .collect();
 
         let free: Vec<&EligibleCandidate<DisposableCandidate>> = eligible
             .iter()
@@ -761,6 +834,85 @@ impl DisposableRouting {
                 reasons: denied_reasons,
             }),
         }
+    }
+
+    /// Map lines 1441 and 1442, for the one caller they name —
+    /// `automatic_classification_choice`'s `glasshouse classify` decision —
+    /// and deliberately not folded into [`Self::choose`] itself.
+    ///
+    /// # Why this is a second function rather than a flag on `choose`
+    ///
+    /// This module's own header states the separation as a design principle:
+    /// the disposable policy "prefers free capacity and re-decides every
+    /// time", against the interactive policy's "keeps what it has". Giving
+    /// `choose` a retained pick to consult would blur that for every
+    /// [`JobKind`] it serves — memory extraction, reranking, evaluation —
+    /// none of which map lines 1441/1442 name. Stickiness here is scoped to
+    /// automatic classification alone, so it stands beside `choose`, calling
+    /// it unchanged, rather than reaching inside it.
+    ///
+    /// # Purity is preserved the same way `choose` preserves it
+    ///
+    /// `tests::no_routing_policy_can_make_a_request` (`routing/mod.rs`) holds
+    /// this module to reading no telemetry itself. This function does not
+    /// break that: `retained` is supplied by the caller, exactly as
+    /// `candidates` and `pool` already are — nothing here opens a cache or a
+    /// connection. The caller is expected to be
+    /// `crate::provider::telemetry::RoutingStickyCache::load`, and to persist
+    /// the returned pick with `RoutingStickyCache::store`, but neither call
+    /// happens in this crate today — see this package's report for the exact
+    /// `main.rs` insertion point that would make it the production path.
+    ///
+    /// # The honesty invariant (map line 1441)
+    ///
+    /// A retained pick is returned **only** when all three hold: it is still
+    /// inside [`AUTOMATIC_CLASSIFICATION_STICKY_WINDOW_SECONDS`], it names a
+    /// candidate still present in `candidates`, and that candidate is a free
+    /// resource `pool` still reports available. A pick that fails any of
+    /// these gets a fresh call to [`Self::choose`] instead — stickiness never
+    /// outlives the healthiness it was predicated on. A **metered** retained
+    /// pick always falls through to a fresh decision too: `pool` is the only
+    /// health signal this build has for a free resource
+    /// (`docs/product/evidence/phase-34c.md`'s 1433 entry: "the health pool
+    /// reaches only free candidates"), so there is nothing honest to check a
+    /// metered pick's continued health against, and inventing one would
+    /// repeat the same fabrication line 1434's elimination step refuses.
+    pub fn choose_for_automatic_classification(
+        &self,
+        candidates: &[DisposableCandidate],
+        pool: &FreePool,
+        now: Instant,
+        now_unix: i64,
+        classification: Option<&TaskClassification>,
+        retained: Option<RetainedPick>,
+    ) -> Result<AutomaticClassificationDecision, NoResource> {
+        if let Some(pick) = &retained {
+            let age = now_unix.saturating_sub(pick.chosen_at_unix);
+            let within_window = (0..AUTOMATIC_CLASSIFICATION_STICKY_WINDOW_SECONDS).contains(&age);
+            let still_present = candidates.iter().find(|candidate| {
+                candidate.provider() == pick.provider && candidate.model() == pick.model
+            });
+            let still_healthy = still_present.is_some_and(|candidate| {
+                candidate.cost().is_free() && pool.is_available(&candidate.as_free_resource(), now)
+            });
+            if within_window && still_healthy {
+                return Ok(AutomaticClassificationDecision::Retained(pick.clone()));
+            }
+        }
+
+        let choice = self.choose(
+            JobKind::Classification,
+            candidates,
+            pool,
+            now,
+            classification,
+        )?;
+        let pick = RetainedPick {
+            provider: choice.provider().to_owned(),
+            model: choice.model().to_owned(),
+            chosen_at_unix: now_unix,
+        };
+        Ok(AutomaticClassificationDecision::Fresh(choice, pick))
     }
 
     /// Score one eligible candidate — map line 1530: every input this policy

@@ -21,12 +21,18 @@
 //! mechanism is correct and ready to be wired in by the patch the report
 //! names.
 
+use std::time::Instant;
+
 use glasshouse::memory::{ExtractionModel, RoutedNoModel};
-use glasshouse::provider::quota::CapacityBand;
-use glasshouse::routing::disposable::{
-    CandidateCapacity, DisposableCandidate, DisposableRouting, JobKind,
+use glasshouse::provider::quota::{
+    Capacity, CapacityBand, CapacityState, NativeAmount, Pool, Reading, ReadingSource,
+    RemainingCapacityScore,
 };
-use glasshouse::routing::free::FreePreferences;
+use glasshouse::routing::disposable::{
+    AutomaticClassificationDecision, CandidateCapacity, DisposableCandidate, DisposableRouting,
+    JobKind,
+};
+use glasshouse::routing::free::{FreePool, FreePreferences, FreeResource, WorkloadOutcome};
 use glasshouse::routing::{Cost, CredentialId};
 use glasshouse::secret::SecretRef;
 
@@ -159,4 +165,239 @@ fn an_ambiguous_empty_request_does_not_get_the_confidently_trivial_outcome() {
             .describe()
             .contains("protected-reserve policy denied every metered candidate")
     );
+}
+
+// ---------------------------------------------------------------------------
+// GH-ROUTING-STICKINESS — map lines 1434, 1441, 1442.
+//
+// The first two here (1434) go through `DisposableRouting::choose` directly,
+// the same production entry point `RoutedNoModel::new_for_request` above
+// wraps for `JobKind::MemoryExtraction` — `choose` itself is unchanged in
+// what calls it, only in what it eliminates before scoring.
+//
+// The last two (1441/1442) go through the new
+// `DisposableRouting::choose_for_automatic_classification`, which is not yet
+// called by `main.rs::automatic_classification_choice` — this package's
+// report names the exact insertion point that would make it the production
+// path for `glasshouse classify`'s automatic mode. These tests prove the
+// mechanism this package built is correct, per practice §35/§36, not that a
+// production caller varies stickiness yet.
+// ---------------------------------------------------------------------------
+
+/// A real, fully-measured remaining-capacity score at `percent` — the same
+/// construction `tests/session_router.rs`'s own `capacity` helper uses,
+/// because external tests cannot build a [`RemainingCapacityScore`] any other
+/// way; its fields are private on purpose.
+fn capacity_score(percent: i64) -> RemainingCapacityScore {
+    const OBSERVED: i64 = 1_800_000_000;
+    let measured = |value: i64| {
+        Capacity::Measured(Reading::new(
+            NativeAmount::whole(value, "tokens"),
+            OBSERVED,
+            ReadingSource::ResponseHeader("x-ratelimit".to_owned()),
+        ))
+    };
+    CapacityState::metered_balance()
+        .with_credits(
+            Pool::inapplicable()
+                .with_remaining(measured(percent))
+                .with_limit(measured(100)),
+        )
+        .remaining_capacity_score()
+        .expect("a fully-measured pool always yields a score")
+}
+
+/// Map line 1434: a free candidate that would otherwise win the user's own
+/// free-resource order is removed outright once it is known to have zero
+/// headroom, and the next available candidate is chosen instead — not merely
+/// ranked below it.
+#[test]
+fn a_zero_headroom_candidate_is_not_selected_even_when_it_would_rank_first() {
+    let routing = DisposableRouting::for_support_work(true, FreePreferences::new());
+    let pool = FreePool::new();
+
+    let exhausted =
+        DisposableCandidate::new("alpha", "alpha-model", credential("alpha"), Cost::Free)
+            .with_capacity(
+                CandidateCapacity::new().with_remaining_capacity(Some(capacity_score(0))),
+            );
+    let healthy = DisposableCandidate::new("beta", "beta-model", credential("beta"), Cost::Free);
+
+    let choice = routing
+        .choose(
+            JobKind::Classification,
+            &[exhausted, healthy],
+            &pool,
+            Instant::now(),
+            None,
+        )
+        .expect("a healthy free candidate remains after elimination");
+    assert_eq!(
+        choice.provider(),
+        "beta",
+        "the zero-headroom candidate ranked first in the user's order and must still lose"
+    );
+}
+
+/// Map line 1434's honesty case: a candidate nothing is known about is not
+/// eliminated, and it keeps its place in the user's own free-resource order —
+/// the elimination step this package adds must not disturb ordering among
+/// survivors.
+#[test]
+fn an_absent_capacity_reading_never_eliminates_a_candidate() {
+    let routing = DisposableRouting::for_support_work(true, FreePreferences::new());
+    let pool = FreePool::new();
+
+    let unread = DisposableCandidate::new("alpha", "alpha-model", credential("alpha"), Cost::Free);
+    let also_unread =
+        DisposableCandidate::new("beta", "beta-model", credential("beta"), Cost::Free);
+
+    let choice = routing
+        .choose(
+            JobKind::Classification,
+            &[unread, also_unread],
+            &pool,
+            Instant::now(),
+            None,
+        )
+        .expect("a free candidate is available");
+    assert_eq!(
+        choice.provider(),
+        "alpha",
+        "a candidate nothing is known about must still win the user's own free-resource \
+         order — absence must never read as exhaustion"
+    );
+}
+
+/// Map line 1442: two successive automatic-classification decisions inside
+/// the sticky window return the same resource, even when the candidate order
+/// changes between calls — proof the second call reused the retained pick
+/// rather than re-running the full ranking, since a fresh ranking over the
+/// changed order would have picked differently.
+#[test]
+fn two_decisions_inside_the_window_return_the_same_resource_without_reranking() {
+    let routing = DisposableRouting::for_support_work(true, FreePreferences::new());
+    let pool = FreePool::new();
+    let now = Instant::now();
+    let first_unix = 1_800_000_000;
+
+    let alpha = DisposableCandidate::new("alpha", "alpha-model", credential("alpha"), Cost::Free);
+    let beta = DisposableCandidate::new("beta", "beta-model", credential("beta"), Cost::Free);
+
+    let first = routing
+        .choose_for_automatic_classification(
+            &[alpha.clone(), beta.clone()],
+            &pool,
+            now,
+            first_unix,
+            None,
+            None,
+        )
+        .expect("a free candidate is available");
+    let AutomaticClassificationDecision::Fresh(choice, pick) = first else {
+        panic!("a call with no retained pick must make a fresh decision: {first:?}");
+    };
+    assert_eq!(choice.provider(), "alpha");
+
+    // Reversed order: a fresh `choose` here would pick `beta` first. Reusing
+    // the retained pick must still return `alpha`.
+    let second = routing
+        .choose_for_automatic_classification(
+            &[beta.clone(), alpha.clone()],
+            &pool,
+            now,
+            first_unix + 5,
+            None,
+            Some(pick.clone()),
+        )
+        .expect("the retained pick is still present and healthy");
+    assert_eq!(
+        second,
+        AutomaticClassificationDecision::Retained(pick),
+        "a retained pick inside the window must be reused, not re-ranked"
+    );
+}
+
+/// Map line 1441: a retained pick whose provider has since become unhealthy
+/// is not returned — stickiness must not outlive the healthiness it was
+/// predicated on. A fresh decision is made instead.
+#[test]
+fn a_retained_pick_whose_provider_turned_unhealthy_is_not_returned() {
+    let routing = DisposableRouting::for_support_work(true, FreePreferences::new());
+    let mut pool = FreePool::new();
+    let now = Instant::now();
+    let first_unix = 1_800_000_000;
+
+    let alpha = DisposableCandidate::new("alpha", "alpha-model", credential("alpha"), Cost::Free);
+    let beta = DisposableCandidate::new("beta", "beta-model", credential("beta"), Cost::Free);
+
+    let first = routing
+        .choose_for_automatic_classification(
+            &[alpha.clone(), beta.clone()],
+            &pool,
+            now,
+            first_unix,
+            None,
+            None,
+        )
+        .expect("a free candidate is available");
+    let AutomaticClassificationDecision::Fresh(choice, pick) = first else {
+        panic!("a call with no retained pick must make a fresh decision: {first:?}");
+    };
+    assert_eq!(choice.provider(), "alpha");
+
+    // Alpha's credential is rejected between calls — the same health signal
+    // 1433 already reaches free candidates with.
+    pool.observe(
+        &FreeResource::new(credential("alpha"), "alpha-model"),
+        WorkloadOutcome::CredentialRejected,
+        now,
+    );
+
+    let second = routing
+        .choose_for_automatic_classification(
+            &[alpha.clone(), beta.clone()],
+            &pool,
+            now,
+            first_unix + 5,
+            None,
+            Some(pick),
+        )
+        .expect("beta remains available");
+    let AutomaticClassificationDecision::Fresh(choice, _) = second else {
+        panic!(
+            "a retained pick whose provider turned unhealthy must trigger a fresh decision: \
+             {second:?}"
+        );
+    };
+    assert_eq!(choice.provider(), "beta");
+}
+
+/// A missing or corrupt on-disk record must decide fresh rather than error —
+/// `RoutingStickyCache::load` never surfaces a parse failure to a caller; see
+/// `provider::telemetry::routing_sticky_cache_tests` for the cache-level
+/// proof (acceptance test 5's `RoutingStickyCache::load` half). This is the
+/// caller-facing half: passing `None` (what a failed load already collapses
+/// to) behaves exactly like "decide fresh", never an error.
+#[test]
+fn a_caller_that_could_not_load_a_pick_still_decides_fresh_without_erroring() {
+    let routing = DisposableRouting::for_support_work(true, FreePreferences::new());
+    let pool = FreePool::new();
+
+    let alpha = DisposableCandidate::new("alpha", "alpha-model", credential("alpha"), Cost::Free);
+
+    let decision = routing
+        .choose_for_automatic_classification(
+            &[alpha],
+            &pool,
+            Instant::now(),
+            1_800_000_000,
+            None,
+            None,
+        )
+        .expect("a missing retained pick must not fail the classification");
+    assert!(matches!(
+        decision,
+        AutomaticClassificationDecision::Fresh(..)
+    ));
 }
