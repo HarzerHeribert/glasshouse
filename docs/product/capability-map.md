@@ -1428,9 +1428,9 @@ Fixed architectural requirements
 
 Phase 34C — Automatic routing-model selection
 
-☐ Let routing_model = auto choose among configured resources dynamically.
+☑ Let routing_model = auto choose among configured resources dynamically.
 ☐ Filter automatic candidates by required structured-output reliability.
-☐ Filter automatic candidates by current provider health.
+☑ Filter automatic candidates by current provider health.
 ☐ Filter automatic candidates by minimum requests-per-minute headroom when known.
 ☐ Filter automatic candidates by maximum acceptable routing latency.
 ☐ Filter automatic candidates by maximum marginal routing cost.
@@ -1440,7 +1440,7 @@ Phase 34C — Automatic routing-model selection
 ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
 ☐ Re-evaluate the automatic routing-model choice when its provider becomes degraded or rate-limited.
 ☐ Keep the selected routing model sticky for a short period to avoid unnecessary provider churn.
-☐ Show the currently selected routing model in resource diagnostics.
+☑ Show the currently selected routing model in resource diagnostics.
 
 Phase 34D — Router request schema
 

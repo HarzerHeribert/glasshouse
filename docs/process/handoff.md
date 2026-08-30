@@ -6,6 +6,89 @@
 
 Last updated: 2026-08-30 (Europe/Berlin)
 
+## Checkpoint — 2026-08-30, batch 55 continued: 818 / 1280 (64%)
+
+**Three process rules landed today that change how you work. Read them before
+choosing anything: `CLAUDE.md`'s three new sections, and practice §86, §87, §88.**
+
+### The user intervened twice, and both changed the process
+
+**On efficiency** — boxes per hour and per token is a real KPI, and picking
+easy meta-work over substantial packages is procrastination. §86 (tiers, what
+each SKIPS) and §87 (six token traps, package sizing) came out of it.
+**On trust** — *"a manager does not check a worker's work when it is an
+established employee which followed the correct process."* §88, in flight as
+`GH-TRUST-MODEL`.
+
+**The trust argument is evidence-backed, not deferential.** All ten wrongly
+ticked boxes in this project's history were **accurate reports about code that
+was correct and simply not wired**. No worker has misreported. Re-reading diffs
+was never the fix; asking the right question in the packet was. And
+`integrate.sh` re-runs the blast radius on the merged tree anyway, so
+hand-verifying a worker's test results pays the cost twice to learn nothing.
+
+**Size packages by the MECHANISM, target 3–6 boxes.** Batch 55 managed 0.77
+boxes per package; its outlier closed five in 66 lines because those five lines
+were facets of one `store.context()` call. `GH-AUTO-ROUTING-MODEL` is the first
+package scoped the new way — six lines against one selector.
+
+### Closed since the last checkpoint
+
+- **327** — by **runtime probe**, not code. Every link had shipped; its reader
+  landed hours earlier as a side effect of `session-context-door`. A live Codex
+  compacted **five times and Glasshouse counted five**, `PostCompact` correctly
+  ignored. Attribution airtight: Codex's own "7 hooks need review" list was
+  `REPORTED_EVENTS` element for element.
+
+### Two boxes REFUSED despite working code — read these before repackaging
+
+- **1331** — three of five timestamps recorded. *"When the protocol exposes
+  them"* is a claim about the **protocol**; for a streaming provider it **does**
+  expose a token boundary and Glasshouse declines to parse. That is Cluster L,
+  ours and deliberate. Closing on 3/5 is the 1455/1456 stretch. **What would
+  close it is narrower than "parse the body": may the relay observe response
+  FRAMING without reading content?** A product decision.
+- **1849** — its consumer already prints *"unknown, not enough observations
+  yet"* to every user and the missing link is **one clock read**. It fails §36:
+  `glasshouse classify` is a command a person types, not something on
+  `launch_session`'s path. **It becomes a good package the day classification is
+  wired into launch.**
+
+### The defect the probe found, now fixed — and the packet's cause was wrong
+
+A resumed session kept `lifecycle = stopped` forever, so **every hook it sent
+was silently discarded**. My packet blamed `may_apply`. There were **two**
+gates: `write_lifecycle_locked` independently refused the dead-to-live write
+**and returned `Ok`**, so `note_lifecycle(Running)` — already called on resume —
+looked like it had succeeded. §58 exactly, caught by reproducing rather than
+reasoning.
+
+Fixed with a `Revival { Forbidden, Authorized }` marker whose only constructor
+is `begin_resume`, reached from the resume path alone — so the authority is
+**unreachable** from `glasshouse hook`, not merely withheld. `is_live()` and
+`may_apply` are unchanged.
+
+**One proof is still owed** (§79): no test can reach `main.rs::resume_session`
+without a live harness and a `#[cfg]`, so the production call is proven
+**present** by a source-scanning test, not proven **exercised**. A short probe
+would close it.
+
+### A process gap worth knowing
+
+`validate_round.py` only compares packets **passed in one invocation**.
+`codex-compaction-probe` and `resume-lifecycle-fix` both claimed
+`tests/session_hook.rs`, an hour apart, and collided at integration — resolved
+by a three-way merge. **Re-validate a new packet against every LIVE packet, not
+just its batch-mates.**
+
+### Next exact action
+
+1. Two workers live: `auto-routing-model` (six lines, one mechanism) and
+   `trust-model` (§88).
+2. **Owed:** an end-to-end probe that a resumed session's hook is now believed.
+3. Still with the user: the **outcome-learning** question (twelve Phase 51
+   lines), **Phase 43 (MCP)** scope, and `rm -rf ~/.ollama/models/models`.
+
 ## Checkpoint — 2026-08-30, batch 55 landed: 817 / 1280 (64%)
 
 **Nine boxes closed, five of them boxes this same session had un-ticked. Net

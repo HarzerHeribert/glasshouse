@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**818 / 1280 mandatory capabilities (64%)** — 462 open across 61 phases.
+**821 / 1280 mandatory capabilities (64%)** — 459 open across 61 phases.
 
 ## Where the work is
 
@@ -69,6 +69,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32E | Burn rate and exhaustion forecasting | **10** | 0 | `1272` |
 | Phase 32G | Provider-aware request-cost estimation | **10** | 0 | `1296` |
 | Phase 33C | Failure, quota, and route correlation | **10** | 5 | `1362` |
+| Phase 34C | Automatic routing-model selection | **10** | 3 | `1429` |
 | Phase 43 | MCP surface for orchestrators | **10** | 0 | `1687` |
 | Phase 54A | Setup and portability completion criteria | **10** | 0 | `1897` |
 | Phase 9K | Harness-aware response profiles | **11** | 26 | `578` |
@@ -77,7 +78,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 34F | Model capability and tier calibration | **11** | 0 | `1473` |
 | Phase 35A | Candidate generation | **11** | 0 | `1504` |
 | Phase 32C | Subscription capacity estimation | **12** | 0 | `1242` |
-| Phase 34C | Automatic routing-model selection | **13** | 0 | `1429` |
 | Phase 33B | Reliability-adjusted agent performance | **14** | 0 | `1345` |
 | Phase 35B | Candidate scoring | **14** | 11 | `1523` |
 | Phase 55 | V1 completion definition | **23** | 0 | `1910` |
@@ -90,7 +90,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~433 open lines are not.
+other ~430 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -261,10 +261,10 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
+- Checkpoint — 2026-08-30, batch 55 continued: 818 / 1280 (64%)
 - Checkpoint — 2026-08-30, batch 55 landed: 817 / 1280 (64%)
 - Checkpoint — 2026-08-30, batch 55 in flight: 813 / 1280 (64%)
 - Checkpoint — 2026-08-30, batch 54: 810 / 1280 (63%)
-- Checkpoint — 2026-08-29, batch 53 dispatched: 757 / 1280 (59%)
 
 ## Evidence ledger files
 

@@ -1026,8 +1026,41 @@ fn observed_provider_health(
     runtime: &Runtime,
     destinations: &[glasshouse::routing::session::Destination],
 ) -> glasshouse::routing::free::FreePool {
+    use glasshouse::routing::free::FreeResource;
+
+    observed_health_of(
+        runtime,
+        destinations.iter().map(|destination| {
+            FreeResource::new(
+                destination.backend().credential().clone(),
+                destination.backend().model().label(),
+            )
+        }),
+    )
+}
+
+/// The persisted gateway-health readings that name any of `resources`, as a
+/// [`glasshouse::routing::free::FreePool`].
+///
+/// This is [`observed_provider_health`]'s whole body, keyed by the type that
+/// function already built internally, so a second caller with resources in a
+/// different shape reads the same cache under the same three refusals rather
+/// than growing a second matcher that could disagree with this one. The
+/// caller supplies the keys because only the caller knows them — see
+/// [`observed_provider_health`]'s own header for why nothing here parses a
+/// label.
+///
+/// The second caller is [`automatic_classification_choice`], whose keys are
+/// [`glasshouse::routing::disposable::DisposableCandidate`]s rather than
+/// destinations. Without it, `glasshouse classify` handed
+/// `DisposableRouting::choose` an empty pool, and a filter that is never fed
+/// a candidate that could fail it is not applied (practice §36).
+fn observed_health_of(
+    runtime: &Runtime,
+    resources: impl IntoIterator<Item = glasshouse::routing::free::FreeResource>,
+) -> glasshouse::routing::free::FreePool {
     use glasshouse::provider::telemetry::{GatewayHealthCache, GatewayHealthReading};
-    use glasshouse::routing::free::{FreePool, FreeResource};
+    use glasshouse::routing::free::FreePool;
 
     let mut pool = FreePool::new();
     let stored = GatewayHealthCache::new(runtime.paths()).load_all();
@@ -1039,10 +1072,10 @@ fn observed_provider_health(
     let now = std::time::Instant::now();
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
 
-    for destination in destinations {
-        let credential = destination.backend().credential();
+    for resource in resources {
+        let credential = resource.credential();
         let label = credential.label();
-        let model = destination.backend().model().label();
+        let model = resource.model().to_owned();
 
         let mut named: Option<&GatewayHealthReading> = None;
         let mut contradicted = false;
@@ -1068,7 +1101,7 @@ fn observed_provider_health(
         };
 
         pool.adopt_observed(
-            &FreeResource::new(credential.clone(), model),
+            &resource,
             reading.consecutive_failures,
             reading.cooling_down_until(now, now_unix),
             reading.credential_rejected,
@@ -3237,17 +3270,9 @@ fn classification_model(
 /// and `tests/classification_call.rs` mutates this call away to prove
 /// something is watching.
 ///
-/// **No `ReserveOverride`.** That input is scoped to sessions the user named
-/// by hand with `glasshouse sessions reserve`, and `glasshouse classify` is
-/// deciding for no session at all — there is no identity here for the
-/// override to apply to, and inventing one would grant a reserve exemption
-/// nobody asked for.
-///
-/// **No `FreePool`.** Health is learned from real request outcomes and this
-/// command has no history to offer, exactly as
-/// `memory::extract::disposable::RoutedNoModel` documents for the same empty
-/// pool: every free candidate is treated as available, which is correct for a
-/// caller with nothing to say about health.
+/// Where the inputs come from — including the health pool, which this path
+/// no longer leaves empty — is [`automatic_classification_choice`]'s header.
+/// This function is the half that turns the choice into a model.
 fn automatic_classification_model(
     runtime: &Runtime,
     user: &UserConfig,
@@ -3255,6 +3280,69 @@ fn automatic_classification_model(
     effective: &EffectiveConfig<'_>,
     request_text: &str,
 ) -> Result<glasshouse::memory::ConfiguredModel, String> {
+    // The tier this job's own demand implies, from the request itself. This
+    // is `RoutedNoModel::new_for_request`'s fifth link, made by the one
+    // `JobKind` its doc comment says the constructor was waiting for — a
+    // request, not a transcript of a finished turn.
+    let requirement = glasshouse::routing::classify::classify_heuristically(request_text);
+    let choice =
+        automatic_classification_choice(runtime, user, project, effective, Some(&requirement))
+            .map_err(|reason| {
+                format!("no resource is available to classify this request: {reason}")
+            })?;
+
+    classification_model(
+        user,
+        project,
+        choice.provider(),
+        choice.model(),
+        Some(choice.credential().reference()),
+    )
+}
+
+/// Which configured resource automatic routing-model selection picks right
+/// now — the decision itself, separated from building the model so that a
+/// diagnostic can name the same pick without asking anything to classify.
+///
+/// # Why the diagnostic must share this function rather than repeat it
+///
+/// `glasshouse resources` reports the model this would choose (map line
+/// 1443). A report that rebuilt the candidate list and the policy beside this
+/// one would be a second implementation of the decision, free to drift from
+/// the one that actually runs — and a diagnostic that names a different model
+/// than the classifier uses is worse than none. So there is one function, and
+/// the report and the classifier differ only in what they do with its answer.
+///
+/// `classification` is `None` for a caller with no request in hand, which is
+/// exactly what [`DisposableRouting::choose`] documents that value as meaning
+/// — the fixed [`WorkloadTier::Leaf`] the policy used before a classification
+/// existed to ask. The report says so rather than implying a request was
+/// classified.
+///
+/// # The health pool is read, not empty
+///
+/// The gateway writes what it learned from real request outcomes to
+/// [`glasshouse::provider::telemetry::GatewayHealthCache`], and
+/// [`observed_health_of`] reads that back for exactly the candidates this
+/// call is about. Passing `FreePool::new()` here — which this path did until
+/// this batch — meant every candidate was treated as available, so
+/// `choose`'s health and allowance filter could never exclude anything on the
+/// production path (map line 1433, practice §36).
+///
+/// **No `ReserveOverride`.** That input is scoped to sessions the user named
+/// by hand with `glasshouse sessions reserve`, and this decision is made for
+/// no session at all — there is no identity here for the override to apply
+/// to, and inventing one would grant a reserve exemption nobody asked for.
+fn automatic_classification_choice(
+    runtime: &Runtime,
+    user: &UserConfig,
+    project: Option<&ProjectConfig>,
+    effective: &EffectiveConfig<'_>,
+    classification: Option<&glasshouse::routing::classify::TaskClassification>,
+) -> Result<
+    glasshouse::routing::disposable::DisposableChoice,
+    glasshouse::routing::disposable::NoResource,
+> {
     use glasshouse::routing::disposable::{DisposableRouting, JobKind};
 
     let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
@@ -3264,6 +3352,15 @@ fn automatic_classification_model(
     );
     let candidates =
         disposable_candidates(user, project, effective, &secrets, &telemetry, now_unix);
+    let health = observed_health_of(
+        runtime,
+        candidates.iter().map(|candidate| {
+            glasshouse::routing::free::FreeResource::new(
+                candidate.credential().clone(),
+                candidate.model(),
+            )
+        }),
+    );
     let free_preferences = glasshouse::routing::free::FreePreferences::new()
         .with_order(
             effective
@@ -3293,27 +3390,12 @@ fn automatic_classification_model(
         free_preferences,
     );
 
-    // The tier this job's own demand implies, from the request itself. This
-    // is `RoutedNoModel::new_for_request`'s fifth link, made by the one
-    // `JobKind` its doc comment says the constructor was waiting for — a
-    // request, not a transcript of a finished turn.
-    let requirement = glasshouse::routing::classify::classify_heuristically(request_text);
-    let choice = routing
-        .choose(
-            JobKind::Classification,
-            &candidates,
-            &glasshouse::routing::free::FreePool::new(),
-            std::time::Instant::now(),
-            Some(&requirement),
-        )
-        .map_err(|reason| format!("no resource is available to classify this request: {reason}"))?;
-
-    classification_model(
-        user,
-        project,
-        choice.provider(),
-        choice.model(),
-        Some(choice.credential().reference()),
+    routing.choose(
+        JobKind::Classification,
+        &candidates,
+        &health,
+        std::time::Instant::now(),
+        classification,
     )
 }
 
@@ -5108,10 +5190,146 @@ fn resources_report(
     }
 
     let options = glasshouse::provider::resources::ReportOptions { verbose, now_unix };
-    Ok(format!(
+    let mut out = format!(
         "{probes}{}",
         glasshouse::provider::resources::report(&effective, &telemetry, options)
-    ))
+    );
+    out.push('\n');
+    render_routing_model(
+        &mut out,
+        runtime,
+        &user,
+        project.as_ref(),
+        &effective,
+        verbose,
+    );
+    Ok(out)
+}
+
+/// Capability map line 1443 — *"show the currently selected routing model in
+/// resource diagnostics"* — as the last block of `glasshouse resources`.
+///
+/// # Why this surface, and why it is not the settings screen
+///
+/// The Settings overlay already renders the configured
+/// [`glasshouse::config::RoutingModelChoice`], and `docs/product/evidence/phase-34c.md`
+/// ruled that showing a value on the screen where you set it is
+/// configuration, not diagnosis. This is the diagnostic surface: the routing
+/// model is named next to the capacity, health and quota of the very
+/// resources it would be chosen from, which is where the question *"why did
+/// routing behave that way"* is actually asked.
+///
+/// # The honesty constraint, and it is the point of the block
+///
+/// `Automatic` is an intent — the word the Settings overlay shows — and
+/// naming only that would answer a different question than a person reading
+/// `glasshouse resources` is asking. So the block runs the real decision
+/// ([`automatic_classification_choice`], the same function `glasshouse
+/// classify` calls) and names the resource it picked.
+///
+/// **And it says `would`, in every arm.** Nothing in this build classifies
+/// anything on its own: `routing::classify::classify`'s only production
+/// caller is the `glasshouse classify` diagnostic, and nothing else asks a
+/// routing model a question. Rendering a "currently selected routing model"
+/// beside live capacity numbers with no signal that it classifies nothing is
+/// the spectacle Phase 47 exists to prevent, so the `in use` row says so in
+/// as many words and is not conditional on anything.
+///
+/// # No credential, ever
+///
+/// [`glasshouse::routing::disposable::DisposableChoice`] carries a
+/// [`glasshouse::routing::CredentialId`], and nothing below reads it. A
+/// provider name, a model name and the policy's own explanation are what this
+/// block prints — the same rule `memory::extract::model`'s header states for
+/// the label a classification is attributed to.
+fn render_routing_model(
+    out: &mut String,
+    runtime: &Runtime,
+    user: &UserConfig,
+    project: Option<&ProjectConfig>,
+    effective: &EffectiveConfig<'_>,
+    verbose: bool,
+) {
+    use glasshouse::config::{RoutingFallback, RoutingModelResolution};
+    use std::fmt::Write as _;
+
+    let resolution = effective.routing_model_resolution();
+    out.push_str("ROUTING MODEL\n");
+
+    let configured = match &resolution.value {
+        RoutingModelResolution::Automatic => "automatic".to_owned(),
+        RoutingModelResolution::Pinned { provider, model } => format!("{provider}/{model}"),
+        RoutingModelResolution::Heuristics(RoutingFallback::ProviderNotConfigured {
+            provider,
+            ..
+        }) => format!("deterministic heuristics (`{provider}` is no longer configured)"),
+        RoutingModelResolution::Heuristics(_) => "deterministic heuristics".to_owned(),
+    };
+    let _ = writeln!(
+        out,
+        "  {:<16}{configured} ({})",
+        "configured",
+        resolution.layer.describe_source()
+    );
+
+    match &resolution.value {
+        RoutingModelResolution::Automatic => {
+            // `None`: this report has no request in hand, and `choose`
+            // documents that value as the fixed `WorkloadTier::Leaf` the
+            // policy used before a classification existed to ask. A request
+            // invented here to fill the argument would make the reported pick
+            // depend on words nobody typed.
+            match automatic_classification_choice(runtime, user, project, effective, None) {
+                Ok(choice) => {
+                    let _ = writeln!(
+                        out,
+                        "  {:<16}{} on {} — {}, {}",
+                        "would select",
+                        choice.model(),
+                        choice.provider(),
+                        choice.cost().as_str(),
+                        choice.reason()
+                    );
+                    let _ = writeln!(
+                        out,
+                        "  {:<16}for a request of unknown demand; a classified request can \
+                         select another",
+                        ""
+                    );
+                    if verbose {
+                        for line in choice.explanation().render().lines() {
+                            let _ = writeln!(out, "  {:<16}{line}", "");
+                        }
+                    }
+                }
+                Err(reason) => {
+                    let _ = writeln!(out, "  {:<16}nothing — {reason}", "would select");
+                }
+            }
+        }
+        RoutingModelResolution::Pinned { provider, model } => {
+            let _ = writeln!(
+                out,
+                "  {:<16}{model} on {provider} — pinned, so no ranking runs",
+                "would select"
+            );
+        }
+        RoutingModelResolution::Heuristics(_) => {
+            let _ = writeln!(
+                out,
+                "  {:<16}no model — deterministic heuristics classify without asking one",
+                "would select"
+            );
+        }
+    }
+
+    let _ = writeln!(
+        out,
+        "  {:<16}nothing yet. `glasshouse classify` is the only command that asks a routing \
+         model;\n  {:<16}no other Glasshouse decision calls one, so this names a choice rather \
+         than a habit.",
+        "in use", ""
+    );
 }
 
 /// The one search this project's memory retrieval goes through — Phase 21F

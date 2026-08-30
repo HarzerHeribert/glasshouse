@@ -1639,3 +1639,266 @@ fn a_harness_that_reported_nothing_does_not_erase_a_plan_already_known() {
     let after = apply_harness_report(known, &HarnessTelemetry::nothing());
     assert_eq!(after.plan().value().map(KnownPlan::name), Some("max"));
 }
+
+// ===== Phase 34C: the routing model in resource diagnostics ================
+//
+// Capability map lines 1443 (*"show the currently selected routing model in
+// resource diagnostics"*) and 1433 (*"filter automatic candidates by current
+// provider health"*), both through the real `Command::Resources` arm.
+//
+// # Why one surface proves both
+//
+// `main.rs::render_routing_model` does not describe the decision, it *runs*
+// it: the block names whatever `automatic_classification_choice` returns, and
+// that is the same function `glasshouse classify` calls on
+// `RoutingModelResolution::Automatic`. So a health reading that changes which
+// resource the policy picks changes what this report prints, and the printed
+// name is evidence about the decision rather than about a renderer.
+//
+// That is deliberate, and it is practice §36: a filter that exists but is
+// never fed a candidate that could fail it is not applied. Until this batch
+// the classifier handed `DisposableRouting::choose` a `FreePool::new()`, so
+// no candidate could ever fail its health check on the production path.
+
+/// The credential variable the routing-model fixtures below name. It is never
+/// a real key and never a real provider: the base URL is the discard port, so
+/// a candidate can be *built* (which is all routing needs) without anything
+/// being reachable.
+const ROUTING_CREDENTIAL_VAR: &str = "GLASSHOUSE_TEST_ROUTING_KEY";
+
+/// Two free providers at the discard port, `zeta-runner` first in the user's
+/// own free-resource order.
+///
+/// `zeta-runner` sorts *second* in `provider_names` (a `BTreeSet`) and is
+/// therefore second in the candidate list, so the two answers differ: anything
+/// reading the user's order picks `zeta-model`, and anything taking the
+/// candidate list as it comes picks `alpha-model`. It is the same
+/// discriminating configuration `tests/classification_call.rs` uses for the
+/// classifier, pointed at the report.
+const TWO_FREE_PROVIDERS: &str = r#"
+[routing]
+model = { kind = "automatic" }
+free_resource_order = [{ provider = "zeta-runner", model = "zeta-model" }]
+
+[providers.alpha-runner]
+template = "openai-compatible"
+base_url = "http://127.0.0.1:9/v1"
+credential_env = ["GLASSHOUSE_TEST_ROUTING_KEY"]
+free_models = ["alpha-model"]
+
+[providers.zeta-runner]
+template = "openai-compatible"
+base_url = "http://127.0.0.1:9/v1"
+credential_env = ["GLASSHOUSE_TEST_ROUTING_KEY"]
+free_models = ["zeta-model"]
+"#;
+
+impl BinaryFixture {
+    /// Run the shipped binary with one environment variable set, and return
+    /// its stdout.
+    ///
+    /// Separate from [`BinaryFixture::run`] because every other test in this
+    /// file must resolve no credential at all; the routing-model tests need
+    /// exactly one to resolve, or `disposable_candidates` builds no candidate
+    /// and there is nothing for the policy to choose between.
+    fn run_with_credential(&self, args: &[&str], value: &str) -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+            .current_dir(self.project.path())
+            .env(ROUTING_CREDENTIAL_VAR, value)
+            .args([
+                "--data-dir",
+                self.config.path().to_str().unwrap(),
+                "--config-dir",
+                self.config.path().to_str().unwrap(),
+            ])
+            .args(args)
+            .output()
+            .expect("the glasshouse binary runs");
+        assert!(
+            output.status.success(),
+            "`glasshouse {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("stdout is UTF-8")
+    }
+}
+
+/// The `ROUTING MODEL` block of `glasshouse resources`, as one string.
+fn routing_block(stdout: &str) -> String {
+    stdout
+        .split_once("ROUTING MODEL\n")
+        .unwrap_or_else(|| panic!("no ROUTING MODEL block in:\n{stdout}"))
+        .1
+        .to_owned()
+}
+
+/// **Map line 1443.** `glasshouse resources` names the model automatic
+/// selection would pick — not the word "automatic", which is the intent the
+/// Settings overlay already shows and which answers a different question.
+///
+/// The assertion is on `zeta-model`, which is reachable only through the
+/// user's own free-resource order — an input nothing but
+/// `DisposableRouting::choose` reads. A block that printed the configured
+/// choice, or the first configured provider, would say `alpha-model` here.
+#[test]
+fn the_shipped_binary_names_the_model_automatic_routing_would_select() {
+    let fixture = BinaryFixture::new().with_config(TWO_FREE_PROVIDERS);
+    let stdout = fixture.run_with_credential(&["resources", "--no-harness"], "sk-not-a-real-key");
+    let block = routing_block(&stdout);
+
+    assert!(
+        block.contains("configured      automatic"),
+        "the block must name the configured intent:\n{block}"
+    );
+    assert!(
+        block.contains("would select    zeta-model on zeta-runner"),
+        "the report must name the resource the routing policy selected:\n{block}"
+    );
+    assert!(
+        !block.contains("alpha-model"),
+        "naming the first configured provider would mean the policy never ran:\n{block}"
+    );
+}
+
+/// **The honesty constraint `docs/product/evidence/phase-34c.md` put on
+/// whoever closed 1443.** Nothing in this build classifies anything on its
+/// own, so the diagnostic must not read as a habit. The `in use` row says so
+/// unconditionally — it is not gated on configuration — and the selected
+/// resource is reported with `would`.
+#[test]
+fn the_routing_model_block_never_claims_a_model_is_classifying_anything() {
+    let fixture = BinaryFixture::new().with_config(TWO_FREE_PROVIDERS);
+    let stdout = fixture.run_with_credential(&["resources", "--no-harness"], "sk-not-a-real-key");
+    let block = routing_block(&stdout);
+
+    assert!(
+        block.contains("in use          nothing yet"),
+        "the block must say nothing is classifying with it:\n{block}"
+    );
+    assert!(
+        block.contains("would select"),
+        "the selected resource must be reported as a choice, not a habit:\n{block}"
+    );
+    assert!(
+        !block.contains("currently using") && !block.contains("in use          zeta"),
+        "no row may imply the model is in use:\n{block}"
+    );
+}
+
+/// A build with no routing model configured — every build until somebody
+/// configures one — names no model at all, rather than reporting whatever the
+/// policy would have picked had it been asked.
+#[test]
+fn with_no_routing_model_configured_the_block_names_no_model() {
+    let fixture = BinaryFixture::new();
+    let stdout = fixture.run(&["resources", "--no-harness"]);
+    let block = routing_block(&stdout);
+
+    assert!(
+        block.contains("configured      deterministic heuristics"),
+        "{block}"
+    );
+    assert!(
+        block.contains("would select    no model"),
+        "an unconfigured routing model must select nothing:\n{block}"
+    );
+}
+
+/// **Map line 1433, through the production path.** A resource the gateway
+/// recorded as having a rejected credential is excluded from automatic
+/// selection, and the next candidate in the user's order is chosen instead.
+///
+/// The control is the sibling test above: with no health reading planted, the
+/// same configuration selects `zeta-model`. The only difference here is a
+/// reading on disk, so the change of answer is attributable to health and to
+/// nothing else.
+///
+/// This is the test that fails if `automatic_classification_choice` goes back
+/// to handing `choose` an empty `FreePool` — which is what it did until this
+/// batch, and which made `choose`'s health filter unreachable from production.
+#[test]
+fn an_unhealthy_resource_is_not_the_one_automatic_routing_would_select() {
+    let fixture = BinaryFixture::new().with_config(TWO_FREE_PROVIDERS);
+    let health_cache_dir = fixture.config.path().join("gateway-health");
+    let cache = glasshouse::provider::telemetry::GatewayHealthCache::at(&health_cache_dir);
+    cache.store(
+        "zeta-runner",
+        &[glasshouse::provider::telemetry::GatewayHealthReading {
+            credential_label: format!("zeta-runner/{ROUTING_CREDENTIAL_VAR}"),
+            model: "zeta-model".to_owned(),
+            consecutive_failures: 3,
+            cooling_down_until_unix: None,
+            credential_rejected: true,
+        }],
+        TELEMETRY_OBSERVED,
+    );
+
+    let stdout = fixture.run_with_credential(&["resources", "--no-harness"], "sk-not-a-real-key");
+    let block = routing_block(&stdout);
+
+    assert!(
+        block.contains("would select    alpha-model on alpha-runner"),
+        "a resource whose credential the gateway saw rejected must not be selected:\n{block}"
+    );
+    assert!(
+        !block.contains("zeta-model"),
+        "the unhealthy resource must be excluded, not merely ranked lower:\n{block}"
+    );
+}
+
+/// The same filter on the other half of `FreePool::is_available`: a resource
+/// still cooling down after real failures is not selected either.
+///
+/// Planted against the wall clock the shipped binary will actually read, for
+/// `a_cooling_down_resource_is_shown_as_paced_through_the_shipped_binary`'s
+/// own reason — `resources_report` has no injectable "now".
+#[test]
+fn a_cooling_down_resource_is_not_the_one_automatic_routing_would_select() {
+    let fixture = BinaryFixture::new().with_config(TWO_FREE_PROVIDERS);
+    let health_cache_dir = fixture.config.path().join("gateway-health");
+    let cache = glasshouse::provider::telemetry::GatewayHealthCache::at(&health_cache_dir);
+    let now = wall_clock_now_unix();
+    cache.store(
+        "zeta-runner",
+        &[glasshouse::provider::telemetry::GatewayHealthReading {
+            credential_label: format!("zeta-runner/{ROUTING_CREDENTIAL_VAR}"),
+            model: "zeta-model".to_owned(),
+            consecutive_failures: 2,
+            cooling_down_until_unix: Some(now + 3_600),
+            credential_rejected: false,
+        }],
+        now,
+    );
+
+    let stdout = fixture.run_with_credential(&["resources", "--no-harness"], "sk-not-a-real-key");
+    let block = routing_block(&stdout);
+
+    assert!(
+        block.contains("would select    alpha-model on alpha-runner"),
+        "a resource still cooling down must not be selected:\n{block}"
+    );
+}
+
+/// The credential the candidate resolved with never reaches the report.
+///
+/// `DisposableChoice` carries a `CredentialId`, and the block prints a
+/// provider name, a model name and the policy's own explanation. This holds
+/// that against the bytes the binary actually wrote, including the verbose
+/// explanation, which is the longest thing the block can print.
+#[test]
+fn no_credential_reaches_the_routing_model_block() {
+    let secret = "sk-a-value-that-must-not-be-printed";
+    let fixture = BinaryFixture::new().with_config(TWO_FREE_PROVIDERS);
+    let stdout = fixture.run_with_credential(&["resources", "--no-harness", "--verbose"], secret);
+
+    assert!(
+        stdout.contains("ROUTING MODEL"),
+        "the block must have been rendered for this test to mean anything:\n{stdout}"
+    );
+    assert!(!stdout.contains(secret), "the credential value leaked");
+    assert!(
+        !stdout.contains(ROUTING_CREDENTIAL_VAR),
+        "the credential variable name leaked into the routing block:\n{stdout}"
+    );
+}

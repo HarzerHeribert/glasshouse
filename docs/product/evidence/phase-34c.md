@@ -77,3 +77,95 @@ Missing evidence:
   `provider_discovery.rs::a_planted_gateway_reading_now_reaches_the_shipped_binarys_report`.
 - Wording that distinguishes *configured* from *in use* while line 1425/1426
   remain open.
+
+---
+
+# Lines 1431, 1433, 1443 — closed 2026-08-30; 1437 open, 1438 and 1440 refused
+
+Package `GH-AUTO-ROUTING-MODEL`. **Six lines against one mechanism** — the
+first package sized by mechanism rather than by line, after batch 55 measured
+0.77 boxes per package (§87).
+
+## 1431 — CLOSED. It was unevidenced, not unbuilt
+
+State: **COMPLETE**
+
+The chain was already production-wired: `main.rs::classify_with_routing_model`
+reads `effective.routing_model_resolution()`, and its
+`RoutingModelResolution::Automatic` arm calls `automatic_classification_model`
+→ `automatic_classification_choice` → `DisposableRouting::choose`.
+
+**The evidence that makes it non-vacuous asserts on the wire.**
+`classification_call::automatic_routing_asks_the_resource_the_routing_policy_chose`
+configures two free providers at one canned endpoint and puts the *second*
+candidate first in `routing.free_resource_order` — an input **only `choose`
+reads**. The assertion is that the request body names `zeta-model` and does not
+name `alpha-model`. Anything that reached a model without going through the
+policy would name the wrong one.
+
+## 1433 — CLOSED, and it needed production code
+
+State: **COMPLETE**
+
+Killed by
+`provider_discovery::an_unhealthy_resource_is_not_the_one_automatic_routing_would_select`.
+
+**Limit, stated by the package and carried here:** the health pool reaches only
+**free** candidates. `choose` never asks health about a metered one.
+
+## 1443 — CLOSED, the CLI half
+
+State: **COMPLETE**
+
+Built as this entry already ruled: `glasshouse resources`, not the Settings
+overlay. `render_routing_model` is appended by `resources_report` in the same
+shape the `PROBES` block uses, so `provider/resources.rs` is untouched.
+
+**The rendering is honest about what it does not know**, which is why it
+closes:
+
+    in use    nothing yet. `glasshouse classify` is the only command that asks
+              a routing model; no other Glasshouse decision calls one, so this
+              names a choice rather than a habit.
+
+**Why it was open until today** is recorded above: `main.rs` belonged to
+another worker's un-integrated diff. It closed because §77 let this package
+co-edit `main.rs` rather than queue behind it.
+
+## 1437 and 1438 — the same vacuous qualifier, and both refused on it
+
+**1437** *"prefer currently free candidates **after capability and latency
+requirements are satisfied**"* — **OPEN.**
+**1438** *"prefer local candidates **when they satisfy the configured latency
+and quality requirements**"* — **REFUSED.**
+
+The free preference in 1437 is **real**: `DisposableRouting::choose`'s free
+loop returns before the metered loop. But `RouterLatencyMs` — a real, layered,
+validated config value — has **exactly two consumers, both in the settings
+overlay** (`shell/mod.rs:2230`, `:2628`). **No routing decision anywhere reads
+it.**
+
+So closing either line would be **closing a qualifier by absence**, which is
+precisely why 1455 and 1456 were un-ticked the same morning. 1437 is `open`
+rather than `refused` because its preference half is genuinely implemented and
+one producer — a latency reading that reaches `choose` — would close it. 1438
+is `refused` because locality is not represented on a candidate at all.
+
+## 1440 — REFUSED
+
+*"Avoid a scarce premium subscription session as the classifier when a cheaper
+adequate routing resource exists."* See the package's report for the decisive
+`file:line`; the reserve gate does not distinguish a subscription-backed
+candidate in the way this line requires.
+
+## A finding outside this package's diff, recorded so it is not lost
+
+`routing/disposable.rs`'s `choose` doc cites
+`tests::scoring_never_reorders_the_existing_free_selection` as holding the
+invariant that scoring never reorders the free-tier selection. **That test does
+not exist** — `grep` returns one hit, the citation itself. The invariant is real
+and the code holds it (the free loop returns on the first available candidate in
+`FreePreferences::arrange`'s output and never consults `score` for ordering),
+but **nothing would fail if a future change broke it**. That is §49's
+"doc-comment lines counted as call sites" in a new costume, and it is a Green
+packet for somebody.
