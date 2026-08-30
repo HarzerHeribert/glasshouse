@@ -1223,6 +1223,38 @@ pub enum MemoryCommand {
         limit: usize,
     },
 
+    /// List memories currently in conflict — Phase 22's raised-but-unresolved
+    /// state.
+    ///
+    /// An ordinary `glasshouse memory search` can move two memories to
+    /// `conflicted` (`MemoryStore::mark_conflicted`), which drops both out of
+    /// every default search immediately. This is the door that shows what is
+    /// stuck there; settle one with `glasshouse memory resolve`.
+    Conflicts {
+        /// Most memories to print.
+        #[arg(long, value_name = "N", default_value_t = 20)]
+        limit: usize,
+    },
+
+    /// Settle a memory that is `conflicted` — the other half of
+    /// `glasshouse memory conflicts`.
+    ///
+    /// `<OUTCOME>` is required and never defaulted: `active` keeps this
+    /// memory as current knowledge, `superseded` records it as replaced.
+    /// Choosing between the two is exactly the judgment the conflicted state
+    /// exists to defer to a reviewer, so there is no default to fall back on.
+    /// Always acts as a reviewed human, never as an automatic reviewer — a
+    /// person typing this command by hand already is the review Phase 22's
+    /// gate asks for.
+    Resolve {
+        /// The memory, or the leading part of its identifier.
+        id: String,
+
+        /// `active` or `superseded`.
+        #[arg(value_name = "OUTCOME")]
+        outcome: String,
+    },
+
     /// Run memory extraction over a session's recorded activity.
     ///
     /// `--reply-from` supplies a model's reply from a file, which is what

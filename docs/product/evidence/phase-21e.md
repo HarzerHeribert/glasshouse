@@ -330,3 +330,106 @@ Missing evidence: the reason is **operator free text and is not screened for
 credentials** — the same standing as `memories.body`, `sessions.purpose` and
 `checkpoints.document`, and the same recorded answer: closed on the producer
 side. It is bound as a SQL parameter and never logged.
+
+---
+
+# Line 922 — closed 2026-08-30, and it was a live defect rather than a gap
+
+Package `GH-MEMORY-CONFLICT-RESOLVE`. State: **COMPLETE**.
+
+## What was actually wrong
+
+`memory/search.rs:515` calls `MemoryStore::mark_conflicted` **in production**,
+during an ordinary `glasshouse memory search`. Both memories move to
+`MemoryStatus::Conflicted`, and `MemoryStatus::is_current` answers `false` for
+that status — so a default search stops returning either one.
+
+`MemoryStore::resolve_conflict` (`memory/store.rs:1578`), the only way back, was
+fully implemented, gated and tested, with **zero production call sites**: all
+six tree-wide were in `crates/glasshouse/tests/`. So an ordinary search could
+permanently remove two memories from every future search, and the shipped binary
+had no way to settle it. Textbook Cluster B, with a user-visible consequence.
+
+## Contract
+
+Given two memories `mark_conflicted` moved to `Conflicted` through an ordinary
+search, when an operator runs `glasshouse memory conflicts`, Glasshouse lists
+both by identifier, text and authority; when the operator then runs
+`glasshouse memory resolve <id> active|superseded`, Glasshouse calls
+`resolve_conflict` as `ConflictResolver::Reviewed` and records exactly the
+outcome given, while refusing to list or resolve a conflicted memory belonging
+to another project.
+
+## Production evidence
+
+- `cli.rs` — `MemoryCommand::Conflicts`, `MemoryCommand::Resolve`
+- `main.rs` — `memory_conflicts_list`, `memory_resolve_conflict`
+- `memory/store.rs` — `with_status` and `resolve_conflict`, **both reused
+  unmodified**. `store.rs` is untouched by this package.
+
+## The measurement that avoided a needless store query
+
+`is_current` returning `false` for `Conflicted` looked like it would block the
+listing. It does not: `with_status` selects `WHERE status = ?1 AND project_id =
+?3` and never consults `is_current` at all — the status column *is* the filter.
+So the surfacing half is a second production call to the method
+`memory_revalidate_list` already uses for `NeedsReview`, with one argument
+changed. **No new store query was written.** Established by reading the SQL,
+not inferred.
+
+## Regression evidence
+
+`crates/glasshouse/tests/memory_conflict_cli.rs`, four tests, all through the
+shipped binary rather than the store:
+
+- `resolving_a_conflict_from_the_cli_lists_it_then_settles_one_side` — the round
+  trip that **cannot pass on the previous commit**: there was no subcommand to
+  invoke.
+- `a_binding_authority_memory_resolves_from_the_cli`
+- `an_unclassified_authority_memory_resolves_from_the_cli`
+- `a_conflicted_memory_from_another_project_is_neither_listed_nor_resolvable` —
+  refusal, not deletion; the planted foreign row's status is unchanged after.
+
+## The ruling the box turns on, and the mutation that watches it
+
+A human typing the command **is** `ConflictResolver::Reviewed`. `Automatic`
+would refuse every binding-authority and every unclassified memory — the
+majority — and the command would look broken while behaving as designed.
+
+| mutation | result | killed by |
+|---|---|---|
+| `ConflictResolver::Reviewed` → `::Automatic` | **KILLED** | three of four tests, on `resolved.status.success()`; `Automatic` is refused with `ReviewRequired` on every memory in the suite |
+| `"superseded" => Superseded` → `=> Active` | **KILLED** | `an_unclassified_authority_…` at `memory_conflict_cli.rs:265` |
+
+**The resolver mutation was re-run independently by the orchestrator** after
+integration, in the main checkout, and killed again — three tests failed at
+`:197`, `:237` and `:260`. A worker's mutation is a claim; this one was checked.
+
+## Packet error the worker corrected, and it was right
+
+The packet said to abbreviate the identifier "the way `memory revalidate
+--list` already does". It does not: `memory_revalidate_list` prints the full
+32-hex id, as does every other memory subcommand, and `short_id()` is typed to
+`SessionId`. The worker printed the full id, matching what the codebase does
+rather than what the packet claimed it did.
+
+## Limits, stated rather than discovered later
+
+- Proves the door and the reuse of the store's gate and project scoping. Does
+  **not** touch or re-verify how a conflict is *raised* (`memory/search.rs`,
+  explicitly out of scope).
+- The full cross-platform gate was not run for this package alone.
+  `blast-radius.sh` flagged `main.rs` for pre-existing
+  `cfg(unix/windows/target_os)` blocks unrelated to this diff; 34 traced test
+  targets plus `--lib`, `--bin` and rustdoc all passed on macOS.
+- `--limit` truncation beyond the default 20 rests on `with_status`'s existing
+  tests, not on a new one here.
+
+## Owed, not blocking
+
+`MemoryCommand::Resolve` takes its outcome as a `String` validated in the
+command body rather than a clap `ValueEnum`. The error message is explicit and
+fires before the store is touched, so this is correctness-neutral — but a
+`ValueEnum` would put `active|superseded` into `--help` and shell completion,
+which matters more than usual for a command whose entire purpose is surfacing
+something the user cannot otherwise see.

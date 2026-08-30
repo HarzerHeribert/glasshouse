@@ -919,7 +919,7 @@ Fixed architectural requirements
 ☐ Treat current source code and executable tests as stronger evidence of actual behavior than stale memory summaries.
 ☐ Detect when a new requested implementation directly conflicts with an active remembered decision.
 ☐ Do not automatically route around a conflicting decision by adding layers, adapters, compatibility shims, or duplicate pathways.
-☐ Surface the conflict and ask whether the older decision should be superseded when the conflict is material and cannot be resolved from current evidence.
+☑ Surface the conflict and ask whether the older decision should be superseded when the conflict is material and cannot be resolved from current evidence.
 ☐ Allow an implementation agent to supersede an older ordinary decision automatically when current requirements clearly invalidate it and the change is low risk.
 ☑ Require stronger review before superseding security, legal, data-integrity, or externally imposed invariants.
 ☑ Record why a decision was superseded so future agents do not resurrect it without context.

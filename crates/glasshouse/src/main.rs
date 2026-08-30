@@ -317,6 +317,12 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     );
                 }
             }
+            MemoryCommand::Conflicts { limit } => {
+                print!("{}", memory_conflicts_list(&runtime, *limit)?);
+            }
+            MemoryCommand::Resolve { id, outcome } => {
+                print!("{}", memory_resolve_conflict(&runtime, id, outcome)?);
+            }
             MemoryCommand::Extract {
                 session,
                 activity,
@@ -4620,6 +4626,75 @@ fn memory_revalidate(
              superseded, invalidated"
         ),
     };
+
+    Ok(format!("{} is now {}\n", record.id, record.status))
+}
+
+/// `glasshouse memory conflicts` — map line 922's surfacing half.
+///
+/// An ordinary `glasshouse memory search` can move two memories to
+/// [`glasshouse::memory::MemoryStatus::Conflicted`]
+/// (`memory::search::flag_contradictions` → `MemoryStore::mark_conflicted`),
+/// which drops both out of every default search immediately —
+/// `MemoryStatus::is_current` answers `false` for `Conflicted`, same as every
+/// other non-`Active` status. Wires [`glasshouse::memory::MemoryStore::with_status`]
+/// again, this time against `Conflicted` rather than `NeedsReview`: that
+/// method already selects by the `status` column alone and never consulted
+/// `is_current`, so listing a conflict needed no new store query, only a
+/// second production call to the one that already exists.
+fn memory_conflicts_list(runtime: &Runtime, limit: usize) -> anyhow::Result<String> {
+    use glasshouse::memory::{MemoryStatus, ProjectMemory};
+
+    let memory = ProjectMemory::open(runtime)?;
+    let store = memory.store();
+    let conflicted = store.with_status(MemoryStatus::Conflicted, limit)?;
+
+    if conflicted.is_empty() {
+        return Ok("no memory is conflicted\n".to_owned());
+    }
+
+    let mut out = String::new();
+    for record in &conflicted {
+        out.push_str(&format!(
+            "{} {} ({})\n",
+            record.id,
+            record.subject.as_deref().unwrap_or(&record.body),
+            record.authority.map_or("unclassified", |a| a.as_str())
+        ));
+    }
+    Ok(out)
+}
+
+/// `glasshouse memory resolve <id> <outcome>` — map line 922's resolution
+/// half: [`glasshouse::memory::MemoryStore::resolve_conflict`] is fully
+/// implemented and tested and, before this, reachable only from `cargo test`.
+///
+/// Always calls it with [`glasshouse::memory::ConflictResolver::Reviewed`],
+/// never `::Automatic`: a person typing this command by hand already is the
+/// review Phase 22's gate asks for, and `::Automatic` would refuse every
+/// binding-authority and every unclassified memory
+/// (`MemoryStore::require_reviewed_for_high_impact`'s own documentation) —
+/// the majority of them — which would make this command look broken rather
+/// than working as designed. There is no `--automatic` flag here the way
+/// `memory revalidate` has one: nothing in this build calls conflict
+/// resolution automatically, so there is no refusal path this command needs
+/// to make reachable.
+fn memory_resolve_conflict(runtime: &Runtime, id: &str, outcome: &str) -> anyhow::Result<String> {
+    use glasshouse::memory::{ConflictResolver, MemoryStatus, ProjectMemory};
+
+    let outcome = match outcome {
+        "active" => MemoryStatus::Active,
+        "superseded" => MemoryStatus::Superseded,
+        other => anyhow::bail!(
+            "`{other}` is not a conflict outcome; use `active` to keep this memory as current \
+             knowledge or `superseded` to record it as replaced"
+        ),
+    };
+
+    let memory = ProjectMemory::open(runtime)?;
+    let store = memory.store();
+    let resolved = store.resolve_id(id)?;
+    let record = store.resolve_conflict(&resolved, outcome, ConflictResolver::Reviewed)?;
 
     Ok(format!("{} is now {}\n", record.id, record.status))
 }
