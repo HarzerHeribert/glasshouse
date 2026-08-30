@@ -570,7 +570,7 @@ path. **Do not conflate them again.**
 | **P6** | file-path association on memories | Phase 28 (5) | **YES** |
 | **P7** | a retrieval-quality signal (score computed and dropped, `memory/search.rs:443`) | 1129, 1094, 939 | no |
 | **P8** | provider health reaching the router | 1599, 1433, 531 in part | no |
-| **P9** | a compaction event record | 310, 327, 1316, Phase 31 (7) | probably not |
+| **P9** | a compaction event record | **row corrected — see “Phase 31 and P9 scoped” below** | **no** |
 | **P10** | a model axis on the candidate set | 566, 569, 35A/35B unchecked | no |
 | **P11** | per-model capability ratings | 1475–1485 | likely |
 
@@ -766,3 +766,119 @@ level below the one that package had already refused.
 about* — which is exactly the distinction the doc comment draws, and it
 *strengthens* the invariant rather than piercing it. A path lookup then keeps
 the ladder ordering that map line 1141 wants, without inventing a number.
+
+
+## Phase 31 and P9 scoped: the census row was wrong in three ways
+
+`GH-COMPACTION-RECON`, 2026-08-30, read-only. The orchestrator independently
+confirmed the two decisive claims (1316's phase, and `SessionContext`'s caller
+count) before acting on any of it.
+
+**The row said `310, 327, 1316, Phase 31 (7)` and "migration: probably not".
+Every part of that needed fixing.**
+
+1. **1316 is not a compaction line and never was.** `capability-map.md:1316` is
+   *"Track recent rate-limit responses separately from transport or model
+   failures"*, under **Phase 33 — Resource health** (`capability-map.md:1309`),
+   filed at `phase-33.md:463`. It entered P9 by transcription and stayed
+   because nobody re-read it. **Removed from P9.**
+2. **310's blocker was never storage, so Cluster G is the wrong home.**
+   `harness/claude_code.rs:28-38` — a catalogue documented as *observed, not
+   catalogued* — has **no compaction event of any kind**, and
+   `session/lifecycle.rs:157-158` says so in its own words. The missing link is
+   outside this repository. **Re-filed from Cluster G to Cluster E: the signal
+   genuinely does not arrive, do not package.**
+   *Caveat worth keeping:* the catalogue is observed rather than documented, so
+   only a fresh probe of a live installation can change this verdict — an
+   observation, not code. And two records disagree about `TeammateIdle`
+   (`phase-7.md:43-46` lists it, `harness/claude_code.rs:28-38` does not); one
+   is stale and this recon did not resolve which.
+3. **327's blocker moved and the register did not notice.** `phase-8.md:42`
+   says it waits on *"Phase 30's per-session compaction count"*. **Line 1159 is
+   now ☑ and that count ships.** What 327 lacks is a **production reader** —
+   which is in-repo, and small.
+
+**No line in P9 needs a migration.** Not one. `lifecycle_events` stays
+untouched (`LIFECYCLE_EVENT_KINDS` is eleven values, `database.rs:105-117`, none
+a compaction), so `design-decisions.md:2493-2495`'s schema claim still stands —
+**but the sentence attached to it no longer describes 327**, and should not be
+quoted as if it did.
+
+### Cluster Q claims three more: 1169, 1172, 1173
+
+**Glasshouse never compacts anything.** The only `/compact` string in the tree
+is `shell/state.rs:5622`, inside a `#[cfg(test)]` block (boundary `:4967`) whose
+whole point is that Glasshouse forwards the keystrokes untouched. No production
+path decides to compact, requests a compaction, or schedules one.
+
+So *"**never** compact … because the cache is cold"* (1169), *"**prefer**
+compaction at semantic boundaries"* (1172), and *"**allow** the harness its own
+mechanism rather than **replacing** it"* (1173) each forbid or prefer something
+no code path could do. 1173 is structurally immune twice over: `glasshouse hook`
+drains its payload into `io::sink()` unread (`main.rs:3362-3364`), so the binary
+never holds a session's conversation at all.
+
+**A test passing here passes because the feature is absent.** That is the exact
+shape 1455 and 1456 were un-ticked for. **Do not package.**
+
+### What IS reachable: 1171, and only 1171
+
+*"Prefer creating or refreshing a portable checkpoint before intentional
+compaction when practical."* All four Phase −1 links stand in current
+production code, no ruling in front of it, no migration:
+
+- **producer** `harness/codex.rs:34-44` and `:63-71` — Codex's `PreCompact`,
+  in production `REPORTED_EVENTS`, asserted to reach the `hooks.json` Codex
+  actually reads (`session/select.rs:1102-1108`);
+- **caller** `main.rs:3411-3444` — the `PreCompact` arm, which today counts
+  (`:3429`) and runs extraction (`:3437`) and does nothing about checkpoints;
+- **propagation** `Checkpoint::capture` + `CheckpointStore::save`, the shape
+  `checkpoint_after_turn` already uses nineteen lines away (`main.rs:3488-3503`,
+  gated at `main.rs:2530`);
+- **consumer** `glasshouse checkpoint list` (`main.rs:4363`) and
+  `resolve_bootstrap_prompt` (`main.rs:4331`) — both production.
+
+`main.rs` is structurally contended; claim it with `scripts/coedit.sh` (§77)
+rather than queueing behind it.
+
+### A RULING on 327, so the next package does not re-derive it
+
+> **Does a durable per-session count with no timestamp —
+> `sessions.observed_compactions` — satisfy 327's "Record observed Codex
+> compaction events *or compaction-related state* when available"?**
+
+**Yes, the count satisfies the *state* disjunct.** The line is written
+disjunctively, and reading it to require one timestamped row per occurrence
+reads the "or" out of it. The disjunct exists for exactly this case: the only
+signal Codex sends is *"about to compact"*, nothing confirms the compaction
+afterwards (`session/lifecycle.rs:145-156` excludes `PostCompact` on purpose),
+and a per-occurrence row would therefore carry a time and no verified event.
+The column is durable, project-scoped, and distinguishes `NULL` (nobody was
+counting) from `0` (counted, none seen) from `n` — `database.rs:1682-1698`
+argues that distinction at length, and any reader that prints `0` for `NULL`
+collapses it and is wrong.
+
+**327 still does not close on that ruling alone.** It needs two things:
+
+1. a **production reader** — one `line(…)` in `session_detail`
+   (`main.rs:5795-5857`), which today prints nineteen fields and not this one;
+2. **one real Codex `/compact` observed end to end**, which `phase-8.md:39`
+   already named as the remaining work. That is a runtime probe, not a test.
+
+So 327 is packageable *with* a manual probe attached, and 1171 is packageable
+without one. **If the board wants a box that closes without waiting on a
+person, it is 1171 alone.**
+
+### The lead this recon flagged and did not chase
+
+`SessionStore::context` (`session/store.rs:2020`) has **zero production
+callers** — confirmed independently by the orchestrator: `SessionContext`
+appears in `crates/glasshouse/src/` only at its definition (`store.rs:802`), its
+one constructor (`:2060`), a doc comment (`:1999`), the re-export
+(`session/mod.rs:61`), and an unrelated comment (`database.rs:1633`). All 14
+callers are in `tests/session_context.rs`.
+
+It is the only place **five already-ticked Phase 30 lines** produce anything a
+caller could see: **1161–1165**, all ☑. `GH-PHASE30-AUDIT` is dispatched against
+them. 1159 and 1160 are *not* affected — 1159's claim is the write at
+`main.rs:3429`, and `last_activity_at` is rendered by `session_detail`.
