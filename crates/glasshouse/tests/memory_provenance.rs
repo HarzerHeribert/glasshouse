@@ -713,6 +713,7 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
              -- leaves it in place meets `table evaluation_observations
              -- already exists` on the re-run.
              DROP TABLE IF EXISTS evaluation_observations;
+             DROP TABLE IF EXISTS memory_files;
 
              -- Migration 14's column, for the same reason: this rollback
              -- lands above version 5, so `checkpoints` survives it and the
@@ -757,8 +758,8 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
         })
         .unwrap();
     assert_eq!(
-        version, 16,
-        "the launch must have applied migrations 6 through 16"
+        version, 17,
+        "the launch must have applied migrations 6 through 17"
     );
     drop(conn);
 
@@ -984,6 +985,7 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
              -- leaves it in place meets `table evaluation_observations
              -- already exists` on the re-run.
              DROP TABLE IF EXISTS evaluation_observations;
+             DROP TABLE IF EXISTS memory_files;
 
              -- Migration 14's column, for the same reason: this rollback
              -- lands above version 5, so `checkpoints` survives it and the
@@ -1027,8 +1029,8 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
         })
         .unwrap();
     assert_eq!(
-        version, 16,
-        "the launch must have applied migrations 7 through 16"
+        version, 17,
+        "the launch must have applied migrations 7 through 17"
     );
     drop(conn);
 

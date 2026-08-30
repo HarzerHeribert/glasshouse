@@ -56,7 +56,8 @@ pub use extract::{
 };
 pub use policy::{MemoryRefusal, admit};
 pub use store::{
-    AuthorityChange, Classifier, Clock, ConflictResolver, DecisionProvenance, MemoryAuthority,
-    MemoryId, MemoryKind, MemoryRecord, MemoryStatus, MemoryStore, MemoryStoreError, NewMemory,
-    ProjectMemory, ProjectPhase, ReviewReason, SourceEvents,
+    AuthorityChange, Classifier, Clock, ConflictResolver, DecisionProvenance, FileAssociation,
+    MemoryAuthority, MemoryId, MemoryKind, MemoryRecord, MemoryStatus, MemoryStore,
+    MemoryStoreError, NewMemory, ProjectMemory, ProjectPhase, ReviewReason, SourceEvents,
+    normalize_observed_path,
 };

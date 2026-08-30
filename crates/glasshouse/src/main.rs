@@ -7,6 +7,7 @@ use std::io::IsTerminal;
 use glasshouse::checkpoint::git::GitPosition;
 use glasshouse::checkpoint::{
     Checkpoint, CheckpointReason, CheckpointStore, Handoff, ProjectCheckpoints, Stored,
+    WorkingTreeStatus,
 };
 use glasshouse::cli::{ApiCommand, CheckpointCommand};
 use glasshouse::config::response::{ResponseProfileEntry, ResponseRequest};
@@ -3637,6 +3638,25 @@ fn run_extraction(
     // the log holds and claims nothing more.
     let chunk = chunk_for_session(id, &events, None, ChunkLimits::default());
 
+    // The **working tree**, though, is read here, and mid-edit is exactly why.
+    //
+    // The refusal above is about a *commit*: "where the project was when this
+    // was learned" is a poor answer while somebody is still editing. The same
+    // sentence argues the other way for the dirty set — mid-edit is the state
+    // in which what differs from the index is most informative and a commit
+    // least — so this reads it and records it under its own name, `observed`,
+    // rather than claiming the memory referenced anything.
+    //
+    // Read here, before the thread starts, for the reason this function's own
+    // doc gives about everything else cheap: the model call can take seconds,
+    // and the set this associates memories with should be the one that was
+    // true when extraction began rather than whatever the user has typed
+    // since. `WorkingTreeStatus::detect` opens two small files and no
+    // database.
+    let observed_files = WorkingTreeStatus::detect(runtime.project().root())
+        .map(|status| status.changed_files)
+        .unwrap_or_default();
+
     let (tx, rx) = std::sync::mpsc::channel();
     let session = id.clone();
     std::thread::spawn(move || {
@@ -3675,6 +3695,7 @@ fn run_extraction(
             // runs that worked would under-report exactly the calls worth
             // knowing about.
             record_extraction_observation(runtime, &outcome);
+            record_observed_files(runtime, &outcome.recorded, &observed_files);
         }
         Err(_) => tracing::warn!(
             session = %id,
@@ -3741,6 +3762,75 @@ fn record_extraction_observation(
             error = %err,
             "could not record what memory extraction cost"
         );
+    }
+}
+
+/// Which files were being worked on when these memories were learned, into
+/// this project's `memory_files` — migration 17.
+///
+/// # This records an observation and not a reference, deliberately
+///
+/// `paths` is what the git index said differed from the working tree when
+/// extraction began. It says *"this was learned while that file was being
+/// worked on"*, which is a fact about the **session**: three memories out of a
+/// session that dirtied twenty files get all sixty pairs, and each pair is
+/// true. It is emphatically not capability-map line 1139's *"the files a
+/// memory explicitly references"* — on this path the model's input carries no
+/// prose at all, so a model asked to name files here would be fabricating from
+/// an empty input, and line 1294's rule is that a fabricated value inverts the
+/// policy rather than degrading it. Every row therefore carries
+/// [`glasshouse::memory::FileAssociation::Observed`].
+///
+/// # Why the store is opened here and not beside the event log
+///
+/// [`record_extraction_observation`]'s finding, one function over, for the
+/// same reason: an open SQLite handle on a path that turns out to have
+/// nothing to write blocks a later writer under Windows' mandatory
+/// `LockFileEx` while being invisible under POSIX advisory locks (practice
+/// §65). So the guard comes first and nothing is opened at all when there is
+/// no row — which is every extraction that stored nothing, and every one run
+/// against a clean tree.
+///
+/// This deliberately runs on the calling thread rather than inside the
+/// extraction thread: the thread outlives its bound, and a write started
+/// there after the process has already decided to move on would be a second
+/// writable handle appearing at an unpredictable moment.
+///
+/// # A failure here is one log line
+///
+/// [`run_extraction`]'s posture, and the path is not named in it: a file path
+/// is the user's own data, so the log says how many associations were lost
+/// and never which files they were about.
+fn record_observed_files(
+    runtime: &Runtime,
+    recorded: &[glasshouse::memory::MemoryId],
+    paths: &[String],
+) {
+    if recorded.is_empty() || paths.is_empty() {
+        return;
+    }
+    let memory = match glasshouse::memory::ProjectMemory::open(runtime) {
+        Ok(memory) => memory,
+        Err(err) => {
+            tracing::warn!(
+                error = %format!("{err:#}"),
+                "project memory unavailable; which files this session was \
+                 working on is not recorded"
+            );
+            return;
+        }
+    };
+    match memory.store().record_observed_files(recorded, paths) {
+        Ok(written) => tracing::debug!(
+            memories = recorded.len(),
+            files = paths.len(),
+            rows = written,
+            "recorded which files were being worked on"
+        ),
+        Err(err) => tracing::warn!(
+            error = %err,
+            "could not record which files were being worked on"
+        ),
     }
 }
 
@@ -5391,10 +5481,30 @@ fn memory_extract(
         )
     };
 
+    // The same reading `run_extraction` takes, from the same producer, before
+    // the model is asked. Here it is unambiguously cheap: this command is one
+    // synchronous pass on the main thread, and the store below is the same
+    // connection that is about to write the memories, so nothing opens a
+    // second handle.
+    let observed_files = WorkingTreeStatus::detect(runtime.project().root())
+        .map(|status| status.changed_files)
+        .unwrap_or_default();
+
     let memory = ProjectMemory::open(runtime)?;
     let store = memory.store();
     let model = ReplyFromFile(reply);
     let outcome = Extractor::new(&store, &model).run(&chunk, ExtractionTrigger::Manual);
+
+    // Observed, never referenced — see `record_observed_files` for the whole
+    // argument. A clean tree, or an extraction that stored nothing, writes no
+    // rows rather than an empty one. A failure is reported and does not fail
+    // the command: the memories are already stored.
+    if let Err(err) = store.record_observed_files(&outcome.recorded, &observed_files) {
+        tracing::warn!(
+            error = %err,
+            "could not record which files were being worked on"
+        );
+    }
 
     let mut out = String::new();
     writeln!(out, "trigger {}, model {}", outcome.trigger, outcome.model)?;

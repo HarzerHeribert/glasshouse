@@ -337,6 +337,132 @@ sql_enum!(MemoryStatus {
     Conflicted => "conflicted",
 });
 
+/// How a memory came to be associated with a file — `memory_files.provenance`.
+///
+/// **The vocabulary lives here rather than in a SQL `CHECK`**, for the reason
+/// `crate::database::MEMORY_FILE_PROVENANCE` gives: this is the column certain
+/// to grow, and a `CHECK` on such a column is what cost `lifecycle_events` a
+/// table rebuild for its eleventh value.
+///
+/// # One variant, and why the column exists anyway
+///
+/// A column with one value looks like a column that could have been a
+/// constant. It is not, and the reason is the *second* value nobody may add
+/// silently: the difference between *"this file was being worked on"* and
+/// *"this memory refers to this file"* is the difference between an
+/// observation and a claim, and map line 1139 asks for the second. Recording
+/// which one a row is means a later narrower producer lands beside this one
+/// rather than on top of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FileAssociation {
+    /// The file differed from the git index at the moment the memory was
+    /// extracted.
+    ///
+    /// A property of the *session*, not of the memory: a session that dirtied
+    /// twenty files and produced three memories associates all three with all
+    /// twenty. Cheap, portable and never fabricated —
+    /// `crate::checkpoint::WorkingTreeStatus::detect` reads the index and
+    /// asks no model — and it is deliberately **not**
+    /// *"explicitly referenced"*.
+    Observed,
+}
+
+impl FileAssociation {
+    /// The value stored in `memory_files.provenance`. Pinned against
+    /// `crate::database::MEMORY_FILE_PROVENANCE` by a test, which is where
+    /// the guarantee actually lives now that the column carries no `CHECK`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Observed => "observed",
+        }
+    }
+
+    /// Parse a stored provenance. `None` for a value this build does not
+    /// know, which is a data problem to report rather than one to default
+    /// away.
+    pub fn from_stored(value: &str) -> Option<Self> {
+        match value {
+            "observed" => Some(Self::Observed),
+            _ => None,
+        }
+    }
+
+    /// Every variant, for the pinning test.
+    pub const ALL: &'static [Self] = &[Self::Observed];
+}
+
+impl fmt::Display for FileAssociation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+/// The one spelling `memory_files.path` accepts, or `None`.
+///
+/// **Migration 17's column contract, enforced where it can be enforced.** The
+/// column is repo-relative, `/`-separated, UTF-8 and never absolute; the
+/// schema can only refuse the empty string, because `CHECK (path NOT LIKE
+/// '/%')` would miss `C:\...` and a `CHECK` forbidding `\` or `:` would
+/// reject file names that are legal on Unix. So the contract is a function,
+/// and every writer goes through it.
+///
+/// # Why refusing beats normalising here
+///
+/// Two spellings of one file become two rows, and the exact-match index then
+/// silently misses one of them — a missed association is invisible, where a
+/// wrong one is at least wrong out loud. So anything this cannot bring to the
+/// canonical spelling with certainty is dropped rather than guessed at:
+///
+/// - `\` becomes `/`, because git's own index never writes `\` and a
+///   Windows-shaped path reaching here means some other producer wrote it;
+/// - a leading `./` is stripped, and repeated or trailing separators are
+///   collapsed, because they name the same file;
+/// - an **absolute** path is refused — it is not repo-relative, and the
+///   project root is exactly where the `/var` versus `/private/var` class of
+///   ambiguity lives, which is the reason this column stores no root at all;
+/// - a `..` component is refused, because it can leave the repository and no
+///   normalisation here can tell whether it did;
+/// - an empty result is refused, which is what `.` and `./` collapse to.
+///
+/// The observed producer never exercises any of this: git's index is already
+/// UTF-8, repo-relative and `/`-separated on every platform, Windows
+/// included, and `checkpoint::git::parse_index` reads it with no separator
+/// translation. This exists for the producers that come after it.
+pub fn normalize_observed_path(path: &str) -> Option<String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let slashed = path.replace('\\', "/");
+
+    // Absolute in either of the two shapes a path can be absolute in: a
+    // leading separator, or a Windows drive or UNC prefix.
+    if slashed.starts_with('/') {
+        return None;
+    }
+    let mut chars = slashed.chars();
+    if let (Some(drive), Some(':')) = (chars.next(), chars.next())
+        && drive.is_ascii_alphabetic()
+    {
+        return None;
+    }
+
+    let mut components: Vec<&str> = Vec::new();
+    for component in slashed.split('/') {
+        match component {
+            // A repeated, trailing or leading separator, and `.`, all name
+            // the same file the path already names.
+            "" | "." => continue,
+            ".." => return None,
+            other => components.push(other),
+        }
+    }
+    if components.is_empty() {
+        return None;
+    }
+    Some(components.join("/"))
+}
+
 /// The slice of the project event log a memory was extracted from.
 ///
 /// A **range**, not an identifier. Extraction is fed a bounded chunk of a
@@ -1719,6 +1845,93 @@ impl<'a> MemoryStore<'a> {
                 action: "count memories",
                 source,
             })
+    }
+
+    /// Record which files were being worked on when `memories` were learned —
+    /// migration 17's `memory_files`, and the only writer of it.
+    ///
+    /// `paths` is
+    /// [`crate::checkpoint::WorkingTreeStatus::changed_files`]: what the git
+    /// index said differed from the working tree at the moment extraction
+    /// ran. Every row this writes carries
+    /// [`FileAssociation::Observed`] and **never anything stronger** — see
+    /// that variant, and migration 17's own text, for why *observed-dirty* is
+    /// not *explicitly referenced* and why writing the stronger word here
+    /// would invert map line 1294's rule rather than bend it.
+    ///
+    /// # An empty answer is an absence, never a row
+    ///
+    /// A clean tree writes nothing: no memory, no path, no empty-string path
+    /// standing in for "there were none". Neither does a path this build
+    /// cannot bring to the column's canonical spelling — see
+    /// [`normalize_observed_path`], which drops rather than guesses. The
+    /// count returned is rows written, so a caller that wants to know whether
+    /// anything was recorded can ask without querying the table back.
+    ///
+    /// # It is the cross product, and that is the signal rather than a defect
+    ///
+    /// Every memory here was extracted from one session, and the dirty set is
+    /// a property of that session and not of any one memory. Three memories
+    /// and twenty paths are sixty rows, each of them true: *"this was learned
+    /// while that file was being worked on."* A producer that could say more
+    /// than that does not exist in this build.
+    ///
+    /// # Failure is never the caller's problem
+    ///
+    /// Returns [`MemoryStoreError::Sql`] the way every other writer here
+    /// does, so a caller may log it — but a caller on the extraction path
+    /// should log and continue: the memories are already stored, and losing
+    /// their file association is strictly better than losing the session's
+    /// turn to a bookkeeping error.
+    pub fn record_observed_files(
+        &self,
+        memories: &[MemoryId],
+        paths: &[String],
+    ) -> Result<usize, MemoryStoreError> {
+        if memories.is_empty() || paths.is_empty() {
+            return Ok(0);
+        }
+
+        let canonical: Vec<String> = paths
+            .iter()
+            .filter_map(|path| normalize_observed_path(path))
+            .collect();
+        if canonical.is_empty() {
+            return Ok(0);
+        }
+
+        let now = (self.clock)();
+        let mut statement = self
+            .conn
+            .prepare(
+                "INSERT INTO memory_files \
+                     (project_id, memory_id, path, provenance, observed_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .map_err(|source| MemoryStoreError::Sql {
+                action: "prepare a memory file association",
+                source,
+            })?;
+
+        let mut written = 0usize;
+        for memory in memories {
+            for path in &canonical {
+                statement
+                    .execute(rusqlite::params![
+                        &self.project_id,
+                        memory.as_str(),
+                        path,
+                        FileAssociation::Observed.as_str(),
+                        now,
+                    ])
+                    .map_err(|source| MemoryStoreError::Sql {
+                        action: "record a memory file association",
+                        source,
+                    })?;
+                written += 1;
+            }
+        }
+        Ok(written)
     }
 }
 

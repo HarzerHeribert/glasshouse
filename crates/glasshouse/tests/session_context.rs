@@ -200,7 +200,8 @@ fn a_schema_fifteen_database_migrates_forward_and_its_sessions_read_as_uncounted
     {
         let conn = fixture.db();
         conn.execute_batch(
-            "ALTER TABLE sessions DROP COLUMN observed_compactions;
+            "DROP TABLE memory_files;
+             ALTER TABLE sessions DROP COLUMN observed_compactions;
              DELETE FROM schema_migrations WHERE version >= 16;",
         )
         .unwrap();
@@ -215,8 +216,8 @@ fn a_schema_fifteen_database_migrates_forward_and_its_sessions_read_as_uncounted
     let conn = Connection::open(migrated.database_path()).unwrap();
     assert_eq!(
         schema_version(&conn),
-        16,
-        "the launch must have applied migration 16"
+        17,
+        "the launch must have applied migrations 16 and 17"
     );
     drop(conn);
 

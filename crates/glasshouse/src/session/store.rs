@@ -2473,8 +2473,12 @@ mod tests {
     /// indexes go first and `checkpoints_by_session` is put back the way
     /// migration 5 left it. Migration 16's column is indexed by nothing, and a
     /// column-scoped `CHECK` goes with the column it is written on, so it is
-    /// one statement.
+    /// one statement. Migration 17's `memory_files` is one statement for
+    /// migration 15's reason — dropping a table takes its index and its two
+    /// triggers with it — and it goes first, newest migration undone first.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        DROP TABLE memory_files;
+
         ALTER TABLE sessions DROP COLUMN observed_compactions;
         DROP TABLE IF EXISTS evaluation_observations;
         DROP INDEX checkpoints_by_seq;
@@ -3305,6 +3309,24 @@ mod tests {
                 "memories_fts_idx.segid",
                 "memories_fts_idx.term",
                 "memories_fts_idx.pgno",
+                // Migration 17. `seq` and `observed_at` are integers,
+                // `project_id` is the project hash every table carries,
+                // `memory_id` is an identifier, and `provenance` comes from
+                // an exhaustive Rust match at the single writer. `path` is
+                // the one to argue about, and it is argued: it is never free
+                // text a caller chooses — the only writer is
+                // `MemoryStore::record_observed_files`, whose paths come from
+                // the git index by way of
+                // `checkpoint::git::WorkingTreeStatus::detect`, and
+                // `memory::normalize_observed_path` refuses anything that is
+                // not a repo-relative path before it can reach the column. A
+                // credential is not a tracked file name.
+                "memory_files.seq",
+                "memory_files.project_id",
+                "memory_files.memory_id",
+                "memory_files.path",
+                "memory_files.provenance",
+                "memory_files.observed_at",
                 "project_metadata.key",
                 "project_metadata.value",
                 // Migration 11: `routing_observations` (Phase 33A). `seq`,
@@ -3432,6 +3454,7 @@ mod tests {
                 "memories_fts_data",
                 "memories_fts_docsize",
                 "memories_fts_idx",
+                "memory_files",
                 "project_metadata",
                 "routing_observations",
                 "schema_migrations",
@@ -3529,6 +3552,7 @@ mod tests {
                  DROP TABLE IF EXISTS checkpoints;
                  DROP TABLE IF EXISTS routing_observations;
                  DROP TABLE IF EXISTS evaluation_observations;
+                 DROP TABLE IF EXISTS memory_files;
                  DELETE FROM schema_migrations WHERE version >= 3;",
             )
             .unwrap();
@@ -3540,8 +3564,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 16,
-            "the launch must have applied migrations 3 through 16"
+            version, 17,
+            "the launch must have applied migrations 3 through 17"
         );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
@@ -3717,6 +3741,7 @@ mod tests {
                  DROP TABLE IF EXISTS checkpoints;
                  DROP TABLE IF EXISTS routing_observations;
                  DROP TABLE IF EXISTS evaluation_observations;
+                 DROP TABLE IF EXISTS memory_files;
                  DELETE FROM schema_migrations WHERE version >= 2;",
             )
             .unwrap();
@@ -3729,8 +3754,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 16,
-            "the launch must have applied migrations 2 through 16"
+            version, 17,
+            "the launch must have applied migrations 2 through 17"
         );
 
         let store = SessionStore::new(&reopened).unwrap();
@@ -4671,6 +4696,7 @@ mod tests {
                      ALTER TABLE sessions DROP COLUMN source_session_id;
                      DROP TABLE IF EXISTS routing_observations;
                  DROP TABLE IF EXISTS evaluation_observations;
+                 DROP TABLE IF EXISTS memory_files;
                  DELETE FROM schema_migrations WHERE version >= 8;"
                 ))
                 .unwrap();
@@ -4682,8 +4708,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 16,
-                "the launch must have applied migrations 8 through 16"
+                version, 17,
+                "the launch must have applied migrations 8 through 17"
             );
 
             let after = SessionStore::new(&reopened)
@@ -4811,8 +4837,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 16,
-                "the reopen must have applied migrations 12 through 16"
+                version, 17,
+                "the reopen must have applied migrations 12 through 17"
             );
 
             let after = SessionStore::new(&reopened)

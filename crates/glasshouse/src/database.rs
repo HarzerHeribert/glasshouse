@@ -85,9 +85,15 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// then written down nowhere. See the migration's own doc comment for why it
 /// is a counter on `sessions` rather than a twelfth `lifecycle_events` kind,
 /// and for why it is the *only* column Phase 30 needed.
+/// Version 17 adds `memory_files`, the first association in this schema
+/// between a memory and a file — one row per (memory, path) pair, written
+/// from what the working tree was observed to be at the moment extraction
+/// ran. See the migration's own doc comment for why it is a join table
+/// rather than a column, why `path` is repo-relative and `/`-separated, and
+/// why its `provenance` says `observed` and must never say `referenced`.
 /// Later migrations are appended to [`MIGRATIONS`], and this constant moves
 /// with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 16;
+const SUPPORTED_SCHEMA_VERSION: i64 = 17;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -127,6 +133,40 @@ pub(crate) const LIFECYCLE_EVENT_KINDS: [&str; 11] = [
 /// in advance: an enum written before its writers is the same mistake as a
 /// table written before its counts.
 pub(crate) const EVALUATION_KINDS: [&str; 2] = ["memory_retrieved", "disposable_route_decided"];
+
+/// The `memory_files.provenance` values this build writes.
+///
+/// **Deliberately not a SQL `CHECK`**, for [`EVALUATION_KINDS`]' reasons
+/// exactly: this is a vocabulary that will grow — a narrower signal than the
+/// working tree is the obvious next producer — and a `CHECK` on the one
+/// column certain to grow is how `lifecycle_events` came to cost a table
+/// rebuild for its eleventh value and to refuse its twelfth outright.
+/// The vocabulary lives in Rust as [`crate::memory::FileAssociation`], with
+/// an exhaustive `as_str` at the single writer and a test pinning the two
+/// against each other.
+///
+/// **One entry, and the second one is the whole point of having a column.**
+/// `observed` means *"this file differed from the index at the moment the
+/// memory was extracted"* — a correlation with the session, not a claim about
+/// the memory. It is emphatically **not** *"the memory refers to this file"*,
+/// which is what capability-map line 1139 asks for and what nothing in this
+/// build can yet honestly produce. Recording *how* the association was made
+/// is what stops a later, narrower producer from being silently averaged
+/// together with this one.
+///
+/// # `#[cfg(test)]`, and exactly when that stops being right
+///
+/// [`EVALUATION_KINDS`] is not gated because it reaches production through an
+/// error message: something *reads* that table and has to say what it could
+/// not interpret. Nothing reads `memory_files` yet — this package lands the
+/// producer and no consumer — so the only consumer of this constant is the
+/// test that pins it against [`crate::memory::FileAssociation`], and an
+/// ungated constant with a `#[cfg(test)]`-only consumer is dead code that
+/// `-D warnings` refuses. Gating it is the honest shape until a reader lands;
+/// the moment one does, it un-gates and grows the same "which values this
+/// build knows" error [`EVALUATION_KINDS`] already has.
+#[cfg(test)]
+pub(crate) const MEMORY_FILE_PROVENANCE: [&str; 1] = ["observed"];
 
 /// The largest checkpoint the project database will store, in bytes.
 ///
@@ -1667,6 +1707,161 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
     ALTER TABLE sessions ADD COLUMN observed_compactions INTEGER
         CHECK (observed_compactions IS NULL OR observed_compactions >= 0);
     ",
+    // 17: which files were being worked on when a memory was learned —
+    // Phase 28's missing primitive, and deliberately not Phase 28's
+    // capability.
+    //
+    // # What this is, said before what it is not
+    //
+    // One row per (memory, path) pair, written from
+    // `crate::checkpoint::WorkingTreeStatus::changed_files` at the moment
+    // extraction ran. That list is what the git index says differs from the
+    // working tree right now: no model, no subprocess, no guess.
+    //
+    // **It is a correlation with the session, not a reference by the
+    // memory.** A session that dirtied twenty files and yielded three
+    // memories associates all three with all twenty, and that is not a
+    // rounding error in the signal — it *is* the signal. Map line 1139 asks
+    // for the files a memory *"explicitly references"*, and on the automatic
+    // extraction path the model's input contains no prose at all
+    // (`memory::extract::lifecycle`'s own doc comment; `lifecycle_events` has
+    // no text column), so a model asked to name files there would be
+    // fabricating from an empty input. Map line 1294's rule — a fabricated
+    // value does not degrade the policy, it inverts it — is why this table
+    // records what was *observed* and says so in a column, rather than
+    // claiming what was *referenced*.
+    //
+    // # A join table, which this schema has never had, and why not the
+    // alternatives
+    //
+    // - **Not a column on `memories`.** A delimited or JSON list cannot be
+    //   indexed for exact enumeration, which reproduces `checkpoints.document`'s
+    //   defect one table over: you can look a row up, you cannot query the
+    //   set.
+    // - **Not a column in `memories_fts`.** FTS5 tokenisation destroys a path
+    //   at both ends — `src/memory/store.rs` indexes and queries as four
+    //   unrelated words, so every memory sharing any directory component
+    //   would match — and migration 6 shows the cost is a full `DROP` /
+    //   `CREATE` / `'rebuild'` plus three triggers.
+    // - **Not `evaluation_observations`.** That table is *deliberately
+    //   prunable* (90 days / 100,000 rows) and its `subject` is documented as
+    //   free text that is "never a count key on its own". An association that
+    //   expires after 90 days is not an association: the whole value of a
+    //   file→memory link is that it outlives the session that made it.
+    // - **Not `checkpoints.document`.** It already holds real observed paths,
+    //   but it associates them with a *session* rather than a *memory*, in
+    //   opaque JSON, reachable only by a full scan.
+    //
+    // # No `ALTER`, no rebuild, no existing `CHECK` touched
+    //
+    // Migration 15's shape: `CREATE TABLE` plus one index plus migration 11's
+    // two project-scope triggers. `lifecycle_events` is untouched and no new
+    // `LIFECYCLE_EVENT_KINDS` value is added, so map lines 310, 327 and 1316
+    // keep the refusal the register gives them, word for word.
+    //
+    // # `path`: repo-relative, `/`-separated, UTF-8, never absolute
+    //
+    // **This is schema, not an implementation detail, and it is the one place
+    // this table can fail invisibly.** A Windows path, a symlinked mount and
+    // a relative-versus-absolute spelling are three values for one file; two
+    // spellings become two rows and the exact-match index silently misses.
+    // A missed association is invisible, where a wrong one is merely wrong,
+    // so the normalisation is stated here and enforced at the writer by
+    // `crate::memory::normalize_observed_path`.
+    //
+    // The observed producer needs no normalisation *work*: git's index stores
+    // every path as UTF-8, repo-relative and `/`-separated on every platform,
+    // Windows included, and `checkpoint::git::parse_index` reads it straight
+    // with no separator translation. The contract exists for the writers that
+    // come after it — a model-emitted or user-typed path is five spellings of
+    // one file and must be normalised or refused before it reaches this
+    // column.
+    //
+    // Repo-relative is also what keeps the `/var` versus `/private/var` class
+    // of hazard out of the index key: that ambiguity lives in the *root*, and
+    // the root is never stored here. An absolute path would import it
+    // directly into the one column this table matches on.
+    //
+    // Enforcement is at the writer rather than in a `CHECK` because the
+    // schema cannot express it: `CHECK (path NOT LIKE '/%')` would miss
+    // `C:\...`, and a `CHECK` forbidding `\` or `:` would reject file names
+    // that are legal on Unix. The schema refuses only what is never a path at
+    // all — the empty string.
+    //
+    // # `seq`, and bare ids
+    //
+    // `AUTOINCREMENT`, migration 11's and 15's shape for an append-oriented
+    // row: this table has no `UPDATE` path, and an identifier is never reused
+    // even after a future retention policy prunes rows. `memory_id` is a bare
+    // id with no `REFERENCES`, migration 12's rule as migration 15 restates
+    // it: a pointed-at row may be gone, and a read that cannot resolve one
+    // must say so rather than lose the observation.
+    //
+    // # Zero rows is one fact here, not two, and that is deliberate
+    //
+    // A join table cannot distinguish *"the tree was clean"* from
+    // *"extraction ran before this feature existed"* — both are no rows. A
+    // marker column on `memories` would separate them and is exactly the
+    // `ALTER` this migration refuses; the distinction is not worth widening
+    // the schema's blast radius for while nothing reads it. Stated rather
+    // than hidden: for a memory recorded by an older build, the absence of
+    // rows means *unknown*, and for one recorded by this build it means the
+    // reader found nothing to name.
+    //
+    // # One index, and only the one
+    //
+    // `(path)` serves the only access pattern this table exists for: which
+    // memories were learned while this file was being worked on. Migration
+    // 15's closing note applies unchanged — do not add a second index on
+    // speculation.
+    "
+    CREATE TABLE memory_files (
+        seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id  TEXT    NOT NULL,
+
+        -- The memory this row is about. A bare id, no REFERENCES —
+        -- migration 12's rule.
+        memory_id   TEXT    NOT NULL,
+
+        -- Repo-relative, '/'-separated, UTF-8, never absolute. See this
+        -- migration's own 'path' section for why that contract lives at the
+        -- writer and what the schema can and cannot police.
+        path        TEXT    NOT NULL CHECK (path <> ''),
+
+        -- HOW the association was made, so a later narrower signal is never
+        -- silently averaged together with this one. NOT a SQL vocabulary —
+        -- see `MEMORY_FILE_PROVENANCE`.
+        provenance  TEXT    NOT NULL CHECK (provenance <> ''),
+
+        -- When it was observed. Not the memory's own `created_at`: the two
+        -- are written by the same call today and need not stay that way.
+        observed_at INTEGER NOT NULL CHECK (observed_at >= 0)
+    );
+
+    -- The one access pattern: which memories were learned while this exact
+    -- path was being worked on. Exact equality, never a text match.
+    CREATE INDEX memory_files_by_path ON memory_files (path);
+
+    CREATE TRIGGER memory_files_reject_foreign_project_insert
+    BEFORE INSERT ON memory_files
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'memory file association belongs to a different project');
+    END;
+
+    CREATE TRIGGER memory_files_reject_foreign_project_update
+    BEFORE UPDATE OF project_id ON memory_files
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'memory file association belongs to a different project');
+    END;
+    ",
 ];
 
 pub(crate) const PROJECT_ID_KEY: &str = "project_id";
@@ -2150,8 +2345,14 @@ mod tests {
     /// `checkpoints_by_session` is put back the way migration 5 left it.
     /// Migration 16 is one statement for the opposite reason: nothing indexes
     /// `observed_compactions`, and a column-scoped `CHECK` goes with the
-    /// column it is written on.
+    /// column it is written on. Migration 17 is one statement for migration
+    /// 15's reason — dropping `memory_files` takes its index and its two
+    /// triggers with it — and it goes **first**, because the rollback runs
+    /// newest-migration-first for the same reason the ladder runs
+    /// oldest-first.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        DROP TABLE memory_files;
+
         ALTER TABLE sessions DROP COLUMN observed_compactions;
 
         DROP TABLE evaluation_observations;
@@ -2220,6 +2421,161 @@ mod tests {
         // map's own list is five long, so a `CHECK` this failed to read
         // would show up here as an empty vector rather than as a pass.
         assert_eq!(accepted.len(), 5, "the CHECK's list was not read correctly");
+    }
+
+    /// Migration 17's `provenance` carries **no** `CHECK`, so nothing in SQL
+    /// pins it — this test is the guarantee, exactly as
+    /// `EVALUATION_KINDS`' own pinning test is for
+    /// `evaluation_observations.kind`.
+    ///
+    /// Two independently written spellings: [`MEMORY_FILE_PROVENANCE`], which
+    /// sits beside the migration where a schema reader looks, and
+    /// [`crate::memory::FileAssociation`], which is what the writer actually
+    /// stores. Neither is derived from the other — that is the whole point,
+    /// and it is why this is not a tautology.
+    ///
+    /// **The one that must never appear here is `referenced`.** Migration
+    /// 17's own text and `FileAssociation::Observed`'s both say why: this
+    /// build observes which files were dirty, and calling that a reference
+    /// would close capability-map line 1139 on a producer that does not
+    /// exist. A future package may add the value — beside this one, with its
+    /// own producer — and this test is where it has to be declared.
+    #[test]
+    fn every_file_association_the_type_supports_is_one_the_schema_records() {
+        use crate::memory::FileAssociation;
+
+        let declared: Vec<&str> = FileAssociation::ALL
+            .iter()
+            .map(|association| association.as_str())
+            .collect();
+        assert_eq!(
+            declared,
+            MEMORY_FILE_PROVENANCE.to_vec(),
+            "a memory-file provenance was added or renamed on one side only"
+        );
+
+        // Every declared value must survive a round trip, or a row this build
+        // wrote is a row it cannot read back.
+        for association in FileAssociation::ALL {
+            assert_eq!(
+                FileAssociation::from_stored(association.as_str()),
+                Some(*association)
+            );
+        }
+        assert_eq!(FileAssociation::from_stored("referenced"), None);
+        assert_eq!(FileAssociation::from_stored(""), None);
+    }
+
+    /// Migration proof for migration 17: a version-16 database opens,
+    /// migrates to 17, keeps every memory it had, and comes out with a table
+    /// that accepts an association — plus the index and the two triggers, and
+    /// nothing else.
+    ///
+    /// The trigger check is by name and by behaviour: migration 5's three
+    /// append-only triggers are deliberately **not** copied here, so a future
+    /// migration that adds one fails this rather than quietly making a
+    /// prunable table permanent.
+    #[test]
+    fn a_version_sixteen_database_migrates_forward_keeping_its_memories() {
+        use crate::memory::{MemoryKind, NewMemory, ProjectMemory};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+
+        let recorded = {
+            let memory = ProjectMemory::open(&fixture.runtime).unwrap();
+            memory
+                .store()
+                .record(NewMemory::new(
+                    MemoryKind::Finding,
+                    "a memory written before migration 17 existed",
+                ))
+                .unwrap()
+        };
+
+        let db_path = fixture.runtime.database_path();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "DROP TABLE memory_files;
+                 DELETE FROM schema_migrations WHERE version >= 17;",
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            schema_version(&db_path),
+            16,
+            "the rollback must land on version 16"
+        );
+
+        let migrated = fixture.rebootstrap().unwrap();
+        assert_eq!(
+            schema_version(&migrated.database_path()),
+            SUPPORTED_SCHEMA_VERSION,
+            "the launch must have applied migration 17"
+        );
+
+        // The memory that predates the table is still there, and reads back
+        // with no associations — which is the truth about it.
+        let memory = ProjectMemory::open(&migrated).unwrap();
+        let store = memory.store();
+        assert_eq!(
+            store.get(&recorded.id).unwrap().map(|found| found.body),
+            Some(recorded.body.clone())
+        );
+
+        let conn = Connection::open(migrated.database_path()).unwrap();
+        let associations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memory_files", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            associations, 0,
+            "a memory recorded before this migration has no associations to invent"
+        );
+
+        // The index the table exists for.
+        let index: Option<String> = conn
+            .query_row(
+                "SELECT name FROM sqlite_master                   WHERE type = 'index' AND name = 'memory_files_by_path'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(index.as_deref(), Some("memory_files_by_path"));
+
+        // Migration 11's two triggers, and nothing else — no append-only
+        // trigger, so this table stays prunable.
+        let mut statement = conn
+            .prepare(
+                "SELECT name FROM sqlite_master                   WHERE type = 'trigger' AND tbl_name = 'memory_files' ORDER BY name",
+            )
+            .unwrap();
+        let triggers: Vec<String> = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            triggers,
+            vec![
+                "memory_files_reject_foreign_project_insert".to_owned(),
+                "memory_files_reject_foreign_project_update".to_owned(),
+            ],
+            "migration 11's two project-scope triggers, and nothing else"
+        );
+        drop(statement);
+
+        // And the table really is prunable, behaviourally — unlike
+        // `lifecycle_events`, whose BEFORE DELETE trigger aborts.
+        store
+            .record_observed_files(
+                std::slice::from_ref(&recorded.id),
+                &["src/example.rs".to_owned()],
+            )
+            .unwrap();
+        let removed = conn.execute("DELETE FROM memory_files", []).unwrap();
+        assert_eq!(removed, 1);
     }
 
     /// Migration 10's `CHECK` on `review_reason` is the only definition of
