@@ -191,6 +191,69 @@ def main() -> int:
             if "--role worker" not in armed.group(1):
                 failures.append("the worker prompt must arm the watch with --role worker, not the orchestrator role")
 
+    # --- 4b. --effort is optional, composes with --model, and rejects a typo
+    #
+    # Effort is not dynamic today: every worker inherits whatever the global
+    # default is, regardless of tier. `--effort` is the missing sibling of
+    # `--model` (already threaded, positional-independent). The one rule that
+    # matters: omitted, the launch command must be byte-identical to before
+    # this flag existed. `--print-prompt` now emits that command as its first
+    # line (`LAUNCH: ...`), so this is checked hermetically -- no real worker
+    # is spawned, per this package's own STOP CONDITIONS.
+    if not NEW_WORKER.exists():
+        failures.append("scripts/dev/new-worker.sh is missing")  # already recorded above
+    else:
+        def launch_line(*extra_args: str) -> str | None:
+            with tempfile.TemporaryDirectory() as raw:
+                packet = Path(raw) / "packet-test.md"
+                packet.write_text("# TASK PACKET — TEST\n")
+                built = subprocess.run(
+                    ["bash", str(NEW_WORKER), "test-worker", raw, str(packet),
+                     *extra_args, "--print-prompt"],
+                    capture_output=True, text=True, timeout=60,
+                )
+            lines = built.stdout.splitlines()
+            if not lines or not lines[0].startswith("LAUNCH: "):
+                return None
+            return lines[0][len("LAUNCH: "):]
+
+        baseline = launch_line()
+        expected_baseline = "claude --model sonnet --permission-mode auto --remote-control"
+        if baseline != expected_baseline:
+            failures.append(
+                f"no --effort must leave the launch command byte-identical to today's "
+                f"({expected_baseline!r}); got {baseline!r}"
+            )
+
+        with_effort = launch_line("--effort", "medium")
+        if with_effort != f"{expected_baseline} --effort medium":
+            failures.append(f"--effort medium did not appear at that level: {with_effort!r}")
+
+        order_a = launch_line("--model", "sonnet", "--effort", "medium")
+        order_b = launch_line("--effort", "medium", "--model", "sonnet")
+        if order_a != order_b or order_a is None:
+            failures.append(
+                f"--model and --effort must compose regardless of order: {order_a!r} != {order_b!r}"
+            )
+
+        # An unknown level must be rejected loudly, before a workspace is
+        # created -- checked without --print-prompt: validation happens before
+        # any `cmux` call, so a bad level must fail fast rather than hang
+        # waiting on a workspace that never gets created.
+        with tempfile.TemporaryDirectory() as raw:
+            packet = Path(raw) / "packet-test.md"
+            packet.write_text("# TASK PACKET — TEST\n")
+            bad = subprocess.run(
+                ["bash", str(NEW_WORKER), "test-worker", raw, str(packet), "--effort", "bogus"],
+                capture_output=True, text=True, timeout=10,
+            )
+        if bad.returncode == 0:
+            failures.append("new-worker.sh accepted an unknown --effort level (exit 0)")
+        if "dispatched" in (bad.stdout + bad.stderr).lower():
+            failures.append(
+                f"an unknown --effort level must create no workspace; script said: {bad.stdout!r}"
+            )
+
     # --- 5. the orchestrator relaunch prompt arms it ----------------------
     if SELF_CONTINUE.exists():
         text = SELF_CONTINUE.read_text()

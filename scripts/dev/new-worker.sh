@@ -28,7 +28,13 @@
 # prompt did not take, instead of leaving a silent idle worker burning nothing.
 #
 # USAGE
-#   scripts/dev/new-worker.sh <name> <cwd> <packet-path> [--model sonnet]
+#   scripts/dev/new-worker.sh <name> <cwd> <packet-path> [--model sonnet] [--effort <level>]
+#
+# --effort is optional. Omitted, the launch is byte-identical to before this
+# flag existed -- no existing caller or test changes behaviour. Given, it must
+# be one of the levels the harness itself accepts (`claude --help`): low,
+# medium, high, xhigh, max. The orchestrator chooses the level per worker
+# tier; this script only carries it.
 set -uo pipefail
 
 # The checkout this script lives in, resolved from its own location so the
@@ -36,7 +42,30 @@ set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 NAME="${1:?worker name}"; CWD="${2:?working directory}"; PACKET="${3:?packet path}"
-MODEL="sonnet"; [ "${4:-}" = "--model" ] && MODEL="${5:-sonnet}"
+MODEL="sonnet"
+EFFORT=""
+PRINT_PROMPT_FLAG=0
+shift 3
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --model)
+      MODEL="${2:-sonnet}"; shift "$(( $# >= 2 ? 2 : 1 ))" ;;
+    --effort)
+      [ "$#" -ge 2 ] || { echo "new-worker: --effort requires a level"; exit 1; }
+      EFFORT="$2"; shift 2 ;;
+    --print-prompt)
+      PRINT_PROMPT_FLAG=1; shift ;;
+    *)
+      echo "new-worker: unknown argument: $1"; exit 1 ;;
+  esac
+done
+
+case "$EFFORT" in
+  ""|low|medium|high|xhigh|max) ;;
+  *)
+    echo "new-worker: unknown --effort level: $EFFORT (expected one of: low, medium, high, xhigh, max)"
+    exit 1 ;;
+esac
 
 [ -d "$CWD" ]    || { echo "new-worker: $CWD does not exist"; exit 1; }
 [ -f "$PACKET" ] || { echo "new-worker: packet $PACKET does not exist"; exit 1; }
@@ -53,7 +82,17 @@ PACKET="$(cd "$(dirname "$PACKET")" && pwd)/$(basename "$PACKET")"
 
 ARM="FIRST, before reading anything: arm your continuity watch, or you will run out of context mid-package with nothing to show for it. Run Monitor(command: \"${REPO}/scripts/continuity-watch.sh --role worker\", persistent: true). It finds your session itself; if it prints CONTINUITY NOT ARMED, pass --session with the last path component of your scratchpad directory and run it again. THEN:"
 PROMPT="${ARM} Read ${PACKET} now and follow it exactly. Read ONLY the files its 'READ ONLY THIS' section names - reading more is the documented way workers waste context. Do not commit. Write your report to the path the packet's REPORT TO section gives."
-# `--print-prompt` builds the prompt and exits, launching nothing.
+
+# Built here, before the --print-prompt short-circuit, so that path can also
+# expose the launch command a worker actually receives -- not just the prompt
+# it is typed. That is what `--effort` needs proven: the flag composes with
+# `--model` regardless of order, and an omitted flag leaves this byte-identical
+# to before the flag existed.
+LAUNCH="claude --model $MODEL --permission-mode auto --remote-control"
+[ -n "$EFFORT" ] && LAUNCH="$LAUNCH --effort $EFFORT"
+
+# `--print-prompt` builds the prompt and the launch command and exits,
+# launching nothing.
 #
 # It exists so `scripts/tests/test_launch_prompts.py` can assert on the prompt
 # a worker would ACTUALLY receive rather than on how this file spells it. The
@@ -61,7 +100,8 @@ PROMPT="${ARM} Read ${PACKET} now and follow it exactly. Read ONLY the files its
 # mutation that emptied ARM while leaving the words in a trailing comment —
 # SURVIVED, on a check that looked thorough. Assert on the product, not the
 # source.
-if [ "${PRINT_PROMPT:-}" = 1 ] || [ "${4:-}" = "--print-prompt" ]; then
+if [ "${PRINT_PROMPT:-}" = 1 ] || [ "$PRINT_PROMPT_FLAG" = 1 ]; then
+  printf 'LAUNCH: %s\n' "$LAUNCH"
   printf '%s\n' "$PROMPT"
   exit 0
 fi
@@ -113,7 +153,6 @@ for _ in $(seq 1 20); do
 done
 [ "$shell_ready" -eq 1 ] || echo "new-worker: WARNING — no shell prompt seen on $surface; sending anyway"
 
-LAUNCH="claude --model $MODEL --permission-mode auto --remote-control"
 landed=0
 for attempt in 1 2 3; do
   cmux send --surface "$surface" "$LAUNCH" >/dev/null
