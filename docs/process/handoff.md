@@ -84,6 +84,37 @@ session id from the relaunch recipe, collapsing the fire-once lock to a shared
 from a worktree gets *"no changed .rs files"* and **exit 0** — a verification
 tool reporting success about the wrong tree. `GH-BLAST-RADIUS-TREE` is fixing it.
 
+### THE GATE RAN: 20 PASS / 1 FAIL, and the interrupt fix is verified
+
+`ci-local.sh --macos --linux --windows-vm` on `3b73a26`.
+
+**Both jobs the fix was written for are green.** `test (ubuntu) / build+test`
+PASSES — and Ubuntu is where `/bin/sh` is `dash`, the hard case, running both
+`an_interrupt_sent_by_the_client_makes_the_worker_react` and the new shell-matrix
+test. `test (windows) / test` PASSES. The predecessor's "Linux kills the worker"
+conclusion is disproved on the machine as well as in the reading.
+
+**The one FAIL is a flake the same batch introduced**, and it is macOS-only:
+
+| run | result |
+|---|---|
+| gate, macOS leg | **FAILED** — *"timed out waiting for /bin/sh to run its INT trap"*; the 19-test binary took **30.99 s** |
+| alone, that test | **ok in 0.20 s** |
+| alone, all 19 | **ok, 2.81 s** |
+
+Two clean runs, per §85's "attribute a FAIL with two runs, not one". **But this
+is not waved away**: the gate runs its legs *serially* (no `&` in `ci-local.sh`),
+so "the other legs competed" is not the explanation, and a 150× gap between
+0.20 s and a blown 30 s deadline is not gradual degradation — it looks like a
+race, most likely the interrupt arriving before the shell installs its trap.
+`GH-INTERRUPT-TEST-FLAKE` is diagnosing it under deliberately generated load,
+with §60's ≥20-run requirement, and is forbidden from touching `src/` or
+weakening the shell matrix.
+
+**`441` still prints `SKIPPED: the native secure store would not open in this
+session` five times on Windows.** Unchanged, still a CI-image problem, still
+worth reading the skips rather than the summary.
+
 ### The co-edit barrier: a third measurement, and a gap in my own loop
 
 `main.rs` carried two claimants this round — `memory-conflict-resolve` (a
