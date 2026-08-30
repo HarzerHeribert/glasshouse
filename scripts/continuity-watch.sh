@@ -135,9 +135,24 @@ num() {
   echo "$v"
 }
 
+# The relaunch recipe MUST carry the session id, and this is why.
+#
+# `self-continue.sh` scopes its fire-once lock as `.relaunch-<sessid>-<mode>`,
+# and reads that id from `CCSL_SESSID`. That variable is NOT exported into this
+# environment, so a recipe that omits it collapses every session's lock to the
+# single shared file `.relaunch-unknown-context.lock` -- which is precisely the
+# shared-lock defect self-continue.sh's own header says was fixed on 2026-08-26.
+# Measured 2026-08-30: a handoff reported "already relaunched; nothing to do"
+# against a lock written by an entirely different session, and the orchestrator
+# had to work the variable out by hand.
+#
+# This watch has already discovered or been given the id. Passing it on costs
+# nothing, and it is the only place that knows it at the moment the advice is
+# printed. A fire-once safety net whose identity degrades to a constant is a
+# fire-once-EVER safety net.
 if [ "$ROLE" = orchestrator ]; then
-  CTX_ACTION="write .agent-runtime/CONTINUATION.md and hand off: .agent-runtime/self-continue.sh context"
-  RL5_ACTION="Checkpoint now; .agent-runtime/self-continue.sh ratelimit waits for the reset."
+  CTX_ACTION="write .agent-runtime/CONTINUATION.md and hand off: CCSL_SESSID=${SESSID} .agent-runtime/self-continue.sh context"
+  RL5_ACTION="Checkpoint now; CCSL_SESSID=${SESSID} .agent-runtime/self-continue.sh ratelimit waits for the reset."
 else
   CTX_ACTION="finish and WRITE YOUR REPORT NOW, then stop. Do not start new work, and do not run self-continue.sh — that relaunches an orchestrator, which is not your role."
   RL5_ACTION="Write your report with what you have; say in it what is unfinished."

@@ -208,6 +208,57 @@ def main() -> int:
             "relaunch prompt was NOT checked"
         )
 
+    # --- 6. the relaunch recipe carries the session id, and a missing id --
+    #        is refused rather than shared ---------------------------------
+    #
+    # WHY: `self-continue.sh` scopes its fire-once lock as
+    # `.relaunch-<sessid>-<mode>.lock` and reads the id from `CCSL_SESSID`.
+    # That variable is not exported into the environment the watch's advice is
+    # followed in, so `${CCSL_SESSID:-unknown}` collapsed EVERY session onto one
+    # shared lock file — reinstating, by a different route, the exact defect
+    # self-continue.sh's own header says was fixed on 2026-08-26. Measured
+    # 2026-08-30: a handoff reported "already relaunched; nothing to do" against
+    # a lock an unrelated session had written, and
+    # `.agent-runtime/.relaunch-unknown-context.lock` is still on disk as the
+    # evidence.
+    #
+    # Two halves, so check both: the watch must PASS the id on (it is the only
+    # place that knows it), and self-continue.sh must REFUSE a degraded one
+    # rather than quietly share. Either half alone leaves the hole open.
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        sessid = "cafe1234-0000-4000-8000-abcdefabcdef"
+        statusline(tmp, sessid, ctx="76", rl5="10", rl7="10")
+        said = run_watch(sessid, tmp, role="orchestrator")
+        if "self-continue.sh" in said and f"CCSL_SESSID={sessid}" not in said:
+            failures.append(
+                "continuity-watch.sh --role orchestrator advises running self-continue.sh "
+                f"WITHOUT CCSL_SESSID={sessid}; every session would then share the lock "
+                ".relaunch-unknown-context.lock"
+            )
+
+    if SELF_CONTINUE.exists():
+        env = {k: v for k, v in os.environ.items() if k != "CCSL_SESSID"}
+        done = subprocess.run(
+            ["bash", str(SELF_CONTINUE), "context"],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+        if done.returncode == 0:
+            failures.append(
+                ".agent-runtime/self-continue.sh accepted an unset CCSL_SESSID (exit 0) "
+                "instead of refusing; its fire-once lock is shared with every other session"
+            )
+        elif "CCSL_SESSID" not in (done.stderr + done.stdout):
+            failures.append(
+                ".agent-runtime/self-continue.sh refused an unset CCSL_SESSID but never "
+                "named the variable, so the message does not say how to fix it"
+            )
+    else:
+        notes.append(
+            ".agent-runtime/self-continue.sh absent (gitignored) — the shared-lock refusal "
+            "was NOT checked"
+        )
+
     if failures:
         print(f"test_launch_prompts: {len(failures)} failure(s)", file=sys.stderr)
         for f in failures:
@@ -215,7 +266,8 @@ def main() -> int:
         return 1
 
     print("test_launch_prompts: ok — both roles fire at 75/90/100, blind announces itself "
-          "and keeps watching, and the worker launch prompt arms a rooted path")
+          "and keeps watching, the worker launch prompt arms a rooted path, and the "
+          "relaunch recipe carries a session id that cannot degrade to a shared lock")
     for n in notes:
         print(f"  note: {n}")
     return 0
