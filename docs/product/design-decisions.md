@@ -2586,3 +2586,69 @@ behind it. A first package is a model-capability table keyed by
 the measured half can replace the seed per entry rather than wholesale — because
 the seed and the measurement will disagree, and the design has to say which wins
 and when.
+
+## A durable observation sink: the user picks the root, not the eighteen leaves
+
+**Decided 2026-08-30**, on an explicit question, after two recons classified 35
+open lines across five phases and found exactly **one** reachable.
+
+### The finding that forced the question
+
+> *"Every line that closed did so by reading something **already** durable on
+> disk — session events already logged, gateway caches already written by a
+> different process — rather than by adding a new producer. The producers that
+> already exist were the ones that closed the map's easy lines. What is left is
+> producers that do not exist yet."*
+
+So the search heuristic this project has run on — find a mechanism built and
+never installed, then wire it — is **exhausted**. A phase being mostly closed is
+now evidence *against* its remainder being cheap, and `ORIENT.md`'s
+fewest-open-first ranking actively misleads: three packages died at Phase −1 in
+one batch, each of them recommended by that ranking.
+
+### The decision
+
+**Build a durable observation sink.** Offered the three tractable directions,
+the user chose the root rather than the leaves.
+
+It is the largest tractable option — roughly **18 lines** across three phases
+depend on it, and every one is already diagnosed down to its seam:
+
+- **Cluster H** (1757, 1759, 1760, 1763, 1766, 1767, 1769) — *"a view whose data
+  is never made durable"*. `RoutingExplanation` (`routing/mod.rs:475`) has no
+  durable sink; every production sink is a `tracing` line or an in-memory `Vec`.
+  `ShellState::record_disposable_choice` (`shell/state.rs:1216`) has zero
+  production callers while `shell/view.rs:1793` **already renders it**.
+- **Phase 47**'s seven open lines — uniformly the same shape.
+- **Phase 9K's 627–630** — four "Measure…" lines waiting on a measurement
+  channel that does not exist anywhere in the build.
+
+### The trap this decision exists to avoid
+
+**Phase 47, as the map currently words it, is a debug VIEW.** Closing it as
+scoped would deliver a view over data still not made durable, and **would not
+unblock 627–630.** A recon checked this specifically. So the thing to build is a
+**producer**, and no phase in the map currently owns one.
+
+**That is why this was the user's call and not a packet's.** It is new product
+surface. A package that quietly grew a producer while claiming to close a view
+line would be inventing scope, and this project's rule is that the map is
+authoritative and design decisions are recorded here first.
+
+### Constraints the first package inherits
+
+1. **A schema migration is likely, and this project refuses those casually** —
+   Cluster G exists for exactly that, and says *design first*. Establish whether
+   the sink needs new tables or fits an existing one before writing code.
+2. **`EvidenceKey` (`harness/pairing.rs:502`) already keys correctly** —
+   `(harness, launch_profile, model, route)`. `RoutingObservation`
+   (`routing/evidence.rs:338`) does **not**: it has no `launch_profile`. A sink
+   built on the coarser key silently conflates two profiles of the same
+   harness+model+route. Reuse the key that is already right.
+3. **A view is not a producer, and a producer with no reader is Cluster B.**
+   The package must land both halves or state plainly which half it left, and
+   `record_disposable_choice`'s existing renderer at `shell/view.rs:1793` is the
+   cheapest reader to satisfy first.
+4. **Do not fabricate a value to fill a column.** Map line 1294's refusal is the
+   standing example: *"a fabricated value here does not degrade the policy, it
+   inverts it."* A column production cannot honestly fill stays absent.
