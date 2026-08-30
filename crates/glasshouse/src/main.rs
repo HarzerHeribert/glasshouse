@@ -1743,6 +1743,18 @@ fn launch_session(
     // never after: a person who did not want their previous session continued
     // needs to read that on the way in, while `--fresh` is still an answer.
     if let Some(routed) = &routed {
+        // Map lines 1829 and 1830: this is the one moment both facts are
+        // known, and the one the two `eprintln!`s below already render for a
+        // person without either being counted anywhere. `glasshouse route`
+        // (main.rs:1462) reaches the same router but never this branch, so
+        // it never reaches this call either — it reports without acting.
+        glasshouse::evaluation::record_routing_decision(
+            runtime,
+            routed.chosen().id(),
+            routed.chosen().is_fresh(),
+            routed.overrode(),
+            glasshouse::evaluation::now_unix(),
+        );
         if let Some(refusal) = routed.override_refused() {
             eprintln!("glasshouse: {refusal}");
         }

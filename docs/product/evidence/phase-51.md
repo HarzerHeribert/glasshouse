@@ -59,3 +59,74 @@ so both rules could not hold. The worker took ownership as binding, wrote and
 verified the fix, **restored the file byte-identically**, and left the patch
 beside its report — which the orchestrator applied. **Every future migration
 packet must include the rollback fixtures or declare them a shared file.**
+
+---
+
+# Lines 1829 and 1830 — closed 2026-08-30
+
+Package `GH-ROUTING-OVERRIDE-SIGNAL`, scoped by `GH-PHASE51-RECON`.
+
+- **1829** *"Measure how often automatic routing is overridden by the user."*
+- **1830** *"Measure how often warm-session reuse is chosen over fresh-session
+  creation."*
+
+State: **COMPLETE** (both)
+
+## Why these two are one package
+
+They are two fields of the same value. `SessionRouter::choose` returns a
+`Routed` that already carries both: `Routed::overrode()` is 1829 in the
+codebase's own words — *"the `Destination::id` the ranking would have chosen,
+when a user override changed the answer"* — and `Destination::is_fresh()` is
+1830. Splitting them would have meant two workers building one producer call.
+
+`routing/session.rs` contains **zero** `#[cfg(test)]`, so every line of the
+producer is production.
+
+## The gap was not a mechanism, it was a write
+
+**Both numbers were already computed and already shown to the user, then
+discarded.** The resume path prints *"the ranking would have chosen `X`"* and
+the launch path prints *"continuing session N … rather than starting a new
+one"*. Neither was recorded. `record_routing_decision`
+(`evaluation/mod.rs`), called from `launch_session`, records them — copying
+`record_disposable_route`'s established producer shape exactly.
+
+**No migration.** `evaluation_observations.kind` carries only
+`CHECK (kind <> '')`, deliberately, because `database.rs:139-146` says *"this
+is a vocabulary that will grow"*; `evaluation/mod.rs` prescribes *"One variant
+per landed producer."* Two variants were added and pinned in
+`EVALUATION_KINDS`.
+
+## The two honesty properties, both pinned by mutation
+
+1. **`overrode()` returning `None` means the automatic answer stood** — it is
+   not "no override was offered", and it is recorded as `automatic` rather
+   than omitted. Mutating `if overrode.is_some()` to `if true` dies on
+   *"no override was asked for, so `overrode()`'s `None` must be recorded as
+   the automatic answer standing, not as an override."*
+2. **`glasshouse route` records nothing.** It reports without acting, so
+   recording there would make the counts answer a different question than
+   1829 and 1830 ask. Pinned by
+   `glasshouse_route_reports_without_acting_and_records_nothing`.
+
+The characteristic mutation — deleting the `record_routing_decision` call from
+`launch_session` — is **KILLED** by four tests. It lands on the **call** (§35),
+so a test that had entered at the producer would not have caught it.
+
+## Consumer
+
+`EvaluationObservations::recent_of_kind` and `::count(kind, from, to)`, both
+already production and already rendered by `build_route_decision_table` in the
+shell's routing-decisions view. A person reads that table today.
+
+## Limits
+
+- No mutation isolates the freshness fact independently of the shared call
+  site; `Destination::is_fresh()` lives in a file this package was forbidden to
+  edit.
+- The ledger-open-failure arm is inspection-verified against a byte-identical
+  sibling (`record_memory_retrieval`), not independently test-verified.
+- These count decisions on the **launch** path only. The resume path
+  (`main.rs`) computes the same `Routed` and still records nothing; that is a
+  separate package, not a gap in these two lines.

@@ -1826,8 +1826,8 @@ Phase 51 — Evaluation hooks
 ☑ Measure how often superseded memories are incorrectly resurfaced as current guidance.
 ☐ Measure whether production-aware checks catch expensive query patterns or scaling assumptions before deployment.
 ☐ Measure how often one harness successfully continues work from another harness’s checkpoint.
-☐ Measure how often automatic routing is overridden by the user.
-☐ Measure how often warm-session reuse is chosen over fresh-session creation.
+☑ Measure how often automatic routing is overridden by the user.
+☑ Measure how often warm-session reuse is chosen over fresh-session creation.
 ☐ Measure how often memory prevents repetition of a recorded failed approach.
 ☐ Measure memory-extraction cost separately from interactive coding cost.
 ☐ Measure routing-model cost and request consumption separately from interactive coding cost.

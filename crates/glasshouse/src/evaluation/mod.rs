@@ -116,6 +116,23 @@ pub enum EvaluationKind {
     /// already renders, and a reader renders that sentence rather than
     /// rebuilding the decision.
     DisposableRouteDecided,
+    /// A launch's session-boundary routing decided whether the automatic
+    /// ranking stood or a user override changed it — map line 1829.
+    /// `subject` is `"automatic"` or `"overridden"`; `detail` is, only when
+    /// overridden, the destination id the ranking would have chosen instead
+    /// (`crate::routing::session::Routed::overrode`).
+    ///
+    /// **Recorded every launch that reached a routing decision, not only the
+    /// overridden ones.** Unlike [`Self::MemoryRetrieved`], omitting the
+    /// non-event here would leave no way to tell "never overridden" from
+    /// "never launched", and line 1829 asks about the former.
+    RoutingOverrideDecided,
+    /// The same launch's decision on the other axis: whether the chosen
+    /// destination continues a warm session or starts fresh — map line 1830.
+    /// `subject` is `"existing"` or `"fresh"`
+    /// (`crate::routing::session::Destination::is_fresh`); `detail` is the
+    /// chosen destination's id.
+    RoutingContinuationDecided,
 }
 
 impl EvaluationKind {
@@ -123,6 +140,8 @@ impl EvaluationKind {
         match self {
             Self::MemoryRetrieved => "memory_retrieved",
             Self::DisposableRouteDecided => "disposable_route_decided",
+            Self::RoutingOverrideDecided => "routing_override_decided",
+            Self::RoutingContinuationDecided => "routing_continuation_decided",
         }
     }
 
@@ -136,6 +155,8 @@ impl EvaluationKind {
         match value {
             "memory_retrieved" => Some(Self::MemoryRetrieved),
             "disposable_route_decided" => Some(Self::DisposableRouteDecided),
+            "routing_override_decided" => Some(Self::RoutingOverrideDecided),
+            "routing_continuation_decided" => Some(Self::RoutingContinuationDecided),
             _ => None,
         }
     }
@@ -1001,6 +1022,75 @@ pub fn record_disposable_route(
     }
 }
 
+/// Record one launch's session-boundary routing decision — the producer for
+/// [`EvaluationKind::RoutingOverrideDecided`] and
+/// [`EvaluationKind::RoutingContinuationDecided`], map lines 1829 and 1830.
+///
+/// **This never fails a launch.** Its one caller is
+/// `main.rs::launch_session`, on the person's own command path, so every
+/// error here is a `tracing::warn!` and a return, exactly as
+/// [`record_disposable_route`] is.
+///
+/// The handle is opened here, and only here, and only when there is a routed
+/// decision to record — practice §65's rule that a resource is acquired
+/// where its consumer starts.
+///
+/// # What is stored, and what is left absent
+///
+/// Two rows, always together: `destination_id` and `fresh` are known the
+/// instant a destination is chosen, so neither one is ever the "nothing
+/// meaningful to say" case the way an empty rationale is for
+/// [`record_disposable_route`]. `subject` carries the boolean-shaped fact
+/// each line asks about and `detail` carries a destination id — never a file
+/// path, prompt text, or credential.
+///
+/// `session_id` is left absent on both rows. A launch that continues an
+/// existing session could name it, but a fresh launch has not minted one yet
+/// at this point in `launch_session`, and a producer that filled the field on
+/// one branch and not the other would make its absence look like a fact
+/// about the decision rather than about when the row was written.
+pub fn record_routing_decision(
+    runtime: &Runtime,
+    destination_id: &str,
+    fresh: bool,
+    overrode: Option<&str>,
+    observed_at_unix: i64,
+) {
+    let mut override_observation = NewObservation::new(EvaluationKind::RoutingOverrideDecided)
+        .with_subject(if overrode.is_some() {
+            "overridden"
+        } else {
+            "automatic"
+        });
+    if let Some(automatic) = overrode {
+        override_observation = override_observation.with_detail(automatic);
+    }
+
+    let continuation_observation = NewObservation::new(EvaluationKind::RoutingContinuationDecided)
+        .with_subject(if fresh { "fresh" } else { "existing" })
+        .with_detail(destination_id);
+
+    let observations = [override_observation, continuation_observation];
+
+    let ledger = match EvaluationObservations::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not open the evaluation ledger; the routing decision stands, but it was \
+                 not counted"
+            );
+            return;
+        }
+    };
+    if let Err(err) = ledger.record_all(&observations, observed_at_unix) {
+        tracing::warn!(
+            error = %err,
+            "could not record a routing decision; the decision stands, but it was not counted"
+        );
+    }
+}
+
 /// Seconds since the Unix epoch, the way every other store in this crate reads
 /// the clock.
 pub fn now_unix() -> i64 {
@@ -1028,6 +1118,8 @@ mod tests {
         let declared = [
             EvaluationKind::MemoryRetrieved,
             EvaluationKind::DisposableRouteDecided,
+            EvaluationKind::RoutingOverrideDecided,
+            EvaluationKind::RoutingContinuationDecided,
         ];
         let names: Vec<&str> = declared.iter().map(|kind| kind.as_str()).collect();
         assert_eq!(

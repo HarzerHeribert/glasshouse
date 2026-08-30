@@ -1068,3 +1068,337 @@ fn an_evaluation_rows_provenance_survives_a_routing_observations_rebuild() {
         }
     }
 }
+
+// -------------------------------------------------------------------------
+// 1829 / 1830 — a launch's routing decision becomes countable
+// -------------------------------------------------------------------------
+
+/// A project wired with a fake harness, so `glasshouse launch` runs end to
+/// end — the same shape `tests/route_command.rs` uses, and for the same
+/// reason (practice §35): lines 1829 and 1830's whole claim is that
+/// `main.rs::launch_session`, the production caller, now leaves a trace.
+/// Asserting that `record_routing_decision` inserts a row would prove
+/// nothing about that.
+struct LaunchFixture {
+    base: PathBuf,
+    runtime: Runtime,
+}
+
+impl LaunchFixture {
+    fn new(base: &Path) -> Self {
+        let root = base.join("workspace");
+        std::fs::create_dir_all(root.join(".git")).expect("create project root");
+        let root = std::fs::canonicalize(&root).expect("canonicalize project root");
+
+        let bin_dir = base.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let harness = install_fake_harness(&bin_dir);
+        let escaped = harness.display().to_string().replace('\\', "\\\\");
+
+        let config_dir = base.join("config");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            format!(
+                "version = 1\n\n[integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n"
+            ),
+        )
+        .expect("write user config");
+
+        let cli = Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            base.join("data").to_str().unwrap(),
+            "--config-dir",
+            config_dir.to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = bootstrap(&cli, &root).unwrap();
+
+        LaunchFixture {
+            base: base.to_path_buf(),
+            runtime,
+        }
+    }
+
+    fn glasshouse(&self, args: &[&str]) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+            .current_dir(self.runtime.project().root())
+            .arg("--data-dir")
+            .arg(self.base.join("data"))
+            .arg("--config-dir")
+            .arg(self.base.join("config"))
+            .args(args)
+            .output()
+            .expect("the glasshouse binary must run")
+    }
+
+    fn both_streams(output: &std::process::Output) -> String {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    }
+
+    fn ledger(&self) -> EvaluationObservations {
+        EvaluationObservations::open(&self.runtime).unwrap()
+    }
+
+    /// Every recorded session's id, oldest first — read straight off the
+    /// `sessions` table, the same door `route_command.rs`'s
+    /// `recorded_sessions` reaches through `glasshouse sessions` instead.
+    fn session_ids(&self) -> Vec<String> {
+        let conn = Connection::open(self.runtime.database_path()).unwrap();
+        let mut statement = conn
+            .prepare("SELECT id FROM sessions ORDER BY created_at")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
+    }
+}
+
+#[cfg(unix)]
+fn install_fake_harness(bin_dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join("fake-claude-code");
+    std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write fake harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+#[cfg(windows)]
+fn install_fake_harness(bin_dir: &Path) -> PathBuf {
+    let path = bin_dir.join("fake-claude-code.cmd");
+    std::fs::write(&path, "@echo off\r\nexit /b 0\r\n").expect("write fake harness");
+    path
+}
+
+/// **Acceptance 1.** A launch with nothing to override records the automatic
+/// outcome, and `overrode()`'s `None` must be recorded as *the automatic
+/// answer stood* — not folded into an override.
+///
+/// This is also the mutation target for the producer: a producer that
+/// recorded `"overridden"` whenever it was merely called, rather than reading
+/// `overrode()`, would pass every other test here and only fail this one.
+#[test]
+fn a_launch_where_the_ranking_stands_records_the_automatic_outcome_not_an_override() {
+    let tmp = tempdir();
+    let fixture = LaunchFixture::new(tmp.path());
+
+    let launched = fixture.glasshouse(&["launch", "claude-code", "--headless"]);
+    assert!(
+        launched.status.success(),
+        "the launch must succeed:\n{}",
+        LaunchFixture::both_streams(&launched)
+    );
+
+    let overrides = fixture
+        .ledger()
+        .recent_of_kind(EvaluationKind::RoutingOverrideDecided, 10)
+        .unwrap();
+    assert_eq!(overrides.len(), 1, "one launch, one override outcome");
+    assert_eq!(
+        overrides[0].subject.as_deref(),
+        Some("automatic"),
+        "no override was asked for, so `overrode()`'s `None` must be recorded as the automatic \
+         answer standing, not as an override"
+    );
+    assert_eq!(
+        overrides[0].detail, None,
+        "the automatic case names no destination the ranking would have chosen instead"
+    );
+
+    let continuations = fixture
+        .ledger()
+        .recent_of_kind(EvaluationKind::RoutingContinuationDecided, 10)
+        .unwrap();
+    assert_eq!(
+        continuations.len(),
+        1,
+        "one launch, one continuation outcome"
+    );
+    assert_eq!(
+        continuations[0].subject.as_deref(),
+        Some("fresh"),
+        "a first launch has no warm session to continue"
+    );
+}
+
+/// **Acceptance 2.** An explicit `--fresh` that the ranking disagreed with —
+/// because a warm session from the first launch was there to continue — is
+/// recorded as an override, naming the destination the ranking would have
+/// chosen instead.
+#[test]
+fn an_override_the_ranking_disagreed_with_names_the_destination_it_would_have_chosen() {
+    let tmp = tempdir();
+    let fixture = LaunchFixture::new(tmp.path());
+
+    let first = fixture.glasshouse(&["launch", "claude-code", "--headless"]);
+    assert!(
+        first.status.success(),
+        "the first launch must succeed:\n{}",
+        LaunchFixture::both_streams(&first)
+    );
+    let sessions_after_first = fixture.session_ids();
+    assert_eq!(
+        sessions_after_first.len(),
+        1,
+        "the first launch records exactly one session"
+    );
+    let warm_id = sessions_after_first[0].clone();
+
+    // Without `--fresh` the ranking continues that warm session — proven by
+    // `route_command.rs`'s `a_second_launch_continues_the_warm_session_...`.
+    // `--fresh` overrides that answer.
+    let second = fixture.glasshouse(&["launch", "claude-code", "--headless", "--fresh"]);
+    assert!(
+        second.status.success(),
+        "`--fresh` must start a session even over a warm one:\n{}",
+        LaunchFixture::both_streams(&second)
+    );
+
+    let overrides = fixture
+        .ledger()
+        .recent_of_kind(EvaluationKind::RoutingOverrideDecided, 10)
+        .unwrap();
+    assert_eq!(overrides.len(), 2, "one row per launch");
+    assert_eq!(
+        overrides[0].subject.as_deref(),
+        Some("overridden"),
+        "`--fresh` changed the answer away from the warm session the ranking would have chosen"
+    );
+    assert_eq!(
+        overrides[0].detail.as_deref(),
+        Some(warm_id.as_str()),
+        "the row must name the destination the ranking would have chosen instead"
+    );
+    assert_eq!(
+        overrides[1].subject.as_deref(),
+        Some("automatic"),
+        "the first launch had nothing to override"
+    );
+}
+
+/// **Acceptance 3.** A launch that continues a warm session and one that
+/// starts fresh are distinguishable in the ledger.
+#[test]
+fn a_continued_warm_session_and_a_fresh_one_are_distinguishable_in_the_ledger() {
+    let tmp = tempdir();
+    let fixture = LaunchFixture::new(tmp.path());
+
+    let first = fixture.glasshouse(&["launch", "claude-code", "--headless"]);
+    assert!(
+        first.status.success(),
+        "the first launch must succeed:\n{}",
+        LaunchFixture::both_streams(&first)
+    );
+
+    // No override this time: the router is left to prefer the warm session
+    // the first launch just made.
+    let second = fixture.glasshouse(&["launch", "claude-code", "--headless"]);
+    assert!(
+        second.status.success(),
+        "the second launch must succeed:\n{}",
+        LaunchFixture::both_streams(&second)
+    );
+    assert_eq!(
+        fixture.session_ids().len(),
+        1,
+        "the second launch must have continued the warm session rather than starting another"
+    );
+
+    let continuations = fixture
+        .ledger()
+        .recent_of_kind(EvaluationKind::RoutingContinuationDecided, 10)
+        .unwrap();
+    assert_eq!(continuations.len(), 2, "one row per launch");
+    assert_eq!(
+        continuations[0].subject.as_deref(),
+        Some("existing"),
+        "the second launch continued the warm session"
+    );
+    assert_eq!(
+        continuations[1].subject.as_deref(),
+        Some("fresh"),
+        "the first launch had nothing to continue"
+    );
+
+    let overrides = fixture
+        .ledger()
+        .recent_of_kind(EvaluationKind::RoutingOverrideDecided, 10)
+        .unwrap();
+    assert!(
+        overrides
+            .iter()
+            .all(|row| row.subject.as_deref() == Some("automatic")),
+        "neither launch asked for an override:\n{overrides:?}"
+    );
+}
+
+/// **Acceptance 4.** `glasshouse route` reports without acting; it must
+/// record nothing, or the counts these two lines produce would answer a
+/// different question than 1829 and 1830 ask.
+#[test]
+fn glasshouse_route_reports_without_acting_and_records_nothing() {
+    let tmp = tempdir();
+    let fixture = LaunchFixture::new(tmp.path());
+
+    let launched = fixture.glasshouse(&["launch", "claude-code", "--headless"]);
+    assert!(
+        launched.status.success(),
+        "the launch must succeed:\n{}",
+        LaunchFixture::both_streams(&launched)
+    );
+
+    let overrides_before = fixture
+        .ledger()
+        .recent_of_kind(EvaluationKind::RoutingOverrideDecided, 100)
+        .unwrap()
+        .len();
+    let continuations_before = fixture
+        .ledger()
+        .recent_of_kind(EvaluationKind::RoutingContinuationDecided, 100)
+        .unwrap()
+        .len();
+    assert_eq!(
+        overrides_before, 1,
+        "the launch recorded exactly one override outcome"
+    );
+    assert_eq!(
+        continuations_before, 1,
+        "the launch recorded exactly one continuation outcome"
+    );
+
+    let reported = fixture.glasshouse(&["route"]);
+    assert!(
+        reported.status.success(),
+        "`glasshouse route` must succeed:\n{}",
+        LaunchFixture::both_streams(&reported)
+    );
+
+    let overrides_after = fixture
+        .ledger()
+        .recent_of_kind(EvaluationKind::RoutingOverrideDecided, 100)
+        .unwrap()
+        .len();
+    let continuations_after = fixture
+        .ledger()
+        .recent_of_kind(EvaluationKind::RoutingContinuationDecided, 100)
+        .unwrap()
+        .len();
+    assert_eq!(
+        overrides_after, overrides_before,
+        "`glasshouse route` reports without acting, so it must not add an override row"
+    );
+    assert_eq!(
+        continuations_after, continuations_before,
+        "`glasshouse route` reports without acting, so it must not add a continuation row"
+    );
+}
