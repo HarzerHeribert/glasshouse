@@ -259,6 +259,8 @@ batch 50 and it was wrong; the correction is in `phase-47.md`.
 ### Cluster K — a decision nobody has made, and a door that records nothing *(in-repo: yes)*
 
 
+**745 is now CLOSED (`glasshouse api read`), and Phase 16 is finished.** The correction below stands as the record of why it was open for so long.
+
 **745's entry in this cluster is WRONG, corrected 2026-08-30.** It frames the
 line as an unmade Red-tier decision — *"the worker becomes `Embedded`"* versus
 *"a pty handed between processes"* — on the grounds that no read path into a

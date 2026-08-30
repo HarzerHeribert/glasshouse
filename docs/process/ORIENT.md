@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**806 / 1280 mandatory capabilities (63%)** — 474 open across 63 phases.
+**807 / 1280 mandatory capabilities (63%)** — 473 open across 62 phases.
 
 ## Where the work is
 
@@ -28,7 +28,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 9H | Sticky gateway routing for harness-backed interactive sessions | **1** | 13 | `501` |
 | Phase 9I | Free-pool routing | **1** | 13 | `523` |
 | Phase 15 | Orchestrator wake-up flow | **1** | 7 | `731` |
-| Phase 16 | Worker transparency | **1** | 6 | `742` |
 | Phase 27 | Context injection | **1** | 10 | `1118` |
 | Phase 30 | Session context metadata | **1** | 7 | `1156` |
 | Phase 32B | Quota telemetry sources | **1** | 13 | `1220` |
@@ -86,7 +85,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 51 | Evaluation hooks | **34** | 3 | `1818` |
 | Phase 21K | Assumption-aware implementation guardrails | **43** | 0 | `992` |
 
-**Fully closed (41):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 26, Phase 32, Phase 34, Phase 35, Phase 40, Phase 41, Phase 42, Phase 45, Phase 48.
+**Fully closed (42):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 26, Phase 32, Phase 34, Phase 35, Phase 40, Phase 41, Phase 42, Phase 45, Phase 48.
 
 ## The nearly-finished phases, in full
 
@@ -124,10 +123,6 @@ these unwrapped.
 ### Phase 15 — Orchestrator wake-up flow  (1 open, 7 closed)
 
 - **740** ☐ Preserve the user’s ability to enter and modify a worker session before the orchestrator acts on its result.
-
-### Phase 16 — Worker transparency  (1 open, 6 closed)
-
-- **745** ☐ Allow the user to enter any orchestrated worker while it is running.
 
 ### Phase 27 — Context injection  (1 open, 10 closed)
 

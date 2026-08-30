@@ -366,6 +366,9 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             ApiCommand::Interrupt { session } => {
                 api::interrupt(&runtime, session)?;
             }
+            ApiCommand::Read { session, max_bytes } => {
+                api::read_output(&runtime, session, *max_bytes)?;
+            }
         },
         None => {
             // Setup runs by itself the first time, so a new user does not have

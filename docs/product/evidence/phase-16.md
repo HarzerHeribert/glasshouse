@@ -495,3 +495,135 @@ Gates the worker ran (re-run the decisive ones yourself):
 - scripts/blast-radius.sh: every traced target passed — 40 cargo targets (--lib, 38 integration tests, --bin glasshouse) plus rustdoc clean, exit 0
 - non-Unix path via §18 cfg flip across api/mod.rs and main.rs: cargo clippy --bin glasshouse -- -D warnings clean; both files restored byte-identical
 
+
+
+---
+
+# Line 745 — closed 2026-08-30. **Phase 16 is finished, 7 of 7.**
+
+Package `GH-WORKER-READ`; report in `.agent-runtime/report-worker-read.md`.
+
+`glasshouse api read --session <ID> [--max-bytes N]` is the third client verb,
+and the one that turns send and interrupt into a person being *in* a running
+worker rather than typing into one blind:
+
+    ApiCommand::Read -> api::read_output -> socket -> Request::RecentOutput
+                     -> SessionApi::recent_output (session/api.rs:150)
+
+**`recent_output` now has a production caller** (`api/unix.rs:619`). Every call
+site was previously in its own `#[cfg(test)]` module.
+
+## The blocker was recorded wrong, and that is the story of this line
+
+`phase-16.md` and the register's Cluster K both framed 745 as an unmade
+**Red-tier** design decision — *"the worker becomes `Embedded`"* versus *"a pty
+handed between processes"* — because no read path existed outside the process
+owning the worker.
+
+**One existed inside it, and had for some time.** `GH-API-CLIENT` found it while
+correctly refusing this same line the day before, for a different and real
+reason: there was no verb returning output, and its packet said stop rather
+than add one. It stopped, and then checked *why* the line was open. Cluster K
+is corrected.
+
+## The four answers that must stay distinguishable
+
+`recent_output` refuses `ApiError::NotLive` rather than returning an empty
+string, because *"returning an empty string would be a lie the caller has no
+way to detect"*. That distinction had to survive the wire, and the mutation
+that removes it is killed:
+
+| mutation | result | killed by |
+|---|---|---|
+| dispatch reads `SessionRuntime` directly, **keeping the bound**, so only the project-scope resolve is gone | **KILLED** | `another_projects_worker_cannot_be_read_and_a_crafted_id_says_the_same_thing` |
+| `NotLive` answered as `{"output": ""}` | **KILLED** | `a_live_worker_…different_answers` |
+| ceiling raised from 64 KiB to 64 MiB | **KILLED** | `an_absurd_byte_bound_still_comes_back_bounded` |
+| client sends the wrong `op` | **KILLED** | **all six** reading tests |
+
+The first is the one worth noting: it removes the scope check *without*
+removing the bound, so a test that only checked the byte limit would have
+passed. The last is §35 in executable form — no test enters below the
+production client.
+
+---
+
+### Allow the user to enter any orchestrated worker while it is running. (line 745)
+
+Contract: Given an orchestrated worker running under `glasshouse api serve`, when a person runs `glasshouse api read` from their own terminal, Glasshouse shows them that worker's own recent terminal output — bounded server-side, on standard output and verbatim — while preserving project scope, keeping `no live process`, `no such session` and `live but silent` as three different answers, writing nothing to the session, and naming no filesystem path.
+
+State: **COMPLETE**
+
+Production evidence:
+- `src/api/protocol.rs` — `Request::RecentOutput`
+- `src/api/protocol.rs` — `default_recent_output_bytes`
+- `src/api/unix.rs` — `MAX_RECENT_OUTPUT_BYTES`
+- `src/api/unix.rs` — `dispatch (Request::RecentOutput arm)`
+- `src/api/client.rs` — `read_output`
+- `src/api/mod.rs` — `read_output (export, and the non-Unix refusal)`
+- `src/cli.rs` — `ApiCommand::Read`
+- `src/main.rs` — `run (Command::Api / ApiCommand::Read arm)`
+- `src/session/api.rs` — `SessionApi::recent_output (unchanged; now has its first production call site, at src/api/unix.rs:619)`
+
+Regression evidence:
+- `worker_access::output_a_real_harness_printed_comes_back_through_the_client`
+- `worker_access::a_live_worker_with_nothing_to_say_and_a_session_with_no_process_are_different_answers`
+- `worker_access::another_projects_worker_cannot_be_read_and_a_crafted_id_says_the_same_thing`
+- `worker_access::an_absurd_byte_bound_still_comes_back_bounded`
+- `worker_access::reading_a_worker_changes_nothing_about_it`
+- `worker_access::a_worker_whose_process_died_under_a_live_door_still_reads_back_what_it_printed`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| the Request::RecentOutput arm: `let api = SessionApi::new(&store, &mut guard); match api.recent_output(&SessionId::new(session), max_bytes.min(MAX_RECENT_OUTPUT_BYTES))` -> read `guard.get(&SessionId::new(session))`'s scrollback directly, keeping an identical byte bound so ONLY the project-scope resolve is removed | `go-around-the-project-scope-seam` | **killed** | `worker_access::another_projects_worker_cannot_be_read_and_a_crafted_id_says_the_same_thing` |
+| the Request::RecentOutput arm gains `Err(ApiError::NotLive { .. }) => Response::ok(serde_json::json!({ "output": "" })),` above the general Err arm | `empty-string-instead-of-the-not-live-refusal` | **killed** | `worker_access::a_live_worker_with_nothing_to_say_and_a_session_with_no_process_are_different_answers` |
+| const MAX_RECENT_OUTPUT_BYTES: usize = 64 * 1024; -> = 64 * 1024 * 1024; | `raise-the-server-side-ceiling` | **killed** | `worker_access::an_absurd_byte_bound_still_comes_back_bounded` |
+| src/api/client.rs read_output: `"op": "recent_output",` -> `"op": "session_state",` | `client-asks-a-different-verb` | **killed** | `worker_access::output_a_real_harness_printed_comes_back_through_the_client` |
+| src/api/client.rs read_output: the empty-output notice `eprintln!` -> `println!` | `silence-notice-onto-stdout` | **killed** | `worker_access::a_live_worker_with_nothing_to_say_and_a_session_with_no_process_are_different_answers` |
+| the Request::RecentOutput arm: `max_bytes.min(MAX_RECENT_OUTPUT_BYTES),` -> `MAX_RECENT_OUTPUT_BYTES,` | `ignore-the-callers-own-lower-bound` | **killed** | `worker_access::an_absurd_byte_bound_still_comes_back_bounded` |
+
+> go-around-the-project-scope-seam observed: panicked at worker_access.rs:1472 — `the refusal must scope itself, so the answer is about this project rather than about the session's existence anywhere`. Also failed a_live_worker_...different_answers at 1370 (the refusal no longer named the session). Both are the assertions those tests are named for, not fixture guards (§80 case 5). A first, coarser version of this mutation also removed the bound and was discarded rather than reported.
+
+> empty-string-instead-of-the-not-live-refusal observed: panicked at worker_access.rs:1358 — `a session no process is running has no output to give, and saying so is the whole point of the verb`. Exactly one test failed, so the mutation is precisely targeted at ruling 3's collapse and nothing else.
+
+> raise-the-server-side-ceiling observed: panicked at worker_access.rs:1607 — `a caller asking for a hundred million bytes received 152106 of them; the door's ceiling is not being applied`. §80 case 6 checked: no test input derives from the constant — the request is the literal 100000000, the assertion is a literal 64*1024 restated in the test file, and the burst size is fixed, so the mutation moved the answer and not the goalposts.
+
+> client-asks-a-different-verb observed: all six reading tests failed. §35's check: no test enters below the production client — every one of them drives `glasshouse api read` as the shipped binary, so the new production caller is the one under test rather than a socket shortcut beside it.
+
+> silence-notice-onto-stdout observed: panicked at worker_access.rs:1340 — `there was nothing to show, so nothing may be shown`. Proves the stdout/stderr split is a live assertion rather than an incidental property.
+
+> ignore-the-callers-own-lower-bound observed: panicked at worker_access.rs:1621 — `a caller may lower the ceiling: 65536`. The ceiling and the caller's own lower request are separately watched.
+
+Recorded scope limits — stated by the worker, not discovered later:
+- It is not an interactive attach. Ruling 5's reading — that send, interrupt and read together are entering a worker — is what this is built to, and whether that closes the line is the orchestrator's ruling, not the worker's. `session::attach`'s objection to a transparent full-terminal attach is untouched.
+- A read is a snapshot, not a stream: there is no follow/tail mode.
+- A tail, not history. The runtime keeps 256 KiB per session, this door returns at most 64 KiB of it, and nothing persists terminal output — output older than the scrollback cannot be given by any verb.
+- Truncation is silent. The response carries `output` and nothing else, so a caller that received exactly the ceiling cannot tell `that is all there was` from `there was more`. No `truncated` flag was invented, because `recent_output` does not report whether it cut.
+- MEASURED FINDING (test 6): `ok` means this door holds a pseudo-terminal record for the session, NOT that a process is alive. A worker that dies under a still-running door reads back `ok` with what it printed, because SessionRuntime deliberately keeps an exited session's scrollback. Consequence: a worker that died before printing anything is indistinguishable through this verb from a live silent one — `session_state` and the event log can tell them apart.
+- The 8192-byte default is asserted nowhere: the CLI omits `max_bytes` rather than restating it, so one source of truth was bought at the price of an unpinned default.
+- The non-Unix refusal is compile-proven via a §18 cfg flip, never executed on Windows.
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **745** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+
+**Packet errors the worker reported — read these BEFORE its results.**
+Thirteen consecutive rounds a worker corrected its packet and was right:
+- Acceptance test 3 required a boundary refusal `distinguishable from 'no such session'`. It is not satisfiable and should not be: each project has its own database, so another project's session is ABSENT rather than foreign, `ApiError::ForeignProject` is unreachable between two real projects, and saying more would confirm the session exists elsewhere — a worse leak for a read verb than for a write one. Re-verified on current source rather than inherited from GH-API-CLIENT. The test asserts the scoped sentence, that a crafted id gets the identical sentence, and by content that a marker planted in alpha's scrollback appears nowhere in beta's answer.
+- The packet's acceptance test 2 says `a session with no live process`. That is not where the refusal falls: `NotLive` means this process holds no pseudo-terminal for the session (a door restarted, or a session started elsewhere), not that the process behind it exited. Pinned by test 6 rather than left to be found later. src/session/runtime.rs:1151 poll_exits keeps an exited session; src/session/runtime.rs:1349 reuses the same scrollback across a restart.
+- docs/process/refusal-register.md:259 Cluster K's 745 entry was corrected on 2026-08-30 and is now stale in a second way: 745 is no longer a refusal at all and the entry should be retired rather than corrected again. STALE — reported, not edited.
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo build: clean
+- cargo fmt --all -- --check: clean
+- cargo clippy --all-targets --all-features -- -D warnings: clean
+- cargo test --test worker_access: 15 passed
+- cargo test --test project_isolation: 7 passed
+- cargo test --test api_event_log: 6 passed
+- scripts/blast-radius.sh: exit 0, every traced target passed — 43 targets (--lib 1548 passed, 41 integration tests, --bin glasshouse 44 passed) plus rustdoc clean
+- non-Unix path via §18 cfg flip across api/mod.rs and main.rs (unix -> windows): cargo clippy --bin glasshouse -- -D warnings clean; both files restored byte-identical, verified with cmp
+

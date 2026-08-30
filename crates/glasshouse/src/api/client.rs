@@ -1,4 +1,5 @@
-//! The half of the control door that knocks — capability map lines 746 and 747.
+//! The half of the control door that knocks — capability map lines 745, 746
+//! and 747.
 //!
 //! `api serve` answers `send_message` and `interrupt` against a
 //! `SessionRuntime` it owns, and has done since Phase 42. Nothing in this
@@ -30,25 +31,30 @@
 //! An orchestrator relaying the same words would have to be running, would
 //! spend a turn, and could reword them. None of those is true here.
 //!
-//! # What this deliberately does not do
+//! # The third verb, and why it completes line 745
 //!
-//! **It does not let a user *enter* a worker (line 745).** No request on this
-//! wire returns a worker's terminal output, so a client built from the
-//! existing verbs can put input in and cannot show what came back.
+//! *"Allow the user to enter any orchestrated worker while it is running."*
+//! Send and interrupt could put a person's words and a person's `Ctrl-C`
+//! into a worker and could not show them a single character of what came
+//! back, so this module shipped with the honest note that a user could type
+//! into a worker blind. `glasshouse api read` is the half that was missing:
 //!
-//! What is missing is *only* the verb, and that is worth writing down here
-//! because `docs/product/evidence/phase-16.md` records the opposite — that
-//! 745 waits on a decision about pty ownership, because no read path into a
-//! running worker exists outside the process that owns it. **One does**, in
-//! that very process: `session::api::SessionApi::recent_output` returns a
-//! live session's scrollback tail, resolves project scope through the same
-//! seam every other verb uses, and **has no production caller at all** — its
-//! only call sites are its own tests. Adding a `Request` variant for it is a
-//! wire-format change, which is not this module's to make alone; whether a
-//! polled read *is* "entering" a worker is a product question, and a
-//! transparent full-terminal attach is still a different thing again (see
-//! `session::attach`'s own doc comment). Recorded where the wiring would be
-//! attempted, so the next reader does not re-derive it as blocked.
+//!     glasshouse api read --session <ID> [--max-bytes N]
+//!
+//! It is answered by `Request::RecentOutput`, which is
+//! `session::api::SessionApi::recent_output` — a read of a live session's
+//! scrollback tail, inside the process that owns the pty, project-scoped
+//! through the same seam send and interrupt resolve through. That function
+//! existed for this module's whole life with **no production caller at
+//! all**; the note this section replaces is what recorded it, and this is
+//! the caller.
+//!
+//! **What this is not.** A transparent full-terminal attach — a person's own
+//! terminal handed to the worker's, keystroke for keystroke — is a different
+//! thing again, and `session::attach`'s own doc comment explains why it is a
+//! larger decision than a verb. What these three commands are is a person in
+//! a running worker without an agent between them: words in, an interrupt,
+//! and the terminal read back.
 //!
 //! **It never retries.** One connect, one line written, one line read. A send
 //! refused by the terminal's canonical line limit
@@ -133,6 +139,71 @@ pub fn interrupt(runtime: &Runtime, session: &str) -> anyhow::Result<()> {
         }),
     )?;
     println!("glasshouse: interrupted session `{session}`");
+    Ok(())
+}
+
+/// Show the recent terminal output of a live session in this project — map
+/// line 745.
+///
+/// # Four answers, kept apart
+///
+/// The door distinguishes four things about a read, and a client that
+/// flattened any two of them would hand the user a fact that is not true:
+///
+/// - **A live session with output** — written to standard output, verbatim
+///   and with nothing added, and nothing else is written there. What a
+///   worker's terminal holds is what a pipe receives.
+/// - **A live session that has printed nothing yet** — `ok` with an empty
+///   `output`. Said on standard error, because it is Glasshouse talking
+///   rather than the worker, and it succeeds: a worker that has said nothing
+///   is not a failure to read it.
+/// - **A session no process is running** — the door's `not live` refusal,
+///   which fails. This is the distinction the whole verb turns on:
+///   `SessionApi::recent_output` refuses rather than answering `""` because
+///   *"returning an empty string would be a lie the caller has no way to
+///   detect"*, and a client that printed nothing for both would have told
+///   that lie on the door's behalf.
+/// - **No such session in this project** — the door's scoped sentence,
+///   which fails. Passed through unchanged, as every error on this path is;
+///   see [`call`].
+///
+/// `max_bytes` is optional rather than defaulted here on purpose. The door
+/// owns both the default and the ceiling, so a client carrying its own copy
+/// of either could drift from the door it is talking to — and the ceiling in
+/// particular is not a client's to state, because a client cannot enforce
+/// it.
+pub fn read_output(
+    runtime: &Runtime,
+    session: &str,
+    max_bytes: Option<usize>,
+) -> anyhow::Result<()> {
+    let mut request = serde_json::json!({
+        "op": "recent_output",
+        "session": session,
+    });
+    if let Some(max_bytes) = max_bytes {
+        request["max_bytes"] = serde_json::json!(max_bytes);
+    }
+
+    let result = call(runtime, &request)?;
+    let output = result
+        .get("output")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            anyhow!("this project's control API answered a read without any output in it")
+        })?;
+
+    if output.is_empty() {
+        eprintln!("glasshouse: session `{session}` is running and has printed nothing yet");
+        return Ok(());
+    }
+
+    // Verbatim, and flushed explicitly: this is the one command whose
+    // standard output is another program's bytes rather than Glasshouse's
+    // own sentence, so nothing is appended to it — not even a newline the
+    // worker did not print.
+    print!("{output}");
+    std::io::stdout().flush()?;
     Ok(())
 }
 

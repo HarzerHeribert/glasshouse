@@ -616,6 +616,44 @@ pub enum ApiCommand {
         #[arg(long, value_name = "ID")]
         session: String,
     },
+    /// Show the recent terminal output of a session this project's control
+    /// API is running.
+    ///
+    /// Capability map line 745, and the half of it `send` and `interrupt`
+    /// could not do: a person typing into a running worker from their own
+    /// terminal could not see a single character of what came back. This is
+    /// the reading half — words in, an interrupt, and the terminal read back
+    /// are together a person being in a running worker without an agent
+    /// between them.
+    ///
+    /// Read-only. It sends nothing to the worker, raises no signal, starts
+    /// nothing, and records nothing about having looked. As with `send` and
+    /// `interrupt`, there is no `--socket`.
+    ///
+    /// The worker's output goes to standard output exactly as its terminal
+    /// holds it, with nothing added, so it can be piped. Anything Glasshouse
+    /// has to say about the read — including that a running worker has
+    /// printed nothing yet — goes to standard error instead, so the two are
+    /// never mixed into one stream.
+    ///
+    /// A session **no process is running** is an error rather than an empty
+    /// read: Glasshouse does not keep a session's output after its process is
+    /// gone, and reporting that as "printed nothing" would be indistinguishable
+    /// from a worker that is alive and quiet.
+    Read {
+        /// The session to read, as `glasshouse sessions` lists it.
+        #[arg(long, value_name = "ID")]
+        session: String,
+
+        /// Return at most this many bytes of the most recent output.
+        ///
+        /// The control API bounds this again on its own side, so this can
+        /// lower the ceiling and cannot raise it. Absent means the door's own
+        /// default, which is stated in one place — the protocol — rather than
+        /// copied here where it could drift from the door being talked to.
+        #[arg(long, value_name = "BYTES")]
+        max_bytes: Option<usize>,
+    },
 }
 
 #[cfg(test)]

@@ -24,11 +24,21 @@
 //! appeared nowhere in `crates/glasshouse/src`, so a transport that could
 //! carry a person's keystrokes into a running worker had no person on either
 //! end of it, and capability map lines 746 and 747 were returned
-//! premise-invalid for exactly that. `glasshouse api send` and `glasshouse
-//! api interrupt` are the missing end. They share nothing with the server but
-//! `protocol`'s wire shape, and they deliberately take **no socket path** —
-//! see `client`'s own doc comment for why that omission is the project
-//! boundary rather than a gap in it.
+//! premise-invalid for exactly that. `glasshouse api send`, `glasshouse api
+//! interrupt` and `glasshouse api read` are the missing end. They share
+//! nothing with the server but `protocol`'s wire shape, and they deliberately
+//! take **no socket path** — see `client`'s own doc comment for why that
+//! omission is the project boundary rather than a gap in it.
+//!
+//! **The read verb is what made those three a person being *in* a worker**
+//! (line 745). Send and interrupt shipped first and could only write: a user
+//! could type into a running worker and see nothing come back.
+//! `Request::RecentOutput` answers with the tail of the session's scrollback
+//! through `session::api::SessionApi::recent_output`, which had lived in this
+//! repository with no production caller outside its own tests. It is not an
+//! interactive attach — see `client`'s doc comment for that boundary — and it
+//! is bounded server-side, because a worker's scrollback is the largest and
+//! the most sensitive thing this door returns.
 //!
 //! **Why a Unix socket, not a subcommand-per-call.** A subcommand-per-call
 //! ("`glasshouse api send-message ...`") is a fresh process per request, and
@@ -81,7 +91,7 @@ mod unix;
 mod client;
 
 #[cfg(unix)]
-pub use client::{interrupt, send_message};
+pub use client::{interrupt, read_output, send_message};
 #[cfg(unix)]
 pub use unix::serve;
 
@@ -91,7 +101,7 @@ pub use unix::serve;
 /// transport exists, rather than a build that silently does nothing on
 /// Windows.
 ///
-/// One sentence for all three verbs rather than three near-copies: a client
+/// One sentence for all four verbs rather than four near-copies: a client
 /// that could not connect on this platform and a server that could not bind
 /// on it are the *same* missing transport, and a user who reads two different
 /// explanations of one absence has been told there are two problems.
@@ -128,5 +138,16 @@ pub fn send_message(
 /// See [`no_unix_socket`].
 #[cfg(not(unix))]
 pub fn interrupt(_runtime: &glasshouse::Runtime, _session: &str) -> anyhow::Result<()> {
+    Err(no_unix_socket())
+}
+
+/// See [`no_unix_socket`]. There is no door to read through here for the same
+/// reason there is none to write through.
+#[cfg(not(unix))]
+pub fn read_output(
+    _runtime: &glasshouse::Runtime,
+    _session: &str,
+    _max_bytes: Option<usize>,
+) -> anyhow::Result<()> {
     Err(no_unix_socket())
 }

@@ -35,6 +35,19 @@ fn default_route_alternatives() -> usize {
     5
 }
 
+/// How much of a session's terminal output [`Request::RecentOutput`] returns
+/// when the caller does not say.
+///
+/// Several screenfuls: enough to answer "what is this worker doing right
+/// now" without a caller having to know how much to ask for, and small
+/// against the ceiling `unix::MAX_RECENT_OUTPUT_BYTES` allows a caller that
+/// wants more. Stated once, here, because `cli::ApiCommand::Read`'s
+/// `--max-bytes` is deliberately optional rather than carrying a copy of
+/// this number that could drift from the door it is talking to.
+fn default_recent_output_bytes() -> usize {
+    8192
+}
+
 /// Read from [`SnapshotBudget::default`] rather than restated, so the door's
 /// default snapshot is the same one every other caller of
 /// `memory::snapshot::snapshot` gets and the two cannot drift apart.
@@ -88,6 +101,50 @@ pub enum Request {
     SendMessage { session: String, text: String },
     /// Interrupt a live session, as Glasshouse rather than as the user.
     Interrupt { session: String },
+    /// The tail of one live session's terminal output — capability map line
+    /// 745, *"allow the user to enter any orchestrated worker while it is
+    /// running."*
+    ///
+    /// The third of the three verbs that together are a person being *in* a
+    /// running worker: [`Request::SendMessage`] puts words in,
+    /// [`Request::Interrupt`] stops what is happening, and this is the half
+    /// that shows what came back. Until it existed a client built from this
+    /// door could type into a worker and could not see it.
+    ///
+    /// Answered through `session::api::SessionApi::recent_output`, the same
+    /// project-scoped seam its two neighbours resolve through, and read-only
+    /// in the strong sense [`Request::RecommendRoute`] is: it sends nothing
+    /// to the session, signals nothing, spawns nothing, writes to no store
+    /// and records no event.
+    ///
+    /// # A session with no live process is a refusal, not an empty string
+    ///
+    /// Glasshouse does not persist terminal output, so a session no process
+    /// is running has none to give. `recent_output` refuses that with
+    /// `ApiError::NotLive` rather than answering `""`, because — in its own
+    /// words — *"returning an empty string would be a lie the caller has no
+    /// way to detect"*, and this verb carries that distinction onto the
+    /// wire rather than flattening it: a session nothing is running comes
+    /// back as `status: error`, and a live session that has printed nothing
+    /// yet comes back as `status: ok` with an empty `output`. They are
+    /// different answers because they are different facts, and a caller
+    /// deciding whether to wait or to restart a worker needs to tell them
+    /// apart.
+    ///
+    /// # The bound
+    ///
+    /// `max_bytes` is capped server-side at `unix::MAX_RECENT_OUTPUT_BYTES`
+    /// regardless of what is asked for, so a caller may lower the ceiling
+    /// and cannot raise it — the same shape as [`Request::QueryMemory`]'s
+    /// `limit`. It matters more here than anywhere else on this door: a
+    /// session's scrollback is bounded by the *runtime*, at a size no caller
+    /// chose, and this is the one verb whose response would otherwise grow
+    /// with how long a worker has been talking.
+    RecentOutput {
+        session: String,
+        #[serde(default = "default_recent_output_bytes")]
+        max_bytes: usize,
+    },
     /// Current resource capacity and quota telemetry for every model
     /// resource Glasshouse can describe — capability map line 1679.
     ///

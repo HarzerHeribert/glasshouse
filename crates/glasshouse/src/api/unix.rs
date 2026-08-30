@@ -89,6 +89,29 @@ const MAX_SNAPSHOT_SECTION_LIMIT: usize = 50;
 /// line forbids.
 const MAX_SNAPSHOT_BODY_CHARS: usize = 2000;
 
+/// The hard ceiling on how much of a session's terminal output
+/// [`Request::RecentOutput`] returns in one call, regardless of the
+/// `max_bytes` a caller asks for — the same shape as [`MAX_MEMORY_LIMIT`] and
+/// [`MAX_SNAPSHOT_BODY_CHARS`] above, and load-bearing for a reason neither
+/// of those has.
+///
+/// Every other bound on this door limits how many *rows* a caller may pull
+/// out of a store it is querying. This one limits a buffer nobody queried:
+/// a session's scrollback is `session::runtime::DEFAULT_SCROLLBACK_BYTES`
+/// wide, filled by whatever the harness happened to print, and a caller
+/// asking for `usize::MAX` would otherwise receive the whole of it —
+/// JSON-escaped, on one line, over a socket — with the size decided by how
+/// long the worker had been talking rather than by anything either end
+/// chose.
+///
+/// Sixty-four kibibytes is many screenfuls of a worker's terminal and a
+/// quarter of what the scrollback holds: enough to see what a worker is
+/// doing, and far short of "send me everything you have". A caller that
+/// wants a specific earlier moment is asking for history, which this door
+/// does not have — see [`Request::RecentOutput`]'s own doc comment for why
+/// there is none to give.
+const MAX_RECENT_OUTPUT_BYTES: usize = 64 * 1024;
+
 /// Which of this project's memories each live session has already been sent
 /// — capability map line 1135's *"already-aware hot session"*.
 ///
@@ -570,6 +593,34 @@ fn dispatch(
             let mut api = SessionApi::new(&store, &mut guard);
             match api.interrupt(&SessionId::new(session)) {
                 Ok(()) => Response::ok(serde_json::json!({})),
+                Err(err) => Response::err(api_error(err)),
+            }
+        }
+        // Through `SessionApi::recent_output`, never into the runtime's
+        // scrollback directly, for the reason `ListSessions` above goes
+        // through `SessionApi::list`: that seam is where project scope is
+        // checked, and a door that read a worker's terminal from underneath
+        // it would be the one caller in this binary that never had to say
+        // whose session it was reading. A scrollback is the most sensitive
+        // thing this door returns — it is whatever the harness printed — so
+        // this is the last verb that should be the exception.
+        //
+        // The bound is applied here rather than passed through, so a caller
+        // may lower the ceiling and cannot raise it. `usize::MAX` is a
+        // request for [`MAX_RECENT_OUTPUT_BYTES`], not for everything.
+        //
+        // `NotLive` is passed on as the refusal it is. Answering `ok` with
+        // an empty string would collapse "nothing is running this session"
+        // into "this session has printed nothing", and the caller has no way
+        // to tell them apart afterwards.
+        Request::RecentOutput { session, max_bytes } => {
+            let mut guard = lock(live);
+            let api = SessionApi::new(&store, &mut guard);
+            match api.recent_output(
+                &SessionId::new(session),
+                max_bytes.min(MAX_RECENT_OUTPUT_BYTES),
+            ) {
+                Ok(output) => Response::ok(serde_json::json!({ "output": output })),
                 Err(err) => Response::err(api_error(err)),
             }
         }
