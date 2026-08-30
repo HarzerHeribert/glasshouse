@@ -416,16 +416,17 @@ seventeen are not packageable.** Full citations in
 | 1089, 1091, 1092 | All three need a reranking stage that does not exist (`classify.rs:583-586`, no cheap model wired). `memory/search.rs`'s BM25+decay ranking (`search.rs:412-441`) is the **lexical ranker**, not a reranker, and the lines ask for the latter. |
 | 1094 | **No debug-mode concept exists in this build** — `debug_mode\|DebugMode\|--debug` returns zero hits across `crates/glasshouse/src`, and there is no verbosity-gated diagnostic path in `memory/`. Worse, the diagnostics it would record are discarded: `memory/search.rs::search` computes BM25 relevance × `retrieval_weight` purely to sort, then drops the scores at `search.rs:443`. Both halves are missing. |
 
-### The one that IS reachable
+### ~~The one that IS reachable~~ — CLOSED 2026-08-30
 
 **1093** — *"Return only a small number of high-value memories for automatic
 prompt injection"* — is `ALREADY TRUE` and independent of reranking.
 `memory/inject.rs::briefing` applies `.take(MAX_INJECTED_MEMORIES)`
 (`inject.rs:253`) where the constant is `3` (`inject.rs:87`), after the
-ladder-rung/decay ordering. Both are live production code. **It needs a
-regression test and a mutation, not an implementation**: raise or delete the
-`.take(...)` and check whether anything in `context_injection.rs` asserts an
-injected-count ceiling. That is the whole package.
+ladder-rung/decay ordering. Both are live production code. **Closed by `GH-INJECTION-CAP`** with two tests and no production change. The
+existing test asserted *at most* three on a fixture where the 900-byte
+`MAX_INJECTED_BYTES` ceiling was also live, so it could not tell which ceiling
+fired (§41). The new fixture uses five short candidates so only the count cap
+can act, and asserts **exactly** three.
 
 
 ## Phases 9K and 47 — 18 lines checked, ZERO reachable, 2026-08-30

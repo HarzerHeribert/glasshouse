@@ -883,6 +883,166 @@ fn active_constraints_and_failed_approaches_are_injected_in_preference_to_ordina
     );
 }
 
+// ---------------------------------------------------------------------------
+// Map line 1093 — the injected count is capped at exactly
+// MAX_INJECTED_MEMORIES, not merely "no more than a handful" by coincidence.
+// ---------------------------------------------------------------------------
+
+/// More than [`MAX_INJECTED_MEMORIES`] eligible memories exist — all current,
+/// none an idea, none already injected, all genuinely reachable by the
+/// injection query — and the briefing carries **exactly** the cap.
+///
+/// # Why "exactly", and why the fixture is small
+///
+/// [`an_absurd_caller_supplied_task_still_yields_a_bounded_injection`] already
+/// asserts an *upper* bound, but its bodies are large enough that
+/// [`MAX_INJECTED_BYTES`] could be the thing doing the truncating instead of
+/// the cap — an "at most" assertion cannot tell the two apart, and a test
+/// that only happens to pass with the cap's own number of memories present is
+/// not watching the cap (§41). Every entry here is kept small enough that
+/// even all five candidates, unbounded by the cap, would still fit the byte
+/// budget (measured below), so a count that is anything other than the cap
+/// can only be `.take(MAX_INJECTED_MEMORIES)`'s doing.
+///
+/// # The measurement the packet asked for
+///
+/// `search_grouped_for_injection` is called directly first — the same call
+/// `briefing` makes before its own `.take` — to establish, independent of
+/// delivery, that the fixture really does produce more than the cap's worth
+/// of eligible candidates.
+///
+/// # Why `CANDIDATES` is a literal and not `MAX_INJECTED_MEMORIES + 2` (§80,
+/// case 6)
+///
+/// A fixture size derived from the constant a mutation changes rescales with
+/// that mutation: raising the cap would have grown this fixture right along
+/// with it, so "raise the cap" would still fail here, but for the confounded
+/// reason §80's sixth case describes rather than because the cap actually
+/// let more through. Five is fixed so the fixture's shape cannot move when
+/// the constant does — only the comparison against `MAX_INJECTED_MEMORIES`
+/// below is allowed to.
+#[test]
+fn the_cap_truncates_more_than_the_cap_eligible_candidates_to_exactly_the_cap() {
+    let fixture = Fixture::new();
+    let root = fixture.project_root("alpha");
+    let runtime = fixture.runtime(&root);
+    let project = ProjectMemory::open(&runtime).unwrap();
+    let store = project.store();
+
+    const CANDIDATES: usize = 5;
+    for index in 0..CANDIDATES {
+        store
+            .record(
+                NewMemory::new(
+                    MemoryKind::Constraint,
+                    format!("Constraint kestrel {index} must always hold."),
+                )
+                .with_authority(Some(MemoryAuthority::Constraint)),
+            )
+            .unwrap();
+    }
+
+    // The measurement: more than the cap survives retrieval before selection
+    // ever narrows it. Without this, "exactly the cap arrived" could just as
+    // well mean the fixture never produced more than the cap's worth of
+    // candidates in the first place.
+    let grouped = store
+        .search_grouped_for_injection("kestrel", SearchScope::Current, 40)
+        .unwrap();
+    assert_eq!(
+        grouped.invariants_and_constraints.len(),
+        CANDIDATES,
+        "the fixture must produce more than {MAX_INJECTED_MEMORIES} eligible candidates for the \
+         cap to have anything to truncate"
+    );
+
+    let server = Server::start(&fixture, &root);
+    let session = server.spawn_with_task("kestrel");
+    wait_for("the worker's harness to start", || {
+        fixture.argv(&root, &session).is_some()
+    });
+    let block = {
+        let lines = deliveries(&fixture, &root, &session, 2);
+        the_injected_block(&lines).to_owned()
+    };
+
+    // Headroom: even all five candidates at this entry size fit under
+    // MAX_INJECTED_BYTES (measured at 832 of 900 bytes off this exact header
+    // and entry shape), so a count other than the cap here cannot be
+    // attributed to the byte budget instead.
+    let entries = block.matches(" kind=").count();
+    assert_eq!(
+        entries, MAX_INJECTED_MEMORIES,
+        "more than {MAX_INJECTED_MEMORIES} eligible candidates exist, and the byte budget has \
+         room for all of them, so the injected count must be exactly the cap: {block}"
+    );
+
+    let present = (0..CANDIDATES)
+        .filter(|index| block.contains(&format!("Constraint kestrel {index}")))
+        .count();
+    assert_eq!(
+        present, MAX_INJECTED_MEMORIES,
+        "exactly {MAX_INJECTED_MEMORIES} of the {CANDIDATES} eligible candidates may survive: \
+         {block}"
+    );
+}
+
+/// Fewer eligible memories than the cap yields **all** of them.
+///
+/// Without this, [`the_cap_truncates_more_than_the_cap_eligible_candidates_to_exactly_the_cap`]
+/// could pass against a `briefing` that always returns the cap's worth
+/// regardless of how many candidates actually exist — acceptance test 3.
+///
+/// `CANDIDATES` is a literal, not `MAX_INJECTED_MEMORIES - 1`, for the same
+/// reason given on this test's sibling above (§80, case 6): two is under the
+/// cap at its real value today, and staying a literal means this test does
+/// not quietly change shape if that value ever does.
+#[test]
+fn fewer_eligible_memories_than_the_cap_are_all_injected() {
+    let fixture = Fixture::new();
+    let root = fixture.project_root("alpha");
+    let runtime = fixture.runtime(&root);
+    let project = ProjectMemory::open(&runtime).unwrap();
+    let store = project.store();
+
+    const CANDIDATES: usize = 2;
+    for index in 0..CANDIDATES {
+        store
+            .record(
+                NewMemory::new(
+                    MemoryKind::Constraint,
+                    format!("Constraint kestrel {index} must always hold."),
+                )
+                .with_authority(Some(MemoryAuthority::Constraint)),
+            )
+            .unwrap();
+    }
+
+    let server = Server::start(&fixture, &root);
+    let session = server.spawn_with_task("kestrel");
+    wait_for("the worker's harness to start", || {
+        fixture.argv(&root, &session).is_some()
+    });
+    let block = {
+        let lines = deliveries(&fixture, &root, &session, 2);
+        the_injected_block(&lines).to_owned()
+    };
+
+    let entries = block.matches(" kind=").count();
+    assert_eq!(
+        entries, CANDIDATES,
+        "fewer than {MAX_INJECTED_MEMORIES} eligible candidates exist, so nothing should be \
+         dropped: {block}"
+    );
+    for index in 0..CANDIDATES {
+        assert!(
+            block.contains(&format!("Constraint kestrel {index}")),
+            "candidate {index} of {CANDIDATES} must be injected, none below the cap may be \
+             dropped: {block}"
+        );
+    }
+}
+
 /// Lines 1132 and 1133 together, because they are two halves of one
 /// presentation decision.
 ///

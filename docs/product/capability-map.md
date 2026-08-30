@@ -1090,7 +1090,7 @@ Fixed architectural requirements
 ☐ Keep reranking optional so memory search still works offline without an LLM.
 ☐ Limit reranking to a small candidate set to keep latency and token use low.
 ☐ Ask the reranker to optimize for task relevance, recency, active status, and non-duplication.
-☐ Return only a small number of high-value memories for automatic prompt injection.
+☑ Return only a small number of high-value memories for automatic prompt injection.
 ☐ Record retrieval diagnostics when debug mode is enabled so poor memory selection can be investigated.
 
 Phase 25 — Project knowledge view
