@@ -376,3 +376,53 @@ what the audit found, including 1294, 372 and 740.
 **So: every new row above names a symbol and a file:line.** A row that does not
 cannot be audited, and an unauditable refusal is how a wrong reason survives
 long enough to send a worker at the wrong target.
+
+
+## Cluster Q — a negative requirement over a capability that does not exist
+
+**Added 2026-08-30, and it is a CLASS, not a list** (§83 — gather refusals by
+root cause). A line of the form *"never do X"* / *"avoid X"* / *"keep Y
+optional"* cannot be closed while nothing in the build could do X in the first
+place. The test passes, the box looks green, and nothing is being watched.
+
+**This class has already cost two ticked boxes.** 1455 and 1456 were closed and
+un-ticked the same week. Three more lines have now been checked and hold the
+same shape.
+
+| line | the forbidden thing, and why nothing could do it |
+|---|---|
+| 1090 | *"Keep reranking optional so memory search still works offline without an LLM."* **There is no reranker.** `routing/classify.rs:583-586`: *"No cheap model is wired up in this build."* Search working without one is the only state that has ever existed. |
+| 951 | *"Avoid automatic revalidation work when the memory is not about to affect any current task."* There is no automatic revalidation to avoid — confirms `phase-21g.md`'s own ruling. |
+| 1142 | *"Keep file-aware retrieval advisory and never treat stale memory as stronger evidence than the current source code."* No mechanism anywhere reads current source and compares it to a memory's claim; `memory/policy.rs:280-295` says so in its own doc comment, and comparing a memory against live repository state was declined at 828, 829, 862 and 932. |
+| ~~1455, 1456~~ | see Cluster P — the same shape, caught only after they were ticked. |
+
+**The test before packaging any negative line: name the code path that could do
+the forbidden thing, with a file and a line.** If you cannot, the line is not
+closeable and saying so is the finding. **A test that passes because the feature
+is absent is not evidence of restraint.**
+
+## Memory phases 28, 21G and 24 — seventeen lines checked, 2026-08-30
+
+`GH-MEMORY-PHASES-RECON` classified all seventeen against current source.
+`ORIENT.md` ranks these phases as cheap (0 closed, few open); **sixteen of the
+seventeen are not packageable.** Full citations in
+`.agent-runtime/report-memory-phases-recon.md`.
+
+| lines | missing link |
+|---|---|
+| 1139, 1140 | **No file-path association exists at all.** The `memories` table (`database.rs:303-326`) has no path column — its columns are `id, project_id, kind, authority, status, subject, body, source_session_id, source_commit, superseded_by, created_at, updated_at` — and a tree-wide grep for `file_path\|FilePath\|referenced_file\|associated_file` returns **zero hits**. `memory/extract/` has no path-identification logic. Nothing produces the signal, so there is nothing to retrieve by. Note §71 for 1140 when it becomes reachable: it needs an **enumeration** by path, not a lookup by known id. |
+| 1141 | **Half already ships and the other half is 1139's blocker.** `memory/inject.rs::briefing` (234-254) already orders invariants, constraints and failed attempts ahead of ordinary matches, tested by `context_injection.rs:820`. But the line sits under a *file-aware* phase and nothing scopes that preference to a file about to be edited. **Do not tick it on the generic evidence** — the phase's premise is the file scoping. |
+| 943–947 | Blocked, confirming `phase-21g.md`'s existing NOT STARTED ruling. 945 and 946 remain **Cluster C** — `ReviewReason::ArchitectureDrift` and `::ProductionIncident` still have no constructor anywhere, including tests. |
+| 1089, 1091, 1092 | All three need a reranking stage that does not exist (`classify.rs:583-586`, no cheap model wired). `memory/search.rs`'s BM25+decay ranking (`search.rs:412-441`) is the **lexical ranker**, not a reranker, and the lines ask for the latter. |
+| 1094 | **No debug-mode concept exists in this build** — `debug_mode\|DebugMode\|--debug` returns zero hits across `crates/glasshouse/src`, and there is no verbosity-gated diagnostic path in `memory/`. Worse, the diagnostics it would record are discarded: `memory/search.rs::search` computes BM25 relevance × `retrieval_weight` purely to sort, then drops the scores at `search.rs:443`. Both halves are missing. |
+
+### The one that IS reachable
+
+**1093** — *"Return only a small number of high-value memories for automatic
+prompt injection"* — is `ALREADY TRUE` and independent of reranking.
+`memory/inject.rs::briefing` applies `.take(MAX_INJECTED_MEMORIES)`
+(`inject.rs:253`) where the constant is `3` (`inject.rs:87`), after the
+ladder-rung/decay ordering. Both are live production code. **It needs a
+regression test and a mutation, not an implementation**: raise or delete the
+`.take(...)` and check whether anything in `context_injection.rs` asserts an
+injected-count ceiling. That is the whole package.
