@@ -572,6 +572,53 @@ fn automatic_routing_asks_the_resource_the_routing_policy_chose() {
     );
 }
 
+/// Map lines 1441/1442, on the shipped binary — the production-path proof
+/// `routing_disposable_tier`'s in-process tests cannot give (§35): each
+/// `glasshouse classify` invocation is its own process, so stickiness must
+/// survive a disk round-trip through `RoutingStickyCache`, not just two
+/// calls against one in-memory `DisposableRouting` value.
+///
+/// The user's free-resource order is changed between the two calls — a
+/// fresh `choose` would resolve it to `alpha-model` the second time, exactly
+/// as `automatic_routing_asks_the_resource_the_routing_policy_chose` proves
+/// order changes the answer. The second call must still name `zeta-model`:
+/// proof it reused the retained pick rather than re-ranking.
+#[test]
+fn two_successive_classify_processes_reuse_the_same_routed_resource() {
+    let model = FakeModel::answering(MODEL_ANSWER);
+    let fixture = Fixture::new();
+    fixture.add_provider("alpha-runner", "alpha-model", &model.base_url());
+    fixture.add_provider("zeta-runner", "zeta-model", &model.base_url());
+    fixture.automatic_routing_model();
+    fixture.prefer_free_resource("zeta-runner", "zeta-model");
+
+    let first = fixture.classify(QUESTION);
+    assert!(first.status.success(), "stderr: {}", first.stderr);
+
+    fixture.prefer_free_resource("alpha-runner", "alpha-model");
+
+    let second = fixture.classify(QUESTION);
+    assert!(second.status.success(), "stderr: {}", second.stderr);
+
+    let requests = model.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "two classify processes, one model call each"
+    );
+    assert!(
+        requests[0].body.contains("zeta-model"),
+        "the first call must go to the resource named first in the order: {}",
+        requests[0].body
+    );
+    assert!(
+        requests[1].body.contains("zeta-model") && !requests[1].body.contains("alpha-model"),
+        "the second call, inside the sticky window, must reuse the retained pick rather than \
+         re-rank against the changed order: {}",
+        requests[1].body
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 3. A model failure falls back to the heuristic.
 // ---------------------------------------------------------------------------

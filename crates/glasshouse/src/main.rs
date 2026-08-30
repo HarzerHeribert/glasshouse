@@ -3343,7 +3343,8 @@ fn automatic_classification_choice(
     glasshouse::routing::disposable::DisposableChoice,
     glasshouse::routing::disposable::NoResource,
 > {
-    use glasshouse::routing::disposable::{DisposableRouting, JobKind};
+    use glasshouse::provider::telemetry::RoutingStickyCache;
+    use glasshouse::routing::disposable::{AutomaticClassificationDecision, DisposableRouting};
 
     let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
@@ -3390,13 +3391,27 @@ fn automatic_classification_choice(
         free_preferences,
     );
 
-    routing.choose(
-        JobKind::Classification,
+    // Map lines 1441/1442: reuse a recent healthy pick rather than
+    // re-ranking every call. `RoutingStickyCache::new` roots the cache at
+    // `RuntimePaths::project_state_dir(project_id)`, unlike the
+    // account-scoped `GatewayQuotaCache` above, so a pick never leaks
+    // between projects.
+    let sticky_cache = RoutingStickyCache::new(runtime.paths(), runtime.project().id().as_str());
+    let decision = routing.choose_for_automatic_classification(
         &candidates,
         &health,
         std::time::Instant::now(),
+        now_unix,
         classification,
-    )
+        sticky_cache.load(),
+    )?;
+    match decision {
+        AutomaticClassificationDecision::Fresh(choice, pick) => {
+            sticky_cache.store(&pick);
+            Ok(choice)
+        }
+        AutomaticClassificationDecision::Retained(choice) => Ok(choice),
+    }
 }
 
 /// Ask the configured routing model to classify `request_text`.

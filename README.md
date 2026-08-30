@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████░░░░░░░░░░░░░░░` 822 / 1280 mandatory capabilities (64%)
+`█████████████████████████░░░░░░░░░░░░░░░` 824 / 1280 mandatory capabilities (64%)
 
 <details>
 <summary>Per-phase breakdown (43 of 104 phases complete)</summary>
@@ -100,7 +100,7 @@ the authoritative specification and tracks what is done.
 | Phase 34 — Capability registry | 10/10 ✅ |
 | Phase 34A — Workload tiers | 7/10 |
 | Phase 34B — Routing-model role | 7/15 |
-| Phase 34C — Automatic routing-model selection | 4/13 |
+| Phase 34C — Automatic routing-model selection | 6/13 |
 | Phase 34D — Router request schema | 2/13 |
 | Phase 34E — Router economics | 1/9 |
 | Phase 34F — Model capability and tier calibration | 0/11 |

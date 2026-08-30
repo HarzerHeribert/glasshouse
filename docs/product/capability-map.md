@@ -1438,8 +1438,8 @@ Phase 34C — Automatic routing-model selection
 ☐ Prefer local candidates when they satisfy the configured latency and quality requirements.
 ☐ Prefer a cheap metered model over an unreliable free model when failed routing attempts would cost more time than the price difference.
 ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
-☐ Re-evaluate the automatic routing-model choice when its provider becomes degraded or rate-limited.
-☐ Keep the selected routing model sticky for a short period to avoid unnecessary provider churn.
+☑ Re-evaluate the automatic routing-model choice when its provider becomes degraded or rate-limited.
+☑ Keep the selected routing model sticky for a short period to avoid unnecessary provider churn.
 ☑ Show the currently selected routing model in resource diagnostics.
 
 Phase 34D — Router request schema

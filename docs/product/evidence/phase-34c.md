@@ -209,7 +209,42 @@ reading — **KILLED** by
 test in the target, since the mutation eliminates every candidate the file's
 helpers build without a capacity reading.
 
-## 1441 and 1442 — OPEN, and this is a deliberate Cluster B
+## 1441 and 1442 — CLOSED 2026-08-31 by `GH-STICKY-WIRING`
+
+State: **COMPLETE** (both). The Cluster B recorded below lasted about an hour.
+
+`main.rs::automatic_classification_choice` now calls
+`choose_for_automatic_classification` through a project-scoped
+`RoutingStickyCache`, and the `Retained` arm carries a fully-built
+`DisposableChoice` **constructed inside `routing/disposable.rs`** using the
+module-private `choice(...)`.
+
+**The first attempt refused and it was right to** — and the blocker was the
+orchestrator's packet, not the worker. `DisposableChoice` has no public fields
+(a stated invariant) and its only constructor is private to
+`DisposableRouting`, so the wiring **cannot** be done from `main.rs`, which is
+the only file that packet allowed. The reissue granted `routing/disposable.rs`
+for the `Retained` arm and the wiring completed.
+
+**The honesty requirement held.** A retained pick did not win a ranking and no
+`score` ran, so its `RoutingExplanation` says it was **retained** rather than
+reading as `score`'s output for a comparison that never happened — the same
+class of fabrication refused elsewhere in this project (a `0.0` relevance for
+an unmatched memory; a `0` token count for an unmeasured call).
+
+**Mutations, both killed on the production call:** returning the retained pick
+without re-checking health dies at
+`a_retained_pick_whose_provider_turned_unhealthy_is_not_returned`, and dropping
+the store dies at
+`classification_call::two_successive_classify_processes_reuse_the_same_routed_resource`
+— a test spanning **two `classify` processes**, which is the level a persisted
+cache has to be proven at.
+
+**The invariant that makes stickiness honest:** a retained pick is never
+returned without re-checking its health. Stickiness must not outlive the
+healthiness it was predicated on.
+
+## ~~1441 and 1442 — OPEN, and this is a deliberate Cluster B~~ (superseded, kept for the record)
 
 State: **SCAFFOLDED**, and it must not be read as anything more.
 

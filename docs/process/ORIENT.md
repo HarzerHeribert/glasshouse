@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**822 / 1280 mandatory capabilities (64%)** — 458 open across 61 phases.
+**824 / 1280 mandatory capabilities (64%)** — 456 open across 61 phases.
 
 ## Where the work is
 
@@ -51,6 +51,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
 | Phase 31 | Compaction-aware behavior | **6** | 1 | `1167` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **6** | 0 | `1858` |
+| Phase 34C | Automatic routing-model selection | **7** | 6 | `1429` |
 | Phase 38 | Quota-preserving routing | **7** | 0 | `1604` |
 | Phase 47 | Observability without spectacle | **7** | 8 | `1750` |
 | Phase 50 | Tracked project knowledge as an optional feature | **7** | 0 | `1803` |
@@ -61,7 +62,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 36 | Session affinity | **8** | 0 | `1579` |
 | Phase 21J | Implementation review checklist | **9** | 0 | `980` |
 | Phase 32A | Unified quota and capacity model | **9** | 12 | `1196` |
-| Phase 34C | Automatic routing-model selection | **9** | 4 | `1429` |
 | Phase 35C | Capacity-aware tier escalation and downgrade | **9** | 0 | `1556` |
 | Phase 39 | Gateway-backed disposable jobs | **9** | 0 | `1614` |
 | Phase 44 | User control and override | **9** | 0 | `1705` |
@@ -90,7 +90,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~429 open lines are not.
+other ~427 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**

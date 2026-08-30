@@ -1093,7 +1093,12 @@ only four reasons.**
 - **1439 (cheap metered over unreliable free) — fails on the price half.** It
   needs both a reliability signal and a price comparison, and the price side is
   1436's missing producer.
-- **1441 and 1442 — one missing producer, shared.** Nothing retains the last
+- **~~1441 and 1442~~ — CLOSED 2026-08-31, and this row is why.** The refusal
+  named one shared missing producer; `GH-ROUTING-STICKINESS` built it and
+  `GH-STICKY-WIRING` wired it, both within hours. **This is what the register
+  is for** — a refusal that names its producer is the input to the next
+  package, not an archive entry (§83). Original reasoning kept below.
+  Nothing retained the last
   automatic pick: `automatic_classification_choice` is a pure function of its
   inputs and re-runs `choose` in full every call, and `classify` is a fresh
   process each time. 1441 needs a prior choice to *reconsider*; 1442 needs one

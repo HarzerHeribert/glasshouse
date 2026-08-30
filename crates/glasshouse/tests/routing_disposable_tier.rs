@@ -311,10 +311,23 @@ fn two_decisions_inside_the_window_return_the_same_resource_without_reranking() 
             Some(pick.clone()),
         )
         .expect("the retained pick is still present and healthy");
+    let AutomaticClassificationDecision::Retained(retained_choice) = second else {
+        panic!("a retained pick inside the window must be reused, not re-ranked: {second:?}");
+    };
     assert_eq!(
-        second,
-        AutomaticClassificationDecision::Retained(pick),
+        retained_choice.provider(),
+        "alpha",
         "a retained pick inside the window must be reused, not re-ranked"
+    );
+    assert_eq!(retained_choice.model(), pick.model);
+    assert!(
+        retained_choice
+            .explanation()
+            .render()
+            .contains("reused without re-ranking"),
+        "a retained decision's explanation must say it was retained, not read as a fresh \
+         ranking that never ran: {}",
+        retained_choice.explanation().render()
     );
 }
 

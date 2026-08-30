@@ -307,6 +307,12 @@ pub struct DisposableChoice {
     /// Map line 1554: the top candidate plus a concise explanation of the
     /// most important reasons it won — [`DisposableRouting::score`]'s
     /// output for the candidate that was actually chosen.
+    ///
+    /// **One exception: a retained pick (map lines 1441/1442,
+    /// [`AutomaticClassificationDecision::Retained`]).** No ranking ran for
+    /// it, so its explanation says exactly that — reused without
+    /// re-ranking, and when it was originally chosen — rather than reading
+    /// as `score`'s output for a comparison that never happened.
     explanation: RoutingExplanation,
 }
 
@@ -518,8 +524,11 @@ pub const AUTOMATIC_CLASSIFICATION_STICKY_WINDOW_SECONDS: i64 =
 pub enum AutomaticClassificationDecision {
     /// The retained pick was reused: still inside the window, still naming a
     /// candidate this call was given, and still healthy. [`DisposableRouting::choose`]
-    /// did not run.
-    Retained(RetainedPick),
+    /// did not run. The [`DisposableChoice`] is built here, from the
+    /// retained candidate, rather than handed to a caller as a bare
+    /// [`RetainedPick`] — `DisposableChoice` has no public fields and no
+    /// public constructor, so nothing outside this module could build one.
+    Retained(DisposableChoice),
     /// A fresh decision was made — no usable retained pick, the window had
     /// elapsed, or the retained resource's health had turned against it.
     /// Carries both the ordinary [`DisposableChoice`] and the
@@ -859,9 +868,8 @@ impl DisposableRouting {
     /// `candidates` and `pool` already are — nothing here opens a cache or a
     /// connection. The caller is expected to be
     /// `crate::provider::telemetry::RoutingStickyCache::load`, and to persist
-    /// the returned pick with `RoutingStickyCache::store`, but neither call
-    /// happens in this crate today — see this package's report for the exact
-    /// `main.rs` insertion point that would make it the production path.
+    /// the returned pick with `RoutingStickyCache::store` on the
+    /// [`AutomaticClassificationDecision::Fresh`] arm.
     ///
     /// # The honesty invariant (map line 1441)
     ///
@@ -877,6 +885,14 @@ impl DisposableRouting {
     /// reaches only free candidates"), so there is nothing honest to check a
     /// metered pick's continued health against, and inventing one would
     /// repeat the same fabrication line 1434's elimination step refuses.
+    ///
+    /// # The retained arm's explanation is not `score`'s output
+    ///
+    /// No ranking runs when a pick is retained, so the [`DisposableChoice`]
+    /// built here carries a [`RoutingExplanation`] that says exactly that —
+    /// reused without re-ranking, and its age — rather than a synthesised
+    /// comparison that never happened. See [`DisposableChoice`]'s
+    /// `explanation` field doc.
     pub fn choose_for_automatic_classification(
         &self,
         candidates: &[DisposableCandidate],
@@ -896,7 +912,25 @@ impl DisposableRouting {
                 candidate.cost().is_free() && pool.is_available(&candidate.as_free_resource(), now)
             });
             if within_window && still_healthy {
-                return Ok(AutomaticClassificationDecision::Retained(pick.clone()));
+                let candidate =
+                    still_present.expect("still_healthy is true only when still_present is Some");
+                let reason = if self.prefer_free_setting {
+                    UseReason::UserPreference
+                } else {
+                    UseReason::QuotaPreservation
+                };
+                let mut explanation = RoutingExplanation::new();
+                explanation.push(Contribution::new(
+                    "retained pick",
+                    0.0,
+                    format!(
+                        "reused without re-ranking: chosen {age}s ago, inside the \
+                         {AUTOMATIC_CLASSIFICATION_STICKY_WINDOW_SECONDS}s sticky window (map \
+                         line 1442); DisposableRouting::score did not run for this decision"
+                    ),
+                ));
+                let choice = self.choice(JobKind::Classification, candidate, reason, explanation);
+                return Ok(AutomaticClassificationDecision::Retained(choice));
             }
         }
 
