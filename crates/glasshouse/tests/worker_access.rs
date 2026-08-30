@@ -453,16 +453,66 @@ impl Server {
     }
 
     fn spawn_worker(&self) -> String {
+        self.spawn_as("worker")
+    }
+
+    /// Spawn a session under an arbitrary role.
+    ///
+    /// The fourth section of this file needs an *orchestrator* session as
+    /// well as a worker, because `Request::WatchWorker` refuses a session
+    /// watching itself and the completion has to be delivered somewhere.
+    /// The role is a label on the record; both sessions are the same kind of
+    /// live pseudo-terminal, which is itself part of what that section
+    /// measures.
+    fn spawn_as(&self, role: &str) -> String {
         let response = self.call(serde_json::json!({
             "op": "spawn_session",
             "harness": "claude-code",
-            "role": "worker",
+            "role": role,
         }));
         assert_eq!(response["status"], "ok", "{response}");
         response["result"]["session"]
             .as_str()
             .expect("a session id")
             .to_owned()
+    }
+
+    /// The highest log position this door has issued so far.
+    ///
+    /// Used as a causal fence rather than a clock: a row with a greater
+    /// `seq` was written after everything counted here, whatever the wall
+    /// clock says.
+    fn max_seq(&self) -> i64 {
+        self.events()
+            .iter()
+            .filter_map(|event| event["seq"].as_i64())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Whether the log holds any `text_delivered` row at all.
+    ///
+    /// A causal "the completion handoff has happened" signal that does **not**
+    /// depend on *which* session received it. §80 case 5: a fixture must be
+    /// able to observe a failure independently of the thing being mutated, or
+    /// a mutation that redirects the delivery kills the test through the
+    /// fixture's own timeout and the test's real assertions never run. That
+    /// happened once here, with `hand-the-result-back-to-the-worker`.
+    ///
+    /// Sound because the handoff is the **first** write into any session in
+    /// the two tests that use this: nothing is sent to anyone before it.
+    fn a_delivery_was_recorded(&self) -> bool {
+        self.events()
+            .iter()
+            .any(|event| event["kind"] == "text_delivered")
+    }
+
+    /// Every `text_delivered` row the log holds for one session, in order.
+    fn deliveries_to(&self, session: &str) -> Vec<serde_json::Value> {
+        self.events()
+            .into_iter()
+            .filter(|event| event["session"] == session && event["kind"] == "text_delivered")
+            .collect()
     }
 
     /// Every event the orchestrator's own read path can see, from the start
@@ -1801,4 +1851,437 @@ fn a_worker_whose_process_died_under_a_live_door_still_reads_back_what_it_printe
         "what the worker printed before it died must survive it: {:?}",
         stdout_of(&read).len()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Map line 740 — and why these three tests are a refusal rather than a closure.
+// ---------------------------------------------------------------------------
+
+/// Every `glasshouse worker-completion` line one session's harness has read.
+///
+/// The same shape `worker_wakeup.rs` uses, restated here rather than shared:
+/// these tests need the *payload* to pull a log position out of it.
+fn completions(text: &str) -> Vec<serde_json::Value> {
+    text.lines()
+        .filter_map(|line| line.split_once("glasshouse worker-completion "))
+        .filter_map(|(_, payload)| serde_json::from_str(payload.trim()).ok())
+        .collect()
+}
+
+/// Line 740: *"Preserve the user's ability to enter and modify a worker
+/// session before the orchestrator acts on its result."*
+///
+/// **This is an ordering claim, and one of its two events does not exist in
+/// this build.** The three tests below are written to say so executably, in
+/// the shape this file already uses once
+/// ([`an_intervention_through_the_door_reaches_the_orchestrators_event_read_path`]
+/// asserted the wrong behaviour on purpose until somebody fixed it, and was
+/// then inverted rather than deleted). Each pins today's behaviour with a
+/// failure message naming what the fix would be, so the refusal is
+/// falsifiable by anyone who disagrees with it.
+///
+/// # The user's half is recorded, but not as the *user's*
+///
+/// `SessionApi::send_text` and `SessionApi::interrupt` hard-wire
+/// [`glasshouse::events::MessageOrigin::Machine`] (`src/session/api.rs:129`
+/// and `:139`), and they are the only write path this door has. So a person
+/// running `glasshouse api send` and an orchestrator issuing
+/// `Request::SendMessage` produce log rows that are equal field for field —
+/// [`a_persons_intervention_and_the_orchestrators_own_are_the_same_row`].
+/// Nor is there an identity to record: `unix::authorize`
+/// (`src/api/unix.rs:309`) admits a peer whose uid equals this process's, so
+/// the person and the agent acting for them are the **same principal** by
+/// construction.
+///
+/// The *"enter"* half is not recorded at all — reading a worker writes
+/// nothing, which [`reading_a_worker_changes_nothing_about_it`] already
+/// asserts as a feature.
+///
+/// # The orchestrator's half is not represented
+///
+/// [`nothing_in_the_log_records_the_orchestrator_acting_on_a_result`] shows
+/// the only moment this build writes down is the **converse** one: Glasshouse
+/// handing a result *to* an orchestrator (`pump_watches`, delivering through
+/// `SessionApi::send_text` at `src/api/unix.rs:2041`). What the orchestrator
+/// then does — re-read, decide, integrate — leaves no row, and an
+/// orchestrator that polls `Request::Events` instead of registering a watch
+/// leaves not even the handoff.
+///
+/// # What does hold, and it is worth having
+///
+/// [`a_person_can_still_enter_and_change_a_worker_after_its_result_reached_the_orchestrator`]
+/// proves the *ability* is never foreclosed: the handoff does not close,
+/// quiesce or reap the worker, so a person can read it, type into it and
+/// interrupt it strictly **after** the orchestrator has been handed its
+/// result — which subsumes "before" without needing to win a race. That is
+/// an absence of teardown rather than a preserved guarantee, and it is the
+/// honest residue of this line.
+#[test]
+fn a_persons_intervention_and_the_orchestrators_own_are_the_same_row() {
+    let fixture = Fixture::new();
+    let root = fixture.project_root("alpha");
+    let server = Server::start(&fixture, &root);
+
+    let worker = server.spawn_worker();
+    wait_for("the worker's harness to start", || {
+        fixture.argv(&root, &worker).is_some()
+    });
+
+    // Deliberately the same length, so `bytes` cannot be mistaken for the
+    // thing that tells the two apart.
+    const BY_A_PERSON: &str = "from-the-person";
+    const BY_THE_AGENT: &str = "by-orchestrator";
+    assert_eq!(
+        BY_A_PERSON.len(),
+        BY_THE_AGENT.len(),
+        "the two lines must be the same length or `bytes` would distinguish \
+         them for a reason that has nothing to do with who sent them"
+    );
+
+    // A person, in a process of their own, running the shipped client.
+    let typed = fixture.client(
+        &root,
+        &["api", "send", "--session", &worker, "--text", BY_A_PERSON],
+    );
+    assert!(
+        typed.status.success(),
+        "`glasshouse api send` failed: {}",
+        stderr_of(&typed)
+    );
+    wait_for("the worker to read the person's line", || {
+        fixture
+            .received(&root, &worker)
+            .is_some_and(|text| text.contains(BY_A_PERSON))
+    });
+
+    // The orchestrator, speaking the protocol straight into the door.
+    let machine = server.call(serde_json::json!({
+        "op": "send_message",
+        "session": worker,
+        "text": BY_THE_AGENT,
+    }));
+    assert_eq!(machine["status"], "ok", "{machine}");
+    wait_for("the worker to read the orchestrator's line", || {
+        fixture
+            .received(&root, &worker)
+            .is_some_and(|text| text.contains(BY_THE_AGENT))
+    });
+
+    // The viewport (§17): both deliveries demonstrably happened, so the rows
+    // being alike is a fact about the rows and not about an empty log.
+    let rows = server.deliveries_to(&worker);
+    assert_eq!(
+        rows.len(),
+        2,
+        "both lines reached the worker, so the orchestrator's read path must \
+         hold exactly two deliveries for it — otherwise this test is \
+         comparing something other than the two writes it made: {rows:?}"
+    );
+
+    for row in &rows {
+        assert_eq!(
+            row["origin"], "machine",
+            "IF THIS FAILS, INVERT THIS TEST RATHER THAN DELETING IT. It pins \
+             capability map line 740's missing half: today every write through \
+             this door is stamped `machine`, because `SessionApi::send_text` \
+             and `SessionApi::interrupt` hard-wire `MessageOrigin::Machine` \
+             (src/session/api.rs:129 and :139) and there is no second write \
+             path. An origin arriving here means a person's intervention has \
+             become distinguishable, which is one of the two things line 740 \
+             needs: {row}"
+        );
+    }
+
+    let stripped: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|row| {
+            let mut row = row.clone();
+            let fields = row.as_object_mut().expect("an event object");
+            // `seq` orders them and `at` is a wall clock. Neither says *who*,
+            // which is the only question line 740 is asking.
+            fields.remove("seq");
+            fields.remove("at");
+            row
+        })
+        .collect();
+
+    assert_eq!(
+        stripped[0], stripped[1],
+        "IF THIS FAILS, INVERT THIS TEST RATHER THAN DELETING IT. A person's \
+         intervention and an orchestrator's own message are, today, the same \
+         row: identical session, kind, origin and byte count, differing only \
+         in log position. So no reader of this log can say that *the user* \
+         did something, which is the first of the two events line 740's \
+         ordering is over. Rows: {rows:?}"
+    );
+}
+
+/// Line 740's second missing event, and the one the packet asked to be named
+/// with a `file:line` if it could not be found.
+///
+/// It could not. The nearest thing this build records is its **converse** —
+/// `pump_watches` handing a completion *to* an orchestrator through
+/// `SessionApi::send_text` (`src/api/unix.rs:2041`), which lands as one
+/// `text_delivered` row on the *notify* session. That is Glasshouse speaking,
+/// not the orchestrator acting.
+///
+/// What an orchestrator does with a result it has been handed is, by design,
+/// invisible here: the notification is a statement about log position `seq`
+/// and carries no live state (`Completion`'s own doc comment,
+/// `src/api/unix.rs:1766`), so consuming it *means* re-reading through
+/// `Request::SessionState`, `Request::RecentOutput` and `Request::Events` —
+/// and all three are reads, which this door deliberately does not record.
+///
+/// # The viewport (§17)
+///
+/// The fence is taken from a log already known to be carrying rows for both
+/// sessions — the handoff row is asserted first, by content — so "nothing was
+/// added" is measured against a read path demonstrably working, not against
+/// one that was broken all along.
+#[test]
+fn nothing_in_the_log_records_the_orchestrator_acting_on_a_result() {
+    let fixture = Fixture::new();
+    let root = fixture.project_root("alpha");
+    let server = Server::start(&fixture, &root);
+
+    let worker = server.spawn_as("worker");
+    let orchestrator = server.spawn_as("orchestrator");
+    wait_for("both harnesses to start", || {
+        fixture.argv(&root, &worker).is_some() && fixture.argv(&root, &orchestrator).is_some()
+    });
+
+    let registered = server.call(serde_json::json!({
+        "op": "watch_worker",
+        "session": worker,
+        "notify": orchestrator,
+    }));
+    assert_eq!(registered["status"], "ok", "{registered}");
+
+    fixture.hook(&root, &worker, "UserPromptSubmit");
+    fixture.hook(&root, &worker, "Stop");
+
+    wait_for("the worker's result to be handed over", || {
+        server.a_delivery_was_recorded()
+    });
+
+    // The one row the handoff writes, and whose session it is on.
+    let handoff = server.deliveries_to(&orchestrator);
+    assert_eq!(
+        handoff.len(),
+        1,
+        "the handoff is one machine-originated line typed into the \
+         orchestrator's own session: {handoff:?}"
+    );
+    assert_eq!(
+        handoff[0]["origin"], "machine",
+        "the recorded moment is Glasshouse speaking to the orchestrator, not \
+         the orchestrator acting: {}",
+        handoff[0]
+    );
+
+    // And it really was a completion, read by the orchestrator's own harness.
+    // Asserted *after* the two above so a mutation that redirects the
+    // delivery fails on their terms rather than in this wait.
+    wait_for("the orchestrator to read the completion", || {
+        fixture
+            .received(&root, &orchestrator)
+            .is_some_and(|text| !completions(&text).is_empty())
+    });
+
+    // Causal fence: any row written from here on has a greater `seq`. No
+    // clock is consulted.
+    let fence = server.max_seq();
+    assert!(
+        fence > 0,
+        "the fence must come from a log that has rows in it, or the emptiness \
+         below would be free"
+    );
+
+    // Now the orchestrator does the only thing the notification permits it to
+    // do with a result: ask again. This *is* acting on it.
+    for request in [
+        serde_json::json!({ "op": "session_state", "session": worker }),
+        serde_json::json!({ "op": "recent_output", "session": worker }),
+        serde_json::json!({ "op": "events", "after": 0, "limit": 1000 }),
+    ] {
+        let response = server.call(request.clone());
+        assert_eq!(response["status"], "ok", "{request} -> {response}");
+    }
+
+    let after: Vec<serde_json::Value> = server
+        .events()
+        .into_iter()
+        .filter(|event| event["seq"].as_i64().is_some_and(|seq| seq > fence))
+        .collect();
+    assert!(
+        after.is_empty(),
+        "IF THIS FAILS, INVERT THIS TEST RATHER THAN DELETING IT. It pins the \
+         second half of why capability map line 740 is refused: an \
+         orchestrator consuming a worker's result leaves no trace, so there is \
+         no moment to order a user's intervention *before*. A row appearing \
+         here means one now exists and line 740 has become answerable: {after:?}"
+    );
+
+    // Both directions (§17): an emptiness assertion over a fence that could
+    // never advance would pass for free. One write that *is* recorded, read
+    // back through the identical comparison, is what makes the emptiness
+    // above a fact about reads rather than about the fence.
+    let control = server.call(serde_json::json!({
+        "op": "send_message",
+        "session": worker,
+        "text": "a-row-that-must-be-seen",
+    }));
+    assert_eq!(control["status"], "ok", "{control}");
+    let seen: Vec<serde_json::Value> = server
+        .events()
+        .into_iter()
+        .filter(|event| event["seq"].as_i64().is_some_and(|seq| seq > fence))
+        .collect();
+    assert!(
+        !seen.is_empty(),
+        "the fence must be able to see a new row at all, or the emptiness \
+         asserted above is free rather than earned"
+    );
+}
+
+/// What line 740 *does* have, stated exactly: the ability is never foreclosed.
+///
+/// The handoff does not close, quiesce or reap the worker — `pump_watches`
+/// writes into the notify session and touches nothing else — so a person can
+/// enter and modify the worker strictly **after** its result reached the
+/// orchestrator. That is the strongest honest form of the line's ordering:
+/// the user never has to win a race, because the window does not shut.
+///
+/// **It is an absence of teardown, not a preserved guarantee**, and that is
+/// the difference the refusal turns on. The mutation that kills this test —
+/// `pump_watches` closing the worker once its completion is delivered —
+/// proves the absence is watched; it does not produce a mechanism that
+/// *keeps* the window open, because there is none to produce.
+///
+/// Ordering is by log position, never by wall clock: the person's delivery is
+/// asserted to sit at a greater `seq` than the handoff, and it could not be
+/// otherwise, because the handoff had already been read by the orchestrator's
+/// own harness before the client process was started.
+#[test]
+fn a_person_can_still_enter_and_change_a_worker_after_its_result_reached_the_orchestrator() {
+    let fixture = Fixture::new();
+    let root = fixture.project_root("alpha");
+    let server = Server::start(&fixture, &root);
+
+    let worker = server.spawn_as("worker");
+    let orchestrator = server.spawn_as("orchestrator");
+    wait_for("both harnesses to start", || {
+        fixture.argv(&root, &worker).is_some() && fixture.argv(&root, &orchestrator).is_some()
+    });
+
+    let registered = server.call(serde_json::json!({
+        "op": "watch_worker",
+        "session": worker,
+        "notify": orchestrator,
+    }));
+    assert_eq!(registered["status"], "ok", "{registered}");
+
+    fixture.hook(&root, &worker, "UserPromptSubmit");
+    fixture.hook(&root, &worker, "Stop");
+
+    wait_for("the worker's result to be handed over", || {
+        server.a_delivery_was_recorded()
+    });
+    let handoff = server.deliveries_to(&orchestrator);
+    assert_eq!(
+        handoff.len(),
+        1,
+        "the result must have been handed to the *orchestrator* before this \
+         test can say anything about what happens after that: {handoff:?}"
+    );
+    wait_for("the orchestrator to read the completion", || {
+        fixture
+            .received(&root, &orchestrator)
+            .is_some_and(|text| !completions(&text).is_empty())
+    });
+    let handed_over = handoff[0]["seq"]
+        .as_i64()
+        .expect("the handoff's log position");
+
+    // ENTER, after the handoff: the person reads the worker's own terminal.
+    const AFTER_THE_HANDOFF: &str = "after-the-handoff";
+    let read = fixture.client(&root, &["api", "read", "--session", &worker]);
+    assert!(
+        read.status.success(),
+        "a worker whose result has been handed over is still readable: {}",
+        stderr_of(&read)
+    );
+    assert!(
+        stdout_of(&read).contains("READY"),
+        "the read must show the worker's own terminal, not an empty answer: \
+         {:?}",
+        stdout_of(&read)
+    );
+
+    // MODIFY, after the handoff: the person types into it, and the worker's
+    // own account is what proves the line arrived.
+    let sent = fixture.client(
+        &root,
+        &[
+            "api",
+            "send",
+            "--session",
+            &worker,
+            "--text",
+            AFTER_THE_HANDOFF,
+        ],
+    );
+    assert!(
+        sent.status.success(),
+        "a worker whose result has been handed over still takes input: {}",
+        stderr_of(&sent)
+    );
+    wait_for("the worker to read the person's line", || {
+        fixture
+            .received(&root, &worker)
+            .is_some_and(|text| text.contains(AFTER_THE_HANDOFF))
+    });
+
+    // And the change is visible to the person through the same door, so
+    // "enter and modify" is one loop rather than two disconnected verbs.
+    let again = fixture.client(&root, &["api", "read", "--session", &worker]);
+    assert!(again.status.success(), "{}", stderr_of(&again));
+    assert!(
+        stdout_of(&again).contains(&format!("got:{AFTER_THE_HANDOFF}")),
+        "the worker's echo of the person's line must come back through the \
+         read verb: {:?}",
+        stdout_of(&again)
+    );
+
+    // The ordering, from log positions rather than a clock.
+    let deliveries = server.deliveries_to(&worker);
+    assert_eq!(
+        deliveries.len(),
+        1,
+        "the only line ever sent to this worker is the person's, after the \
+         handoff: {deliveries:?}"
+    );
+    let intervened = deliveries[0]["seq"]
+        .as_i64()
+        .expect("the intervention's log position");
+    assert!(
+        intervened > handed_over,
+        "the person's intervention must sit after the handoff in the same \
+         ordered log ({intervened} > {handed_over}), which is what makes this \
+         the *after* case rather than a race the person happened to win"
+    );
+
+    // Interrupt last, because a real 0x03 ends this harness's read loop: the
+    // worker's own trap file is the evidence, and nothing the door says can
+    // produce it.
+    let interrupted = fixture.client(&root, &["api", "interrupt", "--session", &worker]);
+    assert!(
+        interrupted.status.success(),
+        "a worker whose result has been handed over can still be interrupted: \
+         {}",
+        stderr_of(&interrupted)
+    );
+    wait_for("the worker to handle a real SIGINT", || {
+        fixture.reacted_to_interrupt(&root, &worker)
+    });
 }
