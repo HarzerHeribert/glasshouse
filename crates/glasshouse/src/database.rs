@@ -123,10 +123,10 @@ pub(crate) const LIFECYCLE_EVENT_KINDS: [&str; 11] = [
 /// lives. `response_profile` (migration 8) is the precedent for a column with
 /// no `CHECK` at all.
 ///
-/// One entry, because this package lands one producer. Variants are added as
-/// producers land, never in advance: an enum written before its writers is the
-/// same mistake as a table written before its counts.
-pub(crate) const EVALUATION_KINDS: [&str; 1] = ["memory_retrieved"];
+/// One entry per landed producer. Variants are added as producers land, never
+/// in advance: an enum written before its writers is the same mistake as a
+/// table written before its counts.
+pub(crate) const EVALUATION_KINDS: [&str; 2] = ["memory_retrieved", "disposable_route_decided"];
 
 /// The largest checkpoint the project database will store, in bytes.
 ///

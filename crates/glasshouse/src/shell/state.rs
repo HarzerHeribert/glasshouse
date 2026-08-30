@@ -113,6 +113,19 @@ pub enum Overlay {
     /// it, and [`RouteHealthRow`] for why "unknown" is a real answer in
     /// three of the five concepts.
     RouteHealth,
+    /// Why Glasshouse routed its own recent support jobs the way it did —
+    /// the disposable-routing rationales `glasshouse hook` records in
+    /// [`crate::evaluation`] once per completed turn.
+    ///
+    /// [`Overlay::RouteEvidence`]'s and [`Overlay::RouteHealth`]'s sibling,
+    /// and the one that answers a different question from both: those two are
+    /// about the *gateway* — which identities it routed, and what is known
+    /// about their health — and this one is about a decision Glasshouse made
+    /// for itself, with the named contributions behind it. Read-only, like
+    /// every overlay above it. See [`RouteDecisionsState`], and
+    /// [`RouteDecisionRow`] for why the rationale is text rather than a
+    /// reconstructed choice.
+    RouteDecisions,
 }
 
 /// Who currently owns the keyboard.
@@ -277,6 +290,14 @@ pub enum Action {
     /// no failure for a note to report, and adding one would be a field
     /// nothing sets. Phase 47, map line 1765.
     OpenRouteHealth,
+    /// Open the routing-decisions view. Reading the evaluation ledger
+    /// (`crate::evaluation::EvaluationObservations`) is file I/O this module
+    /// deliberately does not hold — the run loop reads it and calls
+    /// [`ShellState::open_route_decisions`], reporting a read failure back
+    /// through its own note rather than refusing to open, the same contract
+    /// [`Action::OpenRouteEvidence`] keeps and for the same reason: that
+    /// ledger is SQLite and really can fail to open.
+    OpenRouteDecisions,
 }
 
 /// A session's screen, as a terminal would have drawn it, ready to draw.
@@ -715,6 +736,67 @@ impl RouteEvidenceState {
     }
 }
 
+/// One recorded disposable-routing decision, for the routing-decisions view.
+/// Built by `shell::build_route_decision_table` from
+/// `crate::evaluation::EvaluationObservations::recent_of_kind` — this module
+/// holds plain data rather than importing `crate::evaluation`'s own types
+/// directly, the same split [`RouteEvidenceRow`] keeps from
+/// `crate::routing::evidence`.
+///
+/// # Why the rationale is text, and must stay text
+///
+/// The decision behind one of these rows is a
+/// `crate::routing::disposable::DisposableChoice`, whose fields are private
+/// and which nothing outside its own module can construct. That is an
+/// enforced safety invariant rather than a style choice — its module header
+/// records that a choice on a metered resource must not be reproducible from
+/// a policy that withheld it — so a stored decision is deliberately **not**
+/// turned back into one. The producer renders the rationale at the moment it
+/// decides and stores the sentence; this row carries that sentence; the view
+/// draws it. Nothing anywhere reconstructs the choice.
+///
+/// # Every field is what was recorded, and absent stays absent
+///
+/// `session_id` and `rationale` are `Option` because the ledger's columns are
+/// nullable and a row written by a later producer may not fill them. The view
+/// says so plainly rather than drawing an empty column that reads as a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteDecisionRow {
+    /// When the decision was made, as the ledger recorded it.
+    pub observed_at_unix: i64,
+    /// The job the decision was for, in
+    /// `crate::routing::disposable::JobKind`'s own spelling.
+    pub job: String,
+    /// The session the decision was made for. `None` means the row recorded
+    /// none.
+    pub session_id: Option<String>,
+    /// The rendered rationale, exactly as it was stored. `None` means the row
+    /// recorded none.
+    pub rationale: Option<String>,
+}
+
+/// The routing-decisions view's own data: the decisions the run loop already
+/// read from the evaluation ledger. See
+/// [`ShellState::open_route_decisions`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteDecisionsState {
+    rows: Vec<RouteDecisionRow>,
+    /// Set when the run loop could not read the evaluation ledger at all.
+    /// The overlay still opens with an honest, empty list — the same contract
+    /// [`RouteEvidenceState::note`] keeps.
+    note: Option<String>,
+}
+
+impl RouteDecisionsState {
+    pub fn rows(&self) -> &[RouteDecisionRow] {
+        &self.rows
+    }
+
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
+    }
+}
+
 /// One observed free resource, with map line 1765's five concepts carried as
 /// **five separate groups of fields** — Phase 47.
 ///
@@ -938,6 +1020,9 @@ pub struct ShellState {
     /// The route-health view's own data, or `None` when it is not open — the
     /// same split as `route_evidence`.
     route_health: Option<RouteHealthState>,
+    /// The routing-decisions view's own data, or `None` when it is not open —
+    /// the same split as `route_evidence`.
+    route_decisions: Option<RouteDecisionsState>,
     /// The project-memory view's own data, or `None` when it is not open —
     /// the same split as `project_overview`, `project_knowledge` and
     /// `route_evidence`.
@@ -970,6 +1055,7 @@ impl ShellState {
             project_knowledge: None,
             route_evidence: None,
             route_health: None,
+            route_decisions: None,
             project_memory: None,
             activity: Vec::new(),
         }
@@ -1206,6 +1292,30 @@ impl ShellState {
         self.route_health.as_ref()
     }
 
+    /// Open the routing-decisions view with the decisions the run loop
+    /// already read from the evaluation ledger. Reading `crate::evaluation`
+    /// is file I/O this module deliberately does not hold — see
+    /// [`Self::open_route_evidence`] for the same split.
+    ///
+    /// Opens on an empty `rows`, and opens when `note` is `Some`: a project
+    /// that has never completed a turn under Glasshouse has recorded no
+    /// decision, and that is the most common true state rather than a failure
+    /// — so the view says it plainly instead of refusing to open.
+    pub fn open_route_decisions(
+        &mut self,
+        rows: Vec<RouteDecisionRow>,
+        note: Option<String>,
+    ) -> Action {
+        self.overlay = Some(Overlay::RouteDecisions);
+        self.route_decisions = Some(RouteDecisionsState { rows, note });
+        Action::Redraw
+    }
+
+    /// The routing-decisions view's own data, or `None` when it is not open.
+    pub fn route_decisions(&self) -> Option<&RouteDecisionsState> {
+        self.route_decisions.as_ref()
+    }
+
     /// Open the project-memory view with memory the run loop already read
     /// from disk — every kind, at every status, unfiltered. Reading
     /// `crate::memory` is file I/O this module deliberately does not hold —
@@ -1275,6 +1385,7 @@ impl ShellState {
         self.project_knowledge = None;
         self.route_evidence = None;
         self.route_health = None;
+        self.route_decisions = None;
         self.project_memory = None;
         Action::Redraw
     }
@@ -1659,6 +1770,12 @@ impl ShellState {
             return self.handle_route_health_key(key, had_status);
         }
 
+        // Read-only for the same reason again: a list of decisions already
+        // made has nothing on it to act on.
+        if self.overlay == Some(Overlay::RouteDecisions) {
+            return self.handle_route_decisions_key(key, had_status);
+        }
+
         // The same cursor-and-drill-down shape as `ProjectKnowledge` above,
         // over one unfiltered list instead of five curated sections.
         if self.overlay == Some(Overlay::ProjectMemory) {
@@ -1689,6 +1806,11 @@ impl ShellState {
             // this one claim only their own close key (and, for the two with
             // a cursor, Up/Down/Enter).
             KeyCode::Char('h') => Action::OpenRouteHealth,
+            // `d` for decisions, and it was free: no binding in this table
+            // used it, and the only other `Char('d')` in this file is inside
+            // the Settings overlay's own handler, which runs instead of this
+            // one and never falls through to it.
+            KeyCode::Char('d') => Action::OpenRouteDecisions,
             // Capital, not lowercase `m`: that letter is already the
             // Overview's own "begin sending text" key (`handle_overview_key`'s
             // `Char('m') if !ctrl`), and giving the same key a second,
@@ -1813,6 +1935,16 @@ impl ShellState {
     fn handle_route_health_key(&mut self, key: KeyEvent, had_status: bool) -> Action {
         match key.code {
             KeyCode::Esc | KeyCode::Char('h') => self.close_overlay(),
+            _ => self.handle_control_key(key, had_status),
+        }
+    }
+
+    /// Answer one key while the routing-decisions view is open — the same
+    /// shape as [`Self::handle_route_evidence_key`], for the same reason:
+    /// nothing here is acted on, only shown.
+    fn handle_route_decisions_key(&mut self, key: KeyEvent, had_status: bool) -> Action {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('d') => self.close_overlay(),
             _ => self.handle_control_key(key, had_status),
         }
     }

@@ -57,8 +57,8 @@ pub use state::{
     Action, HarnessRow, IntegrationRow, KnowledgeSection, MemoryDetail, MemoryRow,
     MemorySettingsEdit, Mode, ModelRefresh, Overlay, OverviewState, ProbeKind, ProfileRow,
     ProfileSettingsEdit, ProviderNotice, ProviderProbeIntent, ProviderProbeResult, ProviderRow,
-    ProviderSettingsEdit, ReachabilityCheck, RouteEvidenceRow, RouteHealthRow, RoutingRow,
-    RoutingSettingsEdit, SettingsEdit, ShellState, ViewportGrid,
+    ProviderSettingsEdit, ReachabilityCheck, RouteDecisionRow, RouteEvidenceRow, RouteHealthRow,
+    RoutingRow, RoutingSettingsEdit, SettingsEdit, ShellState, ViewportGrid,
 };
 
 /// Open the shell and run it until the user leaves.
@@ -293,6 +293,21 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     Action::OpenRouteHealth => {
                         state.open_route_health(build_route_health_table(runtime));
                     }
+                    Action::OpenRouteDecisions => match build_route_decision_table(runtime) {
+                        Ok(rows) => {
+                            state.open_route_decisions(rows, None);
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                "could not read the evaluation ledger for the routing-decisions view"
+                            );
+                            state.open_route_decisions(
+                                Vec::new(),
+                                Some(format!("routing decisions unavailable: {err:#}")),
+                            );
+                        }
+                    },
                     Action::OpenProjectMemory => match build_project_memory_view(runtime) {
                         Ok(memory) => {
                             state.open_project_memory(memory, None);
@@ -1963,6 +1978,66 @@ fn build_route_evidence_table(runtime: &Runtime) -> anyhow::Result<Vec<RouteEvid
                 window_start_unix,
                 window_end_unix,
             }
+        })
+        .collect())
+}
+
+/// How many decisions the routing-decisions view shows.
+///
+/// Smaller than [`ROUTE_EVIDENCE_ROW_LIMIT`] on purpose: a row here is a
+/// whole rationale — a heading plus one line per named contribution — where a
+/// row there is one line, so twenty of these would be several screens of text
+/// nobody scrolls. Ten is a few days of ordinary use for a project whose
+/// turns end under Glasshouse.
+const ROUTE_DECISION_ROW_LIMIT: usize = 10;
+
+/// Read the disposable-routing rationales `glasshouse hook` recorded — the
+/// consumer half of this package, and the reason its producer is not
+/// Cluster B.
+///
+/// [`crate::evaluation::EvaluationObservations::recent_of_kind`] is this
+/// package's one additive read, and the whole of what makes this function
+/// possible: [`crate::evaluation::EvaluationObservations::recent`] is an
+/// unkeyed listing over every kind, so on a project that has searched its
+/// memory recently the newest ten rows are ten retrievals and this view would
+/// be empty while the ledger held decisions.
+///
+/// # Project scope is the store's, not this function's
+///
+/// The ledger is opened from [`Runtime`] and nowhere else, which is the same
+/// single door [`build_route_evidence_table`] uses: the database file is this
+/// project's, and migration 15's two triggers refuse a row naming any other
+/// `project_id` besides. There is no argument here that could reach another
+/// project's decisions, and nothing below filters for project scope because
+/// nothing below could observe a row that lacked it.
+///
+/// # Nothing is derived
+///
+/// Every field is the stored column. The rationale is the sentence the
+/// producer rendered at the moment it decided — see
+/// [`crate::shell::state::RouteDecisionRow`] for why it is text and must
+/// stay text — and a row that recorded no session or no rationale arrives
+/// here as `None` rather than as an empty string that would read as a value.
+fn build_route_decision_table(runtime: &Runtime) -> anyhow::Result<Vec<RouteDecisionRow>> {
+    use crate::evaluation::{EvaluationKind, EvaluationObservations};
+
+    let ledger = EvaluationObservations::open(runtime)?;
+    let decisions = ledger.recent_of_kind(
+        EvaluationKind::DisposableRouteDecided,
+        ROUTE_DECISION_ROW_LIMIT,
+    )?;
+    Ok(decisions
+        .into_iter()
+        .map(|observation| RouteDecisionRow {
+            observed_at_unix: observation.observed_at,
+            // `subject` is the job kind's own name, written by the producer.
+            // A row that recorded none says so rather than being drawn as a
+            // decision about nothing in particular.
+            job: observation
+                .subject
+                .unwrap_or_else(|| "(no job recorded)".to_owned()),
+            session_id: observation.session_id,
+            rationale: observation.detail,
         })
         .collect())
 }
@@ -5065,6 +5140,223 @@ mod route_evidence_tests {
                 .rows()
                 .iter()
                 .any(|row| row.provider == "anyrouter")
+        );
+    }
+}
+
+/// The routing-decisions view reads real recorded decisions through
+/// [`build_route_decision_table`] — the production function
+/// `Action::OpenRouteDecisions`'s handler calls.
+///
+/// These write through `crate::evaluation`'s own store rather than
+/// hand-building a [`RouteDecisionRow`], for practice §35's reason. What they
+/// do **not** claim is that a decision ever reaches that store from the
+/// shipped binary — that is `tests/disposable_route_sink.rs`, which drives a
+/// real `glasshouse hook`, and it is a separate proof on purpose.
+#[cfg(test)]
+mod route_decision_tests {
+    use super::*;
+    use crate::evaluation::{
+        EvaluationKind, EvaluationObservations, NewObservation, RetrievalScope,
+    };
+
+    /// The same bootstrap `route_evidence_tests` uses — an isolated, real
+    /// on-disk project database.
+    fn bootstrapped_runtime() -> (tempfile::TempDir, tempfile::TempDir, crate::Runtime) {
+        use clap::Parser;
+
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join(".git")).unwrap();
+
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+            "--config-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, workspace.path()).unwrap();
+        (data, workspace, runtime)
+    }
+
+    /// A project that has recorded nothing gets an empty table and not an
+    /// error — the state every fresh installation is in.
+    #[test]
+    fn a_project_with_no_recorded_decision_reads_an_empty_table() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let rows = build_route_decision_table(&runtime).expect("must not fail");
+        assert!(rows.is_empty(), "{rows:#?}");
+    }
+
+    /// Every stored column reaches the row, and nothing else is invented.
+    #[test]
+    fn a_recorded_decision_reaches_the_table_with_its_rationale_intact() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let rationale = "a-free-model on a-provider — free, used by user preference\n  \
+                         +1.000  cost — free";
+        {
+            let ledger = EvaluationObservations::open(&runtime).unwrap();
+            ledger
+                .record(
+                    NewObservation::new(EvaluationKind::DisposableRouteDecided)
+                        .with_subject("memory extraction")
+                        .with_session_id("session-abc")
+                        .with_detail(rationale),
+                    1_000,
+                )
+                .unwrap();
+        }
+
+        let rows = build_route_decision_table(&runtime).expect("must not fail");
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0].job, "memory extraction");
+        assert_eq!(rows[0].session_id.as_deref(), Some("session-abc"));
+        assert_eq!(rows[0].rationale.as_deref(), Some(rationale));
+        assert_eq!(rows[0].observed_at_unix, 1_000);
+    }
+
+    /// **The narrowing, which is the whole reason `recent_of_kind` exists.**
+    ///
+    /// The evaluation ledger is shared. A project whose memory has been
+    /// searched recently has memory-retrieval rows newer than any routing
+    /// decision, so a view built on the unkeyed `recent` listing would show
+    /// an empty table while the decision sat two rows down — and would show
+    /// it *only* on projects that use memory, which is the worst possible
+    /// place for the bug to be.
+    #[test]
+    fn a_newer_retrieval_of_another_kind_does_not_displace_a_recorded_decision() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        {
+            let ledger = EvaluationObservations::open(&runtime).unwrap();
+            ledger
+                .record(
+                    NewObservation::new(EvaluationKind::DisposableRouteDecided)
+                        .with_subject("memory extraction")
+                        .with_detail("the decision"),
+                    1_000,
+                )
+                .unwrap();
+            // Newer, and more of them than the view will show.
+            for n in 0..(ROUTE_DECISION_ROW_LIMIT * 2) {
+                ledger
+                    .record(
+                        NewObservation::new(EvaluationKind::MemoryRetrieved)
+                            .with_subject(RetrievalScope::Current.as_str())
+                            .with_memory_id(format!("memory-{n}")),
+                        2_000 + n as i64,
+                    )
+                    .unwrap();
+            }
+        }
+
+        let rows = build_route_decision_table(&runtime).expect("must not fail");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the decision must survive newer rows of another kind, and no retrieval may be \
+             drawn as one: {rows:#?}"
+        );
+        assert_eq!(rows[0].rationale.as_deref(), Some("the decision"));
+    }
+
+    /// Newest first, and bounded — a reader looking at this view wants the
+    /// last decision, and the bound is what keeps a long-lived project's
+    /// view from being a transcript.
+    ///
+    /// # The fixture size is a literal, deliberately (practice §80, case 6)
+    ///
+    /// Written first as `ROUTE_DECISION_ROW_LIMIT + 5` recorded rows and
+    /// `assert_eq!(rows.len(), ROUTE_DECISION_ROW_LIMIT)`, which is a test
+    /// that **rescales with the constant it is watching**: raise the limit to
+    /// 30 and the fixture dutifully records 35, the builder returns 30, and
+    /// the assertion passes against a view that is no longer bounded at all.
+    /// `SEEDED` is therefore a fixed number the mutation cannot move, and the
+    /// bracket is `rows.len() < SEEDED` — false exactly when the limit stops
+    /// being a limit.
+    #[test]
+    fn the_table_is_newest_first_and_bounded() {
+        /// Comfortably more than the shipped limit, and independent of it.
+        const SEEDED: usize = 15;
+
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        {
+            let ledger = EvaluationObservations::open(&runtime).unwrap();
+            for n in 0..SEEDED {
+                ledger
+                    .record(
+                        NewObservation::new(EvaluationKind::DisposableRouteDecided)
+                            .with_subject("memory extraction")
+                            .with_detail(format!("decision {n}")),
+                        1_000 + n as i64,
+                    )
+                    .unwrap();
+            }
+        }
+
+        let rows = build_route_decision_table(&runtime).expect("must not fail");
+        assert!(
+            rows.len() < SEEDED,
+            "{SEEDED} decisions were recorded and the view returned all of them, so nothing is \
+             bounding it: {rows:#?}"
+        );
+        assert_eq!(
+            rows.len(),
+            ROUTE_DECISION_ROW_LIMIT,
+            "the bound must be the shipped one: {rows:#?}"
+        );
+        assert_eq!(
+            rows[0].rationale.as_deref(),
+            Some(format!("decision {}", SEEDED - 1).as_str()),
+            "newest first, whatever the bound is: {rows:#?}"
+        );
+    }
+
+    /// The run loop's own arm, not just the builder: pressing `d` opens the
+    /// overlay carrying what the builder read.
+    ///
+    /// This is the in-crate half of the dispatch proof and it is deliberately
+    /// weaker than `tests/disposable_route_sink.rs`'s, which types the key at
+    /// a real terminal — the arm itself lives inside `run`'s event loop and
+    /// no in-crate test can reach it (the finding `tests/tui_harness.rs`
+    /// exists for).
+    #[test]
+    fn opening_the_routing_decisions_view_shows_real_recorded_decisions() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        {
+            let ledger = EvaluationObservations::open(&runtime).unwrap();
+            ledger
+                .record(
+                    NewObservation::new(EvaluationKind::DisposableRouteDecided)
+                        .with_subject("memory extraction")
+                        .with_detail("chose a-free-model"),
+                    1_000,
+                )
+                .unwrap();
+        }
+
+        let mut state = ShellState::new("p", "/p", "0.1.0", Vec::new());
+        assert_eq!(
+            state.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('d'),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+            state::Action::OpenRouteDecisions
+        );
+
+        let rows = build_route_decision_table(&runtime).expect("must not fail");
+        state.open_route_decisions(rows, None);
+
+        assert_eq!(state.overlay(), Some(state::Overlay::RouteDecisions));
+        let shown = state.route_decisions().expect("open");
+        assert!(
+            shown
+                .rows()
+                .iter()
+                .any(|row| row.rationale.as_deref() == Some("chose a-free-model")),
+            "{:#?}",
+            shown.rows()
         );
     }
 }

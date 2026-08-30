@@ -75,6 +75,7 @@ pub fn render(state: &ShellState, frame: &mut Frame) {
         Some(Overlay::ProjectKnowledge) => render_project_knowledge(state, frame, area),
         Some(Overlay::RouteEvidence) => render_route_evidence(state, frame, area),
         Some(Overlay::RouteHealth) => render_route_health(state, frame, area),
+        Some(Overlay::RouteDecisions) => render_route_decisions(state, frame, area),
         Some(Overlay::ProjectMemory) => render_project_memory(state, frame, area),
         None => {}
     }
@@ -333,10 +334,11 @@ fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
         (Mode::Control, Some(Overlay::ProjectKnowledge)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::RouteEvidence)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::RouteHealth)) => "esc back to session   q quit",
+        (Mode::Control, Some(Overlay::RouteDecisions)) => "esc back to session   q quit",
         (Mode::Control, Some(Overlay::ProjectMemory)) => "esc back to session   q quit",
         (Mode::Control, None) => {
             "tab session   enter session   n new   N headless   o overview   p project   \
-             k knowledge   M memory   e events   r routes   h health   q quit"
+             k knowledge   M memory   e events   r routes   h health   d decisions   q quit"
         }
     };
     let mut spans = vec![Span::styled(hint, Style::default().fg(Color::DarkGray))];
@@ -1078,6 +1080,90 @@ fn render_route_evidence(state: &ShellState, frame: &mut Frame, area: Rect) {
 
     if let Some(note) = evidence.and_then(crate::shell::state::RouteEvidenceState::note) {
         lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            note.to_owned(),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Why Glasshouse routed its own recent support jobs the way it did.
+///
+/// # This draws stored text and computes nothing
+///
+/// The rationale on screen is the sentence
+/// `main.rs::disposable_extraction_model` rendered at the moment it decided,
+/// carried through `crate::evaluation` and
+/// `crate::shell::build_route_decision_table` unchanged. This function splits
+/// it into rendered rows and indents it under its own heading; it does not
+/// parse it, does not rank the contributions, and does not summarise them.
+///
+/// That is not modesty about effort — it is the same invariant
+/// [`crate::shell::state::RouteDecisionRow`] documents. The decision behind a
+/// row is a `crate::routing::disposable::DisposableChoice`, which nothing
+/// outside its own module can construct, so there is no version of this
+/// function that could re-derive a field the producer did not write. What was
+/// not recorded is drawn as *not recorded*, never as a blank column.
+///
+/// # The newest decisions are at the top, and a long list is clipped
+///
+/// A decision is a heading plus one line per named contribution, so a full
+/// [`crate::shell::ROUTE_DECISION_ROW_LIMIT`] of them is longer than a
+/// terminal. Newest first means the clipping falls on the oldest, which is
+/// the order a reader wants — the same trade `render_route_health` already
+/// makes for a project with many resources.
+fn render_route_decisions(state: &ShellState, frame: &mut Frame, area: Rect) {
+    let popup = centered(area, 84, 60);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" routing decisions ")
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let decisions = state.route_decisions();
+    let rows = decisions
+        .map(crate::shell::state::RouteDecisionsState::rows)
+        .unwrap_or_default();
+
+    let mut lines = Vec::new();
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no routing decision has been recorded yet",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        let now = crate::provider::cache::now_unix_seconds();
+        for row in rows {
+            let session = row.session_id.as_deref().unwrap_or("(no session recorded)");
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  {} — {}, for session {session}",
+                    row.job,
+                    describe_age(now, row.observed_at_unix)
+                ),
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            match row.rationale.as_deref() {
+                Some(rationale) => {
+                    for line in rationale.lines() {
+                        lines.push(Line::from(format!("    {}", line.trim_end())));
+                    }
+                }
+                None => lines.push(Line::from(Span::styled(
+                    "    (no rationale recorded)",
+                    Style::default().fg(Color::DarkGray),
+                ))),
+            }
+            lines.push(Line::from(""));
+        }
+    }
+
+    if let Some(note) = decisions.and_then(crate::shell::state::RouteDecisionsState::note) {
         lines.push(Line::from(Span::styled(
             note.to_owned(),
             Style::default().fg(Color::Yellow),
@@ -2870,15 +2956,17 @@ mod tests {
         // hundred columns, the same trade recorded on
         // `the_status_bar_shows_a_note_next_to_the_bindings` below; map line
         // 234's `M memory` pushed it past 120 in turn, so this became 132.
-        // Phase 47 line 1765's `h health` takes the whole row to exactly 140
-        // columns, so this is 142 — measured against the row, not guessed.
-        let bottom = last_row(&state, 142, 24);
+        // Phase 47 line 1765's `h health` took the whole row to exactly 140
+        // columns, so this was 142; `d decisions` adds fourteen more, taking
+        // it to exactly 154, so this is 156 — measured against the row, not
+        // guessed.
+        let bottom = last_row(&state, 156, 24);
         assert!(bottom.contains("tab"), "bindings missing: `{bottom}`");
         assert!(bottom.contains("overview"), "bindings missing: `{bottom}`");
         assert!(bottom.contains("quit"), "bindings missing: `{bottom}`");
 
         state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
-        let bottom = last_row(&state, 142, 24);
+        let bottom = last_row(&state, 156, 24);
         assert!(
             bottom.contains("esc") && bottom.contains("quit"),
             "the overlay's bindings must be shown too: `{bottom}`"
@@ -2906,10 +2994,11 @@ mod tests {
         // added `e events`, and 132 after; Phase 25's `k knowledge` pushed
         // the row past 132, so this became 150; Phase 47's `r routes`
         // (batch 43) pushed it past 150, so this became 170; line 1765's
-        // `h health` adds eleven more columns, so this is 182 — the same
-        // margin this test always had, measured against the longer row
-        // rather than assumed.
-        let bottom = last_row(&state, 182, 24);
+        // `h health` added eleven more columns, so this was 182; `d
+        // decisions` adds fourteen, so this is 196 — the same margin this
+        // test always had, measured against the longer row rather than
+        // assumed.
+        let bottom = last_row(&state, 196, 24);
         assert!(
             bottom.contains("only one session"),
             "the note must reach the status bar: `{bottom}`"
@@ -3161,8 +3250,8 @@ mod tests {
     fn the_status_bar_shows_control_mode_bindings_by_default() {
         let state = sample();
         assert_eq!(state.mode(), Mode::Control);
-        // 142, not 100 — see `the_status_bar_always_shows_the_key_bindings`.
-        let bottom = last_row(&state, 142, 24).to_lowercase();
+        // 156, not 100 — see `the_status_bar_always_shows_the_key_bindings`.
+        let bottom = last_row(&state, 156, 24).to_lowercase();
         assert!(!bottom.contains("session mode"), "got: `{bottom}`");
         assert!(bottom.contains("quit"), "got: `{bottom}`");
     }
@@ -4467,6 +4556,172 @@ mod tests {
 
         let text = rendered(&state, 120, 24);
         assert!(text.contains("no routing evidence recorded yet"), "{text}");
+    }
+
+    // -----------------------------------------------------------------
+    // The routing-decisions overlay — the reader half of the disposable
+    // routing sink. Every test here hands the view a row it invented, so
+    // none of them says anything about whether the run loop reads the
+    // ledger; that is `tests/disposable_route_sink.rs`'s job, and practice
+    // §35 is why the split is deliberate rather than an omission.
+    // -----------------------------------------------------------------
+
+    fn decision_row(
+        job: &str,
+        session: Option<&str>,
+        rationale: Option<&str>,
+        observed_at_unix: i64,
+    ) -> crate::shell::state::RouteDecisionRow {
+        crate::shell::state::RouteDecisionRow {
+            observed_at_unix,
+            job: job.to_owned(),
+            session_id: session.map(str::to_owned),
+            rationale: rationale.map(str::to_owned),
+        }
+    }
+
+    /// The whole stored rationale reaches the screen — the heading *and* the
+    /// named contributions under it.
+    ///
+    /// The heading alone would be a view that says which resource won and
+    /// not one reason it did, which is the shape map line 1766 asks this not
+    /// to be. Asserted at a wide viewport too, per practice §17: a
+    /// contribution line is long, and a match that only survives at 400
+    /// columns is a layout finding rather than a rendering one.
+    #[test]
+    fn the_routing_decisions_view_draws_the_whole_stored_rationale() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        state.open_route_decisions(
+            vec![decision_row(
+                "memory extraction",
+                Some("session-abc"),
+                Some(
+                    "a-free-model on a-provider — free, used by user preference\n  \
+                     +1.000  cost — free — line 530 prefers free capacity\n  \
+                     +0.000  user pin — the user pinned this exact free resource",
+                ),
+                1_000,
+            )],
+            None,
+        );
+
+        for (width, height) in [(120, 30), (400, 30)] {
+            let text = rendered(&state, width, height);
+            assert!(text.contains("memory extraction"), "width {width}:\n{text}");
+            assert!(text.contains("session-abc"), "width {width}:\n{text}");
+            assert!(text.contains("a-free-model"), "width {width}:\n{text}");
+            assert!(
+                text.contains("user preference"),
+                "the reason the policy gave must be on screen, width {width}:\n{text}"
+            );
+            assert!(
+                text.contains("line 530 prefers free capacity"),
+                "a decision drawn without its contributions is an outcome, not a \
+                 rationale, width {width}:\n{text}"
+            );
+            assert!(
+                text.contains("user pin"),
+                "every contribution is drawn, not only the first, width {width}:\n{text}"
+            );
+        }
+    }
+
+    /// A row the producer could not fill says so, at both widths — practice
+    /// §17, and map line 1294's rule that an absent value is drawn as absent
+    /// rather than as an empty column a reader would take for a value.
+    #[test]
+    fn a_routing_decision_with_nothing_recorded_says_so_rather_than_drawing_a_blank() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        state.open_route_decisions(
+            vec![decision_row("memory extraction", None, None, 1_000)],
+            None,
+        );
+
+        for (width, height) in [(120, 24), (400, 24)] {
+            let text = rendered(&state, width, height);
+            assert!(
+                text.contains("(no session recorded)"),
+                "width {width}:\n{text}"
+            );
+            assert!(
+                text.contains("(no rationale recorded)"),
+                "width {width}:\n{text}"
+            );
+        }
+    }
+
+    /// The empty half: a project that has recorded no decision is told so,
+    /// which is the honest and most common answer rather than a failure.
+    #[test]
+    fn the_routing_decisions_view_says_so_when_nothing_is_recorded() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        state.open_route_decisions(Vec::new(), None);
+
+        let text = rendered(&state, 120, 24);
+        assert!(
+            text.contains("no routing decision has been recorded yet"),
+            "{text}"
+        );
+    }
+
+    /// The failure half: an unreadable ledger still opens the overlay with an
+    /// honest note, the same contract
+    /// `a_route_evidence_read_failure_still_opens_with_an_honest_note` proves
+    /// for its own view.
+    #[test]
+    fn a_routing_decisions_read_failure_still_opens_with_an_honest_note() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        state.open_route_decisions(
+            Vec::new(),
+            Some("routing decisions unavailable: disk full".to_owned()),
+        );
+
+        let text = rendered(&state, 120, 24);
+        assert!(
+            text.contains("routing decisions unavailable: disk full"),
+            "{text}"
+        );
+    }
+
+    /// Reached only by its own key, never on the screen a user sees without
+    /// asking — asserted at both widths per practice §17.
+    #[test]
+    fn routing_decisions_are_absent_from_the_default_screen_at_a_realistic_and_a_wide_width() {
+        let state = sample();
+        for (width, height) in [(100, 24), (400, 24)] {
+            let text = rendered(&state, width, height);
+            assert!(
+                !text.contains("routing decisions"),
+                "the default screen must not show the routing-decisions overlay, \
+                 width {width}:\n{text}"
+            );
+        }
+    }
+
+    /// The overlay's own footer, and the control-mode footer advertising `d`
+    /// — the same pair `the_route_evidence_footer_names_its_own_key` proves.
+    #[test]
+    fn the_routing_decisions_footer_names_its_own_key() {
+        let mut state = sample();
+        state.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        state.open_route_decisions(Vec::new(), None);
+        let text = rendered(&state, 120, 24);
+        assert!(
+            text.contains("esc back to session"),
+            "routing decisions footer:\n{text}"
+        );
+
+        // 156 for the reason `the_status_bar_always_shows_the_key_bindings`
+        // records: the control row is exactly 154 columns now.
+        let control_text = rendered(&sample(), 156, 24);
+        assert!(
+            control_text.contains("d decisions"),
+            "control-mode footer must advertise the key:\n{control_text}"
+        );
     }
 
     /// Acceptance test 7, failure half: a read failure still opens the

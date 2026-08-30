@@ -2677,6 +2677,31 @@ measurement to key.
 **5. Line 1763 is closer than the register says** — production does emit three
 distinct failure classes, not the one the register records.
 
+### DELIVERED 2026-08-30 — `GH-DISPOSABLE-ROUTE-SINK`, both halves
+
+`glasshouse hook` now records the disposable-routing decision it makes once per
+completed turn into `evaluation_observations` under one new `EvaluationKind`,
+and pressing `d` in the shell draws it. Both proved through the shipped binary:
+a real `hook` process for the write, a real pty and a real keystroke for the
+read. No migration, no new table, no `CHECK`, no constructor for
+`DisposableChoice`. **Zero boxes claimed, as intended.**
+
+**The Cluster-B guard fired for real, and this is the measurement worth
+keeping.** Severing the reader was caught by **exactly one test in the whole
+suite** — the pty one. Every in-crate test still passed. So a package that had
+landed only the producer, or only an in-crate reader test, would have created a
+sixth Cluster-B mechanism and nothing would have said so.
+
+**The worker overrode the packet's write location and was right.** The packet
+and the recon both said "after `rx.recv_timeout`". That point returns when the
+extraction thread calls `tx.send(outcome)` — *before* that thread drops its
+`ProjectMemory` — so a write there races a live second write-capable handle on
+the platform where SQLite's locks are mandatory. It is §65's own hazard, and the
+packet that warned about it proposed it. The write went one step earlier, in
+`disposable_extraction_model`, where the process holds one idle connection and
+nothing else. It also records on turns that time out, where the packet's point
+would have silently dropped them and biased the ledger toward fast cases.
+
 ### The recommended first package
 
 **`GH-DISPOSABLE-ROUTE-SINK`** — make the disposable-job routing rationale

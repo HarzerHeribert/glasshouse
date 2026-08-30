@@ -86,8 +86,8 @@ use crate::database::{EVALUATION_KINDS, PROJECT_ID_KEY};
 /// the constant a test pins this against, for the same reason
 /// `LIFECYCLE_EVENT_KINDS` exists beside its own `CHECK`.
 ///
-/// **One variant, because this package lands one producer.** Variants are
-/// added as producers land, never in advance.
+/// **One variant per landed producer.** Variants are added as producers land,
+/// never in advance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EvaluationKind {
     /// A memory search returned this memory to a caller — `memory_id` names
@@ -97,12 +97,32 @@ pub enum EvaluationKind {
     /// nothing records nothing, which is why this ledger counts retrieved
     /// memories rather than retrievals.
     MemoryRetrieved,
+    /// Glasshouse routed one of its own bounded support jobs — memory
+    /// extraction today — and this is the rationale it decided on. `subject`
+    /// is the [`crate::routing::disposable::JobKind`]'s own name and `detail`
+    /// is the rendered explanation, verbatim.
+    ///
+    /// **Decided, not chosen.** A run where no resource could serve is a
+    /// decision with a reason too, and it is the one a reader most wants to
+    /// see; a kind named for the success case would have had nowhere to put
+    /// it.
+    ///
+    /// **Text, and deliberately not a structured route.**
+    /// [`crate::routing::disposable::DisposableChoice`]'s fields are private
+    /// and nothing outside that module constructs one — its module header
+    /// records that as an enforced safety invariant, because a choice on a
+    /// metered resource must not be reproducible from a policy that withheld
+    /// it. So this ledger stores what was decided as the sentence production
+    /// already renders, and a reader renders that sentence rather than
+    /// rebuilding the decision.
+    DisposableRouteDecided,
 }
 
 impl EvaluationKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MemoryRetrieved => "memory_retrieved",
+            Self::DisposableRouteDecided => "disposable_route_decided",
         }
     }
 
@@ -115,6 +135,7 @@ impl EvaluationKind {
     pub fn from_stored(value: &str) -> Option<Self> {
         match value {
             "memory_retrieved" => Some(Self::MemoryRetrieved),
+            "disposable_route_decided" => Some(Self::DisposableRouteDecided),
             _ => None,
         }
     }
@@ -252,6 +273,11 @@ impl NewObservation {
 
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
         self
     }
 }
@@ -647,71 +673,55 @@ impl EvaluationObservations {
     pub fn recent(&self, limit: usize) -> Result<Vec<EvaluationObservation>, EvaluationError> {
         let conn = self.lock();
         let mut statement = conn
-            .prepare(
-                "SELECT seq, observed_at, kind, outcome, subject, session_id,
-                        feature, arm, memory_id, routing_seq, detail
+            .prepare(&format!(
+                "SELECT {OBSERVATION_COLUMNS}
                    FROM evaluation_observations
                   ORDER BY seq DESC
-                  LIMIT ?1",
-            )
+                  LIMIT ?1"
+            ))
             .map_err(sql_err("read evaluation observations"))?;
         let rows = statement
-            .query_map(params![limit as i64], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                    row.get::<_, Option<i64>>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                ))
-            })
+            .query_map(params![limit as i64], read_observation_row)
             .map_err(sql_err("read evaluation observations"))?;
+        collect_observations(rows)
+    }
 
-        let mut out = Vec::new();
-        for row in rows {
-            let (
-                seq,
-                observed_at,
-                kind,
-                outcome,
-                subject,
-                session_id,
-                feature,
-                arm,
-                memory_id,
-                routing_seq,
-                detail,
-            ) = row.map_err(sql_err("decode an evaluation observation"))?;
-            out.push(EvaluationObservation {
-                seq,
-                observed_at,
-                kind: EvaluationKind::from_stored(&kind).ok_or(EvaluationError::UnknownKind {
-                    seq,
-                    value: kind.clone(),
-                })?,
-                outcome: EvaluationOutcome::from_stored(&outcome).ok_or(
-                    EvaluationError::UnknownValue {
-                        seq,
-                        column: "outcome",
-                        value: outcome.clone(),
-                    },
-                )?,
-                subject,
-                session_id,
-                feature,
-                arm,
-                memory_id,
-                routing_seq,
-                detail,
-            });
-        }
-        Ok(out)
+    /// [`Self::recent`] narrowed to one kind.
+    ///
+    /// **Additive, and the reason it exists is the one `observed_identities`
+    /// gives in [`crate::routing::evidence`]:** a view about *one* kind of
+    /// decision cannot be built out of an unkeyed listing. [`Self::recent`]
+    /// returns the newest rows of every kind, so a reader wanting the last
+    /// twenty routing decisions would get twenty memory retrievals on any
+    /// project that had searched recently, and would have to ask for an
+    /// unbounded number of rows to be sure of finding one. The narrowing is
+    /// done in SQL for the same reason: `LIMIT` after `WHERE` is the only
+    /// order that answers *"the newest twenty of this kind"*.
+    ///
+    /// It also cannot fail on a row this build does not understand, where
+    /// [`Self::recent`] can: `kind` is bound as a parameter, so a row written
+    /// by a later Glasshouse under a kind this build has never heard of is
+    /// never selected, never decoded, and cannot turn one reader's view into
+    /// an error about a different reader's data.
+    pub fn recent_of_kind(
+        &self,
+        kind: EvaluationKind,
+        limit: usize,
+    ) -> Result<Vec<EvaluationObservation>, EvaluationError> {
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(&format!(
+                "SELECT {OBSERVATION_COLUMNS}
+                   FROM evaluation_observations
+                  WHERE kind = ?1
+                  ORDER BY seq DESC
+                  LIMIT ?2"
+            ))
+            .map_err(sql_err("read evaluation observations of one kind"))?;
+        let rows = statement
+            .query_map(params![kind.as_str(), limit as i64], read_observation_row)
+            .map_err(sql_err("read evaluation observations of one kind"))?;
+        collect_observations(rows)
     }
 
     /// Refuse a window that reaches back past what retention kept.
@@ -764,6 +774,94 @@ impl EvaluationObservations {
             }
         }
     }
+}
+
+/// The column list every read of this table selects, in the order
+/// [`read_observation_row`] decodes them.
+///
+/// Spelled once so [`EvaluationObservations::recent`] and
+/// [`EvaluationObservations::recent_of_kind`] cannot drift into two column
+/// orders that both compile and decode each other's fields.
+const OBSERVATION_COLUMNS: &str = "seq, observed_at, kind, outcome, subject, session_id, \
+                                   feature, arm, memory_id, routing_seq, detail";
+
+/// One row of [`OBSERVATION_COLUMNS`], still in the vocabulary the database
+/// stores rather than this build's enums.
+type StoredObservation = (
+    i64,
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+);
+
+fn read_observation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredObservation> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+    ))
+}
+
+/// Decode every row, refusing a stored `kind` or `outcome` this build does not
+/// know rather than bucketing it into a neighbour.
+fn collect_observations<I>(rows: I) -> Result<Vec<EvaluationObservation>, EvaluationError>
+where
+    I: Iterator<Item = rusqlite::Result<StoredObservation>>,
+{
+    let mut out = Vec::new();
+    for row in rows {
+        let (
+            seq,
+            observed_at,
+            kind,
+            outcome,
+            subject,
+            session_id,
+            feature,
+            arm,
+            memory_id,
+            routing_seq,
+            detail,
+        ) = row.map_err(sql_err("decode an evaluation observation"))?;
+        out.push(EvaluationObservation {
+            seq,
+            observed_at,
+            kind: EvaluationKind::from_stored(&kind).ok_or(EvaluationError::UnknownKind {
+                seq,
+                value: kind.clone(),
+            })?,
+            outcome: EvaluationOutcome::from_stored(&outcome).ok_or(
+                EvaluationError::UnknownValue {
+                    seq,
+                    column: "outcome",
+                    value: outcome.clone(),
+                },
+            )?,
+            subject,
+            session_id,
+            feature,
+            arm,
+            memory_id,
+            routing_seq,
+            detail,
+        });
+    }
+    Ok(out)
 }
 
 /// The retention `DELETE`, oldest-first, on a connection already inside a
@@ -837,6 +935,72 @@ pub fn record_memory_retrieval<'a>(
     }
 }
 
+/// Record the rationale behind one disposable-job routing decision — the
+/// producer for [`EvaluationKind::DisposableRouteDecided`].
+///
+/// **This never fails a turn.** Its one caller is `glasshouse hook`, which
+/// runs inside the user's coding session and whose non-zero exit Claude Code
+/// treats as a veto on the user's prompt (see `main.rs::report_hook`). So
+/// every error here is a `tracing::warn!` and a return, exactly as
+/// [`record_memory_retrieval`] is, and for a sharper version of the same
+/// reason: a retrieval that went uncounted cost a count, and a turn that went
+/// unsent costs the user their words.
+///
+/// The handle is opened here, and only here, and only when there is something
+/// to record — practice §65's rule that a resource is acquired where its
+/// consumer starts. A decision with nothing to say about itself opens no
+/// database.
+///
+/// # What is stored, and what is left absent
+///
+/// `subject` is the job kind's own name and `detail` is `rationale` verbatim:
+/// the string the routing decision produced, not a re-derivation of it. The
+/// caller passes what production already renders, so what the ledger holds is
+/// what the decision said.
+///
+/// `routing_seq` is **absent, and stays absent.** This path makes no
+/// `routing_observations` row — the disposable policy calls no model, so
+/// there is no exchange to measure — and a `seq` pointing at some other
+/// turn's measurement would be worse than no provenance at all. Map line
+/// 1294's standing refusal is the rule: *a fabricated value here does not
+/// degrade the policy, it inverts it.* `memory_id`, `feature` and `arm` are
+/// absent for the same reason: this decision is about none of them.
+pub fn record_disposable_route(
+    runtime: &Runtime,
+    job: crate::routing::disposable::JobKind,
+    session_id: &str,
+    rationale: &str,
+    observed_at_unix: i64,
+) {
+    if rationale.trim().is_empty() {
+        return;
+    }
+
+    let observation = NewObservation::new(EvaluationKind::DisposableRouteDecided)
+        .with_subject(job.as_str())
+        .with_session_id(session_id)
+        .with_detail(rationale);
+
+    let ledger = match EvaluationObservations::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not open the evaluation ledger; the routing decision stands, but its \
+                 rationale was not recorded"
+            );
+            return;
+        }
+    };
+    if let Err(err) = ledger.record(observation, observed_at_unix) {
+        tracing::warn!(
+            error = %err,
+            "could not record a disposable routing decision; the decision stands, but its \
+             rationale was not recorded"
+        );
+    }
+}
+
 /// Seconds since the Unix epoch, the way every other store in this crate reads
 /// the clock.
 pub fn now_unix() -> i64 {
@@ -861,7 +1025,10 @@ mod tests {
     /// guarantee, which makes it load-bearing rather than belt-and-braces.
     #[test]
     fn every_kind_the_type_can_produce_is_one_the_schema_constant_declares() {
-        let declared = [EvaluationKind::MemoryRetrieved];
+        let declared = [
+            EvaluationKind::MemoryRetrieved,
+            EvaluationKind::DisposableRouteDecided,
+        ];
         let names: Vec<&str> = declared.iter().map(|kind| kind.as_str()).collect();
         assert_eq!(
             names.as_slice(),

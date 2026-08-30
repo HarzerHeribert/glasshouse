@@ -2625,11 +2625,45 @@ fn disposable_extraction_model(
         free_preferences,
     )
     .with_reserve_override(reserve_override);
-    Box::new(glasshouse::memory::RoutedNoModel::new(
-        glasshouse::routing::disposable::JobKind::MemoryExtraction,
-        &candidates,
-        &routing,
-    ))
+    let job = glasshouse::routing::disposable::JobKind::MemoryExtraction;
+    let routed = glasshouse::memory::RoutedNoModel::new(job, &candidates, &routing);
+
+    // The decision is made above and, until this line existed, died in a
+    // `tracing::info!` a few frames later. `describe()` is the string
+    // production already renders — the chosen model, its provider, its cost,
+    // the `UseReason`, and every named contribution behind it, or the reason
+    // no resource could serve — so what reaches the ledger is the rationale
+    // that was *used*, not a second decision made for the ledger's benefit.
+    // Asking `routing.choose` again here would produce a different `Instant`
+    // and could produce a different answer.
+    //
+    // # Which thread, and why it is safe (practice §65)
+    //
+    // This one, the hook process's main thread, and *before* anything is
+    // spawned. `report_hook_with` evaluates `model(&id)` — this function — as
+    // an argument to `run_extraction`, so Rust has finished here before
+    // `run_extraction` opens the event log, opens `ProjectMemory`, or starts
+    // the extraction thread that owns that memory handle for as long as the
+    // bound allows. The ledger handle is therefore opened, used and dropped
+    // while this process holds exactly one other connection to the project
+    // database — the `ProjectSessions` handle `report_hook_with` is sitting
+    // on, which is idle and holds no lock — and that is the same shape
+    // `EventRecorder::open(runtime).record_observed(..)` on this very path
+    // already has. Nothing here outlives the turn, and no handle is kept.
+    //
+    // Only on this branch, deliberately. The early return above is a model
+    // the user configured by name, where no disposable routing decision is
+    // made at all; recording a rationale for it would be recording something
+    // that did not happen.
+    glasshouse::evaluation::record_disposable_route(
+        runtime,
+        job,
+        session.as_str(),
+        &glasshouse::memory::ExtractionModel::describe(&routed),
+        glasshouse::evaluation::now_unix(),
+    );
+
+    Box::new(routed)
 }
 
 /// Every resource Glasshouse's disposable-job routing may choose from — free
