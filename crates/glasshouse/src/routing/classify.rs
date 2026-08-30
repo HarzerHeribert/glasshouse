@@ -580,6 +580,259 @@ pub fn classify(
     model_output.unwrap_or_else(|| classify_heuristically(request_text))
 }
 
+/// What a classification model is told before it is shown the request.
+///
+/// A `&'static str` and therefore a literal in the binary, which is what
+/// lets [`crate::memory::extract::Prompt::for_request`] accept it without scrubbing
+/// it: the only unscrubbed half of a classification prompt is text this
+/// repository wrote. See that constructor for why the type says so.
+///
+/// Deliberately **not** [`crate::memory::extract::schema::PROMPT_CONTRACT`].
+/// That one asks for a document of durable memories out of a session
+/// transcript; this one asks for ten fields about one request. Sharing them
+/// would mean one prompt trying to be two, and the reply schemas have no
+/// field in common.
+pub const CLASSIFICATION_PROMPT_CONTRACT: &str = "\
+You are a routing classifier inside a developer tool. You are given one \
+request a person has made to a coding agent. Your whole job is to describe \
+that request so a router can decide which model should answer it.
+
+Do not answer the request. Do not explain your reasoning. Do not apologise \
+for anything. Reply with one JSON object and nothing else.
+
+Every field below is required. If you are unsure of a field, still emit it, \
+and set \"confidence\" to \"low\" so the router can escalate — a missing \
+field is a failed classification and the tool falls back to its own \
+heuristics.
+";
+
+/// The reply shape a classification model must produce.
+///
+/// One flat object with ten keys and no nesting: this is the smallest thing
+/// that can carry a [`TaskClassification`], and every key here is a field
+/// [`TaskClassification::new`] takes.
+///
+/// **`hard_capabilities` is deliberately absent.**
+/// [`TaskClassification::hard_capabilities`] derives it from the four signal
+/// booleans, and `tests::hard_capabilities_are_derived_not_stored_separately`
+/// pins that. Asking a model for it would create a second place the same
+/// fact is recorded, which is the one thing that type's doc comment refuses.
+/// `source` is absent for the same reason — it is a fact about who answered,
+/// which the caller knows and the model does not.
+pub const CLASSIFICATION_RESPONSE_SCHEMA: &str = r#"
+## Reply with exactly this shape
+
+{
+  "needs_repo_context": true | false,
+  "needs_code_modification": true | false,
+  "needs_shell_execution": true | false,
+  "needs_browser_interaction": true | false,
+  "complexity": "trivial" | "moderate" | "complex",
+  "likely_multi_turn": true | false,
+  "workload_tier": "deterministic" | "leaf" | "standard" | "heavy" | "frontier",
+  "safe_for_disposable_model": true | false,
+  "warm_context": "prefer_warm" | "prefer_stronger_cold",
+  "confidence": "low" | "medium" | "high"
+}
+
+## What each field means
+
+- needs_repo_context: answering well requires reading this repository.
+- needs_code_modification: the request asks for code to be written or changed.
+- needs_shell_execution: a command must actually be run.
+- needs_browser_interaction: a browser must actually be driven.
+- complexity: how hard the work is, on three coarse bands.
+- likely_multi_turn: this will take several exchanges rather than one.
+- workload_tier: the weakest model that could do this acceptably.
+  deterministic = no model needed at all; leaf = a cheap or local model;
+  standard = an ordinary interactive model; heavy = strong reasoning or
+  long-lived repository context; frontier = the strongest model available.
+- safe_for_disposable_model: this could be handed to a throwaway free model
+  without harming the session.
+- warm_context: whether the session's existing warm backend is worth more
+  than a stronger cold one for this request.
+- confidence: how much the router should trust the fields above.
+
+## The request
+
+"#;
+
+/// Why a model's reply could not be read as a classification.
+///
+/// # No provider text, ever
+///
+/// The same rule `crate::memory::extract::model`'s module header states and
+/// [`crate::memory::ModelError`] was given a `&'static str` to enforce: a
+/// reply answers a prompt built from the user's own request, and a provider's
+/// error body can echo it. So every variant here carries either nothing or a
+/// **field name this file wrote** — never a value, never a fragment of the
+/// reply, never a `serde` message (which names a type and a position but is
+/// still a string this module did not choose).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ClassificationParseError {
+    /// Nothing in the reply was a JSON object.
+    #[error("the routing model's reply was not JSON")]
+    NotJson,
+    /// A required field was missing, or held the wrong JSON type.
+    #[error("the routing model's reply is missing `{field}` or gave it the wrong type")]
+    MissingField { field: &'static str },
+    /// A field was present and a string, and named nothing this enum has.
+    #[error("the routing model's reply gave `{field}` a value this build does not recognise")]
+    UnknownValue { field: &'static str },
+}
+
+/// The outermost `{…}` in `reply`, by brace balance.
+///
+/// Models put JSON inside prose and inside ```` ```json ```` fences, and
+/// tolerating exactly those two things is the difference between a parser
+/// that works against real providers and one that works against a fixture.
+/// Nothing else is tolerated: a reply with no balanced object in it is a
+/// failure, not something to guess at.
+///
+/// Brace counting rather than `find('{')` and `rfind('}')`, because a reply
+/// whose trailing prose contains a `}` would otherwise capture it. Strings
+/// are tracked so a brace inside one does not move the depth.
+///
+/// This repeats `crate::memory::extract::schema`'s own private helper on
+/// purpose. Sharing it would make a routing module depend on memory
+/// extraction's reply schema — the one coupling the recon that specified this
+/// work spent most of its length arguing against, since the transport is
+/// reusable and the schema is not.
+fn outermost_json_object(reply: &str) -> Option<&str> {
+    let start = reply.find('{')?;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (offset, c) in reply[start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&reply[start..start + offset + c.len_utf8()]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn required_bool(
+    document: &serde_json::Value,
+    field: &'static str,
+) -> Result<bool, ClassificationParseError> {
+    document
+        .get(field)
+        .and_then(serde_json::Value::as_bool)
+        .ok_or(ClassificationParseError::MissingField { field })
+}
+
+fn required_str<'a>(
+    document: &'a serde_json::Value,
+    field: &'static str,
+) -> Result<&'a str, ClassificationParseError> {
+    document
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or(ClassificationParseError::MissingField { field })
+}
+
+/// Read one model reply as a [`TaskClassification`] attributed to `label`.
+///
+/// # Every field is required, and nothing has a default
+///
+/// A model that omits `workload_tier` has not classified the request, and a
+/// classification assembled around a default would be a fabrication wearing
+/// [`ClassificationSource::Model`] — indistinguishable, at every consumer
+/// downstream, from a tier the model actually chose. So this returns an error
+/// and the caller falls back to [`classify_heuristically`], which is honest
+/// about being a heuristic. That is the same direction
+/// [`crate::memory::extract::TokenUsage`]'s fields take for an unreported count.
+///
+/// `label` names the resource that answered, for
+/// [`ClassificationSource::Model`]. It is the caller's own description of a
+/// model it configured — a provider name, a model name and a route — and
+/// never anything the reply said.
+pub fn parse_classification(
+    reply: &str,
+    label: impl Into<String>,
+) -> Result<TaskClassification, ClassificationParseError> {
+    let body = outermost_json_object(reply).ok_or(ClassificationParseError::NotJson)?;
+    let document: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| ClassificationParseError::NotJson)?;
+
+    let complexity = match required_str(&document, "complexity")? {
+        "trivial" => Complexity::Trivial,
+        "moderate" => Complexity::Moderate,
+        "complex" => Complexity::Complex,
+        _ => {
+            return Err(ClassificationParseError::UnknownValue {
+                field: "complexity",
+            });
+        }
+    };
+    let workload_tier = match required_str(&document, "workload_tier")? {
+        "deterministic" => WorkloadTier::Deterministic,
+        "leaf" => WorkloadTier::Leaf,
+        "standard" => WorkloadTier::Standard,
+        "heavy" => WorkloadTier::Heavy,
+        "frontier" => WorkloadTier::Frontier,
+        _ => {
+            return Err(ClassificationParseError::UnknownValue {
+                field: "workload_tier",
+            });
+        }
+    };
+    let warm_context = match required_str(&document, "warm_context")? {
+        "prefer_warm" => WarmContextValue::PreferWarm,
+        "prefer_stronger_cold" => WarmContextValue::PreferStrongerCold,
+        _ => {
+            return Err(ClassificationParseError::UnknownValue {
+                field: "warm_context",
+            });
+        }
+    };
+    let confidence = match required_str(&document, "confidence")? {
+        "low" => Confidence::Low,
+        "medium" => Confidence::Medium,
+        "high" => Confidence::High,
+        _ => {
+            return Err(ClassificationParseError::UnknownValue {
+                field: "confidence",
+            });
+        }
+    };
+
+    Ok(TaskClassification::new(
+        required_bool(&document, "needs_repo_context")?,
+        required_bool(&document, "needs_code_modification")?,
+        required_bool(&document, "needs_shell_execution")?,
+        required_bool(&document, "needs_browser_interaction")?,
+        complexity,
+        required_bool(&document, "likely_multi_turn")?,
+        workload_tier,
+        required_bool(&document, "safe_for_disposable_model")?,
+        warm_context,
+        confidence,
+        ClassificationSource::Model {
+            label: label.into(),
+        },
+    ))
+}
+
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
@@ -587,15 +840,22 @@ fn yes_no(value: bool) -> &'static str {
 /// What `glasshouse classify` prints — the production caller of [`classify`],
 /// and the function `main.rs`'s `classify` arm calls.
 ///
-/// No cheap model is wired up in this build, so this always calls
-/// `classify(request_text, None)`: Phase 35's "fall back to deterministic
-/// heuristics when no cheap model is available" is not a fallback for this
-/// caller, it is the only path available, and the report's `source` line
-/// says so on every run rather than implying a model was consulted.
-pub fn report(request_text: &str) -> String {
+/// `model_output` is whatever a configured routing model answered, and
+/// [`None`] is Phase 35's "no cheap model is available" — either because the
+/// user configured none, or because the one they configured could not be
+/// reached or did not answer in the schema. This function does not know
+/// which: `main.rs` says so on standard error at the point it finds out, and
+/// the report's `source` line says which of the two kinds of answer this is
+/// on every run rather than implying a model was consulted.
+///
+/// It takes an already-produced classification rather than fetching one for
+/// the same reason [`classify`] does, and this module's header states: a
+/// classifier that made a network call from inside a pure function would not
+/// be lightweight, and could not be tested without one.
+pub fn report(request_text: &str, model_output: Option<TaskClassification>) -> String {
     use std::fmt::Write as _;
 
-    let result = classify(request_text, None);
+    let result = classify(request_text, model_output);
     let mut out = String::new();
 
     let _ = writeln!(out, "Glasshouse task classification");
@@ -832,7 +1092,7 @@ mod tests {
 
     #[test]
     fn report_says_no_model_was_consulted_and_shows_the_signals() {
-        let text = report("run cargo test and fix whatever fails");
+        let text = report("run cargo test and fix whatever fails", None);
         assert!(
             text.contains("deterministic heuristics"),
             "no cheap model is wired up in this build, so the report must say so, not imply a \

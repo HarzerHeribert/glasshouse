@@ -332,6 +332,28 @@ impl NewObservation {
         self
     }
 
+    /// What this call was *for* — the axis that separates what routing spent
+    /// from what the user's own work spent.
+    ///
+    /// `routing_observations.purpose` is a `TEXT` column with no `CHECK`, so
+    /// the vocabulary is the producers' to agree on rather than the schema's
+    /// to enforce; today there is exactly one producer that sets it, `main.rs`'s
+    /// `glasshouse classify`, writing `"classification"`.
+    ///
+    /// # Why the existing producer keeps writing `NULL`
+    ///
+    /// [`crate::memory::extract::ModelCall::observation`] does not call this, and must
+    /// not be made to: its own doc comment records that every column it could
+    /// plausibly fill with a nearby value stays unwritten, and extraction's
+    /// rows are already on disk with `purpose` `NULL`. Back-filling them from
+    /// a builder added later would make "this build recorded nothing here"
+    /// indistinguishable from "this build recorded a purpose", which is the
+    /// one thing the nullable columns on this type exist to keep apart.
+    pub fn with_purpose(mut self, purpose: Option<impl Into<String>>) -> Self {
+        self.purpose = purpose.map(Into::into);
+        self
+    }
+
     pub fn with_timing(
         mut self,
         dispatched_at_unix: Option<i64>,

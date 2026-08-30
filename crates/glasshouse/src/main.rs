@@ -142,7 +142,25 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             );
         }
         Some(Command::Classify { text }) => {
-            print!("{}", glasshouse::routing::classify::report(&text.join(" ")));
+            let request = text.join(" ");
+            // A model failure degrades to the heuristic and says so, rather
+            // than failing the command: the classification is still produced,
+            // and Phase 35's own fallback is what produces it. The exit code
+            // is unchanged — this command has never had a failure mode, and a
+            // routing model the user configured being unreachable is not one
+            // it should acquire.
+            let model_output = match classify_with_routing_model(&runtime, &request) {
+                ClassificationAttempt::NotConfigured => None,
+                ClassificationAttempt::Answered(classification) => Some(classification),
+                ClassificationAttempt::Failed(why) => {
+                    eprintln!("glasshouse: {why}; deterministic heuristics answered instead");
+                    None
+                }
+            };
+            print!(
+                "{}",
+                glasshouse::routing::classify::report(&request, model_output)
+            );
         }
         Some(Command::Route {
             moment,
@@ -2876,6 +2894,341 @@ fn disposable_candidates(
         }
     }
     candidates
+}
+
+/// What `routing_observations.purpose` records for a call `glasshouse
+/// classify` made.
+///
+/// Spelled once. `purpose` is a `TEXT` column with no `CHECK`
+/// (`database.rs`'s migration 11), so the only thing keeping two producers
+/// from writing two spellings of one word is that each has exactly one.
+const CLASSIFICATION_PURPOSE: &str = "classification";
+
+/// What happened when `glasshouse classify` tried to have a model classify a
+/// request.
+///
+/// Three outcomes rather than an `Option`, because "the user configured no
+/// routing model" and "the routing model they configured could not answer"
+/// are different facts that a caller must say differently: the first is
+/// Phase 35's ordinary state and deserves no message at all, and the second
+/// is a degrade the user is entitled to be told about. Collapsing them would
+/// make a broken configuration look like an absent one.
+enum ClassificationAttempt {
+    /// No routing model is configured. Deterministic heuristics answer,
+    /// exactly as they did before this command could call anything.
+    NotConfigured,
+    /// A model answered, in the schema.
+    Answered(glasshouse::routing::classify::TaskClassification),
+    /// A model was configured, and no classification came back. The sentence
+    /// is chosen in this file — see [`routing_model_failure`].
+    Failed(String),
+}
+
+/// A [`glasshouse::memory::ModelError`] as one sentence about the **routing**
+/// model.
+///
+/// That type's own `Display`, and the `&'static str` phrases
+/// `memory/extract/model.rs` builds its `Failed` variant from, say
+/// *"extraction model"* in every arm. That is accurate for the job the type
+/// was written for and wrong for this one: a user told their extraction model
+/// is rate limited when it is their *routing* model would go and edit the
+/// wrong configuration key. So the subject is named here, where the job is
+/// known, and the transport's own words go to the log rather than to a
+/// sentence that would mis-attribute them.
+fn routing_model_failure(err: &glasshouse::memory::ModelError) -> String {
+    use glasshouse::memory::ModelError;
+
+    tracing::warn!(error = %err, "the routing model could not classify this request");
+    match err {
+        ModelError::Unavailable => "the routing model could not be reached",
+        ModelError::Refused => "the routing model declined the request",
+        ModelError::TimedOut => "the routing model did not answer within its bound",
+        ModelError::Failed { .. } => "the routing model's call produced no usable answer",
+    }
+    .to_owned()
+}
+
+/// Build the model `provider`/`model` names, or say in one sentence why it
+/// cannot be built.
+///
+/// The provider's whole configuration comes from whichever layer actually
+/// holds its name, project winning over user — the same rule
+/// [`configured_extraction_model`] and [`disposable_candidates`] apply, and
+/// for the same reason.
+///
+/// `credential` is the reference to resolve when the caller already knows
+/// which one applies — `DisposableRouting`'s choice names the exact
+/// `SecretRef` that resolved when its candidate was built, and re-deriving it
+/// here could pick a different one. `None` is the pinned case, where nobody
+/// has resolved anything yet and the first variable that resolves wins, the
+/// same order `disposable_candidates` walks.
+fn classification_model(
+    user: &UserConfig,
+    project: Option<&ProjectConfig>,
+    provider_name: &str,
+    model_name: &str,
+    credential: Option<&glasshouse::secret::SecretRef>,
+) -> Result<glasshouse::memory::ConfiguredModel, String> {
+    use glasshouse::memory::{ConfiguredModel, ConfiguredModelError};
+    use glasshouse::secret::{SecretRef, SecretStore as _};
+
+    let Some(provider_config) = project
+        .and_then(|p| p.providers().get(provider_name))
+        .or_else(|| user.providers().get(provider_name))
+    else {
+        return Err(format!(
+            "the routing model names `{provider_name}`, which this project has not configured"
+        ));
+    };
+    if !provider_config.enabled() {
+        return Err(format!(
+            "the routing model names `{provider_name}`, which is disabled"
+        ));
+    }
+    let provider = provider_config
+        .to_provider(provider_name)
+        .map_err(|err| format!("the routing model's provider does not resolve: {err}"))?;
+
+    let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
+    let credential = match credential {
+        Some(reference) => secrets.resolve(reference),
+        None => provider
+            .credential_env
+            .iter()
+            .find_map(|var| secrets.resolve(&SecretRef::Environment { var: var.clone() })),
+    };
+
+    ConfiguredModel::new(&provider, model_name, credential).map_err(|err| match err {
+        // Every other arm of this error already reads as a statement about a
+        // provider, and is rendered as it stands. This one names the *job* —
+        // "extraction speaks OpenAI chat completions" — which is the one
+        // thing about it that is not true here.
+        ConfiguredModelError::UnsupportedProtocol { protocol, .. } => format!(
+            "classification speaks OpenAI chat completions, and `{provider_name}` serves \
+             `{protocol}`; configure a provider that serves openai-chat"
+        ),
+        other => format!("the routing model cannot be used: {other}"),
+    })
+}
+
+/// The `Automatic` half of `RoutingModelChoice`: ask
+/// `DisposableRouting::choose` which resource should classify this request,
+/// and build the model it named.
+///
+/// # Why this goes through `choose` rather than building a model directly
+///
+/// `choose` is the **only** production call site of
+/// `provider::quota::evaluate_reserve_spend` — Phase 32F's protected-reserve
+/// gate. `configured_extraction_model` returns before that gate is consulted,
+/// which is defensible for extraction (it runs once per completed turn, on a
+/// model the user named by hand) and would not be for classification: a
+/// classifier is asked on every routing decision, which is a request per
+/// decision, and it is the spend Phase 34E's own lines exist to bound. So a
+/// model reached around this function is a model whose cost nothing decided,
+/// and `tests/classification_call.rs` mutates this call away to prove
+/// something is watching.
+///
+/// **No `ReserveOverride`.** That input is scoped to sessions the user named
+/// by hand with `glasshouse sessions reserve`, and `glasshouse classify` is
+/// deciding for no session at all — there is no identity here for the
+/// override to apply to, and inventing one would grant a reserve exemption
+/// nobody asked for.
+///
+/// **No `FreePool`.** Health is learned from real request outcomes and this
+/// command has no history to offer, exactly as
+/// `memory::extract::disposable::RoutedNoModel` documents for the same empty
+/// pool: every free candidate is treated as available, which is correct for a
+/// caller with nothing to say about health.
+fn automatic_classification_model(
+    runtime: &Runtime,
+    user: &UserConfig,
+    project: Option<&ProjectConfig>,
+    effective: &EffectiveConfig<'_>,
+    request_text: &str,
+) -> Result<glasshouse::memory::ConfiguredModel, String> {
+    use glasshouse::routing::disposable::{DisposableRouting, JobKind};
+
+    let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+    let telemetry = glasshouse::provider::resources::GatheredTelemetry::new().gather_gateway_quota(
+        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths()),
+    );
+    let candidates =
+        disposable_candidates(user, project, effective, &secrets, &telemetry, now_unix);
+    let free_preferences = glasshouse::routing::free::FreePreferences::new()
+        .with_order(
+            effective
+                .free_resource_order()
+                .value
+                .iter()
+                .map(|order| order.to_key())
+                .collect(),
+        )
+        .with_disabled(
+            effective
+                .free_resource_disabled()
+                .value
+                .iter()
+                .map(|disabled| disabled.to_key())
+                .collect(),
+        )
+        .with_pin(
+            effective
+                .free_resource_pin()
+                .value
+                .as_ref()
+                .map(|pin| pin.to_key()),
+        );
+    let routing = DisposableRouting::for_support_work(
+        effective.prefer_free_routing().value,
+        free_preferences,
+    );
+
+    // The tier this job's own demand implies, from the request itself. This
+    // is `RoutedNoModel::new_for_request`'s fifth link, made by the one
+    // `JobKind` its doc comment says the constructor was waiting for — a
+    // request, not a transcript of a finished turn.
+    let requirement = glasshouse::routing::classify::classify_heuristically(request_text);
+    let choice = routing
+        .choose(
+            JobKind::Classification,
+            &candidates,
+            &glasshouse::routing::free::FreePool::new(),
+            std::time::Instant::now(),
+            Some(&requirement),
+        )
+        .map_err(|reason| format!("no resource is available to classify this request: {reason}"))?;
+
+    classification_model(
+        user,
+        project,
+        choice.provider(),
+        choice.model(),
+        Some(choice.credential().reference()),
+    )
+}
+
+/// Ask the configured routing model to classify `request_text`.
+///
+/// This is the caller `routing::classify::classify`'s `Some(..)` arm was
+/// written for and never had: the module is downstream of the decision about
+/// *which* model classifies, and this is where that decision is made and
+/// carried out.
+///
+/// # The three resolutions, and which one changes nothing
+///
+/// `RoutingModelResolution::Heuristics` returns before anything is read,
+/// built, opened or sent. A build with no routing model configured — which is
+/// every build until somebody configures one — asks nothing, opens no
+/// database, and prints exactly what it printed before this function existed.
+/// `tests/classification_call.rs` holds that byte-for-byte against the
+/// heuristic's own output.
+fn classify_with_routing_model(runtime: &Runtime, request_text: &str) -> ClassificationAttempt {
+    use glasshouse::config::RoutingModelResolution;
+    use glasshouse::memory::ExtractionModel as _;
+
+    let user = match UserConfig::load(runtime.paths()) {
+        Ok(user) => user,
+        Err(err) => {
+            tracing::debug!(error = %err, "could not read configuration for the routing model");
+            return ClassificationAttempt::NotConfigured;
+        }
+    };
+    let project = match config::load_project_config(runtime.project()) {
+        Ok(project) => project,
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "could not read project configuration for the routing model"
+            );
+            return ClassificationAttempt::NotConfigured;
+        }
+    };
+    let effective = EffectiveConfig::new(&user, project.as_ref());
+
+    let built = match effective.routing_model_resolution().value {
+        RoutingModelResolution::Heuristics(_) => return ClassificationAttempt::NotConfigured,
+        RoutingModelResolution::Pinned { provider, model } => {
+            classification_model(&user, project.as_ref(), &provider, &model, None)
+        }
+        RoutingModelResolution::Automatic => automatic_classification_model(
+            runtime,
+            &user,
+            project.as_ref(),
+            &effective,
+            request_text,
+        ),
+    };
+    let model = match built {
+        Ok(model) => model,
+        Err(why) => return ClassificationAttempt::Failed(why),
+    };
+
+    // `describe()` names the provider, the model and the route, and neither
+    // the base URL nor the credential — see `memory::extract::model`'s header
+    // for why the base URL is excluded even though it looks harmless. This is
+    // the label the classification is attributed to, and it comes from the
+    // model this process built, never from anything the reply said.
+    let label = model.describe();
+    let prompt = glasshouse::memory::extract::Prompt::for_request(
+        glasshouse::routing::classify::CLASSIFICATION_PROMPT_CONTRACT,
+        glasshouse::routing::classify::CLASSIFICATION_RESPONSE_SCHEMA,
+        request_text,
+    );
+
+    let reply = match model.complete_observed(&prompt) {
+        Ok(reply) => reply,
+        Err(err) => return ClassificationAttempt::Failed(routing_model_failure(&err)),
+    };
+    // Recorded before the reply is read, and whether or not it parses: this
+    // row is what the call *cost*, and a call that came back in the wrong
+    // shape cost exactly as much as one that came back in the right one.
+    if let Some(call) = &reply.call {
+        record_classification_observation(runtime, call);
+    }
+
+    match glasshouse::routing::classify::parse_classification(&reply.reply, label) {
+        Ok(classification) => ClassificationAttempt::Answered(classification),
+        Err(err) => ClassificationAttempt::Failed(err.to_string()),
+    }
+}
+
+/// Append what one classification call cost to the routing evidence ledger,
+/// under `purpose = "classification"`.
+///
+/// # Why the handle is opened here and dropped here (practice §65)
+///
+/// `EvidenceLedger` holds an open SQLite connection for its whole lifetime,
+/// and a handle opened for work that never happens blocks a later writer on
+/// Windows while being invisible on Unix. So it is opened at the one point
+/// its consumer exists — after a provider has actually answered and there is
+/// a `ModelCall` to record — and not on the path where `glasshouse classify`
+/// asks no model at all, which is every run until somebody configures one.
+///
+/// No error channel, for the same reason [`record_extraction_observation`]
+/// has none: a classification a person asked for is not made worse by the
+/// bookkeeping failing, and Glasshouse's books are never more important than
+/// the answer they are about.
+fn record_classification_observation(
+    runtime: &Runtime,
+    call: &glasshouse::memory::extract::ModelCall,
+) {
+    let ledger = match glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "routing evidence ledger unavailable; what this classification cost is not recorded"
+            );
+            return;
+        }
+    };
+    let observation = call
+        .observation()
+        .with_purpose(Some(CLASSIFICATION_PURPOSE));
+    if let Err(err) = ledger.record(observation, glasshouse::provider::cache::now_unix_seconds()) {
+        tracing::warn!(error = %err, "could not record what classification cost");
+    }
 }
 
 /// What real telemetry says about `provider`'s remaining capacity right now

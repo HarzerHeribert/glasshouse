@@ -198,6 +198,47 @@ impl Prompt {
         Self(out)
     }
 
+    /// Assemble a **request** prompt: a contract this repository wrote,
+    /// followed by one request a person actually typed.
+    ///
+    /// # Why this exists beside [`Prompt::build`] rather than replacing it
+    ///
+    /// [`Prompt::build`] assembles a session transcript, which is the one
+    /// thing a classification job must never send: a routing decision is
+    /// about a single request, and quoting the conversation at a cheap model
+    /// would put a whole session's activity through a resource chosen for
+    /// being disposable. The two constructors therefore differ in what they
+    /// assemble and agree on the only thing this newtype exists to guarantee
+    /// — that every byte reaching a model went through
+    /// [`credentials::scrub`] or was written in this repository's source.
+    ///
+    /// # The `&'static str` is the guarantee, not a convenience
+    ///
+    /// `contract` and `schema` are unscrubbed, so they must be text that
+    /// cannot have come from a person, a file or a database. `&'static str`
+    /// is the type that says so: a runtime-assembled `String` cannot be
+    /// passed here, so the only unscrubbed half of the result is a literal
+    /// compiled into the binary. They are two arguments rather than one for
+    /// the same reason [`Prompt::build`] pushes `PROMPT_CONTRACT` and then
+    /// `RESPONSE_SCHEMA` — what a job is for and what its reply must look
+    /// like are separately documented and separately revised.
+    /// `request_text` is the half that *did* come from a person, and
+    /// it is scrubbed — a request that pasted a key in gets the key removed
+    /// before anything leaves the process, which is the same direction
+    /// [`Prompt::build`] scrubs its `existing` memories for.
+    ///
+    /// The caller keeps the original text for its own report; only what
+    /// reaches the model is altered.
+    pub fn for_request(contract: &'static str, schema: &'static str, request_text: &str) -> Self {
+        let mut out =
+            String::with_capacity(contract.len() + schema.len() + request_text.len() + 64);
+        out.push_str(contract);
+        out.push_str(schema);
+        out.push_str(credentials::scrub(request_text).text());
+        out.push('\n');
+        Self(out)
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
