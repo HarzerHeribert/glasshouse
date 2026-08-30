@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**810 / 1280 mandatory capabilities (63%)** — 470 open across 62 phases.
+**811 / 1280 mandatory capabilities (63%)** — 469 open across 62 phases.
 
 ## Where the work is
 
@@ -38,10 +38,10 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 21F | Memory retrieval quality | **2** | 9 | `927` |
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
+| Phase 37 | Basic session-aware router | **2** | 9 | `1590` |
 | Phase 46 | Security and contamination tests | **2** | 6 | `1739` |
 | Phase 49 | Configuration | **2** | 14 | `1784` |
 | Phase 34A | Workload tiers | **3** | 7 | `1393` |
-| Phase 37 | Basic session-aware router | **3** | 8 | `1590` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 54 | Criteria before deeper cmux coupling | **4** | 0 | `1885` |
 | Phase 28 | File-aware memory lookup | **5** | 0 | `1137` |
@@ -170,6 +170,11 @@ these unwrapped.
 - **1263** ☐ Lower the score when user-defined spending budget is close to exhaustion.
 - **1267** ☐ Treat unlimited local inference as high-capacity but still account for measured latency and concurrency.
 
+### Phase 37 — Basic session-aware router  (2 open, 9 closed)
+
+- **1594** ☐ Prefer a fresh session when existing relevant sessions are cold, bloated, or semantically poor and a good checkpoint exists.
+- **1599** ☐ Consider provider health when choosing a destination.
+
 ### Phase 46 — Security and contamination tests  (2 open, 6 closed)
 
 - **1745** ☐ Add automated tests proving cmux session metadata cannot bypass project-scope validation.
@@ -185,12 +190,6 @@ these unwrapped.
 - **1401** ☐ Allow workload tiers to express required capabilities independently from raw model intelligence.
 - **1402** ☐ Allow a task to require a lower reasoning tier but a specific capability such as browser use or a very large context window.
 - **1403** ☐ Allow a task to require a minimum harness capability even when a cheap raw model would otherwise score highly.
-
-### Phase 37 — Basic session-aware router  (3 open, 8 closed)
-
-- **1594** ☐ Prefer a fresh session when existing relevant sessions are cold, bloated, or semantically poor and a good checkpoint exists.
-- **1598** ☐ Consider known quota pressure when choosing a destination.
-- **1599** ☐ Consider provider health when choosing a destination.
 
 ## Practice sections, by number
 

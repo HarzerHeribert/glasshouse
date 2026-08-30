@@ -1429,6 +1429,31 @@ fn launch_session(
     // exist yet here — the gateway is started further down, and only for a
     // profile that needs one. An empty pool contributes 0.0 to every
     // destination rather than a guess.
+    //
+    // **Map line 1599 is REFUSED here, and this is the place the wiring would
+    // be attempted, so the refusal is written here rather than only in the
+    // ledger** (practice §79). The pool below is empty from construction to
+    // `choose`: `main.rs` calls no `FreePool` mutator anywhere, and the only
+    // production filler is `gateway::session::observe_exchange`, into a pool
+    // owned by a running gateway's `SessionRouting` state that never leaves
+    // that process **as a pool**. So `provider_health` returns the identical
+    // contribution for every candidate, and a signal constant across the set
+    // being ranked cannot change the ranking, whatever its weight —
+    // `docs/product/evidence/phase-9j.md`'s own rule.
+    //
+    // What a gateway *does* export is `provider::telemetry::
+    // GatewayHealthReading`s, persisted to `GatewayHealthCache` and read back
+    // by `GatheredTelemetry::gather_gateway_health` for `glasshouse
+    // resources`. **Do not reach for that here without re-opening line 1599
+    // first.** It is not a seam, it is a design task with two hazards this
+    // note exists to name: `FreeResource` is keyed by a `CredentialId` while
+    // a reading carries only a rendered `credential_label`, and
+    // `ResourceHealth::cooling_down_until` is an `Instant` with no epoch
+    // while a reading carries unix seconds — the exact mixing
+    // `gateway::session::health_readings_for` documents itself avoiding.
+    // `tests/route_command.rs`'s
+    // `a_persisted_provider_health_reading_reaches_the_binary_but_never_the_launch_paths_router`
+    // is the tripwire, and it fails the moment this changes.
     let health = glasshouse::routing::free::FreePool::new();
     let inputs = glasshouse::routing::session::RouterInputs {
         overrides: &overrides,

@@ -41,6 +41,17 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_extra_config("")
+    }
+
+    /// The same project, with `extra` appended to the user config.
+    ///
+    /// Every test above this line calls [`Fixture::new`] and must keep seeing
+    /// the configuration it was written against: adding a launch profile adds
+    /// a *destination*, and several of those tests assert on how many
+    /// destinations the ranking held. So the quota tests below get their own
+    /// profiles through here rather than by widening the shared fixture.
+    fn with_extra_config(extra: &str) -> Self {
         let tmp = tempfile::tempdir().expect("tempdir");
         let base = tmp.path().to_path_buf();
         let root = base.join("workspace");
@@ -69,7 +80,7 @@ impl Fixture {
                  [profiles.metered]\nharness = \"claude-code\"\n\
                  expected_protocol = \"anthropic-messages\"\n\n\
                  [profiles.metered.backend]\nkind = \"direct-provider\"\n\
-                 provider = \"route-probe\"\n"
+                 provider = \"route-probe\"\n{extra}"
             ),
         )
         .expect("write user config");
@@ -99,6 +110,14 @@ impl Fixture {
 
     fn stdout(&self, args: &[&str]) -> String {
         String::from_utf8_lossy(&self.glasshouse(args).stdout).into_owned()
+    }
+
+    /// The directory `--data-dir` names, which is what
+    /// `crate::paths::RuntimePaths::data_dir` resolves to inside the binary
+    /// and therefore the root `GatewayQuotaCache::new` and
+    /// `GatewayHealthCache::new` build their caches under.
+    fn data_dir(&self) -> PathBuf {
+        self.base.join("data")
     }
 
     fn both_streams(output: &Output) -> String {
@@ -1503,5 +1522,337 @@ fn a_profile_configured_for_another_harness_is_never_offered_under_the_wrong_one
     assert!(
         report.contains("fresh:codex:direct-codex"),
         "direct-codex must still be offered under its own harness:\n{report}"
+    );
+}
+
+// ===========================================================================
+// Lines 1598 and 1599 — the two routing inputs, on the path that *acts*
+// ===========================================================================
+//
+// `tests/session_router.rs` already shows `quota_pressure` and
+// `provider_health` each separating two destinations. Both of those tests
+// build their `Destination`s by hand and hand them straight to
+// `SessionRouter::choose`, so neither can fail on a build where
+// `routing_destinations` never reads a capacity at all — practice §35's exact
+// shape, and why `docs/product/evidence/phase-37.md` returned 1598 and 1599
+// open rather than closing them on those tests.
+//
+// Everything below enters through `glasshouse launch`, which is
+// `main.rs::launch_session` — the caller that starts a session, not
+// `route_recommendation`, which ranks and prints and starts nothing.
+//
+// **No production seam was needed for the quota half, and none was added.**
+// `routing_destinations` already reads its telemetry from the on-disk gateway
+// quota cache — `GatheredTelemetry::gather_gateway_quota(&GatewayQuotaCache::
+// new(runtime.paths()))` — and that cache is a real production producer,
+// written by the gateway from responses it forwards anyway. Planting a
+// reading in it is what `tests/provider_discovery.rs` already does for
+// `glasshouse resources`; the binary reads it through the code it always runs.
+
+/// Two launch profiles that differ in **nothing** the router scores except
+/// the provider whose quota cache they read.
+///
+/// Same harness, same declared wire protocol, same provider template, same
+/// credential variable — so `harness capability fit`, `provider health`,
+/// `model behaviour`, `switching cost` and `prompt-cache state` are equal
+/// across the pair by construction.
+const QUOTA_PROFILES: &str = "\n\
+     [providers.alpha-probe]\ntemplate = \"openrouter\"\n\
+     credential_env = [\"GLASSHOUSE_ROUTE_TEST_KEY\"]\n\n\
+     [providers.beta-probe]\ntemplate = \"openrouter\"\n\
+     credential_env = [\"GLASSHOUSE_ROUTE_TEST_KEY\"]\n\n\
+     [profiles.alpha]\nharness = \"claude-code\"\n\
+     expected_protocol = \"anthropic-messages\"\n\n\
+     [profiles.alpha.backend]\nkind = \"direct-provider\"\n\
+     provider = \"alpha-probe\"\n\n\
+     [profiles.beta]\nharness = \"claude-code\"\n\
+     expected_protocol = \"anthropic-messages\"\n\n\
+     [profiles.beta.backend]\nkind = \"direct-provider\"\n\
+     provider = \"beta-probe\"\n";
+
+/// Wall-clock now: the binary reads these caches with its own real clock and
+/// there is no injectable one (`mod@glasshouse::provider::quota`'s own rule).
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the system clock is after 1970")
+        .as_secs() as i64
+}
+
+/// Plant a gateway quota reading exactly where `GatewayQuotaCache::new`
+/// resolves one from this run's `--data-dir`, and prove it landed.
+fn plant_quota(fixture: &Fixture, provider: &str, remaining: i64, limit: i64) {
+    let cache = glasshouse::provider::telemetry::GatewayQuotaCache::at(
+        fixture.data_dir().join("gateway-quota"),
+    );
+    cache.store(
+        provider,
+        &glasshouse::provider::telemetry::RateLimitHeaders::read(vec![
+            ("ratelimit-limit", limit.to_string().as_str()),
+            ("ratelimit-remaining", remaining.to_string().as_str()),
+        ]),
+        now_unix(),
+    );
+    assert!(
+        cache.load(provider).is_some(),
+        "the planted reading for `{provider}` must be on disk and readable, or the assertion \
+         it supports would be about a misplaced file rather than about routing"
+    );
+}
+
+/// The session identifier the fake harness was started with, from one logged
+/// argv line. A fresh launch is `--session-id <uuid>`; a resume is
+/// `--resume <uuid>`.
+fn session_arg(argv: &str, flag: &str) -> String {
+    let mut tokens = argv.split_whitespace();
+    while let Some(token) = tokens.next() {
+        if token == flag {
+            return tokens
+                .next()
+                .unwrap_or_else(|| panic!("`{flag}` carried no identifier in `{argv}`"))
+                .to_owned();
+        }
+    }
+    panic!("no `{flag}` in `{argv}`")
+}
+
+/// Start one session under each of the two profiles and return
+/// `(alpha_session, beta_session)`, read off the harness's own argv log
+/// rather than off any listing this package also renders (§80 case 5).
+fn two_sessions(fixture: &Fixture) -> (String, String) {
+    for profile in ["alpha", "beta"] {
+        let out =
+            fixture.glasshouse(&["launch", "claude-code", "--headless", "--profile", profile]);
+        assert!(
+            out.status.success(),
+            "launching under `{profile}` must succeed:\n{}",
+            Fixture::both_streams(&out)
+        );
+    }
+    let invocations = fixture.harness_invocations();
+    assert_eq!(
+        invocations.len(),
+        2,
+        "each `--profile` launch starts its own session:\n{invocations:?}"
+    );
+    let alpha = session_arg(&invocations[0], "--session-id");
+    let beta = session_arg(&invocations[1], "--session-id");
+    assert_ne!(alpha, beta, "the two launches must be two sessions");
+    (alpha, beta)
+}
+
+/// Launch with no destination flags and return the session that was resumed.
+fn launch_and_read_resumed(fixture: &Fixture) -> String {
+    let out = fixture.glasshouse(&["launch", "claude-code", "--headless"]);
+    let said = Fixture::both_streams(&out);
+    assert!(
+        out.status.success(),
+        "the deciding launch must succeed:\n{said}"
+    );
+    let invocations = fixture.harness_invocations();
+    assert_eq!(
+        invocations.len(),
+        3,
+        "the deciding launch must have continued one of the two existing sessions rather \
+         than started a third:\n{invocations:?}\n{said}"
+    );
+    session_arg(&invocations[2], "--resume")
+}
+
+/// **Line 1598, through the acting path — as a mirrored pair.**
+///
+/// Two existing sessions, equal on every axis the router scores except what
+/// the gateway quota cache says about their providers. The pair is run twice
+/// with the readings swapped, and the winner has to follow the reading both
+/// times.
+///
+/// Mirroring is what makes this airtight rather than merely green. A single
+/// direction could be satisfied by any fixed ordering that happened to agree
+/// with it — the caller's order, the store's, or a sub-second recency gap
+/// between the two launches, which is worth `1.5/28800` per second against
+/// quota's `0.8` and is decided by which side of a clock tick each launch
+/// landed on. **No ordering can produce both halves below.** Only a value the
+/// binary actually read can.
+///
+/// A build where `routing_destinations` stops calling `destination_capacity`,
+/// or passes `None` for it, fails here — and nothing in
+/// `tests/session_router.rs` can keep it passing, because nothing below
+/// `launch_session` is entered.
+#[test]
+fn known_quota_pressure_decides_which_session_the_launch_path_continues() {
+    // Half one: the room is on `alpha`.
+    let roomy_alpha = Fixture::with_extra_config(QUOTA_PROFILES);
+    let (alpha, beta) = two_sessions(&roomy_alpha);
+    plant_quota(&roomy_alpha, "alpha-probe", 95, 100);
+    plant_quota(&roomy_alpha, "beta-probe", 5, 100);
+    assert_eq!(
+        launch_and_read_resumed(&roomy_alpha),
+        alpha,
+        "the session on the provider with 95% remaining must win over the one on 5%. \
+         alpha={alpha} beta={beta}"
+    );
+
+    // Half two: the same project, the same two profiles, the readings
+    // swapped. This is the half a fixed ordering cannot also satisfy — and
+    // the assertion that fails when the binary stops supplying
+    // `Destination::capacity`, which no test that constructs a `Destination`
+    // by hand can notice.
+    let roomy_beta = Fixture::with_extra_config(QUOTA_PROFILES);
+    let (alpha, beta) = two_sessions(&roomy_beta);
+    plant_quota(&roomy_beta, "alpha-probe", 5, 100);
+    plant_quota(&roomy_beta, "beta-probe", 95, 100);
+    assert_eq!(
+        launch_and_read_resumed(&roomy_beta),
+        beta,
+        "swapping the readings must swap the destination; a ranking that answers `alpha` \
+         both times is reading its own order, not the quota cache. alpha={alpha} beta={beta}"
+    );
+
+    // And the explanation a person reads carries the planted reading itself,
+    // not a placeholder. `route` renders the same contributions from the same
+    // producers; the claim under test is the launch above, this is its
+    // readable trace.
+    let explained = roomy_beta.stdout(&["route"]);
+    assert!(
+        explained.contains("known quota pressure"),
+        "the ranking must name the term:\n{explained}"
+    );
+    assert!(
+        explained.contains("95% remaining") && explained.contains("5% remaining"),
+        "and must carry both planted readings:\n{explained}"
+    );
+}
+
+/// **The negative control.**
+///
+/// With nothing read about either provider, line 1598's term must be present
+/// and worth exactly nothing — `quota_pressure`'s `None` arm, which is
+/// neither "assume full" nor "assume empty" — and the launch must still
+/// continue one of the two existing sessions rather than the ranking
+/// collapsing into something else.
+///
+/// Without this, the pair above could pass because reading the cache changed
+/// the shape of the candidate set rather than because a reading was weighed.
+/// Note what is deliberately *not* asserted: **which** of the two wins. With
+/// the term inert the two destinations are equal to within a sub-second
+/// recency gap, so pinning a winner here would be pinning a clock tick.
+#[test]
+fn with_no_quota_reading_the_term_is_present_and_weighs_nothing() {
+    let fixture = Fixture::with_extra_config(QUOTA_PROFILES);
+    let (alpha, beta) = two_sessions(&fixture);
+
+    let explained = fixture.stdout(&["route"]);
+    assert!(
+        explained.contains("known quota pressure"),
+        "the term must still be in the explanation when nothing was read — a term that \
+         vanishes cannot be told from one that was never computed:\n{explained}"
+    );
+    assert!(
+        explained.contains("nothing has been read about `alpha-probe/GLASSHOUSE_ROUTE_TEST_KEY`")
+            && explained
+                .contains("nothing has been read about `beta-probe/GLASSHOUSE_ROUTE_TEST_KEY`"),
+        "and must say so about both providers rather than inventing a number:\n{explained}"
+    );
+
+    let resumed = launch_and_read_resumed(&fixture);
+    assert!(
+        resumed == alpha || resumed == beta,
+        "with the term inert the launch must still continue one of the two existing \
+         sessions: resumed={resumed} alpha={alpha} beta={beta}"
+    );
+}
+
+/// **Line 1599, recorded as a refusal rather than closed — and this is the
+/// executable form of it.**
+///
+/// `provider_health` reads a [`glasshouse::routing::free::FreePool`], and on
+/// the launch path there is no live one to read. `launch_session` constructs
+/// `FreePool::new()` immediately before `SessionRouter::choose` and nothing
+/// between the two mutates it — `main.rs` calls no `FreePool` mutator at all,
+/// and the only production filler of a pool is `gateway::session`'s
+/// `observe_exchange`, into a pool owned by a running gateway's
+/// `SessionRouting` state that never leaves that process **as a pool**. So
+/// `provider_health` returns the identical "nothing has been observed"
+/// contribution for every candidate, and a signal constant across the set
+/// being ranked cannot change the ranking — `docs/product/evidence/phase-9j.md`'s
+/// own rule.
+///
+/// What the gateway *does* export is
+/// [`glasshouse::provider::telemetry::GatewayHealthReading`]s, persisted to
+/// `GatewayHealthCache` — a real producer with a real reader
+/// (`GatheredTelemetry::gather_gateway_health`, which `glasshouse resources`
+/// calls). No production code converts one into a `FreePool`, so the reading
+/// stops at the report.
+///
+/// This test gives that reading a **fulcrum**: quota (proven decisive above)
+/// is planted so `alpha` wins by `0.8 × 0.9`, and a credential-rejected
+/// health reading is planted against `alpha` — worth `-1.5` if it were ever
+/// weighed, which is more than enough to overturn the quota gap. `alpha`
+/// still wins, because nothing reads it.
+///
+/// **It is a tripwire, not an approval.** The day someone bridges
+/// `GatewayHealthCache` into `RouterInputs.health`, this test fails — which
+/// is the signal to re-open line 1599, not to relax the assertion.
+#[test]
+fn a_persisted_provider_health_reading_reaches_the_binary_but_never_the_launch_paths_router() {
+    let fixture = Fixture::with_extra_config(QUOTA_PROFILES);
+    let (alpha, beta) = two_sessions(&fixture);
+    plant_quota(&fixture, "alpha-probe", 95, 100);
+    plant_quota(&fixture, "beta-probe", 5, 100);
+
+    let cache = glasshouse::provider::telemetry::GatewayHealthCache::at(
+        fixture.data_dir().join("gateway-health"),
+    );
+    let rejected = |credential: &str, model: &str| {
+        vec![glasshouse::provider::telemetry::GatewayHealthReading {
+            credential_label: credential.to_owned(),
+            model: model.to_owned(),
+            consecutive_failures: 9,
+            cooling_down_until_unix: Some(now_unix() + 3_600),
+            credential_rejected: true,
+        }]
+    };
+    cache.store(
+        "alpha-probe",
+        &rejected("alpha-probe/GLASSHOUSE_ROUTE_TEST_KEY", "claude-sonnet-4"),
+        now_unix(),
+    );
+
+    // The fixture is not broken, proven twice (§80 case 5 — a tripwire must
+    // fail on its own subject, never on its fixture's ability to plant).
+    //
+    // First: the decisive reading is on disk, at the path
+    // `GatewayHealthCache::new` resolves from this run's `--data-dir`, and it
+    // parses back through the same reader production uses.
+    assert_eq!(
+        cache.load("alpha-probe").len(),
+        1,
+        "the planted reading for the routed provider must be on disk and readable"
+    );
+    // Second: the shipped binary really does read *this* directory in *this*
+    // fixture. `glasshouse resources` describes the built-in registry rather
+    // than a config-only provider, so that half is planted under a registry
+    // name — same cache, same run — and it comes back rendered.
+    cache.store(
+        "anyrouter",
+        &rejected("anyrouter/ANYROUTER_API_KEY", "anyrouter/free-model"),
+        now_unix(),
+    );
+    let resources = fixture.stdout(&["resources", "--no-harness"]);
+    assert!(
+        resources.contains("credential rejected"),
+        "the binary must read the very directory this test plants into, or the assertion \
+         below would be about a misplaced file rather than about routing:\n{resources}"
+    );
+
+    let resumed = launch_and_read_resumed(&fixture);
+    assert_eq!(
+        resumed, alpha,
+        "line 1599 is REFUSED, structurally: `RouterInputs.health` is a `FreePool` the launch \
+         path builds empty, and no production code converts a persisted \
+         `GatewayHealthReading` into one — so a provider whose credential the gateway watched \
+         being *rejected* is still chosen, on the strength of its quota alone. If this ever \
+         fails, the bridge was built and line 1599 must be re-opened. alpha={alpha} \
+         beta={beta}"
     );
 }
