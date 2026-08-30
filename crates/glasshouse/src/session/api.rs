@@ -356,15 +356,119 @@ mod tests {
         path
     }
 
+    /// The Windows equivalent of a shell's `trap ... INT`, and why there is no
+    /// `sleepy-harness.cmd` beside the one above any more.
+    ///
+    /// There was one, and
+    /// [`interrupting_through_the_api_is_recorded_as_machine_initiated`] used
+    /// it: a `.cmd` running `timeout /t 300 /nobreak`, whose reaction to the
+    /// interrupt was read as a `^C` appearing in the session's scrollback.
+    /// That marker went quiet, and `test (windows)` on `655bbc0` failed with
+    /// *"timed out waiting for the interrupted harness to react"* after the
+    /// full 45 seconds — while `pty_smoke::interrupt_is_delivered_as_a_terminal_interrupt`
+    /// and `pty_smoke::an_interrupt_reaches_an_unfocused_session_and_leaves_it_running`
+    /// **passed in the same run**, both of them proving a real `CTRL_C_EVENT`
+    /// reaching a real Windows child through this very seam.
+    ///
+    /// So the interrupt was never the thing that failed; the marker was. It
+    /// could not have been anything else, because it is unobservable in both
+    /// directions: a `^C` echo is the *console's* reaction and depends on the
+    /// input mode `timeout` happens to have set when the byte lands, and a
+    /// child that died of the interrupt produces no echo either — the check
+    /// cannot tell "nothing arrived" from "everything arrived and cmd.exe ate
+    /// the echo".
+    ///
+    /// This is the marker those two passing tests use instead, and it is the
+    /// one `pty_smoke` already wrote down the reasoning for: a child that
+    /// installs a real `SetConsoleCtrlHandler`, says so, returns *handled*,
+    /// and keeps running. No `cmd.exe` script can do that, so the harness is
+    /// this same test binary re-entered — which is why it lives here and not
+    /// beside the shell scripts.
+    ///
+    /// Inert unless `GLASSHOUSE_INTERRUPT_TRAP` is set, so it costs the
+    /// ordinary suite one immediately-returning test.
     #[cfg(windows)]
-    fn install_sleepy_harness(bin_dir: &Path) -> PathBuf {
-        let path = bin_dir.join("sleepy-harness.cmd");
-        std::fs::write(
-            &path,
-            "@echo off\r\necho READY\r\ntimeout /t 300 /nobreak >nul\r\n",
-        )
-        .unwrap();
-        path
+    static CAUGHT_CONSOLE_INTERRUPT: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// Returning non-zero means *handled*, which is what stops the default
+    /// action — ending the process — and is the whole point: interrupting is
+    /// not killing.
+    #[cfg(windows)]
+    unsafe extern "system" fn note_console_interrupt(event: u32) -> i32 {
+        const CTRL_C_EVENT: u32 = 0;
+        if event == CTRL_C_EVENT {
+            CAUGHT_CONSOLE_INTERRUPT.store(true, std::sync::atomic::Ordering::SeqCst);
+            1
+        } else {
+            0
+        }
+    }
+
+    #[cfg(windows)]
+    unsafe extern "system" {
+        fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(u32) -> i32>,
+            add: i32,
+        ) -> i32;
+    }
+
+    /// Start the trap child described by `CAUGHT_CONSOLE_INTERRUPT` as a
+    /// session's harness: this same test binary, re-entered with the console
+    /// control handler installed.
+    ///
+    /// **Compiled on every platform and called only on Windows**, which is
+    /// deliberate. Practice §18 says compile the other platform's path, and
+    /// the one part of this that genuinely cannot be — the handler itself,
+    /// whose `SetConsoleCtrlHandler` has no symbol to link against off
+    /// Windows — is a copy of code `pty_smoke` already runs green there. This
+    /// half is new, so it is written where a macOS `cargo test` typechecks it.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn start_the_interrupt_trap_child(fixture: &Fixture, live: &mut SessionRuntime, id: SessionId) {
+        let exe = std::env::current_exe().expect("current exe");
+        let resolved = exec::resolve_explicit(&exe).expect("resolve this test binary");
+        let launch = HarnessLaunch::new(resolved, fixture.runtime.project())
+            .args([
+                "--exact",
+                "session::api::tests::windows_interrupt_trap_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("GLASSHOUSE_INTERRUPT_TRAP", "1");
+        live.start(id, SessionPresentation::Embedded, &launch)
+            .expect("start the trap child as a harness");
+    }
+
+    /// See [`CAUGHT_CONSOLE_INTERRUPT`].
+    #[cfg(windows)]
+    #[test]
+    fn windows_interrupt_trap_child() {
+        use std::io::Write as _;
+
+        if std::env::var_os("GLASSHOUSE_INTERRUPT_TRAP").is_none() {
+            return;
+        }
+        assert_ne!(
+            unsafe { SetConsoleCtrlHandler(Some(note_console_interrupt), 1) },
+            0,
+            "could not install a console control handler"
+        );
+
+        // Printed only after the handler is installed, so a caller that has
+        // seen this marker knows the interrupt cannot hit the default action.
+        println!("TRAP-READY");
+        std::io::stdout().flush().expect("flush");
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut announced = false;
+        while Instant::now() < deadline {
+            if !announced && CAUGHT_CONSOLE_INTERRUPT.load(std::sync::atomic::Ordering::SeqCst) {
+                println!("CAUGHT-INTERRUPT");
+                std::io::stdout().flush().expect("flush");
+                announced = true;
+            }
+            std::thread::sleep(POLL);
+        }
     }
 
     /// A harness that echoes every line it reads, forever, so more than one
@@ -673,6 +777,7 @@ mod tests {
         let record = store.create(NewSession::embedded("claude-code")).unwrap();
 
         let mut live = SessionRuntime::new();
+        #[cfg(unix)]
         start_live_session(
             &fixture,
             &mut live,
@@ -680,16 +785,26 @@ mod tests {
             &bin_dir,
             install_sleepy_harness,
         );
+        // A different harness on Windows, for the reason
+        // `CAUGHT_CONSOLE_INTERRUPT` gives: nothing a `cmd.exe` script can do
+        // reports a console control event, so the harness is this test binary
+        // re-entered with a real handler installed.
+        #[cfg(windows)]
+        start_the_interrupt_trap_child(&fixture, &mut live, record.id.clone());
 
-        // Wait for `READY`, not just for the runtime to say the session
-        // started: on Windows the child does not run until something
-        // answers ConPTY's handshake (see `drive`'s doc comment), so without
-        // this a dead-at-handshake child would still "pass" the interrupt
-        // below — nothing would be there to receive it, and nothing here
-        // would notice.
+        // Wait for the harness's own marker, not just for the runtime to say
+        // the session started: on Windows the child does not run until
+        // something answers ConPTY's handshake (see `drive`'s doc comment),
+        // so without this a dead-at-handshake child would still "pass" the
+        // interrupt below — nothing would be there to receive it, and nothing
+        // here would notice. On Windows the marker also means the console
+        // control handler is installed, which has to be true before the
+        // interrupt arrives or this would prove the opposite of what it
+        // claims.
+        const HARNESS_IS_UP: &str = if cfg!(windows) { "TRAP-READY" } else { "READY" };
         drive(&mut live, "the harness to announce itself", |live| {
             live.get(&record.id)
-                .map(|session| session.scrollback().contains("READY"))
+                .map(|session| session.scrollback().contains(HARNESS_IS_UP))
                 .unwrap_or(false)
         });
         assert!(
@@ -702,28 +817,33 @@ mod tests {
             api.interrupt(&record.id, MessageOrigin::Machine).unwrap();
         }
 
-        // The sleeping child installs no handler, so a real interrupt has a
-        // real, platform-specific effect on it -- proof a dead child could
-        // never produce, as opposed to the event log entry alone, which the
-        // API writes whether or not anything was listening.
+        // Each harness reports the interrupt the only way its platform can,
+        // and both are proof a dead child could never produce -- as opposed
+        // to the event log entry alone, which the API writes whether or not
+        // anything was listening.
         //
         // On Unix the shell's `sleep` simply dies: no trap, default action.
-        // On Windows the sleeping harness is a `.cmd` script, and `cmd.exe`
-        // itself intercepts Ctrl-C rather than dying -- verified on the ARM64
-        // CI VM: the console's own `^C` echo appears immediately, but neither
-        // process death nor a "Terminate batch job (Y/N)?" prompt reliably
-        // follows within a test's timeout when the batch job is unattended
-        // (no one is there to answer Y or N). `^C` in the scrollback is proof
-        // enough on its own -- the console only prints it in response to a
-        // genuine console control event reaching a live process, and a dead
-        // child could not produce it either.
+        // On Windows the trap child says `CAUGHT-INTERRUPT` from inside its
+        // console control handler, so what is observed is a real
+        // `CTRL_C_EVENT` rather than a byte the child happened to read, and
+        // the child is still running when it says it. See
+        // [`CAUGHT_CONSOLE_INTERRUPT`] for what this replaced and why.
+        //
         // A longer deadline than `drive`'s shared `TIMEOUT`, not a shorter
-        // one: this waits on a console's own reaction to a control event
-        // under whatever load the rest of the suite is putting on the same
-        // machine, and that reaction has been observed to take longer than
-        // 15s here specifically when many pty-heavy tests are running at
-        // once (§34/§40's standing timing debt, not a defect in the wait
-        // condition itself).
+        // one: this waits on a child's own reaction to a control event under
+        // whatever load the rest of the suite is putting on the same machine,
+        // and that reaction has been observed to take longer than 15s here
+        // specifically when many pty-heavy tests are running at once
+        // (§34/§40's standing timing debt, not a defect in the wait condition
+        // itself).
+        //
+        // Whether the child is still alive is in the failure message because
+        // the last time this timed out it was not, and that was the whole
+        // question: `SessionRuntime`'s `Debug` says only how many sessions
+        // there are, so the gate could not tell "the interrupt never arrived"
+        // from "it arrived and killed the harness". The *scrollback* stays
+        // out of it — this file's error text does not carry a session's
+        // terminal contents.
         {
             let deadline = Instant::now() + Duration::from_secs(45);
             loop {
@@ -733,7 +853,7 @@ mod tests {
                     .get(&record.id)
                     .map(|session| {
                         if cfg!(windows) {
-                            session.scrollback().contains("^C")
+                            session.scrollback().contains("CAUGHT-INTERRUPT")
                         } else {
                             !session.is_running()
                         }
@@ -742,10 +862,14 @@ mod tests {
                 if reacted {
                     break;
                 }
+                let still_running = live
+                    .get(&record.id)
+                    .map(|session| session.is_running())
+                    .unwrap_or(false);
                 assert!(
                     Instant::now() < deadline,
                     "timed out waiting for the interrupted harness to react to the interrupt; \
-                     sessions: {live:?}"
+                     sessions: {live:?}; harness still running: {still_running}"
                 );
                 std::thread::sleep(POLL);
             }

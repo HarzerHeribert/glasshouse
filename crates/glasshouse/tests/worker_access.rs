@@ -236,6 +236,31 @@ impl Fixture {
     }
 }
 
+/// The script [`install_session_tagging_harness`] writes, as a constant so
+/// [`the_tagging_harness_survives_an_interrupt_under_every_posix_shell_here`]
+/// runs the very same bytes rather than a copy that could drift away from it.
+const SESSION_TAGGING_HARNESS: &str = "#!/bin/sh\n\
+     tag=unknown\n\
+     prev=\"\"\n\
+     for a in \"$@\"; do\n\
+     if [ \"$prev\" = \"--settings\" ]; then tag=$(basename \"$(dirname \"$a\")\"); fi\n\
+     prev=\"$a\"\n\
+     done\n\
+     echo \"$@\" > \"$PWD/argv-$tag.log\"\n\
+     interrupted=0\n\
+     trap 'echo interrupted >> \"$PWD/interrupted-$tag.log\"; interrupted=1' INT\n\
+     echo READY\n\
+     while :; do\n\
+     if IFS= read -r line; then\n\
+     printf '%s\\n' \"$line\" >> \"$PWD/received-$tag.log\"\n\
+     echo \"got:$line\"\n\
+     elif [ \"$interrupted\" = 1 ]; then\n\
+     interrupted=0\n\
+     else\n\
+     break\n\
+     fi\n\
+     done\n";
+
 /// A harness that names its log files after the session it was started for,
 /// taken from the `--settings <state>/sessions/<id>/settings.json` argument
 /// the lifecycle-hook installation adds.
@@ -251,31 +276,45 @@ impl Fixture {
 /// own pty into one. Nothing Glasshouse says about the request can produce
 /// that file.
 ///
-/// Trapping also keeps the harness *alive* through the interrupt (an untrapped
-/// `sh` dies on `SIGINT`), which is what lets
-/// [`an_interrupt_sent_by_the_client_makes_the_worker_react`] go on to prove
-/// the session still takes input afterwards. An interrupt that killed the
-/// worker would satisfy a weaker test and would not be an interrupt.
+/// Trapping also keeps the harness *alive* through the interrupt, which is
+/// what lets [`an_interrupt_sent_by_the_client_makes_the_worker_react`] go on
+/// to prove the session still takes input afterwards. An interrupt that killed
+/// the worker would satisfy a weaker test and would not be an interrupt.
+///
+/// # Why the read loop is written the long way
+///
+/// A trap alone is *not* enough, and believing it was is what turned this
+/// fixture into a kill test on Linux while it stayed an interrupt test on
+/// macOS. The shells disagree about what an interrupted `read` builtin
+/// returns, and `while IFS= read -r line` ends on any non-zero:
+///
+/// | shell | after a trapped `SIGINT` during `read` |
+/// |---|---|
+/// | `bash` — macOS `/bin/sh` | restarts the read; returns `0` with the real line |
+/// | `dash` — Debian/Ubuntu `/bin/sh` | returns `1` with an empty line |
+/// | `ksh` | returns `258` with an empty line |
+///
+/// Measured on both platforms rather than reasoned: on macOS 26 against
+/// `/bin/sh`, `/bin/dash`, `/bin/ksh`, `/bin/bash` and `/bin/zsh`, and inside
+/// the gate's own `rust:1.98.0` container — where `/bin/sh` is
+/// `/usr/bin/dash` — against `/bin/sh` and `/bin/bash`. Under the old
+/// one-line loop the trap fired everywhere and the *loop* then ended
+/// everywhere except `bash`, so the harness exited and the next
+/// `glasshouse api send` was answered *"session `…` has already exited"*.
+/// That is what `test (ubuntu)` reported on `655bbc0`.
+///
+/// So the loop distinguishes the two reasons `read` can fail. The trap sets a
+/// flag, a failed read with the flag set is an interrupt and is resumed, and
+/// a failed read without it is the real end of input and breaks. The flag is
+/// cleared on the way through, so a later end-of-input is still an
+/// end-of-input rather than an endless retry.
+///
+/// [`the_tagging_harness_survives_an_interrupt_under_every_posix_shell_here`]
+/// runs these exact bytes under every shell the machine has, so the next
+/// person to shorten this loop finds out on macOS instead of in the gate.
 fn install_session_tagging_harness(bin_dir: &Path) -> PathBuf {
     let path = bin_dir.join("session-tagging-harness");
-    std::fs::write(
-        &path,
-        "#!/bin/sh\n\
-         tag=unknown\n\
-         prev=\"\"\n\
-         for a in \"$@\"; do\n\
-         if [ \"$prev\" = \"--settings\" ]; then tag=$(basename \"$(dirname \"$a\")\"); fi\n\
-         prev=\"$a\"\n\
-         done\n\
-         echo \"$@\" > \"$PWD/argv-$tag.log\"\n\
-         trap 'echo interrupted >> \"$PWD/interrupted-$tag.log\"' INT\n\
-         echo READY\n\
-         while IFS= read -r line; do\n\
-         printf '%s\\n' \"$line\" >> \"$PWD/received-$tag.log\"\n\
-         echo \"got:$line\"\n\
-         done\n",
-    )
-    .expect("write the session-tagging harness");
+    std::fs::write(&path, SESSION_TAGGING_HARNESS).expect("write the session-tagging harness");
     let mut perms = std::fs::metadata(&path).unwrap().permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&path, perms).unwrap();
@@ -903,6 +942,153 @@ fn an_interrupt_sent_by_the_client_makes_the_worker_react() {
             .received(&root, &worker)
             .is_some_and(|text| text.contains("still-listening-after-the-interrupt"))
     });
+}
+
+/// The shells [`the_tagging_harness_survives_an_interrupt_under_every_posix_shell_here`]
+/// runs the harness under, when the machine has them.
+///
+/// Every entry is a shell that is, or can be, some platform's `/bin/sh`:
+/// `bash` is macOS's, `dash` is Debian's and Ubuntu's — and therefore the
+/// gate's `rust:1.98.0` container's, where `/bin/sh` is `/usr/bin/dash`.
+/// `zsh` is here because macOS ships it and it costs a second.
+///
+/// **`/bin/ksh` is deliberately absent, and it is the shell that would
+/// otherwise look like the best argument for including it** — it fails the
+/// old loop exactly as `dash` does. Measured on macOS 26: parked in `read` on
+/// a *pipe*, `ksh` does not run an `INT` trap at all, so the wait on the trap
+/// file below — the thing that proves a real signal arrived rather than a
+/// timing coincidence — never completes and the test fails for a reason that
+/// is about `ksh`'s signal timing rather than about the harness. On a *pty*
+/// `ksh` traps normally, and with the loop as it now stands it survives the
+/// interrupt on both. It is not any platform's `/bin/sh`, so nothing here
+/// turns on it.
+const CANDIDATE_SHELLS: [&str; 4] = ["/bin/sh", "/bin/dash", "/bin/bash", "/bin/zsh"];
+
+/// **The reproduction (§59), and it is a fixture that is under test.**
+///
+/// [`an_interrupt_sent_by_the_client_makes_the_worker_react`] failed on
+/// `test (ubuntu)` for `655bbc0` — *"the session must still be usable after an
+/// interrupt: glasshouse: session `d6a29df1…` has already exited"* — while
+/// passing on macOS, and Glasshouse was not the thing that differed. The
+/// interrupt path is one `write` of `0x03` onto the session's own terminal and
+/// it behaved identically on both platforms: the gate got **past** the wait on
+/// the worker's `SIGINT` trap file, so a real signal had been raised in the
+/// worker's own process on Linux too. What differed was
+/// [`install_session_tagging_harness`]'s read loop — see its doc comment for
+/// the measured table.
+///
+/// The state under test is therefore *"a POSIX shell that is not `bash`"*,
+/// not *"Linux"*, and §59 says to reproduce the state rather than the event.
+/// This runs the harness's own bytes under **every** shell this machine has,
+/// which is §25's repair applied to a shell rather than to a socket: assert
+/// the property, and exercise every variant that can produce it, so the
+/// platform that has `dash` as `/bin/sh` is not the only one that finds out.
+///
+/// Under the loop this replaces, it fails on macOS at `/bin/dash` and
+/// `/bin/ksh`, and on Linux at `/bin/sh`.
+///
+/// The signal is raised with `kill -INT` rather than through a pty, on
+/// purpose: the line discipline's part is already proven by the test above and
+/// by `pty_smoke::interrupt_is_delivered_as_a_terminal_interrupt`, and what is
+/// in question here is only what the shell does once the signal has arrived.
+/// Sending it directly is also what makes this cheap enough to run per shell.
+/// See [`CANDIDATE_SHELLS`] for the one shell that choice excludes.
+#[test]
+fn the_tagging_harness_survives_an_interrupt_under_every_posix_shell_here() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let harness = install_session_tagging_harness(&bin_dir);
+
+    let mut covered = Vec::new();
+    for shell in CANDIDATE_SHELLS {
+        if !Path::new(shell).is_file() {
+            continue;
+        }
+        covered.push(shell);
+        an_interrupt_leaves_this_shell_reading(shell, &harness, tmp.path());
+    }
+
+    // Never silently vacuous: a machine with none of these would otherwise
+    // report a pass having run nothing at all.
+    assert!(
+        !covered.is_empty(),
+        "none of the candidate shells exist here, so this test proved nothing"
+    );
+}
+
+/// One shell, one interrupt: the trap runs, the process lives, and the next
+/// line still arrives.
+///
+/// Its own working directory, because the harness names its log files after a
+/// tag it takes from `--settings` and there is no such argument here — every
+/// shell would otherwise write to the same `*-unknown.log`.
+fn an_interrupt_leaves_this_shell_reading(shell: &str, harness: &Path, base: &Path) {
+    let work = base.join(shell.replace('/', "-"));
+    std::fs::create_dir_all(&work).expect("create the shell's working directory");
+    let printed = work.join("stdout.log");
+    let stdout = std::fs::File::create(&printed).expect("create the stdout log");
+
+    let mut child = Command::new(shell)
+        .arg(harness)
+        .current_dir(&work)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|err| panic!("could not start `{shell}`: {err}"));
+    let said = || std::fs::read_to_string(&printed).unwrap_or_default();
+
+    // The trap has to be installed before the signal arrives or this would
+    // prove the opposite of what it claims; the harness prints `READY` on the
+    // line after it traps.
+    wait_for(&format!("`{shell}` to trap and print READY"), || {
+        said().contains("READY")
+    });
+
+    let signalled = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .expect("run kill");
+    assert!(signalled.success(), "`kill -INT` failed for `{shell}`");
+
+    wait_for(&format!("`{shell}` to run its INT trap"), || {
+        work.join("interrupted-unknown.log").is_file()
+    });
+
+    // Deliberately not asserted: a write to a pipe whose reader has just gone
+    // may still succeed, so its result says nothing either way. What the line
+    // *comes back* as is the evidence.
+    let _ = child
+        .stdin
+        .as_mut()
+        .expect("the harness's stdin")
+        .write_all(b"still-listening-after-the-interrupt\n");
+
+    let deadline = Instant::now() + TIMEOUT;
+    let mut echoed = said().contains("got:still-listening-after-the-interrupt");
+    while !echoed && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+        echoed = said().contains("got:still-listening-after-the-interrupt");
+    }
+    let exited = child.try_wait().expect("try_wait");
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        echoed,
+        "`{shell}` must still be reading its terminal after a trapped SIGINT, \
+         and this is the difference the Linux gate found: `bash` restarts an \
+         interrupted `read` builtin, `dash` and `ksh` return failure from it \
+         and end a `while read` loop, which ends the harness. \
+         exited={exited:?}, printed so far: {:?}",
+        said()
+    );
+    assert!(
+        exited.is_none(),
+        "`{shell}` must not have ended: an interrupt that kills the worker is \
+         not an interrupt ({exited:?})"
+    );
 }
 
 /// The project boundary, against the client rather than against the door.
@@ -2339,9 +2525,12 @@ fn a_person_can_still_enter_and_change_a_worker_after_its_result_reached_the_orc
          the *after* case rather than a race the person happened to win"
     );
 
-    // Interrupt last, because a real 0x03 ends this harness's read loop: the
-    // worker's own trap file is the evidence, and nothing the door says can
-    // produce it.
+    // The worker's own trap file is the evidence, and nothing the door says
+    // can produce it. Interrupting last is no longer forced — the harness
+    // survives its own interrupt on every shell now, see
+    // `install_session_tagging_harness` — but the order is kept, because an
+    // interrupt is the last thing a person does to a worker whose result has
+    // already been handed over.
     let interrupted = fixture.client(&root, &["api", "interrupt", "--session", &worker]);
     assert!(
         interrupted.status.success(),
