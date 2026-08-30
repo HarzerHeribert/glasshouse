@@ -207,10 +207,10 @@ pub enum Command {
     /// how confident the classification is, so an uncertain answer can be
     /// escalated rather than trusted outright.
     ///
-    /// No cheap model is wired up in this build, so this always runs the
-    /// deterministic heuristic path — the report says so on every run, the
-    /// same way `glasshouse memory extract --reply-from` always says no model
-    /// was called.
+    /// Asks the configured routing model when one is pinned or resolved
+    /// automatically; falls back to the deterministic heuristic path when
+    /// none is configured, or when the model call fails. Either way the
+    /// report says which one actually answered.
     Classify {
         /// The request text to classify.
         text: Vec<String>,
@@ -563,6 +563,22 @@ pub enum Command {
     Api {
         #[command(subcommand)]
         command: ApiCommand,
+    },
+    /// Report what Glasshouse's own routing model has consumed, in tokens
+    /// and requests, apart from every other row this project's evidence
+    /// ledger holds — capability map line 1464.
+    ///
+    /// Groups every recorded observation by what it was for: `classification`
+    /// is `glasshouse classify`'s own calls; the coding-agent group is every
+    /// exchange the gateway relayed for a harness; everything else groups
+    /// together under no purpose and no harness. This build never parses the
+    /// coding-agent traffic the gateway relays, so that group always carries
+    /// a real request count and no token count at all — it prints as *not
+    /// counted*, never as a `0` this build never measured.
+    RoutingCost {
+        /// How far back to look, in hours.
+        #[arg(long, value_name = "N", default_value_t = 24)]
+        hours: u32,
     },
 }
 

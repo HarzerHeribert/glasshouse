@@ -183,6 +183,13 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 return Ok(ExitCode::FAILURE);
             }
         },
+        Some(Command::RoutingCost { hours }) => match routing_cost_report(&runtime, *hours) {
+            Ok(report) => print!("{report}"),
+            Err(err) => {
+                eprintln!("glasshouse: {err:#}");
+                return Ok(ExitCode::FAILURE);
+            }
+        },
         Some(Command::Sessions { command }) => match command {
             // The bare command still lists, which is what every existing
             // caller and every printed identifier assumes.
@@ -1139,6 +1146,106 @@ fn route_report(
 
     let recommendation = route_recommendation(runtime, &effective, parsed, to, fresh, now, task)?;
     Ok(render_route_recommendation(&recommendation))
+}
+
+/// `glasshouse routing-cost` — capability map line 1464: what Glasshouse's
+/// own routing model has spent, in tokens and requests, apart from every
+/// other row this project's evidence ledger holds.
+///
+/// # Why the ledger is opened here, and nowhere earlier (practice §65)
+///
+/// The same reasoning [`record_classification_observation`]'s own header
+/// gives: an open [`glasshouse::routing::evidence::EvidenceLedger`] holds a
+/// SQLite handle for its whole lifetime, and a handle opened for work that
+/// never happens blocks a later writer under Windows while staying invisible
+/// under POSIX advisory locks. This command's handler is the one path that
+/// actually reads the ledger, so it is opened here and nowhere upstream of
+/// it.
+fn routing_cost_report(runtime: &Runtime, hours: u32) -> anyhow::Result<String> {
+    let ledger = glasshouse::routing::evidence::EvidenceLedger::open(runtime)?;
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+    let window_seconds = i64::from(hours) * 3600;
+    let groups = ledger.consumption_by_purpose(now_unix, window_seconds)?;
+    Ok(render_routing_cost(
+        runtime.project().id().as_str(),
+        hours,
+        &groups,
+    ))
+}
+
+/// Render [`routing_cost_report`]'s per-`(purpose, harness_recorded)` groups
+/// as `glasshouse routing-cost` prints them.
+///
+/// **The one rule this function exists to hold:** a token figure nobody
+/// counted prints as the words *not counted*, never as a digit and never as
+/// `0` — the hazard this whole package was built to avoid, because "nothing
+/// was spent" and "nobody counted it" are different facts and a reader who
+/// cannot tell them apart has been handed a fabrication. It is the
+/// coding-agent group, below, that this bites hardest: it has a real request
+/// count and no token count at all, and the two must never be allowed to
+/// look like the same kind of absence.
+fn render_routing_cost(
+    project_id: &str,
+    hours: u32,
+    groups: &[glasshouse::routing::evidence::PurposeConsumption],
+) -> String {
+    let mut out = format!("Routing consumption for project {project_id}, last {hours}h\n");
+    if groups.is_empty() {
+        out.push_str("\n  no routing observations recorded in this window\n");
+    } else {
+        for group in groups {
+            let label = purpose_group_label(group);
+            out.push_str(&format!("\n  {label}\n"));
+            out.push_str(&format!(
+                "    requests            : {}\n",
+                group.sample_count
+            ));
+            out.push_str(&format!(
+                "    input tokens        : {}\n",
+                render_token_count(group.input_tokens)
+            ));
+            out.push_str(&format!(
+                "    output tokens       : {}\n",
+                render_token_count(group.output_tokens)
+            ));
+            out.push_str(&format!(
+                "    cached input tokens : {}\n",
+                render_token_count(group.cached_input_tokens)
+            ));
+        }
+    }
+    out.push_str(
+        "\ncoding-agent consumption relayed through the gateway is never counted in this \
+         build (the relay never parses a reply body), so the coding-agent group above always \
+         has its tokens print as \"not counted\" even though its request count is real; \
+         \"not counted\" always means nobody read a count, never that nothing was spent.\n",
+    );
+    out
+}
+
+/// The label one [`PurposeConsumption`][glasshouse::routing::evidence::PurposeConsumption]
+/// group prints under.
+///
+/// `purpose` alone cannot tell coding-agent consumption apart from every
+/// other unstamped producer — both leave it `NULL` — so a `None` purpose is
+/// read alongside `harness_recorded`, exactly as
+/// [`glasshouse::routing::evidence::PurposeConsumption`]'s own doc comment
+/// explains: only the gateway relay names a harness on every row it writes.
+fn purpose_group_label(group: &glasshouse::routing::evidence::PurposeConsumption) -> &str {
+    match (group.purpose.as_deref(), group.harness_recorded) {
+        (Some(purpose), _) => purpose,
+        (None, true) => "coding-agent (gateway relay)",
+        (None, false) => "(no purpose or harness recorded)",
+    }
+}
+
+/// `Some(n)` as a digit, `None` as the phrase [`render_routing_cost`]'s own
+/// doc comment names — never `0` for a count this build never read.
+fn render_token_count(value: Option<i64>) -> String {
+    match value {
+        Some(count) => count.to_string(),
+        None => "not counted".to_owned(),
+    }
 }
 
 /// The three spellings `glasshouse route --moment` accepts and the control

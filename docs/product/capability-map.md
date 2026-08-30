@@ -1461,7 +1461,7 @@ Phase 34D — Router request schema
 Phase 34E — Router economics
 
 ☐ Measure the number of routing decisions made per interactive hour.
-☐ Measure routing-model token and request consumption separately from coding-agent consumption.
+☑ Measure routing-model token and request consumption separately from coding-agent consumption.
 ☐ Track routing-model spend separately from productive task spend.
 ☐ Warn when routing overhead becomes a non-trivial fraction of the resources it is intended to save.
 ☐ Allow repeated low-risk turns in the same sticky session to bypass the routing model.

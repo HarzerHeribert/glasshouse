@@ -675,6 +675,44 @@ impl ObservedIdentity {
     }
 }
 
+/// Request and token consumption for one `(purpose, harness_recorded)`
+/// group, within a queried window — capability map line 1464's "measure
+/// routing-model token and request consumption separately from coding-agent
+/// consumption," and the absent aggregate
+/// [`EvidenceLedger::consumption_by_purpose`] builds: every other reader on
+/// this ledger requires the caller to already name an identity, and nothing
+/// before this grouped by the columns that answer *what a call was for* and
+/// *whether a harness was relaying it*.
+///
+/// `purpose` alone is not enough to separate coding-agent consumption from
+/// everything else: `purpose` is `None` for every row no producer has
+/// stamped, and today that is **both** every gateway relay exchange (line
+/// 1464's own "coding-agent consumption", `crate::gateway::session`, which
+/// always calls [`NewObservation::with_harness`]) **and** every
+/// memory-extraction call (`crate::memory::extract::ModelCall::observation`,
+/// which never does) — see [`NewObservation::with_purpose`]'s doc comment
+/// for why extraction's rows are not back-filled with one. `harness_recorded`
+/// is what tells those two `NULL`-purpose producers apart: `true` only when
+/// every row in the group named a harness, which today means gateway rows
+/// and gateway rows alone.
+///
+/// `sample_count` is a real `COUNT(*)`, always defined. The three token
+/// fields are not: each is `None` when every row in the group left that
+/// column `NULL`, which is a different fact from `Some(0)` and must stay
+/// one — the hazard this whole aggregate exists to avoid rendering as a
+/// number. A group that mixes counted and uncounted rows sums only what was
+/// counted, exactly as [`NewObservation::with_tokens`] asks every producer to
+/// leave absent counts absent rather than zeroed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PurposeConsumption {
+    pub purpose: Option<String>,
+    pub harness_recorded: bool,
+    pub sample_count: usize,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cached_input_tokens: Option<i64>,
+}
+
 /// An open project database plus the routing observations inside it.
 ///
 /// Owns its connection behind a [`Mutex`] rather than borrowing one, unlike
@@ -1037,6 +1075,66 @@ impl EvidenceLedger {
         }
         Ok(out)
     }
+
+    /// [`PurposeConsumption`] for every `(purpose, harness_recorded)` group
+    /// this ledger holds a row for, within one window — capability map line
+    /// 1464, and the aggregate this module's own header says nothing
+    /// computes yet.
+    ///
+    /// Grouped by `purpose` first, so a routing model's own spend (`purpose
+    /// = "classification"` today) never gets folded into anyone else's
+    /// total; and, within the `NULL`-purpose rows every other producer
+    /// leaves, split again by whether a harness was recorded, because that
+    /// is what actually separates coding-agent consumption
+    /// (`crate::gateway::session` always names a harness) from every other
+    /// `NULL`-purpose producer (`crate::memory::extract` never does) — a
+    /// distinction `purpose` alone cannot make. See [`PurposeConsumption`]'s
+    /// own doc comment for why grouping on `purpose` alone would still fold
+    /// two different producers together.
+    ///
+    /// `SUM(input_tokens)`, and its two siblings, are what SQLite's own
+    /// aggregate already does correctly: it skips `NULL` inputs and answers
+    /// `NULL` only when a group carried none at all, never `0` for an absent
+    /// count. The row reader reads that straight into the `Option<i64>`
+    /// [`PurposeConsumption`] declares, with no manual accumulate-and-default
+    /// in between for a mutation to weaken.
+    ///
+    /// Scoped to this ledger's own `project_id`, like [`Self::observed_identities`]
+    /// next door and for the same belt-and-suspenders reason: this reads
+    /// across every row in the table rather than one already-named identity.
+    pub fn consumption_by_purpose(
+        &self,
+        now_unix: i64,
+        window_seconds: i64,
+    ) -> Result<Vec<PurposeConsumption>, EvidenceLedgerError> {
+        let earliest = now_unix.saturating_sub(window_seconds);
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(
+                "SELECT purpose,
+                        (harness IS NOT NULL) AS harness_recorded,
+                        COUNT(*) AS sample_count,
+                        SUM(input_tokens) AS input_tokens,
+                        SUM(output_tokens) AS output_tokens,
+                        SUM(cached_input_tokens) AS cached_input_tokens
+                 FROM routing_observations
+                 WHERE project_id = ?1 AND observed_at >= ?2 AND observed_at <= ?3
+                 GROUP BY purpose, harness_recorded
+                 ORDER BY purpose IS NULL, purpose ASC, harness_recorded DESC",
+            )
+            .map_err(sql_err("read routing consumption by purpose"))?;
+        let rows = statement
+            .query_map(
+                params![self.project_id, earliest, now_unix],
+                row_to_purpose_consumption,
+            )
+            .map_err(sql_err("read routing consumption by purpose"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(sql_err("read one purpose's routing consumption"))?);
+        }
+        Ok(out)
+    }
 }
 
 fn duration_aggregate(
@@ -1204,6 +1302,22 @@ fn row_to_observation(
         outcome,
         context_state,
     }))
+}
+
+/// No enum on this row to fall through on, unlike [`row_to_identity`] next
+/// door — `purpose` is a free-form nullable `TEXT` with no vocabulary this
+/// module enforces, so there is no unrecognized value to reject, and a plain
+/// [`rusqlite::Result`] is honest about that.
+fn row_to_purpose_consumption(row: &Row<'_>) -> rusqlite::Result<PurposeConsumption> {
+    let sample_count: i64 = row.get("sample_count")?;
+    Ok(PurposeConsumption {
+        purpose: row.get("purpose")?,
+        harness_recorded: row.get("harness_recorded")?,
+        sample_count: sample_count as usize,
+        input_tokens: row.get("input_tokens")?,
+        output_tokens: row.get("output_tokens")?,
+        cached_input_tokens: row.get("cached_input_tokens")?,
+    })
 }
 
 fn row_to_identity(

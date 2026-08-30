@@ -33,13 +33,14 @@
 //! this is asserted directly in the integration tests rather than trusted by
 //! reading the manual once.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use super::policy::retrieval_weight;
 pub use super::policy::{LadderRung, ladder_rung};
 use super::store::{
     MemoryAuthority, MemoryId, MemoryKind, MemoryRecord, MemoryStatus, MemoryStore,
-    MemoryStoreError, row_to_record,
+    MemoryStoreError, normalize_observed_path, row_to_record,
 };
 
 /// How much of a project's memory a search is allowed to see.
@@ -103,6 +104,15 @@ pub struct RetrievalResult {
     /// manufacture a relevance for a memory no query ever matched, which is
     /// precisely the fabricated number [`super::inject::briefing`]'s refusal
     /// exists to prevent.
+    ///
+    /// The map is therefore **not** guaranteed to hold an entry for every
+    /// record in the two groups above, and it never was: it holds an entry
+    /// for every record some query *scored*. [`MemoryStore::for_path`]
+    /// retrieves by an exact file-path match and runs no query at all, so a
+    /// result it produced has both groups populated and this map empty —
+    /// which is the invariant holding, not an omission. See [`Scored`] for
+    /// why the absence is carried as an `Option` rather than filled in with
+    /// a zero.
     relevances: HashMap<MemoryId, f64>,
 }
 
@@ -116,6 +126,12 @@ impl RetrievalResult {
     /// than "was not asked about". A search that matched nothing therefore
     /// answers `None` to every question, rather than `Some(0.0)` to some of
     /// them.
+    ///
+    /// It is also the answer for **every** memory in a result
+    /// [`MemoryStore::for_path`] produced, and for the same reason one step
+    /// further out: that door retrieves by an exact file-path match and asks
+    /// no question, so none of the memories it returns was scored by
+    /// anything. "Was not asked about" is exactly what happened to them.
     ///
     /// # This is a relevance, and it is deliberately not a confidence
     ///
@@ -171,7 +187,7 @@ impl RetrievalResult {
     }
 }
 
-/// One search hit and the BM25 relevance the query gave it, kept together
+/// One retrieval hit and the BM25 relevance the query gave it, kept together
 /// from the moment the row is decoded until the moment the two groups of
 /// [`RetrievalResult`] are built.
 ///
@@ -180,10 +196,28 @@ impl RetrievalResult {
 /// differently for a different query, and a record read by
 /// [`MemoryStore::get`] has no relevance at all. Putting it on the record
 /// would make that absence unrepresentable except as a lie.
+///
+/// # `None` is *"was not asked about"*, and it is why this is an `Option`
+///
+/// [`MemoryStore::for_path`] retrieves by an exact `memory_files.path` match.
+/// **It runs no query, so there is no relevance for it to supply** — and the
+/// alternative was to hand `group` a `0.0`, which would put a manufactured
+/// number into [`RetrievalResult`]'s private relevance map for a memory no
+/// query ever matched. That is precisely what the map is private to prevent,
+/// and [`RetrievalResult::relevance`] already says a zero there *"would be a
+/// fabrication that reads as 'matched as badly as possible' rather than 'was
+/// not asked about'"*.
+///
+/// Making the absence representable **strengthens** that invariant rather
+/// than piercing it: the map still holds only relevances an actual query
+/// produced, because `group` inserts nothing for a `None`, and the third door
+/// still gets the one grouping and the one ranking the other two get.
 #[derive(Debug, Clone)]
 struct Scored {
     record: MemoryRecord,
-    relevance: f64,
+    /// The BM25 score this hit earned, or `None` for a retrieval that asked
+    /// no question. Never `Some(0.0)` standing in for the absence.
+    relevance: Option<f64>,
 }
 
 /// Whether a memory is a *currently binding* invariant or constraint — see
@@ -197,16 +231,25 @@ fn is_current_invariant_or_constraint(record: &MemoryRecord) -> bool {
         )
 }
 
-/// Split one relevance-ordered result list the way [`RetrievalResult`]
-/// describes. A stable partition — neither group is re-sorted.
+/// Split one ranked result list the way [`RetrievalResult`] describes. A
+/// stable partition — neither group is re-sorted.
 ///
 /// The relevance travels sideways rather than into either group: a memory
 /// keeps the score it earned whichever group it lands in, and the grouping
 /// cannot change a number it does not touch.
+///
+/// A hit whose relevance is `None` — see [`Scored`] — contributes **no entry
+/// at all** to the relevance map. It is not stored as a zero and not stored
+/// as a sentinel, so [`RetrievalResult::relevance`] answers `None` for it,
+/// which is the true answer: nothing scored that memory, because nothing was
+/// asked. This is the one place the invariant could have been broken, and it
+/// is where it is kept.
 fn group(hits: Vec<Scored>) -> RetrievalResult {
     let mut grouped = RetrievalResult::default();
     for Scored { record, relevance } in hits {
-        grouped.relevances.insert(record.id.clone(), relevance);
+        if let Some(relevance) = relevance {
+            grouped.relevances.insert(record.id.clone(), relevance);
+        }
         if is_current_invariant_or_constraint(&record) {
             grouped.invariants_and_constraints.push(record);
         } else {
@@ -214,6 +257,64 @@ fn group(hits: Vec<Scored>) -> RetrievalResult {
         }
     }
     grouped
+}
+
+/// The one ordering in this crate, applied by every door before
+/// [`demote_thin_decisions`] permutes within it.
+///
+/// # Phase 21E: the ladder rung is the primary key
+///
+/// See [`ladder_rung`]'s own documentation for why an idea must never
+/// outrank an invariant regardless of how well it matched. Only within the
+/// same rung does the weight below decide the order.
+///
+/// # Within a rung, and why the query-less door is not a second ranking
+///
+/// A queried hit is ordered by `relevance × retrieval_weight`, ascending.
+/// SQLite's `bm25()` is *more negative* for a better match (see the module
+/// documentation) and [`retrieval_weight`] is strictly positive, so ascending
+/// puts the best-matching, highest-weighted memory first — exactly the
+/// comparison [`MemoryStore::search`] has always made.
+///
+/// A hit with no relevance ([`MemoryStore::for_path`]) is ordered by
+/// `retrieval_weight` alone, descending, which is the **same** comparison
+/// with the one factor it does not have left out rather than replaced.
+/// Substituting a number for the missing factor is what this whole change
+/// exists to avoid: a `0.0` would collapse every product to zero and order
+/// the results by nothing at all, while still looking like a ranking.
+/// `retrieval_weight` never sees the query text — that is stated at
+/// [`RetrievalResult::relevance`] as the reason the blend is not offered to
+/// callers — so it remains an honest key when there is no query.
+///
+/// The mixed case cannot arise: a retrieval either ran a `MATCH` or did not,
+/// and both doors build every one of their hits the same way. [`Ordering::Equal`]
+/// is the answer that adds no claim if it ever does.
+fn rank(hits: &mut [Scored], now: i64) {
+    let weight = |record: &MemoryRecord| {
+        retrieval_weight(
+            record.authority,
+            now,
+            record.created_at,
+            record.last_validated_at,
+            record.provenance.project_phase,
+        )
+    };
+
+    hits.sort_by(|a, b| {
+        let a_rung = ladder_rung(&a.record);
+        let b_rung = ladder_rung(&b.record);
+        b_rung.cmp(&a_rung).then_with(|| {
+            let a_weight = weight(&a.record);
+            let b_weight = weight(&b.record);
+            match (a.relevance, b.relevance) {
+                (Some(a_relevance), Some(b_relevance)) => (a_relevance * a_weight)
+                    .partial_cmp(&(b_relevance * b_weight))
+                    .unwrap_or(Ordering::Equal),
+                (None, None) => b_weight.partial_cmp(&a_weight).unwrap_or(Ordering::Equal),
+                (Some(_), None) | (None, Some(_)) => Ordering::Equal,
+            }
+        })
+    });
 }
 
 /// Every column of `memories`, qualified by table name.
@@ -496,6 +597,12 @@ impl<'a> MemoryStore<'a> {
     /// verbatim — there is exactly one ranking in this crate and both callers
     /// get it. See `injection_query` for why a second *expression* is not a
     /// second *retrieval*.
+    ///
+    /// [`MemoryStore::for_path`] does not come through here, because it has
+    /// no `MATCH` expression to be given: it queries a different table by an
+    /// exact path. It shares the parts that are about *ordering* rather than
+    /// about matching — [`rank`], [`demote_thin_decisions`], [`group`] — so
+    /// the "one ranking" property survives the third door.
     fn search_matching(
         &self,
         match_expr: &str,
@@ -547,54 +654,31 @@ impl<'a> MemoryStore<'a> {
                 source,
             })?;
 
-        let mut scored: Vec<(MemoryRecord, f64)> = rows.into_iter().collect::<Result<_, _>>()?;
-
-        self.flag_contradictions(&mut scored)?;
-
-        let now = self.now();
-        scored.sort_by(|(a, a_relevance), (b, b_relevance)| {
-            // Phase 21E: the ladder rung is the primary key — see
-            // `ladder_rung`'s own documentation for why an idea must never
-            // outrank an invariant regardless of how well it matched. Only
-            // within the same rung does the blended relevance/decay weight
-            // decide the order, exactly as it did before this phase.
-            let a_rung = ladder_rung(a);
-            let b_rung = ladder_rung(b);
-            b_rung.cmp(&a_rung).then_with(|| {
-                let a_weight = retrieval_weight(
-                    a.authority,
-                    now,
-                    a.created_at,
-                    a.last_validated_at,
-                    a.provenance.project_phase,
-                );
-                let b_weight = retrieval_weight(
-                    b.authority,
-                    now,
-                    b.created_at,
-                    b.last_validated_at,
-                    b.provenance.project_phase,
-                );
-                let a_score = *a_relevance * a_weight;
-                let b_score = *b_relevance * b_weight;
-                a_score
-                    .partial_cmp(&b_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-        });
+        let scored: Vec<(MemoryRecord, f64)> = rows.into_iter().collect::<Result<_, _>>()?;
 
         // Phase 51 / producer P7: the relevance stops being discarded here.
-        // Until this change the line below was
-        // `.map(|(record, _)| record)` — the sort read the score, the sort
-        // threw it away, and nothing downstream could ever see how well
-        // anything had matched. Pairing it onto `Scored` instead changes no
-        // ordering: `demote_thin_decisions` permutes the same slots by the
-        // same record fields, and the relevance is carried along by the
-        // element it belongs to rather than looked up afterwards.
+        // Until that change the map below was `|(record, _)| record` — the
+        // sort read the score, the sort threw it away, and nothing
+        // downstream could ever see how well anything had matched. Pairing
+        // it onto `Scored` instead changes no ordering: `rank` and
+        // `demote_thin_decisions` permute the same slots by the same record
+        // fields, and the relevance is carried along by the element it
+        // belongs to rather than looked up afterwards.
+        //
+        // `Some`, not a bare number, because `Scored` also carries the hits
+        // of a retrieval that asked no question — see `Scored` and
+        // `MemoryStore::for_path`. Every hit here came from a `MATCH`, so
+        // every one of them has a real score to carry.
         let mut hits: Vec<Scored> = scored
             .into_iter()
-            .map(|(record, relevance)| Scored { record, relevance })
+            .map(|(record, relevance)| Scored {
+                record,
+                relevance: Some(relevance),
+            })
             .collect();
+
+        self.flag_contradictions(&mut hits)?;
+        rank(&mut hits, self.now());
         demote_thin_decisions(&mut hits);
         hits.truncate(limit);
         Ok(hits)
@@ -644,6 +728,132 @@ impl<'a> MemoryStore<'a> {
         Ok(group(self.search_matching(&match_expr, scope, limit)?))
     }
 
+    /// Every memory this project learned while `path` was being worked on —
+    /// the read door onto migration 17's `memory_files` rows, grouped the
+    /// same way [`MemoryStore::search_grouped`] groups a query's answer.
+    ///
+    /// `path` is repo-relative and `/`-separated; it is put through
+    /// [`super::store::normalize_observed_path`] — **the same function
+    /// [`MemoryStore::record_observed_files`] put the column through** — so a
+    /// caller may spell it `./src//a.rs` or `src\a.rs` and still match the
+    /// row the writer stored. A path that function refuses is a path no row
+    /// can hold, and the answer is an empty result rather than an error:
+    /// nothing was observed against a file that cannot be named here.
+    ///
+    /// # There is no relevance here, and none is invented
+    ///
+    /// This runs no `MATCH`, so [`RetrievalResult::relevance`] answers `None`
+    /// for every memory it returns, and that is the true answer — the memory
+    /// was not asked about. See `Scored` for why the alternative, a `0.0`,
+    /// would have been a fabricated number in the one map this module keeps
+    /// private to stop exactly that.
+    ///
+    /// # Ordering is `rank`'s, not this function's
+    ///
+    /// The hits go through the same `rank` and the same
+    /// `demote_thin_decisions` the other two doors go through, so a memory
+    /// cannot rank one way when a query found it and another way when a path
+    /// did. Within a rung the ordering falls back to `retrieval_weight`
+    /// alone, which is the query-blind half of the comparison a search makes
+    /// — see `rank`.
+    ///
+    /// # What this door deliberately does not do
+    ///
+    /// It does not flag contradictions. That is a **write**
+    /// ([`MemoryStore::mark_conflicted`]), and Phase 22 line 1063 scopes
+    /// detection to *"the memories this query actually matched"* — a path
+    /// lookup matched no query, and a read door that mutates the table on
+    /// behalf of a caller that only asked what a file is associated with is
+    /// a larger claim than this package makes. A consumer that needs
+    /// conflict flagging should say so, and the argument belongs where that
+    /// consumer is built.
+    ///
+    /// It also does not narrow by [`super::store::FileAssociation`]. Every
+    /// row this build can write is `observed`; a door that filtered on the
+    /// one existing value would have to be revisited by the producer that
+    /// adds the second, and would read as a promise this build cannot keep.
+    pub fn for_path(
+        &self,
+        path: &str,
+        scope: SearchScope,
+        limit: usize,
+    ) -> Result<RetrievalResult, MemoryStoreError> {
+        if limit == 0 {
+            return Ok(RetrievalResult::default());
+        }
+        let Some(canonical) = normalize_observed_path(path) else {
+            return Ok(RetrievalResult::default());
+        };
+
+        // `DISTINCT` because `memory_files` carries no uniqueness constraint
+        // — migration 17 argued one would be an index on speculation — so a
+        // memory associated with the same path twice must still be returned
+        // once. Both `project_id` predicates are deliberate: the association
+        // row's scoping is what the triggers maintain, and the memory row's
+        // is what a row that reached the file by some other route would have
+        // to defeat as well.
+        //
+        // The SQL `ORDER BY` decides only which candidates survive the
+        // overfetch, never the order returned: `rank` runs in Rust for the
+        // same reason `MemoryStore::search` needs it to — `retrieval_weight`
+        // reads the wall clock and a per-authority policy, neither of which
+        // SQLite has. Newest memory first is the honest candidate rule when
+        // there is no relevance to rank candidates by.
+        let sql = format!(
+            "SELECT DISTINCT {QUALIFIED_COLUMNS} \
+             FROM memories \
+             JOIN memory_files ON memory_files.memory_id = memories.id \
+             WHERE memories.project_id = ?1 \
+               AND memory_files.project_id = ?1 \
+               AND memory_files.path = ?2 \
+               AND (?3 OR memories.status = ?4) \
+             ORDER BY memories.created_at DESC, memories.id ASC \
+             LIMIT ?5"
+        );
+
+        let mut statement =
+            self.connection()
+                .prepare(&sql)
+                .map_err(|source| MemoryStoreError::Sql {
+                    action: "prepare a memory path lookup",
+                    source,
+                })?;
+
+        let historical = matches!(scope, SearchScope::Historical);
+        let fetch_limit = overfetch_limit(limit);
+        let rows = statement
+            .query_map(
+                rusqlite::params![
+                    self.project_id(),
+                    canonical,
+                    historical,
+                    MemoryStatus::Active.as_str(),
+                    i64::try_from(fetch_limit).unwrap_or(i64::MAX),
+                ],
+                row_to_record,
+            )
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|source| MemoryStoreError::Sql {
+                action: "look up memories by file path",
+                source,
+            })?;
+
+        let mut hits: Vec<Scored> = rows
+            .into_iter()
+            .map(|record| {
+                record.map(|record| Scored {
+                    record,
+                    relevance: None,
+                })
+            })
+            .collect::<Result<_, _>>()?;
+
+        rank(&mut hits, self.now());
+        demote_thin_decisions(&mut hits);
+        hits.truncate(limit);
+        Ok(group(hits))
+    }
+
     /// Phase 22 line 1063: detect mutually contradictory current memories
     /// among `scored` and flag them, rather than returning either silently.
     ///
@@ -652,23 +862,20 @@ impl<'a> MemoryStore<'a> {
     /// [`MemoryStatus::Conflicted`] is exactly [`MemoryStore::mark_conflicted`],
     /// so both halves of Phase 22's requirement — flagging, and detecting —
     /// go through the one mechanism the store already exposes for it.
-    fn flag_contradictions(
-        &self,
-        scored: &mut [(MemoryRecord, f64)],
-    ) -> Result<(), MemoryStoreError> {
-        for i in 0..scored.len() {
-            for j in (i + 1)..scored.len() {
-                let already_flagged = scored[i].0.status != MemoryStatus::Active
-                    || scored[j].0.status != MemoryStatus::Active;
-                if already_flagged || !contradicts(&scored[i].0, &scored[j].0) {
+    fn flag_contradictions(&self, hits: &mut [Scored]) -> Result<(), MemoryStoreError> {
+        for i in 0..hits.len() {
+            for j in (i + 1)..hits.len() {
+                let already_flagged = hits[i].record.status != MemoryStatus::Active
+                    || hits[j].record.status != MemoryStatus::Active;
+                if already_flagged || !contradicts(&hits[i].record, &hits[j].record) {
                     continue;
                 }
 
-                let one = scored[i].0.id.clone();
-                let other = scored[j].0.id.clone();
+                let one = hits[i].record.id.clone();
+                let other = hits[j].record.id.clone();
                 let (updated_one, updated_other) = self.mark_conflicted(&one, &other)?;
-                scored[i].0 = updated_one;
-                scored[j].0 = updated_other;
+                hits[i].record = updated_one;
+                hits[j].record = updated_other;
             }
         }
         Ok(())
