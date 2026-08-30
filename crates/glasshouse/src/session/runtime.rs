@@ -31,7 +31,9 @@ use anyhow::{Context, Result};
 
 use crate::events::{EventBus, LifecycleEvent, MessageOrigin, ProcessExit, RecordedEvent};
 use crate::launch::{HarnessLaunch, OwnedHarnessLaunch};
-use crate::pty::{ExitStatus, LineDiscipline, PtyOutput, PtyProcess, TerminalSize};
+use crate::pty::{
+    CanonicalOverflow, ExitStatus, LineDiscipline, PtyOutput, PtyProcess, TerminalSize,
+};
 use crate::session::supervision;
 use crate::session::{SessionId, SessionPresentation};
 
@@ -612,6 +614,7 @@ impl LiveSession {
                 id: self.id.clone(),
                 bytes,
                 limit: line.max_bytes(),
+                overflow: line.overflow(),
             });
         }
         match what {
@@ -682,9 +685,8 @@ pub enum RuntimeError {
     Headless { id: SessionId },
     #[error(
         "session `{id}` is in canonical mode, where one line of input may carry at \
-         most {limit} bytes including its terminator; a {bytes}-byte line would be \
-         discarded along with every byte written to that terminal afterwards, so it \
-         was refused instead"
+         most {limit} bytes including its terminator; a {bytes}-byte line would {overflow}, \
+         so it was refused instead"
     )]
     LineTooLong {
         id: SessionId,
@@ -695,6 +697,16 @@ pub enum RuntimeError {
         /// The terminal's own ceiling, from
         /// [`crate::pty::CanonicalLine::max_bytes`].
         limit: usize,
+        /// What this terminal would actually have done with the line.
+        ///
+        /// Carried rather than spelled out in the format string above,
+        /// because the sentence that string used to hold — *"discarded along
+        /// with every byte written to that terminal afterwards"* — is macOS's
+        /// answer and is **false on Linux**, where the line arrives truncated
+        /// and the terminal survives. A refusal that misdescribes the hazard
+        /// it prevented is the kind of thing a reader checks once and then
+        /// trusts.
+        overflow: CanonicalOverflow,
     },
     #[error("could not {action} session `{id}`")]
     Io {

@@ -5,12 +5,19 @@
 //! `SessionRuntime::send_text_from` used to write a caller's text straight
 //! into the session's pseudo-terminal. A terminal in **canonical mode** —
 //! every harness that has not yet put its own tty into raw mode, and every
-//! shell — assembles input one line at a time in a kernel buffer bounded by
-//! `MAX_CANON`. Overflow that buffer and the excess is discarded *together
-//! with the line's terminator*, so the line never reaches the reader, the
-//! buffer stays full, and **every byte written to that terminal afterwards is
-//! discarded too**. The session is deaf for the rest of its life, and the
-//! caller was told `ok`.
+//! shell — assembles input one line at a time in a bounded kernel buffer.
+//! Overflow that buffer and the caller's data is lost, silently, having been
+//! answered `ok`.
+//!
+//! **How it is lost is a per-kernel fact, and this file no longer assumes
+//! one.** On macOS and the BSDs the excess is discarded together with the
+//! line's terminator, so the line never reaches the reader, the buffer stays
+//! full, and every byte written to that terminal afterwards is discarded too:
+//! the session is deaf for the rest of its life. On Linux the line is
+//! delivered *truncated* and the terminal keeps working — quieter, and not
+//! obviously better, because a shell handed a truncated command runs it. Both
+//! are silent data loss, which is why one refusal is the right answer to
+//! both; see `glasshouse::pty::CanonicalOverflow`.
 //!
 //! # What is proven here, and in what order
 //!
@@ -18,7 +25,7 @@
 //! canonical-mode terminal with a reader on the other end, so every test
 //! below drives a real pty.
 //!
-//! 1. [`the_compiled_limit_is_the_terminals_own_and_one_byte_over_it_is_fatal`]
+//! 1. [`the_compiled_limit_is_the_terminals_own_and_one_byte_over_it_loses_data`]
 //!    — the hazard itself, at the `PtyProcess` layer that sits *below* the fix,
 //!    and the compiled ceiling measured against the kernel in both directions.
 //! 2. [`a_line_over_the_terminals_limit_is_refused_and_the_session_survives`]
@@ -53,7 +60,10 @@ use glasshouse::events::{EventBus, LifecycleEvent, MessageOrigin, Subscription};
 use glasshouse::launch::HarnessLaunch;
 use glasshouse::memory::inject::MAX_INJECTED_BYTES;
 use glasshouse::platform::exec;
-use glasshouse::pty::{LineDiscipline, ProcessSignal, PtyOutput, PtyProcess, TerminalCommand};
+use glasshouse::pty::{
+    CanonicalLine, CanonicalOverflow, LineDiscipline, ProcessSignal, PtyOutput, PtyProcess,
+    TerminalCommand,
+};
 use glasshouse::session::{RuntimeError, SessionId, SessionPresentation, SessionRuntime};
 
 /// Upper bound for any single wait. Generous enough for a loaded machine,
@@ -182,11 +192,18 @@ impl Pty {
         Self { process, collector }
     }
 
+    /// This terminal's ceiling *and* what it does above it, from the same
+    /// reading of the same kernel — so a test cannot end up asserting one
+    /// platform's hazard against another platform's number.
+    fn line(&self) -> CanonicalLine {
+        match self.process.line_discipline() {
+            LineDiscipline::Canonical(line) => line,
+            other => panic!("this test needs a canonical-mode terminal; got {other:?}"),
+        }
+    }
+
     fn limit(&self) -> usize {
-        self.process
-            .line_discipline()
-            .max_line_bytes()
-            .expect("this test needs a terminal with a known canonical limit")
+        self.line().max_bytes()
     }
 }
 
@@ -214,30 +231,47 @@ fn line_of(total: usize) -> String {
 ///
 /// # Why this brackets rather than only reproducing
 ///
-/// The one-byte-over half is the hazard: the line is gone **and so is the
-/// terminal**. That alone would pass with any ceiling at all, because a line
-/// over *any* ceiling still wedges a 1024-byte tty. So the at-the-limit half
-/// is here too, and it is what ties `CanonicalLine::max_bytes` to the kernel:
-/// a compiled value larger than the platform's real `MAX_CANON` makes this
-/// half fail, because the line it says should arrive does not.
+/// The one-byte-over half is the hazard. That alone would pass with any
+/// ceiling at all, because a line over *any* ceiling still overflows a real
+/// one. So the at-the-limit half is here too, and it is what ties
+/// `CanonicalLine::max_bytes` to the kernel: a compiled value larger than the
+/// platform's real ceiling makes this half fail, because the line it says
+/// should arrive does not.
 ///
-/// Together they say the constant is neither too high (the session would still
-/// wedge) nor too low (deliveries would be refused that work), on whichever
+/// Together they say the constant is neither too high (data would still be
+/// lost) nor too low (deliveries would be refused that work), on whichever
 /// platform the test runs on — which is the claim `CanonicalLine::max_bytes`
 /// makes in prose and could not otherwise back.
+///
+/// # The hazard is not the same on every platform, so it is asked, not assumed
+///
+/// This test used to assert one hazard everywhere: the over-long line is gone
+/// **and so is the terminal**. That is macOS's answer. On Linux the line
+/// arrives *truncated* and the terminal keeps working — so the wedge half
+/// failed there, correctly, saying the hazard it was written for does not
+/// exist on that kernel.
+///
+/// The repair is not to weaken the assertion into one that passes everywhere
+/// — that would leave this file asserting a refusal against nothing. It is to
+/// take the platform's own answer from
+/// [`glasshouse::pty::CanonicalLine::overflow`], which is production code's
+/// claim about the kernel, and demand that the kernel back **that** claim.
+/// Each branch below is as strong as the single one it replaced, and a
+/// platform whose behaviour is misdeclared fails here rather than passing
+/// vacuously.
 ///
 /// # Why it goes under the fix
 ///
 /// Through `PtyProcess::write_input`, beneath `SessionRuntime`'s check, on
 /// purpose. It is not testing Glasshouse; it is establishing that the thing
-/// Glasshouse now refuses is genuinely unsurvivable, so the refusal is not a
-/// limit invented for its own sake. If this ever stops reproducing, the
-/// refusal above it should be re-argued rather than kept out of habit.
+/// Glasshouse now refuses genuinely loses the caller's data, so the refusal
+/// is not a limit invented for its own sake. If this ever stops reproducing,
+/// the refusal above it should be re-argued rather than kept out of habit.
 ///
 /// A fresh pty per case, because a wedged canonical buffer never recovers and
 /// would contaminate everything after it. [`TRIALS`] of each.
 #[test]
-fn the_compiled_limit_is_the_terminals_own_and_one_byte_over_it_is_fatal() {
+fn the_compiled_limit_is_the_terminals_own_and_one_byte_over_it_loses_data() {
     for trial in 1..=TRIALS {
         {
             let mut pty = Pty::start("");
@@ -247,7 +281,7 @@ fn the_compiled_limit_is_the_terminals_own_and_one_byte_over_it_is_fatal() {
             assert!(
                 pty.collector.saw(&format!("GOT:{}", limit - 1), TIMEOUT),
                 "trial {trial}/{TRIALS}: a line of exactly {limit} bytes did not \
-                 arrive whole, so {limit} is above this terminal's real MAX_CANON \
+                 arrive whole, so {limit} is above this terminal's real ceiling \
                  and the compiled constant is wrong; output:\n{}",
                 pty.collector.text()
             );
@@ -256,27 +290,75 @@ fn the_compiled_limit_is_the_terminals_own_and_one_byte_over_it_is_fatal() {
             assert!(
                 pty.collector.saw("GOT:4", TIMEOUT),
                 "trial {trial}/{TRIALS}: a line of exactly {limit} bytes left the \
-                 terminal deaf, so {limit} is above its real MAX_CANON"
+                 terminal deaf, so {limit} is above its real ceiling"
             );
         }
         {
             let mut pty = Pty::start("");
-            let limit = pty.limit();
+            let line = pty.line();
+            let limit = line.max_bytes();
             let over = line_of(limit + 1);
             pty.process.write_input(over.as_bytes()).expect("write");
-            assert!(
-                !pty.collector.saw(&format!("GOT:{limit}"), ABSENCE),
-                "trial {trial}/{TRIALS}: a {}-byte line was expected to be \
-                 discarded by the line discipline",
-                limit + 1
-            );
-            pty.process.write_input(b"abcd\r").expect("write");
-            assert!(
-                !pty.collector.saw("GOT:4", ABSENCE),
-                "trial {trial}/{TRIALS}: the over-long line did not wedge the \
-                 terminal, so every assertion in this file about the refusal is \
-                 about a hazard that no longer exists"
-            );
+
+            // Both platforms agree on this much, and it is the half that
+            // catches a ceiling compiled too low: a line one byte over must
+            // not arrive whole. If the constant were below the terminal's
+            // real ceiling this line would sail through intact and report its
+            // full length.
+            let whole = format!("GOT:{limit}");
+
+            match line.overflow() {
+                CanonicalOverflow::WedgesTheTerminal => {
+                    assert!(
+                        !pty.collector.saw(&whole, ABSENCE),
+                        "trial {trial}/{TRIALS}: a {}-byte line was expected to be \
+                         discarded by the line discipline, so {limit} is above this \
+                         terminal's real ceiling",
+                        limit + 1
+                    );
+                    pty.collector.forget();
+                    pty.process.write_input(b"abcd\r").expect("write");
+                    assert!(
+                        !pty.collector.saw("GOT:4", ABSENCE),
+                        "trial {trial}/{TRIALS}: the over-long line did not wedge the \
+                         terminal, so every assertion in this file about the refusal is \
+                         about a hazard that no longer exists on this platform; output:\n{}",
+                        pty.collector.text()
+                    );
+                }
+                CanonicalOverflow::TruncatesTheLine => {
+                    // The hazard here is quieter and needs a *positive*
+                    // assertion to have any force: the line arrives, and it
+                    // arrives short. Asserting only that it did not arrive
+                    // whole would also pass if the child had died.
+                    assert!(
+                        pty.collector.saw(&format!("GOT:{}", limit - 1), TIMEOUT),
+                        "trial {trial}/{TRIALS}: a {}-byte line was expected to arrive \
+                         truncated to this terminal's ceiling of {limit} bytes, \
+                         reporting {} bytes of payload; output:\n{}",
+                        limit + 1,
+                        limit - 1,
+                        pty.collector.text()
+                    );
+                    assert!(
+                        !pty.collector.saw(&whole, ABSENCE),
+                        "trial {trial}/{TRIALS}: a {}-byte line arrived whole, so \
+                         {limit} is below this terminal's real ceiling and the compiled \
+                         constant refuses deliveries that would have worked",
+                        limit + 1
+                    );
+                    pty.collector.forget();
+                    pty.process.write_input(b"abcd\r").expect("write");
+                    assert!(
+                        pty.collector.saw("GOT:4", TIMEOUT),
+                        "trial {trial}/{TRIALS}: the over-long line left the terminal \
+                         deaf, so this platform wedges rather than truncates and \
+                         `CanonicalOverflow::TruncatesTheLine` is the wrong declaration \
+                         for it; output:\n{}",
+                        pty.collector.text()
+                    );
+                }
+            }
         }
     }
 }
@@ -305,10 +387,21 @@ fn a_line_over_the_terminals_limit_is_refused_and_the_session_survives() {
         assert!(
             matches!(
                 refused,
-                RuntimeError::LineTooLong { bytes, limit: reported, .. }
-                    if bytes == limit + 1 && reported == limit
+                RuntimeError::LineTooLong { bytes, limit: reported, overflow, .. }
+                    if bytes == limit + 1
+                        && reported == limit
+                        && overflow == harness.line().overflow()
             ),
             "trial {trial}: wrong refusal: {refused:?}"
+        );
+        // The refusal must describe the hazard this kernel actually has. The
+        // sentence used to be macOS's, unconditionally, which made it a false
+        // statement on every Linux session it was ever shown on.
+        let hazard = harness.line().overflow().to_string();
+        assert!(
+            refused.to_string().contains(&hazard),
+            "trial {trial}: the refusal must say what this terminal would really \
+             have done ({hazard}): {refused}"
         );
         assert!(
             refused.to_string().contains(harness.id().as_str()),
@@ -570,10 +663,15 @@ impl LiveHarness {
             .line_discipline()
     }
 
+    fn line(&self) -> CanonicalLine {
+        match self.discipline() {
+            LineDiscipline::Canonical(line) => line,
+            other => panic!("this test needs a canonical-mode terminal; got {other:?}"),
+        }
+    }
+
     fn limit(&self) -> usize {
-        self.discipline()
-            .max_line_bytes()
-            .expect("this test needs a terminal with a known canonical limit")
+        self.line().max_bytes()
     }
 
     /// Everything the session has printed since the last [`LiveHarness::forget`].

@@ -365,20 +365,23 @@ impl std::fmt::Debug for PtyOutput {
 /// # Why anything above the pty needs to know
 ///
 /// A terminal line discipline in **canonical mode** assembles input one line
-/// at a time in a kernel buffer, and that buffer has a hard ceiling —
-/// `MAX_CANON`. A write that pushes a line past the ceiling is not truncated:
-/// the excess is discarded, **the line terminator is discarded with it**, so
-/// the line never reaches the reader, the buffer stays full, and every byte
-/// written to that terminal afterwards is discarded too. The session's input
-/// is wedged for good and nothing on the writing side is told.
+/// at a time in a kernel buffer, and that buffer has a hard ceiling. A write
+/// that pushes a line past the ceiling loses data, and **the kernels do not
+/// lose it the same way** — see [`CanonicalOverflow`], which names the two
+/// behaviours that were measured and is why this type carries the hazard
+/// rather than assuming the one the defect was first found on.
 ///
-/// Measured on macOS 25.5 against a real pty by
-/// `tests/canonical_line_limit.rs`, one fresh pty per case:
+/// Measured against a real pty, one fresh pty per case, 20 trials of each:
 ///
 /// ```text
-/// 1023 bytes + CR = 1024 total -> arrives, terminal still works
-/// 1024 bytes + CR = 1025 total -> discarded, terminal wedged forever
+/// macOS 25.5   1023 + CR = 1024 -> arrives, terminal still works
+///              1024 + CR = 1025 -> discarded, terminal wedged forever
+/// Linux 7.0.11 4095 + CR = 4096 -> arrives, terminal still works
+///              4096 + CR = 4097 -> arrives TRUNCATED to 4095, terminal fine
 /// ```
+///
+/// Both are data loss the writing side is not told about, which is what makes
+/// one refusal the right answer to both; only the wreckage differs.
 ///
 /// In **raw** mode there is no line and no such ceiling: the same 2000-byte
 /// write arrives intact. A harness TUI puts its own tty into raw mode as it
@@ -419,12 +422,72 @@ impl LineDiscipline {
     }
 }
 
-/// A canonical-mode terminal's limit on one line, and what it counts as the
-/// end of one.
+/// What a canonical-mode terminal does with a line that overflows its buffer.
+///
+/// # This is not the same hazard on every platform, and that was measured
+///
+/// The defect this module's refusal exists for was found on macOS, where an
+/// over-long line takes the terminal with it. Setting Linux's ceiling from
+/// its documented buffer size and inheriting that description was wrong:
+/// Linux's `n_tty` is not BSD's, and one byte over its ceiling is survivable
+/// in a way one byte over BSD's is not.
+///
+/// Both variants are silent data loss, so both justify refusing the write —
+/// but a message, a doc comment, or a test that claims the wrong one on the
+/// wrong platform is claiming a hazard it cannot demonstrate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalOverflow {
+    /// The line's excess **and its terminator** are discarded, so the line
+    /// never reaches the reader, the buffer stays full, and every byte
+    /// written to that terminal afterwards is discarded too. The session's
+    /// input is deaf for the rest of its life.
+    ///
+    /// macOS and the BSDs. Measured on macOS 25.5 (arm64): a 1025-byte line
+    /// never arrived and neither did the four-byte line after it, 20 trials
+    /// out of 20.
+    WedgesTheTerminal,
+    /// The excess is discarded and the line is **delivered short**,
+    /// terminator intact; the terminal keeps working and the next line
+    /// arrives normally.
+    ///
+    /// Linux. Measured on 7.0.11 (arm64) inside the gate's own `rust:1.98.0`
+    /// image: a 4097-byte line arrived as 4095 bytes, 20 trials out of 20,
+    /// with the following four-byte line arriving every time. The discarded
+    /// tail does **not** come back as a second line — a 65536-byte line
+    /// produces exactly one 4095-byte line and nothing else.
+    ///
+    /// Quieter than [`Self::WedgesTheTerminal`] and not obviously better: a
+    /// wedged session visibly stops, whereas a shell handed a truncated
+    /// command runs the truncated command.
+    TruncatesTheLine,
+}
+
+impl std::fmt::Display for CanonicalOverflow {
+    /// The consequence clause of a refusal sentence, in the present
+    /// conditional: *"a 1025-byte line would `…`"*.
+    ///
+    /// Written to slot into [`crate::session::RuntimeError::LineTooLong`]
+    /// rather than to stand alone, because that is the only sentence that has
+    /// to be true on both platforms and it is the one a caller is shown.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::WedgesTheTerminal => {
+                "be discarded along with every byte written to that terminal afterwards"
+            }
+            Self::TruncatesTheLine => {
+                "arrive truncated to that ceiling, silently losing everything past it"
+            }
+        })
+    }
+}
+
+/// A canonical-mode terminal's limit on one line, what it counts as the
+/// end of one, and what it does to a line that will not fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanonicalLine {
     max_bytes: usize,
     cr_ends_a_line: bool,
+    overflow: CanonicalOverflow,
 }
 
 impl CanonicalLine {
@@ -435,20 +498,40 @@ impl CanonicalLine {
     /// - **macOS and the BSDs**: `MAX_CANON`, `1024`, from
     ///   `<sys/syslimits.h>`. The measurement in [`LineDiscipline`]'s doc
     ///   comment is what establishes that the terminator is counted.
-    /// - **Linux**: the `n_tty` line discipline's own buffer,
-    ///   `N_TTY_BUF_SIZE` = `4096`. Linux's `<linux/limits.h>` says
-    ///   `MAX_CANON` is 255 and `fpathconf(_PC_MAX_CANON)` agrees, but the
-    ///   driver does not — that constant is the POSIX minimum rather than
-    ///   the kernel's buffer, and enforcing it would refuse 256-byte lines
-    ///   that demonstrably arrive. `fpathconf` is the portable spelling and
-    ///   it is wrong on the platform where it differs most, so the value is
-    ///   compiled in per target and `tests/canonical_line_limit.rs` measures
-    ///   it back on whichever platform the test runs on.
+    /// - **Linux**: `4096`, the `n_tty` line discipline's own buffer
+    ///   (`N_TTY_BUF_SIZE`). Linux's `<linux/limits.h>` says `MAX_CANON` is
+    ///   255 and `fpathconf(_PC_MAX_CANON)` agrees, but the driver does not
+    ///   — that constant is the POSIX minimum rather than the kernel's
+    ///   buffer, and enforcing it would refuse 256-byte lines that
+    ///   demonstrably arrive. `fpathconf` is the portable spelling and it is
+    ///   wrong on the platform where it differs most.
+    ///
+    ///   **This number was originally compiled in from that documented buffer
+    ///   size and not measured, and the description that came with it was
+    ///   BSD's.** The boundary has since been measured against a real Linux
+    ///   pty and 4096 is exactly right — 4096 total arrives whole, 4097 does
+    ///   not — but what happens above it is [`CanonicalOverflow::TruncatesTheLine`],
+    ///   not the wedge this constant was first documented with.
     /// - **Everything else**, Windows included: no limit, and such a
     ///   terminal is [`LineDiscipline::Unknown`] rather than
     ///   [`LineDiscipline::Canonical`].
+    ///
+    /// Each is compiled in per target, and
+    /// `tests/canonical_line_limit.rs` measures it back on whichever platform
+    /// the test runs on — in both directions, so a value too high and a value
+    /// too low each fail there rather than in production.
     pub const fn max_bytes(self) -> usize {
         self.max_bytes
+    }
+
+    /// What this terminal does to a line that will not fit in [`Self::max_bytes`].
+    ///
+    /// Carried on the value rather than looked up by the caller, so the one
+    /// place that knows the platform — [`PtyProcess::line_discipline`], which
+    /// read this terminal's mode a statement ago — is also the only place
+    /// that has to.
+    pub const fn overflow(self) -> CanonicalOverflow {
+        self.overflow
     }
 
     /// Whether this terminal treats `byte` as the end of a line.
@@ -474,8 +557,10 @@ impl CanonicalLine {
     /// The run after the last terminator counts, and counts as if it were
     /// terminated: it stays in the buffer waiting for one, and it is the
     /// *next* write's terminator that gets discarded for want of room.
-    /// Measured — writing 1024 bytes and then a bare `CR` as two separate
-    /// calls wedges a macOS pty exactly as one 1025-byte write does.
+    /// Measured on both platforms, because the accounting is the claim and
+    /// not the number — writing `max_bytes` bytes and then a bare `CR` as two
+    /// separate calls costs exactly what one `max_bytes + 1` write costs:
+    /// a macOS pty wedges either way, and a Linux pty truncates either way.
     pub fn longest_line(self, input: &[u8]) -> usize {
         input
             .split(|&byte| self.ends_a_line(byte))
@@ -503,35 +588,57 @@ impl CanonicalLine {
         let longest = self.longest_line(input);
         (longest > self.max_bytes).then_some(longest)
     }
+
+    /// This platform's canonical-mode ceiling and the hazard one byte over
+    /// it, or `None` where no canonical ceiling applies.
+    ///
+    /// See [`CanonicalLine::max_bytes`] for the numbers and
+    /// [`CanonicalOverflow`] for the two behaviours; both halves of each arm
+    /// below were measured against a real pty rather than read from a header,
+    /// which is how the Linux arm's description came to be corrected.
+    ///
+    /// # Why it is public, and why that is not a workaround
+    ///
+    /// It is a fact about the **platform**, not about any one terminal: a
+    /// caller sizing a delivery before it has a session to ask — the memory
+    /// injection ceiling is exactly such a caller — needs the number without
+    /// a pty in hand.
+    ///
+    /// It also has to be reachable on a target that compiles no reader for
+    /// it. `PtyProcess::line_discipline` is the only consumer and it is
+    /// `#[cfg(unix)]`, so as a private constant this was dead code on
+    /// Windows and `-D warnings` turned that into a failed build. Deleting
+    /// the Windows arm would have silenced it by throwing away the fact that
+    /// Windows has no ceiling, which is the one thing this constant is for
+    /// there.
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    pub const PLATFORM: Option<(usize, CanonicalOverflow)> =
+        Some((1024, CanonicalOverflow::WedgesTheTerminal));
+
+    /// See [`CanonicalLine::PLATFORM`].
+    #[cfg(target_os = "linux")]
+    pub const PLATFORM: Option<(usize, CanonicalOverflow)> =
+        Some((4096, CanonicalOverflow::TruncatesTheLine));
+
+    /// See [`CanonicalLine::PLATFORM`].
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        target_os = "linux"
+    )))]
+    pub const PLATFORM: Option<(usize, CanonicalOverflow)> = None;
 }
-
-/// See [`CanonicalLine::max_bytes`], which documents these numbers and is the
-/// only thing that should read this.
-#[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "freebsd",
-    target_os = "netbsd",
-    target_os = "openbsd",
-    target_os = "dragonfly"
-))]
-const MAX_CANONICAL_LINE_BYTES: Option<usize> = Some(1024);
-
-/// See [`CanonicalLine::max_bytes`].
-#[cfg(target_os = "linux")]
-const MAX_CANONICAL_LINE_BYTES: Option<usize> = Some(4096);
-
-/// See [`CanonicalLine::max_bytes`].
-#[cfg(not(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "freebsd",
-    target_os = "netbsd",
-    target_os = "openbsd",
-    target_os = "dragonfly",
-    target_os = "linux"
-)))]
-const MAX_CANONICAL_LINE_BYTES: Option<usize> = None;
 
 /// A running child process attached to a pseudo-terminal.
 pub struct PtyProcess {
@@ -810,7 +917,8 @@ impl PtyProcess {
     /// duplicated.
     #[cfg(unix)]
     pub fn line_discipline(&self) -> LineDiscipline {
-        let (Some(fd), Some(max_bytes)) = (self.master.as_raw_fd(), MAX_CANONICAL_LINE_BYTES)
+        let (Some(fd), Some((max_bytes, overflow))) =
+            (self.master.as_raw_fd(), CanonicalLine::PLATFORM)
         else {
             return LineDiscipline::Unknown;
         };
@@ -830,6 +938,7 @@ impl PtyProcess {
         LineDiscipline::Canonical(CanonicalLine {
             max_bytes,
             cr_ends_a_line: termios.c_iflag & libc::ICRNL != 0,
+            overflow,
         })
     }
 
@@ -971,6 +1080,7 @@ mod tests {
         CanonicalLine {
             max_bytes: 1024,
             cr_ends_a_line: true,
+            overflow: CanonicalOverflow::WedgesTheTerminal,
         }
     }
 
@@ -1026,8 +1136,8 @@ mod tests {
     fn a_carriage_return_ends_a_line_only_when_icrnl_says_so() {
         let with_icrnl = macos_default();
         let without = CanonicalLine {
-            max_bytes: 1024,
             cr_ends_a_line: false,
+            ..macos_default()
         };
         let block = cr_separated();
         // Same bytes, two terminals, two honest answers: with ICRNL the CRs

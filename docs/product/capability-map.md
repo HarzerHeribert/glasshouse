@@ -1449,11 +1449,11 @@ Phase 34D — Router request schema
 ☐ Include current capacity bands rather than raw provider secrets or unnecessary billing details.
 ☐ Include required user-specified constraints such as pinned harness or forbidden providers.
 ☐ Include whether the task is expected to modify code.
-☐ Include whether the task needs repository exploration.
-☐ Include whether browser or external-tool capability is required.
+☑ Include whether the task needs repository exploration.
+☑ Include whether browser or external-tool capability is required.
 ☐ Include whether the user appears to expect a long-running multi-turn task.
-☐ Avoid sending full repository contents to the router.
-☐ Avoid sending full session transcripts to the router.
+☑ Avoid sending full repository contents to the router.
+☑ Avoid sending full session transcripts to the router.
 ☐ Define structured routing output containing task class, required workload tier, required capabilities, expected duration class, and confidence.
 ☐ Allow the router output to recommend reuse-session, new-session, or disposable-job as an execution shape.
 ☐ Treat low-confidence routing classifications as a reason to use conservative deterministic fallback rules.

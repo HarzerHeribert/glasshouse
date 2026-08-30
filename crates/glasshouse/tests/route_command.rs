@@ -676,6 +676,167 @@ fn empty_or_whitespace_only_task_text_behaves_as_absent() {
     );
 }
 
+// --- GH-ROUTER-INPUT-PROOF: Phase 34D lines 1452/1453/1455/1456 -----------
+//
+// `report-router-schema-recon.md` called 1452/1453 REACHABLE/ALREADY TRUE
+// with a diagnostic-only caveat (the chain runs under `glasshouse route`,
+// which ranks and prints and starts nothing) and called 1455/1456 ALREADY
+// TRUE by construction. Phase 34D's own heading is "Router request schema"
+// — every line in it, 1452/1453 included, is a claim about what the
+// router's *input* contains, not about what a routing decision then does.
+// The diagnostic-only caveat is therefore not disqualifying here: `--task`
+// genuinely builds `RouterInputs` and hands it to `SessionRouter::choose`
+// (`main.rs:1170-1206`), which is the router this phase's lines are about.
+// It would be disqualifying for a line asking whether a *launch* sees the
+// signal — it does not (`launch_session`/`report_task_boundary_routing`
+// still pass `TaskRequirements::default()`, `main.rs:1431`/`3820`) — but
+// that is a different claim than these two lines make.
+#[test]
+fn a_task_naming_repository_work_puts_repository_access_in_the_router_input_and_a_plain_question_does_not()
+ {
+    let fixture = Fixture::new();
+
+    let repo_task = fixture.stdout(&[
+        "route",
+        "--task",
+        "check how the router handles this repo's classification logic",
+    ]);
+    assert!(
+        repo_task.contains("needs repository access"),
+        "a declarative task naming this repository must put the repository-exploration \
+         signal in the router's input — `capability_fit`'s evidence string is the \
+         observable trace of `TaskRequirements.hard_capabilities` (line 1452):\n{repo_task}"
+    );
+
+    let plain_question = fixture.stdout(&[
+        "route",
+        "--task",
+        "what is the difference between a fresh and an existing session",
+    ]);
+    assert!(
+        !plain_question.contains("needs repository access"),
+        "a pure question with no repository reference and no code-modification signal must \
+         not carry the repository-exploration signal:\n{plain_question}"
+    );
+    assert!(
+        plain_question.contains("the task named no hard capability requirement"),
+        "and must classify to no hard capability at all, the same evidence string \
+         `TaskRequirements::default()` produces:\n{plain_question}"
+    );
+}
+
+/// Lines 1455/1456: the router's actual input, not the CLI report.
+///
+/// The CLI report (`render_route_recommendation`) never echoes `--task`
+/// text or any Debug form of `RouterInputs`/`TaskRequirements` — it renders
+/// only the six/seven named `Contribution`s (verified by reading
+/// `main.rs:1226-1250`). So a report-text assertion cannot tell "the router
+/// received a bounded classification" from "the router received the raw
+/// text and nothing happens to print it". The claim has to be checked
+/// against the value the router actually receives, so these tests call the
+/// same two library functions `task_requirements_from_text` calls
+/// (`main.rs:1277-1281`, quoted in its doc comment above) directly —
+/// `main.rs` itself is a forbidden file in this packet and is not edited,
+/// even transiently, so this mirrors its body rather than invoking it (it
+/// is private to the binary target and unreachable from an integration
+/// test regardless).
+mod bounded_router_input {
+    use glasshouse::routing::classify::classify_heuristically;
+    use glasshouse::routing::session::TaskRequirements;
+
+    /// What `task_requirements_from_text` (`main.rs:1277-1281`) builds from
+    /// a task string, reproduced here because that function is private.
+    fn router_input_for(task_text: &str) -> TaskRequirements {
+        let hard_capabilities = classify_heuristically(task_text).hard_capabilities();
+        TaskRequirements {
+            needs_tool_calls: !hard_capabilities.is_empty(),
+            hard_capabilities,
+        }
+    }
+
+    /// Line 1455. A task description built to look like a real file's
+    /// worth of source — many lines, `.rs` references, the shape a person
+    /// pasting repository content into `--task` would actually produce —
+    /// must not make the router's input grow. `HardCapability` is a
+    /// three-variant, data-free enum (`classify.rs:241-245`) and
+    /// `TaskRequirements` is exactly `{ needs_tool_calls: bool,
+    /// hard_capabilities: Vec<HardCapability> }` (`session.rs:379-386`), so
+    /// there is structurally nowhere for the repository content itself to
+    /// go — this test is the executable form of that reading.
+    #[test]
+    fn the_router_input_stays_small_when_the_task_text_looks_like_repository_contents() {
+        let repo_shaped = format!(
+            "check how this repo's router.rs handles this: {}",
+            "fn handle_request(req: &Request) -> Response { todo!() }\n".repeat(4_000)
+        );
+        assert!(
+            repo_shaped.len() > 200_000,
+            "the fixture text must actually be repository-content-sized"
+        );
+
+        let requirements = router_input_for(&repo_shaped);
+        let rendered = format!("{requirements:?}");
+        assert!(
+            rendered.len() < 300,
+            "the router's input must stay a small structured value however large a task \
+             description that looks like repository contents is — it rendered to {} bytes \
+             for a {}-byte task, which would mean the repository content itself reached the \
+             router:\n{rendered}",
+            rendered.len(),
+            repo_shaped.len()
+        );
+    }
+
+    /// Line 1456. Same claim, shaped like a session transcript rather than
+    /// source code — many `user:`/`assistant:` turns, the shape a person
+    /// pasting a prior conversation into `--task` would produce.
+    #[test]
+    fn the_router_input_stays_small_when_the_task_text_looks_like_a_session_transcript() {
+        let transcript_shaped = format!(
+            "continue this session: {}",
+            "user: can you look at this repo\nassistant: sure, one moment\n".repeat(4_000)
+        );
+        assert!(
+            transcript_shaped.len() > 200_000,
+            "the fixture text must actually be transcript-sized"
+        );
+
+        let requirements = router_input_for(&transcript_shaped);
+        let rendered = format!("{requirements:?}");
+        assert!(
+            rendered.len() < 300,
+            "the router's input must stay small however large a task description that looks \
+             like a session transcript is — it rendered to {} bytes for a {}-byte task, which \
+             would mean the transcript itself reached the router:\n{rendered}",
+            rendered.len(),
+            transcript_shaped.len()
+        );
+    }
+
+    /// Acceptance test 5: the general case, independent of content shape —
+    /// "small structured input" as an executable bound rather than a
+    /// description. A task body an order of magnitude larger than either
+    /// fixture above, of arbitrary content, still renders to a bounded
+    /// value.
+    #[test]
+    fn a_very_long_task_body_of_arbitrary_content_still_produces_a_small_structured_input() {
+        let huge = "the quick brown fox jumps over the lazy dog, repeatedly, ".repeat(20_000);
+        assert!(
+            huge.len() > 1_000_000,
+            "the fixture text must be over a megabyte"
+        );
+
+        let requirements = router_input_for(&huge);
+        let rendered = format!("{requirements:?}");
+        assert!(
+            rendered.len() < 300,
+            "a megabyte-scale task description must still produce a router input that \
+             renders to a small, bounded value — it rendered to {} bytes:\n{rendered}",
+            rendered.len()
+        );
+    }
+}
+
 /// A project with two harnesses behind the same provider, differing only in
 /// what map line 1382's registry establishes about `browser-use`:
 /// `claude-code` declares it present (`claude --help`'s `--chrome`); `codex`
