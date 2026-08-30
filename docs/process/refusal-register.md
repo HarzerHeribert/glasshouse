@@ -973,3 +973,60 @@ known way to catch this class, and it has produced un-ticks twice —
 `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's
 packet does not bind the integrator)."* The step exists, it was owed, and it was
 skipped.
+
+
+## Phase 51's thirty-four lines reduce to FOUR root causes, not thirty-four
+
+`GH-PHASE51-RECON`, 2026-08-30. **1829 and 1830 were the one packageable pair
+and they closed the same evening.** This is what is left, grouped by first
+failing link (§83) so nobody re-derives thirty-four paragraphs.
+
+**RC-A — decided in production, announced to the user, dropped.** The quantity
+is computed on a path the shipped binary takes, printed to a terminal or a
+`tracing` line, and never written. **Nothing was missing but the producer
+call.** This was 1829/1830, and it is now **empty** except the recordable half
+of 1851. *This is the cheap cluster; check it first in any phase.*
+
+**RC-B — no outcome is ever learned.** `EvaluationOutcome::Unknown` is the only
+value written, and `routing_observations.outcome` is written only by the
+gateway, where `evidence.rs:70-83` calls it *"a transport-level fact, not a
+statement about whether the turn actually helped the user."* Every line whose
+verb is *succeeds*, *is useful*, *is justified*, *correctly identifies*,
+*predicts*, or *causes a poor decision* fails here: **1821, 1823, 1824, 1825,
+1831, 1834, 1835, 1836, 1837, 1846, 1852, 1854**.
+
+> **This is twelve lines behind one question, and the question is a product
+> decision, not a wiring job: how does Glasshouse learn whether a routing
+> decision was good?** Nothing in the build observes that today, and inventing
+> a proxy would be a fabricated denominator of the kind line 1294 refuses. **Do
+> not package any RC-B line until a person answers it.** It is the single
+> highest-leverage unanswered question on the board.
+
+**RC-C — the column exists and has no producer.** `first_byte_at`,
+`first_token_at`, `first_tool_call_at`, `tool_rounds`, `retries`, `repairs`,
+`failovers`, `cost_micro_usd` — schema present since migration 11, no builder,
+no writer. Lines **1820, 1839, 1845, 1849, 1850, 1855**, plus the *money*
+reading of 1832/1833. Buildable, but each needs its own producer.
+
+**RC-D — the feature the line measures does not exist.** A missing subject, not
+a missing measurement: **1827, 1828, 1838, 1840, 1841, 1842, 1843, 1844, 1847,
+1848, 1853**.
+
+### Three specific traps recorded so they are not re-derived
+
+- **1849 looks like the best package in the phase and is not.** Its consumer is
+  already built and already reachable — `routing_latency_phrase`
+  (`shell/mod.rs:1585`) prints *"unknown — not enough observations yet"* to
+  every user today — and the missing link is one clock read. **It loses on
+  §36**: the line says latency *"added before interactive task execution"*, and
+  `glasshouse classify` is the only production caller of the classification
+  path. It is a command a person types, not something on `launch_session`'s
+  path. **It becomes a good package the day classification is wired into
+  launch, and not before.**
+- **1845 is not "wire the pairing evidence".** It is already wired;
+  `ObservedEvidenceSource::observed` hardcodes **five** of the line's six
+  quantities to `None` because their columns have no writer. The package is
+  three producers, not a join.
+- **1852 would report a tautology.** `FailureDomain::Independent` is *"the
+  state this build never earns"* (`routing/domain.rs:30-34`). The honest answer
+  is a documented constant, not a count.
