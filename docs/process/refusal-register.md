@@ -1131,3 +1131,43 @@ The verdicts survive scrutiny on their own `file:line` evidence — the 1441
 reasoning in particular was reached against the packet's framing rather than
 along it — but **the next packet on contested ground must say plainly that
 disagreeing with it is a good outcome.** `GH-ROUTING-STICKINESS` says so.
+
+
+## "Fewest open lines" is DEAD as a selection heuristic — six of six refused
+
+`GH-LAST-LINES-RECON`, 2026-08-31, closing the question the same day it was
+raised.
+
+`ORIENT.md` ranks phases by open lines, fewest first, and ten phases sit **one
+line from complete**. That reads as the cheapest board on the map. **It is
+not.** Six were checked against current source and the register:
+
+| line | phase | why it is one line from done |
+|---|---|---|
+| 1263, 1267 | 32D | Cluster M — no spend counter, no latency reader |
+| 1294 | 32F | standing refusal; the source itself refuses it |
+| 1158 | 30 | refused in `phase-30.md` |
+| **514** | 9H | **REFUSED — missing caller** |
+| **531** | 9I | **REFUSED — missing caller *and* consumer** (Cluster D holds; one supporting fact corrected) |
+| **1594** | 37 | **REFUSED — and it was already recorded** in `phase-37.md:6,32`, reproduced here with a passing tripwire test |
+
+**Six of six.** A phase is one line from complete *because* that line is the
+hard one — the cheap lines in it were closed first, by construction. **Ranking
+by fewest-open finds the residue, not the opportunity.**
+
+**What to use instead**, both proven on this map the same week:
+
+- **Size by mechanism**, as practice section 87 sets out: a phase whose first line is a mechanism and whose
+  rest are its filters (34C — 1431 selects, 1432–1443 are its rules), or several
+  lines that are fields of one returned value (Phase 30's 1161–1165, one
+  `SessionContext`). Those produced 3-closed and 5-closed packages.
+- **A refusal that names its producer**, as practice section 83 asks. 1441/1442 were refused with one
+  shared missing producer named, and closed **within hours** once it was built
+  and wired.
+
+### And read the evidence entry before queueing a line
+
+**1594 was already refused in `phase-37.md` and the orchestrator queued it
+anyway**, having checked only the map and the register. The ledger is the third
+place a refusal can live and it was not consulted. `discover.py --phase <id>`
+prints the entry alongside the open lines for exactly this reason.
