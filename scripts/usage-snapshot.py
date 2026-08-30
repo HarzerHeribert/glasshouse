@@ -35,7 +35,35 @@ from __future__ import annotations
 
 import argparse, collections, datetime, json, pathlib, subprocess, sys
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+def _main_checkout(script_dir: pathlib.Path) -> pathlib.Path:
+    """The one real .agent-runtime/usage-baseline owner, regardless of which
+    worktree's copy of this script is executing.
+
+    scripts/ is tracked, so every worktree carries its own copy, and
+    .agent-runtime/ is gitignored -- it exists only in the main checkout
+    (continuity-watch.sh's header measured this). Resolving ROOT from
+    __file__ alone silently forks the snapshot store per worktree. Reproduced
+    2026-08-30 (script-tree-audit): `--report` run via a relative path from a
+    worker's own worktree said "no snapshots" while the real baseline sat in
+    the main checkout. git's own worktree metadata names the one real answer.
+    """
+    try:
+        common = subprocess.run(
+            ["git", "-C", str(script_dir), "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return script_dir
+    if common.returncode != 0:
+        return script_dir
+    common_dir = pathlib.Path(common.stdout.strip())
+    if not common_dir.is_absolute():
+        common_dir = (script_dir / common_dir).resolve()
+    return common_dir.parent if common_dir.name == ".git" else script_dir
+
+
+ROOT = _main_checkout(pathlib.Path(__file__).resolve().parents[1])
 STORE = ROOT / ".agent-runtime" / "usage-baseline"
 
 # The account's real weekly boundary. RL7_RESET lands on Tuesday 00:00 local.

@@ -9,7 +9,25 @@
 # reminder is the exact failure the reminder exists to prevent.
 set -u
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# .agent-runtime/{idle,done,dispatched} are single project-wide channels the
+# orchestrator's watches read from the main checkout. scripts/ is tracked, so
+# every worktree carries its own copy of this script -- deriving REPO from
+# BASH_SOURCE alone silently forks these channels per worktree depending on
+# invocation form (the same shape reproduced 2026-08-30 in
+# scripts/ask-user.sh and scripts/worker-done.sh; this script's own second,
+# independent BASH_SOURCE re-derivation below carried the identical bug).
+# git's own worktree metadata names the one real answer.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MAIN_COMMON="$(git -C "$SCRIPT_DIR" rev-parse --git-common-dir 2>/dev/null)"
+case "$MAIN_COMMON" in
+  /*) : ;;
+  *)  MAIN_COMMON="$(cd "$SCRIPT_DIR/$MAIN_COMMON" 2>/dev/null && pwd -P)" ;;
+esac
+if [ -n "$MAIN_COMMON" ] && [ "$(basename "$MAIN_COMMON")" = ".git" ]; then
+  REPO="$(dirname "$MAIN_COMMON")"
+else
+  REPO="$SCRIPT_DIR"
+fi
 IDLE_DIR="$REPO/.agent-runtime/idle"
 mkdir -p "$IDLE_DIR"
 
@@ -46,6 +64,8 @@ fi
 
 # A dispatch marker (written by dev/new-worker.sh so pipeline.sh can see a
 # worktree-less recon) stops meaning "live" once the worker is acknowledged.
+# Reuse the REPO already resolved above -- re-deriving it from BASH_SOURCE
+# here (as this line used to) carried the same wrong-tree bug independently.
 if [ -n "${1:-}" ] && [ "${1:-}" != "--list" ]; then
-  rm -f "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.agent-runtime/dispatched/$1"
+  rm -f "$REPO/.agent-runtime/dispatched/$1"
 fi

@@ -113,5 +113,70 @@ class PipelineCountingTests(unittest.TestCase):
                          "one worker is below the floor of 2 and must still fail")
 
 
+class PipelineWorktreeResolutionTests(unittest.TestCase):
+    """pipeline.sh must report the MAIN checkout's board, not whichever tree
+    its own invoked copy happens to live in.
+
+    Reproduced 2026-08-30 (script-tree-audit): scripts/ is tracked, so a
+    worktree carries its own copy, and running `scripts/pipeline.sh` (a
+    relative path, from the worker's own worktree cwd -- the natural place to
+    type it) reported a healthy-looking empty board while the real one had
+    four live workers. The same BASH_SOURCE-derived-root shape was found in
+    ten other scripts. This class exercises the shared fix (route through
+    git's own worktree metadata to the one real main checkout) against a real
+    git worktree, which the throwaway-directory fixture above cannot: it has
+    no `.git` at all, so it only ever exercises this fix's fallback path.
+    """
+
+    def setUp(self):
+        self.main = Path(tempfile.mkdtemp())
+        subprocess.run(["git", "init", "-q"], cwd=self.main, check=True)
+        subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=self.main, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=self.main, check=True)
+        (self.main / "scripts").mkdir()
+        pipeline_copy = self.main / "scripts" / "pipeline.sh"
+        pipeline_copy.write_bytes(PIPELINE.read_bytes())
+        os.chmod(pipeline_copy, 0o755)
+        ack = self.main / "scripts" / "worker-ack.sh"
+        ack.write_text("#!/usr/bin/env bash\necho 'no workers waiting'\n")
+        os.chmod(ack, 0o755)
+        (self.main / ".gitignore").write_text(".worktrees/\n.agent-runtime/\n")
+        subprocess.run(["git", "add", "."], cwd=self.main, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=self.main, check=True)
+
+        # A dispatched worker on the real board, visible only from $main.
+        (self.main / ".agent-runtime").mkdir()
+        (self.main / ".agent-runtime" / "packet-alpha.md").write_text("# packet\n")
+        (self.main / ".worktrees").mkdir()
+        (self.main / ".worktrees" / "alpha").mkdir()
+
+        # A linked worktree -- carries its OWN copy of pipeline.sh, tracked,
+        # and starts with none of the untracked .agent-runtime/.worktrees
+        # state above, exactly like a real dispatched worker's tree.
+        self.wt = Path(tempfile.mkdtemp()) / "wt"
+        subprocess.run(
+            ["git", "worktree", "add", "-q", "-b", "wt-branch", str(self.wt)],
+            cwd=self.main, check=True,
+        )
+
+    def run_pipeline(self, cwd, script_root=None):
+        script = (script_root or cwd) / "scripts" / "pipeline.sh"
+        return subprocess.run(
+            ["bash", str(script)], capture_output=True, text=True, cwd=cwd,
+        )
+
+    def test_relative_invocation_from_the_worktree_sees_the_real_board(self):
+        out = self.run_pipeline(self.wt).stdout
+        self.assertIn("live=1", out,
+                      "the main checkout's dispatched worker must still be "
+                      "visible from the worktree's own copy of the script")
+
+    def test_absolute_invocation_of_the_worktrees_copy_from_main_also_sees_it(self):
+        out = self.run_pipeline(self.main, script_root=self.wt).stdout
+        self.assertIn("live=1", out,
+                      "running the WORKTREE's copy of pipeline.sh must still "
+                      "report the one real board, not an empty one")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,7 +33,38 @@
 #   scripts/check-doc-boundary.sh --list     # show what product code cites
 set -uo pipefail
 
+ORIG_CWD="$(pwd)"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# $REPO above is the SCRIPT's own location, not necessarily the CALLER's
+# tree: scripts/ is tracked, so every worktree has its own copy, and this
+# check is meant to scan the caller's OWN crates/, not whichever tree the
+# invoked copy happens to live in. Reproduced 2026-08-30 (script-tree-audit):
+# run via absolute path from a worktree, this scanned the main checkout's
+# crates/ instead, with no indication of the mismatch. Same shape and same
+# fix as scripts/blast-radius.sh.
+common_dir() {
+  local d
+  d="$(git -C "$1" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$d" in
+    /*) printf '%s\n' "$d" ;;
+    *)  (cd "$1/$d" 2>/dev/null && pwd -P) ;;
+  esac
+}
+
+CALLER_TOPLEVEL="$(git -C "$ORIG_CWD" rev-parse --show-toplevel 2>/dev/null)"
+if [ -n "$CALLER_TOPLEVEL" ]; then
+  REPO_TOPLEVEL="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null)"
+  if [ "$CALLER_TOPLEVEL" != "$REPO_TOPLEVEL" ]; then
+    REPO_COMMON="$(common_dir "$REPO")"
+    CALLER_COMMON="$(common_dir "$CALLER_TOPLEVEL")"
+    if [ -n "$REPO_COMMON" ] && [ "$REPO_COMMON" = "$CALLER_COMMON" ]; then
+      echo "check-doc-boundary: scanning the caller's worktree at $CALLER_TOPLEVEL (not $REPO)"
+      REPO="$CALLER_TOPLEVEL"
+    fi
+  fi
+fi
+
 cd "$REPO" || exit 1
 
 # Source of truth for "a process document", by path and by legacy filename, so

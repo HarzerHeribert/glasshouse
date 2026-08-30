@@ -34,7 +34,25 @@ SURFACE="${1:?usage: orchestrator-heartbeat.sh <own-surface-ref> [poll] [idle-ch
 POLL="${2:-120}"
 IDLE_CHECKS="${3:-4}"          # 4 × 120s ≈ 8 minutes of genuine quiet
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# .agent-runtime/{idle,stopped} and the capability map are all anchored to
+# the ONE main checkout, regardless of which worktree's copy of this script
+# is running. scripts/ is tracked, so BASH_SOURCE alone silently answers
+# about whichever tree happens to be executing -- the same shape reproduced
+# 2026-08-30 in scripts/pipeline.sh and scripts/worker-done.sh. This heartbeat
+# is normally armed by the orchestrator on its own main-checkout pane, but a
+# team lead arming one on itself from a subcontracting worktree would
+# silently watch the wrong map and the wrong idle/stop signals.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MAIN_COMMON="$(git -C "$SCRIPT_DIR" rev-parse --git-common-dir 2>/dev/null)"
+case "$MAIN_COMMON" in
+  /*) : ;;
+  *)  MAIN_COMMON="$(cd "$SCRIPT_DIR/$MAIN_COMMON" 2>/dev/null && pwd -P)" ;;
+esac
+if [ -n "$MAIN_COMMON" ] && [ "$(basename "$MAIN_COMMON")" = ".git" ]; then
+  REPO="$(dirname "$MAIN_COMMON")"
+else
+  REPO="$SCRIPT_DIR"
+fi
 IDLE_DIR="$REPO/.agent-runtime/idle"
 STOP_FLAG="$REPO/.agent-runtime/stopped"
 

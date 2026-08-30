@@ -29,10 +29,41 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+
+def _main_checkout(script_dir: Path) -> Path:
+    """The one real docs/ owner, regardless of which worktree's copy of this
+    script is executing.
+
+    scripts/ and docs/ are both tracked, so every worktree carries its own
+    (possibly stale) copy of refusal-register.md and capability-map.md.
+    Resolving REPO from __file__ alone answers about whichever tree happens
+    to be running, not necessarily the one the caller means to check.
+    Reproduced 2026-08-30 (script-tree-audit): invoked via a relative path
+    from a worker's own worktree, this checked 75 register ids against a
+    refusal-register.md 116 lines behind the main checkout's 884, and
+    reported "clean" either way, with no indication which tree it read.
+    git's own worktree metadata names the one real answer.
+    """
+    try:
+        common = subprocess.run(
+            ["git", "-C", str(script_dir), "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return script_dir
+    if common.returncode != 0:
+        return script_dir
+    common_dir = Path(common.stdout.strip())
+    if not common_dir.is_absolute():
+        common_dir = (script_dir / common_dir).resolve()
+    return common_dir.parent if common_dir.name == ".git" else script_dir
+
+
+REPO = _main_checkout(Path(__file__).resolve().parents[1])
 REGISTER = REPO / "docs" / "process" / "refusal-register.md"
 MAP = REPO / "docs" / "product" / "capability-map.md"
 

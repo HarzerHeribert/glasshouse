@@ -24,7 +24,30 @@
 #   scripts/reap-worktrees.sh --clean      # remove build output + ci volumes
 set -uo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# REPO here has one job: match `git worktree list`'s own row for the main
+# checkout so it is NEVER touched ("never the main checkout" below).
+# `git worktree list` itself is already worktree-invariant -- any tree of
+# this repo sees the same rows -- so BASH_SOURCE-derived REPO is the only
+# variable, and it silently answers about whichever tree the invoked copy
+# happens to live in. scripts/ is tracked, so every worktree carries its own
+# copy of this script. Reproduced 2026-08-30 (script-tree-audit): run via a
+# relative path from a worker's own worktree, the exclusion check missed
+# every time -- the main checkout's own row (28G of target/) was listed as a
+# reclaimable worktree, and `--clean` run the same way would have deleted the
+# main checkout's own build cache, the one thing this script's header
+# promises it never touches. git's own worktree metadata names the one real
+# main checkout regardless of which copy is running.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MAIN_COMMON="$(git -C "$SCRIPT_DIR" rev-parse --git-common-dir 2>/dev/null)"
+case "$MAIN_COMMON" in
+  /*) : ;;
+  *)  MAIN_COMMON="$(cd "$SCRIPT_DIR/$MAIN_COMMON" 2>/dev/null && pwd -P)" ;;
+esac
+if [ -n "$MAIN_COMMON" ] && [ "$(basename "$MAIN_COMMON")" = ".git" ]; then
+  REPO="$(dirname "$MAIN_COMMON")"
+else
+  REPO="$SCRIPT_DIR"
+fi
 CLEAN=0
 [ "${1:-}" = "--clean" ] && CLEAN=1
 

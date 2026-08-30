@@ -20,7 +20,38 @@
 # the manifest cannot drift. CI's `msrv` job reads it the same way.
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.."
+ORIG_CWD="$(pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+
+# $REPO above is the SCRIPT's own location, not necessarily the CALLER's
+# tree: scripts/ is tracked, so every worktree has its own copy, and this
+# must build the caller's OWN Cargo.toml/workspace, not whichever copy
+# happens to be invoked. Reproduced 2026-08-30 (script-tree-audit): run via
+# absolute path from a worktree, this `cd`'d into the main checkout instead.
+# Same shape and same fix as scripts/blast-radius.sh.
+common_dir() {
+  local d
+  d="$(git -C "$1" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$d" in
+    /*) printf '%s\n' "$d" ;;
+    *)  (cd "$1/$d" 2>/dev/null && pwd -P) ;;
+  esac
+}
+
+CALLER_TOPLEVEL="$(git -C "$ORIG_CWD" rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -n "$CALLER_TOPLEVEL" ]; then
+  REPO_TOPLEVEL="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ "$CALLER_TOPLEVEL" != "$REPO_TOPLEVEL" ]; then
+    REPO_COMMON="$(common_dir "$REPO" || true)"
+    CALLER_COMMON="$(common_dir "$CALLER_TOPLEVEL" || true)"
+    if [ -n "$REPO_COMMON" ] && [ "$REPO_COMMON" = "$CALLER_COMMON" ]; then
+      echo "msrv-check: checking the caller's worktree at $CALLER_TOPLEVEL (not $REPO)"
+      REPO="$CALLER_TOPLEVEL"
+    fi
+  fi
+fi
+
+cd "$REPO"
 
 VERSION="$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
 if [ -z "$VERSION" ]; then

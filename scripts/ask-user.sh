@@ -23,7 +23,27 @@
 # The answer lands in .agent-runtime/answers/<slug>.txt
 set -uo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# .agent-runtime/answers is a single project-wide mailbox the orchestrator
+# watches from the main checkout (continuity-watch.sh's header measured that
+# .agent-runtime/ exists only there). scripts/ is tracked, so every worktree
+# carries its own copy of this script -- deriving REPO from BASH_SOURCE alone
+# silently forks the mailbox per worktree depending on invocation form.
+# Reproduced 2026-08-30 (script-tree-audit): run via a relative path from a
+# worktree, `--list` reported "no questions outstanding" against a brand-new,
+# empty answers dir it had just created there, while the real questions sat
+# unseen in the main checkout. git's own worktree metadata names the one
+# real answer regardless of which copy is running.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MAIN_COMMON="$(git -C "$SCRIPT_DIR" rev-parse --git-common-dir 2>/dev/null)"
+case "$MAIN_COMMON" in
+  /*) : ;;
+  *)  MAIN_COMMON="$(cd "$SCRIPT_DIR/$MAIN_COMMON" 2>/dev/null && pwd -P)" ;;
+esac
+if [ -n "$MAIN_COMMON" ] && [ "$(basename "$MAIN_COMMON")" = ".git" ]; then
+  REPO="$(dirname "$MAIN_COMMON")"
+else
+  REPO="$SCRIPT_DIR"
+fi
 ANS_DIR="$REPO/.agent-runtime/answers"
 mkdir -p "$ANS_DIR"
 

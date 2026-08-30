@@ -62,6 +62,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 
 try:
@@ -70,7 +71,37 @@ except ImportError:                                        # pragma: no cover
     print("evidence: PyYAML is required (pip install pyyaml)", file=sys.stderr)
     raise SystemExit(2)
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def _main_checkout(script_dir: str) -> str:
+    """The one real capability-map.md owner, regardless of which worktree's
+    copy of this script is executing.
+
+    scripts/ and docs/ are both tracked, so every worktree carries its own
+    (possibly stale) copy of the map. Resolving REPO from __file__ alone
+    answers about whichever tree happens to be running, not necessarily the
+    one the orchestrator means to check --map-check against. Same shape as
+    scripts/check-register.py, which reproduced a stale-doc read 2026-08-30
+    (script-tree-audit) from this identical pattern; not independently
+    reproduced here because this worktree's capability-map.md happened to be
+    byte-identical to the main checkout's at audit time. git's own worktree
+    metadata names the one real answer.
+    """
+    try:
+        common = subprocess.run(
+            ["git", "-C", script_dir, "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return script_dir
+    if common.returncode != 0:
+        return script_dir
+    common_dir = common.stdout.strip()
+    if not os.path.isabs(common_dir):
+        common_dir = os.path.normpath(os.path.join(script_dir, common_dir))
+    return os.path.dirname(common_dir) if os.path.basename(common_dir) == ".git" else script_dir
+
+
+REPO = _main_checkout(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MAP = os.path.join(REPO, "docs/product/capability-map.md")
 FENCE = re.compile(r"```glasshouse-facts\s*\n(.*?)\n```", re.S)
 

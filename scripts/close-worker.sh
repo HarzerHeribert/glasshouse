@@ -32,7 +32,27 @@
 #   scripts/close-worker.sh --scan            # just look for orphans
 set -uo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# .agent-runtime/resume is a single project-wide log the orchestrator relies
+# on to reopen a closed worker's conversation, and .worktrees/<name> is
+# addressed relative to the ONE main checkout. scripts/ is tracked, so every
+# worktree carries its own copy of this script -- deriving REPO from
+# BASH_SOURCE alone silently redirects both to whichever tree the invoked
+# copy happens to live in. Reproduced 2026-08-30 (script-tree-audit): run via
+# a relative path from a worker's own worktree, this wrote the captured
+# resume commands into that worktree's own (throwaway) .agent-runtime,
+# reporting success, while the main checkout -- where the orchestrator would
+# ever look -- never saw them. Same fix as scripts/ask-user.sh.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MAIN_COMMON="$(git -C "$SCRIPT_DIR" rev-parse --git-common-dir 2>/dev/null)"
+case "$MAIN_COMMON" in
+  /*) : ;;
+  *)  MAIN_COMMON="$(cd "$SCRIPT_DIR/$MAIN_COMMON" 2>/dev/null && pwd -P)" ;;
+esac
+if [ -n "$MAIN_COMMON" ] && [ "$(basename "$MAIN_COMMON")" = ".git" ]; then
+  REPO="$(dirname "$MAIN_COMMON")"
+else
+  REPO="$SCRIPT_DIR"
+fi
 RESUME_DIR="$REPO/.agent-runtime/resume"
 
 scan_orphans() {

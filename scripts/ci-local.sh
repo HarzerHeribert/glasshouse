@@ -47,7 +47,40 @@
 #   scripts/ci-local.sh --windows-vm # real Windows on the ARM64 VM
 set -uo pipefail
 
+ORIG_CWD="$(pwd)"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# $REPO above is the SCRIPT's own location, not necessarily the CALLER's
+# tree: scripts/ is tracked, so every worktree has its own copy, and this is
+# THE gate to run before every commit -- it must build and test the caller's
+# OWN tree, not whichever copy happens to be invoked. Reproduced 2026-08-30
+# (script-tree-audit): run via absolute path from a worktree -- the exact
+# form CLAUDE.md itself recommends for other scripts in this project, to
+# route around a DIFFERENT worktree-resolution bug -- this cd'd into and
+# would have tested the main checkout instead, silently. Same shape and same
+# fix as scripts/blast-radius.sh.
+common_dir() {
+  local d
+  d="$(git -C "$1" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$d" in
+    /*) printf '%s\n' "$d" ;;
+    *)  (cd "$1/$d" 2>/dev/null && pwd -P) ;;
+  esac
+}
+
+CALLER_TOPLEVEL="$(git -C "$ORIG_CWD" rev-parse --show-toplevel 2>/dev/null)"
+if [ -n "$CALLER_TOPLEVEL" ]; then
+  REPO_TOPLEVEL="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null)"
+  if [ "$CALLER_TOPLEVEL" != "$REPO_TOPLEVEL" ]; then
+    REPO_COMMON="$(common_dir "$REPO")"
+    CALLER_COMMON="$(common_dir "$CALLER_TOPLEVEL")"
+    if [ -n "$REPO_COMMON" ] && [ "$REPO_COMMON" = "$CALLER_COMMON" ]; then
+      echo "ci-local: testing the caller's worktree at $CALLER_TOPLEVEL (not $REPO)"
+      REPO="$CALLER_TOPLEVEL"
+    fi
+  fi
+fi
+
 cd "$REPO" || exit 1
 
 DO_MAC=0; DO_LINUX=0; DO_WIN=0; DO_FLAKE=0; DO_WINVM=0

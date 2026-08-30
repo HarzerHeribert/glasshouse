@@ -42,7 +42,30 @@
 # It stays silent while the board is healthy, so every line it emits is
 # actionable — which is the property a nag needs to keep being read.
 set -uo pipefail
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# .worktrees/, .agent-runtime/{dispatched,packet-*.md} are all anchored to
+# the ONE main checkout -- this is THE board, and it must report on the real
+# one regardless of which worktree's copy of this script is running or what
+# the caller's cwd is. scripts/ is tracked, so BASH_SOURCE alone silently
+# answers about whichever tree happens to be executing. Reproduced
+# 2026-08-30 (script-tree-audit): run via a relative path from a worker's own
+# worktree -- the natural place for anyone sitting there to type this
+# command -- this reported "live=0 waiting=0 ready-to-dispatch=0", a
+# healthy-looking EMPTY board, while the real board (main checkout) showed 4
+# live workers and 2 unacknowledged reports. Driven with `--watch`, this
+# would nag to dispatch NEW work onto an already-busy board. git's own
+# worktree metadata names the one real answer.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MAIN_COMMON="$(git -C "$SCRIPT_DIR" rev-parse --git-common-dir 2>/dev/null)"
+case "$MAIN_COMMON" in
+  /*) : ;;
+  *)  MAIN_COMMON="$(cd "$SCRIPT_DIR/$MAIN_COMMON" 2>/dev/null && pwd -P)" ;;
+esac
+if [ -n "$MAIN_COMMON" ] && [ "$(basename "$MAIN_COMMON")" = ".git" ]; then
+  REPO="$(dirname "$MAIN_COMMON")"
+else
+  REPO="$SCRIPT_DIR"
+fi
 cd "$REPO" || exit 1
 FLOOR="${PIPELINE_FLOOR:-2}"
 

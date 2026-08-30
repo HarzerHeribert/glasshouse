@@ -46,7 +46,26 @@ else
   NAG="${4:-180}"
 fi
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# .agent-runtime/idle and .worktrees/<name> are both anchored to the ONE main
+# checkout, regardless of which worktree's copy of this script is running.
+# scripts/ is tracked, so BASH_SOURCE alone silently answers about whichever
+# tree happens to be executing -- the same shape reproduced 2026-08-30 in
+# scripts/ask-user.sh, scripts/close-worker.sh, scripts/worker-done.sh and
+# scripts/pipeline.sh. This watch is normally armed by the orchestrator from
+# the main checkout already, but a team lead arming it for a subcontractor
+# from its own worktree would silently watch and mark idle-ness in the wrong
+# tree. git's own worktree metadata names the one real answer.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MAIN_COMMON="$(git -C "$SCRIPT_DIR" rev-parse --git-common-dir 2>/dev/null)"
+case "$MAIN_COMMON" in
+  /*) : ;;
+  *)  MAIN_COMMON="$(cd "$SCRIPT_DIR/$MAIN_COMMON" 2>/dev/null && pwd -P)" ;;
+esac
+if [ -n "$MAIN_COMMON" ] && [ "$(basename "$MAIN_COMMON")" = ".git" ]; then
+  REPO="$(dirname "$MAIN_COMMON")"
+else
+  REPO="$SCRIPT_DIR"
+fi
 # Where this worker's worktree lives, for the growth signal below. Defaults to
 # this project's own convention -- `glasshouse-<name>` beside the main checkout,
 # the same derivation `scripts/hooks/worker-turn-ended.sh` already relies on.
