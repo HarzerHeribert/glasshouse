@@ -1046,6 +1046,40 @@ enum Activity {
     No,
 }
 
+/// Whether this write is Glasshouse resuming a session, and may therefore
+/// move a finished record back to a live state.
+///
+/// # The asymmetry this type exists to express
+///
+/// *"A finished session stays finished"* was written for one hazard, and it is
+/// a real one: hook processes are separate processes, and a slow one can
+/// deliver its event after the harness it belongs to has exited. Applying it
+/// would resurrect a stopped session in the records.
+///
+/// A genuine resume is not that case, and until this marker existed the two
+/// were indistinguishable — with the consequence that
+/// `main.rs::resume_session`'s own *"this session is running again"* write was
+/// silently declined along with the zombies, leaving a demonstrably live
+/// session reading `stopped` and every hook it went on to send discarded. That
+/// was observed against a live Codex, with the resume twenty-nine seconds
+/// after the process exit that preceded it.
+///
+/// **A resume is an act Glasshouse performs; a late hook is an event that
+/// merely arrives.** So the authority is a value only the resume boundary can
+/// supply, rather than a property of the event or a loosening of
+/// [`SessionLifecycle::is_live`] — which is unchanged, and which other callers
+/// depend on. [`SessionStore::begin_resume`] is the only constructor of
+/// [`Revival::Authorized`] in the crate, and it is unreachable from the hook
+/// path: `glasshouse hook` never opens a resume boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Revival {
+    /// The default, and what every other caller passes: a finished session
+    /// stays finished.
+    Forbidden,
+    /// Glasshouse is resuming this session itself.
+    Authorized,
+}
+
 /// What this project last recorded about a session's process.
 ///
 /// Read separately from [`SessionRecord`] — see
@@ -1664,7 +1698,7 @@ impl<'a> SessionStore<'a> {
     ) -> Result<SessionRecord, SessionStoreError> {
         let action = "update a session's lifecycle";
         self.in_a_write_transaction(action, || {
-            self.write_lifecycle_locked(id, lifecycle, Activity::Yes, action)
+            self.write_lifecycle_locked(id, lifecycle, Activity::Yes, Revival::Forbidden, action)
         })?;
         self.get(id)?
             .ok_or(SessionStoreError::NotFound { id: id.clone() })
@@ -1696,12 +1730,17 @@ impl<'a> SessionStore<'a> {
         id: &SessionId,
         next: SessionLifecycle,
         activity: Activity,
+        revival: Revival,
         action: &'static str,
     ) -> Result<(), SessionStoreError> {
         let current = self.read_lifecycle_locked(id, action)?;
 
-        // A finished session stays finished.
-        if !current.is_live() && next.is_live() {
+        // A finished session stays finished — unless Glasshouse is the one
+        // reopening it. See [`Revival`] for why that is a value the caller
+        // supplies rather than something inferred from `next`: every caller
+        // but [`SessionStore::begin_resume`] passes `Forbidden`, and the hook
+        // path cannot reach the one that does not.
+        if revival == Revival::Forbidden && !current.is_live() && next.is_live() {
             return Ok(());
         }
 
@@ -1900,9 +1939,13 @@ impl<'a> SessionStore<'a> {
             // implied it — so a supervision pass and a hook in another process
             // cannot each half-apply.
             match lifecycle {
-                Some(lifecycle) => {
-                    self.write_lifecycle_locked(id, lifecycle, Activity::Yes, action)
-                }
+                Some(lifecycle) => self.write_lifecycle_locked(
+                    id,
+                    lifecycle,
+                    Activity::Yes,
+                    Revival::Forbidden,
+                    action,
+                ),
                 None => Ok(()),
             }
         })?;
@@ -2219,7 +2262,13 @@ impl<'a> SessionStore<'a> {
                     lifecycle: current,
                 });
             }
-            self.write_lifecycle_locked(id, SessionLifecycle::Closed, Activity::No, action)
+            self.write_lifecycle_locked(
+                id,
+                SessionLifecycle::Closed,
+                Activity::No,
+                Revival::Forbidden,
+                action,
+            )
         })?;
         self.get(id)?
             .ok_or(SessionStoreError::NotFound { id: id.clone() })
@@ -2308,6 +2357,87 @@ impl<'a> SessionStore<'a> {
                 .native_session_id
                 .expect("a resumable disposition requires a native session identifier"),
         })
+    }
+
+    /// Record that Glasshouse is resuming this session, moving it back to
+    /// `Running`.
+    ///
+    /// # Why this is not `set_lifecycle`
+    ///
+    /// [`SessionStore::set_lifecycle`] declines to move a finished record back
+    /// to a live state, and must keep declining: a hook process outliving its
+    /// harness is exactly what that rule is for. But the resume path's own
+    /// *"this session is running again"* write went through the same door and
+    /// was refused by the same rule, so a session Glasshouse itself had just
+    /// reopened kept reading `stopped` — and every hook the resumed harness
+    /// then sent was discarded for arriving at a finished session.
+    ///
+    /// Observed against a live Codex over five compaction trials, with the
+    /// resume recorded twenty-nine seconds after the process exit before it,
+    /// so nothing about it was a race.
+    ///
+    /// The two cases are told apart by **who is acting**. A resume is
+    /// something Glasshouse does, at a boundary it opened deliberately; a late
+    /// hook is an event that merely arrives. So this is a separate operation
+    /// carrying `Revival::Authorized`, rather than a widening of
+    /// [`SessionLifecycle::is_live`] or of `lifecycle::may_apply` — and once
+    /// this has run, a resumed session is live, so `may_apply` believes its
+    /// harness again without knowing anything about resumes at all.
+    ///
+    /// # The disposition is checked again, under the write lock
+    ///
+    /// Not defence in depth for its own sake. [`SessionStore::open_for_resume`]
+    /// reads outside a transaction, so between its answer and this write
+    /// another process can close the record, quarantine it, or start it — the
+    /// classic read-check-write window this module's
+    /// `in_a_write_transaction` exists to shut. Re-asking
+    /// [`SessionRecord::disposition`] with the write lock already held makes
+    /// the check and the write one indivisible step, which is Phase 10A's
+    /// requirement for every lifecycle change and is what makes this one safe
+    /// to authorise at all.
+    ///
+    /// # `Stopped`, `Failed` and `Closed` are three different answers
+    ///
+    /// Only a **stopped** record with a native identifier is
+    /// [`SessionDisposition::Resumable`], and only that one is revived here.
+    /// A **failed** session ended badly and reports
+    /// [`SessionDisposition::Failed`]; a **closed** one was retired by the
+    /// user, and a stopped one with nothing to resume *to* is
+    /// [`SessionDisposition::Closed`]. All three are refused, by the same
+    /// classification `open_for_resume` refuses them by — one rule read twice
+    /// rather than a second rule that could drift from the first.
+    pub fn begin_resume(
+        &self,
+        resumable: &ResumableSession,
+    ) -> Result<SessionRecord, SessionStoreError> {
+        let id = &resumable.id;
+        let action = "record a session resume";
+        self.in_a_write_transaction(action, || {
+            let record = self
+                .get(id)?
+                .ok_or_else(|| SessionStoreError::NotFound { id: id.clone() })?;
+            let disposition = record.disposition();
+            if disposition != SessionDisposition::Resumable {
+                return Err(SessionStoreError::NotResumable {
+                    id: id.clone(),
+                    disposition: match disposition {
+                        SessionDisposition::Active => "still running",
+                        SessionDisposition::Closed => "closed",
+                        SessionDisposition::Failed => "failed",
+                        SessionDisposition::Resumable => unreachable!("checked above"),
+                    },
+                });
+            }
+            self.write_lifecycle_locked(
+                id,
+                SessionLifecycle::Running,
+                Activity::Yes,
+                Revival::Authorized,
+                action,
+            )
+        })?;
+        self.get(id)?
+            .ok_or(SessionStoreError::NotFound { id: id.clone() })
     }
 }
 
@@ -2782,6 +2912,166 @@ mod tests {
                 native_session_id: "thread-77".to_owned(),
             }
         );
+    }
+
+    /// The defect this package repairs, at the layer that caused it.
+    ///
+    /// `set_lifecycle` is what `main.rs::resume_session` used to call, and it
+    /// silently declines a finished record — so the resume left the session
+    /// reading `stopped`, and the *caller got no error saying so*. Both halves
+    /// are asserted: the old door still refuses, and the resume boundary's own
+    /// door opens.
+    #[test]
+    fn a_resume_reopens_a_session_that_set_lifecycle_would_have_left_finished() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let store = fixture.store();
+
+        let record = store.create(NewSession::embedded("codex")).unwrap();
+        store
+            .set_native_session_id(&record.id, "thread-77")
+            .unwrap();
+        store
+            .set_lifecycle(&record.id, SessionLifecycle::Stopped)
+            .unwrap();
+
+        // The door a hook comes through, and the reason the defect was silent:
+        // it returns the record as it stands rather than an error.
+        let declined = store
+            .set_lifecycle(&record.id, SessionLifecycle::Running)
+            .expect("a declined lifecycle change is not a failure");
+        assert_eq!(
+            declined.lifecycle,
+            SessionLifecycle::Stopped,
+            "`set_lifecycle` must keep refusing to revive a finished session"
+        );
+
+        let resumable = store.open_for_resume(&record.id).unwrap();
+        let resumed = store.begin_resume(&resumable).unwrap();
+        assert_eq!(
+            resumed.lifecycle,
+            SessionLifecycle::Running,
+            "the resume boundary must reopen the session it was given"
+        );
+    }
+
+    /// A resume is not a licence that outlives the session it was granted for.
+    /// Once the resumed process exits, the record is finished again and the
+    /// next late hook is refused exactly as the first incarnation's was.
+    #[test]
+    fn a_resumed_session_that_stops_again_is_finished_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let store = fixture.store();
+
+        let record = store.create(NewSession::embedded("codex")).unwrap();
+        store
+            .set_native_session_id(&record.id, "thread-77")
+            .unwrap();
+        store
+            .set_lifecycle(&record.id, SessionLifecycle::Stopped)
+            .unwrap();
+        let resumable = store.open_for_resume(&record.id).unwrap();
+        store.begin_resume(&resumable).unwrap();
+        store
+            .set_lifecycle(&record.id, SessionLifecycle::Stopped)
+            .unwrap();
+
+        let declined = store
+            .set_lifecycle(&record.id, SessionLifecycle::Running)
+            .unwrap();
+        assert_eq!(
+            declined.lifecycle,
+            SessionLifecycle::Stopped,
+            "having once been resumed must not make a session revivable for ever"
+        );
+    }
+
+    /// **The window `open_for_resume` cannot close on its own.** It reads
+    /// outside a transaction, so its answer can be stale by the time the
+    /// resume writes — and the write is what matters.
+    ///
+    /// Here the record is closed after a `ResumableSession` has been obtained,
+    /// which is exactly what a `glasshouse sessions close` in another process
+    /// does between the two steps. The resume must refuse rather than reopen a
+    /// record the user retired.
+    #[test]
+    fn a_resume_refuses_a_record_that_stopped_being_resumable_after_it_was_opened() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let store = fixture.store();
+
+        let record = store.create(NewSession::embedded("codex")).unwrap();
+        store
+            .set_native_session_id(&record.id, "thread-77")
+            .unwrap();
+        store
+            .set_lifecycle(&record.id, SessionLifecycle::Stopped)
+            .unwrap();
+        let resumable = store.open_for_resume(&record.id).unwrap();
+
+        store.close(&record.id).unwrap();
+
+        let error = store
+            .begin_resume(&resumable)
+            .expect_err("a record closed since it was opened is no longer resumable");
+        assert!(
+            matches!(&error, SessionStoreError::NotResumable { disposition, .. } if *disposition == "closed"),
+            "got {error:?}"
+        );
+        assert_eq!(
+            store.get(&record.id).unwrap().unwrap().lifecycle,
+            SessionLifecycle::Closed,
+            "the refused resume must have written nothing"
+        );
+    }
+
+    /// `Failed` and `Closed` are not `Stopped`, and neither is a stopped
+    /// record with nothing to resume *to*. All three are refused by the resume
+    /// boundary itself, so the refusal does not depend on every caller having
+    /// remembered to ask `open_for_resume` first.
+    #[test]
+    fn only_a_stopped_session_with_something_to_resume_to_may_be_reopened() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let store = fixture.store();
+
+        // A distinct identifier per case: `(harness, native_session_id)` is
+        // unique, which is the constraint that stops two sessions claiming one
+        // harness conversation.
+        for (case, lifecycle, native_recorded, expected) in [
+            (0, SessionLifecycle::Failed, true, "failed"),
+            (1, SessionLifecycle::Closed, true, "closed"),
+            (2, SessionLifecycle::Stopped, false, "closed"),
+            (3, SessionLifecycle::Running, true, "still running"),
+        ] {
+            let native = format!("thread-{case}");
+            let record = store.create(NewSession::embedded("codex")).unwrap();
+            if native_recorded {
+                store.set_native_session_id(&record.id, &native).unwrap();
+            }
+            store.set_lifecycle(&record.id, lifecycle).unwrap();
+
+            // Built by hand rather than through `open_for_resume`, which
+            // refuses all four: the claim is that the boundary refuses them
+            // too, and a test that could not construct the input could not
+            // make it.
+            let resumable = ResumableSession {
+                id: record.id.clone(),
+                harness: "codex".to_owned(),
+                native_session_id: native.clone(),
+            };
+            let error = store.begin_resume(&resumable).unwrap_err();
+            assert!(
+                matches!(&error, SessionStoreError::NotResumable { disposition, .. } if *disposition == expected),
+                "{lifecycle:?} with a recorded identifier={native_recorded} got {error:?}"
+            );
+            assert_eq!(
+                store.get(&record.id).unwrap().unwrap().lifecycle,
+                lifecycle,
+                "a refused resume must leave {lifecycle:?} exactly as it was"
+            );
+        }
     }
 
     #[test]

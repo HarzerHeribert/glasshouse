@@ -167,6 +167,28 @@ pub fn precedes_native_compaction(event: &str) -> bool {
 /// Only a live session can change state this way. A session that has stopped,
 /// failed, or been closed is finished, and a hook arriving afterwards — from a
 /// process that outlived its harness — must not bring it back.
+///
+/// # Why a genuine resume needs nothing here
+///
+/// A resumed session was, for a while, refused by this rule: its record still
+/// read `stopped`, so every hook the reopened harness sent was discarded. The
+/// cause was not this predicate. `main.rs::resume_session` already wrote
+/// *"running"* the moment it reopened the session, and
+/// [`crate::session::SessionStore`]'s own copy of this rule — the one inside
+/// its write transaction, where two processes cannot step over it — declined
+/// that write for exactly the reason above. The record never left `stopped`,
+/// and this function was then asked the wrong question about a state that
+/// should not have been current.
+///
+/// The fix belongs where the acts differ: `SessionStore::begin_resume` is
+/// something Glasshouse *does*, at a boundary it opened, and a hook is an
+/// event that merely *arrives*. Widening this predicate instead would have
+/// meant a hook arguing for its own authority, which is the one thing the
+/// rule exists to refuse — and it would not have helped, because the record
+/// would still have been `stopped` when it was asked.
+///
+/// So this stays as it is. Once a resume has been recorded the session is
+/// live, and a live session follows its harness.
 pub fn may_apply(current: SessionLifecycle, next: SessionLifecycle) -> bool {
     current.is_live() && current != next
 }
@@ -351,6 +373,54 @@ mod tests {
         assert!(
             !runtime.contains("set_lifecycle("),
             "the runtime reads terminal output and must not also decide session state"
+        );
+    }
+
+    /// The resume path must reopen its session through the store's resume
+    /// boundary, and `may_apply` above is why that matters here rather than
+    /// only in `session::store`.
+    ///
+    /// **§35's shape, and this defect's own history.** Every test that can
+    /// reach a resume without spawning a harness executable calls
+    /// `SessionStore::begin_resume` itself, so all of them would still pass
+    /// against a binary whose resume path never called it — which is precisely
+    /// the state this package found the tree in: `main.rs::resume_session`
+    /// wrote a lifecycle the store silently declined, no test noticed, and the
+    /// defect was found by running a real Codex instead.
+    ///
+    /// So the production call site is asserted directly. The slice is checked
+    /// against a landmark first: a scan over the wrong span passes for the
+    /// wrong reason, which this module has been caught by before.
+    #[test]
+    fn the_resume_path_reopens_its_session_through_the_stores_resume_boundary() {
+        let main = production_code(include_str!("../main.rs"));
+
+        let start = main
+            .find("fn resume_session(")
+            .expect("the CLI resume path must still be called `resume_session`");
+        let body = &main[start..];
+        let end = body
+            .find("\n}\n")
+            .expect("`resume_session` must end at a top-level closing brace");
+        let body = &body[..end];
+
+        // The landmark: this really is the function that crosses the resume
+        // boundary, and not some other span that happens to be named alike.
+        assert!(
+            body.contains("open_for_resume("),
+            "the slice scanned is not the resume path: it never opens a resume boundary"
+        );
+
+        assert!(
+            body.contains("note_resume("),
+            "the resume path does not reopen its session through the store's resume \
+             boundary, so the record stays finished and every hook the resumed harness \
+             sends is discarded"
+        );
+        assert!(
+            main.contains("store.begin_resume("),
+            "`note_resume` must reach `SessionStore::begin_resume`; nothing else in the \
+             crate may move a finished session back to a live state"
         );
     }
 

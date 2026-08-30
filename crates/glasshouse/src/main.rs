@@ -4939,7 +4939,7 @@ fn resume_session(
         None => (launch, None, None),
     };
 
-    note_lifecycle(&store, &resumable.id, SessionLifecycle::Running);
+    note_resume(&store, &resumable);
 
     // Phase 18's "record session resume events". A distinct event rather than
     // a second `SessionStarted`, because otherwise a reader has to infer a
@@ -4997,6 +4997,39 @@ fn note_lifecycle(
 ) {
     if let Err(err) = store.set_lifecycle(id, lifecycle) {
         tracing::warn!(session = %id, %lifecycle, error = %err, "could not record a session state change");
+    }
+}
+
+/// Move a resumed session back to `Running`, logging rather than failing.
+///
+/// [`note_lifecycle`]'s sibling, and **not** a call to it. `set_lifecycle`
+/// declines to move a finished record back to a live state, because a hook
+/// process outliving its harness must not resurrect a stopped session — and
+/// this write went through that same door and was refused by that same rule,
+/// so a session Glasshouse had just reopened kept reading `stopped`. Every
+/// hook the resumed harness then sent was discarded for arriving at a
+/// session the store believed was over.
+///
+/// `SessionStore::begin_resume` is the door for the case where Glasshouse is
+/// the one acting. It re-checks the disposition under the write lock, so a
+/// record another process closed between `open_for_resume` and here is
+/// refused rather than revived.
+///
+/// Best effort, for `note_lifecycle`'s reason: the harness is about to be
+/// handed the user's conversation, and Glasshouse's own record keeping is not
+/// worth failing that over. A refusal is logged at `warn` rather than
+/// swallowed, because a resume that could not be recorded is the exact
+/// condition this function exists to make visible.
+fn note_resume(
+    store: &glasshouse::session::SessionStore<'_>,
+    resumable: &glasshouse::session::ResumableSession,
+) {
+    if let Err(err) = store.begin_resume(resumable) {
+        tracing::warn!(
+            session = %resumable.id,
+            error = %err,
+            "could not record a session resume; the session will keep reading as finished"
+        );
     }
 }
 

@@ -104,6 +104,44 @@ impl Fixture {
     fn log(&self) -> EventLog {
         EventLog::open(&self.runtime).unwrap()
     }
+
+    /// Run `glasshouse sessions show <session>` and return what it printed.
+    ///
+    /// The binary again, not `session_detail`: the claim under test is what a
+    /// user is told about a session, and the printer is only half of that.
+    fn sessions_show(&self, session: &str) -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+            .arg("--scope")
+            .arg(&self.root)
+            .arg("--data-dir")
+            .arg(self.base.join("data"))
+            .arg("--config-dir")
+            .arg(self.base.join("config"))
+            .arg("sessions")
+            .arg("show")
+            .arg(session)
+            .output()
+            .expect("the glasshouse binary must be runnable");
+        assert!(
+            output.status.success(),
+            "`sessions show` failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("the report is text")
+    }
+}
+
+/// The value `glasshouse sessions show` printed on the line labelled `label`.
+///
+/// Parsed rather than matched as a padded substring: the column width is a
+/// formatting decision that has moved before, and a test that encoded it
+/// would fail for the wrong reason when it moves again.
+fn reported(report: &str, label: &str) -> String {
+    report
+        .lines()
+        .find_map(|line| line.strip_prefix(label))
+        .map(|rest| rest.trim().to_owned())
+        .unwrap_or_else(|| panic!("no `{label}` line in the report:\n{report}"))
 }
 
 fn bootstrap(base: &Path, root: &Path) -> Runtime {
@@ -773,5 +811,262 @@ fn the_codex_hook_catalogue_was_read_from_the_installed_codex() {
          screen, reconcile `harness::codex::HOOK_EVENTS` with what it shows, and only \
          then move `CATALOGUE_OBSERVED_VERSION`.",
         glasshouse::harness::codex::CATALOGUE_OBSERVED_VERSION
+    );
+}
+
+// -------------------------------------------------------------------------
+// A resumed session's harness is believed again.
+//
+// Found against a live Codex by `GH-CODEX-COMPACTION-PROBE`: a session that
+// was quit and then continued by a second `glasshouse launch` kept
+// `lifecycle = stopped` for the rest of its life, and every hook it sent
+// afterwards was discarded. The state under test is therefore **a session
+// that has been through a genuine resume**, not a session that received an
+// event — see `resume_the_way_a_launch_does` for why the distinction is the
+// whole defect.
+// -------------------------------------------------------------------------
+
+/// A recorded session that has stopped with something to resume to, which is
+/// the only shape a resume can be performed on.
+///
+/// `set_native_session_id` is what makes the record `Resumable` rather than
+/// `Closed`: without a native identifier there is nothing to resume *to*, and
+/// `SessionRecord::disposition` says so.
+fn stopped_resumable_session(fixture: &Fixture, harness: &str) -> SessionId {
+    let id = running_session(fixture, harness);
+    let sessions = ProjectSessions::open(&fixture.runtime).unwrap();
+    let store = sessions.store();
+    store.set_native_session_id(&id, "thread-77").unwrap();
+    store.set_lifecycle(&id, SessionLifecycle::Stopped).unwrap();
+    id
+}
+
+/// The two steps `main.rs::resume_session` performs, in its order, against
+/// this project's own store.
+///
+/// This mirrors production rather than reaching past it: `open_for_resume` is
+/// the resume boundary — it carries the project-isolation check, the
+/// supervision guard and the disposition check — and the lifecycle write
+/// immediately after it is the one the launch path makes before handing the
+/// harness the conversation.
+///
+/// A test cannot drive the rest of `resume_session`, which spawns a real
+/// harness executable and attaches a terminal to it; `pty_smoke.rs` covers
+/// that half against a fake harness. What is reproduced here is the **store
+/// state a genuine resume leaves behind**, which is what every later hook is
+/// judged against.
+fn resume_the_way_a_launch_does(fixture: &Fixture, id: &SessionId) {
+    let sessions = ProjectSessions::open(&fixture.runtime).unwrap();
+    let store = sessions.store();
+    let resumable = store
+        .open_for_resume(id)
+        .expect("a stopped session with a native identifier is resumable");
+    store
+        .begin_resume(&resumable)
+        .expect("the resume path records that the session is running again");
+}
+
+fn lifecycle_of(fixture: &Fixture, id: &SessionId) -> SessionLifecycle {
+    ProjectSessions::open(&fixture.runtime)
+        .unwrap()
+        .store()
+        .get(id)
+        .unwrap()
+        .unwrap()
+        .lifecycle
+}
+
+/// **The defect.** A session that was stopped and then genuinely resumed must
+/// believe its harness again.
+///
+/// Two assertions, and they fail in that order against the unfixed tree: the
+/// resume itself must leave the record live, and a turn the harness reports
+/// afterwards must move it. The second is the contract — *"when its harness
+/// reports any lifecycle event, Glasshouse believes it"* — and the first is
+/// why the second could not hold.
+///
+/// `Stop` rather than `UserPromptSubmit`, deliberately. A resumed session is
+/// already `Running`, and `may_apply` refuses a transition to the state a
+/// session is already in, so a `UserPromptSubmit` that changed nothing would
+/// leave `Running` behind whether the hook was believed or discarded. `Stop`
+/// means `Idle`, which the record can only be holding if the hook was applied.
+#[test]
+fn a_resumed_session_believes_its_harness_again() {
+    let fixture = Fixture::new();
+    let id = stopped_resumable_session(&fixture, "codex");
+
+    resume_the_way_a_launch_does(&fixture, &id);
+    assert_eq!(
+        lifecycle_of(&fixture, &id),
+        SessionLifecycle::Running,
+        "a genuine resume must leave the session live; a record still reading `stopped` is \
+         what makes every later hook unbelievable"
+    );
+
+    assert!(fixture.hook(id.as_str(), "Stop", &payload()).success());
+
+    assert_eq!(
+        lifecycle_of(&fixture, &id),
+        SessionLifecycle::Idle,
+        "the harness reported a turn ending in a session Glasshouse itself resumed, and the \
+         report was discarded"
+    );
+}
+
+/// **The zombie defence, which must still hold.** A hook for a session that
+/// stopped and was *not* resumed changes nothing about its state.
+///
+/// This is the case the rule was written for: hook processes are separate
+/// processes and a slow one can deliver its event after the harness it
+/// belongs to has exited. The sibling
+/// `a_late_hook_is_recorded_without_reviving_a_finished_session` asserts the
+/// same thing for one event; this one sweeps every event that implies a live
+/// state, so a fix that reopened the door for any of them is caught here
+/// rather than by whichever one happened to be written down.
+#[test]
+fn a_hook_for_a_session_that_was_never_resumed_is_still_refused() {
+    let fixture = Fixture::new();
+    let id = stopped_resumable_session(&fixture, "codex");
+
+    for event in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PermissionRequest",
+        "Stop",
+    ] {
+        assert!(fixture.hook(id.as_str(), event, &payload()).success());
+        assert_eq!(
+            lifecycle_of(&fixture, &id),
+            SessionLifecycle::Stopped,
+            "`{event}` arriving for a session nobody resumed revived it"
+        );
+    }
+}
+
+/// A resume is not a permanent licence. Once a resumed session stops again,
+/// the next late hook is refused exactly as the first incarnation's would
+/// have been.
+///
+/// Without this, "was this session ever resumed?" would be the question the
+/// gate asks, and a zombie from before the resume would be believed forever
+/// after.
+#[test]
+fn a_session_that_stopped_after_being_resumed_is_finished_again() {
+    let fixture = Fixture::new();
+    let id = stopped_resumable_session(&fixture, "codex");
+    resume_the_way_a_launch_does(&fixture, &id);
+
+    ProjectSessions::open(&fixture.runtime)
+        .unwrap()
+        .store()
+        .set_lifecycle(&id, SessionLifecycle::Stopped)
+        .unwrap();
+
+    assert!(fixture.hook(id.as_str(), "Stop", &payload()).success());
+    assert_eq!(
+        lifecycle_of(&fixture, &id),
+        SessionLifecycle::Stopped,
+        "a session that has stopped again is finished again, however many times it was resumed"
+    );
+}
+
+/// A **failed** session is not resumable, so nothing can revive it.
+///
+/// `Failed` is not `Stopped`: the process ended badly, `disposition` reports
+/// `Failed` rather than `Resumable`, and `open_for_resume` refuses it by
+/// name. The resume path is therefore unreachable for such a record, and the
+/// only thing that can arrive is a late hook — which is refused.
+#[test]
+fn a_failed_session_is_not_resumable_and_no_hook_revives_it() {
+    let fixture = Fixture::new();
+    let id = stopped_resumable_session(&fixture, "codex");
+    let sessions = ProjectSessions::open(&fixture.runtime).unwrap();
+    sessions
+        .store()
+        .set_lifecycle(&id, SessionLifecycle::Failed)
+        .unwrap();
+
+    let refusal = sessions
+        .store()
+        .open_for_resume(&id)
+        .expect_err("a failed session has no resume boundary to cross");
+    assert!(
+        format!("{refusal}").contains("failed"),
+        "the refusal must name why: {refusal}"
+    );
+
+    assert!(fixture.hook(id.as_str(), "Stop", &payload()).success());
+    assert_eq!(
+        lifecycle_of(&fixture, &id),
+        SessionLifecycle::Failed,
+        "a failed session was revived by a hook"
+    );
+}
+
+/// A **closed** session is not resumable, so nothing can revive it.
+///
+/// `Closed` is not `Stopped` either: the user retired the record. It is the
+/// one finished state a person chose, and `close` refuses to file a live
+/// session away precisely so that the word keeps meaning that.
+#[test]
+fn a_closed_session_is_not_resumable_and_no_hook_revives_it() {
+    let fixture = Fixture::new();
+    let id = stopped_resumable_session(&fixture, "codex");
+    let sessions = ProjectSessions::open(&fixture.runtime).unwrap();
+    sessions.store().close(&id).unwrap();
+
+    let refusal = sessions
+        .store()
+        .open_for_resume(&id)
+        .expect_err("a closed session has no resume boundary to cross");
+    assert!(
+        format!("{refusal}").contains("closed"),
+        "the refusal must name why: {refusal}"
+    );
+
+    assert!(fixture.hook(id.as_str(), "Stop", &payload()).success());
+    assert_eq!(
+        lifecycle_of(&fixture, &id),
+        SessionLifecycle::Closed,
+        "a closed session was revived by a hook"
+    );
+}
+
+/// What the user sees. After a resume and a turn the harness reported,
+/// `glasshouse sessions show` says the session is live rather than stopped.
+///
+/// Through the shipped binary and its own printer, because "the record is
+/// right" and "the report is right" are two claims and this package was
+/// raised against the second one: the probe's evidence was a listing that
+/// kept saying `stopped` while Codex was answering prompts.
+#[test]
+fn a_resumed_sessions_turn_is_reported_as_live_rather_than_stopped() {
+    let fixture = Fixture::new();
+    let id = stopped_resumable_session(&fixture, "codex");
+    resume_the_way_a_launch_does(&fixture, &id);
+
+    assert!(
+        fixture
+            .hook(id.as_str(), "UserPromptSubmit", &payload())
+            .success()
+    );
+    let working = fixture.sessions_show(id.as_str());
+    assert_eq!(
+        reported(&working, "lifecycle"),
+        "running",
+        "a resumed session taking a turn must not be reported as stopped:\n{working}"
+    );
+
+    assert!(fixture.hook(id.as_str(), "Stop", &payload()).success());
+    let idle = fixture.sessions_show(id.as_str());
+    assert_eq!(
+        reported(&idle, "lifecycle"),
+        "idle",
+        "a resumed session's completed turn must be reported:\n{idle}"
+    );
+    assert_eq!(
+        reported(&idle, "state"),
+        "active",
+        "the disposition a listing shows must follow the lifecycle:\n{idle}"
     );
 }
