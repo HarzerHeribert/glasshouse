@@ -101,6 +101,44 @@ makes every file-scope item it alone uses invisible-dead on Windows, and `-D
 warnings` turns that into a build failure the other two platforms cannot see.
 **When a package adds a `cfg(unix)` test module, check what it alone consumes.**
 
+### THE FLAKE IS SOLVED, IT WAS NEVER A FLAKE, AND THE LAUNCHER WAS ME
+
+`GH-INTERRUPT-SIGNAL-TARGET` found it. **A signal ignored on entry to a
+non-interactive shell cannot be trapped by it** — POSIX requires that, and
+`SIG_IGN` survives `execve` while Rust's `Command` resets the child's signal
+*mask* but not its *dispositions*. So the shell under test started with whatever
+the test binary inherited from whoever launched `cargo`. Where that was
+`SIG_IGN`, `trap … INT` was a no-op, `kill -INT` returned **success** (it does
+for an ignored signal), nothing was delivered, and the test waited the full 30 s
+for a trap that was never installed — on a shell that was perfectly healthy.
+
+**Deterministic, not marginal:**
+
+| child's `SIGINT` | before | after |
+|---|---|---|
+| `SIG_DFL` | 20/20 pass, slowest 0.25 s | 20/20 pass |
+| `SIG_IGN` | **0/20 pass, every one 30.09 s** | 20/20 pass |
+
+Every failure in that `0/20` cell printed the gate's message byte for byte.
+**Reproduces in 30 seconds:** `/bin/sh -c 'cargo test … & wait'` — a POSIX shell
+without job control hands a background child `SIG_IGN`. No load, no soak.
+
+**The worker proved the mechanism and said honestly it could not show the gate's
+macOS leg had run that way, because nothing in `scripts/` backgrounds a cargo
+run. It was right that it wasn't in `scripts/`. It was me.** I launched both
+gates with `nohup … &` and the failing blast radius with `integrate.sh … &`,
+and ran every *passing* check in the foreground. Verified directly on this
+machine: a backgrounded child gets `SIG_IGN`, a foreground one gets the default
+handler. Every data point fits — including why 65 trials of CPU soak never
+reproduced it. **The previous worker was varying load; the axis was the
+launcher.**
+
+**Two lessons worth more than the fix.** First: *"could not reproduce under
+heavy load"* does not mean *"intermittent"* — it can mean the axis is wrong, and
+`exited=None` was the clue that redirected it. Second: **how the orchestrator
+invokes a gate is part of the test environment.** A backgrounded gate run is not
+the same environment as a foreground one, and nothing said so anywhere.
+
 ### The interrupt flake finally has a diagnosis, and it is not "load"
 
 Third failure. The self-diagnosing panic from `GH-INTERRUPT-TEST-FLAKE` fired

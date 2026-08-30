@@ -57,6 +57,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -1029,12 +1030,79 @@ fn an_interrupt_leaves_this_shell_reading(shell: &str, harness: &Path, base: &Pa
     let printed = work.join("stdout.log");
     let stdout = std::fs::File::create(&printed).expect("create the stdout log");
 
-    let mut child = Command::new(shell)
+    // `SIGINT` back to its default disposition in the child, and this line is
+    // the whole of what GH-INTERRUPT-TEST-FLAKE was chasing.
+    //
+    // **A signal that is ignored on entry to a non-interactive shell cannot be
+    // trapped by it.** POSIX requires that, and `bash`, `dash` and every other
+    // conforming shell obey it. `SIG_IGN` survives `execve`, and Rust's
+    // `Command` resets the child's signal *mask* but not its *dispositions*,
+    // so the shell under test starts with whatever this test binary inherited
+    // from whoever launched `cargo`. Where that is `SIG_IGN`, the harness's
+    // `trap ... INT` is a no-op and the `kill -INT` below is discarded by the
+    // kernel — after which this function waits 30s for a trap that was never
+    // installed, on a shell that is perfectly healthy.
+    //
+    // That is not a race and not load, and it is not even slightly marginal.
+    // Measured 2026-08-30 on macOS 26 by spawning this test binary with
+    // `SIGINT` set explicitly to each disposition and changing nothing else:
+    //
+    // | disposition in the child | without this line | with it |
+    // |---|---|---|
+    // | `SIG_DFL` | 20/20 pass, slowest 0.25s | 20/20 pass, slowest 0.49s |
+    // | `SIG_IGN` | **0/20 pass**, every one 30.09s | 20/20 pass, slowest 0.30s |
+    //
+    // and every failure in that `0/20` cell reads `exited=None` with
+    // `printed so far: "READY\n"` — the gate's message byte for byte. A shell
+    // without job control hands a background child exactly that disposition,
+    // so `sh -c 'cargo test ... & wait'` reproduces the gate's failure in 30
+    // seconds and is how this was found.
+    //
+    // `/bin/sh`, `/bin/dash` and `/bin/bash` all fail that way; `/bin/zsh`
+    // installs the trap regardless, so reordering [`CANDIDATE_SHELLS`] moves
+    // the failure to `/bin/dash` rather than leaving it at the front. It
+    // follows the shell, not the position — `/bin/sh` was only ever named
+    // because it is the first of the three that cannot.
+    //
+    // It is also why the Ubuntu leg is green while the macOS one is not, and
+    // the reason is not the operating system: `scripts/ci-local.sh` runs the
+    // Linux jobs under `docker run`, whose process the daemon spawns rather
+    // than the CLI, so it starts from default dispositions no matter how the
+    // gate was launched. The macOS jobs run natively and inherit. Only the
+    // native leg inherits anything, which is the whole of the asymmetry.
+    //
+    // So this is not a workaround for a flake. It is the precondition the
+    // experiment always needed and never stated — what is under test here is
+    // what a shell does *once a `SIGINT` has arrived* — and it makes the test
+    // independent of how anyone launched `cargo`. It changes no timing on any
+    // platform and is a no-op wherever the disposition was already default,
+    // which is every foreground run including today's green Ubuntu leg.
+    //
+    // Only this test needs it: under the reproducing launcher the other
+    // eighteen in this file pass,
+    // [`an_interrupt_sent_by_the_client_makes_the_worker_react`] included, so
+    // the product's own interrupt path is not exposed to the inherited
+    // disposition the way this raw `Command::spawn` is.
+    let mut command = Command::new(shell);
+    command
         .arg(harness)
         .current_dir(&work)
         .stdin(Stdio::piped())
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: `pre_exec` requires the closure to be async-signal-safe, because
+    // it runs between `fork` and `execve` in a child that may hold locks the
+    // parent's other threads own. This one is a single `signal(2)` call: no
+    // allocation, no locks, no library state.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::signal(libc::SIGINT, libc::SIG_DFL) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command
         .spawn()
         .unwrap_or_else(|err| panic!("could not start `{shell}`: {err}"));
     let said = || std::fs::read_to_string(&printed).unwrap_or_default();
@@ -1050,19 +1118,23 @@ fn an_interrupt_leaves_this_shell_reading(shell: &str, harness: &Path, base: &Pa
         .args(["-INT", &child.id().to_string()])
         .status()
         .expect("run kill");
+    // Worth knowing what this does and does not prove: `kill(2)` succeeds on a
+    // signal the target ignores, so a green line here says the pid existed and
+    // says nothing about delivery. The `pre_exec` above is what makes delivery
+    // follow from it.
     assert!(signalled.success(), "`kill -INT` failed for `{shell}`");
 
     // Not `wait_for`: a bare "timed out waiting for `{shell}` to run its INT
     // trap" is exactly the message this test produced under macOS gate load
     // on 2026-08-30, and it does not say whether the trap is late or the
     // signal never arrived at all — the two defects GH-INTERRUPT-TEST-FLAKE
-    // was opened to tell apart. Local reproduction (CPU soak to a load
-    // average past 80 on a 12-core machine, four concurrent
-    // `cargo test -p glasshouse` runs providing real subprocess/pty
-    // contention, 25 full-binary trials in total) never reproduced the
-    // timeout, so this does not change the deadline — it only makes the next
-    // occurrence self-diagnosing: whether the shell had already exited (a
-    // real kill, not a slow trap) and what it had printed by the deadline.
+    // was opened to tell apart. It kept the deadline and reported instead
+    // whether the shell had already exited and what it had printed, and that
+    // is what closed the investigation: `exited=None` with `"READY\n"` ruled
+    // out both a kill and a shell that had not reached its read loop, which
+    // left "the signal was never delivered" as the only reading and led to the
+    // ignored disposition the spawn above now resets. Kept because the same
+    // three-way answer is what any future occurrence will need.
     let trap_deadline = Instant::now() + TIMEOUT;
     loop {
         if work.join("interrupted-unknown.log").is_file() {
