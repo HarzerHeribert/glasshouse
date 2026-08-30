@@ -3738,3 +3738,80 @@ one with a measured miss rate.
    batches — and they are exactly the batches where throughput fell. The next
    orchestrator owes the batch-46..55 rows or an explicit decision to stop
    requiring them.
+
+## 2026-08-30 — package sizing, and what an integration costs regardless of size
+
+Companion to the entry above and to practice **§87**. That entry priced a *box*;
+this one prices a *package*, and the two numbers only mean something together.
+
+### Boxes per package
+
+**Batch 55: thirteen packages, ten boxes closed — 0.77 boxes per package.**
+Package count is the batch's dispatched packets and box count is the map delta:
+
+    ls .agent-runtime/packet-*.md                                  # packets on disk
+    git show <rev>:docs/product/capability-map.md | grep -c '^☑'   # at each end
+
+**The outlier carries the rule.** `GH-SESSION-CONTEXT-DOOR` closed **five boxes
+(1161–1165) in about 66 lines**, because those five map lines are fields of one
+`SessionContext` rendered by a single `store.context(&id)` call — one mechanism,
+five lines. `GH-AUTO-ROUTING-MODEL` was scoped the same way afterwards: six
+lines against one existing selector. §87 turns that into a target of **3–6 boxes
+per implementation package** and names the three map shapes that find such a
+mechanism before any code is opened.
+
+### An integration is priced by files touched, never by boxes closed
+
+Five integration logs survive from this session. The blast radius each one ran:
+
+    cd .agent-runtime
+    for f in integrate-*.log; do
+      printf '%-20s %-4s %s\n' "$f" \
+        "$(grep -c '^test result:' "$f")" \
+        "$(grep -o 'finished in [0-9.]*s' "$f" | awk '{s+=$3} END {printf "%.1fs", s}')"
+    done
+
+| log | test targets | reported test time |
+|---|---|---|
+| `integrate-cc.log` | 41 | 122.9 s |
+| `integrate-gfb.log` | 53 | 148.8 s |
+| `integrate-probe.log` | 10 | 33.9 s |
+| `integrate-ros.log` | 46 | 105.6 s |
+| `integrate-scd.log` | 56 | 120.2 s |
+
+**Four of the five ran 41–56 targets, and package size did not predict which.**
+`integrate-scd.log` is the sharp case: **3 files changed, 161 insertions — and
+56 targets, the largest run here.** A small package pays what a large one pays,
+so ten boxes shipped as five 2-box packages buys five of these where two 5-box
+packages buys two.
+
+**Two limits on this table, stated rather than smoothed.** The `reported test
+time` column sums the `finished in Ns` lines and therefore **excludes
+compilation**; the logs carry no elapsed-time line, so this ledger records no
+wall-clock cost per integration — `time scripts/integrate.sh` if a later session
+wants it. And logs are overwritten by name, so **five files is a floor on the
+number of runs, not a count of them**; batch 55's seven integrations is the
+session's own figure, not one re-derived here.
+
+### The ledger gap is itself the finding
+
+    grep -o '^## Batch [0-9]*' docs/process/orchestration-measurements.md | tail -1
+    # -> ## Batch 45
+
+**Batches 46–55 have no entry**, and they are exactly the batches across which
+output-per-box went 57k → 811k. The instrument that would have shown the regime
+change on day one was not being read, so the user found it on day four. This is
+the third open question of the entry above, restated as a measurement: the cost
+of the missing rows is the three days of delay, not the minutes the rows would
+have taken.
+
+### Open questions this entry creates
+
+1. **Does the 3–6 box target survive contact with a phase whose open lines are
+   genuinely independent?** It is a target, not a gate. Record the first package
+   that should legitimately have been 1 box and say why, rather than stretching
+   it to three.
+2. **What is the wall-clock cost of one `integrate.sh` run?** Unknown here.
+   `time scripts/integrate.sh <names>` once and add the row; until then the
+   sizing argument rests on the target count alone, which is enough for the
+   ordering but not for a budget.

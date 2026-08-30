@@ -265,6 +265,38 @@ interpretation:
   --glasshouse`, and `git show <rev>:docs/product/capability-map.md | grep -c
   '^☑'` at each end of the window. 250k is 2× the worst healthy day measured.
 
+## Size the package by the mechanism, and the six token traps
+
+Long form and every number: **practice §87**. Batch 55 managed **0.77 boxes per
+package** across thirteen packages; its outlier closed **five boxes in 66 lines**
+because those five map lines were facets of one `store.context(&id)` call.
+
+**Size a package by the mechanism, not by the line — target 3–6 boxes.** One
+producer, one call site or one reader serving several map lines is *one*
+package. A 1-box package is right only when the phase has one **reachable** line
+(Phase 31: one of seven, the rest Cluster Q). Three shapes find the fat
+mechanisms: a phase whose first line is the mechanism and whose rest are its
+filters (34C — 1431 selects, 1432–1443 are its rules); several lines that are
+fields of one returned value (Phase 30's 1161–1165, one `SessionContext`); a
+recon grouped **by root cause** — Phase 51's 34 lines were 4 causes, and the
+causes are the package boundaries.
+
+**The traps, each one structural and invisible at the moment it is chosen.**
+
+| # | trap | rule |
+|---|---|---|
+| 1 | investigation ending in a document instead of a dispatch — register 280→969 on the day the map moved +9 | §86: name the successor package in the packet |
+| 2 | small packages multiply a fixed integration cost — the blast radius ran **41–56 test targets** per run, priced by files touched, not boxes closed | batch disjoint partitions into ONE `integrate.sh` call; this is what makes 3–6 above worth anything |
+| 3 | a co-edit buys dispatch parallelism and sells integration parallelism — `integrate.sh` refuses a shared file, so co-editors integrate **one at a time**, each paying trap 2 in full | partition by mechanism to stay file-disjoint; reserve a co-edit for a large package that must share `main.rs` |
+| 4 | reading for a property a script decides — all ten un-ticked boxes were `cluster-b.py`'s shape, every one found *after* the orchestrator read the diff | run the script; spend the reading on **decisions**, and on Phase −1 |
+| 5 | polling a running job — `sleep`-and-check pays a tool round to learn "still running" | arm a `Monitor` whose filter names the **failure** signatures too, or background it and wait; a bounded one-shot check is the only exception |
+| 6 | skipping the batch's ledger row — batches 46–55 are unlogged, exactly the span where out-per-box went 57k→811k | one row per batch; it is the only instrument that sees a regime change while it happens |
+
+Trap 3 does not contradict *"do not integrate serially"*: that rule is about
+**disjoint** partitions, where serial integration hides the cross-patch
+interaction it exists to find. Co-editors of one file are the case
+`integrate.sh` refuses to batch, and one at a time is correct there.
+
 ## An orchestrator does not idle, and does not hand off cold
 
 **`scripts/pipeline.sh --watch 600` is not advisory. When it fires, dispatch —

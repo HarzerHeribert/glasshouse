@@ -3896,3 +3896,170 @@ something and does not record the diffs that caught nothing, so no hit rate can
 be computed from it and none is claimed here. The un-tick count is the one place
 where the misses *are* recorded, which is exactly why it is the one place this
 section is willing to move work off the orchestrator.
+
+## §87 — size the package by the mechanism, and the six token traps
+
+§86 settled *how much ceremony* a package buys. This is its other half: **how
+much work goes into one package**, and the specific behaviours whose token cost
+is structural — invisible at the moment the decision is made, and paid for
+afterwards. Every figure below is either from batch 55 or re-derived from the
+integration logs of 2026-08-30; where a number could not be re-derived, it says
+so rather than being smoothed over.
+
+### Size by the mechanism, not by the line
+
+**Batch 55: thirteen packages, ten boxes closed — 0.77 boxes per package.** Most
+implementation packets targeted one or two map lines.
+
+**The outlier is the lesson.** `GH-SESSION-CONTEXT-DOOR` closed **five boxes
+(1161–1165) in about 66 lines of code**, because those five map lines were never
+five pieces of work: they were facets of one mechanism, a single
+`store.context(&id)` call rendering four values. `GH-AUTO-ROUTING-MODEL` was
+then deliberately scoped the same way — six lines against one existing selector.
+
+**The rule: a package is a mechanism, not a line.** Where one producer, one call
+site, or one reader serves several map lines, those lines belong in **one**
+package. **Target roughly 3–6 boxes for an implementation package.** A 1-box
+package is correct only when the phase genuinely has one *reachable* line —
+Phase 31 had exactly one of seven, and the other six are Cluster Q.
+
+**Three shapes mark a fat mechanism**, because "pick bigger packages" is not
+actionable on its own:
+
+1. **A phase whose first line names the mechanism and whose remaining lines are
+   its filters, preferences or facets.** Phase 34C: 1431 is the selector,
+   1432–1443 are its rules.
+2. **Several lines that are fields of one returned value.** Phase 30's 1161–1165
+   are fields of one `SessionContext`.
+3. **A recon that groups a phase by root cause rather than by line.** The Phase
+   51 recon reduced 34 open lines to **4 causes** — and the causes are the
+   package boundaries, not the lines.
+
+The first two are visible in the map itself, in seconds, before any code is
+opened. The third is what a recon is *for*, which makes this rule and §86's
+"an investigation names the implementation package it unblocks" the same rule
+seen from two ends: the recon's output is a package boundary or it is an
+archive.
+
+### The traps
+
+Six behaviours, each with the number that bought it and the rule that replaces
+it. They are ordered by how much they cost, not by how obvious they are.
+
+**Trap 1 — investigation that ends in a document instead of a dispatch.** §86 is
+the full treatment; it is repeated here only so the list is complete. The
+number: `docs/process/refusal-register.md` went **280 → 969 lines** on the day
+the map moved **+9**. The rule is §86's second: an investigation package names,
+in its own packet, the implementation package a positive answer authorises.
+
+**Trap 2 — small packages multiply a fixed integration cost.** Every
+`scripts/integrate.sh` run ends in the blast radius, and the blast radius is
+priced by the **files the package touched**, not by the boxes it closed. Five
+integration logs from 2026-08-30:
+
+    cd .agent-runtime
+    for f in integrate-*.log; do
+      printf '%-20s %s\n' "$f" "$(grep -c '^test result:' "$f")"
+    done
+
+| log | test targets | test time reported |
+|---|---|---|
+| `integrate-cc.log` | 41 | 122.9 s |
+| `integrate-gfb.log` | 53 | 148.8 s |
+| `integrate-probe.log` | 10 | 33.9 s |
+| `integrate-ros.log` | 46 | 105.6 s |
+| `integrate-scd.log` | 56 | 120.2 s |
+
+Four of the five ran **41–56 targets**. The `test time` column sums the
+`finished in Ns` lines and therefore **excludes compilation**, which is where
+the rest of the wall clock goes; the logs carry no elapsed-time line, so no
+wall-clock figure is claimed here.
+
+**A three-file package pays essentially what a twelve-file package pays.**
+`integrate-scd.log` is the proof: three files changed, 161 insertions — and 56
+test targets, the largest run of the five. Ten boxes shipped as five 2-box
+packages costs five of these; as two 5-box packages it costs two. **This is the
+arithmetic that makes the sizing rule above worth anything**, and the two rules
+should never be read apart.
+
+**Trap 3 — a co-edit buys dispatch parallelism and sells integration
+parallelism.** §77's protocol correctly unblocks *dispatch* on a contended file,
+and that is real. What it does not do is survive integration: `integrate.sh`
+**refuses any file two named worktrees both touched** and hands reconciliation
+back to the orchestrator, so **co-edited worktrees must be integrated one at a
+time**, each paying Trap 2 in full. On 2026-08-30 an orchestrator moved from
+queueing behind `main.rs` — a dispatch stall — to three-way co-editing it — an
+integration stall — inside one session, and both ends of that trade were
+invisible at the moment each decision was made.
+
+**The rule: partition by mechanism so packages are file-disjoint where they can
+be, and batch those into ONE `integrate.sh` call. Reserve a co-edit for a
+genuinely large package that must share `main.rs`, not as a routine way to slip
+one more small package onto the board.**
+
+**This is not a contradiction of "do not integrate serially."** That rule is
+about *disjoint* partitions, where serial integration hides exactly the
+cross-patch interaction integration exists to find (§79, batch 47's non-`Default`
+field). Co-editors of one file are the case the tool refuses to batch, and
+integrating them one at a time is correct. The two rules cover different
+inputs; the cost note is that the second input is the expensive one, so do not
+choose it casually.
+
+**Trap 4 — reading for a property a script decides.** Ten wrongly ticked boxes
+have been corrected, **all ten found by audit workers after the orchestrator had
+read the diff and ticked the box**, and all ten are the "no production caller"
+shape `scripts/cluster-b.py` finds mechanically in seconds. `CLAUDE.md` already
+carries that specific correction; **the general trap is the one to hold**:
+reading for a property some script already decides is spend with no yield, and
+it is spend from the most expensive context in the project — 36.5% of the whole
+project's output tokens come from the main checkout (§86).
+
+**Reading for a *decision* is not this trap** and must not be cut with it. The
+diff of anything that decides something, and Phase −1 on every packet, stay with
+the orchestrator; the caller check does not, because it is the one question with
+a *measured* miss rate.
+
+**Trap 5 — polling a background job instead of being notified.** Observed
+directly on 2026-08-30: repeated `sleep`-and-check cycles against a running gate
+and against `integrate.sh`. Each cycle costs a tool round-trip and a context
+entry, and every one of them returns the same information — *still running*. The
+job already notifies on completion, so the entire loop is spend that produces
+nothing but the delay it was trying to observe.
+
+**The rule: arm a `Monitor` whose filter names the failure signatures as well as
+the success line, or launch with a backgrounded run and wait for the completion
+notification. Do not write a poll loop.** The one legitimate exception is a
+**bounded** check — one look, not a loop — when the very next decision genuinely
+depends on the answer and cannot be made without it.
+
+A monitor that greps only for the success marker is worse than no monitor: it is
+silent through a crash and silence reads as "still running". Name the failure
+strings in the same alternation.
+
+**Trap 6 — skipping the batch's own ledger row.** The measurements ledger's last
+batch entry is **Batch 45**:
+
+    grep -o '^## Batch [0-9]*' docs/process/orchestration-measurements.md | tail -1
+
+**Batches 46–55 — ten consecutive batches — have no entry**, and they are
+exactly the batches across which output-per-box went 57k → 811k. The row costs a
+few minutes at the end of a batch and it is the *only* instrument in this
+project that can see a regime change while it is happening. Without it, the 6.4×
+step was found by the user on the fourth day rather than by the ledger on the
+first. **The rule is already in `CLAUDE.md` — "add every batch to its ledger" —
+and it went unenforced for ten batches, which makes this the same failure mode
+as §86's finding about §83: a rule that lives only as prose does not bind.**
+
+### What this section does not claim
+
+- **No wall-clock cost per integration.** The logs record test time, not elapsed
+  time. If a later session wants that number, `time scripts/integrate.sh` and
+  add it here.
+- **3–6 boxes is a target, not a gate.** Nothing enforces it, and a phase whose
+  open lines are genuinely independent mechanisms should still be several
+  packages. The failure it is aimed at is thirteen packages for ten boxes, not
+  any particular package.
+- **Batch 55's seven integrations are the packet's count, not a re-derived one.**
+  Five `integrate-*.log` files survive in `.agent-runtime/`; logs are
+  overwritten by name, so the file count is a floor on the number of runs and
+  not a measurement of it.
