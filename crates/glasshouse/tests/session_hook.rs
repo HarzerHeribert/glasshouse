@@ -717,3 +717,61 @@ fn automatic_checkpoint_still_runs_when_memory_extraction_is_disabled() {
         "an automatic checkpoint must still appear when only memory extraction is disabled: {after:?}"
     );
 }
+
+/// The Codex hook catalogue this build declares was read from the Codex this
+/// machine has installed.
+///
+/// **Why this test exists.** `harness::codex::HOOK_EVENTS` is an *observed*
+/// catalogue: Codex publishes no machine-readable list of its hook events,
+/// and — verified on 0.150.1 — a `hooks.json` naming an event it does not
+/// recognise is accepted in silence, with no diagnostic on any non-interactive
+/// path. So a Codex release that renamed, removed, or re-scoped an event
+/// would break a capability here and *nothing in this repository would say
+/// so*. That is not hypothetical: between 0.149.1 and 0.150.1 the catalogue
+/// gained `Interrupt`, and it was found by a person re-reading the review
+/// screen by hand, not by a test.
+///
+/// The only thing left to hold Codex to, without a terminal, is the
+/// provenance itself: the version the catalogue was read from must still be
+/// the version installed. This would have failed the moment this machine
+/// moved to 0.150.1.
+///
+/// It is deliberately **not** an assertion about `HOOK_EVENTS`'s contents.
+/// Comparing a constant to itself is the vacuous shape this suite already
+/// gets caught by; the claim here is about the world, and the only way to
+/// satisfy it is to go and look.
+///
+/// Skips when Codex is not installed, so this is inert on CI and on any
+/// machine without it — the check is for the development machine the
+/// catalogue is read on.
+#[test]
+fn the_codex_hook_catalogue_was_read_from_the_installed_codex() {
+    let Ok(codex) = glasshouse::platform::exec::resolve("codex") else {
+        eprintln!("skipping: `codex` is not on PATH, so there is no catalogue to compare against");
+        return;
+    };
+
+    let Ok(output) = Command::new(codex.path()).arg("--version").output() else {
+        eprintln!("skipping: `codex --version` could not be run");
+        return;
+    };
+    let reported = String::from_utf8_lossy(&output.stdout);
+    // `codex --version` prints `codex-cli <version>`; take the last field so
+    // a change to the product name ahead of it does not read as a drift.
+    let Some(installed) = reported.split_whitespace().next_back() else {
+        eprintln!("skipping: `codex --version` printed nothing to compare");
+        return;
+    };
+
+    assert_eq!(
+        installed,
+        glasshouse::harness::codex::CATALOGUE_OBSERVED_VERSION,
+        "Codex {installed} is installed, but this build's hook catalogue was read from \
+         {}. The catalogue is observed rather than documented, so a version bump is the \
+         only warning available that `PreCompact` — or any other event Glasshouse \
+         subscribes to — may have been renamed or removed. Re-read Codex's hook review \
+         screen, reconcile `harness::codex::HOOK_EVENTS` with what it shows, and only \
+         then move `CATALOGUE_OBSERVED_VERSION`.",
+        glasshouse::harness::codex::CATALOGUE_OBSERVED_VERSION
+    );
+}

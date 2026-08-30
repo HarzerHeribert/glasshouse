@@ -4,6 +4,12 @@
 //! 2026-08-25 — `codex --help`, `codex resume --help`, `codex login --help`,
 //! the hook state it records in its own configuration, and the session
 //! rollouts it writes.
+//!
+//! The **hook catalogue** below was re-read from Codex 0.150.1 on 2026-08-30
+//! and had gained one event; see `HOOK_EVENTS` and
+//! [`CATALOGUE_OBSERVED_VERSION`]. The rollout-header evidence on
+//! [`Codex::read_session_record`] is still the 0.149.0 reading and is
+//! deliberately not restamped — it was never re-derived.
 
 use std::ffi::OsString;
 
@@ -21,9 +27,36 @@ pub struct Codex;
 
 /// Codex's own hook event catalogue, in the spelling its `hooks.json` uses.
 ///
-/// Read from Codex 0.149.1's **hook review screen**, which enumerates every
-/// event it supports with a one-line description — the authoritative artifact,
-/// and not the one an earlier revision of this file cited.
+/// Read from the **hook review screen**, which enumerates every event Codex
+/// supports with a one-line description — the authoritative artifact, and not
+/// the one an earlier revision of this file cited. First read from 0.149.1,
+/// **re-read from 0.150.1 on 2026-08-30**, where the screen rendered:
+///
+/// ```text
+///   Event                 Installed   Active      Description
+///   PreToolUse            0           0           Before a tool executes
+///   PermissionRequest     3           3           When permission is requested
+///   PostToolUse           2           2           After a tool executes
+///   PreCompact            1           1           Before context compaction
+///   PostCompact           1           1           After context compaction
+///   SessionStart          3           3           When a new session starts
+///   SessionEnd            1           1           Right before a session ends
+///   UserPromptSubmit      3           3           When the user submits a prompt
+///   SubagentStart         0           0           When a subagent is created
+///   SubagentStop          0           0           Right before a subagent ends its turn
+///   Stop                  3           3           Right before Codex ends its turn
+///   Interrupt             0           0           Right before an interrupted turn is aborted
+/// ```
+///
+/// `Interrupt` is the one that moved: it is **new since 0.149.1** and is
+/// listed here because this constant is the catalogue of what Codex
+/// *supports*, not of what Glasshouse asks for. It is deliberately absent
+/// from [`REPORTED_EVENTS`] — an aborted turn is the harness's own business
+/// and says nothing a `SessionLifecycle` records that `Stop` does not.
+///
+/// `PreCompact` and `PostCompact` were **unchanged** across that bump, in
+/// both spelling and position, which is what the 2026-08-30 runtime probe of
+/// map line 327 rested on.
 ///
 /// That earlier revision listed ten events in `snake_case`, taken from the
 /// `[hooks.state."<path>:<event>:0:0"]` keys in `config.toml`. Those keys are
@@ -43,13 +76,33 @@ const HOOK_EVENTS: &[&str] = &[
     "SubagentStart",
     "SubagentStop",
     "Stop",
+    "Interrupt",
 ];
+
+/// The Codex version `HOOK_EVENTS` was last read from.
+///
+/// **This catalogue is observed, not documented.** Codex publishes no
+/// machine-readable list of its hook events — `codex --help`, `codex debug`
+/// and `codex features` all say nothing about them, and a `hooks.json`
+/// naming an event Codex does not recognise is accepted in silence. The only
+/// artifact that enumerates them is an interactive TUI screen, so the sole
+/// thing a test can cheaply hold Codex to is that the version this was read
+/// from is still the version installed.
+///
+/// See `tests/session_hook.rs::the_codex_hook_catalogue_was_read_from_the_installed_codex`.
+/// When it fails, re-read the review screen (start a Codex session in a
+/// project carrying a `hooks.json` and answer *Review hooks*), reconcile
+/// `HOOK_EVENTS` with what it shows, and move this constant — in that
+/// order. Bumping the constant alone is the one edit that makes the check
+/// worthless.
+pub const CATALOGUE_OBSERVED_VERSION: &str = "0.150.1";
 /// The events Glasshouse asks Codex to report.
 ///
 /// A subset of [`HOOK_EVENTS`], deliberately not the remaining per-tool
 /// events (`PreToolUse`/`PostToolUse`/`SubagentStart`/`SubagentStop`): those
 /// fire many times per turn and say nothing about a *session's* state, the
-/// same reasoning Claude Code's adapter applies. `SessionEnd` is asked for
+/// same reasoning Claude Code's adapter applies. `Interrupt` is excluded for
+/// its own reason, given on [`HOOK_EVENTS`]. `SessionEnd` is asked for
 /// here even though `session/lifecycle.rs` deliberately never maps it to a
 /// state — Codex still reports it, and declining to *ask* for it would be a
 /// second, redundant way of encoding the same decision.

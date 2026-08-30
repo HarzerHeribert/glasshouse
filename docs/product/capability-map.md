@@ -324,7 +324,7 @@ Fixed architectural requirements
 ☑ Translate supported Codex lifecycle events into Glasshouse lifecycle events.
 ☑ Detect Codex turn completion structurally when possible.
 ☑ Detect Codex waiting-for-user and permission states structurally when possible.
-☐ Record observed Codex compaction events or compaction-related state when available.
+☑ Record observed Codex compaction events or compaction-related state when available.
 ☑ Avoid coupling Glasshouse core logic to Codex-internal Rust crates.
 
 Phase 9 — Antigravity adapter

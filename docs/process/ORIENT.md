@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**817 / 1280 mandatory capabilities (64%)** — 463 open across 62 phases.
+**818 / 1280 mandatory capabilities (64%)** — 462 open across 61 phases.
 
 ## Where the work is
 
@@ -23,7 +23,6 @@ closures are usually at the top. Open the map at the line number given.
 | phase | title | open | closed | map line |
 |---|---|---|---|---|
 | Phase 7 | Claude Code adapter | **1** | 9 | `296` |
-| Phase 8 | Codex adapter | **1** | 9 | `313` |
 | Phase 9A | Harness launch profiles | **1** | 25 | `344` |
 | Phase 9H | Sticky gateway routing for harness-backed interactive sessions | **1** | 13 | `501` |
 | Phase 9I | Free-pool routing | **1** | 13 | `523` |
@@ -85,7 +84,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 51 | Evaluation hooks | **32** | 5 | `1818` |
 | Phase 21K | Assumption-aware implementation guardrails | **43** | 0 | `992` |
 
-**Fully closed (42):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 26, Phase 32, Phase 34, Phase 35, Phase 40, Phase 41, Phase 42, Phase 45, Phase 48.
+**Fully closed (43):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 8, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 26, Phase 32, Phase 34, Phase 35, Phase 40, Phase 41, Phase 42, Phase 45, Phase 48.
 
 ## The nearly-finished phases, in full
 
@@ -103,10 +102,6 @@ these unwrapped.
 ### Phase 7 — Claude Code adapter  (1 open, 9 closed)
 
 - **310** ☐ Record Claude compaction events when they can be observed reliably.
-
-### Phase 8 — Codex adapter  (1 open, 9 closed)
-
-- **327** ☐ Record observed Codex compaction events or compaction-related state when available.
 
 ### Phase 9A — Harness launch profiles  (1 open, 25 closed)
 

@@ -434,3 +434,98 @@ Missing evidence:
   killing it left the session count unchanged), so identifier discovery has to
   wait for the first turn and match on the rollout header's `payload.cwd` and
   `payload.id`.
+
+---
+
+# Line 327 — closed 2026-08-30 by a runtime probe against a live Codex
+
+Package `GH-CODEX-COMPACTION-PROBE`. **This line was never blocked on code.**
+Its producer, caller and propagation have shipped for some time; its reader
+landed the same afternoon as a side effect of `GH-SESSION-CONTEXT-DOOR`
+(`glasshouse sessions show` prints a `compactions` line). What it had never had
+was an **observation**.
+
+State: **COMPLETE**
+
+## The ruling, recorded before the probe so it could not be reverse-fitted
+
+> *"Record observed Codex compaction events **or compaction-related state**
+> when available"* is written disjunctively, and the durable per-session count
+> satisfies the **state** disjunct.
+
+Reading it to require one timestamped row per occurrence reads the "or" out of
+a line written for exactly this case: Codex only ever says *about to compact*,
+`PostCompact` is excluded on purpose (`session/lifecycle.rs`), and a
+per-occurrence row would carry a time and no verified event. `NULL` / `0` / `n`
+remain three distinguishable states, as `database.rs:1682-1698` argues at
+length.
+
+## What was observed
+
+**Five real compactions, five counted.** A live `codex-cli 0.150.1` decided to
+compact its own context and spawned the hook itself; the hook was never invoked
+by hand. Each `/compact` moved the count by **exactly one** — so `PostCompact`
+is being correctly ignored — and `glasshouse sessions show` printed the new
+value each time. §60 is satisfied: this is five trials, not one.
+
+Attribution is airtight. On the fresh session Codex reported
+*"7 hooks need review"*, and the seven with a review count of 1 were exactly
+`REPORTED_EVENTS`, element for element. `PreCompact` and `PostCompact` showed
+`1` — **only Glasshouse's hook could have produced the increments.** The probe
+ran in a throwaway project with its own data and config roots.
+
+## The catalogue drifted, and now there is a tripwire
+
+The observed catalogue was read from **0.149.1**; the installed binary is
+**0.150.1**. `PreCompact` and `PostCompact` are present and unchanged in
+spelling and position — but Codex gained a twelfth event, `Interrupt`, which
+`HOOK_EVENTS` did not list. It has been added to the catalogue and
+**deliberately not** to `REPORTED_EVENTS`: an aborted turn says nothing about a
+lifecycle that `Stop` does not already say.
+
+**Codex publishes no machine-readable hook catalogue**, and the probe verified
+that a `hooks.json` naming an event Codex does not recognise is accepted **in
+complete silence** — no diagnostic, exit 0. So the catalogue's *contents*
+cannot be asserted against anything offline, and asserting `HOOK_EVENTS`
+against itself is the vacuous shape this project has been bitten by.
+
+What *can* be checked is **provenance**:
+`harness::codex::CATALOGUE_OBSERVED_VERSION` records the version the catalogue
+was read from, and
+`session_hook::the_codex_hook_catalogue_was_read_from_the_installed_codex`
+compares it to `codex --version`. Mutating the constant back to `0.149.1`
+**KILLED** it, so it would have caught this exact drift. It skips when Codex is
+absent, so it is inert on CI.
+
+**Its cost, stated rather than hidden:** it fails on every Codex release,
+including ones that change nothing. That is the honest trade for an
+observed-not-documented catalogue — the claim *"read from version X"* genuinely
+expires when X changes. Bumping the constant alone is the one edit that makes
+the check worthless, and its doc comment says so.
+
+## Two defects found, neither fixed here
+
+Reported rather than patched, because their files were forbidden to the probe.
+
+**(a) A resumed session's lifecycle stays `stopped`, and every later hook is
+silently discarded.** `may_apply` is `current.is_live() && current != next`, and
+`is_live()` is `false` for `Stopped` — so once a session stops, **no transition
+can ever apply again**, and nothing moves it back on resume. Observed: Codex
+was demonstrably running and writing `turn_started`/`turn_ended` rows while the
+record read `stopped`. Timestamps rule out a race — `process_exited` and
+`session_resumed` were **29 seconds apart**. `GH-RESUME-LIFECYCLE-FIX` is
+dispatched against it.
+
+**(b)** The compaction count is written outside that gate, so a row can read
+`stopped` with the count incremented after the stop. The probe judged this a
+symptom of (a), and it is.
+
+**Neither affects this line's claim:** in the trials where the lifecycle was
+correct throughout, the count was correct.
+
+## Limits
+
+- **macOS only, Codex 0.150.1 only.** The hook catalogue is observed per
+  platform and this observation is one platform's.
+- Says nothing about Claude Code, which emits no compaction event at all — the
+  reason map line 310 is refused rather than open.
