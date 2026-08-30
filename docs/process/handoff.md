@@ -84,6 +84,47 @@ session id from the relaunch recipe, collapsing the fire-once lock to a shared
 from a worktree gets *"no changed .rs files"* and **exit 0** — a verification
 tool reporting success about the wrong tree. `GH-BLAST-RADIUS-TREE` is fixing it.
 
+### THE GATE, 2026-08-30 evening: one real Windows regression, then green
+
+Full three-platform run on `7683de9`: **13 PASS / 3 FAIL.**
+
+**`test (windows) / build` was a genuine regression** from the observation-sink
+package — `DECISIONS_EMPTY` and `DECISIONS_TITLE` declared at file scope in
+`tests/disposable_route_sink.rs` but read only from its `#[cfg(unix)]` screen
+module, so on Windows they are dead and `-D warnings` fails the build.
+`test (windows) / test` failed **as a consequence of the build**, not on its own.
+Both constants now carry `#[cfg(unix)]`, and a `--windows-vm` re-run is
+**PASS / PASS / PASS**.
+
+**The lesson is the shape, not the constants.** A `#[cfg(unix)]` test module
+makes every file-scope item it alone uses invisible-dead on Windows, and `-D
+warnings` turns that into a build failure the other two platforms cannot see.
+**When a package adds a `cfg(unix)` test module, check what it alone consumes.**
+
+### The interrupt flake finally has a diagnosis, and it is not "load"
+
+Third failure. The self-diagnosing panic from `GH-INTERRUPT-TEST-FLAKE` fired
+and the gate captured it in full:
+
+    timed out waiting for `/bin/sh` to run its INT trap after 30s:
+    exited=None (...None means it is still running and the trap is merely late),
+    printed so far: "READY\n"
+
+**`exited=None` — the shell was still running**, so the signal did not kill it;
+every "the interrupt killed the harness" hypothesis is dead. It had printed
+`READY`, so it reached the read loop with its trap installed. And the same
+worker measured trap latency at **4–30 ms** under a 36-spinner soak on 12 cores.
+
+**A 30-second miss against a millisecond norm is not a late trap — it points at
+the signal never arriving.** `GH-INTERRUPT-SIGNAL-TARGET` is dispatched on that,
+told to check first whether the pid the test signals is the pid running `read`
+or a wrapper above it, and **forbidden from raising the timeout** — that fix is
+now positively contradicted by the latency data.
+
+**That package changed nothing but a failure message and it was worth it.** The
+previous worker could not reproduce the defect and correctly refused to guess;
+the one thing it shipped is what produced the diagnosis three failures later.
+
 ### I CALLED AN INTEGRATION GREEN THAT WAS NOT — and the grep was mine
 
 Integrating the 1599 bridge, I checked for failures with
