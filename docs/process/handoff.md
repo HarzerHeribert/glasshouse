@@ -101,6 +101,30 @@ makes every file-scope item it alone uses invisible-dead on Windows, and `-D
 warnings` turns that into a build failure the other two platforms cannot see.
 **When a package adds a `cfg(unix)` test module, check what it alone consumes.**
 
+### HOW TO LAUNCH THE GATE, now that the launcher is known to matter
+
+**`nohup scripts/ci-local.sh … &` gives every test `SIGINT = SIG_IGN`.** That is
+what produced three "flake" failures and one wasted 65-trial investigation.
+
+**A shell cannot fix this for itself** — restoring an ignored disposition is
+exactly what POSIX forbids, so `trap - INT` inside `ci-local.sh` does nothing.
+It has to be reset *before* the exec:
+
+    /bin/sh -c 'python3 -c "
+    import signal, os
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    os.execvp(\"scripts/ci-local.sh\", [\"ci-local.sh\", \"--macos\", \"--linux\", \"--windows-vm\"])
+    " > .agent-runtime/gate-latest.log 2>&1 &'
+
+Verified on this machine: plain background gives `SIGINT: 1` (`SIG_IGN`); with
+the reset it gives the default handler.
+
+**The robust fix is the one already landed** — the test resets the disposition
+in its own child via `pre_exec`, so it no longer cares. **But other
+signal-sensitive tests exist** (`pty_smoke`'s interrupt tests among them), and
+nothing else has been audited for this. **Until they are, launch the gate with
+the reset above, or in the foreground.**
+
 ### THE FLAKE IS SOLVED, IT WAS NEVER A FLAKE, AND THE LAUNCHER WAS ME
 
 `GH-INTERRUPT-SIGNAL-TARGET` found it. **A signal ignored on entry to a
