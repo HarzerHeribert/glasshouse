@@ -84,6 +84,29 @@ session id from the relaunch recipe, collapsing the fire-once lock to a shared
 from a worktree gets *"no changed .rs files"* and **exit 0** — a verification
 tool reporting success about the wrong tree. `GH-BLAST-RADIUS-TREE` is fixing it.
 
+### The co-edit barrier: a third measurement, and a gap in my own loop
+
+`main.rs` carried two claimants this round — `memory-conflict-resolve` (a
+`MemoryCommand` arm at `:320` and two functions at `:4670`/`:4707`) and
+`quota-health-routing` (the 25-line 1599 refusal at `:1433`). **Both intents
+were preserved without a merge**: the regions are ~1100 lines apart,
+`integrate.sh` applied them serially, and both survive verbatim in `HEAD`.
+
+That is the third round in a row where co-editing cost nothing and saved a
+queued round — and the third where **it still has not been tested against edits
+that actually collide.** The measurement §77 wants is still owed.
+
+**The gap this round exposed is mine, not the protocol's.** I integrated both
+workers and never ran `coedit.sh release`. `integrate.sh` does not release
+barriers — deliberately, since reconciliation is a ruling — and nothing in my
+loop reminded me. **Only the Stop hook caught it**, and its warning is exact:
+an unreleased barrier makes the next round believe the file is still contended,
+which is how a package gets queued behind a file nobody is holding. That is
+precisely the failure CLAUDE.md already records costing a round.
+
+**So: `coedit.sh release <file>` belongs immediately after the integration that
+reconciles it**, in the same turn, the way `worker-ack.sh` follows a review.
+
 ### Next action
 
 **Run `scripts/ci-local.sh --macos --linux --windows-vm` when the board quiets.**
