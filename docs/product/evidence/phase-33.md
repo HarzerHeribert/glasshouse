@@ -500,3 +500,116 @@ Mutations, all killed:
 
 That third mutation is the important one: it proves Glasshouse does not
 substitute a default when the provider stated nothing. `None` stays a fact.
+
+
+---
+
+# Line 1313 — closed 2026-08-30 by proof, with no production change
+
+Package `GH-LATENCY-PROOF`; report in `.agent-runtime/report-latency-proof.md`.
+**Tests-only diff.**
+
+## Why a proof packet was the right shape
+
+1313 was **Cluster D** in the refusal register: *"latency aggregates have zero
+production readers; every candidate consumer is in another partition."* That
+was true until `1b66889`, when Phase 41's line 1661 made the project overview
+read `median_duration_ms` at `shell/mod.rs:1571`.
+
+The chain was then complete and nobody had checked. Building anything would
+have been manufacturing work; the honest question was *"is this already
+true, and can it be proven?"*
+
+## The chain, hop by hop, each above its file's `#[cfg(test)]` boundary
+
+| hop | where | test boundary |
+|---|---|---|
+| producer | `SessionRouting::record_routing_observation`, `gateway/session.rs:327`, called in production at `gateway/mod.rs:640` | `:739` / `:830` |
+| derivation | `RoutingObservation::duration_ms`, `routing/evidence.rs:374` | `:1283` |
+| aggregate | `EvidenceLedger::summarize`, `evidence.rs:784` | `:1283` |
+| consumer | project overview, `shell/mod.rs:1571` | — |
+
+The worker checked every boundary rather than asserting the hops were
+production — which is the check that would have caught three of this session's
+wrong claims.
+
+## §14 was the bar, and it was met with production mutations
+
+A tests-only closure resting on tests that already pass proves nothing. All
+three mutations targeted **production** code and were killed by named tests:
+
+| mutation | site | killed by |
+|---|---|---|
+| `duration_ms` returns `None` | `evidence.rs:380` | `a_recorded_observation_yields_duration_ms_and_a_real_median` |
+| `summarize`'s window bound → `i64::MIN` | `evidence.rs:791` | `an_old_latency_outlier_does_not_skew_the_recent_median` — the median took a 100,000,000 ms outlier |
+| minimum-sample gate fabricates `Some(0)` | `evidence.rs:979` | `below_the_minimum_sample_the_latency_summary_is_unknown_not_zero` |
+
+The second is the one that matters for the word *recent*: without the window
+bound, "recent latency" silently includes all history, and the test names the
+failure.
+
+## The limit, recorded rather than smoothed over
+
+`dispatched_at` is **an approximation** — `evidence.rs:30` says so: the
+accept-loop handoff, not the true wire-dispatch instant inside
+`ingress::forward`. The line's own *"where measurable"* permits this, and a
+future reader must not mistake the number for a true round-trip.
+
+---
+
+### Track recent observed latency for gateway-backed resources where measurable. (line 1313)
+
+Contract: Given a gateway exchange that actually reached a provider, when the accept loop finishes it, Glasshouse records dispatch and completion timestamps as a routing observation and can summarize them into a real recent median/tail/EWMA latency for that resource's (provider, model, route, harness, context_state) identity within a bounded window, while staying honestly 'unknown' rather than a fabricated zero below the minimum sample, never blending in an observation outside the window or from another project, and never claiming a true first-byte/first-token latency it cannot see.
+
+State: **COMPLETE**
+
+Production evidence:
+- `crates/glasshouse/src/gateway/session.rs` — `SessionRouting::record_routing_observation`
+- `crates/glasshouse/src/gateway/mod.rs:640 (production caller, inside the connection-handling loop)`
+- `crates/glasshouse/src/routing/evidence.rs` — `RoutingObservation::duration_ms`
+- `crates/glasshouse/src/routing/evidence.rs` — `EvidenceLedger::summarize`
+- `crates/glasshouse/src/routing/evidence.rs` — `EvidenceLedger::summarize_latest_for_model`
+- `crates/glasshouse/src/shell/mod.rs` — `build_project_overview_routing (production caller, project overview)`
+
+Regression evidence:
+- `routing_evidence::a_recorded_observation_yields_duration_ms_and_a_real_median`
+- `routing_evidence::an_old_latency_outlier_does_not_skew_the_recent_median`
+- `routing_evidence::below_the_minimum_sample_the_latency_summary_is_unknown_not_zero`
+- `routing_evidence::recent_latency_never_crosses_a_project_boundary`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| evidence.rs:380 (completed - dispatched).checked_mul(1000) -> None | `duration-ms-always-none` | **killed** | `routing_evidence::a_recorded_observation_yields_duration_ms_and_a_real_median` |
+| evidence.rs:791 let earliest = now_unix.saturating_sub(window_seconds); -> let earliest = i64::MIN; | `summarize-drop-window-bound` | **killed** | `routing_evidence::an_old_latency_outlier_does_not_skew_the_recent_median` |
+| evidence.rs:979-981 return None; -> return Some(AggregateReading::new(0,0,0,durations.len(),ReadingSource::LocalObservation(what.to_owned()))); | `duration-aggregate-zero-below-minimum` | **killed** | `routing_evidence::below_the_minimum_sample_the_latency_summary_is_unknown_not_zero` |
+
+> duration-ms-always-none observed: assertion left == right failed: each observation carried a 2-second dispatched/completed pair
+
+> summarize-drop-window-bound observed: median assertion failed; the 100,000,000ms outlier leaked into the window
+
+> duration-aggregate-zero-below-minimum observed: assert!(summary.median_duration_ms.is_none()) failed — mutant fabricated Some(0)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- dispatched_at_unix is an accept-loop-handoff approximation, not the true wire-dispatch instant (stated in evidence.rs's own header, unchanged by this package).
+- first_byte_at/first_token_at/first_tool_call_at are never recorded by this producer; map lines 1331/1332 stay open.
+- Only one identity (the pinned routing model) currently has a production screen reading its latency; the tracking mechanism itself is generic over any observed (provider, model, route, harness) identity.
+- No shipped-binary PTY run performed for this package; matches phase-41's own stated precedent for this overlay.
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **1313** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo build: clean
+- cargo test --test routing_evidence: 13 passed, 0 failed
+- cargo test --test observability_views: 6 passed, 0 failed
+- cargo test --lib routing::evidence: 22 passed, 0 failed
+- cargo clippy --all-targets --all-features -D warnings: clean
+- cargo fmt --all -- --check: clean
+- scripts/blast-radius.sh: every traced target passed (lib 1548, events_log 6, memory_snapshot 8, routing_evidence 13, cargo doc clean)
+

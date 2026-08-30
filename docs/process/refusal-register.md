@@ -112,7 +112,7 @@ whose consuming phases are still at zero. **It belongs in Cluster D.**
 | 1795 | no fallback-chain concept; routing-model selection is Phase 34C |
 | 1796 | nothing maps a model to a tier ceiling. **Its recorded blocker is stale** — `WorkloadTier` ships at `routing/classify.rs:79` — but §14 applies: the blocker being gone is not the capability |
 | 372 | **stale blocker**: `phase-9a.md:482` says `grep 'fn score\|Score'` is empty; it is not. Nothing selects among launch profiles, so still open |
-| 1313 | latency aggregates have zero production readers; every candidate consumer is in another partition |
+| ~~1313~~ | **CLOSED 2026-08-30.** The blocker was real and is gone: `1b66889` gave the aggregates a production reader (`shell/mod.rs:1571`), and `GH-LATENCY-PROOF` then proved the whole chain with three production mutations. **This row is the cluster working as intended** — it held a line that genuinely could not close, and expired the moment its consumer landed. Compare the seven rows the audit found stale, which nobody retired |
 | 531 | **moved here from Cluster B in batch 50.** Missing caller *and* consumer: nothing in production distinguishes a request pool from a token-priced allowance, and no `FreePool` outlives one call. Needs a routing consumer that behaves differently for the two — see Cluster B's note |
 | ~~930, 934~~ | **CLOSED the same day this row was written.** Phase 27 landed, `GH-INJECTION-RECALL` closed both behind it. Kept struck through for one batch as the clearest evidence in this file that **a Cluster D row expires the moment its trunk lands** — I wrote this row and did not revisit it |
 

@@ -1310,7 +1310,7 @@ Phase 33 — Resource health
 
 ☑ Track whether each configured resource is currently available.
 ☑ Track recent request failures for gateway-backed resources.
-☐ Track recent observed latency for gateway-backed resources where measurable.
+☑ Track recent observed latency for gateway-backed resources where measurable.
 ☑ Track known quota or usage state when a provider or harness exposes it.
 ☑ Track known quota reset time when it is exposed.
 ☐ Track recent rate-limit responses separately from transport or model failures.

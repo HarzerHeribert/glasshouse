@@ -478,3 +478,183 @@ fn observed_identities_is_project_scoped_from_outside_the_crate() {
         .unwrap();
     assert!(beta_identities.is_empty());
 }
+
+/// Phase 33 line 1313's "track recent observed latency for gateway-backed
+/// resources where measurable" — the same chain `shell/mod.rs:1571` now
+/// reads for the project overview, exercised the way a caller outside this
+/// crate reaches it: a recorded observation exposes a real
+/// [`RoutingObservation::duration_ms`], and a summary over a window
+/// containing it reports a real median rather than staying unknown.
+#[test]
+fn a_recorded_observation_yields_duration_ms_and_a_real_median() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let ledger = EvidenceLedger::open(&fixture.runtime).unwrap();
+
+    for i in 0..MIN_SAMPLE_FOR_SUMMARY {
+        let at = 1_000 + i as i64 * 10;
+        ledger
+            .record(synthetic_observation(at, Outcome::Succeeded), at)
+            .unwrap();
+    }
+
+    let query = ObservationQuery {
+        provider: "anyrouter",
+        model: "claude-opus-4-1",
+        route: Some("anthropic-messages"),
+        harness: Some("claude-code"),
+    };
+
+    let rows = ledger.recent(query, 10).unwrap();
+    assert_eq!(rows.len(), MIN_SAMPLE_FOR_SUMMARY);
+    for row in &rows {
+        assert_eq!(
+            row.duration_ms(),
+            Some(2_000),
+            "each observation carried a 2-second dispatched/completed pair"
+        );
+    }
+
+    let summary = ledger
+        .summarize(query, ContextState::Unknown, 10_000, 100_000)
+        .unwrap();
+    let median = summary
+        .median_duration_ms
+        .expect("five timed observations must produce a real latency reading");
+    assert_eq!(*median.value(), 2_000);
+    assert_eq!(median.sample_count(), MIN_SAMPLE_FOR_SUMMARY);
+}
+
+/// The integration-level version of `evidence.rs`'s
+/// `an_observation_outside_the_window_is_excluded_from_the_summary_but_not_deleted`,
+/// for latency specifically: that unit test only asserts on `failure_rate`,
+/// so it cannot show an old *duration* outlier is excluded from the median
+/// rather than skewing it. A "recent" latency figure that silently includes
+/// history outside the window is not the line line 1313 asks for.
+#[test]
+fn an_old_latency_outlier_does_not_skew_the_recent_median() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let ledger = EvidenceLedger::open(&fixture.runtime).unwrap();
+
+    // One very old observation with a wildly different duration than the
+    // recent ones — if the window bound leaked, the median would move.
+    let old = synthetic_observation(0, Outcome::Succeeded).with_timing(Some(0), Some(100_000));
+    ledger.record(old, 0).unwrap();
+
+    for i in 0..MIN_SAMPLE_FOR_SUMMARY {
+        let at = 100_000 + i as i64;
+        let recent =
+            synthetic_observation(at, Outcome::Succeeded).with_timing(Some(at), Some(at + 2));
+        ledger.record(recent, at).unwrap();
+    }
+
+    let query = ObservationQuery {
+        provider: "anyrouter",
+        model: "claude-opus-4-1",
+        route: Some("anthropic-messages"),
+        harness: Some("claude-code"),
+    };
+
+    // Assert the premise (§17) before the absence: the old outlier is
+    // genuinely in the table and genuinely has a much larger duration.
+    let raw = ledger.recent(query, 100).unwrap();
+    assert_eq!(
+        raw.len(),
+        MIN_SAMPLE_FOR_SUMMARY + 1,
+        "the old row must still be readable raw, never deleted"
+    );
+
+    let now_unix = 100_000 + MIN_SAMPLE_FOR_SUMMARY as i64;
+    let summary = ledger
+        .summarize(query, ContextState::Unknown, now_unix, 1_000)
+        .unwrap();
+    let median = summary
+        .median_duration_ms
+        .expect("the recent, in-window observations alone must clear the minimum sample");
+    assert_eq!(
+        *median.value(),
+        2_000,
+        "the old 100-second outlier is outside the window and must not pull the median toward it"
+    );
+    assert_eq!(median.sample_count(), MIN_SAMPLE_FOR_SUMMARY);
+}
+
+/// Capability map line 1340, for latency specifically: below the minimum
+/// sample the summary's `median_duration_ms` stays `None` — "unknown" — and
+/// is never reported as a fabricated `Some(0)`. `RoutingSummary` keeps the
+/// two apart as an `Option`, so this proves the distinction rather than
+/// merely asserting it can be expressed.
+#[test]
+fn below_the_minimum_sample_the_latency_summary_is_unknown_not_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let ledger = EvidenceLedger::open(&fixture.runtime).unwrap();
+
+    for i in 0..(MIN_SAMPLE_FOR_SUMMARY - 1) {
+        let at = 1_000 + i as i64 * 10;
+        ledger
+            .record(synthetic_observation(at, Outcome::Succeeded), at)
+            .unwrap();
+    }
+
+    let query = ObservationQuery {
+        provider: "anyrouter",
+        model: "claude-opus-4-1",
+        route: Some("anthropic-messages"),
+        harness: Some("claude-code"),
+    };
+    let summary = ledger
+        .summarize(query, ContextState::Unknown, 10_000, 100_000)
+        .unwrap();
+    assert!(
+        summary.median_duration_ms.is_none(),
+        "four observations is below MIN_SAMPLE_FOR_SUMMARY, so the reading must be unknown, not a computed zero"
+    );
+}
+
+/// Phase 33 line 1313 read together with line 1343: a project's recent
+/// latency never crosses into a sibling project's summary, the same
+/// physical isolation `two_projects_never_share_a_routing_observation`
+/// proves for raw rows, demonstrated here for the aggregate a routing
+/// decision or the project overview would actually read.
+#[test]
+fn recent_latency_never_crosses_a_project_boundary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alpha = Fixture::new(tmp.path(), "alpha");
+    let beta = Fixture::new(tmp.path(), "beta");
+
+    let alpha_ledger = EvidenceLedger::open(&alpha.runtime).unwrap();
+    for i in 0..MIN_SAMPLE_FOR_SUMMARY {
+        let at = 1_000 + i as i64 * 10;
+        alpha_ledger
+            .record(synthetic_observation(at, Outcome::Succeeded), at)
+            .unwrap();
+    }
+
+    let query = ObservationQuery {
+        provider: "anyrouter",
+        model: "claude-opus-4-1",
+        route: Some("anthropic-messages"),
+        harness: Some("claude-code"),
+    };
+
+    // Assert the premise (§17): alpha's own summary is a real reading before
+    // asserting beta can't see it.
+    let alpha_summary = alpha_ledger
+        .summarize(query, ContextState::Unknown, 10_000, 100_000)
+        .unwrap();
+    assert!(
+        alpha_summary.median_duration_ms.is_some(),
+        "alpha genuinely recorded enough timed observations for a reading"
+    );
+
+    let beta_summary = EvidenceLedger::open(&beta.runtime)
+        .unwrap()
+        .summarize(query, ContextState::Unknown, 10_000, 100_000)
+        .unwrap();
+    assert!(
+        beta_summary.median_duration_ms.is_none(),
+        "a sibling project's database must never contribute to this project's latency summary"
+    );
+}
