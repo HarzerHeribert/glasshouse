@@ -63,11 +63,13 @@ const OTHER_FREE_MODEL: &str = "probe-free-model-elsewhere";
 /// Every screen assertion waits for this alongside the value it wants, so a
 /// view that drew the empty state fails on its own terms rather than by
 /// running out of patience (practice §80 case 5).
+#[cfg(unix)] // read only from the `#[cfg(unix)]` screen module below
 const DECISIONS_EMPTY: &str = "no routing decision has been recorded yet";
 
 /// The overlay's own border title — the readiness signal that says the key
 /// arrived and the run loop's arm ran. True on a tree whose reader has been
 /// emptied, which is exactly why it is never the assertion.
+#[cfg(unix)] // read only from the `#[cfg(unix)]` screen module below
 const DECISIONS_TITLE: &str = " routing decisions ";
 
 // ---------------------------------------------------------------------------
