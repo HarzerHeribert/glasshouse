@@ -6,6 +6,100 @@
 
 Last updated: 2026-08-30 (Europe/Berlin)
 
+## Checkpoint — 2026-08-30, batch 55 landed: 817 / 1280 (64%)
+
+**Nine boxes closed, five of them boxes this same session had un-ticked. Net
++4. The user intervened mid-batch on efficiency and the process documents
+changed as a result — read that part first.**
+
+### THE PROCESS CHANGED. `CLAUDE.md` now has tiers and three numeric triggers
+
+`GH-WORKFLOW-EFFICIENCY` was commissioned after the user observed that boxes
+per hour and per token had gone bad, and that this orchestrator was picking
+easy meta-work over substantial packages *"like actually a human would
+procrastinate."* **They were right and the numbers say so**: output tokens per
+net closed box ran **57k → 109k → 126k → 811k** across 08-27..30.
+
+**But "too much investigation" is NOT the diagnosis, and the data says so.**
+The process-doc : box-advancing commit ratio held at 2.0 / 2.2 / 1.9 / 3.3 — no
+regime change. What exploded is **investigation that ends in a document instead
+of a dispatch**: the refusal register grew **280 → 969 lines on 08-30**, 61% of
+the day's entire `docs/process/` growth, on the day the map moved +9. The
+decisive instance is `1d708ca` — it proved a blocker false and **unblocked 38
+lines**, and nothing was dispatched against them for the next 3h45m.
+
+So: **`CLAUDE.md` now carries a Green/Amber/Red table that names what each tier
+SKIPS**, and three rules that fire without interpretation. The one that binds
+hardest: **a validated, undispatched implementation packet outranks any new
+investigation, and a co-edit is the normal case** — declining one needs a
+specific reason written *here*, not a judgement made silently. Phase −1 is
+never skipped at any tier.
+
+**One standing rule of this file was corrected on evidence.** It said reading
+every diff stays with the orchestrator. Ten wrongly-ticked boxes have been
+corrected and **all ten were found by audit workers *after* the orchestrator
+read the diff and ticked it** — every one the "no production caller" shape
+`cluster-b.py` finds mechanically. Run the script; spend the reading on
+decisions.
+
+### Closed this batch
+
+- **1464** — `glasshouse routing-cost`. The qualifier *"separately from
+  coding-agent consumption"* is the vacuity trap; it is not vacuous because
+  `routing_observations` has **three** production writers and the gateway
+  relay's rows *are* the coding-agent exchanges. Grouped on
+  `(purpose, harness IS NOT NULL)`. The honesty property is structural: SQL's
+  `SUM` returns `NULL` only when every input was `NULL`, so "not counted" can
+  never render as `0`.
+- **1171** — refresh the checkpoint before Codex compacts, **preserving the
+  previous reason** rather than stamping `TaskBoundary` (which would be false,
+  and a new variant would need a table rebuild).
+- **1829, 1830** — record what the router decided at launch. Both numbers were
+  already computed *and already printed to the user*, then discarded.
+- **1161–1165** — un-ticked at 20:34, re-closed at 21:40. See below.
+
+### 1161–1165: un-ticked and re-earned in one session
+
+`SessionStore::context` computed all five values correctly and had fourteen
+callers, **all fourteen tests**. `session_detail` never called it. An
+adversarial audit refuted all five; the repair was **one call, two `Display`
+impls, four render lines** — 34 lines in `main.rs`, 32 in `store.rs`, no
+migration.
+
+**The tests moved from `session_context.rs` to `session_model.rs`**, which
+drives the real binary through `glasshouse sessions show`. That is the whole
+difference: the delete-the-`store.context`-call mutation is now KILLED, and
+under the old arrangement the same deletion changed nothing any test could see.
+
+### Fourteen scripts were answering about the wrong tree
+
+`GH-SCRIPT-TREE-AUDIT`. The worst: **`worker-done.sh` wrote every worker's
+"I am done" signal into that worker's own worktree**, where `worker-watch.sh`
+(rooted in the main checkout) never looks. Every done-signal in this project's
+history was silently lost and the pane-reading fallback masked it.
+`pipeline.sh` from a worktree reported an empty board while four workers ran.
+`reap-worktrees.sh --clean` would have deleted the main checkout's 28G build
+cache. All fixed on `git rev-parse --git-common-dir`, which is invariant across
+worktrees.
+
+### Next exact action
+
+1. **The board is EMPTY and that was deliberate**: the gate needs a quiet
+   machine (§40) and five code commits had landed since the last run. **Dispatch
+   before anything else.**
+2. **327 is one probe from closing.** Its reader landed as a side effect of
+   `session-context-door` — `glasshouse sessions show` now prints the
+   compaction count (`main.rs:6052`). The recorded ruling says the per-session
+   count satisfies the *"or compaction-related state"* disjunct; what remains is
+   **one real Codex `/compact` observed end to end**. That is a runtime probe,
+   not a unit test.
+3. **Phase 51 has 15 BLOCKED-IN-REPO lines** with the missing link named per
+   line in `.agent-runtime/report-phase51-recon.md`. 1849 is the attractive
+   runner-up and **loses on §36** — classification is not on the launch path.
+4. Still owed by the user, still blocked by the permission classifier
+   (correctly): `rm -rf ~/.ollama/models/models` — 36G orphaned. **Do not touch
+   the 48G `Glasshouse Windows CI.vmwarevm`.**
+
 ## Checkpoint — 2026-08-30, batch 55 in flight: 813 / 1280 (64%)
 
 **Board: three workers live, one accepted and parked, one packet ready and
