@@ -6,6 +6,41 @@
 
 Last updated: 2026-08-30 (Europe/Berlin)
 
+## Checkpoint — 2026-08-30, batch 55 continued: 821 / 1280 (64%)
+
+### Selection heuristics that DO NOT work on this map — read before choosing
+
+**"Fewest open lines" is misleading.** Ten phases sit one line from complete;
+six were checked against the register and **four are one line from done because
+that line is refused** — 1263/1267 are Cluster M, 1294 is a standing refusal,
+1158 is refused in `phase-30.md` itself. Only 514, 531 and 1594 survived, and
+none is yet Phase −1 verified.
+
+**Size by mechanism (§87), and the two shapes that worked:** several map lines
+that are facets of one call (Phase 30's five, one `store.context()`), or a
+phase whose first line is a mechanism and whose rest are its filters (34C's
+1431 + its rules). Both produced real packages; the second produced three
+closes and then six honest refusals.
+
+### The distinction worth carrying out of Phase 34C
+
+**A signal that reaches a decision is not the same as a signal the decision
+acts on.** The RPM-headroom figure genuinely arrives at
+`DisposableRouting::choose` — and is read in exactly one place, `score()`'s
+ranking contribution, while every place `choose` *removes* a candidate ignores
+it. A candidate at 0% headroom is ranked last and never excluded, which is a
+different claim from the line's word *"filter"*. Check which one a line asks
+for before crediting it.
+
+### A packet defect recorded against the orchestrator, not a worker
+
+`GH-ROUTING-FILTERS`'s packet **anchored toward refusal** — it pre-judged two
+lines, told the worker to *"expect"* a third to fail, and pre-framed two more as
+one mechanism. §44 says a packet's hypothesis is an anchor and must be labelled
+killable. The verdicts survived on their own evidence, but that was luck.
+**A packet on contested ground must say that disagreeing with it is a good
+outcome.**
+
 ## Checkpoint — 2026-08-30, batch 55 continued: 818 / 1280 (64%)
 
 **Three process rules landed today that change how you work. Read them before
