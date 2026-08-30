@@ -516,3 +516,63 @@ then packaging them would burn a round discovering this.
 phase, where that phase — read as written — does not actually supply the missing
 link. The register records blockers; it has not until now recorded whether the
 thing being waited on would satisfy them.
+
+
+## THE REGISTER'S BIGGEST CLAIM WAS FALSE — corrected 2026-08-30
+
+`GH-PRODUCER-CENSUS` re-derived it. **"There is no measurement channel in this
+build at all"** — repeated from `phase-9k.md`, and the reason lines 627–630 and
+all thirty-four of Phase 51 read as unreachable — **is wrong.**
+
+`evaluation_observations` shipped as **migration 15** (`database.rs:1515-1545`):
+`kind`, `outcome`, `subject`, `session_id`, a `feature`/`arm` A/B pair,
+`memory_id`. Its `kind` column deliberately carries **no SQL `CHECK`**
+(`database.rs:1521-1522`) so the vocabulary can grow, and `evaluation/mod.rs:89-90`
+says so: *"One variant, because this package lands one producer. Variants are
+added as producers land, never in advance."* One production writer exists today
+(`main.rs:4230` → `record_memory_retrieval`).
+
+**The earlier recon searched for `fn score|Score`. The channel is not called a
+score.** That is how a whole phase's blocker went stale without anyone noticing.
+
+**The blocker moves from "no channel" to "no measured quantity."** And when you
+ask which quantity, ~40 lines across six phases give one answer.
+
+### Nobody counts tokens — and the wall around it has a door
+
+`prompt_tokens|completion_tokens|total_tokens|cached_tokens` has **zero readers**
+tree-wide. `routing/evidence.rs:65-67` names four columns "not supplied", and
+`provider/resources.rs:952-954` prints **"Glasshouse does not count spend against
+this"** to the user.
+
+**Cluster L is right about the relay path and wrong as a blanket claim.**
+`gateway/ingress.rs:455-458` refuses to parse a relayed body — deliberate, and
+not to be revisited. **But on the disposable path Glasshouse makes the request
+itself and already deserializes the whole document**:
+`memory/extract/model.rs::content_of` (`:391`, production; `#[cfg(test)]` at
+`:470`) calls `serde_json::from_str` and walks `choices[0].message.content`.
+**`usage` is a sibling key, already parsed, already in memory.**
+
+So the largest group splits: **buildable today** on the disposable path
+(`GH-USAGE-READER`, dispatched), and **blocked on a design ruling** on the relay
+path. **Do not conflate them again.**
+
+### The ranked producer census — what to build, in order
+
+| # | missing producer | open lines | migration? |
+|---|---|---|---|
+| **P1a** | usage reader on Glasshouse's own model calls | ~12 | **no** — in flight |
+| **P1b** | usage reader on the relay path | 1333, 1263, 1158, most of 32E + 32G, much of 51 | no — **needs the `ingress` ruling** |
+| **P2** | a caller that dispatches a Classification/Reranking disposable job | ~38 (34C, 34D, 34E, 1089–1092, 1455/1456) | no |
+| **P3** | measured quantities for the evaluation channel | Phase 51 (34), 627–630 | no — **mostly P1+P2 renamed** |
+| **P4** | durable sink for a routing decision | 1757, 1766, 1767, 1769, 1307 | likely — **in flight, do not repackage** |
+| **P5** | Glasshouse as an MCP server | 1746 + Phase 43 (10) | no |
+| **P6** | file-path association on memories | Phase 28 (5) | **YES** |
+| **P7** | a retrieval-quality signal (score computed and dropped, `memory/search.rs:443`) | 1129, 1094, 939 | no |
+| **P8** | provider health reaching the router | 1599, 1433, 531 in part | no |
+| **P9** | a compaction event record | 310, 327, 1316, Phase 31 (7) | probably not |
+| **P10** | a model axis on the candidate set | 566, 569, 35A/35B unchecked | no |
+| **P11** | per-model capability ratings | 1475–1485 | likely |
+
+**Not work, so nobody re-derives them:** Cluster E, Cluster F, 442 (a `keyring`
+dependency decision), and the standing refusals 1294, 828, 829, 1323.
