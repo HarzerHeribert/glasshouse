@@ -721,3 +721,48 @@ with disjoint dirty sets produce disjoint rows, and a clean tree produces none.
 The characteristic mutation is making the writer store the whole index instead
 of the changed subset, which is exactly what a producer that associates every
 memory with every file would look like.
+
+
+## The signal-disposition class: audited, and it was one test
+
+`GH-SIGNAL-ENV-AUDIT`, after the interrupt "flake" turned out to be a
+`SIG_IGN`-on-entry defect. **`worker_access.rs` was the only test at risk and it
+is fixed.** Everything else either sends `SIGKILL` or probes with signal `0` —
+neither affected by an ignored disposition — or goes through the product's pty
+path.
+
+**And the product is structurally immune, for a reason nobody wired on purpose.**
+`portable-pty` 0.9.0 resets `SIGCHLD`/`SIGHUP`/`SIGINT`/`SIGQUIT`/`SIGTERM`/
+`SIGALRM` to `SIG_DFL` in its own `pre_exec` before every child, on every
+platform this project runs. That is the same fix `worker_access.rs` now applies
+by hand, already present one layer down for every real harness Glasshouse
+starts. **So a user launching `glasshouse` from a `SIG_IGN` context can still
+interrupt a worker** — and it is why `pty_smoke`'s interrupt tests passed in the
+same gate leg where the other one failed.
+
+**Recorded because it is load-bearing and undocumented**: a dependency upgrade
+that dropped that `pre_exec` would silently reintroduce the defect in
+production, where no test currently watches for it.
+
+## Phase 28's read door needs a ruling, and an invariant from this morning caught it
+
+`GH-MEMORY-FILE-OBSERVER` built migration 17 and **stopped** on `for_path`.
+Beyond `group()` being module-private, the real reason is a design question:
+
+**`group()` takes `Scored` — a record *plus a BM25 relevance* — and a path lookup
+has no relevance to supply.** Passing `0.0` would manufacture a relevance for a
+memory no query ever matched, which is exactly what `RetrievalResult.relevances`
+was made private to prevent. Its doc comment, written the same day by
+`GH-RETRIEVAL-SCORE`, says so: *"a caller that could insert into it could
+manufacture a relevance for a memory no query ever matched"*, and a zero *"would
+be a fabrication that reads as 'matched as badly as possible' rather than 'was
+not asked about'."*
+
+**An invariant landed in the morning stopped a fabrication in the evening**, one
+level below the one that package had already refused.
+
+**The ruling, so the next package does not re-derive it:** the honest shape is
+`Scored`'s relevance becoming `Option<f64>`, with `None` meaning *not asked
+about* — which is exactly the distinction the doc comment draws, and it
+*strengthens* the invariant rather than piercing it. A path lookup then keeps
+the ladder ordering that map line 1141 wants, without inventing a number.
