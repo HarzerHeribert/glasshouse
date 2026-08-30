@@ -3695,3 +3695,204 @@ run, not weaker.
 **So the attribution rule is directional, and §40 should be read that way:**
 a FAIL under unknown load is unattributed and needs a second run. A PASS under
 known heavy load is the best evidence available and should be kept.
+
+## §86 — ceremony must scale to difficulty, and investigation must name its successor
+
+The user's judgement on 2026-08-30, which opened this section:
+
+> the KPI done requirements in the capability map per hour work and our token
+> spent is kinda bad … verification is appropriate for substantial work packages
+> but needs to be dynamically scaled by how hard the task actually is to do
+
+> I watched you trying to nitpick the easiest tasks like a missing test or some
+> little bug over a big work package because you argued it would be easier —
+> like actually a human would procrastinate.
+
+This section tests that against the record rather than agreeing with it. **The
+headline claim survives and is worse than stated; the diagnosis inside it needs
+one correction.**
+
+### The measurement
+
+Boxes are counted from the map at each commit, not from any checkpoint's own
+claim about itself:
+
+```sh
+for r in $(git log --format=%h -- docs/product/capability-map.md); do
+  echo "$(git log -1 --format=%ad --date=format:'%Y-%m-%d %H:%M' $r)" \
+       "$(git show $r:docs/product/capability-map.md | grep -c '^☑')"
+done | tac
+```
+
+Token volume is `python3 scripts/usage-snapshot.py --glasshouse`. Active hours
+are the sum of gaps between consecutive commits where the gap is under an hour —
+a proxy, and it undercounts long unattended worker runs.
+
+| day | out | cache-create | boxes Δ | boxes/h | **out per box** | cc per box |
+|---|---|---|---|---|---|---|
+| 08-27 | 13.62M | 34.8M | +239 | 13.2 | **57k** | 146k |
+| 08-28 | 6.24M | 20.8M | +57 | 8.5 | **109k** | 365k |
+| 08-29 | 14.06M | 37.5M | +112 | 7.0 | **126k** | 335k |
+| 08-30 | 7.30M | 27.2M | **+9** | 1.1 | **811k** | 3.02M |
+
+**The shape that matters is that the last step is discontinuous.** 27→28 is
+1.9×, 28→29 is 1.2×, 29→30 is **6.4×**. Remaining-box difficulty rises smoothly
+by construction — the easy lines are consumed first — so it explains the first
+two steps and cannot explain the third.
+
+A second cut says the same thing without tokens. Boxes per box-advancing commit:
+**11.4 → 5.2 → 4.2 → 1.5**. The *number* of advancing commits barely moved (21,
+11, 27, 11); their yield fell 8×.
+
+    git log --format="%H" --after="$d 00:00" --before="$d 23:59" -- <path>   # per-area commit counts
+
+| day | commits | process-docs | scripts | code | map |
+|---|---|---|---|---|---|
+| 08-27 | 71 | 43 | 20 | 31 | 23 |
+| 08-28 | 39 | 24 | 2 | 9 | 11 |
+| 08-29 | 110 | 52 | 27 | 44 | 30 |
+| 08-30 | 57 | 36 | 10 | 24 | 13 |
+
+### Where the data corrects the framing, and it matters
+
+**Investigation is not the waste, and the ratio of investigation commits barely
+changed.** Process-doc commits per box-advancing commit ran 2.0 : 2.2 : 1.9 :
+3.3 — the last day is high but not a regime change. If meta-work volume were the
+disease, that row would have exploded and it did not.
+
+**What exploded is investigation that terminates in a document instead of a
+dispatch.** `docs/process/refusal-register.md` went from **280 lines to 969** on
+08-30 (`git show <rev>:docs/process/refusal-register.md | wc -l`) — **61% of the
+day's entire process-doc growth**, on the day the map moved +9. And the sharpest
+single instance: `1d708ca` at 17:09 proved a recorded blocker false and
+*unblocked 38 lines*. In the three hours and forty-five minutes that followed,
+the map went **813 → 808 → 809**. The finding was correct, valuable, and never
+became a package.
+
+**§83 predicted this exactly, one day earlier**, in this same file: *"the
+refusals are not an archive. They are the input to the next package."* It was
+written 08-29 and the largest refusal-documentation burst in the project's
+history happened 08-30. **A rule that lives only as prose does not bind.** That
+is the real lesson, and it is why the deliverable below is a numeric trigger and
+a CLAUDE.md table rather than another paragraph.
+
+**And the honest counterweight, computed rather than asserted.** Four audits have
+un-ticked **ten boxes** total (`c7eccb1` −2, `889da59` −1, `64a0d87` −2,
+`bd81e04` −5). That is 1.2% of 809 ticks, bought for a few dollars of read-only
+worker each, and it protects the meaning of every other tick — this project's
+entire value. Read-only recon is cheap and it pays: batch 45's six recons cost
+~$11 and assessed 255 lines. **The problem was never that investigation happened.
+It is that on 08-30 nothing downstream consumed it.** This session's own −4 delta
+is five *corrections*, which is not the same kind of loss as failing to close
+five, and should not be reported as if it were.
+
+### The tier, and what each one skips
+
+`assurance-economics.md` already had this — Phase 3 reuses Green/Amber/Red from
+`worker-capabilities.md`. It has never bound anything, for two reasons, and both
+are now fixed rather than restated:
+
+1. **It was gated behind unbuilt instrumentation** (Phases 0–2), so it read as
+   future work.
+2. **Its table adds requirements and names nothing to skip**, and it closes with
+   *"do not reduce assurance because a task looks small."* A tier that only adds
+   is not a tier; that sentence is why everything ran at Amber ceremony.
+
+The tier now lives in `CLAUDE.md` with an explicit skip column, and the entry
+criterion is deliberately answerable **from the packet you just wrote**, in under
+a minute, without opening the codebase:
+
+- **Green — the packet introduces no new decision.** Wiring an existing value to
+  an existing consumer; a `Display`/`Debug`/serde impl; a CLI flag forwarding to
+  a settled function; tests only; documentation or config literals.
+- **Amber — the packet introduces or changes a decision.** A branch, a
+  threshold, an ordering, a ranking, a persisted field, a public API shape.
+- **Red — the packet touches the risk list**, which is unchanged from
+  `worker-capabilities.md`: lifecycle, signals, shutdown, migrations, session
+  identity and resume, isolation, secrets, `#[cfg(...)]` platform code — or the
+  architecture is disputed.
+
+**Green skips the mutation.** This is the one that will feel wrong, so it is
+worth being precise about why it is safe. A mutation answers *"does a test watch
+this decision?"* — §80's whole catalogue of the four ways a mutation lies is
+about mis-locating the decision. **Where the change contains no decision, the
+mutation has nothing to be about**, and its most likely outcome is one of §80's
+false SURVIVEDs: a wiring line whose removal breaks compilation, or a target
+that does not hold the killing test. Green also skips the independent reviewer
+and the orchestrator's diff read; it does not skip Phase −1, and it does not
+skip a test that proves the production caller actually runs the code.
+
+**Phase −1 survives at every tier without exception.** It is two greps, it is
+enforced by `validate_round.py` at no cost, and `assurance-economics.md` records
+it as the only inefficiency class that is pure waste — batch 36's ~$30 that no
+downstream optimisation could recover.
+
+### The check that would have caught this session
+
+Three rules, chosen over the alternatives rather than listed beside them.
+
+**1. A validated, undispatched implementation packet outranks any new
+investigation.** This is the one that addresses the session directly: a
+validated packet sat on disk while four workers went out, of which one closed a
+box. `validate_round.py` passing is the entire trigger — no judgement, nothing
+to argue with. Its rider: **a co-edit is the normal case, not an exception.**
+Contention on `main.rs` is structural (§32, §77), and declining a co-edit must
+be written into the checkpoint with its specific reason. A decision made
+silently is the shape that produced this session.
+
+**2. An investigation package names the implementation package it unblocks,
+before dispatch.** Cheap, leading rather than lagging, and it would have caught
+`1d708ca`'s 38 unblocked lines going nowhere. It does not forbid investigation
+and it does not require predicting the answer — only naming what a positive
+answer would authorise.
+
+**3. Above 250k output tokens per net closed box over a two-day window, the
+next dispatch must be implementation**, and no investigation goes out until it
+is back under. This is the lagging backstop for the two above. 250k is 2× the
+worst healthy day (126k, 08-29) and deliberately loose, so it fires on a regime
+change rather than on a hard batch. **On 08-30 it reads 811k.**
+
+Rejected: a *floor on the share of live workers that must be box-closing*.
+Batch 45 ran six read-only recons alongside five implementers and that was
+correct — a share rule would have blocked the round the ledger calls its best
+parallelism result. The right constraint is on what investigation *produces*,
+not on how many of them run.
+
+**What `pipeline.sh` would need to tell a busy board from a productive one**, if
+a later package implements it — this one does not: at each fire, compute
+`grep -c '^☑'` on the map at `HEAD` and at the commit nearest the oldest live
+worker's start time. If the delta is ≤ 0 over four hours **and** two or more live
+workers are read-only, print the empty-board nag. That is the same signal as
+rule 3 at batch granularity, and it needs no new bookkeeping — the map's git
+history already carries it.
+
+### Where the orchestrator's own attention actually goes
+
+`scripts/usage-snapshot.py --glasshouse`, 2026-08-24..30: **60.22M output tokens
+across 213 project directories, of which the main checkout produced 21.98M** —
+36.5% of the project's entire output volume from one directory, and **6.2× the
+next seven worker directories combined** (3.56M). §74 measured this at 13.7M vs
+3.5M; the gap has widened, not closed.
+
+So `CLAUDE.md`'s *"reading every diff, every mutation target, every box decision
+and every commit stays with the orchestrator"* is worth testing, and it splits:
+
+- **Keep the diff of anything that decides something.** The catches are real and
+  recorded — batch 45's classify-caller refusal was noticed while applying the
+  patch, and the integrator's own mutation in batch 40 was worth more than the
+  worker's five.
+- **Stop paying for the caller check by hand.** All ten un-ticked boxes were
+  found by *audit workers*, after the orchestrator had read the diff and ticked
+  the box — and all ten are the shape `cluster-b.py` finds mechanically in
+  seconds. That is a measured miss rate on one specific question, and the
+  correct response is to run the script rather than read harder.
+- **Keep Phase −1, and treat it as the highest-value use of this context.**
+  Eleven consecutive rounds a worker corrected its packet and was right (batch
+  45). The orchestrator's defects are concentrated in what it *hands out*, not
+  in what it reviews.
+
+**The honest limit on all three.** The ledger records the diffs that caught
+something and does not record the diffs that caught nothing, so no hit rate can
+be computed from it and none is claimed here. The un-tick count is the one place
+where the misses *are* recorded, which is exactly why it is the one place this
+section is willing to move work off the orchestrator.

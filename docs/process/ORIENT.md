@@ -254,6 +254,7 @@ to do, and the orchestrator should follow its own rule.
 - **§83** — refusals accumulate; gather them by root cause and attack that
 - **§84** — a defect gets its own worker, not the whole line's attention
 - **§85** — `kill $(jobs -p)` is a no-op in a non-interactive shell, and load outlives the experiment
+- **§86** — ceremony must scale to difficulty, and investigation must name its successor
 
 ## Recent checkpoints
 

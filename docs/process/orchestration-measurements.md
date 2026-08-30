@@ -3619,3 +3619,122 @@ this family is ~50% red on Linux, so that batch simply won its coin flips. A
 parallel session running the gate four times for an unrelated reason found what
 one green run each could not — which is an argument for repeated runs on the
 platform that is not the developer's own.
+
+## 2026-08-30 — cost per box across four days, and the first regime change
+
+Commissioned as `GH-WORKFLOW-EFFICIENCY` after the user's judgement that
+*"the KPI done requirements in the capability map per hour work and our token
+spent is kinda bad."* Ruling and rules in practice **§86**; the numbers and the
+commands that produce them are here.
+
+### Method — do not trust a checkpoint's claim about itself
+
+Every box count is read from the map at the commit, not from a handoff:
+
+```sh
+for r in $(git log --format=%h -- docs/product/capability-map.md); do
+  echo "$(git log -1 --format=%ad --date=format:'%Y-%m-%d %H:%M' $r)" \
+       "$(git show $r:docs/product/capability-map.md | grep -c '^☑')"
+done | tac
+```
+
+`☑` is the tick; `- [x]` matches nothing in this map. Tokens are
+`python3 scripts/usage-snapshot.py --glasshouse`. "Active hours" sums the gaps
+between consecutive commits under one hour — a proxy that undercounts long
+unattended worker runs, so the boxes/h column is an upper bound on productivity,
+not a lower one.
+
+### The table
+
+| day | output | cache-create | boxes Δ | active h | boxes/h | **out per box** | cc per box |
+|---|---|---|---|---|---|---|---|
+| 2026-08-27 | 13.62M | 34.8M | +239 | 18.1 | 13.2 | **57k** | 146k |
+| 2026-08-28 | 6.24M | 20.8M | +57 | 6.7 | 8.5 | **109k** | 365k |
+| 2026-08-29 | 14.06M | 37.5M | +112 | 16.0 | 7.0 | **126k** | 335k |
+| 2026-08-30 | 7.30M | 27.2M | **+9** | 8.2 | 1.1 | **811k** | 3.02M |
+
+**The step is 1.9× → 1.2× → 6.4×.** Difficulty of the remaining boxes rises
+smoothly by construction and explains the first two. It does not step 6.4×
+overnight.
+
+Cost per box from this ledger's own earlier rounds, for scale: batch 35 $1.04,
+36 $1.34, 37 $1.00, 39 $1.44, 40 $2.51, 41 $1.67, 45 ~$53 for 23 boxes = $2.30.
+**The 2026-08-30 session recorded in `handoff.md` as batch 55 spent ~$35 of
+worker compute across four workers for one closed box.**
+
+### The implementation-to-investigation ratio, and where it does *not* support the framing
+
+    git log --format=%H --after="$d 00:00" --before="$d 23:59" -- <path> | wc -l
+
+| day | commits | process-docs | scripts | code | map | process-doc : box-advancing |
+|---|---|---|---|---|---|---|
+| 08-27 | 71 | 43 | 20 | 31 | 23 | 2.0 |
+| 08-28 | 39 | 24 | 2 | 9 | 11 | 2.2 |
+| 08-29 | 110 | 52 | 27 | 44 | 30 | 1.9 |
+| 08-30 | 57 | 36 | 10 | 24 | 13 | 3.3 |
+
+**The volume of investigation barely moved.** If meta-work quantity were the
+disease that row would have exploded, and it did not. What moved is the **yield
+of each box-advancing commit: 11.4 → 5.2 → 4.2 → 1.5**, an 8× fall while the
+count of such commits stayed flat (21, 11, 27, 11).
+
+### What actually changed on 08-30
+
+`docs/process/refusal-register.md`: **280 lines → 969**, +689 in one day, which
+is **61% of the day's entire `docs/process/` growth** (+1133).
+
+    h=$(git log --format=%H --before="2026-08-29 23:59" -1)
+    git show $h:docs/process/refusal-register.md | wc -l   # 280
+    wc -l docs/process/refusal-register.md                 # 969
+
+And the decisive single instance: **`1d708ca` at 17:09 proved a recorded blocker
+false and unblocked 38 lines.** Over the next 3h45m the map went 813 → 808 → 809.
+Nothing was dispatched against those 38 lines.
+
+**§83 was written on 08-29** — *"refusals are not an archive, they are the input
+to the next package"* — **and 08-30 produced the largest refusal-documentation
+burst in the project's history.** That is the finding: prose does not bind, which
+is why §86's output is a numeric trigger and a table in `CLAUDE.md`.
+
+### The counterweight, computed rather than assumed
+
+Investigation is not waste and the record says so. Four audits have un-ticked
+**ten boxes** — `c7eccb1` −2, `889da59` −1, `64a0d87` −2, `bd81e04` −5 — at a few
+dollars of read-only worker each. Ten is 1.2% of 809 ticks, and correcting them
+protects the meaning of the other 799, which is this project's whole product.
+Batch 45's six recons cost ~$11 and assessed 255 lines.
+
+**This session's −4 map delta is five corrections, not five failures**, and
+reporting it as a loss would be the same error in the opposite direction.
+
+### The orchestrator remains the largest single consumer, and the gap widened
+
+`python3 scripts/usage-snapshot.py --glasshouse`, 2026-08-24..30:
+
+| | output tokens |
+|---|---|
+| all Glasshouse dirs (213) | 60.22M |
+| **main checkout — the orchestrator** | **21.98M (36.5%)** |
+| next seven worker directories combined | 3.56M |
+
+**6.2× the next seven combined.** §74 measured 13.7M vs 3.5M on 08-24..28; the
+ratio has grown, not shrunk. The one place where the orchestrator's misses are
+recorded rather than invisible is the un-tick count above: **all ten were found
+by audit workers after the orchestrator had read the diff and ticked the box**,
+and all ten are `cluster-b.py`'s mechanical shape. That is the specific reading
+§86 moves off the orchestrator, and it is the only one, because it is the only
+one with a measured miss rate.
+
+### Open questions this entry creates
+
+1. **Does the 250k out-per-box trigger fire on a genuinely hard batch?** It is
+   set at 2× the worst healthy day. If it fires on a legitimate red-risk round,
+   raise it once and record why — do not disable it.
+2. **Does Green-tier skipping cost a defect?** Track every box closed at Green
+   and check whether any is later un-ticked. The un-tick count is 10; if Green
+   is wrong, that number moves and the tier is falsified by its own metric.
+3. **The ledger stopped at batch 45.** Batches 46–55 have no entry here, which
+   is `CLAUDE.md`'s "add every batch to its ledger" going unenforced for ten
+   batches — and they are exactly the batches where throughput fell. The next
+   orchestrator owes the batch-46..55 rows or an explicit decision to stop
+   requiring them.

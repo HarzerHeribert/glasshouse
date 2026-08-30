@@ -32,14 +32,10 @@ Glasshouse uses a spec-to-evidence, multi-harness development process.
   `docs/process/harness-hook-protocol.md`, `docs/process/orchestrator-prompt.md`
   — when the task actually reaches them.
 
-**Why this changed.** The old list said "read these eleven completely" and cost
-about **228,000 tokens**, paid before any work happened. Every orchestrator so
-far quietly improvised around it — reading the checkpoint, then grepping — which
-meant this file enforced its own scoping rule on workers and exempted the role
-that spends the most context. Measured 2026-08-29: `ORIENT.md` is **4,900
-tokens**, a 46× cut, and it is derived from the same documents. Nothing was
-deleted; the difference is that you now open a document because you need it
-rather than to discover whether you do.
+**Why this changed.** The old "read these eleven completely" list cost about
+**228,000 tokens** before any work happened; `ORIENT.md` is **4,900** and derives
+from the same documents. Nothing was deleted — you now open a document because
+you need it rather than to discover whether you do.
 
 ## If you are a worker, this list is not yours
 
@@ -179,23 +175,23 @@ invisible), runs fmt, and runs the blast radius. It refuses a dirty tree, a
 non-ancestor base, and any file two worktrees both touched.
 
 **Pass every finished worktree in one call. Do not integrate serially.** The
-interactions between patches are the part no worker can see, and they only
-appear once the diffs share a tree — so serial integration hides exactly what
-integration is for. Batch 47 measured both halves of this: adding a non-`Default`
-field to `SessionRecord` broke five struct literals inside *another* worker's
-files, and a schema bump broke eight migration-ladder tests in files no packet
-named. Neither worker could have found either alone; one combined
-`integrate.sh` run surfaced both. Attribution does not suffer, because the tool
-already refuses any file two worktrees both touched, so the patches are
-file-disjoint and the blast radius names the failing target.
+interactions between patches only appear once the diffs share a tree, so serial
+integration hides exactly what integration is for — batch 47's non-`Default`
+field on `SessionRecord` broke five struct literals inside *another* worker's
+files. Attribution does not suffer: the tool refuses any file two worktrees both
+touched, so the patches stay file-disjoint and the blast radius names the target.
 
 **It deliberately stops there.** It never commits, ticks a box, writes evidence,
 or runs a mutation. The mechanics caught nothing on their own in batch 45 —
 every real catch came from reading a diff or choosing a mutation, and the
 classify-caller refusal was noticed *while applying the patch*. Automating the
 mechanics is a win; delegating them to an agent would remove the exposure that
-produces the rulings. **Reading every diff, every mutation target, every box
-decision and every commit stays with the orchestrator.**
+produces the rulings. **The ruling, every packet's Phase −1, and the diff of
+anything that decides something stay with you.** Not *every* diff: ten wrongly
+ticked boxes have been corrected so far and **all ten were found by audit
+workers, after the orchestrator had read the diff and ticked it** — every one of
+them the "no production caller" shape `cluster-b.py` finds mechanically. Run the
+script instead, and spend the reading on decisions (§86).
 
 **Before the gate, run `scripts/blast-radius.sh`.** It maps the files you changed
 to the cargo test targets that could break, and runs them. Practice §79 exists
@@ -231,6 +227,44 @@ reasoning and the one trap. Start Ox with the normal `ox` TUI—never
 `ox run` or a headless loop. Follow the worker do/don't rules and the safe hook
 protocol rather than personal global routing configuration.
 
+## Scale the ceremony to the task, and prove the board is closing boxes
+
+Output tokens per net closed box, by day: **57k → 109k → 126k → 811k**
+(2026-08-27..30, §86). The last step is 6.4× in a day, and box difficulty does
+not step 6.4× overnight. Two rules follow, and both are meant to be applied from
+memory in seconds.
+
+**1. Every packet is Green, Amber or Red.** Decide it from the packet you just
+wrote, not from the codebase — it takes under a minute. This is the scale already
+in `worker-capabilities.md`; do not invent a second one.
+
+| tier | entry criterion | it owes | it **skips** |
+|---|---|---|---|
+| **Green** | adds no new decision — wires an existing value to an existing consumer, a `Display`/serde impl, a flag forwarding to a settled function, tests only, docs or config literals | the box's own targeted test, plus one assertion that the production caller runs it | mutation, independent reviewer, orchestrator diff read, and any blast radius beyond the named target |
+| **Amber** | adds or changes a decision — a branch, threshold, ordering, ranking, persisted field, or public API shape | targeted tests, blast radius, **one** mutation on the decision the box names | the independent reviewer, unless the worker flags a decisive claim; and you read the diff of the decision, not of the whole package |
+| **Red** | PTY/process lifecycle, signals, shutdown, migrations, session identity or resume, project isolation, secrets, `#[cfg(...)]` platform code — or a disputed architecture | full relevant regression, platform legs, the semantic mutation suite, an independent verifier | nothing |
+
+**Phase −1 is never skipped, at any tier.** It is the cheapest check here and
+guards the only spend the ledger calls pure waste. *Uncertain tier escalates* —
+but "this feels small" is not uncertainty, it is a Green.
+
+**2. Three rules that keep the board closing boxes.** Each fires without
+interpretation:
+
+- **A validated, undispatched implementation packet outranks any new
+  investigation.** `validate_round.py` passing is the whole trigger. Declining
+  it for a contended file is not free: **a co-edit is the normal case** —
+  `coedit.sh claim` — and declining one needs a specific reason written into the
+  checkpoint, not a judgement made silently.
+- **An investigation package names, in its own packet, the implementation
+  package it unblocks.** No named successor, no dispatch. A refusal-register row
+  is not a deliverable; the package it routes to is (§83).
+- **Above 250k output tokens per net closed box over the last two days, the
+  next dispatch must be implementation** — and no investigation goes out until
+  it is back under. Two commands: `python3 scripts/usage-snapshot.py
+  --glasshouse`, and `git show <rev>:docs/product/capability-map.md | grep -c
+  '^☑'` at each end of the window. 250k is 2× the worst healthy day measured.
+
 ## An orchestrator does not idle, and does not hand off cold
 
 **`scripts/pipeline.sh --watch 600` is not advisory. When it fires, dispatch —
@@ -261,11 +295,9 @@ happened yet.
 
 ## Every script, because naming only some of them cost a session
 
-**CLAUDE.md named fifteen of these and the repo has twenty-seven.** An
-orchestrator on 2026-08-29 queued a package behind `main.rs` for a whole round
-and wrote a "wait for the file to free" packet — with `scripts/coedit.sh`
-sitting unread, and practice **§77** in the index it had already loaded. It had
-the pointer and did not follow it. The fix is a list, not more prose.
+**CLAUDE.md named fifteen of these and the repo has twenty-seven**, which cost a
+round queued behind `main.rs` with `scripts/coedit.sh` sitting unread and §77 in
+an index already loaded. The fix is a list, not more prose.
 
 **Round mechanics:** `new-packet.sh` · `validate_round.py` · `dev/new-worker.sh`
 · `worker-watch.sh` · `worker-ack.sh` · `worker-done.sh` · `close-worker.sh` ·

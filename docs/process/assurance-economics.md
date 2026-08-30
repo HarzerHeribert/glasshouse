@@ -323,17 +323,35 @@ full-suite runs.
 
 ## Phase 3 — adaptive assurance depth
 
+**This phase is live as of 2026-08-30 and is no longer gated behind Phases 0–2.**
+It was written as future work, and the consequence was measured: every package
+ran at Amber ceremony regardless of difficulty, and output tokens per closed box
+reached **811k on 2026-08-30 against 57k on 08-27** (practice §86). The
+instrumentation in Phases 0–2 would make this *better*; it was never what made it
+*safe*.
+
 Reuse the Green / Amber / Red taxonomy already in
 `docs/process/worker-capabilities.md`. Do not invent a second scale.
 
-| | assurance |
-|---|---|
-| **Green** | targeted tests, static checks, standard worker evidence |
-| **Amber** | broader regression, independent orchestrator verification, targeted semantic mutations |
-| **Red** | full relevant regression, strong independent review, semantic mutation suite, capability-wide verification, platform verification where applicable |
+**A tier that adds requirements and removes none is not a tier**, which is what
+the first version of this table was. The skip column is the operative one.
 
-**Uncertain impact escalates.** Do not reduce assurance because a task looks
-small.
+| | entry — decidable from the packet, in under a minute | assurance | **skips** |
+|---|---|---|---|
+| **Green** | introduces no new decision: wiring an existing value to an existing consumer, a `Display`/serde impl, a flag forwarding to a settled function, tests only, docs or config literals | targeted tests, static checks, standard worker evidence, **plus one assertion that the production caller runs it** | the mutation, the independent reviewer, the orchestrator's diff read, and any blast radius past the named target |
+| **Amber** | introduces or changes a decision: a branch, threshold, ordering, ranking, persisted field, or public API shape | broader regression, blast radius, **one** targeted semantic mutation on the decision the box names | the independent reviewer unless a decisive claim is flagged; the orchestrator reads the decision's diff, not the package's |
+| **Red** | the risk list above — lifecycle, signals, shutdown, migrations, session identity/resume, isolation, secrets, platform-conditional code — or disputed architecture | full relevant regression, strong independent review, semantic mutation suite, capability-wide and platform verification | nothing |
+
+**Why Green may skip the mutation.** A mutation answers *"does a test watch this
+decision?"* Where the change contains no decision the mutation has nothing to be
+about, and its likely outcome is one of practice §80's false SURVIVEDs — a
+wiring line whose removal breaks compilation, or a target that does not hold the
+killing test. This is not "small tasks need less proof"; it is that the
+instrument does not fit the change.
+
+**Uncertain impact escalates**, and Phase −1 runs at every tier without
+exception. But *"this feels small"* is not uncertainty — it is a Green, and
+naming it that is the point of the table.
 
 ---
 
