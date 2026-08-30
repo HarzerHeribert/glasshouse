@@ -137,6 +137,39 @@ printf '\033[1m=== plan ===\033[0m\n'
 [ ${#TESTS[@]} -gt 0 ] && echo "  --test ${TESTS[*]}"
 [ ${#BINS[@]}  -gt 0 ] && echo "  --bin  ${BINS[*]}"
 
+# Platform-conditional code: warn that this tool is macOS-only evidence.
+#
+# WHY: on 2026-08-30 the full gate returned 13 PASS / 3 FAIL on a tree this
+# script had called green. All three failures were in `pty/mod.rs`'s
+# platform-conditional code — a Windows build error (`-D warnings` on an unused
+# constant that is `None` there) and a Linux test failure (a hazard that exists
+# on macOS/BSD and *not* on Linux, so a ceiling derived from the documented
+# constant rather than measured was protecting against nothing).
+#
+# This script runs on one platform. That is not a defect in it — but it means
+# "blast radius green" is never evidence about the other two, and nineteen
+# commits accumulated before anyone ran the gate that could see them. So say so,
+# loudly, exactly when it matters.
+if [ "${#FILES[@]}" -gt 0 ]; then
+  plat=""
+  for f in "${FILES[@]}"; do
+    [ -f "$f" ] || continue
+    case "$f" in *.rs)
+      if grep -qE '#\[cfg\((target_os|unix|windows)|cfg!\((unix|windows|target_os)' "$f" 2>/dev/null; then
+        plat="$plat $f"
+      fi ;;
+    esac
+  done
+  if [ -n "$plat" ]; then
+    printf '\n\033[33m=== PLATFORM-CONDITIONAL CODE CHANGED ===\033[0m\n'
+    printf '  These files contain cfg(unix/windows/target_os):\n'
+    for f in $plat; do printf '    %s\n' "$f"; done
+    printf '  \033[33mThis script runs on THIS platform only. A green result here is\n'
+    printf '  NOT evidence about the other two.\033[0m Run the full gate before\n'
+    printf '  believing it:  scripts/ci-local.sh --macos --linux --windows-vm\n'
+  fi
+fi
+
 if [ "$DRY" -eq 1 ]; then echo; echo "blast-radius: --dry-run, nothing executed"; exit 0; fi
 
 # ---- 4. run ----------------------------------------------------------------
