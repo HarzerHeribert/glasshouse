@@ -679,3 +679,45 @@ only ever added by hand, after the validator refuses. Worth closing in
 `new-packet.sh` — and until then, **when a peer joins a file after a worker is
 already live, the live worker must be told**, because its packet was written
 when it was alone. That relay was sent.
+
+
+## Phase 28 scoped: the producer is OBSERVATION, and 1139's qualifier is unsatisfiable
+
+`GH-FILE-MEMORY-RECON`, 2026-08-30. It corrected **four** claims it was handed
+(§81), including that the `memories` column list in circulation is **migration
+4's**: migrations 6, 10 and 13 have since added eighteen more, for **30 columns**
+(`database.rs:654-668`, `:1058-1070`, `:1298`). None is a path, so the
+conclusion survives — but the evidence for it had drifted.
+
+**No existing table or column can hold a file association.** `memories` has no
+path column; `evaluation_observations` is a *deliberately prunable* ledger whose
+`subject` is documented as *"never a count key on its own"*;
+`checkpoints.document` holds real observed paths but at **session** granularity,
+in opaque JSON, reachable only by a full scan.
+
+**So a migration is needed — migration 17, one table plus one index**, reusing
+migration 11's project-scope trigger pair. No `ALTER`, no rebuild, no existing
+`CHECK` touched, `lifecycle_events` untouched — **Cluster G's 310 / 327 / 1316
+keep their refusal exactly.**
+
+### The finding that decides the package
+
+**On the production automatic extraction path the model's input contains no
+prose at all.** So map line 1139's own qualifier — *"when extraction can
+identify them reliably"* — is **not merely unmet there, it is unsatisfiable.**
+
+**The honest producer is observation, not extraction**:
+`WorkingTreeStatus::changed_files` (`checkpoint/git.rs:117-126`) already ships
+in production at four call sites. Rows therefore carry provenance **`observed`**
+and **never `referenced`** — because *observed-dirty* is not *explicitly
+referenced*, and asserting otherwise closes a box by fabricating a producer.
+
+**`GH-MEMORY-FILE-OBSERVER` is dispatched and closes ZERO of Phase 28's five
+boxes, deliberately.** That is the fourth producer package this week to close
+nothing on purpose. The consumer, and the boxes, come after.
+
+**§79's fifth question is answered**: the value genuinely varies — two sessions
+with disjoint dirty sets produce disjoint rows, and a clean tree produces none.
+The characteristic mutation is making the writer store the whole index instead
+of the changed subset, which is exactly what a producer that associates every
+memory with every file would look like.
