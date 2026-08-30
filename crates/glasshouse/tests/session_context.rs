@@ -31,6 +31,7 @@ use clap::Parser;
 use rusqlite::Connection;
 
 use glasshouse::checkpoint::{Checkpoint, CheckpointReason, Handoff, ProjectCheckpoints};
+use glasshouse::config::UserConfig;
 use glasshouse::session::{
     AdvisoryCacheState, CacheState, CheckpointRecency, NewSession, ProjectSessions, SessionId,
     SessionLifecycle, SessionStore, TaskContinuity,
@@ -363,6 +364,123 @@ fn a_session_recorded_before_the_migration_starts_counting_at_its_first_compacti
         fixture.observed_compactions(&id),
         Some(1),
         "an uncounted row must start counting rather than stay uncountable for ever"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Map line 1171 — refresh a portable checkpoint before intentional compaction
+// ---------------------------------------------------------------------------
+
+/// **Line 1171, acceptance 1.** A session with an existing checkpoint gets it
+/// refreshed — `created_at` moves forward — when `PreCompact` fires, through
+/// the shipped binary.
+#[test]
+fn a_precompact_hook_refreshes_an_existing_checkpoints_created_at() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let id = {
+        let sessions = fixture.sessions();
+        let store = sessions.store();
+        store.create(NewSession::embedded("codex")).unwrap().id
+    };
+
+    store_checkpoint(&fixture, &id, 1_700_000_000);
+    let before = latest_checkpoint(&fixture, &id).created_at;
+
+    fixture.hook(&id, "PreCompact");
+
+    let after = latest_checkpoint(&fixture, &id).created_at;
+    assert!(
+        after > before,
+        "a refreshed checkpoint must move forward in time: before {before}, after {after}"
+    );
+}
+
+/// **Line 1171, acceptance 2 — the ruling's own test.** The refreshed
+/// checkpoint keeps the reason the previous one recorded rather than
+/// stamping `TaskBoundary`: a compaction is not a turn ending, and
+/// `CheckpointReason` has no third value honest enough to invent instead.
+#[test]
+fn a_precompact_hook_preserves_a_manual_checkpoints_reason() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let id = {
+        let sessions = fixture.sessions();
+        let store = sessions.store();
+        store.create(NewSession::embedded("codex")).unwrap().id
+    };
+
+    store_checkpoint_with_reason(&fixture, &id, 1_700_000_000, CheckpointReason::Manual);
+
+    fixture.hook(&id, "PreCompact");
+
+    assert_eq!(
+        latest_checkpoint(&fixture, &id).reason,
+        CheckpointReason::Manual,
+        "compaction must never restamp a manual checkpoint as a task boundary"
+    );
+}
+
+/// **Line 1171, acceptance 3.** A session with no checkpoint gets none
+/// invented, and the hook still succeeds: `store.latest_for(id)? == None` is
+/// the whole of "when practical".
+#[test]
+fn a_precompact_hook_invents_no_checkpoint_for_a_session_that_never_had_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let id = {
+        let sessions = fixture.sessions();
+        let store = sessions.store();
+        store.create(NewSession::embedded("codex")).unwrap().id
+    };
+
+    fixture.hook(&id, "PreCompact");
+
+    let checkpoints = ProjectCheckpoints::open(&fixture.runtime).unwrap();
+    assert!(
+        checkpoints.store().latest_for(&id).unwrap().is_none(),
+        "a session that never had a checkpoint must not get one invented at compaction time"
+    );
+}
+
+/// **Line 1171, acceptance 4 — pins the gating ruling.** With automatic
+/// checkpoints disabled, `PreCompact` refreshes nothing, but the compaction
+/// count still increments: the count sits outside the `automatic_checkpoint`
+/// gate, deliberately, the same way it already sits outside
+/// `memory_extraction`.
+#[test]
+fn a_precompact_hook_with_automatic_checkpoints_disabled_refreshes_nothing_but_still_counts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let id = {
+        let sessions = fixture.sessions();
+        let store = sessions.store();
+        store.create(NewSession::embedded("codex")).unwrap().id
+    };
+    store_checkpoint(&fixture, &id, 1_700_000_000);
+    let before = latest_checkpoint(&fixture, &id).created_at;
+
+    let mut user = UserConfig::load(fixture.runtime.paths())
+        .expect("a fresh fixture has no config file yet, which loads as the default");
+    user.set_automatic_checkpoint(Some(false));
+    user.save(fixture.runtime.paths())
+        .expect("the user config layer must be writable in the fixture's own tempdir");
+
+    fixture.hook(&id, "PreCompact");
+
+    assert_eq!(
+        latest_checkpoint(&fixture, &id).created_at,
+        before,
+        "automatic_checkpoint=false must leave an existing checkpoint untouched"
+    );
+    assert_eq!(
+        fixture.observed_compactions(&id),
+        Some(1),
+        "the compaction count is gated independently and must still increment"
     );
 }
 
@@ -736,13 +854,22 @@ fn a_checkpoint_written_in_the_same_second_as_the_last_activity_is_current() {
 }
 
 fn store_checkpoint(fixture: &Fixture, session: &SessionId, created_at: i64) {
+    store_checkpoint_with_reason(fixture, session, created_at, CheckpointReason::TaskBoundary);
+}
+
+fn store_checkpoint_with_reason(
+    fixture: &Fixture,
+    session: &SessionId,
+    created_at: i64,
+    reason: CheckpointReason,
+) {
     let checkpoints = ProjectCheckpoints::open(&fixture.runtime).unwrap();
     checkpoints
         .store()
         .save(Checkpoint::capture(
             session,
             "codex",
-            CheckpointReason::TaskBoundary,
+            reason,
             created_at,
             &fixture.root,
             Handoff {
@@ -752,6 +879,19 @@ fn store_checkpoint(fixture: &Fixture, session: &SessionId, created_at: i64) {
             },
         ))
         .unwrap();
+}
+
+/// The most recent stored checkpoint for `session`, unwrapped: every caller
+/// in this file uses it after seeding one, so a missing checkpoint is a test
+/// bug, not a case to handle.
+fn latest_checkpoint(fixture: &Fixture, session: &SessionId) -> Checkpoint {
+    ProjectCheckpoints::open(&fixture.runtime)
+        .unwrap()
+        .store()
+        .latest_for(session)
+        .unwrap()
+        .expect("a checkpoint must be stored for this session")
+        .checkpoint
 }
 
 // ---------------------------------------------------------------------------

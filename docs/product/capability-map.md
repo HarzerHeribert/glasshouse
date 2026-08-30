@@ -1168,7 +1168,7 @@ Phase 31 — Compaction-aware behavior
 
 ☐ Never compact a session solely because its prompt cache is estimated to be cold.
 ☐ Prefer continuing a relevant native session when its contextual value outweighs the cost of rehydrating it.
-☐ Prefer creating or refreshing a portable checkpoint before intentional compaction when practical.
+☑ Prefer creating or refreshing a portable checkpoint before intentional compaction when practical.
 ☐ Prefer compaction at semantic task boundaries over arbitrary elapsed-time boundaries.
 ☐ Allow the native harness to perform its own compaction mechanism rather than replacing it with a Glasshouse-specific history format.
 ☐ Record enough pre-compaction durable memory that important project decisions do not depend solely on a lossy native compact summary.

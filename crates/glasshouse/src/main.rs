@@ -2696,6 +2696,62 @@ fn checkpoint_after_turn(runtime: &Runtime, id: &SessionId, harness: &str) {
     }
 }
 
+/// Map line 1171: refresh a session's portable checkpoint just before the
+/// harness compacts its own context, so the handoff a fresh window would
+/// bootstrap from reflects where the repository actually stands rather than
+/// wherever it stood at the last completed turn.
+///
+/// # Refresh, not a new kind of checkpoint
+///
+/// This mirrors [`checkpoint_after_turn`] in every respect but one: it
+/// preserves `previous.checkpoint.reason` instead of stamping
+/// [`CheckpointReason::TaskBoundary`]. A compaction is not a turn ending, so
+/// stamping `TaskBoundary` would misdescribe why the checkpoint exists — and
+/// `CheckpointReason` has exactly two variants, both pinned by a SQL `CHECK`,
+/// so there is no third value honest enough to invent instead. What moves is
+/// `created_at` and the Git position; the reason a person or agent already
+/// gave the checkpoint does not change because the harness is about to
+/// compact.
+///
+/// # `store.latest_for(id)?` returning `None` is the whole of "when practical"
+///
+/// A session that has never had a checkpoint taken gets nothing here,
+/// silently — there is no previous handoff to carry forward and nothing
+/// honest to invent, exactly as [`checkpoint_after_turn`] already declines.
+///
+/// # Nothing here can hurt the session
+///
+/// Same stance as its neighbour: a checkpoint that cannot be refreshed is
+/// logged and this returns, never propagating an error back to the hook that
+/// is running inside somebody's coding session.
+fn checkpoint_before_compaction(runtime: &Runtime, id: &SessionId, harness: &str) {
+    let outcome = (|| -> anyhow::Result<()> {
+        let checkpoints = ProjectCheckpoints::open(runtime)?;
+        let store = checkpoints.store();
+        let Some(previous) = store.latest_for(id)? else {
+            return Ok(());
+        };
+        let refreshed = Checkpoint::capture(
+            id,
+            harness,
+            previous.checkpoint.reason,
+            store.now(),
+            runtime.project().root(),
+            previous.checkpoint.handoff.clone(),
+        );
+        store.save(refreshed)?;
+        Ok(())
+    })();
+
+    if let Err(err) = outcome {
+        tracing::warn!(
+            session = %id,
+            error = %format!("{err:#}"),
+            "could not refresh the checkpoint before compaction"
+        );
+    }
+}
+
 /// Phase 21 line 834's production caller: the cheap or local model the user
 /// actually chose, ready to be asked.
 ///
@@ -3547,6 +3603,16 @@ fn report_hook_with(
                         model(&id),
                         glasshouse::memory::ExtractionTrigger::BeforeCompaction,
                     );
+                }
+                // Map line 1171 — *"prefer creating or refreshing a portable
+                // checkpoint before intentional compaction when practical"*.
+                // Gated by `automatic_checkpoint`, the same independent
+                // switch `checkpoint_after_turn` answers to below, and
+                // deliberately **not** `memory_extraction`: checkpoints and
+                // extraction are separate capabilities and turning one off
+                // must leave the other exactly as it was.
+                if automatic_checkpoint_enabled(runtime) {
+                    checkpoint_before_compaction(runtime, &id, &record.harness);
                 }
                 return Ok(());
             }
