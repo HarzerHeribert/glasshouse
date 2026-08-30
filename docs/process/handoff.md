@@ -175,6 +175,31 @@ precisely the failure CLAUDE.md already records costing a round.
 **So: `coedit.sh release <file>` belongs immediately after the integration that
 reconciles it**, in the same turn, the way `worker-ack.sh` follows a review.
 
+**I wrote that and then did it again two hours later.** Same file, same gap, the
+Stop hook again the only thing that caught it. Writing a rule into the handoff
+did not change my behaviour; only the hook did. **The honest conclusion is that
+this belongs in `integrate.sh`'s closing output as a named next step, or in the
+hook as a pre-integration check — not as prose in this file.** Recorded as owed
+work rather than as another resolution.
+
+### §77's fourth measurement — the closest to a real collision so far
+
+`main.rs` again had two claimants: `disposable-route-sink` (writes in
+`disposable_extraction_model`) and `usage-reader` (edits the `rx.recv_timeout`
+match inside `run_extraction`) — **adjacent regions in the same call path**, the
+nearest this protocol has come to genuine overlap.
+
+The first landed and was integrated. The second was still live, based on a
+commit **before** those changes. Reconciliation was therefore not "do both
+patches agree" but *"does the live worker's patch still apply to a tree its peer
+has already changed"* — **tested with `git apply --check` rather than reasoned
+about, and it applied cleanly.** Both intents coexist, no merge was written.
+
+That is a new shape worth naming: **when one claimant integrates before another
+finishes, verify the outstanding patch against the landed tree at release time.**
+A barrier released on the assumption that disjoint-at-claim means
+disjoint-at-merge would have deferred the discovery to `integrate.sh`.
+
 ### Next action
 
 **Run `scripts/ci-local.sh --macos --linux --windows-vm` when the board quiets.**
