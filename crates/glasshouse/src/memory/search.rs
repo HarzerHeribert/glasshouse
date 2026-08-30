@@ -33,11 +33,13 @@
 //! this is asserted directly in the integration tests rather than trusted by
 //! reading the manual once.
 
+use std::collections::HashMap;
+
 use super::policy::retrieval_weight;
 pub use super::policy::{LadderRung, ladder_rung};
 use super::store::{
-    MemoryAuthority, MemoryKind, MemoryRecord, MemoryStatus, MemoryStore, MemoryStoreError,
-    row_to_record,
+    MemoryAuthority, MemoryId, MemoryKind, MemoryRecord, MemoryStatus, MemoryStore,
+    MemoryStoreError, row_to_record,
 };
 
 /// How much of a project's memory a search is allowed to see.
@@ -74,7 +76,15 @@ pub const DEFAULT_SEARCH_LIMIT: usize = 20;
 /// [`MemoryAuthority::Decision`]: line 929 names exactly the two classes
 /// Glasshouse treats as rules nobody may quietly work around, not every
 /// class capable of directing current work.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// # `Eq` is not derived, and the reason is the relevance
+///
+/// A relevance is an `f64`, and `f64` is [`PartialEq`] but not [`Eq`]. The
+/// derive was dropped rather than the field hidden from equality: two
+/// retrievals that returned the same memories at different relevances are
+/// not the same retrieval, and pretending otherwise would be the only thing
+/// worse than losing a trait nothing in this crate uses.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RetrievalResult {
     /// Currently active invariants and constraints, in the relevance/decay
     /// order [`MemoryStore::search`] produced them.
@@ -84,6 +94,96 @@ pub struct RetrievalResult {
     /// authority is invariant or constraint but that is no longer active,
     /// which is history rather than a current rule.
     pub other: Vec<MemoryRecord>,
+    /// What each returned memory scored on this query — see
+    /// [`RetrievalResult::relevance`], which is the only way to read it.
+    ///
+    /// Private, unlike the two groups above, so that the one invariant this
+    /// map has cannot be broken from outside: **every entry was produced by
+    /// an actual retrieval.** A caller that could insert into it could
+    /// manufacture a relevance for a memory no query ever matched, which is
+    /// precisely the fabricated number [`super::inject::briefing`]'s refusal
+    /// exists to prevent.
+    relevances: HashMap<MemoryId, f64>,
+}
+
+impl RetrievalResult {
+    /// What `id` scored on the query that produced this result, or `None` if
+    /// `id` was not one of the memories it returned.
+    ///
+    /// `None` is a real answer and the only honest one for a memory this
+    /// retrieval never saw: there is no relevance to report, and a zero would
+    /// be a fabrication that reads as "matched as badly as possible" rather
+    /// than "was not asked about". A search that matched nothing therefore
+    /// answers `None` to every question, rather than `Some(0.0)` to some of
+    /// them.
+    ///
+    /// # This is a relevance, and it is deliberately not a confidence
+    ///
+    /// SQLite's `bm25()` scores how well one memory's indexed text matched
+    /// one query against **this project's own corpus statistics** — term
+    /// frequency, document length, and how many other memories in this table
+    /// contain the same terms. More negative is a better match (see the
+    /// module documentation), so the scale is unbounded below and has no
+    /// natural zero.
+    ///
+    /// Three consequences, and each one is a reason not to threshold it:
+    ///
+    /// - **It is not calibrated.** The same number means different things for
+    ///   two different queries, and for the same query against two different
+    ///   projects. There is no constant of which *"below this, the retrieval
+    ///   was poor"* is a true statement, so a threshold would be a number
+    ///   somebody picked rather than a fact about the retrieval.
+    /// - **It is not the order the results came back in.**
+    ///   [`MemoryStore::search`] ranks by [`LadderRung`] first, breaks ties
+    ///   *within* one rung by this number multiplied by a decay weight, and
+    ///   then `demote_thin_decisions` permutes again. Reading it as "why this
+    ///   memory came first" is wrong across rungs.
+    /// - **It measures the match, not the memory.** Whether a memory is worth
+    ///   putting into a session's context is a question about the memory's
+    ///   authority, currency and scope. None of those is in here.
+    ///
+    /// So map line 1129 — *"avoid injecting memory when retrieval confidence
+    /// is low"* — is **not** satisfied by comparing this against a constant,
+    /// and [`super::inject::briefing`] still refuses it. That function's
+    /// documentation carries the three objections that survive this method
+    /// existing.
+    ///
+    /// # Why the raw match and not the blended ranking score
+    ///
+    /// [`MemoryStore::search`] also computes `relevance × retrieval_weight` —
+    /// the number it actually sorts on inside a rung. That one is not offered
+    /// here, and the difference is the whole reason this method is worth
+    /// having: `super::policy::retrieval_weight` reads a memory's authority,
+    /// age, validation state and project phase and **never sees the query
+    /// text**. Blending it in yields a number that is high for an ancient
+    /// invariant no matter what was asked — exactly the query-blind signal
+    /// `inject.rs` refuses to build a gate from. It is also wall-clock
+    /// dependent, so the same store and the same query yield a different
+    /// value tomorrow.
+    ///
+    /// The raw match is the one quantity in this module that varies with the
+    /// query and with nothing else. Anything inside this module that
+    /// genuinely wants the blend can compute it: the record carries its own
+    /// authority, timestamps and phase, and `retrieval_weight` is the same
+    /// function [`MemoryStore::search`] calls.
+    pub fn relevance(&self, id: &MemoryId) -> Option<f64> {
+        self.relevances.get(id).copied()
+    }
+}
+
+/// One search hit and the BM25 relevance the query gave it, kept together
+/// from the moment the row is decoded until the moment the two groups of
+/// [`RetrievalResult`] are built.
+///
+/// A pair rather than a field on [`MemoryRecord`], because a relevance is a
+/// property of *this retrieval* and not of the memory: the same record scores
+/// differently for a different query, and a record read by
+/// [`MemoryStore::get`] has no relevance at all. Putting it on the record
+/// would make that absence unrepresentable except as a lie.
+#[derive(Debug, Clone)]
+struct Scored {
+    record: MemoryRecord,
+    relevance: f64,
 }
 
 /// Whether a memory is a *currently binding* invariant or constraint — see
@@ -99,9 +199,14 @@ fn is_current_invariant_or_constraint(record: &MemoryRecord) -> bool {
 
 /// Split one relevance-ordered result list the way [`RetrievalResult`]
 /// describes. A stable partition — neither group is re-sorted.
-fn group(records: Vec<MemoryRecord>) -> RetrievalResult {
+///
+/// The relevance travels sideways rather than into either group: a memory
+/// keeps the score it earned whichever group it lands in, and the grouping
+/// cannot change a number it does not touch.
+fn group(hits: Vec<Scored>) -> RetrievalResult {
     let mut grouped = RetrievalResult::default();
-    for record in records {
+    for Scored { record, relevance } in hits {
+        grouped.relevances.insert(record.id.clone(), relevance);
         if is_current_invariant_or_constraint(&record) {
             grouped.invariants_and_constraints.push(record);
         } else {
@@ -332,12 +437,50 @@ impl<'a> MemoryStore<'a> {
     /// scoped to the memories this query actually matched, not the whole
     /// project: Phase 22 asks that a conflict be flagged, not that every
     /// memory be compared against every other one on every search.
+    ///
+    /// # The relevance is no longer thrown away
+    ///
+    /// This method still returns bare records, because a caller that wanted a
+    /// list of memories before wants one now. The BM25 relevance every hit
+    /// earned survives the call on the other door:
+    /// [`MemoryStore::search_grouped`] returns a [`RetrievalResult`], and
+    /// [`RetrievalResult::relevance`] reads it back by
+    /// [`super::store::MemoryId`]. **Read that method before using the
+    /// number** — it is a within-query match score, not a confidence, and it
+    /// must not be thresholded.
     pub fn search(
         &self,
         text: &str,
         scope: SearchScope,
         limit: usize,
     ) -> Result<Vec<MemoryRecord>, MemoryStoreError> {
+        Ok(self
+            .search_scored(text, scope, limit)?
+            .into_iter()
+            .map(|hit| hit.record)
+            .collect())
+    }
+
+    /// [`MemoryStore::search`] with each hit's BM25 relevance still attached.
+    ///
+    /// The one line of [`MemoryStore::search`] that is not shared: turning
+    /// free text into a `MATCH` expression. Everything after it — the SQL,
+    /// the project scoping, the conflict flagging, the ladder, the decay
+    /// weighting, the thin-decision demotion and the truncation — is
+    /// `search_matching`, so this door and the injection door cannot rank
+    /// differently.
+    ///
+    /// Private because [`RetrievalResult::relevance`] is the supported way to
+    /// read a relevance and carries the reasons it must not be thresholded.
+    /// A bare `Vec<Scored>` carries no such warning, and a second public door
+    /// returning one would be a second place for the next reader to find the
+    /// number without finding the caveat.
+    fn search_scored(
+        &self,
+        text: &str,
+        scope: SearchScope,
+        limit: usize,
+    ) -> Result<Vec<Scored>, MemoryStoreError> {
         let Some(match_expr) = sanitize_query(text) else {
             return Ok(Vec::new());
         };
@@ -358,7 +501,7 @@ impl<'a> MemoryStore<'a> {
         match_expr: &str,
         scope: SearchScope,
         limit: usize,
-    ) -> Result<Vec<MemoryRecord>, MemoryStoreError> {
+    ) -> Result<Vec<Scored>, MemoryStoreError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -440,10 +583,21 @@ impl<'a> MemoryStore<'a> {
             })
         });
 
-        let mut records: Vec<MemoryRecord> = scored.into_iter().map(|(record, _)| record).collect();
-        demote_thin_decisions(&mut records);
-        records.truncate(limit);
-        Ok(records)
+        // Phase 51 / producer P7: the relevance stops being discarded here.
+        // Until this change the line below was
+        // `.map(|(record, _)| record)` — the sort read the score, the sort
+        // threw it away, and nothing downstream could ever see how well
+        // anything had matched. Pairing it onto `Scored` instead changes no
+        // ordering: `demote_thin_decisions` permutes the same slots by the
+        // same record fields, and the relevance is carried along by the
+        // element it belongs to rather than looked up afterwards.
+        let mut hits: Vec<Scored> = scored
+            .into_iter()
+            .map(|(record, relevance)| Scored { record, relevance })
+            .collect();
+        demote_thin_decisions(&mut hits);
+        hits.truncate(limit);
+        Ok(hits)
     }
 
     /// [`MemoryStore::search`], grouped the way Phase 21F line 929 asks:
@@ -466,7 +620,7 @@ impl<'a> MemoryStore<'a> {
         scope: SearchScope,
         limit: usize,
     ) -> Result<RetrievalResult, MemoryStoreError> {
-        Ok(group(self.search(text, scope, limit)?))
+        Ok(group(self.search_scored(text, scope, limit)?))
     }
 
     /// [`MemoryStore::search_grouped`] for a routed task — the retrieval
@@ -593,22 +747,29 @@ fn normalize_subject(subject: &str) -> String {
 ///
 /// The sort is stable, so two decisions that are both thin, or both
 /// well-proven, keep their BM25 order relative to each other.
-fn demote_thin_decisions(records: &mut [MemoryRecord]) {
+///
+/// Operates on [`Scored`] rather than bare records so that a memory keeps the
+/// relevance it earned when this permutation moves it. The permutation reads
+/// only `authority`, `kind` and [`MemoryRecord::is_lower_confidence_decision`]
+/// — never the relevance — so attaching the score changed no ordering.
+fn demote_thin_decisions(hits: &mut [Scored]) {
     let classes: Vec<Option<MemoryAuthority>> = {
         let mut seen: Vec<Option<MemoryAuthority>> = Vec::new();
-        for record in records.iter() {
-            if !seen.contains(&record.authority) {
-                seen.push(record.authority);
+        for hit in hits.iter() {
+            if !seen.contains(&hit.record.authority) {
+                seen.push(hit.record.authority);
             }
         }
         seen
     };
 
     for class in classes {
-        let slots: Vec<usize> = records
+        let slots: Vec<usize> = hits
             .iter()
             .enumerate()
-            .filter(|(_, record)| record.authority == class && record.kind == MemoryKind::Decision)
+            .filter(|(_, hit)| {
+                hit.record.authority == class && hit.record.kind == MemoryKind::Decision
+            })
             .map(|(index, _)| index)
             .collect();
         if slots.len() < 2 {
@@ -616,13 +777,18 @@ fn demote_thin_decisions(records: &mut [MemoryRecord]) {
         }
 
         let mut ordered = slots.clone();
-        ordered.sort_by_key(|&index| records[index].is_lower_confidence_decision());
-        let moved: Vec<MemoryRecord> = ordered
+        ordered.sort_by_key(|&index| hits[index].record.is_lower_confidence_decision());
+        // The whole `Scored` moves, not the record out of it. A permutation
+        // that reassigned scores to positions would leave every memory
+        // holding the relevance of whichever memory used to sit where it
+        // landed — a number that is real, plausible, and about a different
+        // query result.
+        let moved: Vec<Scored> = ordered
             .into_iter()
-            .map(|index| records[index].clone())
+            .map(|index| hits[index].clone())
             .collect();
-        for (slot, record) in slots.into_iter().zip(moved) {
-            records[slot] = record;
+        for (slot, hit) in slots.into_iter().zip(moved) {
+            hits[slot] = hit;
         }
     }
 }

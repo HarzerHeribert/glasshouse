@@ -198,15 +198,29 @@ impl Injection {
 /// # Line 1129 is refused, and here is the evidence
 ///
 /// *"Avoid injecting memory when retrieval confidence is low"* needs a
-/// confidence a retrieval can actually report. Glasshouse has none to report:
+/// confidence a retrieval can actually report. Glasshouse reports a
+/// *relevance* and still has no *confidence*, and the gap between those two
+/// words is the whole refusal:
 ///
-/// - [`MemoryStore::search`] computes BM25 relevance and multiplies it by
-///   `policy::retrieval_weight`, then **discards both** — the scored pairs
-///   are mapped back to bare records before the method returns. Neither
-///   [`MemoryRecord`] nor [`super::search::RetrievalResult`] carries a
-///   relevance, score or confidence field.
-/// - Exposing that score means editing `memory/search.rs`, which this work
-///   was explicitly forbidden to change.
+/// - The raw BM25 relevance now survives the retrieval — it is on
+///   [`super::search::RetrievalResult::relevance`], and this function's own
+///   `grouped` carries it. **This is the one bullet that has changed, and it
+///   changed the availability of a number, not the argument.** Read that
+///   method's documentation before reaching for it: BM25 is a *within-query*
+///   match score against this project's own corpus statistics, uncalibrated
+///   and with no natural zero, so there is no constant of which "below this,
+///   the retrieval was poor" is a true statement. It is a relevance, not a
+///   confidence, and the earlier form of this bullet — that exposing the
+///   score would mean editing `memory/search.rs`, which that work was
+///   forbidden to touch — was a note about one packet's scope rather than a
+///   fact about Glasshouse. It has expired; the three objections below have
+///   not.
+/// - The blended score `search` actually sorts on — relevance ×
+///   `policy::retrieval_weight` — is deliberately **not** exposed, and is the
+///   one a threshold would be most tempted by. `retrieval_weight` reads
+///   authority, age, validation state and project phase and never sees the
+///   query, so the blend is high for an ancient invariant no matter what was
+///   asked. Its being unavailable is the point.
 /// - The signals that *are* reachable measure the wrong thing.
 ///   `super::search::ladder_rung` and `policy::retrieval_weight` vary with a
 ///   memory's authority, age and validation state and never see the query

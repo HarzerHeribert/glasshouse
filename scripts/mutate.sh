@@ -37,10 +37,64 @@
 # arbitrary command in place of `cargo test`, and only that command's exit
 # code decides KILLED vs SURVIVED. Documented here because it is a deliberate
 # escape hatch, not an accident: `scripts/tests/test_mutate.py` uses it with
-# /bin/true and /bin/false so the acceptance tests run in under a second.
+# a trivially-passing and a trivially-failing command so the acceptance tests
+# run in under a second. It resolves them portably rather than naming
+# `/bin/true` and `/bin/false`, which this comment used to do and which is
+# wrong on macOS -- they live in `/usr/bin/` there, and a missing binary exits
+# 127, which this script correctly reports as KILLED. That cost the
+# orchestrator a confused investigation on 2026-08-30: the verdict was right
+# and the comment that suggested the probe was not.
 set -u
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Resolve which tree this invocation operates on. $REPO above is the SCRIPT's
+# own location, not necessarily the CALLER's tree: scripts/ is tracked, so
+# every worktree has its own copy, and this script is reachable by absolute
+# path / PATH from the main checkout. Every mutation below is driven off
+# $REPO (relative --file resolution, the dirty-file git -C query, and the cd
+# inside run_test), so leaving it pointed at the wrong tree mutates one tree
+# and tests another. This is the same defect scripts/blast-radius.sh fixed
+# first; this block follows its shape.
+#
+# Kinship is git-common-dir, not a path prefix: a worktree of this repo
+# shares one git dir with the main checkout no matter where it lives.
+common_dir() {                     # absolute common .git dir for tree "$1"
+  local d
+  d="$(git -C "$1" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$d" in
+    # git reports the common dir through a resolved (physical) path when it
+    # is already absolute; `pwd -P` matches that for the relative case so the
+    # two forms compare equal instead of differing by a symlinked tmp/mount
+    # prefix (e.g. macOS /var vs /private/var).
+    /*) printf '%s\n' "$d" ;;
+    *)  (cd "$1/$d" 2>/dev/null && pwd -P) ;;
+  esac
+}
+
+ORIG_CWD="$(pwd)"
+CALLER_TOPLEVEL="$(git -C "$ORIG_CWD" rev-parse --show-toplevel 2>/dev/null)"
+
+if [ -z "$CALLER_TOPLEVEL" ]; then
+  echo "mutate.sh: refusing -- '$ORIG_CWD' is not a git worktree (script lives at '$REPO')" >&2
+  exit 1
+fi
+
+# Compare through git's own (symlink-resolved) view of $REPO, not the logical
+# BASH_SOURCE-derived path, so a caller reached through a symlinked mount does
+# not spuriously look like "a different tree".
+REPO_TOPLEVEL="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null)"
+
+if [ "$CALLER_TOPLEVEL" != "$REPO_TOPLEVEL" ]; then
+  REPO_COMMON="$(common_dir "$REPO")"
+  CALLER_COMMON="$(common_dir "$CALLER_TOPLEVEL")"
+  if [ -z "$REPO_COMMON" ] || [ "$REPO_COMMON" != "$CALLER_COMMON" ]; then
+    echo "mutate.sh: refusing -- '$CALLER_TOPLEVEL' is not a worktree of the repo at '$REPO'" >&2
+    exit 1
+  fi
+  echo "mutate.sh: operating on the caller's worktree at $CALLER_TOPLEVEL (not $REPO)"
+  REPO="$CALLER_TOPLEVEL"
+fi
 
 usage() {
   cat >&2 <<'EOF'
