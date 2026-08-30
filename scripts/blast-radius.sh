@@ -239,6 +239,13 @@ run_target() {                     # run_target <label> <cargo args...>
   # the result line, including the count.
   grep -E 'test result:|^error' "$out" | tail -6
   grep -q 'test result: FAILED' "$out" && status=1
+  # Show the panic MESSAGE, not only the failing test's name. cargo prints the
+  # message under `---- <test> stdout ----`, which is ABOVE `failures:`, so the
+  # `-A4 '^failures:'` grep below never reaches it. Measured 2026-08-30: a test
+  # whose whole purpose was a self-diagnosing panic ("exited=Some(_) means the
+  # signal killed the shell; None means the trap is merely late") failed here
+  # and this script printed its file:line and threw the diagnosis away.
+  [ "$status" -ne 0 ] && { echo "  --- why ---"; grep -A6 'panicked at' "$out" | head -24; }
   [ "$status" -ne 0 ] && { echo "  --- failures ---"; grep -A4 '^failures:' "$out" | head -12; }
   rm -f "$out"
   return "$status"

@@ -84,6 +84,40 @@ session id from the relaunch recipe, collapsing the fire-once lock to a shared
 from a worktree gets *"no changed .rs files"* and **exit 0** — a verification
 tool reporting success about the wrong tree. `GH-BLAST-RADIUS-TREE` is fixing it.
 
+### I CALLED AN INTEGRATION GREEN THAT WAS NOT — and the grep was mine
+
+Integrating the 1599 bridge, I checked for failures with
+`grep -acE "FAILED|^error"` and got **0**. The log said
+**`blast-radius: FAILURES above — fix before the gate`**. My pattern matched
+`FAILED`; the banner says `FAILURES`. **I committed a box closure believing a
+red integration was green.**
+
+The closure itself survives — the only failing test was the known
+`the_tagging_harness_survives_an_interrupt_under_every_posix_shell_here` flake,
+and `worker_access` (19/19) and `route_command` (36/36) both pass alone, twice.
+But the claim I made was not supported by the check I ran.
+
+**Do not hand-roll the greenness check.** `integrate.sh` already exits non-zero
+and `blast-radius.sh` already prints a red banner; read the **exit code** and
+the banner, not a pattern you invented at the prompt. A grep you wrote in the
+moment is not a gate.
+
+### The flake reproduced a second time, and reproduces CHEAPLY
+
+It failed under `integrate.sh`'s blast radius — **not** the full three-platform
+gate. That is a far cheaper reproduction than the one `GH-INTERRUPT-TEST-FLAKE`
+could not obtain with a 12-core CPU soak, and it is the lead for whoever fixes
+it: **run the blast radius, not a synthetic load.**
+
+**And the diagnosis was thrown away by the tool.** The test panics at
+`worker_access.rs:1073` with a message that says whether the shell *exited* (a
+real kill) or is *still running* (a late trap) — the whole point of that
+package. `blast-radius.sh` printed the file:line and dropped the message,
+because it greps `-A4 '^failures:'` and cargo puts the message in the
+`---- stdout ----` block **above** that line. Fixed: it now prints a `--- why ---`
+section from `panicked at`. **That is the fourth verification tool this week
+found losing or misreporting the thing it exists to show.**
+
 ### WHERE THE NEXT BATCHES SHOULD GO — §83, applied across the whole register
 
 Two recons this batch classified **35 lines** across five phases and found
