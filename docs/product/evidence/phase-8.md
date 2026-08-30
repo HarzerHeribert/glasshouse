@@ -520,8 +520,24 @@ dispatched against it.
 `stopped` with the count incremented after the stop. The probe judged this a
 symptom of (a), and it is.
 
-**Neither affects this line's claim:** in the trials where the lifecycle was
-correct throughout, the count was correct.
+**Neither affects this line's claim** — the count is recorded, displayed, and
+correct — **but the limit is sharper than first written, and 2026-08-30's
+`GH-RESUME-PROBE` proved it.**
+
+`e66909c` did **not** fix (a), so (b) has not become harmless. In a **resumed**
+session the lifecycle is reverted to `stopped` by supervision before the
+`PreCompact` hook runs, so both trials produced exactly the self-contradictory
+row: `lifecycle stopped` with a compaction counted *after* the stop, on a
+session demonstrably alive. `glasshouse sessions show` renders
+`state resumable / lifecycle stopped / compactions 1`.
+
+**327 stands** because its contract is that the compaction is recorded and
+readable, and it is — the count is right in every trial. **What a reader cannot
+currently trust is the lifecycle printed beside it**, which is
+`GH-RESUME-IDENTITY`'s defect, not this line's. The probe was explicit that
+(b) is a symptom of the same revert: *"fix the revert and the earlier
+prediction becomes true; touching `record_observed_compaction`'s gate would
+treat the symptom."* **Do not gate the count to make the row look consistent.**
 
 ## Limits
 
