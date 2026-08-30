@@ -576,3 +576,46 @@ path. **Do not conflate them again.**
 
 **Not work, so nobody re-derives them:** Cluster E, Cluster F, 442 (a `keyring`
 dependency decision), and the standing refusals 1294, 828, 829, 1323.
+
+
+## A THIRD VERIFICATION TOOL WAS ANSWERING ABOUT THE WRONG TREE
+
+**Found 2026-08-30 by `GH-USAGE-READER`, and it is the second instance of one
+shape in a single day.**
+
+`scripts/mutate.sh` derives `REPO` from its own location and resolves a relative
+`--file` against it (`:111-116`). `scripts/` is tracked, so **every worktree has
+its own copy**, and the invocation form silently decides which tree the tool
+operates on. A worker running the **main checkout's** copy from its worktree
+**mutates one tree and compiles the other.**
+
+- Two real attempts reported **`KILLED`** falsely — cargo had exited non-zero
+  with *"no test target named `usage_reader`"*, a target that existed only in
+  the worktree.
+- **The unhit case is the dangerous one.** When the file *and* the target exist
+  in both trees, the mutation changes nothing that is compiled, the tests pass,
+  and the tool reports a **clean false `SURVIVED`** with a perfect `test result:`
+  line. **This project reads a SURVIVED as a finding** — practice calls it the
+  most valuable outcome — so a false one manufactures a conclusion rather than
+  losing information. **This is a new entry in §80's list of ways a mutation
+  lies, and it is invisible in the tool's own output.**
+- **The guard against it is disabled by the same bug.** The dirty-file check
+  (`:124`) runs `git -C "$REPO" status --porcelain -- "$path"`; under an
+  absolute-path invocation `$path` is outside `$REPO`, the query returns
+  nothing, the file reads clean, and the guard no-ops.
+
+### The shape, now seen three times — check every tool for it
+
+`blast-radius.sh` had it (fixed today: it `cd`'d to its own checkout and
+answered *"no changed .rs files"*, **exit 0**, about the wrong tree).
+`mutate.sh` has it. Both derive a repo root from `BASH_SOURCE` and never ask
+what tree the **caller** meant.
+
+**Every script in `scripts/` that resolves a path or runs a build should be
+audited for this**, because the failure mode is not an error — it is a
+confident, plausible, wrong answer from the tools this project uses to decide
+whether evidence holds. `GH-MUTATE-TREE` is fixing `mutate.sh` against
+`blast-radius.sh`'s now-proven shape.
+
+**Until it lands: invoke `mutate.sh` worktree-relative, never by absolute path
+from another checkout.**

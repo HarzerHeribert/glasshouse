@@ -51,7 +51,7 @@ use ureq::config::AutoHeaderValue;
 use crate::harness::WireProtocol;
 use crate::secret::{REDACTED, Secret};
 
-use super::{ExtractionModel, ModelError, Prompt};
+use super::{ExtractionModel, ModelCall, ModelError, ModelReply, Prompt, TokenUsage};
 
 /// How long the call waits for the TCP connection and any TLS handshake.
 ///
@@ -292,20 +292,15 @@ impl ConfiguredModel {
     }
 }
 
-impl ExtractionModel for ConfiguredModel {
-    /// Names the resource and the route, and neither the base URL nor the
-    /// credential — see the module header for why the base URL is excluded
-    /// even though it looks harmless.
-    fn describe(&self) -> String {
-        format!(
-            "{}/{} via {}",
-            self.provider,
-            self.model,
-            WireProtocol::OpenAiChat
-        )
-    }
-
-    fn complete(&self, prompt: &Prompt) -> Result<String, ModelError> {
+impl ConfiguredModel {
+    /// Make the call, and report both halves of what came back.
+    ///
+    /// The whole of [`ExtractionModel::complete`] and
+    /// [`ExtractionModel::complete_observed`] is here, so that the two can
+    /// never diverge in what they send, what they refuse, or which error
+    /// they produce — the second is the first plus a field read out of a
+    /// document the first already parsed.
+    fn call(&self, prompt: &Prompt) -> Result<ModelReply, ModelError> {
         // `http_status_as_error(false)` is load-bearing: with the default a
         // `401` arrives as an `Err` indistinguishable in shape from a refused
         // connection, and those are different problems with different fixes.
@@ -359,7 +354,43 @@ impl ExtractionModel for ConfiguredModel {
                 phrase: "the extraction model's reply could not be read",
             })?;
 
-        content_of(&text)
+        let (reply, usage) = parse_reply(&text)?;
+        Ok(ModelReply {
+            reply,
+            call: Some(ModelCall {
+                provider: self.provider.clone(),
+                model: self.model.clone(),
+                // The wire protocol slug, which is what
+                // `crate::gateway::session` records as a route for its own
+                // observations. Two producers, one spelling of the same
+                // identity, so a consumer reading either does not have to
+                // know which wrote the row.
+                route: Some(WireProtocol::OpenAiChat.slug().to_owned()),
+                usage,
+            }),
+        })
+    }
+}
+
+impl ExtractionModel for ConfiguredModel {
+    /// Names the resource and the route, and neither the base URL nor the
+    /// credential — see the module header for why the base URL is excluded
+    /// even though it looks harmless.
+    fn describe(&self) -> String {
+        format!(
+            "{}/{} via {}",
+            self.provider,
+            self.model,
+            WireProtocol::OpenAiChat
+        )
+    }
+
+    fn complete(&self, prompt: &Prompt) -> Result<String, ModelError> {
+        self.call(prompt).map(|answered| answered.reply)
+    }
+
+    fn complete_observed(&self, prompt: &Prompt) -> Result<ModelReply, ModelError> {
+        self.call(prompt)
     }
 }
 
@@ -382,13 +413,31 @@ fn has_userinfo(url: &str) -> bool {
     authority.contains('@')
 }
 
-/// The assistant message out of an OpenAI chat-completions reply.
+/// The assistant message and the token counts out of an OpenAI
+/// chat-completions reply.
 ///
-/// Separate from [`ConfiguredModel::complete`] so the shapes a real endpoint
-/// produces can be tested without one. Note what it does **not** do: it never
-/// puts any part of `text` into the error, because `text` is a provider's
-/// answer to a prompt built from the user's session.
-fn content_of(text: &str) -> Result<String, ModelError> {
+/// Separate from [`ConfiguredModel::call`] so the shapes a real endpoint
+/// produces can be tested without one. Every error below is produced in the
+/// same order and with the same phrase it was before this function read a
+/// second key: a reply that was not an answer stays not an answer, whatever
+/// `usage` it carried, and `tests::content_of` is the wrapper that keeps
+/// asserting exactly that.
+///
+/// # Why the counts are read here and not somewhere with a socket
+///
+/// This function already deserializes the whole chat-completions document to
+/// find one key in it. `usage` is a sibling of `choices` in that same
+/// value — already parsed, already in memory. Reading it needs no streaming
+/// observer, no second request and no new dependency, which is what
+/// separates this path from the relay in `crate::gateway::ingress`: there,
+/// the body is a byte stream the proxy is designed never to parse, and that
+/// remains true and untouched. Here, Glasshouse made the request itself and
+/// has the document in its hand.
+///
+/// The same rule as [`content_of`] applies to everything it returns: no part
+/// of `text` reaches an error or a log. Token counts are integers and carry
+/// none of the provider's words.
+fn parse_reply(text: &str) -> Result<(String, TokenUsage), ModelError> {
     let document: serde_json::Value =
         serde_json::from_str(text).map_err(|_| ModelError::Failed {
             phrase: "the extraction model's reply was not JSON",
@@ -407,7 +456,60 @@ fn content_of(text: &str) -> Result<String, ModelError> {
             phrase: "the extraction model answered with an empty message",
         });
     }
-    Ok(content.to_owned())
+    Ok((content.to_owned(), usage_of(&document)))
+}
+
+/// What the reply says the call cost, and nothing it does not say.
+///
+/// # A missing count is `None`, never a zero
+///
+/// `usage` is optional in this protocol and providers disagree about which
+/// of its fields they fill in. A reply with no `usage` at all, a `usage`
+/// missing one of these fields, or a field that is not a non-negative
+/// integer all produce [`None`] for that count — *the provider did not
+/// say* — because that is a different fact from a reported zero and
+/// [`TokenUsage`] exists to keep them apart all the way to the nullable
+/// column that stores them.
+///
+/// **Negative is refused rather than passed on.** `routing_observations`
+/// `CHECK`s every one of these columns `>= 0`, so a negative would turn a
+/// telemetry write into a failed one; and a provider reporting a negative
+/// token count has not told us anything we can record.
+///
+/// # Only the spellings this protocol actually defines
+///
+/// `prompt_tokens`, `completion_tokens` and
+/// `prompt_tokens_details.cached_tokens` are OpenAI chat completions' own
+/// names for these, and OpenAI chat completions is the only protocol this
+/// module speaks — see the module header for why it refuses to approximate
+/// the ones it does not. A provider with a private spelling for a
+/// cached-prompt count is read as having reported none, which is the same
+/// refusal to guess [`ConfiguredModel::new`] applies to a base URL it was
+/// not given. Adding a spelling is a change with a provider behind it, not
+/// a default.
+fn usage_of(document: &serde_json::Value) -> TokenUsage {
+    let Some(usage) = document.get("usage") else {
+        return TokenUsage::UNREPORTED;
+    };
+    TokenUsage {
+        input_tokens: reported_count(usage.get("prompt_tokens")),
+        output_tokens: reported_count(usage.get("completion_tokens")),
+        cached_input_tokens: reported_count(
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cached_tokens")),
+        ),
+    }
+}
+
+/// One count as the provider reported it, or [`None`] for anything that is
+/// not a non-negative integer — absent, null, a string, a float, or below
+/// zero. See [`usage_of`] for why none of those becomes a number.
+fn reported_count(value: Option<&serde_json::Value>) -> Option<i64> {
+    match value?.as_i64()? {
+        count if count >= 0 => Some(count),
+        _ => None,
+    }
 }
 
 /// An HTTP status, as a [`ModelError`].
@@ -472,6 +574,19 @@ mod tests {
     use super::*;
     use crate::harness::Declared;
     use crate::provider::{ProtocolSupport, Provider};
+
+    /// The content half of [`parse_reply`], on its own.
+    ///
+    /// This was production code until the usage reader landed, and it is
+    /// kept — here, where its only callers now are — because the reply-shape
+    /// regressions below are claims about the **content** contract that
+    /// `crate::memory::extract::Extractor` depends on, and they should keep
+    /// reading as such rather than growing a `.0` at every assertion. It is
+    /// a projection of the production function, so the shapes it refuses are
+    /// the shapes production refuses.
+    fn content_of(text: &str) -> Result<String, ModelError> {
+        parse_reply(text).map(|(content, _usage)| content)
+    }
 
     fn provider(name: &str, protocol: WireProtocol, base_url: &str) -> Provider {
         Provider {
@@ -685,6 +800,129 @@ mod tests {
             assert!(
                 !err.to_string().contains(ECHOED),
                 "a provider's own text reached a diagnostic: {err}"
+            );
+        }
+    }
+
+    /// **The producer, at the function that reads it.** The three counts
+    /// this build records, in OpenAI chat completions' own spelling for
+    /// them.
+    #[test]
+    fn a_reply_carrying_usage_yields_the_three_counts_it_reported() {
+        let (content, usage) = parse_reply(
+            r#"{"choices":[{"message":{"content":"answer"}}],
+                "usage":{"prompt_tokens":1234,"completion_tokens":56,"total_tokens":1290,
+                         "prompt_tokens_details":{"cached_tokens":1024}}}"#,
+        )
+        .expect("this is an answer");
+        assert_eq!(content, "answer");
+        assert_eq!(
+            usage,
+            TokenUsage {
+                input_tokens: Some(1234),
+                output_tokens: Some(56),
+                cached_input_tokens: Some(1024),
+            }
+        );
+    }
+
+    /// **The honesty rule.** Absent, null, partial, negative, fractional and
+    /// non-numeric all mean *the provider did not say* — never a zero, which
+    /// downstream would be indistinguishable from a real count of none.
+    #[test]
+    fn nothing_a_provider_did_not_report_becomes_a_number() {
+        const CONTENT: &str = r#"{"choices":[{"message":{"content":"answer"}}]"#;
+
+        // No `usage` at all: the shape plenty of OpenAI-compatible endpoints
+        // actually send.
+        let (_, absent) = parse_reply(&format!("{CONTENT}}}")).unwrap();
+        assert!(
+            absent.is_unreported(),
+            "a reply with no usage reported no counts: {absent:?}"
+        );
+
+        for usage in [
+            r#"{}"#,
+            r#"{"prompt_tokens":null,"completion_tokens":null}"#,
+            r#"{"prompt_tokens":-1,"completion_tokens":-1,
+                "prompt_tokens_details":{"cached_tokens":-1}}"#,
+            r#"{"prompt_tokens":"12","completion_tokens":[3],
+                "prompt_tokens_details":{"cached_tokens":{}}}"#,
+            r#"{"prompt_tokens":1.5,"completion_tokens":2.5,
+                "prompt_tokens_details":{"cached_tokens":3.5}}"#,
+            // A `usage` that is not an object at all.
+            r#""none of your business""#,
+            // The nested detail missing, which is the common real case: a
+            // provider that counts prompt and completion and says nothing
+            // about caching.
+            r#"{"prompt_tokens_details":{}}"#,
+        ] {
+            let (_, read) = parse_reply(&format!(r#"{CONTENT},"usage":{usage}}}"#))
+                .unwrap_or_else(|err| panic!("`{usage}` is still an answer: {err}"));
+            assert!(
+                read.is_unreported(),
+                "`{usage}` reported no usable count, so none may be recorded: {read:?}"
+            );
+        }
+
+        // And the discriminating half: a count that *is* reported is read,
+        // so the assertions above are about the values and not about the
+        // reader being inert.
+        let (_, one) = parse_reply(&format!(
+            r#"{CONTENT},"usage":{{"prompt_tokens":0,"completion_tokens":7}}}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            one,
+            TokenUsage {
+                input_tokens: Some(0),
+                output_tokens: Some(7),
+                cached_input_tokens: None,
+            },
+            "a reported zero is a count and must survive; an unreported one must not appear"
+        );
+    }
+
+    /// **The existing contract, unchanged.** Reading a second key must not
+    /// change which replies are answers, which are refused, or what the
+    /// refusal says — and a `usage` object must not rescue a reply that was
+    /// never an answer.
+    #[test]
+    fn reading_usage_changes_no_content_and_no_error_shape() {
+        const USAGE: &str = r#""usage":{"prompt_tokens":9,"completion_tokens":9}"#;
+
+        assert_eq!(
+            content_of(&format!(
+                r#"{{"choices":[{{"message":{{"content":"{{}}"}}}}],{USAGE}}}"#
+            )),
+            Ok("{}".to_owned()),
+            "a reply that was an answer is still an answer, and the same one"
+        );
+
+        const ECHOED: &str = "PROMPT-ECHO-a1b2c3-MUST-NEVER-REACH-A-DIAGNOSTIC";
+        for (bare, with_usage) in [
+            (
+                format!(r#"{{"choices":[{{"message":{{"reasoning":"{ECHOED}"}}}}]}}"#),
+                format!(r#"{{"choices":[{{"message":{{"reasoning":"{ECHOED}"}}}}],{USAGE}}}"#),
+            ),
+            (
+                r#"{"choices":[{"message":{"content":"   "}}]}"#.to_owned(),
+                format!(r#"{{"choices":[{{"message":{{"content":"   "}}}}],{USAGE}}}"#),
+            ),
+            (
+                format!(r#"{{"error":{{"message":"bad request: {ECHOED}"}}}}"#),
+                format!(r#"{{"error":{{"message":"bad request: {ECHOED}"}},{USAGE}}}"#),
+            ),
+        ] {
+            let without = content_of(&bare).expect_err("not an answer");
+            let within = content_of(&with_usage).expect_err("still not an answer");
+            assert_eq!(
+                without, within,
+                "a usage object must not change which failure a reply produces"
+            );
+            assert!(
+                !within.to_string().contains(ECHOED),
+                "a provider's own text reached a diagnostic: {within}"
             );
         }
     }

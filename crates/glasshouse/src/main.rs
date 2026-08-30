@@ -3171,31 +3171,98 @@ fn run_extraction(
     });
 
     match rx.recv_timeout(EXTRACTION_BOUND) {
-        Ok(outcome) => match &outcome.failure {
-            None => tracing::info!(
-                session = %id,
-                trigger = %trigger,
-                model = outcome.model,
-                stored = outcome.stored(),
-                duplicates = outcome.duplicates,
-                speculative = outcome.speculative,
-                rejected = outcome.rejected.len(),
-                "memory extraction ran"
-            ),
-            Some(failure) => tracing::info!(
-                session = %id,
-                trigger = %trigger,
-                model = outcome.model,
-                reason = %failure,
-                "memory extraction produced nothing"
-            ),
-        },
+        Ok(outcome) => {
+            match &outcome.failure {
+                None => tracing::info!(
+                    session = %id,
+                    trigger = %trigger,
+                    model = outcome.model,
+                    stored = outcome.stored(),
+                    duplicates = outcome.duplicates,
+                    speculative = outcome.speculative,
+                    rejected = outcome.rejected.len(),
+                    "memory extraction ran"
+                ),
+                Some(failure) => tracing::info!(
+                    session = %id,
+                    trigger = %trigger,
+                    model = outcome.model,
+                    reason = %failure,
+                    "memory extraction produced nothing"
+                ),
+            }
+            // After the log line and outside the `failure` match on purpose:
+            // a reply that failed the extraction contract still cost whatever
+            // the provider says it cost, and a ledger that recorded only the
+            // runs that worked would under-report exactly the calls worth
+            // knowing about.
+            record_extraction_observation(runtime, &outcome);
+        }
         Err(_) => tracing::warn!(
             session = %id,
             trigger = %trigger,
             bound_ms = EXTRACTION_BOUND.as_millis(),
             "memory extraction did not finish within its bound; the session is unaffected"
         ),
+    }
+}
+
+/// What the extraction model reported the call cost, into this project's
+/// routing evidence ledger.
+///
+/// # This is the first thing in this build that counts tokens
+///
+/// `routing_observations` has carried `input_tokens`, `output_tokens` and
+/// `cached_input_tokens` since migration 11 and nothing has ever written
+/// one: `crate::gateway::ingress` relays a response body it is designed
+/// never to parse, so the gateway producer leaves all three `NULL` and says
+/// so in its own module header. Memory extraction is the other path —
+/// Glasshouse builds the request itself and already deserializes the whole
+/// reply — so the counts come from a document that was parsed anyway. See
+/// [`glasshouse::memory::extract::ModelCall::observation`] for exactly what
+/// one row carries and what it deliberately leaves empty.
+///
+/// # Why the ledger is opened here and not beside the event log
+///
+/// The same finding [`evidence_ledger`] carries, one path over.
+/// [`glasshouse::routing::evidence::EvidenceLedger`] holds `Mutex<Connection>`
+/// — an open SQLite handle for its whole lifetime — and a handle opened on a
+/// path that turns out to have nothing to write blocks a later writer under
+/// Windows' mandatory `LockFileEx` while being invisible under POSIX advisory
+/// locks. So nothing is opened until `observation()` has already said there
+/// is a row: that is [`None`] for every run that reached no provider, which
+/// is every run under the default configuration, where extraction chooses a
+/// resource and calls nothing at all.
+///
+/// # A failure here is one log line
+///
+/// [`run_extraction`]'s own posture, for its own reason: this is a hook
+/// process running inside somebody's coding session, and Glasshouse's
+/// bookkeeping is never more important than the session it keeps books
+/// about. There is no error channel out of this function because no caller
+/// should have one.
+fn record_extraction_observation(
+    runtime: &Runtime,
+    outcome: &glasshouse::memory::ExtractionOutcome,
+) {
+    let Some(observation) = outcome.observation() else {
+        return;
+    };
+    let ledger = match glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "routing evidence ledger unavailable; what this extraction cost is not recorded"
+            );
+            return;
+        }
+    };
+    if let Err(err) = ledger.record(observation, glasshouse::provider::cache::now_unix_seconds()) {
+        tracing::warn!(
+            error = %err,
+            "could not record what memory extraction cost"
+        );
     }
 }
 

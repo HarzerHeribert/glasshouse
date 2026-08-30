@@ -203,6 +203,124 @@ impl Prompt {
     }
 }
 
+/// What one provider said a call cost, in tokens.
+///
+/// # Every field is optional, and an absence is never a zero
+///
+/// `usage` is optional in the protocols this seam is asked over, and
+/// providers disagree about which of its fields they populate. So each count
+/// here is [`None`] when the provider did not report it — a distinct fact
+/// from a reported zero, and the reason
+/// `crate::routing::evidence::NewObservation`'s own token fields are
+/// `Option<i64>` and its columns nullable. Collapsing the two would make
+/// "this build recorded nothing here" indistinguishable from "this call used
+/// no input tokens" at every consumer downstream, which is the shape of
+/// fabrication the capability map refuses by name: *a fabricated value here
+/// does not degrade the policy, it inverts it.*
+///
+/// Deliberately not here: a **cost**. A monetary figure needs per-model
+/// pricing this build does not have, and `routing_observations` pairs
+/// `cost_micro_usd` with a `cost_confidence` by `CHECK` for exactly that
+/// reason — a stored number must carry a stated confidence, and there is
+/// none to state. Tokens are what a provider actually reports; a price is
+/// what somebody would have to invent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cached_input_tokens: Option<i64>,
+}
+
+impl TokenUsage {
+    /// A call whose provider reported nothing at all.
+    ///
+    /// The same value as [`TokenUsage::default`], named so that a reader of a
+    /// call site can tell "the provider said nothing" from "this field was
+    /// left out of a literal".
+    pub const UNREPORTED: Self = Self {
+        input_tokens: None,
+        output_tokens: None,
+        cached_input_tokens: None,
+    };
+
+    /// Whether the provider reported no count at all.
+    pub fn is_unreported(&self) -> bool {
+        *self == Self::UNREPORTED
+    }
+}
+
+/// One real call to a provider: which resource answered, and what it
+/// reported spending.
+///
+/// Only an implementation that actually reached a provider constructs one.
+/// [`RoutedNoModel`](disposable::RoutedNoModel) chooses a resource and calls
+/// nothing, so it has no call to describe and reports [`None`] — the
+/// distinction that keeps a routing *decision* out of a ledger of what
+/// routing actually *cost*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelCall {
+    /// The provider as the user's own configuration names it.
+    pub provider: String,
+    /// The model as the user's own configuration names it.
+    pub model: String,
+    /// The wire protocol slug the call was made over — the same thing
+    /// `crate::gateway::session` records as a route, so both producers key
+    /// the same identity the same way.
+    pub route: Option<String>,
+    pub usage: TokenUsage,
+}
+
+impl ModelCall {
+    /// This call as an observation the routing evidence ledger can append.
+    ///
+    /// # What it deliberately leaves `NULL`
+    ///
+    /// Identity and token counts, and nothing else. `dispatched_at`,
+    /// `completed_at`, `outcome`, `tool_rounds`, `retries`, `repairs`,
+    /// `failovers` and `purpose` are all columns this producer could
+    /// plausibly fill with a nearby number, and each stays unwritten because
+    /// a column filled with the nearest available value is worse than an
+    /// honest `NULL`: a consumer cannot tell the two apart. This exists to
+    /// supply the token counts nothing in this build supplied before, and
+    /// widening it is a separate decision with its own evidence.
+    pub fn observation(&self) -> crate::routing::evidence::NewObservation {
+        crate::routing::evidence::NewObservation::new(&self.provider, &self.model)
+            .with_route(self.route.as_deref())
+            .with_tokens(
+                self.usage.input_tokens,
+                self.usage.output_tokens,
+                self.usage.cached_input_tokens,
+            )
+    }
+}
+
+/// What an extraction model answered, and what the call cost.
+///
+/// [`ExtractionModel::complete`] returns only the first half and keeps its
+/// existing shape, because every one of its callers wants the text and
+/// nothing else. This is the shape [`ExtractionModel::complete_observed`]
+/// adds beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelReply {
+    /// The assistant message, exactly as [`ExtractionModel::complete`] would
+    /// have returned it.
+    pub reply: String,
+    /// The call that produced it, when a provider was actually reached.
+    /// [`None`] from any implementation that answered without one.
+    pub call: Option<ModelCall>,
+}
+
+impl ModelReply {
+    /// A reply from something that reached no provider, and therefore has no
+    /// usage to report and must not report one.
+    pub fn uncalled(reply: impl Into<String>) -> Self {
+        Self {
+            reply: reply.into(),
+            call: None,
+        }
+    }
+}
+
 /// Something that can answer an extraction prompt.
 ///
 /// # This is the seam, and Phase 39 is what fills it
@@ -235,6 +353,26 @@ pub trait ExtractionModel: Send + Sync {
 
     /// Answer the prompt, or say why not.
     fn complete(&self, prompt: &Prompt) -> Result<String, ModelError>;
+
+    /// Answer the prompt **and** say what the call reported spending.
+    ///
+    /// # Why this is additive rather than a change to [`Self::complete`]
+    ///
+    /// Ten implementations of this trait exist across the crate and its
+    /// integration tests, and only one of them — [`model::ConfiguredModel`] —
+    /// ever reaches a provider. Widening [`Self::complete`] would have made
+    /// the other nine describe a call none of them makes, which is exactly
+    /// the fabrication the token columns are nullable to prevent. So the
+    /// default here forwards to [`Self::complete`] and reports **no call**,
+    /// and an implementation that genuinely makes one overrides it.
+    ///
+    /// [`Extractor::run`] calls this rather than [`Self::complete`]; an
+    /// implementation that overrides neither, or only [`Self::complete`],
+    /// keeps working unchanged and is honestly recorded as having reached no
+    /// provider.
+    fn complete_observed(&self, prompt: &Prompt) -> Result<ModelReply, ModelError> {
+        self.complete(prompt).map(ModelReply::uncalled)
+    }
 }
 
 /// Why one emitted memory was not stored.
@@ -331,6 +469,15 @@ pub struct ExtractionOutcome {
     /// Set when the whole extraction failed. Never an error a caller must
     /// handle.
     pub failure: Option<ExtractionFailure>,
+    /// The provider call this run made, and what it reported spending.
+    ///
+    /// [`None`] on every run that reached no provider: an empty chunk that
+    /// short-circuited before the model was asked, an unreadable store, a
+    /// model that could not be called at all, and every implementation that
+    /// chooses a resource without calling one. A run with no call has no
+    /// usage, and recording a zero for it would put a fabricated measurement
+    /// in a ledger whose whole purpose is to be trusted.
+    pub call: Option<ModelCall>,
 }
 
 impl ExtractionOutcome {
@@ -349,7 +496,19 @@ impl ExtractionOutcome {
             activity_truncated: chunk.truncated(),
             redactions: chunk.redactions(),
             failure: None,
+            call: None,
         }
+    }
+
+    /// The routing observation this run's provider call is evidence of.
+    ///
+    /// [`None`] when no provider was reached — which is the common case and
+    /// the whole of the guard a caller needs: a run with nothing to record
+    /// must not cause a database to be opened for it. See
+    /// [`ModelCall::observation`] for what one carries and what it leaves
+    /// `NULL`.
+    pub fn observation(&self) -> Option<crate::routing::evidence::NewObservation> {
+        self.call.as_ref().map(ModelCall::observation)
     }
 
     /// How many memories were stored.
@@ -429,10 +588,19 @@ impl<'a> Extractor<'a> {
 
         let prompt = Prompt::build(chunk, &existing);
 
+        // `complete_observed` rather than `complete`, so that a model which
+        // really called a provider can say what the call cost. The usage is
+        // attached to the outcome **before** the reply is parsed: a reply
+        // that fails the contract below still cost whatever the provider
+        // says it cost, and dropping that would under-report exactly the
+        // calls worth knowing about.
         let reply = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.model.complete(&prompt)
+            self.model.complete_observed(&prompt)
         })) {
-            Ok(Ok(reply)) => reply,
+            Ok(Ok(answered)) => {
+                outcome.call = answered.call;
+                answered.reply
+            }
             Ok(Err(err)) => {
                 outcome.failure = Some(ExtractionFailure::Model(err));
                 return outcome;

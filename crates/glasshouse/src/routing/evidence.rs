@@ -63,9 +63,10 @@
 //!   turn, and only something above the gateway — the harness, or the
 //!   session it belongs to — can count rounds across that boundary.
 //! - **`input_tokens`, `output_tokens`, `cached_input_tokens`,
-//!   `cost_micro_usd`: not supplied.** Same reason as the timing columns
-//!   above: reading them means parsing a response body this module is
-//!   forbidden to parse.
+//!   `cost_micro_usd`: not supplied *by this producer*.** Same reason as the
+//!   timing columns above: reading them means parsing a response body this
+//!   module is forbidden to parse. See the second producer below, which is
+//!   not a gateway and is not forbidden it.
 //! - **`outcome`: a coarse proxy, not the user-visible outcome line 1334
 //!   asks for.** This producer only records an observation when an exchange
 //!   actually reached the provider (`Forwarded` or `Unreachable` — the same
@@ -83,6 +84,27 @@
 //!   has no cache-state signal of its own; the schema's `NOT NULL DEFAULT
 //!   'unknown'` is exactly what makes that the honest default rather than a
 //!   guess.
+//!
+//! # The second producer, and why it can read what the gateway cannot
+//!
+//! `crate::memory::extract` supplies the token columns the gateway leaves
+//! `NULL`, and it is allowed to for a reason that does not weaken the rule
+//! above. The gateway **relays** somebody else's request: the response body
+//! is a byte stream `crate::gateway::ingress` is designed never to parse,
+//! and that is unchanged. Memory extraction is the **disposable** path,
+//! where Glasshouse builds the request itself and already deserializes the
+//! whole reply document to find the assistant message in it — so `usage` is
+//! a sibling key of something already parsed, not a new capability to read
+//! payloads.
+//!
+//! What that producer supplies, through
+//! [`crate::memory::extract::ModelCall::observation`]: `provider`, `model`,
+//! `route` (the wire protocol slug, the same spelling the gateway uses), and
+//! `input_tokens`, `output_tokens`, `cached_input_tokens` **when the
+//! provider reported them**. What it leaves `NULL`, deliberately: every
+//! timing column, `outcome`, the four turn counters, `purpose`, and
+//! `cost_micro_usd` — see that type's own documentation for why filling a
+//! column with the nearest available number is worse than leaving it empty.
 //!
 //! # [`ObservationSource`] for `crate::config::pairing`
 //!
@@ -317,6 +339,34 @@ impl NewObservation {
     ) -> Self {
         self.dispatched_at_unix = dispatched_at_unix;
         self.completed_at_unix = completed_at_unix;
+        self
+    }
+
+    /// The token counts a provider reported for this turn.
+    ///
+    /// Three `Option`s rather than a struct, matching [`Self::with_timing`]
+    /// next door: a producer that read one field and not the others passes
+    /// [`None`] for the rest, and [`None`] becomes `NULL` — *this build
+    /// recorded nothing here* — exactly as it does for every other optional
+    /// column on this type. **A producer that did not read a count must
+    /// never pass `Some(0)` for it**: the columns are nullable so that
+    /// "unreported" and "zero" stay two different facts, and a consumer
+    /// cannot recover the difference once it is lost.
+    ///
+    /// `cost_micro_usd` is deliberately not part of this. A cost needs
+    /// per-model pricing, migration 11 `CHECK`s it against a
+    /// `cost_confidence` label for that reason, and tokens are a thing a
+    /// provider reports while a price is a thing somebody would have to
+    /// supply.
+    pub fn with_tokens(
+        mut self,
+        input_tokens: Option<i64>,
+        output_tokens: Option<i64>,
+        cached_input_tokens: Option<i64>,
+    ) -> Self {
+        self.input_tokens = input_tokens;
+        self.output_tokens = output_tokens;
+        self.cached_input_tokens = cached_input_tokens;
         self
     }
 
