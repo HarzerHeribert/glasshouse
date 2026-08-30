@@ -217,8 +217,8 @@ against this register individually, not the phase.**
 
 | line | missing link |
 |---|---|
-| 327, 310 | a compaction lifecycle event needs a new `LIFECYCLE_EVENT_KINDS` value, and SQLite cannot widen a `CHECK` in place — `database.rs:830`'s house rule forbids the rebuild |
-| 1316 | a new persisted outcome value, same constraint |
+| ~~327~~, ~~310~~ | **BOTH RETIRED 2026-08-30 — and the stated blocker was wrong for both.** **327 is CLOSED**: no lifecycle event was ever needed, because the line's *"or compaction-related "**state"* disjunct is satisfied by `sessions.observed_compactions` (migration 16), and a live Codex compacted five times against the shipped binary to prove it. **310 moved to Cluster E**: Claude Code emits no compaction event at all, so its blocker was never storage. |
+| 1316 | a new persisted outcome value, same constraint. **Note: 1316 is a Phase 33 rate-limit line and was never a compaction line** — it sat in this cluster by transcription. |
 | 1325 | of four provenance values the line names, production can emit one |
 
 ---
@@ -1030,3 +1030,44 @@ a missing measurement: **1827, 1828, 1838, 1840, 1841, 1842, 1843, 1844, 1847,
 - **1852 would report a tautology.** `FailureDomain::Independent` is *"the
   state this build never earns"* (`routing/domain.rs:30-34`). The honest answer
   is a documented constant, not a count.
+
+
+## 1331 — three of five timestamps recorded, and the box stays OPEN
+
+**Ruled by the orchestrator 2026-08-30 after `GH-GATEWAY-FIRST-BYTE` landed.
+The worker was forbidden from deciding this and correctly reported
+`verdict: open`.**
+
+The line: *"Record dispatch time, first-byte time, time to first real token,
+time to first tool call, and completion time **when the protocol exposes
+them**."*
+
+The package is good and it shipped: `first_byte_at` now has its **first
+production producer and its first production consumer** — the gateway takes the
+clock once when upstream's first byte arrives, and `glasshouse routing-cost`
+prints a per-group sample count and mean time-to-first-byte, with an untimed
+group saying *"not recorded"* rather than `0ms`. Both mutations killed.
+
+**But three of five is not five, and the qualifier does not rescue it.**
+*"When the protocol exposes them"* is a statement about the **protocol's**
+capability, not about what Glasshouse chooses to look at. For a streaming
+provider the protocol **does** expose a first-token boundary; `gateway::ingress`
+declines to parse the body that carries it. That refusal is deliberate,
+documented, and correct — it is **Cluster L**, *"Glasshouse refuses to parse the
+thing that carries the signal … the boundary is ours and deliberate — do not
+package without changing it first."*
+
+So closing 1331 here would mean reading the qualifier as *"when Glasshouse
+chooses to look"*, which is the same qualifier-stretch that un-ticked **1455 and
+1456** the same morning. **Do not tick it on this evidence.**
+
+**What 1331 actually needs:** a decision about whether the relay may observe
+*framing* — the boundary between response chunks — without reading content.
+That is a narrower question than "parse the body", and it may have an honest
+answer. **It is a product decision and it belongs with the `ingress` ruling
+that already blocks P1b's relay path.** Until someone answers it, the line's
+remaining two timestamps have no honest producer.
+
+`docs/product/evidence/phase-33a.md` records the entry as **PARTIALLY
+VERIFIED**, which is the state `agent-sdlc.md` defines for exactly this: one
+contract clause proven, another required clause missing.

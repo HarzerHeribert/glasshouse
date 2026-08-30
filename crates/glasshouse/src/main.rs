@@ -1184,6 +1184,14 @@ fn routing_cost_report(runtime: &Runtime, hours: u32) -> anyhow::Result<String> 
 /// coding-agent group, below, that this bites hardest: it has a real request
 /// count and no token count at all, and the two must never be allowed to
 /// look like the same kind of absence.
+///
+/// Capability map line 1331's gateway half applies the same rule to a
+/// different pair of columns: `first-byte samples` is a real count (honestly
+/// `0` when nothing timed), and `time to first byte` is `render_time_to_first_byte`'s
+/// own *not recorded* — never `0ms` — for exactly that case. Unlike the token
+/// columns above, the coding-agent group is the one group this build **can**
+/// honestly time, because a first-byte instant is a clock reading rather than
+/// a read of the response body the relay never parses.
 fn render_routing_cost(
     project_id: &str,
     hours: u32,
@@ -1211,6 +1219,14 @@ fn render_routing_cost(
             out.push_str(&format!(
                 "    cached input tokens : {}\n",
                 render_token_count(group.cached_input_tokens)
+            ));
+            out.push_str(&format!(
+                "    first-byte samples  : {}\n",
+                group.first_byte_sample_count
+            ));
+            out.push_str(&format!(
+                "    time to first byte  : {}\n",
+                render_time_to_first_byte(group.mean_time_to_first_byte_ms)
             ));
         }
     }
@@ -1245,6 +1261,23 @@ fn render_token_count(value: Option<i64>) -> String {
     match value {
         Some(count) => count.to_string(),
         None => "not counted".to_owned(),
+    }
+}
+
+/// Capability map line 1331's gateway half, rendered — `render_token_count`'s
+/// own rule applied to a timing column rather than a token count: a group
+/// with no timed rows prints the words *not recorded*, never a digit and
+/// never `0ms`, because "the mean was zero" and "nothing was timed" are
+/// different facts and this build must never let them look the same.
+///
+/// `mean_ms` is [`None`] exactly when
+/// [`glasshouse::routing::evidence::PurposeConsumption::first_byte_sample_count`]
+/// is `0` — see that field's own doc comment — so there is nothing else this
+/// function needs to check.
+fn render_time_to_first_byte(mean_ms: Option<f64>) -> String {
+    match mean_ms {
+        Some(ms) => format!("{}ms (mean)", ms.round() as i64),
+        None => "not recorded".to_owned(),
     }
 }
 

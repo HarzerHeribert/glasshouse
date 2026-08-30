@@ -34,9 +34,10 @@
 //!
 //! [`Exchange`] is the only thing that reaches `tracing`, and it is
 //! structurally incapable of carrying a body: it holds an outcome, two
-//! statuses, a byte count and two names. Glasshouse's logging is already off
-//! unless `GLASSHOUSE_LOG` is set — see [`crate::logging`] — so "opt-in" is
-//! the existing mechanism rather than a new flag.
+//! statuses, a byte count, two names and one optional clock reading.
+//! Glasshouse's logging is already off unless `GLASSHOUSE_LOG` is set — see
+//! [`crate::logging`] — so "opt-in" is the existing mechanism rather than a
+//! new flag.
 //!
 //! **The packet asked for the provider error's `error.type` and
 //! `error.message` to reach the diagnostic. They deliberately do not.**
@@ -61,6 +62,19 @@
 //! completes — a real inference response is the only kind of request that
 //! has ever been observed to carry a token pool's own headers, and
 //! `discovery` is forbidden from making one.
+//!
+//! # A third thing may now be recorded: when the first response byte arrived
+//!
+//! Capability map line 1331's gateway half. [`forward`] reads the clock the
+//! instant [`Agent::run`] returns with the provider's status and headers —
+//! before a byte of the body is read — and carries that reading on
+//! [`Exchange`] as `first_byte_at`. It is `None` on every path that never
+//! reached a provider at all: refused before a route was chosen, or the
+//! provider could not be reached. Reading the clock here costs nothing this
+//! module was forbidden to pay — a status and a set of headers are already
+//! read to relay them, and the clock is read after they land rather than
+//! after any of the body that follows, so this stays a timing read and never
+//! a parse of what the bytes mean.
 
 use std::io::{BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -108,11 +122,11 @@ const SETTLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What happened on one connection. **The only value that reaches a log.**
 ///
-/// Every field is an outcome, a status, a count or a name. There is nowhere
-/// here to put a request body, a response body, a header value, a token or a
-/// credential — which is a stronger statement than a promise not to log one,
-/// and `an_exchange_has_nowhere_to_put_a_body` checks it against this
-/// declaration.
+/// Every field is an outcome, a status, a count, a name, or one clock
+/// reading. There is nowhere here to put a request body, a response body, a
+/// header value, a token or a credential — which is a stronger statement
+/// than a promise not to log one, and `an_exchange_has_nowhere_to_put_a_body`
+/// checks it against this declaration.
 #[derive(Debug)]
 pub(super) struct Exchange {
     pub(super) outcome: Outcome,
@@ -128,6 +142,13 @@ pub(super) struct Exchange {
     /// then no host this request was ever going to reach — and naming one
     /// anyway would be the log asserting something that did not happen.
     pub(super) host: String,
+    /// The instant the provider's status and headers became available to
+    /// this relay — a clock reading, never a byte of the response itself.
+    /// `None` whenever no response ever arrived: refused before a route was
+    /// chosen, refused before an upstream connection was opened, or the
+    /// provider could not be reached at all. See this module's own "a third
+    /// thing may now be recorded" for what this may and may not become.
+    pub(super) first_byte_at: Option<i64>,
 }
 
 /// How a connection ended.
@@ -449,6 +470,10 @@ fn forward(
             );
         }
     };
+    // The status and headers just arrived — see this module's own "a third
+    // thing may now be recorded". Read once, here, before anything below
+    // touches the body: every return past this point carries it.
+    let first_byte_at = Some(crate::provider::cache::now_unix_seconds());
 
     let (parts, mut body) = response.into_parts();
     let status = parts.status;
@@ -502,7 +527,10 @@ fn forward(
         // fact about the inbound hop, not about whether the outbound one
         // produced a reading.
         return (
-            exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route)),
+            Exchange {
+                first_byte_at,
+                ..exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route))
+            },
             quota,
         );
     }
@@ -513,7 +541,10 @@ fn forward(
             Ok(bytes) => moved = bytes,
             Err(_) => {
                 return (
-                    exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route)),
+                    Exchange {
+                        first_byte_at,
+                        ..exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route))
+                    },
                     quota,
                 );
             }
@@ -524,15 +555,18 @@ fn forward(
     let _ = out.shutdown(Shutdown::Both);
 
     (
-        exchange(
-            Outcome::Forwarded {
-                upstream_status: status.as_u16(),
-                bytes: moved,
-            },
-            status.as_u16(),
-            upstream,
-            Some(route),
-        ),
+        Exchange {
+            first_byte_at,
+            ..exchange(
+                Outcome::Forwarded {
+                    upstream_status: status.as_u16(),
+                    bytes: moved,
+                },
+                status.as_u16(),
+                upstream,
+                Some(route),
+            )
+        },
         quota,
     )
 }
@@ -739,6 +773,10 @@ fn exchange(outcome: Outcome, status: u16, upstream: &Upstream, route: Option<&R
         provider: upstream.provider().to_owned(),
         protocol: route.map(|route| route.protocol().to_owned()),
         host: route.map(Route::host).unwrap_or_default(),
+        // Every caller of this helper returns before a response ever
+        // arrived; [`forward`]'s own three post-response returns override
+        // this with the real reading via struct-update syntax.
+        first_byte_at: None,
     }
 }
 
@@ -895,6 +933,7 @@ mod tests {
                 provider: "openrouter".to_owned(),
                 protocol: Some("anthropic-messages".to_owned()),
                 host: "openrouter.ai".to_owned(),
+                first_byte_at: Some(1_700_000_000),
             };
             let line = recorded(&exchange);
 

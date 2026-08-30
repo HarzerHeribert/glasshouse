@@ -454,3 +454,79 @@ it rested on*. The gap is between an entry's summary line and its body. Nothing
 checks that those two agree — `scripts/check-evidence-coverage.py` verifies an
 entry **exists** for a phase, not that its summary matches its dispositions.
 That is a cheap gate somebody could write, and it would have caught this one.
+
+---
+
+# Line 1331 — PARTIALLY VERIFIED 2026-08-30, and the box stays ☐
+
+Package `GH-GATEWAY-FIRST-BYTE`.
+
+*"Record dispatch time, first-byte time, time to first real token, time to
+first tool call, and completion time when the protocol exposes them."*
+
+State: **PARTIALLY VERIFIED** — three of the five timestamps have real
+production evidence; two have no honest producer.
+
+## What now exists
+
+`first_byte_at` had **no production writer and no production reader** before
+this package. It has both now:
+
+- **Producer** — `gateway::ingress::forward` takes the clock **once**, when
+  upstream's first response byte becomes available, onto `Exchange::first_byte_at`.
+  An exchange that never reached upstream (`Unauthenticated`, `Declined`,
+  `Unrouted`) records `NULL`, because there was no first byte.
+- **Carrier** — `NewObservation::with_first_byte_at`, added **additively**. The
+  packet suggested widening `with_timing` to three parameters; that broke two
+  call sites outside scope (`routing/interactive.rs`, `shell/mod.rs`), and the
+  worker reverted it rather than reach into forbidden files. Correct call.
+- **Consumer** — `EvidenceLedger::consumption_by_purpose` returns a first-byte
+  sample count and a mean time-to-first-byte per group, and
+  `glasshouse routing-cost` prints them.
+
+**The honesty rule the command already enforced for tokens is enforced here
+too**: a group with no timed rows prints *"not recorded"*, never `0ms`.
+Mutating that to `"0ms"` is **KILLED** by
+`an_exchange_that_never_reached_a_provider_records_no_first_byte_and_the_reader_says_so`.
+The characteristic mutation — `.with_first_byte_at(exchange.first_byte_at)` →
+`.with_first_byte_at(None)` — is **KILLED** on the call.
+
+## Why the box does not tick
+
+`first_token_at` and `first_tool_call_at` are `NULL` on every row, because
+finding either boundary means parsing a response body `gateway::ingress` is
+designed never to read.
+
+**The qualifier does not rescue it.** *"When the protocol exposes them"* is a
+claim about the **protocol's** capability. For a streaming provider the protocol
+**does** expose a first-token boundary; Glasshouse declines to look. Reading the
+qualifier as *"when Glasshouse chooses to look"* is the same stretch that
+un-ticked 1455 and 1456 the same morning, and it is refused here for the same
+reason.
+
+**What would close it:** a decision about whether the relay may observe response
+**framing** — the boundary between chunks — without reading content. That is
+narrower than "parse the body" and may have an honest answer. It is a product
+decision, and it belongs with the `ingress` ruling that already blocks the relay
+path's usage reader.
+
+## One scope overflow, approved
+
+`gateway/conformance.rs` was not in `EXPECTED FILES`. It held
+`a_real_forwarded_exchange_reaches_the_routing_evidence_ledger`, which asserted
+`first_byte_at_unix == None, "this producer never supplies it"` — a fact this
+package's whole purpose is to make false. The worker replaced the negative
+assertion with a positive ordering check
+(`dispatched_at <= first_byte_at <= completed_at`) on the same already-wired
+exchange. **Leaving a known-stale failing assertion in place would have been
+worse**, and the alternative — reporting and stopping — would have shipped a red
+target. Approved.
+
+## Limits
+
+- `dispatched_at` remains the pre-existing accept-loop handoff instant, an
+  honest upper-bound proxy rather than the true dispatch inside
+  `ingress::forward`. Unchanged by this package, and it predates it.
+- `mean_time_to_first_byte_ms` is a **mean**, not a median, computed in SQL over
+  rows carrying both `first_byte_at` and `dispatched_at`.
+- Says nothing about the disposable path, which does not go through the gateway.

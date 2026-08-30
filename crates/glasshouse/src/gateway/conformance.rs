@@ -822,9 +822,16 @@ fn a_real_forwarded_exchange_reaches_the_routing_evidence_ledger() {
         row.quota_context.as_deref(),
         Some("fixture/FIXTURE_API_KEY")
     );
-    assert_eq!(
-        row.first_byte_at_unix, None,
-        "this producer never supplies it — see `crate::routing::evidence`'s own header"
+    let first_byte_at = row
+        .first_byte_at_unix
+        .expect("a real forwarded exchange must record when the first response byte arrived");
+    assert!(
+        first_byte_at >= row.dispatched_at_unix.expect("asserted Some above"),
+        "first_byte_at ({first_byte_at}) must not precede dispatched_at"
+    );
+    assert!(
+        first_byte_at <= row.completed_at_unix.expect("asserted Some above"),
+        "first_byte_at ({first_byte_at}) must not follow completed_at"
     );
 }
 

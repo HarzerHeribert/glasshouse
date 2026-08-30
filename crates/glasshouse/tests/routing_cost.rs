@@ -17,13 +17,22 @@
 //! token field precisely so a future change that coerces an absent count to
 //! `0` fails a string-equality assertion rather than a loose `contains`.
 
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use rusqlite::Connection;
 
-use glasshouse::routing::evidence::{EvidenceLedger, NewObservation};
+use glasshouse::gateway::{Route, Upstream};
+use glasshouse::integrations::IntegrationId;
+use glasshouse::profile::{BackendResource, LaunchProfile};
+use glasshouse::routing::evidence::{EvidenceLedger, NewObservation, ObservationQuery};
+use glasshouse::routing::{AssignedModel, CredentialId};
+use glasshouse::secret::{EnvironmentSecretStore, Secret, SecretRef, SecretStore};
 use glasshouse::{Cli, Runtime, bootstrap};
 
 /// A bootstrapped project inside `base`, sharing `base`'s data and config
@@ -200,6 +209,8 @@ const REQUESTS: &str = "    requests            : ";
 const INPUT_TOKENS: &str = "    input tokens        : ";
 const OUTPUT_TOKENS: &str = "    output tokens       : ";
 const CACHED_TOKENS: &str = "    cached input tokens : ";
+const FIRST_BYTE_SAMPLES: &str = "    first-byte samples  : ";
+const TIME_TO_FIRST_BYTE: &str = "    time to first byte  : ";
 
 // ---------------------------------------------------------------------------
 // 1. Attribution: the routing model's own spend, apart from every other row.
@@ -429,5 +440,343 @@ fn a_row_planted_under_another_projects_id_never_contributes_to_this_projects_to
         !run.stdout.contains("999"),
         "a row planted under another project's id must never appear in this project's totals:\n{}",
         run.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 5. Capability map line 1331's gateway half: a real first-byte instant,
+//    honestly absent when nothing ever answered.
+// ---------------------------------------------------------------------------
+
+/// The provider, model and harness every test below binds an assignment to
+/// and reads the recorded row back with. Arbitrary — no stub upstream reads
+/// any of them — but each must be the one string used everywhere below it.
+const FIRST_BYTE_PROVIDER: &str = "routing-cost-first-byte";
+const FIRST_BYTE_MODEL: &str = "stub-model";
+const FIRST_BYTE_HARNESS: &str = "claude-code";
+
+/// A stand-in provider credential, resolved through the real environment
+/// store rather than a crate-private test constructor — the same shape
+/// `tests/gateway_retry_after.rs`'s own `test_credential` uses, and for the
+/// same reason: `secret::Secret` has no public way to mint one outside
+/// `crate::secret`. `var` is unique per call site so the two tests below,
+/// which may run concurrently, never race on the same environment variable.
+fn first_byte_test_credential(var: &str) -> Secret {
+    // SAFETY: `var` is unique to the one caller that set it, and it is
+    // removed again immediately below, before the resolved value is even
+    // inspected, so no other test can observe it set.
+    unsafe {
+        std::env::set_var(var, "sk-planted-not-a-real-key-firstbyte");
+    }
+    let resolved = EnvironmentSecretStore::new()
+        .resolve(&SecretRef::Environment {
+            var: var.to_owned(),
+        })
+        .expect("the variable was just set");
+    unsafe {
+        std::env::remove_var(var);
+    }
+    resolved
+}
+
+/// A gateway pointed at `upstream_address`, with `evidence_ledger` wired in
+/// exactly the way `crate::gateway::start_if_required_with_telemetry`'s own
+/// production callers wire it. Driving a real accept loop this way — rather
+/// than calling `SessionRouting::record_routing_observation` or
+/// `NewObservation::with_first_byte_at` directly — is what makes the tests
+/// below reach the production call practice §35 asks for, not a helper's own
+/// shortcut around it.
+fn gateway_to_stub(
+    credential_var: &str,
+    upstream_address: SocketAddr,
+    evidence_ledger: Arc<EvidenceLedger>,
+) -> glasshouse::gateway::Gateway {
+    let upstream = Upstream::new(
+        FIRST_BYTE_PROVIDER.to_owned(),
+        vec![Route::new(
+            "anthropic-messages".to_owned(),
+            &["/messages"],
+            &format!("http://{upstream_address}"),
+        )],
+        first_byte_test_credential(credential_var),
+        CredentialId::new(
+            FIRST_BYTE_PROVIDER,
+            SecretRef::Environment {
+                var: credential_var.to_owned(),
+            },
+        ),
+    )
+    .expect("a loopback http URL is absolute and this credential is header-safe");
+
+    let mut profile = LaunchProfile::native(IntegrationId::ClaudeCode);
+    profile.backend = BackendResource::GlasshouseGateway;
+    let gateway = glasshouse::gateway::start_if_required_with_telemetry(
+        &[profile],
+        || Ok(upstream),
+        None,
+        Some(evidence_ledger),
+        None,
+    )
+    .expect("loopback is bindable")
+    .expect("a gateway-backed profile requires a gateway");
+
+    gateway.routing().bind(
+        FIRST_BYTE_HARNESS,
+        "anthropic-messages",
+        AssignedModel::named(FIRST_BYTE_MODEL),
+        gateway.upstream(),
+    );
+
+    gateway
+}
+
+fn first_byte_messages_request(token: &str) -> Vec<u8> {
+    let body = format!(r#"{{"model":"{FIRST_BYTE_MODEL}"}}"#);
+    format!(
+        "POST /v1/messages HTTP/1.1\r\n\
+         Host: 127.0.0.1\r\n\
+         Authorization: Bearer {token}\r\n\
+         Content-Type: application/json\r\n\
+         Anthropic-Version: 2023-06-01\r\n\
+         Content-Length: {}\r\n\
+         \r\n\
+         {body}",
+        body.len()
+    )
+    .into_bytes()
+}
+
+/// Send `raw` and return everything the gateway wrote back, to the close —
+/// the same shape `tests/gateway_retry_after.rs`'s own `send_and_read` uses.
+fn first_byte_send_and_read(address: SocketAddr, raw: &[u8]) -> String {
+    let mut client = TcpStream::connect(address).expect("the gateway accepts connections");
+    client
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .expect("a non-zero read timeout is valid");
+    client
+        .write_all(raw)
+        .expect("the gateway reads the request");
+    client.flush().expect("the gateway reads the request");
+    let mut out = Vec::new();
+    client
+        .read_to_end(&mut out)
+        .expect("the gateway answers and then closes");
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// How long a real answer sits between its head landing and its body
+/// following it — long enough, at this build's second-granularity clock, for
+/// `dispatched_at`, `first_byte_at` and `completed_at` to have a real chance
+/// to land in different seconds rather than merely satisfying `>=`/`<=` by
+/// coincidence.
+const FIRST_BYTE_STUB_DELAY: Duration = Duration::from_millis(1_200);
+
+/// A stub upstream that answers one connection with `200 OK`, writing its
+/// status and headers immediately and then holding the body back for
+/// [`FIRST_BYTE_STUB_DELAY`] — so `ingress::forward`'s own read of the clock
+/// right after `Agent::run` returns (`crate::gateway::ingress`'s own "a third
+/// thing may now be recorded") lands well before the exchange actually
+/// completes, rather than at the same instant as a matter of course.
+fn stub_ok_server_with_delayed_body() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback is bindable");
+    let address = listener
+        .local_addr()
+        .expect("a bound listener has a local address");
+    listener
+        .set_nonblocking(true)
+        .expect("a listener can be put in polling mode");
+
+    std::thread::Builder::new()
+        .name("routing-cost-first-byte-stub".to_owned())
+        .spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _peer)) => break Some(stream),
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            break None;
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break None,
+                }
+            };
+            let Some(stream) = stream.as_mut() else {
+                return;
+            };
+            let _ = stream.set_nonblocking(false);
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+
+            let body = b"ok";
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.flush();
+
+            std::thread::sleep(FIRST_BYTE_STUB_DELAY);
+
+            let _ = stream.write_all(body);
+            let _ = stream.flush();
+        })
+        .expect("can spawn the stub server thread");
+
+    address
+}
+
+/// A loopback address nothing listens on — bound, then immediately dropped,
+/// so a connection attempt is refused rather than merely slow. Models
+/// `Outcome::Unreachable`: a route was chosen and a connection was
+/// attempted, but no response — and so no first byte — ever arrived.
+fn unreachable_address() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback is bindable");
+    let address = listener
+        .local_addr()
+        .expect("a bound listener has a local address");
+    drop(listener);
+    address
+}
+
+/// Poll the ledger for the one row `FIRST_BYTE_PROVIDER`/`FIRST_BYTE_MODEL`/
+/// route/harness names, giving the same margin `tests/gateway_retry_after.rs`'s
+/// own `wait_for_readings` gives: the accept loop's connection thread writes
+/// the observation *after* `send_and_read` has already returned, so the
+/// client side finishing is not proof the row has landed yet.
+fn wait_for_observation(
+    ledger: &EvidenceLedger,
+) -> glasshouse::routing::evidence::RoutingObservation {
+    let query = ObservationQuery {
+        provider: FIRST_BYTE_PROVIDER,
+        model: FIRST_BYTE_MODEL,
+        route: Some("anthropic-messages"),
+        harness: Some(FIRST_BYTE_HARNESS),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let rows = ledger.recent(query, 1).unwrap();
+        if let Some(row) = rows.into_iter().next() {
+            return row;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no routing observation was recorded within 5s of a completed exchange"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// **Acceptance test 1.** A real relayed exchange, driven through a real
+/// `Gateway` and a real accept loop — never
+/// `SessionRouting::record_routing_observation` called directly (practice
+/// §35) — records a `first_byte_at` that lands between `dispatched_at` and
+/// `completed_at`, not merely present. The stub's own delay between its head
+/// and its body ([`FIRST_BYTE_STUB_DELAY`]) is what makes the ordering
+/// assertion mean something rather than being trivially true at this
+/// build's second-granularity clock.
+///
+/// Mutation target (§35): delete `exchange.first_byte_at` from
+/// `SessionRouting::record_routing_observation`'s own
+/// `.with_first_byte_at(exchange.first_byte_at)` call — the production call
+/// this test reaches — and this assertion must fail.
+#[test]
+fn a_real_relayed_exchange_records_first_byte_at_between_dispatch_and_completion() {
+    const CREDENTIAL_VAR: &str = "GLASSHOUSE_ROUTING_COST_FIRST_BYTE_TEST_KEY_OK";
+
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let ledger = Arc::new(fixture.ledger());
+
+    let upstream_address = stub_ok_server_with_delayed_body();
+    let gateway = gateway_to_stub(CREDENTIAL_VAR, upstream_address, ledger);
+
+    let response = first_byte_send_and_read(
+        gateway.address(),
+        &first_byte_messages_request(gateway.token().expose()),
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "the gateway must relay the stub's own 200: {response}"
+    );
+
+    let row = wait_for_observation(&fixture.ledger());
+    let dispatched = row
+        .dispatched_at_unix
+        .expect("a forwarded exchange always records dispatched_at");
+    let completed = row
+        .completed_at_unix
+        .expect("a forwarded exchange always records completed_at");
+    let first_byte = row
+        .first_byte_at_unix
+        .expect("a real forwarded exchange must record when the first response byte arrived");
+    assert!(
+        first_byte >= dispatched,
+        "first_byte_at ({first_byte}) must not precede dispatched_at ({dispatched})"
+    );
+    assert!(
+        first_byte <= completed,
+        "first_byte_at ({first_byte}) must not follow completed_at ({completed})"
+    );
+
+    let run = fixture.routing_cost(None);
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+    let coding_agent = section(&run.stdout, "coding-agent (gateway relay)");
+    assert_eq!(value_after(&coding_agent, FIRST_BYTE_SAMPLES), "1");
+    let rendered = value_after(&coding_agent, TIME_TO_FIRST_BYTE);
+    assert!(
+        rendered.ends_with("ms (mean)") && rendered != "not recorded",
+        "a timed row must render a real reading, not the absence phrase: {rendered:?}"
+    );
+}
+
+/// **Acceptance test 2.** An exchange that never reached a provider —
+/// `Outcome::Unreachable`, a real connection attempt that was refused —
+/// records `first_byte_at` as `NULL`, and the reader prints the *not
+/// recorded* phrase: no digit anywhere in that field, and never `0` or
+/// `0ms`.
+///
+/// Mutation target: render an absent first-byte time as `0` in
+/// `main.rs::render_time_to_first_byte` and this test must fail.
+#[test]
+fn an_exchange_that_never_reached_a_provider_records_no_first_byte_and_the_reader_says_so() {
+    const CREDENTIAL_VAR: &str = "GLASSHOUSE_ROUTING_COST_FIRST_BYTE_TEST_KEY_UNREACHABLE";
+
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let ledger = Arc::new(fixture.ledger());
+
+    let upstream_address = unreachable_address();
+    let gateway = gateway_to_stub(CREDENTIAL_VAR, upstream_address, ledger);
+
+    let response = first_byte_send_and_read(
+        gateway.address(),
+        &first_byte_messages_request(gateway.token().expose()),
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 502"),
+        "an unreachable provider must relay as a 502: {response}"
+    );
+
+    let row = wait_for_observation(&fixture.ledger());
+    assert!(row.dispatched_at_unix.is_some());
+    assert!(row.completed_at_unix.is_some());
+    assert_eq!(
+        row.first_byte_at_unix, None,
+        "no response ever arrived, so there is no first byte to record"
+    );
+
+    let run = fixture.routing_cost(None);
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+    let coding_agent = section(&run.stdout, "coding-agent (gateway relay)");
+    assert_eq!(value_after(&coding_agent, FIRST_BYTE_SAMPLES), "0");
+    let rendered = value_after(&coding_agent, TIME_TO_FIRST_BYTE);
+    assert_eq!(
+        rendered, "not recorded",
+        "an untimed group must say so, never a number: {rendered:?}"
+    );
+    assert!(
+        !rendered.chars().any(|c| c.is_ascii_digit()),
+        "\"not recorded\" must never carry a stray digit: {rendered:?}"
     );
 }

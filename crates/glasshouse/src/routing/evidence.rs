@@ -39,22 +39,29 @@
 //! - **`completed_at`: accurate.** Stamped the instant `ingress::serve`
 //!   returns, which is genuinely when the exchange finished — every byte of
 //!   the response has been relayed and the connection is closing.
-//! - **`first_byte_at`, `first_token_at`, `first_tool_call_at`: not
-//!   supplied, at all, by this producer.** Not merely unavailable to this
-//!   round's partition — structurally unavailable to the ingress design
-//!   itself. `crate::gateway::ingress`'s own module documentation is explicit
-//!   that `crate::gateway::ingress::Exchange` (private to that module) "holds an outcome, two
-//!   statuses, a byte count and two names" and is "structurally incapable of
-//!   carrying a body," because a pass-through gateway that parsed response
-//!   bytes to find the first real token would be a parser of the payload it
-//!   exists to be unable to read. Line 1332's warning against treating
-//!   "whitespace padding, transport keepalives, or reasoning-only deltas" as
-//!   the first generated token is consequently moot for this producer: it
-//!   never attempts to find one, so it cannot get it wrong, and it leaves the
-//!   column `NULL` rather than fabricate a value. **These boxes stay open.**
-//!   A component that reads the response stream's own framing (the harness
-//!   adapter, or a body-aware layer this project has not built) is what would
-//!   have to supply them.
+//! - **`first_byte_at`: accurate, and the one timing column this producer
+//!   added after this module's own header was first written.** Stamped the
+//!   instant `crate::gateway::ingress::forward` sees the provider's status
+//!   and headers arrive — before a byte of the body is read, so this is a
+//!   clock reading rather than a step toward the parse this module is
+//!   forbidden. `None` on every exchange that never reached a provider at
+//!   all, and on the transport-failure case where one was dialled but never
+//!   answered.
+//! - **`first_token_at`, `first_tool_call_at`: not supplied, at all, by this
+//!   producer.** Not merely unavailable to this round's partition —
+//!   structurally unavailable to the ingress design itself.
+//!   `crate::gateway::ingress`'s own module documentation is explicit that
+//!   `crate::gateway::ingress::Exchange` (private to that module) is
+//!   "structurally incapable of carrying a body," because a pass-through
+//!   gateway that parsed response bytes to find the first real token would be
+//!   a parser of the payload it exists to be unable to read. Line 1332's
+//!   warning against treating "whitespace padding, transport keepalives, or
+//!   reasoning-only deltas" as the first generated token is consequently moot
+//!   for this producer: it never attempts to find one, so it cannot get it
+//!   wrong, and it leaves the column `NULL` rather than fabricate a value.
+//!   **These two boxes stay open.** A component that reads the response
+//!   stream's own framing (the harness adapter, or a body-aware layer this
+//!   project has not built) is what would have to supply them.
 //! - **`tool_rounds`, `retries`, `repairs`, `failovers`: not supplied.** The
 //!   gateway serves one HTTP request per connection
 //!   (`crate::gateway::ingress::serve`'s own "why one request per
@@ -361,6 +368,19 @@ impl NewObservation {
     ) -> Self {
         self.dispatched_at_unix = dispatched_at_unix;
         self.completed_at_unix = completed_at_unix;
+        self
+    }
+
+    /// Line 1331's one timing column [`Self::with_timing`] does not carry:
+    /// the instant the first response byte arrived, supplied only by the one
+    /// producer that can honestly observe it — the gateway relay, mid-exchange,
+    /// before its own body-parsing prohibition would apply. A separate
+    /// builder rather than a third parameter on [`Self::with_timing`], so
+    /// every other producer's existing two-argument call is untouched by a
+    /// column only one producer can ever supply. `None` becomes `NULL`,
+    /// exactly like every other absent column on this type.
+    pub fn with_first_byte_at(mut self, first_byte_at_unix: Option<i64>) -> Self {
+        self.first_byte_at_unix = first_byte_at_unix;
         self
     }
 
@@ -703,7 +723,7 @@ impl ObservedIdentity {
 /// number. A group that mixes counted and uncounted rows sums only what was
 /// counted, exactly as [`NewObservation::with_tokens`] asks every producer to
 /// leave absent counts absent rather than zeroed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PurposeConsumption {
     pub purpose: Option<String>,
     pub harness_recorded: bool,
@@ -711,6 +731,15 @@ pub struct PurposeConsumption {
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub cached_input_tokens: Option<i64>,
+    /// How many rows in this group carried a `first_byte_at` — a real
+    /// `COUNT(first_byte_at)`, always defined and honestly `0` when none did.
+    /// Line 1331's gateway producer is the only writer that can ever supply
+    /// this column, so today it is nonzero only for the coding-agent group.
+    pub first_byte_sample_count: usize,
+    /// The mean time to first byte, in milliseconds, over exactly the rows
+    /// counted in [`Self::first_byte_sample_count`] — `None` when that count
+    /// is `0`, never a fabricated duration for a group nothing timed.
+    pub mean_time_to_first_byte_ms: Option<f64>,
 }
 
 /// An open project database plus the routing observations inside it.
@@ -1099,6 +1128,13 @@ impl EvidenceLedger {
     /// [`PurposeConsumption`] declares, with no manual accumulate-and-default
     /// in between for a mutation to weaken.
     ///
+    /// `first_byte_sample_count` is a genuine `COUNT(first_byte_at)`, so it
+    /// is honestly `0` — not absent — for a group nothing timed.
+    /// `mean_time_to_first_byte_ms` is computed only across rows carrying
+    /// **both** `first_byte_at` and `dispatched_at`, and is `NULL` (`None`)
+    /// exactly when that count is `0` — SQLite's `AVG` over an empty set is
+    /// already `NULL`, so there is no manual zero-guard here either.
+    ///
     /// Scoped to this ledger's own `project_id`, like [`Self::observed_identities`]
     /// next door and for the same belt-and-suspenders reason: this reads
     /// across every row in the table rather than one already-named identity.
@@ -1116,7 +1152,14 @@ impl EvidenceLedger {
                         COUNT(*) AS sample_count,
                         SUM(input_tokens) AS input_tokens,
                         SUM(output_tokens) AS output_tokens,
-                        SUM(cached_input_tokens) AS cached_input_tokens
+                        SUM(cached_input_tokens) AS cached_input_tokens,
+                        COUNT(first_byte_at) AS first_byte_sample_count,
+                        AVG(
+                            CASE
+                                WHEN first_byte_at IS NOT NULL AND dispatched_at IS NOT NULL
+                                THEN CAST(first_byte_at - dispatched_at AS REAL) * 1000
+                            END
+                        ) AS mean_time_to_first_byte_ms
                  FROM routing_observations
                  WHERE project_id = ?1 AND observed_at >= ?2 AND observed_at <= ?3
                  GROUP BY purpose, harness_recorded
@@ -1310,6 +1353,7 @@ fn row_to_observation(
 /// [`rusqlite::Result`] is honest about that.
 fn row_to_purpose_consumption(row: &Row<'_>) -> rusqlite::Result<PurposeConsumption> {
     let sample_count: i64 = row.get("sample_count")?;
+    let first_byte_sample_count: i64 = row.get("first_byte_sample_count")?;
     Ok(PurposeConsumption {
         purpose: row.get("purpose")?,
         harness_recorded: row.get("harness_recorded")?,
@@ -1317,6 +1361,8 @@ fn row_to_purpose_consumption(row: &Row<'_>) -> rusqlite::Result<PurposeConsumpt
         input_tokens: row.get("input_tokens")?,
         output_tokens: row.get("output_tokens")?,
         cached_input_tokens: row.get("cached_input_tokens")?,
+        first_byte_sample_count: first_byte_sample_count as usize,
+        mean_time_to_first_byte_ms: row.get("mean_time_to_first_byte_ms")?,
     })
 }
 

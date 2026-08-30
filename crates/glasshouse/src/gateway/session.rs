@@ -323,7 +323,11 @@ impl SessionRouting {
     ///
     /// `dispatched_at_unix` and `completed_at_unix` come from the accept
     /// loop, the only place in this partition with a timestamp on both sides
-    /// of `ingress::serve`.
+    /// of `ingress::serve`. `exchange.first_byte_at` comes from inside that
+    /// call instead — `ingress::forward` is the only place that ever sees the
+    /// provider's response arrive — and is `None` on every exchange that
+    /// never reached a provider, exactly like every other honest absence this
+    /// method reads off `exchange` rather than invents.
     pub(super) fn record_routing_observation(
         &self,
         ledger: &EvidenceLedger,
@@ -363,6 +367,7 @@ impl SessionRouting {
         .with_harness(Some(assignment.harness().to_owned()))
         .with_quota_context(Some(assignment.backend().credential().label()))
         .with_timing(Some(dispatched_at_unix), Some(completed_at_unix))
+        .with_first_byte_at(exchange.first_byte_at)
         .with_outcome(outcome);
 
         // Best-effort, exactly like `observe_quota_headers`'s own write to
@@ -795,6 +800,9 @@ mod tests {
             provider: provider.to_owned(),
             protocol: Some("anthropic-messages".to_owned()),
             host: String::new(),
+            // No response ever arrived — this outcome exists precisely
+            // because the provider could not be reached at all.
+            first_byte_at: None,
         }
     }
 
@@ -830,6 +838,7 @@ mod tests {
             provider: provider.to_owned(),
             protocol: Some("anthropic-messages".to_owned()),
             host: String::new(),
+            first_byte_at: Some(1_700_000_000),
         }
     }
 
@@ -1214,6 +1223,7 @@ mod tests {
                 provider: "openrouter".to_owned(),
                 protocol: Some("anthropic-messages".to_owned()),
                 host: String::new(),
+                first_byte_at: Some(1_700_000_000),
             },
             now,
             None,
