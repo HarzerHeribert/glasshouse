@@ -31,7 +31,59 @@
 #   scripts/blast-radius.sh f1.rs f2.rs     # explicit files
 set -uo pipefail
 
+ORIG_CWD="$(pwd)"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Resolve which tree to analyse. $REPO is the SCRIPT's own location, not
+# necessarily the CALLER's tree: every editing worker runs from a worktree
+# under .worktrees/, and this script is reachable by absolute path / PATH
+# from the main checkout. Everything below this point is cwd-relative (git
+# diff, the changed-file existence checks, the crates/*/src grep, the cargo
+# invocations) -- so cd'ing unconditionally to $REPO makes the rest of the
+# script silently diff and test the WRONG tree. See the header comment for
+# the incident this guards against.
+#
+# Kinship is git-common-dir, not a path prefix: a worktree of this repo
+# shares one git dir with the main checkout no matter where it lives, and a
+# prefix check would break the moment a worktree lives outside .worktrees/
+# while looking correct for the common case.
+common_dir() {                     # absolute common .git dir for tree "$1"
+  local d
+  d="$(git -C "$1" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$d" in
+    # git itself reports the common dir through a resolved (physical) path
+    # when it is already absolute; `pwd -P` matches that for the relative
+    # case so the two forms compare equal instead of differing by a
+    # symlinked tmp/mount prefix (e.g. macOS /var vs /private/var).
+    /*) printf '%s\n' "$d" ;;
+    *)  (cd "$1/$d" 2>/dev/null && pwd -P) ;;
+  esac
+}
+
+CALLER_TOPLEVEL="$(git -C "$ORIG_CWD" rev-parse --show-toplevel 2>/dev/null)"
+
+if [ -z "$CALLER_TOPLEVEL" ]; then
+  echo "blast-radius: refusing -- '$ORIG_CWD' is not a git worktree (script lives at '$REPO')" >&2
+  exit 1
+fi
+
+# Compare through git's own (symlink-resolved) view of $REPO, not the logical
+# BASH_SOURCE-derived path, so a caller reached through a symlinked mount does
+# not spuriously look like "a different tree" and print a line case 1 must
+# never print.
+REPO_TOPLEVEL="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null)"
+
+if [ "$CALLER_TOPLEVEL" != "$REPO_TOPLEVEL" ]; then
+  REPO_COMMON="$(common_dir "$REPO")"
+  CALLER_COMMON="$(common_dir "$CALLER_TOPLEVEL")"
+  if [ -z "$REPO_COMMON" ] || [ "$REPO_COMMON" != "$CALLER_COMMON" ]; then
+    echo "blast-radius: refusing -- '$CALLER_TOPLEVEL' is not a worktree of the repo at '$REPO'" >&2
+    exit 1
+  fi
+  echo "blast-radius: analysing the caller's worktree at $CALLER_TOPLEVEL (not $REPO)"
+  REPO="$CALLER_TOPLEVEL"
+fi
+
 cd "$REPO" || exit 1
 
 DRY=0; MODE="head"; SINCE=""; FILES=()
