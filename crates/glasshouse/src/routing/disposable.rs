@@ -1234,6 +1234,75 @@ mod tests {
         assert_eq!(choice.reason(), UseReason::QuotaPreservation);
     }
 
+    /// The citation on `choose`'s doc comment: scoring ranks candidates for
+    /// the explanation it hands back, but the free loop never consults
+    /// `score` to pick a *winner* — it walks the user's own configured order
+    /// and returns the first one `pool` says is available. This constructs
+    /// two free candidates whose scoring order and user order **disagree**
+    /// (the second-listed one has far more remaining capacity, so `score`
+    /// would rank it first) and asserts the winner still follows the user's
+    /// order, not the score.
+    #[test]
+    fn scoring_never_reorders_the_existing_free_selection() {
+        use crate::provider::quota::{
+            Capacity, CapacityState, NativeAmount, Pool, Reading, ReadingSource,
+        };
+
+        const OBSERVED: i64 = 1_800_000_000;
+        let measured = |value: i64, unit: &str| {
+            Capacity::Measured(Reading::new(
+                NativeAmount::whole(value, unit),
+                OBSERVED,
+                ReadingSource::ResponseHeader("x-ratelimit".to_owned()),
+            ))
+        };
+        let score_of = |remaining: i64, limit: i64| {
+            CapacityState::metered_balance()
+                .with_credits(
+                    Pool::inapplicable()
+                        .with_remaining(measured(remaining, "tokens"))
+                        .with_limit(measured(limit, "tokens")),
+                )
+                .remaining_capacity_score()
+                .expect("both halves of the credits pool are measured")
+        };
+
+        // Low remaining capacity, but first in the user's own order.
+        let first_choice = free("openrouter", "first-choice-model").with_capacity(
+            CandidateCapacity::new().with_remaining_capacity(Some(score_of(10, 100))),
+        );
+        // High remaining capacity — the one `score` alone would prefer.
+        let scoring_would_prefer = free("openrouter", "scoring-would-prefer-model").with_capacity(
+            CandidateCapacity::new().with_remaining_capacity(Some(score_of(90, 100))),
+        );
+
+        let preferences =
+            FreePreferences::new().with_order(vec![first_choice.key(), scoring_would_prefer.key()]);
+        let routing = DisposableRouting::for_support_work(true, preferences);
+
+        let choice = routing
+            .choose(
+                JobKind::MemoryExtraction,
+                // Listed with the scoring-preferred candidate first, so a
+                // regression that let scoring drive selection would also
+                // have list order working in its favor.
+                &[scoring_would_prefer.clone(), first_choice.clone()],
+                &FreePool::new(),
+                Instant::now(),
+                None,
+            )
+            .expect("both candidates are free and available");
+
+        assert_eq!(
+            choice.model(),
+            first_choice.model(),
+            "scoring favors `{}` (higher remaining capacity), but the user's own order names \
+             `{}` first — scoring must never override the user's free-resource order",
+            scoring_would_prefer.model(),
+            first_choice.model()
+        );
+    }
+
     /// Line 539, the acceptance condition: an automated run finds no free
     /// resource and **fails** rather than buying one.
     #[test]
