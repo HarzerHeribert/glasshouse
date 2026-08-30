@@ -619,3 +619,63 @@ whether evidence holds. `GH-MUTATE-TREE` is fixing `mutate.sh` against
 
 **Until it lands: invoke `mutate.sh` worktree-relative, never by absolute path
 from another checkout.**
+
+
+## P2 scoped: the classification consumer is written and waiting for a caller
+
+`GH-CLASSIFICATION-JOB-RECON`, 2026-08-30. **It re-derived every line number and
+found the census's had moved** (`content_of` is now a *test* helper; the
+production parse is `parse_reply`) — §81 working as intended.
+
+**1. This is a Cluster B join, not a build.**
+`classify(request_text, Some(TaskClassification))` (`routing/classify.rs:576-581`)
+takes exactly the object a model reply would produce, and its only production
+caller — `report` (`classify.rs:595`, from `main.rs:145`) — **hardcodes `None`.**
+
+**2. The extraction job is not the reusable half people assume.** `Prompt` is a
+newtype with **one** constructor taking a `&SessionChunk`
+(`memory/extract/mod.rs:146-201`), and the reply parser is extraction's own
+schema. **The transport is reusable; the prompt, schema and parser are not.**
+
+**3. The spend gate has one production call site, and neither branch both calls
+and gates.** `evaluate_reserve_spend` is called only at
+`routing/disposable.rs:712`, inside `DisposableRouting::choose`.
+`disposable_extraction_model` (`main.rs:2554`) **early-returns**
+`configured_extraction_model` before any routing decision, while the branch that
+*does* route reaches `RoutedNoModel`, whose `complete` is
+`Err(ModelError::Unavailable)` (`memory/extract/disposable.rs:133-135`). So
+**nothing that passes the gate makes a call, and nothing that makes a call
+passes the gate.**
+
+**Stated carefully, because the framing matters.** For *extraction* this is
+arguably correct and is deliberate — the model is one the user configured
+explicitly, it runs once per completed turn, and `main.rs:2652-2655` documents
+why no rationale is recorded on that branch. **It is decisive for
+classification**, which is a request per routing decision — the cost Phase 34E's
+lines 1463–1466 exist to bound. **A classification job copying
+`configured_extraction_model`'s shape would inherit the bypass at far higher
+frequency.** `GH-CLASSIFICATION-CALL` is therefore required to obtain its model
+from `DisposableRouting::choose` on `Automatic`, and to fall back to the
+heuristic rather than reach around for one.
+
+**4. Two small honest gaps, no migration either side.**
+`routing_observations.purpose` is `TEXT` with no `CHECK` (`database.rs:1161`),
+bound at the INSERT and read back — the exact axis 1464/1465 need to separate
+routing spend from task spend — **but `NewObservation` has no `with_purpose`
+builder**; `purpose` is set nowhere but its `None` default. And
+`ModelCall::observation()` deliberately leaves it unwritten: **extraction's rows
+staying `NULL` is correct and must not be back-filled.**
+
+## A gap in this project's own gate, found the same day
+
+**`validate_round.py` supports §77 co-edits and requires them to be MUTUAL** —
+both packets must carry a `COEDIT: <path>` line, because *"one worker knows it
+is sharing and the other does not … is worse than a plain overlap."* That rule
+is right, and it caught a real instance: `gateway-health-bridge` was dispatched
+as `main.rs`'s sole claimant, and `classification-call` then joined.
+
+**The packet template does not emit a `COEDIT:` line**, so the declaration is
+only ever added by hand, after the validator refuses. Worth closing in
+`new-packet.sh` — and until then, **when a peer joins a file after a worker is
+already live, the live worker must be told**, because its packet was written
+when it was alone. That relay was sent.
