@@ -258,6 +258,30 @@ impl Fixture {
         assert_eq!(changed, 1, "exactly one row must have been rewritten");
     }
 
+    /// Deliver one harness event through a real `glasshouse hook` process.
+    ///
+    /// A separate process on purpose: that is what a harness spawns, and it is
+    /// the process whose own `ProjectSessions::open` supervises the session
+    /// the event is about.
+    fn hook(&self, session: &SessionId, event: &str) -> std::process::ExitStatus {
+        let mut child = self
+            .command(&["hook", "--session", session.as_str(), "--event", event])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the glasshouse binary must be runnable");
+        std::io::Write::write_all(
+            child.stdin.as_mut().expect("stdin was piped"),
+            br#"{"session_id":"native-1","hook_event_name":"Stop","cwd":"/somewhere"}"#,
+        )
+        .expect("the handler must read its payload rather than closing the pipe");
+        child
+            .wait_with_output()
+            .expect("the hook must finish")
+            .status
+    }
+
     /// Seconds since the Unix epoch, as the store's own clock reads it.
     fn now(&self) -> i64 {
         i64::try_from(
@@ -1475,4 +1499,337 @@ fn no_two_inputs_are_ever_delivered_to_one_session_at_once() {
     );
 
     live.lock().unwrap().close(&id).expect("close the session");
+}
+
+// -------------------------------------------------------------------------
+// The resume path's own process identity.
+// -------------------------------------------------------------------------
+//
+// Lines 1 and 3 again, at the one boundary that was skipping them.
+// `SessionStore::create` records the process a session was started in, and
+// every test above proves it does. A **resume** is the other way a session
+// becomes live, it happens in a different operating-system process, and it
+// wrote no identity at all — so the record went on naming the `glasshouse`
+// that first created the session, which had exited. Supervision then verified
+// that dead process id on the very next command, correctly concluded the
+// session was gone, and took the record back to `stopped`.
+//
+// That is not a supervision defect and nothing below weakens supervision to
+// make it pass: `a_resumed_session_whose_process_is_gone_is_still_lost` is the
+// same verdict against the same code, reached against the resumed identity
+// instead of the stale one.
+
+/// A harness that finishes at once the first time and stays up afterwards.
+///
+/// One `Fixture` installs one harness body, and this scenario needs both: a
+/// first run that ends so the session becomes `Resumable`, and a second run
+/// that is still alive when the test looks at what the resume recorded. The
+/// marker lives beside the script for
+/// `A_HARNESS_THAT_WORKS_ONCE_THEN_CRASH_LOOPS`'s reason — a resume re-runs
+/// the recorded launch, so anything telling the runs apart has to survive
+/// outside it.
+#[cfg(unix)]
+const A_HARNESS_THAT_FINISHES_THEN_STAYS_UP: &str = concat!(
+    "marker=\"$(dirname \"$0\")/resume-marker\"\n",
+    "if [ -f \"$marker\" ]; then sleep 60; exit 0; fi\n",
+    ": > \"$marker\"\n",
+    "exit 0",
+);
+#[cfg(windows)]
+const A_HARNESS_THAT_FINISHES_THEN_STAYS_UP: &str = concat!(
+    "set \"marker=%~dp0resume-marker\"\r\n",
+    "if exist \"%marker%\" goto stay\r\n",
+    "type nul > \"%marker%\"\r\n",
+    "exit /b 0\r\n",
+    ":stay\r\n",
+    "ping -n 61 127.0.0.1 > nul\r\n",
+    "exit /b 0",
+);
+
+/// A resumed session records the process it is *now* running in, and the next
+/// `glasshouse` command therefore leaves it alone.
+///
+/// The reproduction from `report-resume-probe.md`, with the harness taken out
+/// of it: the harness only ever mattered for showing that the resumed
+/// session's own hook was one of the commands that killed it. Any second
+/// command opens `ProjectSessions`, and every one of them supervises.
+///
+/// Run twice (§60) because a revert that alternated would pass a single pass
+/// and be exactly as broken.
+#[test]
+fn a_resumed_session_records_the_process_it_is_running_in() {
+    let fixture = Fixture::new(A_HARNESS_THAT_FINISHES_THEN_STAYS_UP);
+    let host = supervision::host_name().expect("this platform names its host");
+
+    // A session that ran, ended, and has a native conversation to resume to.
+    fixture.run(&["launch", "claude-code", "--headless"]);
+    let id = fixture.only_session();
+    let stopped = fixture.row(&id);
+    assert_eq!(
+        stopped.lifecycle, "stopped",
+        "the first launch must have ended: {stopped:?}"
+    );
+    let created_in = stopped
+        .identity()
+        .expect("the first launch recorded the process that created the session");
+
+    // The resume: a bare second launch takes the router's continuation branch.
+    let mut background = Background::launch(&fixture);
+    let resumed = fixture.wait_for(&id, "the resume to be recorded", |row| {
+        row.lifecycle == "running"
+    });
+    assert_eq!(
+        fixture.session_ids().len(),
+        1,
+        "the second launch must have continued the first session rather than \
+         started another; this test is about a resume"
+    );
+
+    let running_in = resumed
+        .identity()
+        .expect("a resumed session must record a process identity");
+    assert_ne!(
+        running_in, created_in,
+        "the resume is a different operating-system process, and the record \
+         still names the one that created the session: {resumed:?}"
+    );
+    assert_eq!(
+        supervision::verify(&running_in, &host),
+        supervision::Verdict::Verified,
+        "the identity a resume records must be the process that is actually \
+         running, not a plausible one: {resumed:?}"
+    );
+
+    // Any command that opens this project's sessions supervises. Before the
+    // identity was re-recorded, this pass verified the *creating* process,
+    // found it gone, and wrote `stopped` back over the resume.
+    for pass in 1..=2 {
+        fixture.run(&["sessions"]);
+        let after = fixture.row(&id);
+        assert_eq!(
+            after.lifecycle, "running",
+            "pass {pass}: a supervising command must not take a live resumed \
+             session back to stopped: {after:?}"
+        );
+        assert_ne!(
+            after.supervision.as_deref(),
+            Some("lost"),
+            "pass {pass}: nothing is lost — the process is running: {after:?}"
+        );
+    }
+
+    background.kill();
+}
+
+/// And the invariant that stops the fix being worse than the defect: a
+/// resumed session whose process is genuinely gone is still reported `lost`.
+///
+/// The same conclusion `an_orphaned_session_is_discovered_and_recorded_as_lost`
+/// proves for a created session, reached against an identity the **resume**
+/// wrote. If re-recording the identity had been done by loosening what
+/// supervision is willing to conclude, this is the test that would fail.
+#[test]
+fn a_resumed_session_whose_process_is_gone_is_still_lost() {
+    let fixture = Fixture::new(A_HARNESS_THAT_FINISHES_THEN_STAYS_UP);
+
+    fixture.run(&["launch", "claude-code", "--headless"]);
+    let id = fixture.only_session();
+
+    let mut background = Background::launch(&fixture);
+    let resumed = fixture.wait_for(&id, "the resume to be recorded", |row| {
+        row.lifecycle == "running"
+    });
+    let running_in = resumed
+        .identity()
+        .expect("a resumed session must record a process identity");
+
+    // Abruptly, with no chance to record the exit — the 2026-08-26 shape,
+    // applied to a resume.
+    background.kill();
+
+    fixture.run(&["sessions"]);
+
+    let after = fixture.row(&id);
+    assert_eq!(
+        after.supervision.as_deref(),
+        Some("lost"),
+        "a resumed session whose process is gone must still be found: {after:?}"
+    );
+    assert_eq!(
+        after.lifecycle, "stopped",
+        "and it is not still running: {after:?}"
+    );
+    let reason = after
+        .supervision_reason
+        .expect("a stated reason, as every other conclusion carries");
+    assert!(
+        reason.contains(&running_in.pid.to_string()),
+        "the reason must name the process the resume recorded, not the one \
+         that created the session: {reason}"
+    );
+}
+
+/// A resume refused under the write lock records nothing — not a lifecycle,
+/// and not an identity.
+///
+/// `SessionStore::open_for_resume` reads outside a transaction, so a record
+/// can be closed or failed between its answer and the write. `begin_resume`
+/// re-asks under the lock; this proves the identity write is inside that same
+/// decision rather than beside it, because an identity written for a resume
+/// that was refused would be a live-looking process on a finished session.
+#[test]
+fn a_refused_resume_records_neither_a_lifecycle_nor_an_identity() {
+    let fixture = Fixture::new(A_HARNESS_THAT_FINISHES);
+    fixture.run(&["launch", "claude-code", "--headless"]);
+    let id = fixture.only_session();
+    let before = fixture.row(&id);
+    assert_eq!(before.lifecycle, "stopped");
+
+    for (state, said) in [("failed", "failed"), ("closed", "closed")] {
+        fixture.execute(&format!(
+            "UPDATE sessions SET lifecycle = 'stopped' WHERE id = '{}'",
+            id.as_str()
+        ));
+
+        let runtime = fixture.runtime();
+        let sessions = ProjectSessions::open(&runtime).unwrap();
+        let store = sessions.store();
+        let resumable = store
+            .open_for_resume(&id)
+            .expect("a stopped session with a native identifier is resumable");
+
+        // The window: another process finishes the session after the check
+        // and before the write.
+        fixture.execute(&format!(
+            "UPDATE sessions SET lifecycle = '{state}' WHERE id = '{}'",
+            id.as_str()
+        ));
+
+        let error = store
+            .begin_resume(&resumable)
+            .expect_err("a finished session must refuse resumption");
+        let message = error.to_string();
+        assert!(
+            message.contains(said),
+            "the refusal must say the session is {said}: {message}"
+        );
+
+        let after = fixture.row(&id);
+        assert_eq!(
+            after.lifecycle, state,
+            "a refused resume must leave the lifecycle alone: {after:?}"
+        );
+        assert_eq!(
+            after.process_id, before.process_id,
+            "a refused resume must record no identity: {after:?}"
+        );
+        assert_eq!(
+            after.process_started_at, before.process_started_at,
+            "a refused resume must record no identity: {after:?}"
+        );
+        assert_eq!(
+            after.process_host, before.process_host,
+            "a refused resume must record no identity: {after:?}"
+        );
+    }
+}
+
+/// A session quarantined between the check and the write is not resumed, and
+/// its quarantine survives.
+///
+/// The narrow window `begin_resume` re-asks the disposition for, asked about
+/// the *other* refusal. It matters more since the resume began recording an
+/// identity: a resume that went ahead here would overwrite `quarantined` with
+/// `owned` and erase the record of a process Glasshouse cannot account for —
+/// so the refusal that stops it would never fire again, on this session or on
+/// a replacement claiming its conversation. Phase 10A's rule is that a
+/// quarantined session is never reused, never replaced and never reported as
+/// stopped; this is the resume boundary keeping it.
+#[test]
+fn a_session_quarantined_after_the_check_is_not_resumed_over() {
+    let fixture = Fixture::new(A_HARNESS_THAT_FINISHES);
+    fixture.run(&["launch", "claude-code", "--headless"]);
+    let id = fixture.only_session();
+
+    let runtime = fixture.runtime();
+    let sessions = ProjectSessions::open(&runtime).unwrap();
+    let store = sessions.store();
+    let resumable = store
+        .open_for_resume(&id)
+        .expect("a stopped session with a native identifier is resumable");
+
+    // Another `glasshouse` finds the recorded process alive and unaccounted
+    // for, after this caller was told the session could be resumed.
+    fixture.execute(&format!(
+        "UPDATE sessions SET supervision = 'quarantined', supervision_reason = \
+         'a process Glasshouse cannot account for is still running' WHERE id = '{}'",
+        id.as_str()
+    ));
+
+    let error = store
+        .begin_resume(&resumable)
+        .expect_err("a quarantined session must not be resumed");
+    let message = error.to_string();
+    assert!(
+        message.contains("quarantined"),
+        "the refusal must say why: {message}"
+    );
+
+    let after = fixture.row(&id);
+    assert_eq!(
+        after.supervision.as_deref(),
+        Some("quarantined"),
+        "the quarantine must survive a refused resume; overwriting it would \
+         retire the refusal that produced it: {after:?}"
+    );
+    assert_eq!(
+        after.lifecycle, "stopped",
+        "and the record must not have been made live: {after:?}"
+    );
+}
+
+/// **The contract.** A resumed session's harness is believed again.
+///
+/// `tests/session_hook.rs::a_resumed_session_believes_its_harness_again`
+/// asserts this already and cannot fail on it: its fixture creates the record
+/// with `SessionStore::create` **inside the test process**, so the identity on
+/// the row is the test binary's own and verifies for the whole run. A real
+/// resume happens in a process the creating `glasshouse` has already left, and
+/// that is the case this reproduces — the session below was created by a
+/// `glasshouse` that has exited, and resumed by one that has not.
+///
+/// The hook is a **separate process**, which is the whole of the defect: it
+/// opens `ProjectSessions`, supervision runs at that open, and against a
+/// stale identity it wrote `stopped` roughly a millisecond before the hook's
+/// own transition was refused for arriving at a finished session. `Stop` is
+/// the event for `a_resumed_session_believes_its_harness_again`'s reason — it
+/// means `Idle`, a state the record can only be holding if the report was
+/// applied.
+#[test]
+fn a_resumed_sessions_hook_is_believed_rather_than_refused_by_its_own_arrival() {
+    let fixture = Fixture::new(A_HARNESS_THAT_FINISHES_THEN_STAYS_UP);
+
+    fixture.run(&["launch", "claude-code", "--headless"]);
+    let id = fixture.only_session();
+
+    let mut background = Background::launch(&fixture);
+    fixture.wait_for(&id, "the resume to be recorded", |row| {
+        row.lifecycle == "running"
+    });
+
+    let status = fixture.hook(&id, "Stop");
+    assert!(
+        status.success(),
+        "the hook handler must not fail the harness's turn"
+    );
+
+    let after = fixture.row(&id);
+    assert_eq!(
+        after.lifecycle, "idle",
+        "the harness reported a turn ending in a session Glasshouse itself \
+         resumed, and the report was discarded — by supervision running inside \
+         this very hook process: {after:?}"
+    );
+
+    background.kill();
 }

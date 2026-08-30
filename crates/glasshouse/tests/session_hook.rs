@@ -890,6 +890,25 @@ fn lifecycle_of(fixture: &Fixture, id: &SessionId) -> SessionLifecycle {
 /// session is already in, so a `UserPromptSubmit` that changed nothing would
 /// leave `Running` behind whether the hook was believed or discarded. `Stop`
 /// means `Idle`, which the record can only be holding if the hook was applied.
+///
+/// # What this test cannot see, and where that half is proved
+///
+/// `running_session` creates the record with `SessionStore::create` **inside
+/// this test process**, so the process identity on the row is the test
+/// binary's own and verifies for the whole run. A real resume happens in a
+/// process the creating `glasshouse` has already left — and until the resume
+/// recorded an identity of its own, supervision verified that departed
+/// process at the next `ProjectSessions::open`, concluded the session was
+/// lost, and wrote `stopped` back over the resume roughly a millisecond
+/// before the hook's own transition was refused against the state it had just
+/// caused. Both assertions below hold against a tree with that defect,
+/// because a live identity is exactly what the fixture supplies.
+///
+/// So this test is the contract and not the whole proof of it.
+/// `tests/session_supervision.rs::a_resumed_sessions_hook_is_believed_rather_than_refused_by_its_own_arrival`
+/// is the same claim where the identity is genuinely dead: the session there
+/// is created by one `glasshouse launch` that exits, resumed by a second, and
+/// the event is delivered by a real `glasshouse hook` process.
 #[test]
 fn a_resumed_session_believes_its_harness_again() {
     let fixture = Fixture::new();

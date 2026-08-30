@@ -2406,12 +2406,50 @@ impl<'a> SessionStore<'a> {
     /// [`SessionDisposition::Closed`]. All three are refused, by the same
     /// classification `open_for_resume` refuses them by — one rule read twice
     /// rather than a second rule that could drift from the first.
+    ///
+    /// # The process identity is re-recorded here, and that is not a detail
+    ///
+    /// A resume happens in a **new operating-system process**. Making the
+    /// record live again while it still named the `glasshouse` that created
+    /// the session left every later invocation verifying a process id that
+    /// had exited — so `supervision::reconcile` reached [`Verdict::Gone`],
+    /// correctly, and wrote `stopped` back over the resume on the very next
+    /// command. Observed twice out of two trials against a live Codex, where
+    /// the command that undid the resume was the resumed session's own first
+    /// hook.
+    ///
+    /// The two writes are one transaction on purpose. A resumed record is
+    /// discoverable by supervision the instant its lifecycle goes live
+    /// ([`supervision::discover`] filters on exactly that), so a live
+    /// lifecycle and a stale identity must never both be readable, not even
+    /// between two statements. Afterwards a resumed row is the same shape a
+    /// created one is — live, with the identity of the Glasshouse responsible
+    /// for it — and supervision reaches the same conclusions about it for the
+    /// same reasons, which is the whole of the repair.
+    ///
+    /// Nothing about supervision is weakened. A resumed session whose process
+    /// is genuinely gone is still found and still recorded `lost`; that is
+    /// `a_resumed_session_whose_process_is_gone_is_still_lost` in
+    /// `tests/session_supervision.rs`, reached against the identity this
+    /// function wrote.
+    ///
+    /// `None` — a platform that will not name its processes — clears the
+    /// columns rather than leaving the old values behind, for
+    /// [`SessionStore::create`]'s reason: an unverifiable session is a real
+    /// answer that supervision refuses to conclude anything from, and a stale
+    /// identity is a wrong one it concludes a great deal from.
+    ///
+    /// [`Verdict::Gone`]: super::supervision::Verdict::Gone
     pub fn begin_resume(
         &self,
         resumable: &ResumableSession,
     ) -> Result<SessionRecord, SessionStoreError> {
         let id = &resumable.id;
         let action = "record a session resume";
+        // Asked before the write lock is taken. It reads the operating system
+        // about *this* process, whose answer no other writer can change, and
+        // the lock is for ordering writers rather than for holding a syscall.
+        let identity = supervision::ProcessIdentity::of_this_process();
         self.in_a_write_transaction(action, || {
             let record = self
                 .get(id)?
@@ -2428,6 +2466,25 @@ impl<'a> SessionStore<'a> {
                     },
                 });
             }
+
+            // The other half of what `open_for_resume` already decided,
+            // re-asked here for the same reason the disposition is: it read
+            // outside a transaction, and a quarantine recorded in between
+            // would otherwise be *overwritten* by the identity write below —
+            // turning a session Glasshouse may not touch into one it owns.
+            // Only the quarantine arm can fire, because a resumable record is
+            // stopped and the duplicate refusal is about a live one; it is
+            // still asked through `guard_start` so that a caller cannot check
+            // one refusal and forget the other, which is what that function
+            // exists for.
+            supervision::guard_start(
+                &record,
+                &self.supervision_of(id)?,
+                identity.as_ref(),
+                &|id| self.session_dir(id),
+            )?;
+
+            self.write_identity_locked(id, identity.as_ref(), action)?;
             self.write_lifecycle_locked(
                 id,
                 SessionLifecycle::Running,
@@ -2438,6 +2495,54 @@ impl<'a> SessionStore<'a> {
         })?;
         self.get(id)?
             .ok_or(SessionStoreError::NotFound { id: id.clone() })
+    }
+
+    /// Record the process a session is running in, replacing whatever was
+    /// recorded before it.
+    ///
+    /// The write [`SessionStore::create`] makes as part of its `INSERT`, as an
+    /// `UPDATE`, so that the other way a session becomes live can make it too.
+    /// Callers must already hold a write transaction — the identity and the
+    /// lifecycle it belongs to are one change, and a reader that could see
+    /// half of it is the defect this exists to close.
+    ///
+    /// `supervision` is set to [`Supervision::Owned`] beside the identity, and
+    /// the reason cleared, for the reason `create` gives: this Glasshouse is
+    /// responsible for this process, and it is the only conclusion a writer
+    /// that is not [`super::supervision::reconcile`] may reach. Leaving the
+    /// previous conclusion would leave a sentence like *"its process (65061)
+    /// is no longer running"* printed beside a session that is running, about
+    /// a process the row no longer names.
+    ///
+    /// A `None` identity clears all four columns rather than half of them —
+    /// [`SessionStore::supervision_of`] reads the three identity columns
+    /// together or not at all, and a partially cleared row would be read as an
+    /// identity built from whichever parts survived.
+    fn write_identity_locked(
+        &self,
+        id: &SessionId,
+        identity: Option<&ProcessIdentity>,
+        action: &'static str,
+    ) -> Result<(), SessionStoreError> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE sessions SET process_id = ?2, process_started_at = ?3, \
+                 process_host = ?4, supervision = ?5, supervision_reason = NULL \
+                 WHERE id = ?1",
+                rusqlite::params![
+                    id.as_str(),
+                    identity.map(|identity| identity.pid),
+                    identity.map(|identity| identity.started_at_ms),
+                    identity.map(|identity| identity.host.as_str()),
+                    identity.map(|_| Supervision::Owned.as_str()),
+                ],
+            )
+            .map_err(|source| SessionStoreError::Sql { action, source })?;
+        if changed == 0 {
+            return Err(SessionStoreError::NotFound { id: id.clone() });
+        }
+        Ok(())
     }
 }
 
