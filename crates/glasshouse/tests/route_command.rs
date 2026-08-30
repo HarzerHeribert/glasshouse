@@ -811,6 +811,11 @@ fn install_named_fake_harness(bin_dir: &Path, name: &str, argv_log: &Path) -> Pa
 /// against `native`'s undeclared `+0.000`), and one profile that is
 /// otherwise identical to `better` but for `enabled = false`
 /// (`disabled-one`).
+///
+/// [`ProfileSelectionFixture::with_all_profiles_enabled`] writes the **same**
+/// configuration with that one `enabled = false` line removed and nothing
+/// else changed, which is what makes the no-regression test a controlled
+/// comparison rather than two unrelated fixtures that happen to agree.
 struct ProfileSelectionFixture {
     _tmp: tempfile::TempDir,
     base: PathBuf,
@@ -819,6 +824,24 @@ struct ProfileSelectionFixture {
 
 impl ProfileSelectionFixture {
     fn new() -> Self {
+        Self::build("enabled = false\n")
+    }
+
+    /// The same fixture with no `enabled` key anywhere — the behaviour every
+    /// configuration written before the field was read has to keep.
+    fn with_all_profiles_enabled() -> Self {
+        Self::build("")
+    }
+
+    /// Write a project-level configuration into the fixture's own project
+    /// root, at the path `EffectiveConfig`'s project layer reads.
+    fn write_project_config(&self, toml: &str) {
+        let dir = self.root.join(".glasshouse");
+        std::fs::create_dir_all(&dir).expect("create project config dir");
+        std::fs::write(dir.join("config.toml"), toml).expect("write project config");
+    }
+
+    fn build(disabled_line: &str) -> Self {
         let tmp = tempfile::tempdir().expect("tempdir");
         let base = tmp.path().to_path_buf();
         let root = base.join("workspace");
@@ -844,7 +867,7 @@ impl ProfileSelectionFixture {
                  expected_protocol = \"anthropic-messages\"\n\n\
                  [profiles.better.backend]\nkind = \"direct-provider\"\n\
                  provider = \"route-probe\"\n\n\
-                 [profiles.disabled-one]\nharness = \"claude-code\"\nenabled = false\n\
+                 [profiles.disabled-one]\nharness = \"claude-code\"\n{disabled_line}\
                  expected_protocol = \"anthropic-messages\"\n\n\
                  [profiles.disabled-one.backend]\nkind = \"direct-provider\"\n\
                  provider = \"route-probe\"\n"
@@ -902,38 +925,93 @@ fn two_enabled_profiles_differing_on_protocol_fit_are_ranked_and_the_higher_one_
     );
 }
 
-/// Acceptance test 2, and the evidence for clause 1 of the refusal.
-/// `disabled-one` sets `enabled = false` — the exact field
-/// `config/mod.rs:372` defines and the settings screen round-trips
-/// (`shell/state.rs`, `shell/mod.rs`) — and it is still offered as a fresh
-/// destination, ranked right alongside `better` and `native`.
+/// Acceptance test 1 (GH-PROFILE-ENABLED), and the inversion of the test
+/// this replaces.
 ///
-/// `ProfileConfig::enabled` is read in exactly one place in this crate
-/// outside its own getter/setter: the settings-screen round-trip tests
-/// (`config/mod.rs`, `shell/mod.rs`, `shell/state.rs`). Nothing that builds a
-/// [`glasshouse::profile::LaunchProfile`] or a routing destination reads it —
-/// `EffectiveConfig::launch_profile` (`config/mod.rs:2730`) calls
-/// `ProfileConfig::to_launch_profile` (`config/mod.rs:508`), which never
-/// reads `self.enabled`, and `LaunchProfile` (`profile/mod.rs:211`) has no
-/// `enabled` field to carry it even if it did.
+/// `GH-PROFILE-SELECTION` pinned the defect here as
+/// `a_disabled_profile_is_still_offered_as_a_fresh_destination`, and said in
+/// its own doc that *"if clause 1 is ever closed, this test's assertions
+/// invert along with it"*. This is that inversion: `disabled-one` sets
+/// `enabled = false` — the field `config/mod.rs` defines and the settings
+/// screen round-trips — and it is no longer a routing candidate.
 ///
-/// **If clause 1 is ever closed, this test's assertions invert along with
-/// it** — it pins the gap as it stands, not the behaviour box 372 asks for.
+/// # Why the other two assertions are here
+///
+/// "Does not contain a string" is true of an empty report, of a crashed
+/// binary, and of a filter that removed every profile rather than one. Both
+/// survivors are asserted, in their ranked order, so the exclusion is a real
+/// one — the same shape
+/// `a_profile_configured_for_another_harness_is_never_offered_under_the_wrong_one`
+/// below uses, and practice §17's lesson about absence assertions.
+///
+/// `native` in particular must survive: the filter reads
+/// `EffectiveConfig::profile_enabled`, which answers `true` for the implied
+/// Native profile without consulting configuration, and that is what makes
+/// the enabled candidate set impossible to empty.
 #[test]
-fn a_disabled_profile_is_still_offered_as_a_fresh_destination() {
+fn a_disabled_profile_is_not_offered_as_a_fresh_destination() {
     let fixture = ProfileSelectionFixture::new();
     let report = fixture.stdout(&["route"]);
     assert!(
-        report.contains("fresh:claude-code:disabled-one"),
-        "box 372's first clause — 'among *enabled* launch profiles' — does not hold: \
-         `enabled = false` in config.toml does not remove a profile from the candidate \
-         set:\n{report}"
+        !report.contains("fresh:claude-code:disabled-one"),
+        "`enabled = false` must remove a profile from the routing candidate set:\n{report}"
+    );
+    assert!(
+        report.starts_with("destination  fresh:claude-code:better"),
+        "the enabled profile that outranks `native` must still win — without this the \
+         assertion above would also pass against a build that offered nothing at \
+         all:\n{report}"
+    );
+    assert!(
+        report.contains("fresh:claude-code:native"),
+        "and the implied Native profile must still be offered, so the filter is removing \
+         one profile rather than emptying the set:\n{report}"
+    );
+}
+
+/// Acceptance test 3: an explicit `--profile` naming a disabled profile is
+/// refused, and the refusal names the profile and how to undo it.
+///
+/// The candidate filter above only stops *offering* the profile. Without
+/// this, `--profile disabled-one` would still start a session under it —
+/// `DestinationScope::Launchable` takes the already-chosen name and never
+/// consults the enabled set — and `enabled` would mean nothing on the one
+/// path that actually starts anything.
+///
+/// `launch_preflight.rs`'s
+/// `an_explicitly_named_disabled_profile_is_refused_before_anything_is_probed_or_recorded`
+/// is the other half: that the refusal arrives early enough to cost nothing.
+/// This one is about what the person reads.
+#[test]
+fn explicitly_launching_a_disabled_profile_is_refused_and_says_how_to_undo_it() {
+    let fixture = ProfileSelectionFixture::new();
+    let launched = fixture.glasshouse(&[
+        "launch",
+        "claude-code",
+        "--headless",
+        "--profile",
+        "disabled-one",
+    ]);
+    let streams = Fixture::both_streams(&launched);
+
+    assert!(
+        streams.contains("disabled-one"),
+        "the refusal must name the profile that was refused:\n{streams}"
+    );
+    assert!(
+        streams.contains("enabled = true"),
+        "and must say what to change to undo it — a refusal a person cannot act on is the \
+         same silence this packet removed:\n{streams}"
+    );
+    assert!(
+        !launched.status.success(),
+        "a disabled profile named explicitly must not start a session:\n{streams}"
     );
 
-    // The same gap on the path that acts, not only the one that reports:
-    // nothing refuses to launch a profile explicitly named while disabled,
-    // either.
-    let launched = fixture.glasshouse(&[
+    // The same configuration with that one line gone launches, so the
+    // refusal is about `enabled` and not about anything else in the profile.
+    let enabled = ProfileSelectionFixture::with_all_profiles_enabled();
+    let launched = enabled.glasshouse(&[
         "launch",
         "claude-code",
         "--headless",
@@ -942,9 +1020,205 @@ fn a_disabled_profile_is_still_offered_as_a_fresh_destination() {
     ]);
     assert!(
         launched.status.success(),
-        "a profile with `enabled = false` can still be launched by name, which is the same \
-         gap on the path that starts a session rather than the one that only reports:\n{}",
+        "the same profile without `enabled = false` must launch — otherwise the refusal \
+         above could be about the profile's backend, its protocol, or anything else:\n{}",
         Fixture::both_streams(&launched)
+    );
+}
+
+/// A name nobody configured is reported as **unknown**, not as disabled —
+/// and the list of valid names it prints still contains the disabled
+/// profile.
+///
+/// # This test exists because a mutation survived
+///
+/// Practice §80: flipping `profile_enabled`'s final fallback from `true` to
+/// `false` passed the whole of this file. The verdict held up under §80's
+/// three questions — the target ran, nothing was filtered out, and the line
+/// really is on a path a person reaches, because `--profile <typo>` is
+/// exactly the case where neither layer has the name. Nothing watched it.
+///
+/// What the mutation actually produced, run against the shipped binary:
+/// *"launch profile `no-such-profile` is disabled by default; re-enable it
+/// ... or set `enabled = true`"* — advice for a profile that does not exist,
+/// about a key there is nowhere to put. "Disabled" and "never configured"
+/// are different facts and a typo must not be answered with the wrong one.
+///
+/// # And it is the second listing surface
+///
+/// `ProfileLookupError::Unknown` builds its `valid names are:` list from
+/// `EffectiveConfig::profile_names`, which is the accessor this packet was
+/// told **not** to filter. `disabled-one` appearing here is that ruling
+/// being load-bearing rather than stylistic: had the filter gone into
+/// `profile_names`, a person who disabled a profile and then mistyped its
+/// name would be told the profile does not exist.
+#[test]
+fn an_unconfigured_profile_name_is_unknown_rather_than_disabled() {
+    let fixture = ProfileSelectionFixture::new();
+    let output = fixture.glasshouse(&[
+        "launch",
+        "claude-code",
+        "--headless",
+        "--profile",
+        "no-such-profile",
+    ]);
+    let streams = Fixture::both_streams(&output);
+
+    assert!(
+        streams.contains("is not a known launch profile"),
+        "a name nobody configured must be reported as unknown:\n{streams}"
+    );
+    // `ProfileDisabled`'s own phrase, not the bare word: `disabled-one` is
+    // in the valid-names list below, so "does not contain `disabled`" is a
+    // condition this fixture can never satisfy and would be a test that only
+    // looked like one.
+    assert!(
+        !streams.contains("is disabled"),
+        "and never as disabled — there is no `enabled` key to set on a profile that does \
+         not exist, so that advice cannot be followed:\n{streams}"
+    );
+    assert!(
+        streams.contains("disabled-one"),
+        "the valid-names list comes from `profile_names`, which this packet deliberately \
+         does not filter — so a disabled profile is still named here, and a person who \
+         disabled one and then mistyped it is told it exists:\n{streams}"
+    );
+    assert!(
+        !output.status.success(),
+        "and an unknown profile still does not start a session:\n{streams}"
+    );
+}
+
+/// Acceptance test 4 — the no-regression, and the reason the fixture has two
+/// constructors that differ by exactly one line of TOML.
+///
+/// `enabled_by_default` is `true`, and a configuration file written before
+/// anything read the field has no `enabled` key at all. Every such profile
+/// must be offered exactly as it was before this packet. Captured from the
+/// shipped binary before the change and asserted here: three destinations,
+/// `better` first.
+///
+/// This is the test mutation (c) — `enabled_by_default` returning `false` —
+/// has to fail, and it fails loudly rather than quietly: under it `better`
+/// and `disabled-one` both vanish and the report opens on `native` instead.
+#[test]
+fn a_configuration_with_no_enabled_key_offers_every_profile_exactly_as_before() {
+    let fixture = ProfileSelectionFixture::with_all_profiles_enabled();
+    let report = fixture.stdout(&["route"]);
+
+    assert!(
+        report.starts_with("destination  fresh:claude-code:better"),
+        "with no `enabled` key anywhere the ranking must be what it was before the field \
+         was read — `better` first:\n{report}"
+    );
+    for name in ["better", "disabled-one", "native"] {
+        assert!(
+            report.contains(&format!("fresh:claude-code:{name}")),
+            "`{name}` has no `enabled` key, so it must still be offered:\n{report}"
+        );
+    }
+}
+
+/// Ruling 4: the implied Native profile cannot be disabled, and a
+/// `[profiles.native]` table saying otherwise changes nothing.
+///
+/// `EffectiveConfig::launch_profile` already short-circuits this name before
+/// any table lookup — the Native profile exists for every harness by
+/// construction, and `ProfileTable` never stores it — so `profile_enabled`
+/// answers the same way rather than inventing a second rule. That is what
+/// makes "you have disabled every profile and have nowhere to launch"
+/// unreachable instead of merely unwritten: this one always survives the
+/// filter.
+#[test]
+fn the_implied_native_profile_cannot_be_disabled() {
+    let fixture = ProfileSelectionFixture::new();
+    fixture.write_project_config(
+        "version = 1\n\n[profiles.native]\nharness = \"claude-code\"\nenabled = false\n",
+    );
+
+    let report = fixture.stdout(&["route"]);
+    assert!(
+        report.contains("fresh:claude-code:native"),
+        "`[profiles.native] enabled = false` must not remove the implied Native profile — \
+         it is not a configuration entry and there is nothing there to disable:\n{report}"
+    );
+
+    let launched =
+        fixture.glasshouse(&["launch", "claude-code", "--headless", "--profile", "native"]);
+    assert!(
+        launched.status.success(),
+        "and naming it explicitly must still launch:\n{}",
+        Fixture::both_streams(&launched)
+    );
+}
+
+/// Acceptance test 5: project and user disagreeing about `enabled` resolve
+/// the way every other lookup on `EffectiveConfig` resolves — project first,
+/// then user — asserted in **both** directions through the shipped binary.
+///
+/// Both directions matter, and a mutation that inverts the precedence has to
+/// fail on one of them whichever way it inverts. A single-direction test
+/// would pass against a build that simply ignored the project layer, or one
+/// that simply ignored the user layer.
+///
+/// The layer is chosen for the profile as a whole, not for this field alone:
+/// `launch_profile` already takes the winning layer's `ProfileConfig` entire,
+/// so a project that redefines a name supplies its `enabled` too. See
+/// `EffectiveConfig::profile_enabled`'s own doc for why resolving the field
+/// separately would build a profile neither layer wrote.
+#[test]
+fn project_and_user_disagreeing_about_enabled_resolve_project_first() {
+    // The user disabled it; the project redefines the name and says nothing
+    // about `enabled`, which is `true`. Project wins, so it is offered.
+    let user_disabled = ProfileSelectionFixture::new();
+    user_disabled.write_project_config(
+        "version = 1\n\n\
+         [profiles.disabled-one]\nharness = \"claude-code\"\n\
+         expected_protocol = \"anthropic-messages\"\n\n\
+         [profiles.disabled-one.backend]\nkind = \"direct-provider\"\n\
+         provider = \"route-probe\"\n",
+    );
+    let report = user_disabled.stdout(&["route"]);
+    assert!(
+        report.contains("fresh:claude-code:disabled-one"),
+        "the project layer redefines this profile and does not disable it, so it wins over \
+         the user layer's `enabled = false`:\n{report}"
+    );
+
+    // And the other way: nothing disabled at the user layer, the project
+    // disables it. Project wins again, so it is gone.
+    let project_disabled = ProfileSelectionFixture::with_all_profiles_enabled();
+    project_disabled.write_project_config(
+        "version = 1\n\n\
+         [profiles.disabled-one]\nharness = \"claude-code\"\nenabled = false\n\
+         expected_protocol = \"anthropic-messages\"\n\n\
+         [profiles.disabled-one.backend]\nkind = \"direct-provider\"\n\
+         provider = \"route-probe\"\n",
+    );
+    let report = project_disabled.stdout(&["route"]);
+    assert!(
+        !report.contains("fresh:claude-code:disabled-one"),
+        "the project layer disables it and the user layer says nothing, so it must be \
+         gone:\n{report}"
+    );
+    assert!(
+        report.starts_with("destination  fresh:claude-code:better"),
+        "and the rest of the ranking is untouched, so the assertion above is an exclusion \
+         rather than an empty report:\n{report}"
+    );
+
+    // The refusal reads the same resolution, and says which layer decided.
+    let launched = project_disabled.glasshouse(&[
+        "launch",
+        "claude-code",
+        "--headless",
+        "--profile",
+        "disabled-one",
+    ]);
+    let streams = Fixture::both_streams(&launched);
+    assert!(
+        streams.contains("this project's configuration"),
+        "a person told their profile is disabled needs to know which file to open:\n{streams}"
     );
 }
 

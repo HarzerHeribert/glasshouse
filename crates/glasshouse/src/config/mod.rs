@@ -2577,6 +2577,22 @@ pub enum Layer {
     Default,
 }
 
+impl Layer {
+    /// Where a value this layer supplied came from, as a phrase that reads
+    /// inside a sentence — "disabled *in your configuration*". Deliberately
+    /// says nothing about *where on disk*: a refusal a person reads on their
+    /// terminal must not print an absolute path (`crate::secret`'s own rule
+    /// about what a message may carry), and the file a layer means is
+    /// already `glasshouse doctor`'s job to name.
+    pub fn describe_source(self) -> &'static str {
+        match self {
+            Self::Project => "in this project's configuration",
+            Self::User => "in your configuration",
+            Self::Default => "by default",
+        }
+    }
+}
+
 /// A resolved value together with which layer produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layered<T> {
@@ -2713,6 +2729,82 @@ impl<'a> EffectiveConfig<'a> {
             names.extend(project.profiles().names().map(str::to_owned));
         }
         names.into_iter().collect()
+    }
+
+    /// Whether the launch profile `name` may be *started*, reporting which
+    /// layer decided it. See [`ProfileConfig::enabled`], the field this
+    /// reads.
+    ///
+    /// # Why this is a separate query rather than a filter inside `profile_names`
+    ///
+    /// [`EffectiveConfig::profile_names`] means *every configured profile
+    /// name*, and the surfaces that list profiles need exactly that: a user
+    /// has to be able to see a disabled profile in order to re-enable it,
+    /// which is the whole of that field's "disable is not delete" rule.
+    /// Filtering inside a general accessor would make a disabled profile
+    /// invisible rather than unavailable, and would do it to every caller at
+    /// once — including [`ProfileLookupError::Unknown`]'s own list of valid
+    /// names, where a missing name reads as a typo. So the filter belongs at
+    /// the one site that decides which profiles the router may *consider*
+    /// (`main.rs`'s `routing_destinations`, under its `Everything` scope),
+    /// and this is the question that site asks.
+    ///
+    /// # Which layer wins, and why the whole definition decides it
+    ///
+    /// Project first, then user, then [`Layer::Default`] — the same order as
+    /// [`EffectiveConfig::enabled`] and every other lookup on this type
+    /// except [`EffectiveConfig::bypass_acknowledged`].
+    ///
+    /// The layer is picked exactly as [`EffectiveConfig::launch_profile`]
+    /// picks it, and that is not a free choice. `launch_profile` takes the
+    /// winning layer's [`ProfileConfig`] **whole** — harness, backend,
+    /// model, approval and preset all come out of one file — so resolving
+    /// `enabled` on its own could produce a profile whose body came from the
+    /// project and whose enable decision came from the user, which is a
+    /// profile neither layer ever wrote.
+    ///
+    /// The consequence, recorded because it is real: a project that defines
+    /// `[profiles.foo]` at all supplies `enabled` for it, defaulting to
+    /// `true` — so it re-enables a `foo` the user disabled.
+    /// [`ProfileConfig::enabled`] is a plain `bool` rather than
+    /// [`IntegrationConfig::enabled`]'s tri-state `Option<bool>`, so a
+    /// project has no way to say "I define this profile and leave the enable
+    /// decision alone". This grants a project nothing it did not already
+    /// have — it can define `[profiles.anything-else]` and have that offered
+    /// — and it cannot escalate approval, because
+    /// [`ProfileApproval::Bypass`] still needs
+    /// [`EffectiveConfig::bypass_acknowledged`], which is read from the user
+    /// layer alone.
+    ///
+    /// # The implied Native profile is always enabled
+    ///
+    /// [`crate::profile::NATIVE_PROFILE_NAME`] answers `true` at
+    /// [`Layer::Default`] without consulting either table, mirroring
+    /// `launch_profile`'s own short circuit: the Native profile exists for
+    /// every harness *by construction* rather than as a configuration entry
+    /// — see [`ProfileTable`], which never stores it — so there is no entry
+    /// to disable. That is what keeps a person from configuring their way
+    /// into having nowhere to launch: `profile_names` always contains it,
+    /// `launch_profile` always resolves it, so the enabled candidate set is
+    /// never empty and the "you have disabled everything" refusal this would
+    /// otherwise need is unreachable rather than merely unwritten.
+    ///
+    /// An unknown name answers `true` at [`Layer::Default`] too. "Disabled"
+    /// and "never configured" are different facts and `launch_profile`
+    /// already reports the second one as [`ProfileLookupError::Unknown`];
+    /// answering "disabled" here would hand a caller a second, wronger
+    /// refusal for the same typo.
+    pub fn profile_enabled(&self, name: &str) -> Layered<bool> {
+        if name == crate::profile::NATIVE_PROFILE_NAME {
+            return Layered::new(true, Layer::Default);
+        }
+        if let Some(config) = self.project.and_then(|p| p.profiles().get(name)) {
+            return Layered::new(config.enabled(), Layer::Project);
+        }
+        if let Some(config) = self.user.profiles().get(name) {
+            return Layered::new(config.enabled(), Layer::User);
+        }
+        Layered::new(true, Layer::Default)
     }
 
     /// Resolve `name` to a [`crate::profile::LaunchProfile`] for `harness`,
@@ -3167,6 +3259,39 @@ pub enum ProfileLookupError {
     },
     #[error(transparent)]
     Invalid(#[from] ProfileConfigError),
+}
+
+/// A launch profile a person named explicitly is disabled.
+///
+/// Deliberately **not** a [`ProfileLookupError`] variant.
+/// [`EffectiveConfig::launch_profile`] never returns this and must not: it is
+/// the resolver *every* path uses, and a session already running under a
+/// profile since disabled has to stay resumable — `enabled` decides what may
+/// be **started**, not what may be continued, which is the same reading
+/// `resume`'s own profile fallback already took. So this is a separate
+/// refusal raised at the one place a session is started from a name a person
+/// typed.
+///
+/// The message carries the profile name and the two ways to undo it, and no
+/// path: see [`Layer::describe_source`].
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "launch profile `{name}` is disabled {}; re-enable it in the Settings screen's \
+     Launch Profiles section, or set `enabled = true` under `[profiles.{name}]`",
+    .layer.describe_source()
+)]
+pub struct ProfileDisabled {
+    pub name: String,
+    pub layer: Layer,
+}
+
+impl ProfileDisabled {
+    pub fn new(name: impl Into<String>, layer: Layer) -> Self {
+        Self {
+            name: name.into(),
+            layer,
+        }
+    }
 }
 
 /// Load a TOML-serialized `T` from `path`, or `T::default()` if the file

@@ -176,6 +176,9 @@ impl Fixture {
                  credential_env = [\"{CREDENTIAL_VAR}\"]\n\n\
                  [profiles.direct]\nharness = \"claude-code\"\n\n\
                  [profiles.direct.backend]\nkind = \"direct-provider\"\n\
+                 provider = \"preflight-probe\"\n\n\
+                 [profiles.parked]\nharness = \"claude-code\"\nenabled = false\n\n\
+                 [profiles.parked.backend]\nkind = \"direct-provider\"\n\
                  provider = \"preflight-probe\"\n"
             ),
         )
@@ -568,6 +571,86 @@ fn a_direct_provider_profile_cannot_be_launched_while_its_harness_is_not_install
     assert!(
         !output.status.success(),
         "an uninstalled harness must not start a session:\n{stderr}"
+    );
+}
+
+/// GH-PROFILE-ENABLED acceptance test 3, in this file because this is where
+/// "a refusal costs nothing" is provable.
+///
+/// `route_command.rs`'s
+/// `explicitly_launching_a_disabled_profile_is_refused_and_says_how_to_undo_it`
+/// covers what the person reads. What only this fixture can show is **when**
+/// the refusal happens: `parked` is a direct-provider profile pointed at a
+/// provider that answers, so a launch that got as far as the profile would
+/// probe it. Zero hits means the refusal arrived before the profile was
+/// resolved at all — the same ordering, and the same evidence, as the
+/// uninstalled-harness refusal above.
+///
+/// # The assertions are ordered the same way, and for the same reason
+///
+/// A non-zero exit is asserted last (§80 case 5). The mutation that removes
+/// this guarantee — dropping the `profile_enabled` check in `launch_session`
+/// — lets the launch proceed, and the fake harness then exits `HARNESS_EXIT`,
+/// which is also not success. A test that led with "it did not succeed" would
+/// report KILLED with its real subject unexercised. So what leads is what
+/// only a refusal produces: the provider was never probed, and no session
+/// exists.
+#[test]
+fn an_explicitly_named_disabled_profile_is_refused_before_anything_is_probed_or_recorded() {
+    let provider = FakeProvider::answering("HTTP/1.1 200 OK");
+    let fixture = Fixture::new(&provider.base_url, true);
+
+    let output =
+        fixture.glasshouse(&["launch", "claude-code", "--profile", "parked", "--headless"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert_eq!(
+        provider.hits(),
+        0,
+        "a disabled profile must be refused before it is resolved, so the pre-flight check \
+         never has a launch to look at:\n{stderr}"
+    );
+    let listing = fixture.glasshouse(&["sessions"]);
+    let listing = String::from_utf8_lossy(&listing.stdout).into_owned();
+    assert!(
+        !listing.contains("claude-code"),
+        "a refused launch must record no session:\n{listing}"
+    );
+    assert!(
+        stderr.contains("parked"),
+        "the refusal must name the profile that was refused:\n{stderr}"
+    );
+    assert!(
+        !output.status.success(),
+        "a disabled profile must not start a session:\n{stderr}"
+    );
+}
+
+/// The other half, and the same pairing `a_direct_provider_profile_cannot_be
+/// _launched_while_its_harness_is_not_installed` has with the test below it:
+/// disabling is not deleting. The identical launch against the profile that
+/// carries no `enabled = false` runs, on the same fixture, in the same
+/// process — so the refusal above is about that one key and not about
+/// `parked`'s backend, its provider, or its harness.
+#[test]
+fn the_sibling_profile_that_is_not_disabled_launches_on_the_same_configuration() {
+    let provider = FakeProvider::answering("HTTP/1.1 200 OK");
+    let fixture = Fixture::new(&provider.base_url, true);
+
+    let output =
+        fixture.glasshouse(&["launch", "claude-code", "--profile", "direct", "--headless"]);
+    assert_eq!(
+        output.status.code(),
+        Some(HARNESS_EXIT),
+        "`direct` differs from `parked` only in that it has no `enabled = false`, and it \
+         must launch:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        provider.hits() > 0,
+        "and it must get far enough to be pre-flight checked, which is what makes the \
+         zero-hit assertion above a statement about the refusal rather than about this \
+         fixture"
     );
 }
 

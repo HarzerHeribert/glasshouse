@@ -546,6 +546,90 @@ fn free_resource_order_disabled_and_pin_round_trip_and_a_stale_pin_degrades_visi
     assert!(matches!(err, NoResource::PinnedResourceUnavailable { .. }));
 }
 
+/// GH-PROFILE-ENABLED acceptance test 2: a disabled launch profile is still
+/// **listed**, so a person can find it and turn it back on.
+///
+/// This is the constraint that decided where the enabled filter went. The
+/// obvious fix for "a disabled profile is still a routing candidate" is to
+/// filter inside `EffectiveConfig::profile_names`, and it is wrong: that
+/// accessor means *every configured profile name*, this screen is what a
+/// person uses to re-enable one, and a profile filtered out of the list
+/// cannot be re-enabled from anywhere. `disable is not delete` — the rule
+/// `ProfileConfig::enabled`'s own doc names — needs both halves, and the
+/// routing half is worthless if it takes this one with it.
+///
+/// The Settings list is the **only** surface that enumerates launch
+/// profiles: `shell::build_settings` merges the two profile tables itself
+/// rather than calling `profile_names` (its own comment says why — the
+/// implied Native profile has no `ProfileConfig` to show), and `glasshouse
+/// doctor` does not list profiles at all.
+///
+/// # Rendered twice, at two widths
+///
+/// Practice §17: the row is a fixed-column format and `enabled`/`disabled` is
+/// its **last** column, so a narrow viewport clips exactly the word under
+/// test. 100 columns is what a person sees; 200 is where nothing can be
+/// truncated. A build that rendered the label correctly and a build that
+/// dropped the row entirely differ at both widths, but only the wide one can
+/// tell "shows disabled" from "shows nothing after the approval column".
+#[test]
+fn a_disabled_launch_profile_is_still_listed_in_settings_so_it_can_be_re_enabled() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use glasshouse::config::{Layer, ProfileConfig};
+    use glasshouse::integrations::IntegrationId;
+    use glasshouse::shell::{HarnessRow, ProfileRow, ProviderRow, ShellState};
+
+    let mut parked = ProfileConfig::new(IntegrationId::ClaudeCode);
+    parked.set_enabled(false);
+    let mut running = ProfileConfig::new(IntegrationId::ClaudeCode);
+    running.set_enabled(true);
+
+    let mut state = ShellState::new("p", "/work/p", "0.1.0", Vec::new());
+    state.open_settings(
+        Vec::<HarnessRow>::new(),
+        Vec::new(),
+        Vec::<ProviderRow>::new(),
+        vec![
+            ProfileRow {
+                name: "parked-one".to_owned(),
+                config: parked,
+                layer: Layer::User,
+            },
+            ProfileRow {
+                name: "running-one".to_owned(),
+                config: running,
+                layer: Layer::User,
+            },
+        ],
+    );
+    // Harnesses, Integrations, Providers, Launch Profiles.
+    for _ in 0..3 {
+        state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+
+    for width in [100, 200] {
+        let text = rendered_settings(&state, width, 30);
+        assert!(
+            text.contains("parked-one"),
+            "a disabled profile must still be listed at {width} columns, or there is nowhere \
+             to re-enable it from:\n{text}"
+        );
+        assert!(
+            text.contains("running-one"),
+            "and so must its enabled sibling, so the assertion above is about listing rather \
+             than about this screen rendering at all:\n{text}"
+        );
+    }
+
+    // The word itself, only where it cannot be truncated away.
+    let wide = rendered_settings(&state, 200, 30);
+    assert!(
+        wide.contains("disabled"),
+        "and it must be shown *as* disabled — a row listed with no state is a profile a \
+         person cannot tell is off:\n{wide}"
+    );
+}
+
 fn rendered_settings(state: &glasshouse::shell::ShellState, width: u16, height: u16) -> String {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;

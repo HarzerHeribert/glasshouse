@@ -617,11 +617,33 @@ fn routing_destinations(
         );
     }
 
-    // 2. One fresh destination per configured launch profile, each carrying
-    //    what the most recent checkpoint would give it to boot from.
+    // 2. One fresh destination per *enabled* configured launch profile, each
+    //    carrying what the most recent checkpoint would give it to boot from.
+    //
+    //    This is where "which launch profiles may the router consider" is
+    //    decided, so it is where `ProfileConfig::enabled` is read — not
+    //    inside `EffectiveConfig::profile_names`, which every listing surface
+    //    also calls and which has to keep naming a disabled profile so a
+    //    person can find it and turn it back on. See
+    //    `EffectiveConfig::profile_enabled`'s own doc for that split.
+    //
+    //    Only the fresh destinations are filtered. The sessions above are
+    //    deliberately untouched: disabling a profile says what may be
+    //    *started*, and a session that already exists under it stays
+    //    resumable — dropping it here would make an existing conversation
+    //    unreachable, which is a heavier thing than a routing preference and
+    //    is not what a person disabling a profile asked for.
+    //
+    //    The filtered set is never empty: `profile_names` always contains the
+    //    implied Native profile and `profile_enabled` always answers `true`
+    //    for it, by construction rather than by configuration.
     let checkpoint = latest_checkpoint_quality(runtime);
     let offered: Vec<String> = match scope {
-        DestinationScope::Everything => effective.profile_names(),
+        DestinationScope::Everything => effective
+            .profile_names()
+            .into_iter()
+            .filter(|name| effective.profile_enabled(name).value)
+            .collect(),
         DestinationScope::Launchable { profile } => vec![profile.to_owned()],
     };
     for name in offered {
@@ -1359,10 +1381,35 @@ fn launch_session(
     // sources it has always come from — with `--to fresh:<harness>:<profile>`
     // added as a fourth, because an identifier a person pasted out of
     // `glasshouse route` has to mean the same thing here as it did there.
-    let fresh_profile = to
+    let named_profile = to
         .and_then(|id| fresh_destination_profile(id, selection.id()))
-        .or(profile_name)
-        .unwrap_or(glasshouse::profile::NATIVE_PROFILE_NAME);
+        .or(profile_name);
+    // A profile the user disabled is not a profile Glasshouse may start,
+    // and being asked for it by name is the one case where saying nothing
+    // would be worst: the routing filter above simply stops offering it, so
+    // without this a `--profile` naming it would launch it anyway and
+    // `enabled` would mean nothing on the path that actually starts a
+    // session.
+    //
+    // Refused *here*, before `routing_destinations` and before any
+    // pre-flight check, so a refusal costs nothing — no probe, no session
+    // record, no process — matching the harness-not-installed refusal below
+    // it in `session::select`.
+    //
+    // Only a name the person supplied is checked. `fresh_profile`'s fallback
+    // is the implied Native profile, which nobody asked for and which
+    // `profile_enabled` never reports as disabled anyway.
+    if let Some(name) = named_profile {
+        let enabled = effective.profile_enabled(name);
+        if !enabled.value {
+            eprintln!(
+                "glasshouse: {}",
+                config::ProfileDisabled::new(name, enabled.layer)
+            );
+            return Ok(ExitCode::FAILURE);
+        }
+    }
+    let fresh_profile = named_profile.unwrap_or(glasshouse::profile::NATIVE_PROFILE_NAME);
     let destinations = routing_destinations(
         runtime,
         &effective,
