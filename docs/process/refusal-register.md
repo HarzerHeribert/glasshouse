@@ -485,3 +485,33 @@ a **measured** justification naming harness version and date
 (`claude_code.rs:120-135`). Declaring cache invalidation honestly requires
 **observing it on a real harness** — nothing in this repository can answer it.
 **Do not package as wiring; inventing the value is 1294's error.**
+
+
+## A dependency that would not resolve — 627–630 on Phase 47
+
+**The most expensive thing this recon found, because it is invisible until
+someone finishes the phase being waited on.**
+
+`phase-9k.md` records that map lines **627–629** wait on **Phase 47** for a
+durable metrics channel, and 630 additionally on Phase 33A. The wait is real —
+there is no measurement channel in this build at all: `fn score\|Score` across
+`crates/glasshouse/src` finds only `RemainingCapacityScore`
+(`provider/quota.rs:1779`) and its routing consumers, which are about remaining
+quota for routing decisions and unrelated to measuring a response profile's
+effect on a conversation. No per-pairing observation storage, no
+output-token-reduction counter, no cognitive-load signal.
+
+**But the recorded blocker understates the gap in a way that matters.** Phase
+47's seven open lines are uniformly **Cluster H** — a debug *view* over data
+that is never made durable. So **Phase 47 closing as currently scoped would not
+unblock 627–630.** It would deliver a view; those lines need a *producer*, which
+nothing in Phase 47 currently asks anyone to build.
+
+**Do not treat 627–630 as "unblocked once 47 lands."** They are blocked on a
+measurement producer that no phase in the map currently owns. Closing 47 and
+then packaging them would burn a round discovering this.
+
+**This is the shape to check for elsewhere**: a line whose blocker names another
+phase, where that phase — read as written — does not actually supply the missing
+link. The register records blockers; it has not until now recorded whether the
+thing being waited on would satisfy them.
