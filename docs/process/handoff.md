@@ -84,6 +84,43 @@ session id from the relaunch recipe, collapsing the fire-once lock to a shared
 from a worktree gets *"no changed .rs files"* and **exit 0** — a verification
 tool reporting success about the wrong tree. `GH-BLAST-RADIUS-TREE` is fixing it.
 
+### WHERE THE NEXT BATCHES SHOULD GO — §83, applied across the whole register
+
+Two recons this batch classified **35 lines** across five phases and found
+**one** reachable. That is not bad luck; the recon that produced it also
+produced the explanation, and it changes how work should be chosen:
+
+> *"Every line that closed did so by reading something **already** durable on
+> disk. The producers that already exist were the ones that closed the map's
+> easy lines. What is left is producers that do not exist yet."*
+
+**So stop hunting for unwired mechanisms. There are almost none left.** A phase
+being mostly closed is now evidence *against* its remainder being cheap, and
+`ORIENT.md`'s fewest-open-first ranking is actively misleading — three packages
+died at Phase −1 this batch, each recommended by that ranking.
+
+**Gather by root cause and attack the root (§83).** Counting the register:
+
+| missing producer | lines it would unblock |
+|---|---|
+| **A durable observation/metrics sink** | Cluster H's **7** (1757, 1759, 1760, 1763, 1766, 1767, 1769) + Phase 47's **7** + 9K's **627–630** = **~18** |
+| A routing model actually wired | 1455/1456, most of 34C (13) and 34D (11), Q's 1090 — the largest, and the largest build |
+| A file-path association on memories | Phase 28's **5** |
+
+**The durable observation sink is the recommendation.** It is the largest
+tractable one, every member is already diagnosed, and Cluster H's rows name the
+exact seam each needs — `RoutingExplanation` has no durable sink and every
+production sink is a `tracing` line or an in-memory `Vec`;
+`ShellState::record_disposable_choice` has zero production callers while
+`shell/view.rs:1793` already renders it.
+
+**But read the warning above it first**: Phase 47 *as written* is a debug
+**view**, and closing it would not unblock 627–630. Whatever gets built must be
+a **producer**, and no phase in the map currently owns that. **That is a scope
+question for the user before it is a packet** — it is new product surface, not
+wiring, and this project's rule is that a design decision goes to
+`docs/product/design-decisions.md` rather than being settled inside a package.
+
 ### THE GATE RAN: 20 PASS / 1 FAIL, and the interrupt fix is verified
 
 `ci-local.sh --macos --linux --windows-vm` on `3b73a26`.
