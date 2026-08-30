@@ -1052,9 +1052,35 @@ fn an_interrupt_leaves_this_shell_reading(shell: &str, harness: &Path, base: &Pa
         .expect("run kill");
     assert!(signalled.success(), "`kill -INT` failed for `{shell}`");
 
-    wait_for(&format!("`{shell}` to run its INT trap"), || {
-        work.join("interrupted-unknown.log").is_file()
-    });
+    // Not `wait_for`: a bare "timed out waiting for `{shell}` to run its INT
+    // trap" is exactly the message this test produced under macOS gate load
+    // on 2026-08-30, and it does not say whether the trap is late or the
+    // signal never arrived at all — the two defects GH-INTERRUPT-TEST-FLAKE
+    // was opened to tell apart. Local reproduction (CPU soak to a load
+    // average past 80 on a 12-core machine, four concurrent
+    // `cargo test -p glasshouse` runs providing real subprocess/pty
+    // contention, 25 full-binary trials in total) never reproduced the
+    // timeout, so this does not change the deadline — it only makes the next
+    // occurrence self-diagnosing: whether the shell had already exited (a
+    // real kill, not a slow trap) and what it had printed by the deadline.
+    let trap_deadline = Instant::now() + TIMEOUT;
+    loop {
+        if work.join("interrupted-unknown.log").is_file() {
+            break;
+        }
+        if Instant::now() >= trap_deadline {
+            let exited = child.try_wait().expect("try_wait");
+            panic!(
+                "timed out waiting for `{shell}` to run its INT trap after \
+                 {TIMEOUT:?}: exited={exited:?} (Some(_) here means the \
+                 signal killed the shell rather than being trapped; None \
+                 means it is still running and the trap is merely late), \
+                 printed so far: {:?}",
+                said()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 
     // Deliberately not asserted: a write to a pipe whose reader has just gone
     // may still succeed, so its result says nothing either way. What the line

@@ -2635,6 +2635,65 @@ surface. A package that quietly grew a producer while claiming to close a view
 line would be inventing scope, and this project's rule is that the map is
 authoritative and design decisions are recorded here first.
 
+### SCOPED 2026-08-30 — and two things above are WRONG, corrected here
+
+`GH-OBSERVATION-SINK-RECON` scoped it read-only, and its findings correct this
+entry rather than confirming it. **Read this section, not the estimate above.**
+
+**1. "~18 lines depend on it" overstates the payoff, and the correction is
+material.** Counted conservatively, line by line: **0 `WOULD CLOSE`, 5 `NEEDS
+MORE`, 6 `STILL BLOCKED`.** A minimal sink closes **nothing** outright and moves
+**two** lines from `STILL BLOCKED` to `NEEDS MORE`. The five it is necessary for
+(1757, 1759, 1763, 1766, 1769) each *also* need a reader, and often more. The six
+it does not help (1760, 1767, 627–630) fail on a different missing link — no
+cache-temperature signal exists at all, nothing computes a correlation, and
+nothing counts output tokens.
+
+**The user agreed to build a producer, and that is still what this is. But it
+buys fewer boxes than the question implied, and the honest first package closes
+zero.**
+
+**2. No new table, and no migration.** `evaluation_observations` (migration 15,
+`database.rs:1515`) **is** the sink. It was built to be extended by adding one
+Rust enum variant and says so in its own header: *"One variant, because this
+package lands one producer. Variants are added as producers land, never in
+advance"* (`evaluation/mod.rs:89-90`). It already has retention, project-scope
+triggers, a `kind` with no SQL `CHECK`, a free-text `detail`, `session_id`,
+`routing_seq` provenance and a listing read.
+
+**3. Constraint 2 below is aimed at the wrong table — do not follow it.**
+`sessions` already carries **harness** (`database.rs:179`), **launch_profile**
+(`:241`), **model** (`:905`), **protocol** (`:916`) and **response_profile**
+(`:921`), the last two written by two real production launch callers. **A sink
+row carrying `session_id` recovers every `EvidenceKey` axis by join.** Copying
+`EvidenceKey` into a new table would *reintroduce* the conflation, not fix it.
+
+**4. Line 630's recorded blocker is wrong.** `phase-9k.md:347-348` says it waits
+on Phase 33A because *"separately for each harness-model pairing is that
+ledger's key"*. **33A's ledger is the one missing `launch_profile`; `sessions`
+keys correctly today.** 630's real and only blocker is that there is no
+measurement to key.
+
+**5. Line 1763 is closer than the register says** — production does emit three
+distinct failure classes, not the one the register records.
+
+### The recommended first package
+
+**`GH-DISPOSABLE-ROUTE-SINK`** — make the disposable-job routing rationale
+durable and read it back in the shell. **It closes zero boxes**, and it is the
+right first package anyway: it builds the producer plus the reader that stops it
+being Cluster B, on the signal produced most often, needing no ruling, no
+migration and no new table.
+
+Chosen over the gateway failover path because that one fires only on provider
+failure, holds no `session_id`, and its `routing_seq` does not exist at the
+moment its explanation does. The disposable path fires **once per completed
+turn**, and `report_hook` (`main.rs:2351`) already has a `&Runtime` and a
+`session: &str` in scope.
+
+`main.rs` is structurally contended — claim it with `scripts/coedit.sh` (§77)
+rather than queueing behind it.
+
 ### Constraints the first package inherits
 
 1. **A schema migration is likely, and this project refuses those casually** —
