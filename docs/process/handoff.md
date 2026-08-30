@@ -6,6 +6,129 @@
 
 Last updated: 2026-08-30 (Europe/Berlin)
 
+## Checkpoint — 2026-08-30, batch 55 in flight: 813 / 1280 (64%)
+
+**Board: three workers live, one accepted and parked, one packet ready and
+queued behind `main.rs`. The gate is GREEN on all sixteen legs.**
+
+### The owed gate run is done, and it is green
+
+It had not run since `7683de9`. It has now run at `efc5330` and passed every
+leg — including **real Windows on the ARM64 VM**: 16 PASS, 0 FAIL. The five
+`SKIPPED` are the native secure store, which would not open in this session.
+
+Launched with the `execvp` incantation the previous checkpoint recorded, and
+that still matters: `nohup … &` gives every test `SIGINT = SIG_IGN`, which is
+what produced three "flake" failures and a 65-trial investigation.
+
+**A caution for whoever greps this log next.** The Windows leg prints
+`panicked at` lines *from tests that assert panics* — `test result: ok` on
+every target. Reading a `panicked at` grep as a failure would have called a
+green gate red, which is the mirror image of the mistake the last checkpoint
+recorded (calling a red integration green off an invented grep). **Read the
+`PASS`/`FAIL` summary block, not a substring you chose.**
+
+### Workers
+
+- **`memory-path-lookup`** — **DONE, REVIEWED, ACCEPTED, parked for batch
+  integration.** Closes no box by design. `Scored::relevance` is now
+  `Option<f64>`; `group()` inserts **nothing** for a `None`, so
+  `RetrievalResult.relevances` still holds only relevances a real query
+  produced — the invariant is *strengthened*, not pierced. `store.rs` needed no
+  change and no visibility was widened: `search.rs` already has an
+  `impl MemoryStore` block. Verified by the orchestrator:
+  `normalize_observed_path` is `pub` at `store.rs:431` and is the same function
+  the writer uses at `:1897`, so reader and writer agree on spelling.
+  Its strongest evidence was built *before* the source change — a
+  same-order/same-relevance test written and passed on the pristine tree at
+  `efc5330`, then re-run after.
+- **`routing-spend-door`** (Sonnet) — `glasshouse routing-cost`, targeting
+  **1464 only**. Holds `main.rs`, `cli.rs`, `routing/evidence.rs`.
+- **`script-tree-audit`** (Sonnet) — audits every script in `scripts/` for the
+  wrong-tree bug that has now bitten three tools. Holds `scripts/**` only.
+- **`phase30-audit`** (Opus, read-only, main checkout) — attacking five
+  **already-ticked** lines. See below.
+- **`compaction-checkpoint`** — **written, validated, NOT dispatched.** It is
+  blocked on `main.rs` and that is a deliberate refusal to co-edit: §77's own
+  addendum says its hard case — two agents whose changes genuinely conflict —
+  **is still untested**, and `routing-spend-door` is mid-flight with +640 lines
+  in that file. Dispatch it the moment `main.rs` frees.
+
+### The find that matters most this batch: five ticked boxes may be wrong
+
+`GH-COMPACTION-RECON` flagged it and **the orchestrator confirmed it
+independently**: `SessionStore::context` (`session/store.rs:2020`) has **zero
+production callers**. `SessionContext` appears in `crates/glasshouse/src/` only
+at its definition (`:802`), its one constructor (`:2060`), a doc comment
+(`:1999`), the re-export (`session/mod.rs:61`) and an unrelated comment
+(`database.rs:1633`). All 14 callers are in `tests/session_context.rs`.
+
+It is the only place **1161–1165 — all ☑ — produce anything a caller could
+see.** If that holds, the shipped binary never estimates a prompt-cache state,
+never computes checkpoint recency, and never produces a task-continuity flag.
+`GH-PHASE30-AUDIT` is dispatched against exactly those five. **1159 and 1160
+are not affected**; 1159's claim is the write at `main.rs:3429`.
+
+### Rulings made this batch, so nobody re-derives them
+
+1. **327's count satisfies the "or compaction-related state" disjunct.**
+   Reading it to require a timestamped row per occurrence reads the "or" out of
+   a line written disjunctively for exactly this case — Codex only ever says
+   *about to compact*, and `PostCompact` is excluded on purpose. 327 still needs
+   a production reader **and** one real `/compact` observed end to end.
+2. **1465 is REFUSED.** `ObservedCost` has no production producer: both
+   assignments (`routing/evidence.rs:1674`, `:1723`) are past that file's
+   `#[cfg(test)]` at `:1355`. No money figure exists anywhere in this build.
+3. **1463 is not claimed.** "per interactive hour" needs a notion of
+   interactive time nothing builds.
+4. **1171's design is settled and it needs no migration.** The compaction arm
+   **preserves the previous checkpoint's `reason`** rather than stamping one.
+   `CheckpointReason` has exactly two variants and `database.rs:588` pins them
+   with `CHECK (reason IN ('manual','task_boundary'))`, so a `BeforeCompaction`
+   variant would need a table rebuild — and stamping `TaskBoundary` would be
+   false, since its own doc says *"Glasshouse took it because a turn ended."*
+   The map line's verb is *"creating **or refreshing**"*, and a refresh needs no
+   new reason.
+
+### `routing_observations` has THREE production writers, not two
+
+Found while pre-verifying the ruling I owed `routing-spend-door`, and relayed
+to it mid-flight:
+
+| writer | `purpose` | `harness` | tokens |
+|---|---|---|---|
+| classification — `main.rs:3229` | `"classification"` | NULL | **present** |
+| extraction — `main.rs:3760` | NULL | NULL | **present** |
+| gateway relay — `gateway/session.rs:358` | NULL | **set** | **NULL by design** |
+
+The gateway rows **are** the coding-agent consumption 1464 asks routing
+consumption to be separated from, and they carry real request counts with no
+token counts. That makes 1464 genuinely closeable rather than vacuous — and it
+makes the *not counted* vs `0` distinction the package's central test.
+
+### Register corrections
+
+- **P9's census row was wrong in three ways.** 1316 is a **Phase 33** line
+  (rate limits), not compaction. 310 moves from Cluster G to **Cluster E** — the
+  harness emits no compaction event. 327's blocker moved from storage to a
+  reader when 1159 shipped. **No P9 line needs a migration.**
+- **1169, 1172, 1173 join Cluster Q.** Glasshouse never compacts anything; the
+  only `/compact` in the tree is inside a `cfg(test)` block.
+- **New Cluster R: P5 has no producer either.** Every `mcp` mention in `src` is
+  a *harness capability declaration*; there is no MCP server and no MCP
+  dependency. Phase 43 is a **build**, and 1702/1703 make it a **product-scope
+  decision for the user**, not a package to be ranked by open-line count.
+
+### Next exact action
+
+1. Review `routing-spend-door`, `script-tree-audit`, `phase30-audit` as they
+   land. **`phase30-audit` first** — it may un-tick five boxes.
+2. **`integrate.sh memory-path-lookup <others>` in ONE call**, never serially.
+3. Dispatch `compaction-checkpoint` as soon as `main.rs` frees.
+4. Still owed by the user, still blocked by the permission classifier
+   (correctly): `rm -rf ~/.ollama/models/models` — 36G orphaned. **Do not touch
+   the 48G `Glasshouse Windows CI.vmwarevm`.**
+
 ## Checkpoint — 2026-08-30, batch 54: 810 / 1280 (63%)
 
 **Net +1 box, and that undersells it: one closed, two un-ticked after audit, and
