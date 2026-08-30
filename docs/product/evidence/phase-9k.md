@@ -531,11 +531,38 @@ This entry records *"no reader outside `harness/mod.rs`"* for line 618. That was
 true when written. **`glasshouse doctor` now reads `StyleChange` in production**
 — `integrations/mod.rs:1168-1178`, wired by `fc16943`.
 
-**Two of line 618's three terms are therefore closed.** Only the
-cache-invalidation variant remains: one enum variant plus one adapter
-declaration. Across Phase 9K's eleven open lines and Phase 47's seven, this is
-the smallest remaining gap the recon found — and the only one it judged worth
-packaging soon.
+**Two of line 618's three terms are therefore closed.** The
+cache-invalidation term remains.
+
+## But it is NOT "one enum variant", and the orchestrator's first record of this
+## was wrong — corrected the same day, before anything was dispatched
+
+The recon called the remainder *"one enum variant plus one adapter declaration —
+smaller than anything else in either phase"*, and this entry repeated it. **A
+Phase −1 check against source contradicts it on two counts.**
+
+**1. It is not a variant.** `StyleChange` (`harness/mod.rs:693`) is two
+*mutually exclusive* states — `InPlace | NewSession` — answering "does changing
+the style need a new session". *"Likely to invalidate prompt caching"* is
+**orthogonal**: a change can be in-place **and** invalidate the cache. Adding it
+as a third variant would make the enum say two different things on one axis, and
+`integrations/mod.rs:1168-1178` matches it exhaustively to render one phrase. It
+needs a **separate field**, and that is a type change across every adapter.
+
+**2. The declaration is the expensive half, not the wiring.** Every value here
+is a `Declared::verified(value, evidence)` carrying a *measured* justification —
+`claude_code.rs:120-135` names the harness version, the date, and the exact
+observation (*"Claude Code 2.1.246 `claude --help` documents `--settings
+<file-or-json>` as a launch option"*). To declare cache invalidation honestly, a
+package must **observe** it per harness. Nothing in this repository can tell you
+whether changing Claude Code's output style invalidates its prompt cache.
+
+**So 618's third term is blocked on an observation nobody has made**, and
+inventing a value would be map line 1294's error exactly: *"a fabricated value
+here does not degrade the policy, it inverts it."* **Do not package it as
+wiring.** What it needs first is a measurement, on a real harness, of whether a
+style change costs the prompt cache — the same kind of work that produced the
+two values already here.
 
 **The rest of 9K is not cheap**, which was the recon's headline and is recorded
 in the refusal register: 616 and 622 are Cluster Q (vacuous restraints over

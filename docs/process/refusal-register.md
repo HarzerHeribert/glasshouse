@@ -473,6 +473,15 @@ tripwire does **not** tick a box. Both lines stay open, in Cluster Q.
 **`phase-9k.md`'s claim about line 618 is stale.** It records "no reader outside
 `harness/mod.rs`"; `glasshouse doctor` now reads `StyleChange` in production
 (`integrations/mod.rs:1168-1178`, wired via `fc16943`). **Two of the line's
-three terms are closed**; only the cache-invalidation variant remains — one enum
-variant plus one adapter declaration. That is the smallest remaining gap in
-either phase, and the only thing here worth packaging soon.
+three terms are closed.**
+
+**The third is NOT cheap, and the recon's "one enum variant plus one adapter
+declaration" was wrong — checked at Phase −1 before anything was dispatched.**
+`StyleChange` (`harness/mod.rs:693`) is two *mutually exclusive* states;
+"invalidates prompt caching" is **orthogonal** (a change can be in-place *and*
+invalidate the cache), so it needs a separate field across every adapter, not a
+variant. And every value here is `Declared::verified(value, evidence)` carrying
+a **measured** justification naming harness version and date
+(`claude_code.rs:120-135`). Declaring cache invalidation honestly requires
+**observing it on a real harness** — nothing in this repository can answer it.
+**Do not package as wiring; inventing the value is 1294's error.**
