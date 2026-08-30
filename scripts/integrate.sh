@@ -153,4 +153,51 @@ Still yours, and not delegable:
   * rule on every box, write the evidence, commit, push
 
 NEXT
+
+# ---- 6. co-edit release nudge (packet GH-INTEGRATE-RELEASE-NUDGE): name any
+#         barrier a just-integrated worker still holds. Silence is correct
+#         when nothing is held — a nudge that always fires is noise, and this
+#         script still never releases anything itself: that asserts
+#         reconciliation happened, which is a ruling, the same reason it
+#         already refuses to commit or tick a box (CLAUDE.md, practice §77).
+release_cmds=()
+seen_files=""
+if [ -x scripts/coedit.sh ]; then
+  list_out="$(scripts/coedit.sh list 2>&1)"; list_rc=$?
+  if [ "$list_rc" -eq 0 ]; then
+    files="$(printf '%s\n' "$list_out" | awk '$1 !~ /^coedit:/ && NF>=2 {print $1}')"
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      peers_out="$(scripts/coedit.sh peers "$f" "" 2>&1)"; peers_rc=$?
+      [ "$peers_rc" -eq 0 ] || continue
+      for n in "${NAMES[@]}"; do
+        printf '%s\n' "$peers_out" | grep -qF "  peer $n " || continue
+        case "$seen_files" in
+          *"|$f|"*) ;;
+          *) seen_files="$seen_files|$f|"; release_cmds+=("$f") ;;
+        esac
+      done
+    done <<COEDIT_FILES
+$files
+COEDIT_FILES
+  else
+    echo "integrate: scripts/coedit.sh list failed (exit $list_rc) — skipping the release nudge" >&2
+  fi
+else
+  echo "integrate: scripts/coedit.sh not found — skipping the release nudge" >&2
+fi
+
+if [ "${#release_cmds[@]}" -gt 0 ]; then
+  echo "One or more just-integrated workers still hold a co-edit barrier (practice §77):"
+  for f in "${release_cmds[@]}"; do
+    echo "  scripts/coedit.sh release $f"
+  done
+  cat <<'RECONCILE'
+Reconciliation here is not "do the patches agree" — a peer may still be live,
+so check whether its outstanding patch still applies to the tree you just
+changed before releasing:
+  git apply --check <peer worktree diff>
+RECONCILE
+fi
+
 exit "$rc"

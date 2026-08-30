@@ -129,5 +129,112 @@ class CoEdit(unittest.TestCase):
         self.assertIn("no claims", sh("peers", "f.txt", cwd=self.repo).stdout)
 
 
+class IntegrateReleaseNudge(unittest.TestCase):
+    """scripts/integrate.sh names an unreleased co-edit barrier instead of
+    silently leaving it for a later round to rediscover (packet
+    GH-INTEGRATE-RELEASE-NUDGE, CLAUDE.md, practice §77).
+
+    `integrate.sh` resolves its own repo root from its OWN script location
+    (`dirname "${BASH_SOURCE[0]}"/..`), not from cwd, so it cannot be pointed
+    at a throwaway repo the way `coedit.sh` can. Exercising it means copying
+    the real script — and the real `coedit.sh`, whose interface these tests
+    also pin — into a fake project tree, with stub `cargo` and
+    `blast-radius.sh` so the run needs no Rust toolchain. This never invokes
+    the real `scripts/integrate.sh` against a live `.worktrees/` entry, which
+    the packet forbids.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fake = Path(self.tmp.name) / "fake_repo"
+        self.fake.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=self.fake, check=True)
+        (self.fake / "README.md").write_text("fake\n")
+        # .agent-runtime/ and .worktrees/ are gitignored in the real repo —
+        # coedit.sh's claim state and every worker worktree live there, and
+        # neither should make integrate.sh's own dirty-tree check trip on
+        # state that was never meant to be committed to the main checkout.
+        (self.fake / ".gitignore").write_text(".agent-runtime/\n.worktrees/\n")
+
+        scripts = self.fake / "scripts"
+        scripts.mkdir()
+        for name in ("integrate.sh", "coedit.sh"):
+            dst = scripts / name
+            dst.write_text((REPO / "scripts" / name).read_text())
+            dst.chmod(0o755)
+        blast = scripts / "blast-radius.sh"
+        blast.write_text("#!/usr/bin/env bash\necho 'blast-radius: (stub)'\nexit 0\n")
+        blast.chmod(0o755)
+
+        subprocess.run(["git", "add", "-A"], cwd=self.fake, check=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "base"], cwd=self.fake, check=True)
+
+        # `cargo fmt --all` is unconditional in integrate.sh and this fake repo
+        # has no Cargo.toml — stub cargo on PATH rather than touch that line.
+        bindir = Path(self.tmp.name) / "bin"
+        bindir.mkdir()
+        cargo_stub = bindir / "cargo"
+        cargo_stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+        cargo_stub.chmod(0o755)
+        self.env = dict(os.environ)
+        self.env["PATH"] = f"{bindir}:{self.env['PATH']}"
+
+        self.worktrees = self.fake / ".worktrees"
+        self.worktrees.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_worktree(self, name):
+        wt = self.worktrees / name
+        subprocess.run(["git", "worktree", "add", "--detach", "-f", str(wt), "HEAD"],
+                       cwd=self.fake, capture_output=True, check=True)
+        (wt / "README.md").write_text(f"fake\nedited by {name}\n")
+        return wt
+
+    def _integrate(self, *names):
+        return subprocess.run(
+            [str(self.fake / "scripts" / "integrate.sh"), *names],
+            cwd=self.fake, env=self.env, capture_output=True, text=True,
+        )
+
+    def _coedit(self, *args):
+        return subprocess.run(
+            [str(self.fake / "scripts" / "coedit.sh"), *args],
+            cwd=self.fake, env=self.env, capture_output=True, text=True,
+        )
+
+    def test_the_nudge_fires_when_the_integrated_worker_holds_a_claim(self):
+        wt = self._make_worktree("wa")
+        self._coedit("claim", "shared.txt", "wa", str(wt))
+        r = self._integrate("wa")
+        self.assertIn("scripts/coedit.sh release shared.txt", r.stdout,
+                      r.stdout + r.stderr)
+
+    def test_silence_when_the_integrated_worker_holds_nothing(self):
+        self._make_worktree("wb")
+        r = self._integrate("wb")
+        self.assertNotIn("coedit.sh release", r.stdout, r.stdout)
+
+    def test_integrate_does_not_release_the_barrier_itself(self):
+        wt = self._make_worktree("wa")
+        self._coedit("claim", "shared.txt", "wa", str(wt))
+        self._integrate("wa")
+        status = self._coedit("status", "shared.txt").stdout
+        self.assertIn("peer wa", status)
+        self.assertNotIn("no claims", status)
+
+    def test_exit_code_and_existing_output_survive_the_nudge(self):
+        wt = self._make_worktree("wa")
+        self._coedit("claim", "shared.txt", "wa", str(wt))
+        r = self._integrate("wa")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("cargo fmt --all: done", r.stdout)
+        self.assertIn("Still yours, and not delegable:", r.stdout)
+        self.assertIn('rule on every box, write the evidence, commit, push',
+                      r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
