@@ -31,6 +31,23 @@ cannot reliably carry it.
 - deploy, publish a release, or broaden product scope. Pushing to origin to run
   CI is expected of this role rather than withheld from it — see the SDLC.
 
+**What "summaries" means here, and what it does not.** That entry — and the
+**Do** list's *"inspect every diff and independently rerun relevant checks"* —
+both predate the trust model in `orchestration-practice.md` §88, and both are
+narrower than they read. A *summary* is a worker's prose assertion standing in
+the place of an artifact: "tests pass", "the mutation was killed", "it is
+wired". **That is what may not be accepted.** A report carrying the artifacts
+themselves is not a summary — `validate_round.py` passed before dispatch, a
+well-formed ```glasshouse-facts``` block, a `KILLED` mutation with its killing
+test named and its failure output quoted, real `test result:` lines with counts
+(§68), `blast-radius.sh` exit 0 — and re-deriving *those* facts buys nothing,
+because `integrate.sh` re-runs them on the merged tree regardless. Inspect the
+decisive code and output **before an irreversible act** — ticking a box,
+un-ticking one, or recording a ruling — and in §88's four other named cases:
+Phase −1 before every dispatch, a weakness the report flags itself, two sources
+that disagree, and a red result. Not on every report, and never on the grounds
+that a claim is merely unverified.
+
 ## Opus specialist worker
 
 Use only when the task is red-risk or architecture remains disputed.
@@ -133,7 +150,15 @@ Stop Ox and promote the task when any of these occurs:
 Do not accumulate contradictory prompts in a confused context. Stop it, write a
 cleaner task packet, and restart at the appropriate model tier.
 
-## Leaf tier: a fast cheap model works here
+## Leaf tier: a fast cheap model works here — an option, not the default
+
+**Read this as an available option with a measured result, not as a routing
+prescription.** Green routes to **Sonnet at low–medium effort** (see *Risk
+routing*): the user's ruling on 2026-08-30 was *"if using another harness just
+makes it complicated use sonnet"*, and the friction recorded at the end of this
+section is what that ruling is about. Nothing below is retracted — the
+measurement stands, and reach for it deliberately when a task is large,
+purely mechanical, and worth the setup.
 
 The leaf tier is not Ox-only. A fast, cheap, less capable model is exactly
 right for mechanically decidable work, and it was measured rather than
@@ -158,7 +183,23 @@ it to write its own report.
 
 ## Risk routing
 
-### Green: Ox
+**This is the same scale as `CLAUDE.md`'s tier table, and the tier decides the
+model *and* the effort together — one decision, not three.** The table there is
+authoritative for the pairing: **Green is Sonnet at low–medium effort, Amber is
+Sonnet at medium–high, Red is an Opus specialist at high–xhigh.** Green and
+Amber are the same harness and the same flag, differing only in effort — one
+harness and no cross-harness setup, which is the point.
+
+**The default is not Opus**, and xhigh effort on a mechanically decidable task
+is waste: effort buys deliberation over a decision, and Green work contains
+none. Do not route the model here and the effort somewhere else.
+
+The leaf tier below is a **documented option, not the prescription** — see
+*"Leaf tier: a fast cheap model works here"*, which records both its measured
+result and the setup friction that is the reason Green routes to Sonnet by
+default.
+
+### Green: Sonnet, low–medium effort
 
 - inventories and call-site searches;
 - focused stress reproduction;
@@ -166,7 +207,7 @@ it to write its own report.
 - path/config literals;
 - settled comments and mechanical reviews.
 
-### Amber: Sonnet
+### Amber: Sonnet, medium–high effort
 
 - configuration layering;
 - integration selection;
@@ -174,7 +215,7 @@ it to write its own report.
 - bounded adapters and refactors;
 - multi-file implementation with settled ownership.
 
-### Red: Opus specialist
+### Red: Opus specialist, high–xhigh effort
 
 - project/session isolation;
 - PTY lifecycle, shutdown, signals, and job control;

@@ -4063,3 +4063,222 @@ as §86's finding about §83: a rule that lives only as prose does not bind.**
   Five `integrate-*.log` files survive in `.agent-runtime/`; logs are
   overwritten by name, so the file count is a floor on the number of runs and
   not a measurement of it.
+
+## §88 — trust the process's artifacts, and spend verification on irreversibility
+
+The user's instruction on 2026-08-30, which opened this section:
+
+> You are not trusting anything you get as info. You always seem to go hunt for
+> the evidence by rerunning everything and reading yourself. This is also a time
+> killer… a manager does not check a worker's work when it is an established
+> employee which followed the correct process. By following the rules of the
+> process can be a legitimately way to establish trust or as evidence. Do you
+> agree? If so bake it in.
+
+The orchestrator agreed. **The agreement is not deference — two findings in this
+project's own record decide it, and both are checkable in under a minute.**
+
+### Finding 1 — not one worker has misreported, and the un-tickings prove it
+
+Ten wrongly ticked boxes have been corrected (§86: `c7eccb1` −2, `889da59` −1,
+`64a0d87` −2, `bd81e04` −5). The tempting reading is ten worker failures. **It is
+the opposite reading that is correct**, and `bd81e04`'s own subject line says so:
+
+    fix(map): un-tick 1161-1165 -- five boxes ticked over a function nothing calls
+
+The code was correct. The tests were real and they passed. `GH-SESSION-CONTEXT`'s
+report was true in every particular. **Nobody had asked whether
+`SessionStore::context` had a production caller.** Every one of the ten is that
+shape: an accurate report about code that was genuinely correct and simply not
+wired.
+
+So **re-reading the diff was never the fix**, and the record says so from the
+other end too — all ten were found by *audit workers*, after the orchestrator had
+already read the diff and ticked the box (§86; trap 4). What fixes them is asking
+the right question in the packet, which is what §35, §36 and Phase −1 now force,
+and what `cluster-b.py` now answers mechanically in seconds.
+
+**Distrust was aimed at the wrong target. The reports were reliable; the
+questions were not.**
+
+### Finding 2 — the machine already re-runs what the report claims
+
+`scripts/integrate.sh` ends every integration in the blast radius, run on the
+**merged** tree. Every `test result:` line a worker quotes is therefore
+independently re-executed before anything is committed, against a tree the worker
+never saw — which is a *stronger* check than the worker's own run, not a weaker
+one. An orchestrator who re-runs those same targets by hand between report and
+integration learns nothing new and pays trap 2's fixed cost twice.
+
+### The trust condition — five artifacts, and none of them is reputation
+
+Trust attaches to **artifacts, not to reputation**. This matters mechanically: a
+worker in a fresh session with no history earns trust on its first report exactly
+as an "established" one does, because what is being trusted is the process the
+report carries, not the worker's past. Every signal below is cheap to confirm at
+a glance and expensive to fabricate:
+
+1. **The packet passed `validate_round.py` before dispatch** — so Phase −1 was
+   established *before any work happened*, which is where this project's defects
+   actually concentrate.
+2. **The report carries a well-formed ```glasshouse-facts``` block.** A schema
+   the worker had to fill, not prose it could round off.
+3. **Mutations are reported `KILLED` with the killing test named and the observed
+   failure text quoted.** §80 catalogues four ways a mutation lies, and all four
+   are visible in exactly this detail — which is why its *absence* is the signal.
+4. **Gates quote real `test result:` lines with counts**, not "tests pass" (§68:
+   a filter matching nothing looks exactly like a pass).
+5. **`scripts/blast-radius.sh` exited 0.**
+
+**When all five are present, act on the report.** Read it for the *decision* it
+hands you — the ruling it needs, the box it claims, the follow-on package it
+names — and not to re-derive the facts it already carries.
+
+A missing signal is not an accusation. It is a **question**, and the cheap move
+is to ask the worker for the missing artifact rather than to re-derive the whole
+report yourself.
+
+### Where verification is still mandatory, and the list is deliberately short
+
+Each entry below is tied to **irreversibility, or to a signal the report itself
+raised**. None is tied to generalised suspicion, and nothing may be added to this
+list on the grounds that a claim merely feels unverified.
+
+- **Before an authority-carrying act** — ticking a box, un-ticking one, or
+  recording a ruling. This is the act that cannot be quietly undone: a wrong tick
+  propagates into every later decision that reads the map as true. It is also the
+  one the un-tickings vindicate, and it is where the orchestrator's own reading
+  pays for itself.
+- **Phase −1, before every dispatch, at every tier.** The cheapest check in the
+  process and the highest-yield. On 2026-08-30 it caught that `first_byte_at` had
+  zero production readers, which would have made a producer-only package a
+  Cluster B refusal on arrival. Two greps.
+- **When the report flags its own weakness.** `GH-RESUME-LIFECYCLE-FIX` reported
+  a `SURVIVED` mutation and wrote that the production call site *"is proven
+  present, not proven exercised"* (`.agent-runtime/report-resume-lifecycle-fix.md`).
+  **A worker that tells you where it is thin has earned trust everywhere else and
+  has pointed at the one place to spend it** — §79's case of completing a proof
+  the worker was forbidden to finish. Treating a self-flagged weakness as grounds
+  to re-verify the *whole* report punishes the behaviour this process most needs.
+- **When two sources disagree.** `889da59` is the recorded instance: *"the tick
+  disagreed with its own ledger entry"*. A `packet_errors` entry contradicting
+  the packet is the same trigger, and it is usually the packet that is wrong
+  (§78) — eleven consecutive rounds a worker corrected its packet and was right.
+- **A red result**, which needs attribution before it gets a cause: two runs, not
+  one (§34, and the load-induced `events_lifecycle` failure of 2026-08-30, where
+  the orchestrator's own concurrent `cargo` was the cause).
+
+### What must not be re-derived
+
+Stated as prohibitions, because this is where the time actually goes:
+
+- **Test results the blast radius re-runs at integration.** Finding 2.
+- **Line numbers the worker already re-derived under §81.**
+- **Mutation outcomes reported with a killing test and its observed output.**
+- **Anything a script decides mechanically** — `cluster-b.py`,
+  `validate_round.py`, `check-register.py`, `blast-radius.sh`. This is trap 4,
+  and it has a *measured* miss rate in the direction that says run the script:
+  ten for ten.
+
+### How trust is lost, and how it is regained
+
+One rule, and no ceremony: **a worker caught misreporting a fact loses trust for
+that class of claim for the rest of the batch, and the orchestrator writes that
+into the checkpoint.** Class, not blanket — a worker that overstated a mutation
+has not thereby become unreliable about which files it touched. It is regained at
+the next batch, on the artifacts, like anyone else's.
+
+**This has never happened.** Across every batch recorded here, no worker report
+has been found to misstate a fact. That is recorded deliberately: **the failure
+case of this trust model is untested, not proven safe**, and a later session
+should know which of the two it is holding.
+
+**Do not build a scoring system, a reputation table, or a per-worker ledger.**
+The signals are per-report and binary, and they are meant to be applied from
+memory in seconds while under context pressure. §86 and §87 both found that a
+rule which lives only as prose does not bind; the symmetric failure is a rule
+that binds only when someone maintains its bookkeeping, and under pressure that
+bookkeeping is the first thing dropped.
+
+### The trap is symmetrical, and that is the whole difficulty
+
+- **Too much trust:** a false capability claim ships — and this project's entire
+  product is the proposition that its evidence means something.
+- **Too little:** the orchestrator becomes the bottleneck it exists to relieve.
+  Measured on 2026-08-30 at **811k output tokens per net closed box** (§86), with
+  36.5% of the project's whole output volume produced by the main checkout.
+
+Neither is a safe default and the midpoint is not a rule. **The resolution is
+that verification is spent where an act is irreversible, not where a claim is
+merely unverified.** Everything above is that sentence applied.
+
+### What this section does not claim
+
+- **That workers are honest.** It claims that no misreport has been *found*
+  across the batches recorded here. That is the absence of a counterexample, not
+  a measurement of a rate, and it is consistent with a misreport that nobody
+  looked for.
+- **A hit rate for verification.** §86's limit stands: the ledger records the
+  diffs that caught something and not the diffs that caught nothing. The un-tick
+  count is the one question whose misses *are* recorded, which is why it is the
+  one place work moves off the orchestrator.
+- **That the five artifacts are sufficient for a Red package.** They are the
+  trust condition, not the assurance tier. Red still buys the independent
+  verifier and the full suite from `CLAUDE.md`'s table; trusting a report is not
+  the same act as deciding how much proof the package owed in the first place.
+
+### One tier, one model, one effort — the scope addition of 2026-08-30
+
+Three tier concepts existed in this repo without being bound to each other, so
+choosing a tier chose **none** of the other two:
+
+1. `worker-capabilities.md`'s **risk routing**, as it then stood — Green→Ox,
+   Amber→Sonnet, Red→Opus specialist;
+2. `CLAUDE.md`'s **ceremony tier** from §86 — what a package owes and skips;
+3. the **`--model` flag** on `scripts/dev/new-worker.sh`, chosen per dispatch.
+
+Nothing tied them, and unbound concepts drift toward the expensive end. **The
+user's measurement of this session: 6 Sonnet and 8 Opus dispatched — but the
+last five in a row were Opus**, and at least two of those were over-tiered (a
+docs-writing package, and `GH-TRUST-MODEL` itself). *Writing prose from facts
+the orchestrator has already gathered is Amber at most.* The drift is in
+dispatch habit and not in the tooling: `new-worker.sh:39` already defaults
+`MODEL="sonnet"`, so every one of those eight was an explicit override.
+
+**The tier table in `CLAUDE.md` now carries `model` and `effort` columns, and
+the tier decides all three.** Green is **Sonnet at low–medium effort**, Amber is
+**Sonnet at medium–high**, Red is an **Opus specialist at high–xhigh**.
+
+**Green and Amber are deliberately the same harness.** The first draft routed
+Green to the leaf tier (`agy-gh`, Ox); the user's ruling on 2026-08-30 was
+*"if using another harness just makes it complicated use sonnet"*, and it is
+correct on this project's own evidence — `worker-capabilities.md` records that
+Antigravity declares no automatic-review mode, that its "always allow" matches
+on the exact command prefix so it re-prompts per script, and that a leaf worker
+there needs `--dangerously-skip-permissions` and `--mode accept-edits`. That
+setup cost is paid per dispatch and the tier decision is meant to be made in
+seconds. **One harness, one flag, and Green differs from Amber only in effort.**
+The leaf tier keeps its section and its measured result — 171 quotes, all
+verbatim — as an *option* for large purely-mechanical work, not as the routing.
+
+Two further rules follow, and neither needs interpretation:
+
+- **The default is not Opus.** Opus is what Red buys, and Red is the risk list —
+  lifecycle, signals, migrations, session identity, isolation, secrets,
+  platform code, or a disputed architecture. A package outside that list which
+  *feels* hard is an Amber, exactly as §86 says a package that feels small is a
+  Green.
+- **xhigh effort on a mechanical task is waste.** Effort buys deliberation over
+  a *decision*. A Green packet contains no decision by construction — that is
+  its entry criterion — so there is nothing for the deliberation to be about,
+  and this is the same argument §86 used to let Green skip the mutation.
+
+**The gap this does not close, and it needs its own packet.**
+`scripts/dev/new-worker.sh:116` builds
+
+    LAUNCH="claude --model $MODEL --permission-mode auto --remote-control"
+
+with **no effort flag**, so every worker inherits the session's global default
+regardless of the tier its packet was written at. Until that line takes the
+effort the tier names, the `effort` column is documentation and not a control —
+a rule that lives only as prose, which §86 and §87 both found does not bind.

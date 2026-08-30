@@ -238,11 +238,21 @@ memory in seconds.
 wrote, not from the codebase — it takes under a minute. This is the scale already
 in `worker-capabilities.md`; do not invent a second one.
 
-| tier | entry criterion | it owes | it **skips** |
-|---|---|---|---|
-| **Green** | adds no new decision — wires an existing value to an existing consumer, a `Display`/serde impl, a flag forwarding to a settled function, tests only, docs or config literals | the box's own targeted test, plus one assertion that the production caller runs it | mutation, independent reviewer, orchestrator diff read, and any blast radius beyond the named target |
-| **Amber** | adds or changes a decision — a branch, threshold, ordering, ranking, persisted field, or public API shape | targeted tests, blast radius, **one** mutation on the decision the box names | the independent reviewer, unless the worker flags a decisive claim; and you read the diff of the decision, not of the whole package |
-| **Red** | PTY/process lifecycle, signals, shutdown, migrations, session identity or resume, project isolation, secrets, `#[cfg(...)]` platform code — or a disputed architecture | full relevant regression, platform legs, the semantic mutation suite, an independent verifier | nothing |
+| tier | model | effort | entry criterion | it owes | it **skips** |
+|---|---|---|---|---|---|
+| **Green** | Sonnet | low–medium | adds no new decision — wires an existing value to an existing consumer, a `Display`/serde impl, a flag forwarding to a settled function, tests only, docs or config literals | the box's own targeted test, plus one assertion that the production caller runs it | mutation, independent reviewer, orchestrator diff read, and any blast radius beyond the named target |
+| **Amber** | Sonnet | medium–high | adds or changes a decision — a branch, threshold, ordering, ranking, persisted field, or public API shape | targeted tests, blast radius, **one** mutation on the decision the box names | the independent reviewer, unless the worker flags a decisive claim; and you read the diff of the decision, not of the whole package |
+| **Red** | Opus specialist | high–xhigh | PTY/process lifecycle, signals, shutdown, migrations, session identity or resume, project isolation, secrets, `#[cfg(...)]` platform code — or a disputed architecture | full relevant regression, platform legs, the semantic mutation suite, an independent verifier | nothing |
+
+**The tier picks the model and the effort with it — one decision, not three.**
+`worker-capabilities.md`'s risk routing and `dev/new-worker.sh --model` are this
+same scale; never choose them separately. **One harness, one flag: Green and
+Amber are both Sonnet and differ only in effort.** **The default is not Opus.**
+This session dispatched 6 Sonnet and 8 Opus — but the **last five in a row were
+Opus**, and at least two were over-tiered: writing prose from facts the
+orchestrator already gathered is Amber at most. **xhigh on a mechanical task is
+waste** — effort buys deliberation over a decision, and a Green packet contains
+none by definition.
 
 **Phase −1 is never skipped, at any tier.** It is the cheapest check here and
 guards the only spend the ledger calls pure waste. *Uncertain tier escalates* —
@@ -296,6 +306,36 @@ Trap 3 does not contradict *"do not integrate serially"*: that rule is about
 **disjoint** partitions, where serial integration hides the cross-patch
 interaction it exists to find. Co-editors of one file are the case
 `integrate.sh` refuses to batch, and one at a time is correct there.
+
+## Trust the report's artifacts, and verify where the act is irreversible
+
+Long form: **practice §88**. **Not one worker has misreported.** All ten wrongly
+ticked boxes were *accurate* reports about correct code nobody had asked the right
+question about (`bd81e04`), and all ten were found *after* the orchestrator read
+the diff — while `integrate.sh` re-runs every quoted test on the merged tree.
+
+**Act on a report carrying all five artifacts**, reading it for the decision it
+hands you rather than to re-derive its facts: `validate_round.py` passed before
+dispatch (so Phase −1 is established) · a well-formed ```glasshouse-facts``` block
+· mutations **KILLED, killing test named and failure text quoted** · gates quoting
+real `test result:` lines with counts, not "tests pass" (§68) · `blast-radius.sh`
+exit 0. A missing artifact is a question for the worker, not a re-derivation.
+
+**Verify anyway in these five cases and no others**, each tied to irreversibility
+or to a signal the report itself raised — never to suspicion:
+
+- **an authority-carrying act**: ticking a box, un-ticking one, or ruling;
+- **Phase −1, before every dispatch, at every tier**;
+- **the report names its own thin spot** — spend it there, not on the whole report;
+- **two sources disagree**, or `packet_errors` contradicts the packet;
+- **a red result** — two runs to attribute it before naming a cause (§34).
+
+**Never re-derive** test results the blast radius re-runs, §81 line numbers, a
+mutation reported with its killing test and output, or a script's verdict (trap 4).
+
+**A worker caught misreporting loses trust for that class of claim for the rest of
+the batch, and the checkpoint says so. That has never fired** — untested, not
+proven. No scoring and no per-worker ledger: bookkeeping is dropped first.
 
 ## An orchestrator does not idle, and does not hand off cold
 

@@ -255,6 +255,7 @@ to do, and the orchestrator should follow its own rule.
 - **§85** — `kill $(jobs -p)` is a no-op in a non-interactive shell, and load outlives the experiment
 - **§86** — ceremony must scale to difficulty, and investigation must name its successor
 - **§87** — size the package by the mechanism, and the six token traps
+- **§88** — trust the process's artifacts, and spend verification on irreversibility
 
 ## Recent checkpoints
 
