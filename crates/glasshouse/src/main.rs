@@ -930,6 +930,128 @@ fn destination_capacity(
         .remaining_capacity_score()
 }
 
+/// **Line 1599's bridge**: what a gateway has actually observed about these
+/// destinations' resources, in the shape `provider_health` reads.
+///
+/// A read of [`glasshouse::provider::telemetry::GatewayHealthCache`], which is
+/// [`destination_capacity`]'s own cost and its sibling directory under the
+/// same `--data-dir` — no network, no subprocess, no credential, and **no
+/// handle kept**: `load_all` reads the files and returns owned values, so
+/// nothing here is still open when this function returns (practice §65, which
+/// was paid for by a database handle opened on a path nobody was asserting
+/// about).
+///
+/// An empty pool when the cache is empty. That is the same inert `0.0`
+/// contribution for every destination this path produced before the bridge
+/// existed, and it is correct: an absent reading is an absent contribution,
+/// never an invented one.
+///
+/// # Hazard 1 — identity, which is what makes this a design and not a wiring
+///
+/// [`glasshouse::routing::free::FreeResource`] is keyed by a
+/// [`glasshouse::routing::CredentialId`]; a persisted
+/// [`glasshouse::provider::telemetry::GatewayHealthReading`] carries only the
+/// **rendered** `credential_label`. That rendering is not reversible —
+/// `CredentialId::label` prints `provider/var` for a `SecretRef::Environment`
+/// and `provider/service:account` for a `SecretRef::OsCredential`, so a parse
+/// would have to guess both where the provider ends and which variant it was
+/// looking at, and a guess here does not weaken the policy, it inverts it
+/// (map line 1294): the router would avoid a healthy resource on another's
+/// evidence.
+///
+/// **So nothing here parses a label.** The consumer already tells us the key
+/// it will look up — `provider_health` builds
+/// `FreeResource::new(destination.backend().credential().clone(),
+/// destination.backend().model().label())` — and both of those are in hand
+/// here, before `choose` is called. This walks the *destinations* and renders
+/// each one's label with the very function the write side rendered it with
+/// (`gateway::session::SessionRouting::health_readings_for` calls
+/// `credential().label()`, and `model_key` is `AssignedModel::label`). The
+/// match is string equality between two calls of one renderer, in the forward
+/// direction only.
+///
+/// Three things it therefore refuses to do:
+///
+/// - **attribute across providers.** The provider whose file a reading came
+///   from must be the credential's own provider. Two providers configured
+///   with the same `credential_env` variable are *"two separate allowances"*
+///   (`CredentialId`'s own doc) and share nothing; the label keeps them apart
+///   because the provider is part of it, and this check keeps a mislabelled
+///   file from getting around that.
+/// - **attribute across models.** Health is per credential *and* model —
+///   `FreeResource`'s own doc says a router sharing one entry across a
+///   provider's models would take every model out of service because one was
+///   busy.
+/// - **choose between two readings that name the same resource and disagree.**
+///   A file this program wrote cannot contain those, because
+///   `health_readings_for` maps over a pool already keyed by resource. A file
+///   it did not write can, and it is also the shape a genuine label collision
+///   would take — two distinct credentials rendering one label, which is
+///   exactly the ambiguity that must not be resolved by picking. Contradictory
+///   readings leave the resource unobserved.
+///
+/// # Hazard 2 — the time base
+///
+/// [`glasshouse::provider::telemetry::GatewayHealthReading::cooling_down_until`]
+/// does the conversion and documents it. Both clocks are read **once**, here,
+/// so every reading in one cache is placed against the same pair rather than
+/// against a clock that moved between them.
+fn observed_provider_health(
+    runtime: &Runtime,
+    destinations: &[glasshouse::routing::session::Destination],
+) -> glasshouse::routing::free::FreePool {
+    use glasshouse::provider::telemetry::{GatewayHealthCache, GatewayHealthReading};
+    use glasshouse::routing::free::{FreePool, FreeResource};
+
+    let mut pool = FreePool::new();
+    let stored = GatewayHealthCache::new(runtime.paths()).load_all();
+    if stored.is_empty() {
+        return pool;
+    }
+
+    // Hazard 2: one pair, read together, for every reading below.
+    let now = std::time::Instant::now();
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+
+    for destination in destinations {
+        let credential = destination.backend().credential();
+        let label = credential.label();
+        let model = destination.backend().model().label();
+
+        let mut named: Option<&GatewayHealthReading> = None;
+        let mut contradicted = false;
+        for reading in stored
+            .iter()
+            .filter(|(provider, _)| provider == credential.provider())
+            .flat_map(|(_, readings)| readings.iter())
+            .filter(|reading| reading.credential_label == label && reading.model == model)
+        {
+            match named {
+                None => named = Some(reading),
+                // Two entries saying the same thing are one reading written
+                // twice, not a disagreement.
+                Some(first) if first == reading => {}
+                Some(_) => {
+                    contradicted = true;
+                    break;
+                }
+            }
+        }
+        let Some(reading) = named.filter(|_| !contradicted) else {
+            continue;
+        };
+
+        pool.adopt_observed(
+            &FreeResource::new(credential.clone(), model),
+            reading.consecutive_failures,
+            reading.cooling_down_until(now, now_unix),
+            reading.credential_rejected,
+        );
+    }
+
+    pool
+}
+
 /// What the most recent checkpoint would give a fresh session to boot from —
 /// line 1600's bootstrap half.
 ///
@@ -1086,6 +1208,11 @@ struct RankedRoute {
     /// The `Destination::id` of every fresh candidate `glasshouse launch`
     /// would itself refuse — see [`launch_can_resolve_protocol`].
     refused_by_launch: Vec<String>,
+    /// Every resource `observed_provider_health` could attribute a persisted
+    /// reading to. Kept rather than recomputed because a caveat about what
+    /// the ranking could not see has to be answered from the pool the ranking
+    /// was actually given.
+    health_observed: Vec<String>,
 }
 
 /// Why there is no recommendation.
@@ -1137,7 +1264,6 @@ fn route_recommendation(
     task: Option<&str>,
 ) -> anyhow::Result<RouteRecommendation> {
     use glasshouse::integrations::{IntegrationId, IntegrationKind};
-    use glasshouse::routing::free::FreePool;
     use glasshouse::routing::session::{RouterInputs, RoutingMoment, SessionRouter};
 
     let mut destinations = Vec::new();
@@ -1167,12 +1293,14 @@ fn route_recommendation(
     }
 
     let overrides = effective.pairing_overrides();
-    // §5 of the router's own report: the live health pool belongs to a running
-    // gateway's session lock, and a command-line diagnostic has no gateway. An
-    // empty pool contributes `0.0` for every destination, which is honest and
-    // inert — and the report says so below rather than letting a reader think
-    // provider health was weighed and found equal.
-    let health = FreePool::new();
+    // Line 1599's bridge, on the path that *reports*. The live pool still
+    // belongs to a running gateway's session lock and this diagnostic has no
+    // gateway — but `glasshouse launch` weighs what a previous gateway
+    // persisted, so a report that skipped it would explain a different
+    // ranking from the one the acting path produces, which is the one defect
+    // a routing explanation cannot have. `routing_caveats` below says which
+    // of the two happened rather than asserting the empty case.
+    let health = observed_provider_health(runtime, &destinations);
     let requirements = task_requirements_from_text(task);
     let inputs = RouterInputs {
         overrides: &overrides,
@@ -1224,6 +1352,11 @@ fn route_recommendation(
         routed,
         destinations,
         refused_by_launch,
+        health_observed: health
+            .observed()
+            .into_iter()
+            .map(|(resource, _)| resource.label())
+            .collect(),
     })))
 }
 
@@ -1249,6 +1382,7 @@ fn render_route_recommendation(recommendation: &RouteRecommendation) -> String {
                 &ranked.routed,
                 &ranked.destinations,
                 &ranked.refused_by_launch,
+                &ranked.health_observed,
             ));
             out
         }
@@ -1297,16 +1431,19 @@ fn routing_caveats(
     routed: &glasshouse::routing::session::Routed,
     destinations: &[glasshouse::routing::session::Destination],
     refused_by_launch: &[String],
+    health_observed: &[String],
 ) -> String {
     use glasshouse::routing::session::Continuation;
     use std::fmt::Write as _;
 
     let mut out = String::from("what this ranking could not see\n");
-    let _ = writeln!(
-        out,
-        "  provider health   nothing observed — the health pool is filled by a running \
-         gateway, and this command has none, so the term is 0.0 for every destination"
-    );
+    if health_observed.is_empty() {
+        let _ = writeln!(
+            out,
+            "  provider health   nothing observed — no gateway has yet persisted a health \
+             reading for any of these credentials, so the term is 0.0 for every destination"
+        );
+    }
     if destinations
         .iter()
         .all(|destination| destination.is_fresh())
@@ -1425,36 +1562,24 @@ fn launch_session(
         },
     )?;
     let overrides = effective.pairing_overrides();
-    // §5 of the router's report: the health pool a gateway fills does not
-    // exist yet here — the gateway is started further down, and only for a
-    // profile that needs one. An empty pool contributes 0.0 to every
-    // destination rather than a guess.
+    // **Map line 1599's bridge, on the path that acts.** The live pool a
+    // gateway fills still does not exist here — that gateway is started
+    // further down, and only for a profile that needs one — but what a
+    // gateway *exports* does: `provider::telemetry::GatewayHealthReading`s,
+    // persisted to `GatewayHealthCache` under this run's own data directory,
+    // by whichever earlier `glasshouse run` or `glasshouse launch` served the
+    // work. `observed_provider_health` reads them into the pool
+    // `provider_health` looks in, and its own doc has the two hazards that
+    // make it a design rather than a wiring — the rendered `credential_label`
+    // against a `CredentialId`, and unix seconds against an epoch-less
+    // `Instant`. Neither is guessed at; a reading that cannot be attributed
+    // without guessing is not attributed, which leaves exactly the inert
+    // `0.0` this line had before the bridge.
     //
-    // **Map line 1599 is REFUSED here, and this is the place the wiring would
-    // be attempted, so the refusal is written here rather than only in the
-    // ledger** (practice §79). The pool below is empty from construction to
-    // `choose`: `main.rs` calls no `FreePool` mutator anywhere, and the only
-    // production filler is `gateway::session::observe_exchange`, into a pool
-    // owned by a running gateway's `SessionRouting` state that never leaves
-    // that process **as a pool**. So `provider_health` returns the identical
-    // contribution for every candidate, and a signal constant across the set
-    // being ranked cannot change the ranking, whatever its weight —
-    // `docs/product/evidence/phase-9j.md`'s own rule.
-    //
-    // What a gateway *does* export is `provider::telemetry::
-    // GatewayHealthReading`s, persisted to `GatewayHealthCache` and read back
-    // by `GatheredTelemetry::gather_gateway_health` for `glasshouse
-    // resources`. **Do not reach for that here without re-opening line 1599
-    // first.** It is not a seam, it is a design task with two hazards this
-    // note exists to name: `FreeResource` is keyed by a `CredentialId` while
-    // a reading carries only a rendered `credential_label`, and
-    // `ResourceHealth::cooling_down_until` is an `Instant` with no epoch
-    // while a reading carries unix seconds — the exact mixing
-    // `gateway::session::health_readings_for` documents itself avoiding.
-    // `tests/route_command.rs`'s
-    // `a_persisted_provider_health_reading_reaches_the_binary_but_never_the_launch_paths_router`
-    // is the tripwire, and it fails the moment this changes.
-    let health = glasshouse::routing::free::FreePool::new();
+    // The reading comes from a *previous* process. That is the whole point:
+    // the health of a provider is not a fact this launch can observe about a
+    // session it has not started yet.
+    let health = observed_provider_health(runtime, &destinations);
     let inputs = glasshouse::routing::session::RouterInputs {
         overrides: &overrides,
         health: &health,
@@ -3898,7 +4023,6 @@ fn one_line(text: &str) -> String {
 /// than left to be discovered: **line 1593 is earned on the launch path**,
 /// where the choice is genuinely open, and not here.
 fn report_task_boundary_routing(runtime: &Runtime, session: &str) {
-    use glasshouse::routing::free::FreePool;
     use glasshouse::routing::session::{
         RouterInputs, RoutingMoment, RoutingOverride, SessionRouter, TaskRequirements,
     };
@@ -3944,7 +4068,10 @@ fn report_task_boundary_routing(runtime: &Runtime, session: &str) {
         .find(|destination| destination.id() == id.as_str())
         .cloned();
     let overrides = effective.pairing_overrides();
-    let health = FreePool::new();
+    // Line 1599's bridge again — see `observed_provider_health`. This report
+    // is read beside the launch path's own decision, so it weighs the same
+    // persisted readings that path does.
+    let health = observed_provider_health(runtime, &destinations);
     let inputs = RouterInputs {
         overrides: &overrides,
         health: &health,

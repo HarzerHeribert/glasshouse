@@ -133,6 +133,7 @@
 //! every response it forwards. See that module for where.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use crate::provider::quota::{
     Capacity, CapacityState, KnownPlan, LimitingUnit, LongWindowRequests, NativeAmount, Pool,
@@ -1341,6 +1342,45 @@ impl GatewayHealthReading {
             Some(until) => until <= now_unix,
             None => true,
         }
+    }
+
+    /// This reading's cooldown deadline placed on **the reader's own
+    /// monotonic clock**, or `None` when there is no cooldown or it has
+    /// already elapsed.
+    ///
+    /// Capability map line 1599's second hazard, answered in one place.
+    /// [`crate::routing::free::ResourceHealth::cooling_down_until`] is an
+    /// [`Instant`], which has no epoch and cannot be compared across two
+    /// processes; this reading carries the absolute unix second the write
+    /// side converted it to. Going back requires **both clocks read at the
+    /// same moment**, which is why they are two parameters rather than
+    /// something read in here: a caller bridging a whole cache must place
+    /// every reading against one pair, not against a clock that moved
+    /// between them.
+    ///
+    /// Three cases and no fourth:
+    ///
+    /// - **no deadline** — `None`, and the resource is not cooling down;
+    /// - **already elapsed** (`until <= now_unix`) — also `None`, matching
+    ///   [`Self::is_available`]'s own reading of the same field and
+    ///   [`crate::routing::free::ResourceHealth::is_available`]'s treatment
+    ///   of an elapsed in-memory cooldown. **Never an `Instant` in the
+    ///   past**: `Instant` arithmetic backwards from now is not guaranteed
+    ///   to be representable, and a deadline that has passed is not a
+    ///   cooldown to express at all.
+    /// - **still in the future** — `now` plus the remaining seconds.
+    ///
+    /// A remaining span too large to place on this clock answers `None`
+    /// rather than saturating. It cannot arise from
+    /// `crate::gateway::session::SessionRouting::health_readings_for`, whose
+    /// deadlines are bounded by `routing::free`'s own `MAX_COOLDOWN`, so the
+    /// only way to reach it is a file that says something this program never
+    /// wrote — and inventing a centuries-long cooldown from one is worse
+    /// than reading no cooldown at all.
+    pub fn cooling_down_until(&self, now: Instant, now_unix: i64) -> Option<Instant> {
+        let remaining = self.cooling_down_until_unix?.checked_sub(now_unix)?;
+        let remaining = u64::try_from(remaining).ok().filter(|left| *left > 0)?;
+        now.checked_add(Duration::from_secs(remaining))
     }
 }
 

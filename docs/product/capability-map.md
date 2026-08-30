@@ -1596,7 +1596,7 @@ Phase 37 — Basic session-aware router
 ☑ Consider session affinity when choosing a destination.
 ☑ Consider prompt-cache state when choosing a destination.
 ☑ Consider known quota pressure when choosing a destination.
-☐ Consider provider health when choosing a destination.
+☑ Consider provider health when choosing a destination.
 ☑ Consider estimated switching and bootstrap cost when choosing a destination.
 ☑ Return an inspectable routing explanation in debug or overview mode.
 ☑ Allow the user to override every automatic routing choice.

@@ -244,9 +244,13 @@ fn a_project_with_no_sessions_and_no_telemetry_says_what_it_had_nothing_to_go_on
          weighed them and found them equal:\n{report}"
     );
     assert!(
-        report.contains("the health pool is filled by a running gateway"),
-        "provider health is 0.0 here because nothing filled the pool, and that is a fact \
-         about this command rather than about the providers:\n{report}"
+        report.contains("no gateway has yet persisted a health reading"),
+        "provider health is 0.0 here because nothing has been persisted about these \
+         credentials, and that is a fact about what was read rather than about the \
+         providers. **This caveat is now conditional** — line 1599's bridge makes it \
+         false whenever a reading was attributed — so it has to keep being *printed* in \
+         the case it is still true, or an unread pool becomes indistinguishable from a \
+         pool that was read and found healthy:\n{report}"
     );
     assert!(
         report.contains("no quota reading has been cached"),
@@ -1570,6 +1574,30 @@ const QUOTA_PROFILES: &str = "\n\
      [profiles.beta.backend]\nkind = \"direct-provider\"\n\
      provider = \"beta-probe\"\n";
 
+/// [`QUOTA_PROFILES`] with **a second credential on `alpha-probe`**.
+///
+/// `destination_backend` names a direct provider's credential from
+/// `credential_env.first()`, so `alpha`'s destination is still keyed by
+/// `GLASSHOUSE_ROUTE_TEST_KEY` and every label above is unchanged. What this
+/// adds is a *sibling* key on the same provider — a second entry in the same
+/// `gateway-health` file — which is the only configuration in which line
+/// 1599's identity hazard can actually be observed. `CredentialId`'s own doc
+/// calls two keys for one provider *"two separate allowances"*, and one being
+/// refused says nothing about the other.
+const SIBLING_KEY_PROFILES: &str = "\n\
+     [providers.alpha-probe]\ntemplate = \"openrouter\"\n\
+     credential_env = [\"GLASSHOUSE_ROUTE_TEST_KEY\", \"GLASSHOUSE_ROUTE_SIBLING_KEY\"]\n\n\
+     [providers.beta-probe]\ntemplate = \"openrouter\"\n\
+     credential_env = [\"GLASSHOUSE_ROUTE_TEST_KEY\"]\n\n\
+     [profiles.alpha]\nharness = \"claude-code\"\n\
+     expected_protocol = \"anthropic-messages\"\n\n\
+     [profiles.alpha.backend]\nkind = \"direct-provider\"\n\
+     provider = \"alpha-probe\"\n\n\
+     [profiles.beta]\nharness = \"claude-code\"\n\
+     expected_protocol = \"anthropic-messages\"\n\n\
+     [profiles.beta.backend]\nkind = \"direct-provider\"\n\
+     provider = \"beta-probe\"\n";
+
 /// Wall-clock now: the binary reads these caches with its own real clock and
 /// there is no injectable one (`mod@glasshouse::provider::quota`'s own rule).
 fn now_unix() -> i64 {
@@ -1597,6 +1625,62 @@ fn plant_quota(fixture: &Fixture, provider: &str, remaining: i64, limit: i64) {
         cache.load(provider).is_some(),
         "the planted reading for `{provider}` must be on disk and readable, or the assertion \
          it supports would be about a misplaced file rather than about routing"
+    );
+}
+
+/// The model every destination in these fixtures carries.
+///
+/// None of the profiles above names a `model`, so `session_pairing` answers
+/// `AssignedModel::HarnessDefault` and `AssignedModel::label` renders it as
+/// this. It is written out rather than computed because the bridge under test
+/// matches a persisted reading's `model` field against exactly this string:
+/// a test that derived it from the same call the production code makes would
+/// rescale with any mutation of that call and could not detect one
+/// (practice §80 case 6).
+///
+/// If this ever stops matching, `glasshouse route` prints it — the `provider
+/// health` line names the model between backticks.
+const HARNESS_DEFAULT_MODEL: &str = "the harness's own default";
+
+/// One persisted gateway health reading, in the shape the write side
+/// (`gateway::session::SessionRouting::health_readings_for`) produces: the
+/// credential's **rendered label**, the model's own label, and an absolute
+/// unix deadline.
+fn health_reading(
+    credential_label: &str,
+    consecutive_failures: u32,
+    cooling_down_until_unix: Option<i64>,
+    credential_rejected: bool,
+) -> glasshouse::provider::telemetry::GatewayHealthReading {
+    glasshouse::provider::telemetry::GatewayHealthReading {
+        credential_label: credential_label.to_owned(),
+        model: HARNESS_DEFAULT_MODEL.to_owned(),
+        consecutive_failures,
+        cooling_down_until_unix,
+        credential_rejected,
+    }
+}
+
+/// Plant gateway health readings exactly where `GatewayHealthCache::new`
+/// resolves them from this run's `--data-dir`, and prove they landed.
+///
+/// The same shape `plant_quota` uses, and for the same reason: an assertion
+/// resting on a file nobody checked is an assertion about a path, not about
+/// routing.
+fn plant_health(
+    fixture: &Fixture,
+    provider: &str,
+    readings: &[glasshouse::provider::telemetry::GatewayHealthReading],
+) {
+    let cache = glasshouse::provider::telemetry::GatewayHealthCache::at(
+        fixture.data_dir().join("gateway-health"),
+    );
+    cache.store(provider, readings, now_unix());
+    assert_eq!(
+        cache.load(provider).len(),
+        readings.len(),
+        "the planted readings for `{provider}` must be on disk and readable through the same \
+         reader production uses"
     );
 }
 
@@ -1762,80 +1846,302 @@ fn with_no_quota_reading_the_term_is_present_and_weighs_nothing() {
     );
 }
 
-/// **Line 1599, recorded as a refusal rather than closed — and this is the
-/// executable form of it.**
+/// **Line 1599, through the acting path — the bridge, as a mirrored pair.**
 ///
-/// `provider_health` reads a [`glasshouse::routing::free::FreePool`], and on
-/// the launch path there is no live one to read. `launch_session` constructs
-/// `FreePool::new()` immediately before `SessionRouter::choose` and nothing
-/// between the two mutates it — `main.rs` calls no `FreePool` mutator at all,
-/// and the only production filler of a pool is `gateway::session`'s
-/// `observe_exchange`, into a pool owned by a running gateway's
-/// `SessionRouting` state that never leaves that process **as a pool**. So
-/// `provider_health` returns the identical "nothing has been observed"
-/// contribution for every candidate, and a signal constant across the set
-/// being ranked cannot change the ranking — `docs/product/evidence/phase-9j.md`'s
-/// own rule.
+/// Two existing sessions, and in each half the one whose provider refused the
+/// credential is also the one quota favours. The pair is run twice with **both**
+/// readings moved to the other provider, and the winner has to follow the health
+/// reading both times — against the quota advantage, both times.
 ///
-/// What the gateway *does* export is
-/// [`glasshouse::provider::telemetry::GatewayHealthReading`]s, persisted to
-/// `GatewayHealthCache` — a real producer with a real reader
-/// (`GatheredTelemetry::gather_gateway_health`, which `glasshouse resources`
-/// calls). No production code converts one into a `FreePool`, so the reading
-/// stops at the report.
+/// **Mirroring is what makes this airtight rather than merely green**, exactly
+/// as it is for line 1598 above: a single direction could be satisfied by any
+/// fixed ordering that happened to agree with it — the caller's order, the
+/// store's, or the sub-second recency gap between the two launches. No ordering
+/// produces both halves.
 ///
-/// This test gives that reading a **fulcrum**: quota (proven decisive above)
-/// is planted so `alpha` wins by `0.8 × 0.9`, and a credential-rejected
-/// health reading is planted against `alpha` — worth `-1.5` if it were ever
-/// weighed, which is more than enough to overturn the quota gap. `alpha`
-/// still wins, because nothing reads it.
+/// # Why quota is here rather than two bare destinations
 ///
-/// **It is a tripwire, not an approval.** The day someone bridges
-/// `GatewayHealthCache` into `RouterInputs.health`, this test fails — which
-/// is the signal to re-open line 1599, not to relax the assertion.
+/// **The first version of this test had no fulcrum and it survived severing the
+/// bridge.** With no reading attributed the two sessions are equal to within a
+/// sub-second recency gap, so each half was decided by a tie-break, and a
+/// tie-break is not required to answer the same way in two separately-built
+/// fixtures — so both halves could pass against a build where `launch_session`
+/// read an empty pool. That is precisely practice §35's *"a caller you can
+/// delete without a test noticing is, to the test suite, not a caller"*, found
+/// by running the mutation this package requires rather than by reading the
+/// test.
+///
+/// Planting quota removes the tie: with the bridge severed, quota alone decides
+/// and names the **opposite** session in each half, so a severed build fails
+/// here twice. `known_quota_pressure_decides_which_session_the_launch_path_continues`
+/// is what makes that a fulcrum rather than an assumption — it proves the `0.72`
+/// gap genuinely decides on its own — and `provider_health`'s `-1.5` for a
+/// refused credential is what overturns it.
 #[test]
-fn a_persisted_provider_health_reading_reaches_the_binary_but_never_the_launch_paths_router() {
+fn observed_provider_health_decides_which_session_the_launch_path_continues() {
+    // Half one: quota favours `alpha`, and `alpha` is the one whose credential
+    // was refused — so `beta` must win, against the quota.
+    let sick_alpha = Fixture::with_extra_config(QUOTA_PROFILES);
+    let (alpha, beta) = two_sessions(&sick_alpha);
+    plant_quota(&sick_alpha, "alpha-probe", 95, 100);
+    plant_quota(&sick_alpha, "beta-probe", 5, 100);
+    plant_health(
+        &sick_alpha,
+        "alpha-probe",
+        &[health_reading(
+            "alpha-probe/GLASSHOUSE_ROUTE_TEST_KEY",
+            9,
+            None,
+            true,
+        )],
+    );
+    assert_eq!(
+        launch_and_read_resumed(&sick_alpha),
+        beta,
+        "a session whose provider refused the credential must lose to one nothing has been \
+         observed against, even holding a 90-point quota advantage. A build that reads an \
+         empty pool answers `alpha` here, on the quota alone. alpha={alpha} beta={beta}"
+    );
+
+    // Half two: the same project, the same two profiles, both readings moved to
+    // the other provider.
+    let sick_beta = Fixture::with_extra_config(QUOTA_PROFILES);
+    let (alpha, beta) = two_sessions(&sick_beta);
+    plant_quota(&sick_beta, "alpha-probe", 5, 100);
+    plant_quota(&sick_beta, "beta-probe", 95, 100);
+    plant_health(
+        &sick_beta,
+        "beta-probe",
+        &[health_reading(
+            "beta-probe/GLASSHOUSE_ROUTE_TEST_KEY",
+            9,
+            None,
+            true,
+        )],
+    );
+    assert_eq!(
+        launch_and_read_resumed(&sick_beta),
+        alpha,
+        "moving the readings must move the destination; a ranking that answers the same \
+         session both times is reading its own order, not the health cache — and one that \
+         answers `beta` here is reading the quota and stopping there. alpha={alpha} \
+         beta={beta}"
+    );
+
+    // And the explanation a person reads carries the planted reading itself.
+    let explained = sick_beta.stdout(&["route"]);
+    assert!(
+        explained.contains("`beta-probe/GLASSHOUSE_ROUTE_TEST_KEY` was refused by its provider"),
+        "the ranking must name what it read and attribute it to the credential it was \
+         actually planted against — the identity hazard line 1599 turns on:\n{explained}"
+    );
+    assert!(
+        !explained.contains("`alpha-probe/GLASSHOUSE_ROUTE_TEST_KEY` was refused"),
+        "and must not smear it onto the other provider, which is configured with the very \
+         same credential *variable* and is a separate allowance:\n{explained}"
+    );
+}
+
+/// **Hazard 2: a persisted deadline that has already passed is not a
+/// cooldown.**
+///
+/// `ResourceHealth::cooling_down_until` is an `Instant` — a monotonic clock
+/// with no epoch — while a reading carries unix seconds, so the bridge has to
+/// convert. The conversion that matters is the one for a deadline already in
+/// the past: it must become *"not cooling down"*, never an `Instant`
+/// manufactured to carry a value.
+///
+/// Both destinations carry a reading with the **same** `consecutive_failures`,
+/// so the only difference between them is which side of `now` the deadline
+/// falls on. Holding the failure count constant is deliberate: it is what
+/// stops this passing because one side simply had more evidence against it.
+///
+/// - an expired deadline scores the graded failure penalty (`-0.9`, the floor)
+///   and stays choosable;
+/// - a live deadline scores `HEALTH_UNAVAILABLE_PENALTY` (`-1.5`).
+///
+/// A bridge that converted an elapsed deadline into a future `Instant` — the
+/// obvious way to get the arithmetic wrong — suppresses *both* and this fails.
+#[test]
+fn an_already_elapsed_persisted_cooldown_does_not_suppress_a_destination() {
+    // Half one: `alpha`'s cooldown is over, `beta`'s is not.
+    let alpha_recovered = Fixture::with_extra_config(QUOTA_PROFILES);
+    let (alpha, beta) = two_sessions(&alpha_recovered);
+    plant_health(
+        &alpha_recovered,
+        "alpha-probe",
+        &[health_reading(
+            "alpha-probe/GLASSHOUSE_ROUTE_TEST_KEY",
+            4,
+            Some(now_unix() - 3_600),
+            false,
+        )],
+    );
+    plant_health(
+        &alpha_recovered,
+        "beta-probe",
+        &[health_reading(
+            "beta-probe/GLASSHOUSE_ROUTE_TEST_KEY",
+            4,
+            Some(now_unix() + 3_600),
+            false,
+        )],
+    );
+    assert_eq!(
+        launch_and_read_resumed(&alpha_recovered),
+        alpha,
+        "a cooldown that elapsed an hour ago must not withhold a destination, while one that \
+         has an hour left must. alpha={alpha} beta={beta}"
+    );
+
+    // Half two, swapped — the same reason line 1598's pair is mirrored.
+    let beta_recovered = Fixture::with_extra_config(QUOTA_PROFILES);
+    let (alpha, beta) = two_sessions(&beta_recovered);
+    plant_health(
+        &beta_recovered,
+        "alpha-probe",
+        &[health_reading(
+            "alpha-probe/GLASSHOUSE_ROUTE_TEST_KEY",
+            4,
+            Some(now_unix() + 3_600),
+            false,
+        )],
+    );
+    plant_health(
+        &beta_recovered,
+        "beta-probe",
+        &[health_reading(
+            "beta-probe/GLASSHOUSE_ROUTE_TEST_KEY",
+            4,
+            Some(now_unix() - 3_600),
+            false,
+        )],
+    );
+    assert_eq!(
+        launch_and_read_resumed(&beta_recovered),
+        beta,
+        "swapping which deadline has passed must swap the destination. alpha={alpha} \
+         beta={beta}"
+    );
+
+    let explained = beta_recovered.stdout(&["route"]);
+    assert!(
+        explained.contains(
+            "`alpha-probe/GLASSHOUSE_ROUTE_TEST_KEY` is still cooling down after 4 consecutive \
+             observed failures"
+        ),
+        "the live deadline must read as a cooldown:\n{explained}"
+    );
+    assert!(
+        explained.contains(
+            "4 consecutive observed failures on `beta-probe/GLASSHOUSE_ROUTE_TEST_KEY` that \
+             have not yet earned a cooldown"
+        ),
+        "and the elapsed one must read as failures *without* a cooldown — the same four \
+         failures, scored the other way, which is the whole of hazard 2:\n{explained}"
+    );
+}
+
+/// **The negative control.**
+///
+/// With nothing persisted about either provider, line 1599's term must be
+/// present and worth exactly nothing — `provider_health`'s zero-failure arm,
+/// which is *"not a health claim, the absence of one"* — and the launch must
+/// still continue one of the two existing sessions.
+///
+/// Without this, the pairs above could pass because reading the cache changed
+/// the shape of the candidate set rather than because a reading was weighed.
+/// Note what is deliberately *not* asserted: **which** of the two wins. With
+/// the term inert the two are equal to within a sub-second recency gap, so
+/// pinning a winner here would be pinning a clock tick.
+#[test]
+fn with_no_health_reading_the_term_is_present_and_weighs_nothing() {
+    let fixture = Fixture::with_extra_config(QUOTA_PROFILES);
+    let (alpha, beta) = two_sessions(&fixture);
+
+    let explained = fixture.stdout(&["route"]);
+    assert!(
+        explained.contains(
+            "nothing has been observed against `the harness's own default` on \
+             `alpha-probe/GLASSHOUSE_ROUTE_TEST_KEY`"
+        ) && explained.contains(
+            "nothing has been observed against `the harness's own default` on \
+             `beta-probe/GLASSHOUSE_ROUTE_TEST_KEY`"
+        ),
+        "the term must still be in the explanation when nothing was read, and must say so \
+         about both providers rather than inventing a health claim:\n{explained}"
+    );
+    assert!(
+        explained.contains("provider health   nothing observed — no gateway has yet persisted"),
+        "and the caveat block must say the pool was empty rather than letting a reader think \
+         health was weighed and found equal:\n{explained}"
+    );
+
+    let resumed = launch_and_read_resumed(&fixture);
+    assert!(
+        resumed == alpha || resumed == beta,
+        "with the term inert the launch must still continue one of the two existing sessions: \
+         resumed={resumed} alpha={alpha} beta={beta}"
+    );
+}
+
+/// **The tripwire, inverted — line 1599 is CLOSED and this is the executable
+/// form of it.**
+///
+/// This test was
+/// `a_persisted_provider_health_reading_reaches_the_binary_but_never_the_launch_paths_router`,
+/// and it asserted the opposite: that a persisted `GatewayHealthReading`
+/// reached the binary, was rendered by `glasshouse resources`, and stopped
+/// there — because `launch_session` built `FreePool::new()` and no production
+/// code converted a reading into a pool. Its own doc said *"the day someone
+/// bridges `GatewayHealthCache` into `RouterInputs.health`, this test fails —
+/// which is the signal to re-open line 1599, not to relax the assertion."*
+///
+/// `main.rs::observed_provider_health` is that bridge. **The assertion is
+/// inverted rather than relaxed**, and it keeps its fulcrum, which is what
+/// makes it worth more than a plain "the reading arrives" test:
+///
+/// - quota is planted so `alpha` leads by `0.9 × 0.8 = 0.72` — a gap the
+///   mirrored pair for line 1598 proves is genuinely decisive on its own;
+/// - a credential-rejected reading is planted against `alpha`, worth `-1.5`.
+///
+/// So `beta` wins only if the health reading was read **and weighed against a
+/// quota advantage that would otherwise have carried the ranking**. A bridge
+/// that fired but contributed nothing leaves `alpha` winning, and this fails.
+#[test]
+fn a_persisted_provider_health_reading_reaches_the_launch_paths_router() {
     let fixture = Fixture::with_extra_config(QUOTA_PROFILES);
     let (alpha, beta) = two_sessions(&fixture);
     plant_quota(&fixture, "alpha-probe", 95, 100);
     plant_quota(&fixture, "beta-probe", 5, 100);
+    plant_health(
+        &fixture,
+        "alpha-probe",
+        &[health_reading(
+            "alpha-probe/GLASSHOUSE_ROUTE_TEST_KEY",
+            9,
+            Some(now_unix() + 3_600),
+            true,
+        )],
+    );
 
+    // The fixture is not broken, proven on its own terms (§80 case 5 — a test
+    // must fail on its subject, never on its fixture's ability to plant). The
+    // shipped binary really does read *this* directory in *this* fixture:
+    // `glasshouse resources` describes the built-in registry rather than a
+    // config-only provider, so that half is planted under a registry name —
+    // same cache, same run — and it comes back rendered.
     let cache = glasshouse::provider::telemetry::GatewayHealthCache::at(
         fixture.data_dir().join("gateway-health"),
     );
-    let rejected = |credential: &str, model: &str| {
-        vec![glasshouse::provider::telemetry::GatewayHealthReading {
-            credential_label: credential.to_owned(),
-            model: model.to_owned(),
-            consecutive_failures: 9,
-            cooling_down_until_unix: Some(now_unix() + 3_600),
-            credential_rejected: true,
-        }]
-    };
-    cache.store(
-        "alpha-probe",
-        &rejected("alpha-probe/GLASSHOUSE_ROUTE_TEST_KEY", "claude-sonnet-4"),
-        now_unix(),
-    );
-
-    // The fixture is not broken, proven twice (§80 case 5 — a tripwire must
-    // fail on its own subject, never on its fixture's ability to plant).
-    //
-    // First: the decisive reading is on disk, at the path
-    // `GatewayHealthCache::new` resolves from this run's `--data-dir`, and it
-    // parses back through the same reader production uses.
-    assert_eq!(
-        cache.load("alpha-probe").len(),
-        1,
-        "the planted reading for the routed provider must be on disk and readable"
-    );
-    // Second: the shipped binary really does read *this* directory in *this*
-    // fixture. `glasshouse resources` describes the built-in registry rather
-    // than a config-only provider, so that half is planted under a registry
-    // name — same cache, same run — and it comes back rendered.
     cache.store(
         "anyrouter",
-        &rejected("anyrouter/ANYROUTER_API_KEY", "anyrouter/free-model"),
+        &[health_reading(
+            "anyrouter/ANYROUTER_API_KEY",
+            9,
+            Some(now_unix() + 3_600),
+            true,
+        )],
         now_unix(),
     );
     let resources = fixture.stdout(&["resources", "--no-harness"]);
@@ -1847,12 +2153,147 @@ fn a_persisted_provider_health_reading_reaches_the_binary_but_never_the_launch_p
 
     let resumed = launch_and_read_resumed(&fixture);
     assert_eq!(
-        resumed, alpha,
-        "line 1599 is REFUSED, structurally: `RouterInputs.health` is a `FreePool` the launch \
-         path builds empty, and no production code converts a persisted \
-         `GatewayHealthReading` into one — so a provider whose credential the gateway watched \
-         being *rejected* is still chosen, on the strength of its quota alone. If this ever \
-         fails, the bridge was built and line 1599 must be re-opened. alpha={alpha} \
-         beta={beta}"
+        resumed, beta,
+        "line 1599 is CLOSED: a provider whose credential the gateway watched being \
+         *rejected* must lose even to a provider with a large quota advantage, because \
+         `observed_provider_health` puts the persisted reading into the very `FreePool` \
+         `provider_health` reads. If this fails while the quota pair still passes, the bridge \
+         was severed. alpha={alpha} beta={beta}"
+    );
+}
+
+/// **Hazard 1, as an assertion: one credential's health is not another's.**
+///
+/// This is the test the whole design of `observed_provider_health` exists to
+/// pass, and the only one in this file that can fail while every other one
+/// stays green.
+///
+/// `alpha-probe` is configured with **two** credentials. The destination is
+/// keyed by the first (`destination_backend` reads `credential_env.first()`);
+/// the rejected reading planted in that provider's health file names the
+/// **second**. Both live in `alpha-probe.json`, so a bridge that filtered by
+/// provider and then took whatever it found — the obvious shortcut, and the
+/// one a label that cannot be reversed invites — attributes a sibling key's
+/// refusal to a destination that does not use it.
+///
+/// The fulcrum is quota, proven decisive on its own by line 1598's mirrored
+/// pair: `alpha` leads by `0.9 × 0.8 = 0.72`, and the misattributed `-1.5`
+/// would overturn it. So the two behaviours give opposite answers:
+///
+/// - **attributing by credential** (correct): nothing is known about
+///   `alpha`'s own key, the health term is `0.0` for both, quota decides, and
+///   `alpha` wins;
+/// - **attributing by provider alone** (the hazard): `alpha` is suppressed on
+///   its sibling's evidence and `beta` wins.
+///
+/// Map line 1294's rule is why this is worth a test of its own — *"a
+/// fabricated value here does not degrade the policy, it inverts it"*. A
+/// router that avoids a healthy resource on another key's refusal is worse
+/// than one that reads no health at all, because it is confidently wrong.
+#[test]
+fn a_sibling_credentials_refusal_is_not_attributed_to_the_key_the_destination_uses() {
+    let fixture = Fixture::with_extra_config(SIBLING_KEY_PROFILES);
+    let (alpha, beta) = two_sessions(&fixture);
+    plant_quota(&fixture, "alpha-probe", 95, 100);
+    plant_quota(&fixture, "beta-probe", 5, 100);
+
+    // In `alpha-probe`'s own file, and refused — but against the key this
+    // destination does not use.
+    plant_health(
+        &fixture,
+        "alpha-probe",
+        &[health_reading(
+            "alpha-probe/GLASSHOUSE_ROUTE_SIBLING_KEY",
+            9,
+            Some(now_unix() + 3_600),
+            true,
+        )],
+    );
+
+    assert_eq!(
+        launch_and_read_resumed(&fixture),
+        alpha,
+        "a refusal recorded against `GLASSHOUSE_ROUTE_SIBLING_KEY` must not withhold the \
+         destination keyed by `GLASSHOUSE_ROUTE_TEST_KEY`: they are two separate \
+         allowances, and the quota advantage `alpha` holds must therefore still decide. A \
+         `beta` here means the bridge attributed by provider rather than by credential. \
+         alpha={alpha} beta={beta}"
+    );
+
+    let explained = fixture.stdout(&["route"]);
+    assert!(
+        explained.contains(
+            "nothing has been observed against `the harness's own default` on \
+             `alpha-probe/GLASSHOUSE_ROUTE_TEST_KEY`"
+        ),
+        "the key the destination actually uses must still read as unobserved — a reading \
+         filed under the same provider is not a reading about this credential:\n{explained}"
+    );
+    assert!(
+        !explained.contains("`alpha-probe/GLASSHOUSE_ROUTE_TEST_KEY` was refused"),
+        "and must never be reported as refused on its sibling's evidence:\n{explained}"
+    );
+}
+
+/// **Hazard 1's other half: two readings that name one resource and disagree
+/// are not a reading.**
+///
+/// `health_readings_for` maps over a pool already keyed by `FreeResource`, so
+/// a file *this program wrote* cannot contain two entries for one credential
+/// and model. A file it did not write can — and so, in principle, can a
+/// genuine label collision, because `CredentialId::label` renders
+/// `provider/var` for a `SecretRef::Environment` and
+/// `provider/service:account` for a `SecretRef::OsCredential`, and those two
+/// spellings can coincide. Both arrive as the same thing: one rendered name,
+/// two different claims.
+///
+/// **Picking one is the failure mode this whole design refuses.** Which is
+/// chosen would be an artefact of file order, and the router would then avoid
+/// a healthy resource on evidence that may belong to a different credential
+/// entirely. The rule is that a resource two readings disagree about is
+/// unobserved, which is the same inert `0.0` an empty cache produces.
+///
+/// Quota is the fulcrum again: `alpha` leads by `0.72`, and the `-1.5` of the
+/// refusal below would overturn it if either reading were adopted.
+#[test]
+fn two_readings_that_disagree_about_one_resource_leave_it_unobserved() {
+    let fixture = Fixture::with_extra_config(QUOTA_PROFILES);
+    let (alpha, beta) = two_sessions(&fixture);
+    plant_quota(&fixture, "alpha-probe", 95, 100);
+    plant_quota(&fixture, "beta-probe", 5, 100);
+
+    // The same credential, the same model, contradicting each other about
+    // whether the provider refused the key.
+    plant_health(
+        &fixture,
+        "alpha-probe",
+        &[
+            health_reading(
+                "alpha-probe/GLASSHOUSE_ROUTE_TEST_KEY",
+                9,
+                Some(now_unix() + 3_600),
+                true,
+            ),
+            health_reading("alpha-probe/GLASSHOUSE_ROUTE_TEST_KEY", 0, None, false),
+        ],
+    );
+
+    assert_eq!(
+        launch_and_read_resumed(&fixture),
+        alpha,
+        "with the contradiction withheld the quota advantage decides, exactly as it does \
+         with an empty cache. A `beta` here means one of the two readings was picked — and \
+         a bridge that picks between contradictory claims is choosing by file order. \
+         alpha={alpha} beta={beta}"
+    );
+
+    let explained = fixture.stdout(&["route"]);
+    assert!(
+        explained.contains(
+            "nothing has been observed against `the harness's own default` on \
+             `alpha-probe/GLASSHOUSE_ROUTE_TEST_KEY`"
+        ),
+        "a resource two readings disagree about must read as unobserved, not as whichever \
+         of them the file happened to list first:\n{explained}"
     );
 }

@@ -163,3 +163,103 @@ re-opened — not the assertion relaxed.**
    declared the scope overflow, and gave the reason. It was right.
 3. The packet warned line numbers might have shifted ~100 lines from a peer's
    landing. They had not — the peer's edits were already in this worktree's base.
+
+---
+
+# Line 1599 — CLOSED 2026-08-30, and the refusal above was right until it wasn't
+
+Package `GH-GATEWAY-HEALTH-BRIDGE`. The entry above refused this line and
+tripwired it. **That refusal was correct** — no `FreePool` reached the router —
+and it expired the moment someone built the bridge, which is a refusal cluster
+working exactly as intended.
+
+## The packet said "refuse if the label mapping is lossy". It is lossy. It closed anyway.
+
+`CredentialId::label` (`routing/mod.rs:117`) renders
+`Environment { var }` as `"{provider}/{var}"` and
+`OsCredential { service, account }` as `"{provider}/{service}:{account}"`.
+**Nothing is escaped and `provider` is free text**, so a parser must guess two
+things: where the provider ends (`a/b` + var `c` and `a` + var `b/c` both render
+`a/b/c`) and which variant it is (`Environment { var: "s:a" }` and
+`OsCredential { service: "s", account: "a" }` both render `p/s:a`). The
+structured identity cannot ride along either — `SecretRef` has no serde impl,
+and `secret/mod.rs:88-91` says why.
+
+**So: never parse a label.** The bridge does not.
+
+## The consumer states its own key, so the map is only ever run forward
+
+`provider_health` (`routing/session.rs:890`) looks nothing up by label. It builds
+`FreeResource::new(destination.backend().credential().clone(),
+destination.backend().model().label())`. **Both halves are in hand at the bridge
+site** — `routing_destinations` returns the candidates before `RouterInputs` is
+built. So `observed_provider_health` (`main.rs:999`) walks the *destinations*,
+renders each label with **the very function the write side rendered it with**,
+and compares string equality forward only.
+
+| | write side | read side |
+|---|---|---|
+| credential | `resource.credential().label()` (`gateway/session.rs:265`) | `credential.label()`, same fn |
+| model | `model_key(..)` = `AssignedModel::label` (`gateway/session.rs:579-581`) | `destination.backend().model().label()` |
+
+One renderer, both ends, **no inverse computed anywhere.**
+
+## Three ambiguities, all DECLINED rather than resolved
+
+Forward matching is exact only if labels are unique across what is being
+attributed. Each of these refuses instead of choosing:
+
+1. **Cross-provider** — a reading's provider must equal the credential's own.
+   Two providers sharing a `credential_env` are *"two separate allowances"*
+   (`CredentialId`'s doc) and the label keeps them apart.
+2. **Cross-model** — health is per credential **and** model; sharing one entry
+   *"would take every model out of service because one of them was busy"*.
+3. **Contradiction** — two readings naming one destination's (label, model) and
+   disagreeing means **neither is used**. A file Glasshouse wrote cannot contain
+   those. A file it did not write can — **and so would a genuine label
+   collision, which is exactly what a collision looks like in the data**: one
+   rendered name, two different claims. Picking one would be choosing by file
+   order.
+
+That third refusal is the honest answer to the packet's stop condition: the
+ambiguity is not resolved, it is detected and declined.
+
+## Hazard 2, the epoch-less clock
+
+`ResourceHealth::cooling_down_until` is an `Option<Instant>` with no epoch; a
+persisted reading carries unix seconds. Both clocks are read **as one pair**,
+once, for every reading. An already-elapsed deadline becomes *not cooling down*
+— proven by `an_already_elapsed_persisted_cooldown_does_not_suppress_a_destination`.
+
+## Mutations
+
+| mutation | result | killed by |
+|---|---|---|
+| sever the bridge — `launch_session` gets `FreePool::new()` again | **KILLED** | 3 tests, launch assertion in each |
+| break identity — attribute by provider alone | **KILLED** | `a_sibling_credentials_refusal_…` |
+| Hazard 2 — an elapsed deadline becomes a future `Instant` | **KILLED** | `an_already_elapsed_persisted_cooldown_…` |
+| contradictory readings resolve to file order | **KILLED** | `two_readings_that_disagree_…` |
+| sever the **task-boundary report's** bridge site | **SURVIVED**, predicted | nothing — a real unwatched second site |
+
+**Re-run independently by the orchestrator** after integration, severing at the
+source: KILLED by three tests including
+`observed_provider_health_decides_which_session_the_launch_path_continues`.
+
+**A first draft of the mirrored test pair SURVIVED the sever**, and the worker
+strengthened it rather than shipping it — a mutation catching a weak test again.
+
+## The tripwire was updated, not deleted
+
+`a_persisted_provider_health_reading_reaches_the_binary_but_never_the_launch_paths_router`
+is now `a_persisted_provider_health_reading_reaches_the_launch_paths_router` and
+asserts the new behaviour.
+
+## Limits
+
+- The **task-boundary report** site is bridged but unwatched (the SURVIVED
+  above). Named rather than hidden.
+- Scope overflow, both declared: `api/unix.rs` (+1, compile-forced — a second
+  caller of `routing_caveats`, which gained a parameter) and
+  `tests/routing_api.rs` (an assertion pinning the old caveat wording, updated
+  and kept rather than weakened).
+- macOS only; the cross-platform gate has not run since this landed.

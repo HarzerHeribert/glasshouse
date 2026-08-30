@@ -525,9 +525,13 @@ fn a_recommendation_names_a_destination_and_the_contributions_behind_it() {
         .as_str()
         .unwrap_or_else(|| panic!("caveats must be a string: {result}"));
     assert!(
-        caveats.contains("provider health") && caveats.contains("the health pool is filled by"),
+        caveats.contains("provider health")
+            && caveats.contains("no gateway has yet persisted a health reading"),
         "the response must say that the provider-health term was never read rather than \
-         weighed and found equal: {caveats}"
+         weighed and found equal. **This caveat became conditional with line 1599's \
+         bridge** — `main.rs::observed_provider_health` now fills the pool from \
+         `GatewayHealthCache`, so the line is printed only when nothing was attributed, \
+         and this project has persisted nothing: {caveats}"
     );
 }
 

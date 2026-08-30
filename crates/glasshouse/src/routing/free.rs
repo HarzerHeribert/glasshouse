@@ -385,9 +385,11 @@ impl FreePool {
 
     /// Fold in one real unit of work.
     ///
-    /// **The only mutator of health in Glasshouse.** See this module's
-    /// header for why that is the capability rather than an implementation
-    /// detail.
+    /// **The only mutator of health that *learns* anything in Glasshouse.**
+    /// See this module's header for why that is the capability rather than an
+    /// implementation detail. [`FreePool::adopt_observed`] is the one other
+    /// way health changes, and it deliberately learns nothing: it carries a
+    /// state some other process already learned this way.
     pub fn observe(&mut self, resource: &FreeResource, outcome: WorkloadOutcome, now: Instant) {
         self.health_entry(resource).observe(outcome, now);
 
@@ -402,6 +404,48 @@ impl FreePool {
             };
             self.record_pool(resource.credential(), &reading, now);
         }
+    }
+
+    /// Adopt a health state **another process** already observed about
+    /// `resource` — capability map line 1599's bridge, and the only entry
+    /// point that does not learn.
+    ///
+    /// # Why this is not [`FreePool::observe`]
+    ///
+    /// `observe` takes one outcome and derives the rest: it counts the
+    /// failure, and it computes the cooldown itself from `BASE_COOLDOWN` or
+    /// the provider's stated `retry_after`. There is no outcome here to
+    /// derive anything from. A caller holding a persisted reading knows the
+    /// failure count and the deadline as *facts already established*, and
+    /// replaying them through `observe` would manufacture a cooldown length
+    /// this pool invented rather than the one the gateway actually granted.
+    ///
+    /// # `cooling_down_until` is the caller's conversion, and that is
+    /// deliberate
+    ///
+    /// [`Instant`] has no epoch, so a deadline that crossed a process
+    /// boundary as a wall-clock second can only be placed on this process's
+    /// monotonic clock by something holding **both clocks read at the same
+    /// moment**. This pool holds neither.
+    /// [`crate::provider::telemetry::GatewayHealthReading::cooling_down_until`]
+    /// is that conversion and states the rule this method depends on: a
+    /// deadline that has already elapsed arrives as `None` — *not cooling
+    /// down* — never as an `Instant` in the past manufactured for the sake of
+    /// carrying a value.
+    ///
+    /// Last write wins, exactly like `observe`: a resource this is called for
+    /// twice holds what the second call said.
+    pub fn adopt_observed(
+        &mut self,
+        resource: &FreeResource,
+        consecutive_failures: u32,
+        cooling_down_until: Option<Instant>,
+        credential_rejected: bool,
+    ) {
+        let health = self.health_entry(resource);
+        health.consecutive_failures = consecutive_failures;
+        health.cooling_down_until = cooling_down_until;
+        health.credential_rejected = credential_rejected;
     }
 
     /// Fold in what a real response stated about a credential's request pool.

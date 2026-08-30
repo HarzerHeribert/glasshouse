@@ -1357,6 +1357,7 @@ fn recommend_route(
                     routed,
                     &ranked.destinations,
                     &ranked.refused_by_launch,
+                    &ranked.health_observed,
                 ),
             }))
         }
