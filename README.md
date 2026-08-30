@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████░░░░░░░░░░░░░░░` 811 / 1280 mandatory capabilities (63%)
+`█████████████████████████░░░░░░░░░░░░░░░` 810 / 1280 mandatory capabilities (63%)
 
 <details>
 <summary>Per-phase breakdown (42 of 104 phases complete)</summary>
@@ -68,7 +68,7 @@ the authoritative specification and tracks what is done.
 | Phase 21B — Decision provenance and assumptions | 11/11 ✅ |
 | Phase 21C — Validity conditions and invalidation | 11/11 ✅ |
 | Phase 21D — Memory age and relevance decay | 9/9 ✅ |
-| Phase 21E — Decision ladder and conflict handling | 7/12 |
+| Phase 21E — Decision ladder and conflict handling | 8/12 |
 | Phase 21F — Memory retrieval quality | 9/11 |
 | Phase 21G — Memory revalidation | 3/9 |
 | Phase 21H — Simplicity-first implementation policy | 0/10 |
@@ -101,7 +101,7 @@ the authoritative specification and tracks what is done.
 | Phase 34A — Workload tiers | 7/10 |
 | Phase 34B — Routing-model role | 7/15 |
 | Phase 34C — Automatic routing-model selection | 0/13 |
-| Phase 34D — Router request schema | 4/13 |
+| Phase 34D — Router request schema | 2/13 |
 | Phase 34E — Router economics | 0/9 |
 | Phase 34F — Model capability and tier calibration | 0/11 |
 | Phase 35 — Lightweight task classification | 14/14 ✅ |

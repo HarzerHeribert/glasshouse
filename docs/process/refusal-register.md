@@ -53,7 +53,7 @@ Do not let a `no` become a `yes` because the line looks close.
 
 ## Open refusals, as of batch 50
 
-### Cluster A — a production caller passes an invented constant *(in-repo: YES — being attacked now by `GH-LEAD-PLACEHOLDERS`)*
+### Cluster A — a production caller passes an invented constant *(in-repo: **the cluster is now EMPTY**; see 1294 below)*
 
 | line | missing link | site |
 |---|---|---|
@@ -61,7 +61,7 @@ Do not let a `no` become a `yes` because the line looks close.
 | ~~1291~~ | **CLOSED.** Unblocked by 1288; map line is ☑ |
 | ~~1319~~ | **CLOSED.** `gateway/mod.rs:614` now passes the quota through |
 | ~~1290~~ | **CLOSED 2026-08-30** by `GH-RESERVE-INPUTS`. `user_override` is now set by `ReserveOverride`, a *scope* rather than a switch — there is no spelling of it that means every session |
-| 1294 | `task_nearly_complete: false` hardcoded | `routing/disposable.rs:568` |
+| ~~1294~~ | **NOT A CLUSTER A ROW — MOVED to Standing refusals, 2026-08-30.** The constant is still there (`routing/disposable.rs:730`), but it is a **refusal written into the source**, not a gap awaiting wiring. `provider/quota.rs:2265-2285`: *"no path reports task progress … the only completion fact available there is that the turn is already over … A fabricated value here does not degrade the policy, it inverts it."* Two independent readers reached this on 2026-08-30 — the orchestrator, and `GH-REGISTER-AUDIT`. **Do not package.** |
 
 ### Cluster B — a mechanism built, tested, and never installed in production *(in-repo: YES)*
 
@@ -71,7 +71,7 @@ mis-filed. What is left is one row.
 
 | line | missing link |
 |---|---|
-| 922 (half) | `MemoryStore::resolve_conflict` (`memory/store.rs:1507`) has zero non-test callers. **Re-verified batch 50 and the reason is sharper:** the `memory revalidate` CLI that shipped since does *not* route through it — `revalidate_superseded` (`store.rs:1387`) calls `supersede` (`store.rs:1168`) directly. Glasshouse can raise a conflict and still cannot resolve one from the binary |
+| ~~922~~ | **CLOSED 2026-08-30** by `GH-MEMORY-CONFLICT-RESOLVE`. `glasshouse memory conflicts` and `glasshouse memory resolve <id> active|superseded` give `resolve_conflict` its first production callers. **This row was right and it paid**: an ordinary `memory search` calls `mark_conflicted` in production, `is_current` answers `false` for `Conflicted`, and nothing in the binary could undo it — a live defect, not merely an unwired mechanism. See `phase-21e.md`. |
 
 **CLOSED and removed:** 1735 (batch 50 — `DegradeRelay` in `main.rs`, a lazily
 filled handle that holds and replays; see `phase-45.md`). 925 (batch 50 —
@@ -111,7 +111,7 @@ whose consuming phases are still at zero. **It belongs in Cluster D.**
 | 1239 | consumer belongs to routing phases still at zero |
 | 1795 | no fallback-chain concept; routing-model selection is Phase 34C |
 | 1796 | nothing maps a model to a tier ceiling. **Its recorded blocker is stale** — `WorkloadTier` ships at `routing/classify.rs:79` — but §14 applies: the blocker being gone is not the capability |
-| 372 | **Re-derived 2026-08-30 by `GH-PROFILE-SELECTION`; the old wording was wrong twice over.** *"Nothing selects among launch profiles"* is false — `main.rs:~620` builds one fresh `Destination` per configured profile and the router ranks them. **Both of the line's actual qualifiers fail instead.** *Clause 1, "among **enabled** profiles":* `ProfileConfig::enabled` (`config/mod.rs:372`, default `true`) is **never read**, and the resolved `LaunchProfile` has no `enabled` field at all — a profile the user set to `enabled = false` still appears as a candidate. **That is a live defect, not just an open box.** *Clause 2, "when **automatic routing** is enabled":* the `DestinationScope::Everything` set is built only by `glasshouse route` (a diagnostic that starts nothing) and by `report_task_boundary_routing`, where `RoutingOverride::to(...)` forces the outcome and the ranking only prints a disagreement note. The one caller that **acts**, `launch_session` (`main.rs:1326`), uses a different scope |
+| 372 | **CLAUSE 1 IS CLOSED — updated 2026-08-30 by `GH-REGISTER-AUDIT`.** `59e9633` gave `ProfileConfig::enabled` a reader: `main.rs:642` filters `DestinationScope::Everything` on `effective.profile_enabled(name).value`, and `main.rs:1402-1409` refuses an explicit `--profile` launch of a disabled profile. **Only clause 2 remains** — *"when automatic routing is enabled"*. The rest of this row is the pre-fix analysis, kept for clause 2. Re-derived 2026-08-30 by `GH-PROFILE-SELECTION`; the old wording was wrong twice over. *"Nothing selects among launch profiles"* is false — `main.rs:~620` builds one fresh `Destination` per configured profile and the router ranks them. **Both of the line's actual qualifiers fail instead.** *Clause 1, "among **enabled** profiles":* `ProfileConfig::enabled` (`config/mod.rs:372`, default `true`) is **never read**, and the resolved `LaunchProfile` has no `enabled` field at all — a profile the user set to `enabled = false` still appears as a candidate. **That is a live defect, not just an open box.** *Clause 2, "when **automatic routing** is enabled":* the `DestinationScope::Everything` set is built only by `glasshouse route` (a diagnostic that starts nothing) and by `report_task_boundary_routing`, where `RoutingOverride::to(...)` forces the outcome and the ranking only prints a disagreement note. The one caller that **acts**, `launch_session` (`main.rs:1326`), uses a different scope |
 | ~~1313~~ | **CLOSED 2026-08-30.** The blocker was real and is gone: `1b66889` gave the aggregates a production reader (`shell/mod.rs:1571`), and `GH-LATENCY-PROOF` then proved the whole chain with three production mutations. **This row is the cluster working as intended** — it held a line that genuinely could not close, and expired the moment its consumer landed. Compare the seven rows the audit found stale, which nobody retired |
 | 531 | **moved here from Cluster B in batch 50.** Missing caller *and* consumer: nothing in production distinguishes a request pool from a token-priced allowance, and no `FreePool` outlives one call. Needs a routing consumer that behaves differently for the two — see Cluster B's note |
 | ~~930, 934~~ | **CLOSED the same day this row was written.** Phase 27 landed, `GH-INJECTION-RECALL` closed both behind it. Kept struck through for one batch as the clearest evidence in this file that **a Cluster D row expires the moment its trunk lands** — I wrote this row and did not revisit it |
@@ -316,3 +316,62 @@ observable behaviour**. The write path and a read path that bypasses
 - **1745, 1746** — no cmux-metadata path reaches project-scope validation, and
   there is no MCP surface. A grep for "cmux|mcp" hits doc comments and looks
   like a lead.
+
+
+## Batch 54's refusals — three packages killed at Phase −1 before dispatch
+
+**Added 2026-08-30.** Each of these looked packageable from `ORIENT.md`'s
+open-line ranking and is not. Two were caught by the orchestrator's own Phase −1
+check and one by an adversarial audit. **They are recorded here because the
+ranking will keep recommending them.**
+
+### Cluster M — the measured quantity is never measured *(in-repo: yes, but the counter does not exist)*
+
+| line | missing link |
+|---|---|
+| 1263 | *"Lower the score when user-defined spending budget is close to exhaustion."* The **producer exists** (`QuotaOverride::budget()`, config-loaded and layered) and the **consumer exists** (`remaining_capacity_score` → `normalized()` → `pools()`, which already includes `user_budget`). What is missing is **any count of what has been spent**. `routing/evidence.rs:66` states it: *"`cost_micro_usd`: not supplied."* There is no `SUM(cost…)` anywhere in the tree, and `provider/resources.rs:950` prints the budget to the user with the words **"Glasshouse does not count spend against this"**. "Close to exhaustion" is not computable. The only production writer of `CapacityState::user_budget` is `provider/telemetry.rs:1017`, which merges a *provider-reported* ceiling, not the user's configured budget; `resources.rs:2195` is past that file's `#[cfg(test)]` at `:1281`. **Blocked on Phase 32G (provider-aware request-cost estimation), which is 10 open / 0 closed.** |
+| 1267 | Same function, stated in its own doc comment: *"**This build has no latency or concurrency reader anywhere** — nothing in `CapacityState` carries either quantity."* `remaining_capacity_score` returns a fixed high estimate for local inference carrying an explicit "no evidence" note, which is the honest answer and not the line. |
+
+### Cluster N — a signal constant across the set being ranked *(in-repo: yes, and each has a tripwire)*
+
+A signal that is the same for every candidate cannot change a ranking. This is a
+distinct failure from "no producer", it looks exactly like a wiring gap, and it
+has now cost two separate investigations.
+
+| line | missing link |
+|---|---|
+| 566, 569 | **Do not package. `docs/product/evidence/phase-9j.md` records the full reasoning and a self-maintaining tripwire.** `harness::pairing::classify` derives `PairingClass` from harness, model and user corrections — **never from the route** — while every candidate set the binary can construct varies *only* by route (`UpstreamBackend` has no model field; the one model arrives at `SessionRouting::bind` from `profile.model` and applies to every backend). So the native-pairing prior is constant across every set Glasshouse ranks. 569 is unreachable for the same reason: a warm session cannot outweigh a prior that never tipped anything. Separately, a fresh session does not reach the scorer at all — `best` has exactly two call sites, both in `on_provider_failure`. **The tripwire is `routing::interactive::tests::the_native_pairing_prior_is_constant_across_a_real_session_start_candidate_set`**: if anyone makes `classify` read the route, that test fails, and its failure means 566 has become reachable. |
+
+### Cluster O — Phase 34F has no producer for any of its eleven lines *(in-repo: yes; it is a build, not a wiring join)*
+
+| lines | missing link |
+|---|---|
+| 1475–1485 | **All eleven blocked**, classified line by line by `GH-CAPABILITY-CALIBRATION-RECON` (`.agent-runtime/report-capability-calibration-recon.md`). There is **no benchmark ingestion of any kind** — no config field, no file format, no loader — and no per-(model, task-kind) capability rating anywhere. `WorkloadTier` (`routing/classify.rs:88`) is a *task*-classification output, not a per-model config value, and `classify.rs`'s own doc comment refuses to merge it with `CapabilityAxis`. `AssignedModel` is a bare name string, so 1485 cannot distinguish a local quantized model from a hosted one. **1480 is the nearest to reachable** — `RoutingObservation` (`routing/evidence.rs:338`) needs one new `tier` field and one caller passing it — but note the recon's separate finding first: `RoutingObservation` **has no `launch_profile` field**, so anything built on `routing_observations` inherits a key one axis coarser than 1482 requires. `EvidenceKey` (`harness/pairing.rs:502`) already keys correctly and should be reused instead. |
+
+**Two things the recon established that a later package must not re-derive
+carelessly (§81 — re-derive them, but start here):** nothing today silently
+overwrites a user's configured value on the pairing axis (the only five config
+setters have one production caller, `main.rs:5375`, behind an explicit user
+command); and the decay-to-zero pattern 1484 wants already exists as
+`decay_factor`/`FULL_DECAY_OBSERVATIONS` (`config/pairing.rs:277-287`).
+
+### Cluster P — the restraint is unobservable because the thing restrained is never built
+
+| line | missing link |
+|---|---|
+| 1455, 1456 | **RE-OPENED 2026-08-30 after being ticked in error.** *"Avoid sending full repository contents / session transcripts to the router."* **Nothing in this build constructs a request to a routing model** — `routing/classify.rs:23-27` and `:583-586` both say so in production source. A negative requirement over a request that is never made passes vacuously. The type that appears to enforce it, `TaskRequirements`, bounds the input to `SessionRouter`, an in-process function that sends nothing anywhere. **Do not re-package ahead of 1447**, the line that defines the schema and is still open. Full reasoning in `phase-34d.md`. |
+
+## The register's own weakness, measured 2026-08-30
+
+`GH-REGISTER-AUDIT` checked every open row against current source. Verdicts:
+several `STALE`, several `WRONG`, and — the structural finding — **a large
+number `UNCHECKABLE`, because the row names no symbol, file, or line to grep.**
+
+`scripts/check-register.py` catches exactly one class: a row naming a line that
+is already ☑. It is blind to **a row whose target line is still open but whose
+stated reason for being blocked has become false** — which is the majority of
+what the audit found, including 1294, 372 and 740.
+
+**So: every new row above names a symbol and a file:line.** A row that does not
+cannot be audited, and an unauditable refusal is how a wrong reason survives
+long enough to send a worker at the wrong target.
