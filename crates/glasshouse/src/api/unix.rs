@@ -567,13 +567,21 @@ fn dispatch(
             injected,
         ),
         // Line 1125's *"routed task"* is not only a spawn's own. This verb
-        // is the follow-up half of the same seam — `SessionApi::send_text`,
-        // as `MessageOrigin::Machine`, never as the user (see that type's
-        // doc comment) — so the context-selection step belongs on both or on
-        // neither. It is also the only path on which line 1135 is a real
-        // question: a session is spawned once, and can be given a task many
-        // times.
-        Request::SendMessage { session, text } => {
+        // is the follow-up half of the same seam — `SessionApi::send_text` —
+        // so the context-selection step belongs on both or on neither. It is
+        // also the only path on which line 1135 is a real question: a session
+        // is spawned once, and can be given a task many times.
+        //
+        // The origin is the request's, defaulting to `Machine`, so an
+        // orchestrator that says nothing is recorded exactly as it was before
+        // the field existed and `glasshouse api send` is recorded as the
+        // person who ran it. See `protocol::RequestOrigin`, including why
+        // this is attribution rather than authentication.
+        Request::SendMessage {
+            session,
+            text,
+            origin,
+        } => {
             let id = SessionId::new(session);
             // Selected before the runtime lock is taken: opening the
             // project's memory goes through `database::open`, which can wait
@@ -583,15 +591,15 @@ fn dispatch(
             let mut guard = lock(live);
             let mut api = SessionApi::new(&store, &mut guard);
             deliver_memory(&mut api, &id, briefing, injected);
-            match api.send_text(&id, &text) {
+            match api.send_text(&id, &text, origin.message_origin()) {
                 Ok(()) => Response::ok(serde_json::json!({})),
                 Err(err) => Response::err(api_error(err)),
             }
         }
-        Request::Interrupt { session } => {
+        Request::Interrupt { session, origin } => {
             let mut guard = lock(live);
             let mut api = SessionApi::new(&store, &mut guard);
-            match api.interrupt(&SessionId::new(session)) {
+            match api.interrupt(&SessionId::new(session), origin.message_origin()) {
                 Ok(()) => Response::ok(serde_json::json!({})),
                 Err(err) => Response::err(api_error(err)),
             }
@@ -839,7 +847,12 @@ fn spawn_session(
         // as a separately labelled one. See `deliver_memory` for why a
         // failure here is not a failed spawn.
         deliver_memory(&mut api, &record.id, briefing, injected);
-        if let Err(err) = api.send_text(&record.id, &task) {
+        // `MessageOrigin::Machine`, unconditionally and with no request
+        // field to override it: a task delivered at spawn is something the
+        // caller asked Glasshouse to start a session *with*, not a line a
+        // person typed into a session that was already running. There is no
+        // `glasshouse api spawn`, so nothing human reaches this branch.
+        if let Err(err) = api.send_text(&record.id, &task, MessageOrigin::Machine) {
             return Response::err(format!(
                 "session `{}` was spawned but its task could not be delivered: {err}",
                 record.id
@@ -920,11 +933,22 @@ fn select_memory(
 /// # Line 1128: a message, not a write into the harness's own history
 ///
 /// This goes through [`SessionApi::send_text`] — the same seam
-/// `Request::SendMessage` uses, as [`MessageOrigin::Machine`] — and touches
-/// no harness session file, transcript or resume state. Glasshouse's memory
-/// arrives the way anything else Glasshouse says arrives, which is what
-/// keeps it distinguishable from the harness's own record of the
-/// conversation.
+/// `Request::SendMessage` uses — and touches no harness session file,
+/// transcript or resume state. Glasshouse's memory arrives the way anything
+/// else Glasshouse says arrives, which is what keeps it distinguishable from
+/// the harness's own record of the conversation.
+///
+/// # Always [`MessageOrigin::Machine`], even under a person's own request
+///
+/// The briefing rides along with `Request::SendMessage`, which now carries an
+/// origin — and this delivery deliberately ignores it. A person asking to
+/// send a line did not write this text and has never seen it: it is selected
+/// from the project's memory by [`select_memory`] and composed by
+/// `memory::inject::briefing`. Stamping it with the requester's origin would
+/// record Glasshouse's own words as the person's, which is the exact
+/// confusion the origin exists to end. The person's line, sent immediately
+/// after this one, carries their origin; this one is Glasshouse speaking and
+/// says so.
 ///
 /// # Injection failure is never a delivery failure
 ///
@@ -938,7 +962,7 @@ fn deliver_memory(
     injected: &Injected,
 ) {
     let Some(briefing) = briefing else { return };
-    if let Err(err) = api.send_text(session, briefing.text()) {
+    if let Err(err) = api.send_text(session, briefing.text(), MessageOrigin::Machine) {
         tracing::warn!(
             session = %session,
             error = %api_error(err),
@@ -2033,12 +2057,16 @@ fn pump_watches(state: &WatchState, live: &Mutex<SessionRuntime>, watches: &Watc
         let mut guard = lock(live);
         let mut api = SessionApi::new(&store, &mut guard);
         for completion in completions {
-            // `SessionApi::send_text`, so the delivery is recorded as
-            // `MessageOrigin::Machine` — line 736's "machine-originated
-            // message" — through the same seam an orchestrator's own
-            // `send_message` uses. There is no second write path into a
-            // session, deliberately.
-            match api.send_text(&watch.notify, &completion.line()) {
+            // `MessageOrigin::Machine`, stated here rather than assumed
+            // from the seam — line 736's "machine-originated message".
+            // Glasshouse woke this orchestrator on its own initiative and no
+            // request is involved, so there is no origin to carry and none to
+            // be tempted by: this is the one delivery on this door that is
+            // unambiguously not a person's, and it is pinned by
+            // `tests/worker_access.rs` in both of the tests that watch a
+            // handoff. There is no second write path into a session,
+            // deliberately.
+            match api.send_text(&watch.notify, &completion.line(), MessageOrigin::Machine) {
                 Ok(()) => tracing::info!(
                     worker = %completion.worker,
                     notify = %watch.notify,

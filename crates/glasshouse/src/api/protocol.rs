@@ -6,6 +6,7 @@
 //! the connection. Nothing here is transport-specific — [`super::unix`] is
 //! the only module that knows this travels over a Unix domain socket.
 
+use glasshouse::events::MessageOrigin;
 use glasshouse::memory::snapshot::SnapshotBudget;
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +61,66 @@ fn default_snapshot_body_chars() -> usize {
     SnapshotBudget::default().max_body_chars
 }
 
+/// Who is speaking, on the two requests that write into a session.
+///
+/// The door cannot work this out for itself and must not guess. A connection
+/// carries no clue about what is on the other end of it: `unix::authorize`
+/// admits a peer whose uid equals this process's, so a person at a terminal
+/// and an orchestrator acting for them are the **same principal** by
+/// construction, arriving over the same socket with the same credentials.
+/// Which of the two it is, is a fact only the caller holds — so the caller
+/// states it, and this is the field it states it in.
+///
+/// # Machine by default, and that is a compatibility requirement
+///
+/// An absent origin means [`Self::Machine`]. Every caller written before this
+/// field existed keeps exactly the meaning it had — an orchestrator speaking
+/// the protocol straight into the door was recorded as a machine and still
+/// is — and the delivery Glasshouse makes to an orchestrator on its own
+/// initiative (`unix::pump_watches`) is unchanged for the same reason. New
+/// vocabulary on a wire format only earns its place if silence keeps meaning
+/// what it meant.
+///
+/// # This is an attribution boundary, not a security one
+///
+/// A caller that states an origin it is not is **out of scope**, deliberately
+/// and without a defence, and no part of this type should be read as a claim
+/// about who a peer is. There is nothing here to authenticate: anything that
+/// can reach this socket can already send any bytes it likes under any origin
+/// it likes, and it is the *same user* on both sides. What the field buys is
+/// that the honest callers stop being indistinguishable — `api::client`,
+/// which knows it is a person's command line, and `unix::pump_watches`, which
+/// knows it is Glasshouse's own delivery, no longer write log rows that are
+/// equal field for field.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestOrigin {
+    /// A person, at a keyboard. What `glasshouse api send` and `glasshouse
+    /// api interrupt` say about themselves, because a command line a person
+    /// typed is the one case on this door where that is knowable.
+    User,
+    /// Glasshouse, or an orchestrator through it.
+    #[default]
+    Machine,
+}
+
+impl RequestOrigin {
+    /// The event-log vocabulary this becomes once it is through the door.
+    ///
+    /// Two spellings rather than one on purpose. [`MessageOrigin`] is what
+    /// the log records and `glasshouse::events` owns it; this is what a wire
+    /// format promises to keep accepting. Collapsing them would make every
+    /// future rename of an event-log variant a protocol break, which is the
+    /// same reason `unix`'s own `message_origin_str` exists rather than a
+    /// `Serialize` derive on the internal type.
+    pub fn message_origin(self) -> MessageOrigin {
+        match self {
+            Self::User => MessageOrigin::UserKeystroke,
+            Self::Machine => MessageOrigin::Machine,
+        }
+    }
+}
+
 /// One control-API call.
 ///
 /// Every variant is answered against the project the door was opened for —
@@ -96,11 +157,30 @@ pub enum Request {
         #[serde(default)]
         task: Option<String>,
     },
-    /// Send one line of text to a live session, as Glasshouse rather than as
-    /// the user.
-    SendMessage { session: String, text: String },
-    /// Interrupt a live session, as Glasshouse rather than as the user.
-    Interrupt { session: String },
+    /// Send one line of text to a live session.
+    ///
+    /// `origin` says whose line it is — see [`RequestOrigin`], and note that
+    /// it defaults to [`RequestOrigin::Machine`], so a caller that says
+    /// nothing is speaking as Glasshouse exactly as this verb always did.
+    /// `glasshouse api send` states [`RequestOrigin::User`], because a person
+    /// ran it.
+    SendMessage {
+        session: String,
+        text: String,
+        #[serde(default)]
+        origin: RequestOrigin,
+    },
+    /// Interrupt a live session.
+    ///
+    /// `origin` carries the same meaning and the same default it does on
+    /// [`Request::SendMessage`]: an interrupt is an intervention too, and a
+    /// person's `Ctrl-C` through `glasshouse api interrupt` is a different
+    /// fact from an orchestrator deciding to stop a worker.
+    Interrupt {
+        session: String,
+        #[serde(default)]
+        origin: RequestOrigin,
+    },
     /// The tail of one live session's terminal output — capability map line
     /// 745, *"allow the user to enter any orchestrated worker while it is
     /// running."*

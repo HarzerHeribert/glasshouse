@@ -56,6 +56,25 @@
 //! a running worker without an agent between them: words in, an interrupt,
 //! and the terminal read back.
 //!
+//! # It says who it is, and that is the point
+//!
+//! Every write this module makes carries `"origin": "user"`, because a
+//! process a person started from their own terminal is the one caller on this
+//! door that knows a person is behind it. Until it did, the event log could
+//! not tell a person's intervention from an orchestrator's message: both went
+//! through `session::api::SessionApi`, which hard-wired
+//! `events::MessageOrigin::Machine`, and produced rows equal field for field.
+//! That was harmless while nothing human reached the door and stopped being
+//! harmless the moment these three commands shipped.
+//!
+//! **It is attribution, not authentication.** A different program could
+//! connect to the same socket and claim to be a person; nothing here or on
+//! the far side tries to stop it, and nothing should be built that does. The
+//! socket is already restricted to this user, so a caller that lied would be
+//! lying to that user about that user — and the honest callers, which are the
+//! ones that exist, stop being indistinguishable. See
+//! `protocol::RequestOrigin`.
+//!
 //! **It never retries.** One connect, one line written, one line read. A send
 //! refused by the terminal's canonical line limit
 //! (`session::RuntimeError::LineTooLong`) is a refusal that *prevented* a
@@ -101,6 +120,17 @@ const DEFAULT_SOCKET_NAME: &str = "control.sock";
 /// the temp directory, and report an absent door.
 const MAX_SOCKET_PATH_BYTES: usize = 90;
 
+/// What every write this module makes says about who is making it.
+///
+/// `protocol::RequestOrigin::User`'s wire spelling, written as the literal it
+/// is because this module only ever sends one value of it — see *"It says who
+/// it is, and that is the point"* in this module's doc comment. It is
+/// deliberately not a parameter: a flag saying who you are would be a flag for
+/// lying about it,
+/// on a door where the origin is attribution and not authentication, and
+/// there is nobody to tell `glasshouse api send` that it is a command line.
+const ORIGIN: &str = "user";
+
 /// How long one call waits for the door to answer before giving up.
 ///
 /// Generous on purpose. The door's accept loop is serial, and a single
@@ -116,6 +146,10 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 ///
 /// `text` is data. It is JSON-encoded into one request field and never
 /// interpreted, expanded, or handed to a shell anywhere on this path.
+///
+/// `"origin": "user"` is stated here and nowhere upstream, for the reason
+/// this module's doc comment gives: nobody needs to *tell* this function it
+/// is a person's command line, because being one is the whole of what it is.
 pub fn send_message(runtime: &Runtime, session: &str, text: &str) -> anyhow::Result<()> {
     call(
         runtime,
@@ -123,6 +157,7 @@ pub fn send_message(runtime: &Runtime, session: &str, text: &str) -> anyhow::Res
             "op": "send_message",
             "session": session,
             "text": text,
+            "origin": ORIGIN,
         }),
     )?;
     println!("glasshouse: delivered to session `{session}`");
@@ -130,12 +165,17 @@ pub fn send_message(runtime: &Runtime, session: &str, text: &str) -> anyhow::Res
 }
 
 /// Interrupt a live session in this project — map line 747.
+///
+/// The person's, like [`send_message`]: a `Ctrl-C` somebody asked for is an
+/// intervention, and an orchestrator deciding to stop a worker is not the
+/// same event even though the byte on the wire is identical.
 pub fn interrupt(runtime: &Runtime, session: &str) -> anyhow::Result<()> {
     call(
         runtime,
         &serde_json::json!({
             "op": "interrupt",
             "session": session,
+            "origin": ORIGIN,
         }),
     )?;
     println!("glasshouse: interrupted session `{session}`");

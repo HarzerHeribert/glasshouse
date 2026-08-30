@@ -13,13 +13,23 @@
 //!   session that also happens to be stopped is still refused as foreign,
 //!   never as merely not running, because "you asked about someone else's
 //!   session" is the true answer and the only one worth giving.
-//! - **A message this API sends is never confused with a keystroke.** Every
-//!   write goes through [`super::runtime::SessionRuntime::send_text_from`] and
-//!   [`super::runtime::SessionRuntime::interrupt_from`] with
-//!   [`crate::events::MessageOrigin::Machine`], not the plain `send_text` /
-//!   `interrupt` a person's keyboard uses. The distinction is recorded in
-//!   Glasshouse's own event log, not inferred later from context that will
-//!   not exist by then.
+//! - **Who sent a message is recorded, never inferred.** Every write goes
+//!   through [`super::runtime::SessionRuntime::send_text_from`] and
+//!   [`super::runtime::SessionRuntime::interrupt_from`] with an origin its
+//!   **caller** supplies, not the plain `send_text` / `interrupt` that assume
+//!   a person's keyboard. The distinction is recorded in Glasshouse's own
+//!   event log, not inferred later from context that will not exist by then.
+//!
+//!   This seam used to hard-wire [`crate::events::MessageOrigin::Machine`],
+//!   on the reasoning that everything reaching it was Glasshouse or an
+//!   orchestrator. That stopped being true when `glasshouse api send` and
+//!   `glasshouse api interrupt` shipped: a person's keystrokes now arrive
+//!   here, over the control door, and hard-wiring made their intervention
+//!   equal field for field to an orchestrator's own message. A seam that
+//!   *decides* the origin can only be right while it has one kind of caller,
+//!   so this one asks instead. Callers that are Glasshouse still pass
+//!   `Machine` and are unchanged; the control door passes what its request
+//!   said, defaulting to `Machine` when it said nothing.
 
 use crate::events::MessageOrigin;
 
@@ -110,14 +120,25 @@ impl<'a> SessionApi<'a> {
         Ok(self.resolve(id)?.lifecycle)
     }
 
-    /// Send a line of text to a live session, as Glasshouse rather than as
-    /// the user.
+    /// Send a line of text to a live session, on behalf of `origin`.
     ///
     /// A carriage return is appended, the same way `shell::send_session_text`
     /// sends a line typed at the shell's own prompt: this call delivers one
     /// line, not raw bytes, and `\r` is what a session's terminal expects to
     /// see for the harness's line editor to submit it.
-    pub fn send_text(&mut self, id: &SessionId, text: &str) -> Result<(), ApiError> {
+    ///
+    /// `origin` is the caller's to state and this method's to record — see
+    /// the module doc comment for why it is no longer decided here. Pass
+    /// [`MessageOrigin::Machine`] for anything Glasshouse itself originates,
+    /// which is what every caller inside this process does; only the control
+    /// door has a caller it did not write, and only that door can know
+    /// whether a person is on the other end of it.
+    pub fn send_text(
+        &mut self,
+        id: &SessionId,
+        text: &str,
+        origin: MessageOrigin,
+    ) -> Result<(), ApiError> {
         self.resolve(id)?;
         if self.live.get(id).is_none() {
             return Err(ApiError::NotLive { id: id.clone() });
@@ -125,18 +146,21 @@ impl<'a> SessionApi<'a> {
         let mut line = String::with_capacity(text.len() + 1);
         line.push_str(text);
         line.push('\r');
-        self.live
-            .send_text_from(id, &line, MessageOrigin::Machine)?;
+        self.live.send_text_from(id, &line, origin)?;
         Ok(())
     }
 
-    /// Interrupt a live session, as Glasshouse rather than as the user.
-    pub fn interrupt(&mut self, id: &SessionId) -> Result<(), ApiError> {
+    /// Interrupt a live session, on behalf of `origin`.
+    ///
+    /// An interrupt is an intervention like any other line, and carries the
+    /// same attribution for the same reason: `origin` is the caller's to
+    /// state. See [`SessionApi::send_text`].
+    pub fn interrupt(&mut self, id: &SessionId, origin: MessageOrigin) -> Result<(), ApiError> {
         self.resolve(id)?;
         if self.live.get(id).is_none() {
             return Err(ApiError::NotLive { id: id.clone() });
         }
-        self.live.interrupt_from(id, MessageOrigin::Machine)?;
+        self.live.interrupt_from(id, origin)?;
         Ok(())
     }
 
@@ -485,7 +509,8 @@ mod tests {
 
         {
             let mut api = SessionApi::new(&store, &mut live);
-            api.send_text(&record.id, "hello").unwrap();
+            api.send_text(&record.id, "hello", MessageOrigin::Machine)
+                .unwrap();
         }
 
         drive(&mut live, "the harness to echo the line back", |live| {
@@ -518,7 +543,8 @@ mod tests {
 
         {
             let mut api = SessionApi::new(&store, &mut live);
-            api.send_text(&record.id, "machine-line").unwrap();
+            api.send_text(&record.id, "machine-line", MessageOrigin::Machine)
+                .unwrap();
         }
         // A dead-at-handshake child (never past ConPTY's `ESC[6n`, see
         // `drive`'s doc comment) would never echo this: this line is proof
@@ -554,6 +580,86 @@ mod tests {
             origins,
             vec![MessageOrigin::Machine, MessageOrigin::UserKeystroke],
             "a machine-sent line and a keystroke must be recorded with distinct origins, in order"
+        );
+    }
+
+    /// The seam records the origin it is told, and no longer decides one.
+    ///
+    /// The distinction from
+    /// [`a_machine_sent_line_is_recorded_separately_from_a_keystroke`] is the
+    /// whole point: that test writes one line through this API and one
+    /// through the keyboard, so it would pass just as well against the old
+    /// hard-wired `MessageOrigin::Machine`. **Both** lines here go through
+    /// [`SessionApi::send_text`], on the same session, against the same
+    /// running process — so the only thing that can make their recorded
+    /// origins differ is the argument, which is exactly the property the
+    /// control door needs and did not have.
+    ///
+    /// Ordered, not merely set-equal: the second row is the person's, and a
+    /// seam that stamped every write with its first caller's origin would
+    /// produce two identical rows here.
+    #[test]
+    fn the_seam_records_whichever_origin_its_caller_states() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let store = fixture.store();
+        let record = store.create(NewSession::embedded("claude-code")).unwrap();
+
+        let mut live = SessionRuntime::new();
+        start_live_session(
+            &fixture,
+            &mut live,
+            record.id.clone(),
+            &bin_dir,
+            install_looping_echo_harness,
+        );
+
+        // Deliberately the same length, so `bytes` cannot be what tells the
+        // two rows apart — the same care `tests/worker_access.rs` takes at
+        // the door.
+        const BY_GLASSHOUSE: &str = "sent-by-machine";
+        const BY_A_PERSON: &str = "sent-by-persons";
+        assert_eq!(BY_GLASSHOUSE.len(), BY_A_PERSON.len());
+
+        for (text, origin) in [
+            (BY_GLASSHOUSE, MessageOrigin::Machine),
+            (BY_A_PERSON, MessageOrigin::UserKeystroke),
+        ] {
+            {
+                let mut api = SessionApi::new(&store, &mut live);
+                api.send_text(&record.id, text, origin).unwrap();
+            }
+            // Echoed by a real process before the next line is sent: the
+            // rows below are about two deliveries that demonstrably
+            // happened, and the wait also fixes their order.
+            drive(&mut live, "the harness to echo the line back", |live| {
+                live.get(&record.id)
+                    .map(|session| session.scrollback().contains(&format!("got:{text}")))
+                    .unwrap_or(false)
+            });
+        }
+
+        let history = live.events().history_for(&record.id);
+        let delivered: Vec<(MessageOrigin, usize)> = history
+            .iter()
+            .filter_map(|recorded| match recorded.event() {
+                LifecycleEvent::TextDelivered { origin, bytes } => Some((*origin, *bytes)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            delivered,
+            vec![
+                (MessageOrigin::Machine, BY_GLASSHOUSE.len() + 1),
+                (MessageOrigin::UserKeystroke, BY_A_PERSON.len() + 1),
+            ],
+            "both lines went through `SessionApi::send_text` and differ only in \
+             the origin their caller stated, so the recorded origins must \
+             differ too — a seam that decides the origin itself cannot record \
+             a person's intervention through the control door: {history:?}"
         );
     }
 
@@ -593,7 +699,7 @@ mod tests {
 
         {
             let mut api = SessionApi::new(&store, &mut live);
-            api.interrupt(&record.id).unwrap();
+            api.interrupt(&record.id, MessageOrigin::Machine).unwrap();
         }
 
         // The sleeping child installs no handler, so a real interrupt has a
@@ -676,7 +782,7 @@ mod tests {
         let mut api = SessionApi::new(&store, &mut live);
 
         let error = api
-            .send_text(&SessionId::new("planted"), "hi")
+            .send_text(&SessionId::new("planted"), "hi", MessageOrigin::Machine)
             .expect_err("a session from another project must never be messaged");
 
         match &error {
@@ -713,13 +819,16 @@ mod tests {
         );
         assert!(
             matches!(
-                api.send_text(&id, "hi"),
+                api.send_text(&id, "hi", MessageOrigin::Machine),
                 Err(ApiError::ForeignProject { .. })
             ),
             "send_text must refuse a foreign session"
         );
         assert!(
-            matches!(api.interrupt(&id), Err(ApiError::ForeignProject { .. })),
+            matches!(
+                api.interrupt(&id, MessageOrigin::Machine),
+                Err(ApiError::ForeignProject { .. })
+            ),
             "interrupt must refuse a foreign session"
         );
         assert!(
@@ -755,7 +864,7 @@ mod tests {
         let mut api = SessionApi::new(&store, &mut live);
 
         let error = api
-            .send_text(&id, "hi")
+            .send_text(&id, "hi", MessageOrigin::Machine)
             .expect_err("a foreign, non-running session must still be refused");
         assert!(
             matches!(error, ApiError::ForeignProject { .. }),

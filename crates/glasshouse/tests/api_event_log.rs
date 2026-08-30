@@ -44,6 +44,7 @@ use std::time::{Duration, Instant};
 
 use glasshouse::cli::Cli;
 use glasshouse::events::{EventBus, EventLog, LifecycleEvent, MessageOrigin};
+use glasshouse::memory::{MemoryAuthority, MemoryKind, NewMemory, ProjectMemory};
 use glasshouse::session::SessionId;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -342,11 +343,20 @@ fn a_session_driven_through_the_door_has_a_history_an_observer_can_read() {
 /// changed without saying at whose hand, and `MessageOrigin` exists precisely
 /// because a machine-sent line and a typed one are otherwise identical bytes.
 ///
-/// `machine` is the honest answer today and this asserts it rather than
-/// wishing for `user_keystroke`: `Request::SendMessage` is documented as
-/// speaking as Glasshouse, and `SessionApi::send_text` is hard-wired to
-/// [`MessageOrigin::Machine`]. Lines 746 and 747 — a *user* reaching this door
-/// at all — are refused for that reason and are not what this closes.
+/// # This is the **default** branch, and that is what it is for
+///
+/// Both requests below are made the way an orchestrator makes them — the
+/// protocol spoken straight into the door, with **no `origin` field at all** —
+/// and both must still record `machine`. `Request::SendMessage` and
+/// `Request::Interrupt` grew an origin when `glasshouse api send` shipped and
+/// a person's keystrokes started arriving here; the field defaults to
+/// `protocol::RequestOrigin::Machine` precisely so that every caller written
+/// before it existed, this test included, keeps meaning what it meant.
+///
+/// A request that *does* state its origin is
+/// [`the_origin_a_request_states_is_the_origin_recorded`], and the two
+/// together are what make this door's log answer line 748's *"user
+/// intervention"* rather than merely record that something happened.
 #[test]
 fn an_intervention_is_recorded_with_the_origin_that_says_who_made_it() {
     const TEXT: &str = "intervention-one";
@@ -387,7 +397,8 @@ fn an_intervention_is_recorded_with_the_origin_that_says_who_made_it() {
         .unwrap_or_else(|| panic!("no `text_delivered` in the worker's history: {history:?}"));
     assert_eq!(
         delivered["origin"], "machine",
-        "the record must say who intervened: {delivered}"
+        "the record must say who intervened, and a request that named no \
+         origin is Glasshouse or an orchestrator through it: {delivered}"
     );
     assert_eq!(
         delivered["bytes"],
@@ -401,7 +412,242 @@ fn an_intervention_is_recorded_with_the_origin_that_says_who_made_it() {
         .unwrap_or_else(|| panic!("no `interrupt_delivered` in the worker's history: {history:?}"));
     assert_eq!(
         interrupt["origin"], "machine",
-        "an interrupt is an intervention too: {interrupt}"
+        "an interrupt is an intervention too, and defaults the same way: \
+         {interrupt}"
+    );
+}
+
+/// The other branch of line 748's *"user intervention"*: a request that says
+/// whose intervention it is.
+///
+/// [`an_intervention_is_recorded_with_the_origin_that_says_who_made_it`]
+/// covers the default — a caller that names no origin is a machine. This
+/// covers the field being read at all, on both write verbs, and it is
+/// deliberately driven **on the wire** rather than through the shipped
+/// client: `tests/worker_access.rs` proves `glasshouse api send` sets the
+/// field, and this proves the door acts on it. Two halves, tested where each
+/// one lives.
+///
+/// # Why the same session, in the same log, in one test
+///
+/// The two origins are asserted against rows written seconds apart through
+/// one door into one worker. A test that could only produce `user_keystroke`
+/// rows would pass a door that ignored the field and stamped everything as
+/// the person; the machine-originated pair asserted here alongside them is
+/// what rules that out — and the ordering (`seq`) is what proves four rows
+/// rather than two were written.
+///
+/// # An origin the protocol does not know is refused, not defaulted
+///
+/// The last section asserts that `"origin": "orchestrator"` — a plausible
+/// word this vocabulary does not contain — fails the request outright. That
+/// is the safer of the two available behaviours: a door that silently
+/// defaulted an unrecognised origin to `machine` would record a caller's
+/// intent as its opposite whenever a future client and an older server
+/// disagreed about the vocabulary, and would do it invisibly. Refusing says
+/// so while the caller is still there to hear it.
+#[test]
+fn the_origin_a_request_states_is_the_origin_recorded() {
+    const BY_A_PERSON: &str = "typed-by-a-person";
+    const BY_THE_AGENT: &str = "sent-by-the-agent";
+
+    let fixture = Fixture::new();
+    let root = fixture.project_root("alpha");
+    let server = Server::start(&fixture, &root);
+
+    let worker = server.spawn_worker();
+    wait_for("the worker's harness to start", || {
+        fixture.argv(&root, &worker).is_some()
+    });
+
+    // Same length, so `bytes` cannot be what distinguishes the rows.
+    assert_eq!(BY_A_PERSON.len(), BY_THE_AGENT.len());
+
+    for (text, origin) in [(BY_A_PERSON, "user"), (BY_THE_AGENT, "machine")] {
+        let sent = server.call(serde_json::json!({
+            "op": "send_message",
+            "session": worker,
+            "text": text,
+            "origin": origin,
+        }));
+        assert_eq!(sent["status"], "ok", "{sent}");
+        // The delivery has to have happened for its record to mean anything.
+        wait_for("the worker to read the delivered line", || {
+            fixture
+                .received(&root, &worker)
+                .is_some_and(|read| read.contains(text))
+        });
+    }
+
+    let delivered: Vec<String> = server
+        .events_for(&worker)
+        .iter()
+        .filter(|event| event["kind"] == "text_delivered")
+        .filter_map(|event| event["origin"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        delivered,
+        vec!["user_keystroke".to_owned(), "machine".to_owned()],
+        "the door must record the origin each request stated, in the order \
+         the requests were made — both lines went through the same verb into \
+         the same session and differ only in that field: {:?}",
+        server.events_for(&worker)
+    );
+
+    // A word the vocabulary does not contain is refused, and nothing is
+    // written for it. Asserted here rather than at the end, because the
+    // interrupt below ends this harness's read loop and the `process_exited`
+    // row that follows would land asynchronously between the two counts.
+    let before = server.events_for(&worker).len();
+    let refused = server.call(serde_json::json!({
+        "op": "send_message",
+        "session": worker,
+        "text": "never-delivered",
+        "origin": "orchestrator",
+    }));
+    assert_eq!(
+        refused["status"], "error",
+        "an origin this protocol does not know must be refused rather than \
+         quietly defaulted to its opposite: {refused}"
+    );
+    assert_eq!(
+        server.events_for(&worker).len(),
+        before,
+        "a refused request must write no row at all"
+    );
+
+    // The interrupt half, last, because a real 0x03 ends this harness's read
+    // loop.
+    let interrupted = server.call(serde_json::json!({
+        "op": "interrupt",
+        "session": worker,
+        "origin": "user",
+    }));
+    assert_eq!(interrupted["status"], "ok", "{interrupted}");
+
+    let interrupts: Vec<String> = server
+        .events_for(&worker)
+        .iter()
+        .filter(|event| event["kind"] == "interrupt_delivered")
+        .filter_map(|event| event["origin"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        interrupts,
+        vec!["user_keystroke".to_owned()],
+        "an interrupt carries the same attribution a line of text does: {:?}",
+        server.events_for(&worker)
+    );
+}
+
+/// Glasshouse's own words are never recorded as the person's, even when the
+/// person is the one who made the request that carried them.
+///
+/// `Request::SendMessage` selects project memory for the text it is about to
+/// deliver and sends it as its own separate line before the caller's — the
+/// door's `deliver_memory`. That line rides in on a request that may now say
+/// `"origin": "user"`, and it is **not** the user's: they did not write it,
+/// have not seen it, and it was chosen from the project's store by Glasshouse
+/// on their behalf. Stamping it with the requester's origin would record
+/// Glasshouse's own text as a person's intervention, which is the exact
+/// confusion the origin field exists to end.
+///
+/// # Why this test exists rather than a comment saying so
+///
+/// The mutation that stamps the briefing as the person **survived** every
+/// test in `context_injection.rs`, which is the file that otherwise owns this
+/// path: those tests assert what arrives on the harness's terminal, and the
+/// origin is not on the terminal at all — it is only in the log. So the
+/// ruling was unwatched, and a later change that threaded the request's
+/// origin through every write on this path would have looked correct and
+/// broken nothing.
+///
+/// Both rows come from **one** request, so this cannot pass by the two lines
+/// being sent differently: the door split them, and the door chose a
+/// different origin for each half.
+#[test]
+fn glasshouses_own_memory_block_is_never_recorded_as_the_persons() {
+    const TASK: &str = "kestrel export";
+
+    let fixture = Fixture::new();
+    let root = fixture.project_root("alpha");
+
+    // Seeded before the door opens, so the selection has something to find.
+    ProjectMemory::open(&fixture.runtime(&root))
+        .expect("open this project's memory")
+        .store()
+        .record(
+            NewMemory::new(
+                MemoryKind::Constraint,
+                "The kestrel export must never write partial files.",
+            )
+            .with_subject(Some(TASK))
+            .with_authority(Some(MemoryAuthority::Constraint)),
+        )
+        .expect("record a memory for the door to select");
+
+    let server = Server::start(&fixture, &root);
+    let worker = server.spawn_worker();
+    wait_for("the worker's harness to start", || {
+        fixture.argv(&root, &worker).is_some()
+    });
+
+    // A person's request, stated as one.
+    let sent = server.call(serde_json::json!({
+        "op": "send_message",
+        "session": worker,
+        "text": TASK,
+        "origin": "user",
+    }));
+    assert_eq!(sent["status"], "ok", "{sent}");
+    wait_for("the worker to read the person's own line", || {
+        fixture
+            .received(&root, &worker)
+            .is_some_and(|read| read.contains(TASK))
+    });
+
+    let delivered: Vec<(String, u64)> = server
+        .events_for(&worker)
+        .iter()
+        .filter(|event| event["kind"] == "text_delivered")
+        .map(|event| {
+            (
+                event["origin"].as_str().unwrap_or("<none>").to_owned(),
+                event["bytes"].as_u64().expect("a byte count"),
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        delivered.len(),
+        2,
+        "one request must have produced two deliveries — the memory block and \
+         the person's own line — or this test is not looking at the split it \
+         is about: {:?}",
+        server.events_for(&worker)
+    );
+    assert_eq!(
+        delivered[0].0, "machine",
+        "the memory block is Glasshouse speaking: it was selected from this \
+         project's store, not typed by the person whose request carried it, \
+         and recording it as theirs would put words in their mouth: {delivered:?}"
+    );
+    assert_eq!(
+        delivered[1].0, "user_keystroke",
+        "the person's own line, from the same request, is theirs: {delivered:?}"
+    );
+
+    // The two really are the two halves this test names, not one line
+    // recorded twice: the person's is their bytes plus the carriage return,
+    // and the block is very much larger.
+    assert_eq!(
+        delivered[1].1,
+        TASK.len() as u64 + 1,
+        "the second delivery must be the caller's own bytes: {delivered:?}"
+    );
+    assert!(
+        delivered[0].1 > delivered[1].1,
+        "the first delivery must be the labelled memory block, which is \
+         larger than the task that selected it: {delivered:?}"
     );
 }
 

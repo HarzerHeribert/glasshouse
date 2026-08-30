@@ -515,6 +515,20 @@ impl Server {
             .collect()
     }
 
+    /// Every `interrupt_delivered` row the log holds for one session, in
+    /// order.
+    ///
+    /// Separate from [`Server::deliveries_to`] rather than a parameter of it,
+    /// because the two answer different questions and the tests that use this
+    /// one are asserting that an interrupt carries the same attribution a
+    /// line of text does — an interrupt is an intervention too.
+    fn interrupts_to(&self, session: &str) -> Vec<serde_json::Value> {
+        self.events()
+            .into_iter()
+            .filter(|event| event["session"] == session && event["kind"] == "interrupt_delivered")
+            .collect()
+    }
+
     /// Every event the orchestrator's own read path can see, from the start
     /// of the log.
     fn events(&self) -> Vec<serde_json::Value> {
@@ -558,10 +572,12 @@ fn wait_for<F: FnMut() -> bool>(what: &str, mut done: F) {
 /// harness process writes the text down as having arrived on its terminal.
 ///
 /// What it does not prove — and what line 746 turns on — is that a *user* has
-/// any way to be that caller, or that the delivery is distinguishable from
-/// the orchestrator's own. `Request::SendMessage` is documented as speaking
-/// "as Glasshouse rather than as the user" and routes through
-/// `SessionApi::send_text`, which is hard-wired to `MessageOrigin::Machine`.
+/// any way to be that caller. This request names no origin at all, so it is
+/// recorded as the machine it is; whether a person's own delivery is
+/// distinguishable from an orchestrator's is
+/// [`a_persons_intervention_and_the_orchestrators_own_are_different_rows`],
+/// and it is a fact about `Request::SendMessage`'s `origin` field rather
+/// than about this transport.
 #[test]
 fn a_message_sent_through_the_door_reaches_a_real_worker_process() {
     let fixture = Fixture::new();
@@ -1871,29 +1887,38 @@ fn completions(text: &str) -> Vec<serde_json::Value> {
 /// Line 740: *"Preserve the user's ability to enter and modify a worker
 /// session before the orchestrator acts on its result."*
 ///
-/// **This is an ordering claim, and one of its two events does not exist in
-/// this build.** The three tests below are written to say so executably, in
-/// the shape this file already uses once
+/// **This is an ordering claim, and one of its two events still does not
+/// exist in this build.** The three tests below are written to say so
+/// executably, in the shape this file already uses twice
 /// ([`an_intervention_through_the_door_reaches_the_orchestrators_event_read_path`]
 /// asserted the wrong behaviour on purpose until somebody fixed it, and was
-/// then inverted rather than deleted). Each pins today's behaviour with a
-/// failure message naming what the fix would be, so the refusal is
-/// falsifiable by anyone who disagrees with it.
+/// then inverted rather than deleted; the first test of this section has now
+/// been inverted the same way). Each pins today's behaviour with a failure
+/// message naming what the fix would be, so the refusal is falsifiable by
+/// anyone who disagrees with it.
 ///
-/// # The user's half is recorded, but not as the *user's*
+/// # The user's half is now recorded *as the user's* — this half is fixed
 ///
-/// `SessionApi::send_text` and `SessionApi::interrupt` hard-wire
-/// [`glasshouse::events::MessageOrigin::Machine`] (`src/session/api.rs:129`
-/// and `:139`), and they are the only write path this door has. So a person
-/// running `glasshouse api send` and an orchestrator issuing
-/// `Request::SendMessage` produce log rows that are equal field for field —
-/// [`a_persons_intervention_and_the_orchestrators_own_are_the_same_row`].
-/// Nor is there an identity to record: `unix::authorize`
-/// (`src/api/unix.rs:309`) admits a peer whose uid equals this process's, so
-/// the person and the agent acting for them are the **same principal** by
-/// construction.
+/// It was not when this section was written. `SessionApi::send_text` and
+/// `SessionApi::interrupt` hard-wired
+/// [`glasshouse::events::MessageOrigin::Machine`], and they are the only
+/// write path this door has, so a person running `glasshouse api send` and
+/// an orchestrator issuing `Request::SendMessage` produced log rows equal
+/// field for field. Both now take the origin from their caller, the request
+/// carries it (`protocol::RequestOrigin`, defaulting to machine), and
+/// `api::client` states the person it is —
+/// [`a_persons_intervention_and_the_orchestrators_own_are_different_rows`]
+/// is the inverted test, and it is what a reader should look at first.
 ///
-/// The *"enter"* half is not recorded at all — reading a worker writes
+/// **It is attribution, not identity.** There is still no principal to
+/// record: `unix::authorize` (`src/api/unix.rs:309`) admits a peer whose uid
+/// equals this process's, so the person and the agent acting for them remain
+/// the **same principal** by construction, and a caller that stated an
+/// origin it was not would be believed. What changed is that the honest
+/// callers — the shipped client, and Glasshouse's own deliveries — stopped
+/// being indistinguishable from each other.
+///
+/// The *"enter"* half is still not recorded at all — reading a worker writes
 /// nothing, which [`reading_a_worker_changes_nothing_about_it`] already
 /// asserts as a feature.
 ///
@@ -1916,8 +1941,14 @@ fn completions(text: &str) -> Vec<serde_json::Value> {
 /// result — which subsumes "before" without needing to win a race. That is
 /// an absence of teardown rather than a preserved guarantee, and it is the
 /// honest residue of this line.
+///
+/// # So the line stays refused, for exactly one reason instead of two
+///
+/// Both events had to exist for an ordering to be provable. One of them now
+/// does. The other — the orchestrator *acting on* a result — still leaves no
+/// row, and no test here can be written for a moment nothing records.
 #[test]
-fn a_persons_intervention_and_the_orchestrators_own_are_the_same_row() {
+fn a_persons_intervention_and_the_orchestrators_own_are_different_rows() {
     let fixture = Fixture::new();
     let root = fixture.project_root("alpha");
     let server = Server::start(&fixture, &root);
@@ -1978,19 +2009,22 @@ fn a_persons_intervention_and_the_orchestrators_own_are_the_same_row() {
          comparing something other than the two writes it made: {rows:?}"
     );
 
-    for row in &rows {
-        assert_eq!(
-            row["origin"], "machine",
-            "IF THIS FAILS, INVERT THIS TEST RATHER THAN DELETING IT. It pins \
-             capability map line 740's missing half: today every write through \
-             this door is stamped `machine`, because `SessionApi::send_text` \
-             and `SessionApi::interrupt` hard-wire `MessageOrigin::Machine` \
-             (src/session/api.rs:129 and :139) and there is no second write \
-             path. An origin arriving here means a person's intervention has \
-             become distinguishable, which is one of the two things line 740 \
-             needs: {row}"
-        );
-    }
+    assert_eq!(
+        rows[0]["origin"], "user_keystroke",
+        "the first delivery was made by `glasshouse api send`, a process a \
+         person started from their own terminal, and the log must say so — \
+         this is the first of the two events line 740's ordering is over, \
+         and until the door carried an origin it was unwritable: {}",
+        rows[0]
+    );
+    assert_eq!(
+        rows[1]["origin"], "machine",
+        "the second delivery was the orchestrator speaking the protocol \
+         straight into the door with no origin field at all, so it must \
+         still be `machine` — the default is what keeps every caller written \
+         before the field existed meaning what it meant: {}",
+        rows[1]
+    );
 
     let stripped: Vec<serde_json::Value> = rows
         .iter()
@@ -2005,15 +2039,28 @@ fn a_persons_intervention_and_the_orchestrators_own_are_the_same_row() {
         })
         .collect();
 
-    assert_eq!(
+    assert_ne!(
         stripped[0], stripped[1],
-        "IF THIS FAILS, INVERT THIS TEST RATHER THAN DELETING IT. A person's \
-         intervention and an orchestrator's own message are, today, the same \
-         row: identical session, kind, origin and byte count, differing only \
-         in log position. So no reader of this log can say that *the user* \
-         did something, which is the first of the two events line 740's \
-         ordering is over. Rows: {rows:?}"
+        "a person's intervention and an orchestrator's own message must not \
+         be the same row. Session, kind and byte count are identical here by \
+         construction — the two lines are the same length on purpose — so \
+         the origin is the only field that can tell them apart, and a reader \
+         of this log needs it to say that *the user* did something. Rows: \
+         {rows:?}"
     );
+
+    // Both halves of the inequality above, so it cannot pass for a reason
+    // that is not the origin: everything except the origin still matches.
+    // Without this, a mutation that changed `bytes` would keep `assert_ne!`
+    // green while destroying the property it is asserting.
+    for field in ["session", "kind", "bytes"] {
+        assert_eq!(
+            stripped[0][field], stripped[1][field],
+            "`{field}` must be identical across the two rows, or the \
+             inequality above would be satisfied by something other than who \
+             sent them: {rows:?}"
+        );
+    }
 }
 
 /// Line 740's second missing event, and the one the packet asked to be named
@@ -2194,6 +2241,20 @@ fn a_person_can_still_enter_and_change_a_worker_after_its_result_reached_the_orc
         "the result must have been handed to the *orchestrator* before this \
          test can say anything about what happens after that: {handoff:?}"
     );
+    // No-regression, and the reason this test is the one that carries it:
+    // the handoff and the person's intervention below land in the *same log*
+    // from the same door in the same run, so "the person is distinguishable"
+    // and "Glasshouse's own delivery is unchanged" are one assertion pair
+    // rather than two tests that could drift apart. `pump_watches` is woken
+    // by a worker's completion, not by a request, so there is no origin
+    // field anywhere near it and there must never be one.
+    assert_eq!(
+        handoff[0]["origin"], "machine",
+        "Glasshouse handing a result to an orchestrator is machine-originated \
+         and stays so: nothing about a person reaching this door may change \
+         what `pump_watches` records: {}",
+        handoff[0]
+    );
     wait_for("the orchestrator to read the completion", || {
         fixture
             .received(&root, &orchestrator)
@@ -2261,6 +2322,13 @@ fn a_person_can_still_enter_and_change_a_worker_after_its_result_reached_the_orc
         "the only line ever sent to this worker is the person's, after the \
          handoff: {deliveries:?}"
     );
+    assert_eq!(
+        deliveries[0]["origin"], "user_keystroke",
+        "the line was typed by a person running the shipped client, and the \
+         handoff above is `machine` in this same log — the ordering line 740 \
+         asks about is only writable because these two rows differ: {}",
+        deliveries[0]
+    );
     let intervened = deliveries[0]["seq"]
         .as_i64()
         .expect("the intervention's log position");
@@ -2284,4 +2352,23 @@ fn a_person_can_still_enter_and_change_a_worker_after_its_result_reached_the_orc
     wait_for("the worker to handle a real SIGINT", || {
         fixture.reacted_to_interrupt(&root, &worker)
     });
+
+    // And the interrupt is attributed too. Asserted after the worker's own
+    // trap file proves a real `0x03` arrived, so this is about the record of
+    // an interrupt that demonstrably happened.
+    let interrupts = server.interrupts_to(&worker);
+    assert_eq!(
+        interrupts.len(),
+        1,
+        "the only interrupt this worker ever received is the person's: \
+         {interrupts:?}"
+    );
+    assert_eq!(
+        interrupts[0]["origin"], "user_keystroke",
+        "a person's `Ctrl-C` through `glasshouse api interrupt` is an \
+         intervention like their line was, and an orchestrator deciding to \
+         stop a worker is a different event even though the byte on the wire \
+         is identical: {}",
+        interrupts[0]
+    );
 }
