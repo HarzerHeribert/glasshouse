@@ -882,3 +882,37 @@ It is the only place **five already-ticked Phase 30 lines** produce anything a
 caller could see: **1161–1165**, all ☑. `GH-PHASE30-AUDIT` is dispatched against
 them. 1159 and 1160 are *not* affected — 1159's claim is the write at
 `main.rs:3429`, and `last_activity_at` is rendered by `session_detail`.
+
+
+## Cluster R — P5 has no producer either, and it is a product-scope decision
+
+**Checked by the orchestrator 2026-08-30, directly, because P5 sits high in the
+census and its ten open lines read as cheap.** They are not.
+
+`grep -rin "mcp" crates/glasshouse/src/` returns **only harness capability
+declarations** — `Declared<bool>` fields recording that *Claude Code, Codex,
+OpenCode, Cursor, Hermes and Antigravity* support MCP (`harness/mod.rs:636`,
+and one per adapter). **Nothing in this tree makes Glasshouse an MCP server**,
+and `Cargo.toml` names no MCP dependency at all.
+
+So every line of Phase 43 — 1694–1703, *"Expose session listing / worker
+spawning / session messaging / session status / worker interruption /
+project-memory search / checkpoint retrieval through MCP"* — plus 1746's
+*"automated tests proving MCP operations remain bound to the active project"*
+is a **build, not a wiring join**. This is Cluster O's shape exactly, one phase
+over: there is no producer to connect, and no amount of Phase −1 diligence
+turns ten "expose X" lines into a package when the surface they expose through
+does not exist.
+
+**And it is not merely large — it is the orchestrator's scope boundary.** An
+MCP server exposing *worker spawning*, *session messaging* and *worker
+interruption* adds an external control surface to a product whose invariants
+say cross-project access is disabled structurally and that PTY/process
+ownership is correct on every claimed platform. It needs a dependency choice, a
+transport decision, and a security model for who may call it. `worker-capabilities.md`
+puts *"broaden product scope"* under the orchestrator's **Do not**.
+
+**So: do not package Phase 43 from the map alone. It is a design decision for
+the user, and 1702/1703 are the two lines that make it one.** Recorded here so
+the next orchestrator ranking phases by open-line count does not spend a round
+discovering this again.
