@@ -514,3 +514,52 @@ to another worker this round. It is a follow-up package, not a defect in this
 one, and line 368 is closed on the write path it does control: every session
 Glasshouse starts, and every session it resumes whose profile still resolves,
 records all six facts.
+
+---
+
+# Line 372 — refused 2026-08-30, and the recorded blocker was wrong twice
+
+Package `GH-PROFILE-SELECTION`; report in `.agent-runtime/report-profile-selection.md`.
+**Tests-only diff**, pinning the findings so the refusal is falsifiable.
+
+The register said *"nothing selects among launch profiles, so still open"*.
+**That is false.** `main.rs:~620` builds one fresh `Destination` per configured
+profile — its own comment says so — and `SessionRouter::choose` ranks them,
+each carrying its `launch_profile`. The mechanism exists.
+
+**Both of the line's real qualifiers fail, and they fail for different reasons.**
+
+## Clause 1 — "among *enabled* launch profiles" — FAILS, and it is a defect
+
+`ProfileConfig::enabled` exists (`config/mod.rs:372`, default `true`) and is
+**never read**. The loop offers each configured name unconditionally, and the
+resolved `LaunchProfile` — the type the loop actually builds from — has **no
+`enabled` field at all**. Confirmed independently by the orchestrator:
+`profile/mod.rs` contains no `enabled` field and no read of one.
+
+**A profile a user sets to `enabled = false` still appears in the candidate
+set.** That is configuration the product accepts and silently ignores, which is
+a live defect independent of this box.
+
+## Clause 2 — "when *automatic routing* is enabled" — FAILS
+
+Every production caller of the `DestinationScope::Everything` branch was
+traced:
+
+- `route_recommendation` ← `route_report` ← `Command::Route` — `glasshouse
+  route`, a manual diagnostic. It ranks, prints, starts nothing; already pinned
+  by `route_explains_the_ranking_and_starts_nothing`.
+- `report_task_boundary_routing` ← `resume_session`, only at a task boundary.
+  It *does* call `choose` over the full set — but with
+  `RoutingOverride::to(id)` forcing the outcome to the session being resumed.
+  The ranking's answer only prints an stderr note when it disagrees; it never
+  changes what is attached to.
+
+**The one caller that acts — `launch_session` (`main.rs:1326`) — uses a
+different scope.** So the router ranks profiles only where nothing happens.
+
+## Why this is recorded as a refusal rather than half a closure
+
+Fixing clause 1 is a bounded defect fix. Clause 2 is a product change: making
+automatic routing act on a profile ranking is a behaviour nobody has decided
+on. Closing 372 needs both, and saying so is more useful than a partial tick.

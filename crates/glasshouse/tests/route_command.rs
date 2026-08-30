@@ -795,6 +795,210 @@ fn install_named_fake_harness(bin_dir: &Path, name: &str, argv_log: &Path) -> Pa
     path
 }
 
+// --- GH-PROFILE-SELECTION: box 372 — does the router select among ----------
+// --- *enabled* launch profiles when *automatic routing* is enabled? --------
+//
+// The refusal register's Cluster D marked 372 open on a stale premise (`grep
+// 'fn score\|Score'` is not empty — `SessionRouter` genuinely ranks multiple
+// profiles). The two clauses below are what actually decide it, proven
+// separately per practice §36's rule: a caller reaching the ranking code is
+// not the same as a caller that *acts* on it.
+
+/// A project with `claude-code`, a `route-probe` provider (`openrouter`
+/// template, so it serves `anthropic-messages` among others), one profile
+/// that out-ranks the implied `native` profile on protocol fit (`better`
+/// declares `anthropic-messages`, which claude-code speaks natively — `+1.000`
+/// against `native`'s undeclared `+0.000`), and one profile that is
+/// otherwise identical to `better` but for `enabled = false`
+/// (`disabled-one`).
+struct ProfileSelectionFixture {
+    _tmp: tempfile::TempDir,
+    base: PathBuf,
+    root: PathBuf,
+}
+
+impl ProfileSelectionFixture {
+    fn new() -> Self {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().to_path_buf();
+        let root = base.join("workspace");
+        std::fs::create_dir_all(root.join(".git")).expect("create project root");
+        let root = std::fs::canonicalize(&root).expect("canonicalize project root");
+
+        let bin_dir = base.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let argv_log = base.join("argv.log");
+        let harness = install_fake_harness(&bin_dir, &argv_log);
+        let escaped = harness.display().to_string().replace('\\', "\\\\");
+
+        let config_dir = base.join("config");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            format!(
+                "version = 1\n\n\
+                 [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\n\
+                 [providers.route-probe]\ntemplate = \"openrouter\"\n\
+                 credential_env = [\"{CREDENTIAL_VAR}\"]\n\n\
+                 [profiles.better]\nharness = \"claude-code\"\n\
+                 expected_protocol = \"anthropic-messages\"\n\n\
+                 [profiles.better.backend]\nkind = \"direct-provider\"\n\
+                 provider = \"route-probe\"\n\n\
+                 [profiles.disabled-one]\nharness = \"claude-code\"\nenabled = false\n\
+                 expected_protocol = \"anthropic-messages\"\n\n\
+                 [profiles.disabled-one.backend]\nkind = \"direct-provider\"\n\
+                 provider = \"route-probe\"\n"
+            ),
+        )
+        .expect("write user config");
+
+        Self {
+            _tmp: tmp,
+            base,
+            root,
+        }
+    }
+
+    fn glasshouse(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+            .arg("--scope")
+            .arg(&self.root)
+            .arg("--data-dir")
+            .arg(self.base.join("data"))
+            .arg("--config-dir")
+            .arg(self.base.join("config"))
+            .args(args)
+            .env(CREDENTIAL_VAR, "planted-opaque-route-value-37")
+            .env("PATH", self.base.join("empty-path"))
+            .output()
+            .expect("the glasshouse binary must be runnable")
+    }
+
+    fn stdout(&self, args: &[&str]) -> String {
+        String::from_utf8_lossy(&self.glasshouse(args).stdout).into_owned()
+    }
+}
+
+/// Acceptance test 1: two enabled profiles differing on protocol fit rank
+/// differently, and the higher-scoring one is what the diagnostic
+/// recommends — the half of 372 that is true. `SessionRouter::choose` really
+/// does rank multiple launch profiles against each other; see
+/// `automatic_launch_never_selects_the_higher_ranked_profile_it_did_not_ask_for`
+/// for the half that is not.
+#[test]
+fn two_enabled_profiles_differing_on_protocol_fit_are_ranked_and_the_higher_one_wins() {
+    let fixture = ProfileSelectionFixture::new();
+    let report = fixture.stdout(&["route"]);
+    assert!(
+        report.starts_with("destination  fresh:claude-code:better"),
+        "`better` declares the protocol claude-code speaks natively (protocol fit \
+         `native`, +1.000) and must outrank the implied `native` profile, which declares \
+         none (protocol fit `unknown`, +0.000):\n{report}"
+    );
+    assert!(
+        report.contains("fresh:claude-code:native"),
+        "the implied native profile must still be offered as a ranked alternative — this \
+         is what a mutation offering only the top-ranked name would remove:\n{report}"
+    );
+}
+
+/// Acceptance test 2, and the evidence for clause 1 of the refusal.
+/// `disabled-one` sets `enabled = false` — the exact field
+/// `config/mod.rs:372` defines and the settings screen round-trips
+/// (`shell/state.rs`, `shell/mod.rs`) — and it is still offered as a fresh
+/// destination, ranked right alongside `better` and `native`.
+///
+/// `ProfileConfig::enabled` is read in exactly one place in this crate
+/// outside its own getter/setter: the settings-screen round-trip tests
+/// (`config/mod.rs`, `shell/mod.rs`, `shell/state.rs`). Nothing that builds a
+/// [`glasshouse::profile::LaunchProfile`] or a routing destination reads it —
+/// `EffectiveConfig::launch_profile` (`config/mod.rs:2730`) calls
+/// `ProfileConfig::to_launch_profile` (`config/mod.rs:508`), which never
+/// reads `self.enabled`, and `LaunchProfile` (`profile/mod.rs:211`) has no
+/// `enabled` field to carry it even if it did.
+///
+/// **If clause 1 is ever closed, this test's assertions invert along with
+/// it** — it pins the gap as it stands, not the behaviour box 372 asks for.
+#[test]
+fn a_disabled_profile_is_still_offered_as_a_fresh_destination() {
+    let fixture = ProfileSelectionFixture::new();
+    let report = fixture.stdout(&["route"]);
+    assert!(
+        report.contains("fresh:claude-code:disabled-one"),
+        "box 372's first clause — 'among *enabled* launch profiles' — does not hold: \
+         `enabled = false` in config.toml does not remove a profile from the candidate \
+         set:\n{report}"
+    );
+
+    // The same gap on the path that acts, not only the one that reports:
+    // nothing refuses to launch a profile explicitly named while disabled,
+    // either.
+    let launched = fixture.glasshouse(&[
+        "launch",
+        "claude-code",
+        "--headless",
+        "--profile",
+        "disabled-one",
+    ]);
+    assert!(
+        launched.status.success(),
+        "a profile with `enabled = false` can still be launched by name, which is the same \
+         gap on the path that starts a session rather than the one that only reports:\n{}",
+        Fixture::both_streams(&launched)
+    );
+}
+
+/// Acceptance test 4, and the evidence for clause 2 of the refusal: **the
+/// launch path never reaches the candidate set the previous two tests rank.**
+///
+/// `better` outranks the implied `native` profile in `glasshouse route`. If
+/// box 372's second clause held — "the router selects among launch profiles
+/// when automatic routing is enabled" — a launch with no `--profile` flag
+/// would start under whichever profile the ranking actually prefers. It does
+/// not: `routing_destinations`'s `offered` set under
+/// `DestinationScope::Launchable` (`main.rs`, the match feeding the "one
+/// fresh destination per configured launch profile" loop) is a single
+/// already-chosen name, never `effective.profile_names()`. The two
+/// production callers that *do* build the multi-profile candidate set —
+/// `route_recommendation` (reached only by `glasshouse route`, which starts
+/// nothing, see `route_explains_the_ranking_and_starts_nothing` above) and
+/// `report_task_boundary_routing` (called from `resume_session`, which
+/// forces `RoutingOverride::to` the resumed session and uses the ranking
+/// only to print what it *would* have chosen on stderr) — neither acts on
+/// the ranking. `launch_session`, the one caller that does act, never builds
+/// this candidate set at all.
+#[test]
+fn automatic_launch_never_selects_the_higher_ranked_profile_it_did_not_ask_for() {
+    let fixture = ProfileSelectionFixture::new();
+
+    let report = fixture.stdout(&["route"]);
+    assert!(
+        report.starts_with("destination  fresh:claude-code:better"),
+        "the fixture's own baseline — `better` must outrank the implied `native` profile \
+         before this test's claim about the launch path means anything:\n{report}"
+    );
+
+    let launched = fixture.glasshouse(&["launch", "claude-code", "--headless"]);
+    assert!(
+        launched.status.success(),
+        "the launch must succeed:\n{}",
+        Fixture::both_streams(&launched)
+    );
+
+    let listing = fixture.stdout(&["sessions"]);
+    assert!(
+        !listing.contains("better"),
+        "if the router selected among launch profiles when automatic routing is enabled, a \
+         launch naming no profile would start under `better`, the one the ranking actually \
+         prefers:\n{listing}"
+    );
+    assert!(
+        listing.contains("native"),
+        "instead the launch starts under the implied native profile — the one already \
+         chosen by `launch_session`'s own default, before the router ever runs:\n{listing}"
+    );
+}
+
 /// Acceptance test 3, and box 1382's own executable proof: two runs
 /// differing **only** in `--task` text choose differently, because the
 /// registry the task's classification reaches actually separates the two
@@ -823,5 +1027,46 @@ fn a_task_naming_a_capability_flips_which_candidate_the_ranking_prefers() {
         "a task naming only browser interaction must close `direct-codex`'s protocol-fit \
          lead with `direct-cc`'s own `+0.4` capability contribution and change which \
          candidate wins:\n{with_browser_task}"
+    );
+}
+
+/// Acceptance test 3 (GH-PROFILE-SELECTION, box 372): a profile configured
+/// for another harness is not offered as a destination under the wrong one.
+/// `main.rs`'s own comment on the "one fresh destination per configured
+/// launch profile" loop names this ("a profile configured for another
+/// harness is not a destination for this launch"), and
+/// `EffectiveConfig::launch_profile` (`config/mod.rs:2730`) refuses a
+/// harness mismatch (`ProfileLookupError::HarnessMismatch`) rather than
+/// substituting. Already true before this packet — pinned here as a
+/// regression rather than left proven only by reading the source.
+///
+/// `glasshouse route` with no `--harness` ranks across every enabled harness
+/// in one combined report (`route_recommendation` loops `IntegrationId::ALL`),
+/// so `TwoHarnessFixture`'s single report already carries both harnesses'
+/// candidates — exactly what this test needs.
+#[test]
+fn a_profile_configured_for_another_harness_is_never_offered_under_the_wrong_one() {
+    let fixture = TwoHarnessFixture::new();
+    let report = fixture.stdout(&["route"]);
+
+    assert!(
+        !report.contains("fresh:claude-code:direct-codex"),
+        "`direct-codex` names harness `codex` and must never appear as a claude-code \
+         destination:\n{report}"
+    );
+    assert!(
+        !report.contains("fresh:codex:direct-cc"),
+        "`direct-cc` names harness `claude-code` and must never appear as a codex \
+         destination:\n{report}"
+    );
+    // And both still appear under their own harness, so the two assertions
+    // above are checking a real exclusion rather than a typo nothing renders.
+    assert!(
+        report.contains("fresh:claude-code:direct-cc"),
+        "direct-cc must still be offered under its own harness:\n{report}"
+    );
+    assert!(
+        report.contains("fresh:codex:direct-codex"),
+        "direct-codex must still be offered under its own harness:\n{report}"
     );
 }
