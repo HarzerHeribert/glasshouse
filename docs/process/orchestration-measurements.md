@@ -3973,3 +3973,15 @@ with the notice in its prompt), and a pathspec commit sweeps any uncommitted
 edit to the same file. Fill: three Phase 55 prove-its (tests-only, Green), one
 Fable translation package (T1) and one Fable entitlement package queued behind
 `subscription-rules`.
+
+## Batch 62 outcomes — 2026-08-31, the Fable orchestrator's first wave: one Red finding and fifteen criteria
+
+Dispatched 16:0x–16:3x with six workers live at the peak (two Fable, one Opus, three Sonnet). Three landed in this wave; **16 boxes, every reported mutation KILLED.** Load average reached 38 on 12 cores with six cold `target/` builds — the seventh worker waited for it to fall to 6.
+
+| package | lines | boxes | mutations | notable |
+|---|---|---|---|---|
+| hook-extraction-detach (Opus, Red) | 31 1174 | 1 | 2/2 | the packet's central hypothesis (a detached extraction) was **refuted with measurement**; the real defects were a macOS `O_NONBLOCK` accept-inheritance flake in the repro's fixture and a silently lost extraction (logging off by default) — fixed by a stderr notice following an existing precedent |
+| prove-it-v1-routing (Sonnet, Green) | 55 1930–1937 | 8 | 8/8 | two SURVIVED on the first pass and the *tests* were strengthened (warm and fresh in one candidate list; the unit pinned beside the number) |
+| prove-it-v1-sessions (Sonnet, Green) | 55 1917–1922, 1939 | 7 | 7/7 (+2 SURVIVED, retargeted) | `HarnessAdapter::id` has no production caller; `IntegrationId::slug` is the seam. **1921 was reported `open` because the packet paraphrased the criterion with a clause the map does not contain** ("with its owning orchestrator"); the orchestrator overruled its own packet |
+
+Two packet errors were the orchestrator's, and both are the same shape: per-line guidance in a prove-it packet is read by the worker AS the criterion. Quote the map line's words in the objective; put the suggested seam in a separate sentence marked as a suggestion. The Green tier's own rule held: neither prove-it needed a diff read — the ruling came from the report's artifacts and one grep each.
