@@ -23,8 +23,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Instant;
 
+use glasshouse::RuntimePaths;
 use glasshouse::config::{
-    EffectiveConfig, EntitlementBacking, EntitlementCredential, EntitlementKind,
+    ConfigError, EffectiveConfig, EntitlementBacking, EntitlementCredential, EntitlementKind,
     EntitlementLookupError, EntitlementVendor, ProjectConfig, UserConfig,
     write_project_config_with_consent,
 };
@@ -192,6 +193,47 @@ fn only_the_two_reference_shapes_deserialise_and_a_value_is_refused_by_name() {
     }
 }
 
+/// A mistyped rule key is refused, not read as "no rule". The six rule
+/// fields are plural and the singular is the typo a person actually makes;
+/// an ignored key would leave `EntitlementRules::UNRESTRICTED`, which
+/// *admits* the harness the line was written to keep out.
+#[test]
+fn a_mistyped_rule_key_is_refused_rather_than_read_as_no_rule() {
+    for typo in [
+        "deny_harness",
+        "allow_harness",
+        "deny_tier",
+        "allow_tier",
+        "deny_job_kind",
+        "allow_job_kinds_",
+    ] {
+        let toml = format!("version = 1\n\n[entitlements.a]\n{typo} = [\"claude-code\"]\n");
+        toml::from_str::<UserConfig>(&toml).expect_err(&toml);
+    }
+}
+
+/// A value pasted where the `env` NAME belongs — the mistake one nesting
+/// level deeper than a bare-string credential — is refused by shape, and
+/// the refusal does not repeat the pasted value.
+#[test]
+fn an_env_value_shaped_like_a_credential_is_refused_without_being_echoed() {
+    const PLANTED: &str = "sk-ant-api03-FAKEFAKE";
+    let err = toml::from_str::<UserConfig>(&format!(
+        "version = 1\n\n[entitlements.a]\ncredential = {{ env = \"{PLANTED}\" }}\n"
+    ))
+    .expect_err("a value pasted into `env` must not deserialise");
+    assert!(
+        err.message().contains("NAME"),
+        "expected the env-is-not-a-value refusal, got: {}",
+        err.message()
+    );
+    assert!(
+        !err.message().contains(PLANTED),
+        "the refusal repeated the pasted value: {}",
+        err.message()
+    );
+}
+
 /// The refusal *message* — the sentence this crate writes — never repeats
 /// what was written. The TOML library's full rendering does quote the
 /// offending config line under a caret (measured, not assumed: see this
@@ -209,6 +251,39 @@ fn the_refusal_message_this_crate_writes_never_contains_the_value() {
     assert!(
         !err.message().contains(PLANTED),
         "the refusal sentence repeated the value"
+    );
+}
+
+/// A TOML parse error's rendering — what `main.rs` prints to stderr and
+/// writes into `glasshouse.log` — passes through
+/// [`glasshouse::secret::redact`] before it reaches this crate's `{err:#}`
+/// chain. Without that, `toml`'s own `Display` quotes the whole offending
+/// source line under a caret, so a pasted credential on the line that failed
+/// to parse would be copied there verbatim.
+#[test]
+fn a_config_parse_failure_renders_with_the_credential_redacted() {
+    const PLANTED: &str = "sk-ant-api03-FAKEFAKE-ON-THE-BROKEN-LINE";
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
+    std::fs::create_dir_all(paths.config_dir()).expect("create config dir");
+    std::fs::write(
+        paths.user_config_file(),
+        format!(
+            "version = 1\n\n[entitlements.a]\ncredential = \"{PLANTED}\" this is not valid toml\n"
+        ),
+    )
+    .expect("write malformed config");
+
+    let err = UserConfig::load(&paths).expect_err("malformed TOML must not parse");
+    assert!(matches!(err, ConfigError::Parse { .. }), "{err}");
+    let rendered = err.to_string();
+    assert!(
+        !rendered.contains(PLANTED),
+        "the parse-error rendering repeated the planted credential: {rendered}"
+    );
+    assert!(
+        rendered.contains(glasshouse::secret::REDACTED),
+        "expected the redaction marker in: {rendered}"
     );
 }
 

@@ -1247,6 +1247,12 @@ impl SessionRuntime {
     /// Each exit is reported exactly once; the session stays in the runtime
     /// afterwards so its final output remains readable.
     ///
+    /// **Reported only for a session that stayed exited.** A death that this
+    /// method answers by putting the harness back is published to the history
+    /// as [`LifecycleEvent::ProcessExited`] and then dropped from the returned
+    /// vector, because every caller of it treats an entry as the end of the
+    /// session — see the comment on the `retain` below.
+    ///
     /// # Windows: this is also where output is declared to have ended
     ///
     /// [`crate::pty`] wrote down, before the reader thread existed, that a
@@ -1352,6 +1358,39 @@ impl SessionRuntime {
         for (id, status) in &ended {
             self.consider_restart(id, status);
         }
+
+        // A session that was put back is not an ending anyone may act on.
+        //
+        // `ProcessExited` has already been published, so the history still
+        // records the death — what must not travel out of here is the claim
+        // that the session is *over*. Every consumer of this vector treats an
+        // entry as terminal: `shell::run` writes
+        // `ProcessExit::session_state()` into the durable record and runs
+        // `session::native_id::capture`, and `main.rs`'s headless loop returns
+        // that status as the run's own result. A record left reading `Failed`
+        // or `Stopped` for a live harness is not merely wrong on a list:
+        // `supervision::guard_start` returns `Ok(())` for any record whose
+        // lifecycle is not live, so nothing downstream would refuse a start
+        // over the top of the conversation this harness is still holding —
+        // the duplicate `open_for_resume` exists to prevent, reached from the
+        // outside. `native_id::capture` also runs its end-of-session discovery
+        // window against a mid-life session, which is the widest that window
+        // can be rather than the tightest it assumes. And the focus fix-up
+        // below would move the keyboard off a session that is running again.
+        //
+        // The predicate is the session's *observed* state after the restart
+        // attempt, not the fact that one was attempted, so every way
+        // `consider_restart` can decline or fail — a clean exit, a deliberate
+        // one, a harness that was never healthy, the bound reached, a spawn or
+        // reader that failed — leaves `exit` set and the exit reported. A
+        // session no longer in the runtime at all is kept for the same reason:
+        // there is nothing alive to withhold the report for.
+        //
+        // A harness that is put back and dies again immediately is not lost,
+        // only deferred: its new process is `exit: None` here, and the next
+        // poll asks it, publishes a fresh `ProcessExited`, and reports the
+        // exit as soon as one of them is the death it stays dead of.
+        ended.retain(|(id, _)| !self.get(id).is_some_and(LiveSession::is_running));
 
         // On Windows, this is also where a session's output is declared
         // finished — see the `# Windows` section of this method's doc

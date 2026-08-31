@@ -159,6 +159,16 @@ fn memory_json(kind: &str, authority: &str, body: &str) -> String {
     )
 }
 
+/// Like [`memory_json`], but with a `subject` — the field the reply schema
+/// asks the model for and that `memory_json` never emits.
+fn memory_json_with_subject(kind: &str, authority: &str, subject: &str, body: &str) -> String {
+    format!(
+        r#"{{"kind":"{kind}","authority":"{authority}","disposition":"accepted",
+             "support":"established","confidence":"certain",
+             "subject":"{subject}","body":"{body}"}}"#
+    )
+}
+
 fn reply(memories: &[String]) -> String {
     format!("{{\"memories\": [{}]}}", memories.join(","))
 }
@@ -661,6 +671,60 @@ fn a_memory_the_project_already_holds_is_not_stored_again() {
     assert_eq!(second.duplicates, 1);
 
     assert_eq!(stored(&fixture).len(), 1);
+}
+
+/// The duplicate check reads `existing_bodies`' `"{subject}: {body}"` key, so it
+/// must be built the same way here. Without a subject this passed while the
+/// production path was dead for every memory that had one.
+///
+/// Mutation: revert `store_one`'s key to `normalize(&body)`.
+#[test]
+fn a_memory_with_a_subject_that_the_project_already_holds_is_not_stored_again() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let model = Canned::new(reply(&[memory_json_with_subject(
+        "finding",
+        "constraint",
+        "ConPTY reflows",
+        "ConPTY renders into a screen buffer and reflows long lines",
+    )]));
+
+    let first = extract(&fixture, &model, &chunk(&["we measured ConPTY"]));
+    assert_eq!(first.stored(), 1);
+
+    let second = extract(&fixture, &model, &chunk(&["we measured ConPTY again"]));
+    assert_eq!(
+        second.duplicates, 1,
+        "a memory with a subject was not recognised"
+    );
+    assert_eq!(second.stored(), 0, "the same memory was stored twice");
+    assert_eq!(stored(&fixture).len(), 1);
+}
+
+/// The over-match direction of the same bug: two memories in one reply with
+/// the same body but *different* subjects must not collapse into one, since
+/// they are keyed on subject and body together.
+#[test]
+fn two_memories_with_the_same_body_but_different_subjects_are_both_stored() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let body = "the store retries on a locked database";
+    let model = Canned::new(reply(&[
+        memory_json_with_subject("finding", "constraint", "SQLite retries", body),
+        memory_json_with_subject("finding", "constraint", "Postgres retries", body),
+    ]));
+
+    let outcome = extract(&fixture, &model, &chunk(&["monday"]));
+
+    assert_eq!(
+        outcome.stored(),
+        2,
+        "different-subject memories were collapsed"
+    );
+    assert_eq!(outcome.duplicates, 0);
+    assert_eq!(stored(&fixture).len(), 2);
 }
 
 /// Case, whitespace and a trailing full stop are presentation. *"Nothing

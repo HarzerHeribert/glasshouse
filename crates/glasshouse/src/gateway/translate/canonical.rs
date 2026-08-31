@@ -425,6 +425,60 @@ pub fn accumulate(events: &[StreamEvent]) -> Result<Response, Unsupported> {
     })
 }
 
+/// The ordering rules [`accumulate`] enforces over a whole sequence, enforced
+/// one event at a time on a stream that is never accumulated.
+///
+/// A stream codec's encoder may only be handed a sequence in which a block
+/// starts before its deltas and a delta names the block that is open. Nothing
+/// downstream re-checks it: an encoder writes bytes and has no error channel,
+/// so an out-of-order delta silently rides on whichever block happens to be
+/// open — under the **wrong tool-call id**. This is where that is refused.
+#[derive(Debug, Default)]
+pub struct Order {
+    started: usize,
+    open: Option<usize>,
+}
+
+impl Order {
+    /// `Ok(())` when `event` may follow everything checked so far.
+    pub fn check(&mut self, event: &StreamEvent) -> Result<(), Unsupported> {
+        match event {
+            StreamEvent::BlockStart { index, .. } => {
+                if *index != self.started {
+                    return Err(Unsupported::new(
+                        format!("content_block_start[{index}]"),
+                        format!("blocks must start in order; {} had started", self.started),
+                    ));
+                }
+                self.started += 1;
+                self.open = Some(*index);
+            }
+            StreamEvent::BlockDelta { index, .. } => {
+                if self.open != Some(*index) {
+                    return Err(Unsupported::new(
+                        format!("content_block_delta[{index}]"),
+                        "a delta arrived for a block that is not the open one, and a delta \
+                         carried onto another block would carry another tool call's id",
+                    ));
+                }
+            }
+            StreamEvent::BlockStop { index } => {
+                if self.open != Some(*index) {
+                    return Err(Unsupported::new(
+                        format!("content_block_stop[{index}]"),
+                        "a stop arrived for a block that is not the open one",
+                    ));
+                }
+                self.open = None;
+            }
+            StreamEvent::MessageStart { .. }
+            | StreamEvent::MessageDelta { .. }
+            | StreamEvent::MessageStop => {}
+        }
+        Ok(())
+    }
+}
+
 /// A tool input from its streamed JSON fragments: an empty text is an empty
 /// object, which is what both wires mean by a tool call with no arguments.
 pub fn parse_tool_input(json: &str) -> Result<Value, String> {
@@ -579,5 +633,144 @@ pub(super) mod tests {
             accumulate(&no_stop).expect_err("no stop reason").field,
             "message_delta"
         );
+    }
+
+    fn tool_start(id: &str) -> BlockStart {
+        BlockStart::ToolUse {
+            id: id.to_owned(),
+            name: "Bash".to_owned(),
+        }
+    }
+
+    #[test]
+    fn order_accepts_a_well_ordered_stream() {
+        let mut order = Order::default();
+        assert_eq!(
+            order.check(&StreamEvent::MessageStart {
+                id: "m".to_owned(),
+                model: "x".to_owned(),
+                usage: Usage::default(),
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            order.check(&StreamEvent::BlockStart {
+                index: 0,
+                block: tool_start("call_A"),
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            order.check(&StreamEvent::BlockDelta {
+                index: 0,
+                delta: Delta::InputJson("{}".to_owned()),
+            }),
+            Ok(())
+        );
+        assert_eq!(order.check(&StreamEvent::BlockStop { index: 0 }), Ok(()));
+        assert_eq!(
+            order.check(&StreamEvent::BlockStart {
+                index: 1,
+                block: tool_start("call_B"),
+            }),
+            Ok(())
+        );
+        assert_eq!(order.check(&StreamEvent::BlockStop { index: 1 }), Ok(()));
+        assert_eq!(
+            order.check(&StreamEvent::MessageDelta {
+                stop_reason: StopReason::ToolUse,
+                stop_sequence: None,
+                usage: Usage::default(),
+            }),
+            Ok(())
+        );
+        assert_eq!(order.check(&StreamEvent::MessageStop), Ok(()));
+    }
+
+    #[test]
+    fn order_refuses_a_block_that_starts_out_of_sequence() {
+        let mut order = Order::default();
+        // Block 1 starts before block 0 has ever started.
+        let refusal = order
+            .check(&StreamEvent::BlockStart {
+                index: 1,
+                block: tool_start("call_A"),
+            })
+            .expect_err("index 1 cannot start before index 0");
+        assert_eq!(refusal.field, "content_block_start[1]");
+        assert!(refusal.reason.contains("blocks must start in order"));
+    }
+
+    #[test]
+    fn order_refuses_a_delta_for_a_block_that_is_not_open() {
+        let mut order = Order::default();
+        // The exact hazard shape: call_A starts, call_B starts before call_A
+        // stops, then a delta arrives addressed to call_A (index 0) while
+        // call_B (index 1) is the open block.
+        order
+            .check(&StreamEvent::BlockStart {
+                index: 0,
+                block: tool_start("call_A"),
+            })
+            .expect("call_A starts");
+        order
+            .check(&StreamEvent::BlockStart {
+                index: 1,
+                block: tool_start("call_B"),
+            })
+            .expect("call_B starts before call_A stopped");
+        let refusal = order
+            .check(&StreamEvent::BlockDelta {
+                index: 0,
+                delta: Delta::InputJson("{\"command\"".to_owned()),
+            })
+            .expect_err("call_A's delta must not ride on call_B's open block");
+        assert_eq!(refusal.field, "content_block_delta[0]");
+        assert!(refusal.reason.contains("another tool call's id"));
+    }
+
+    #[test]
+    fn order_refuses_a_stop_for_a_block_that_is_not_open() {
+        let mut order = Order::default();
+        order
+            .check(&StreamEvent::BlockStart {
+                index: 0,
+                block: tool_start("call_A"),
+            })
+            .expect("call_A starts");
+        order
+            .check(&StreamEvent::BlockStart {
+                index: 1,
+                block: tool_start("call_B"),
+            })
+            .expect("call_B starts before call_A stopped");
+        let refusal = order
+            .check(&StreamEvent::BlockStop { index: 0 })
+            .expect_err("index 0 is not the open block");
+        assert_eq!(refusal.field, "content_block_stop[0]");
+        assert!(refusal.reason.contains("not the open one"));
+    }
+
+    #[test]
+    fn order_lets_message_events_pass_through_regardless_of_block_state() {
+        let mut order = Order::default();
+        assert_eq!(
+            order.check(&StreamEvent::MessageStart {
+                id: "m".to_owned(),
+                model: "x".to_owned(),
+                usage: Usage::default(),
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            order.check(&StreamEvent::MessageDelta {
+                stop_reason: StopReason::EndTurn,
+                stop_sequence: None,
+                usage: Usage::default(),
+            }),
+            Ok(()),
+            "message events carry no block index and are never refused by Order"
+        );
+        assert_eq!(order.check(&StreamEvent::MessageStop), Ok(()));
     }
 }

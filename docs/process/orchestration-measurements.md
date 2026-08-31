@@ -4087,4 +4087,38 @@ reach (two processes on one database, SIGKILL mid-migration, a truncated file,
 a schema version from the future), which is where every real Glasshouse defect
 has been found.
 
-Outcomes, boxes and cost per box: to be filled in when the wave lands.
+### Outcomes
+
+| package | result | mutations | notable |
+|---|---|---|---|
+| memory-dedup-subject | fixed | 1/1 KILLED | one `key` binding fixed both the dead check and the over-match |
+| session-restart-identity | fixed | 3/3 KILLED | **corrected the packet**: the lifecycle written is `Failed`, not `Stopped`, because `consider_restart` returns early on `status.success()` — severity unchanged, since `guard_start` short-circuits on `is_live()`, not on the variant. One mutation tested *placement*, not presence |
+| config-hardening | fixed | 1/1 KILLED | also closed `ProviderConfig::credential_env`'s same hole (declared as scope overflow; same file, met the packet's stated condition) |
+| translate-stream-order | fixed | 1/1 KILLED | **corrected the packet's test location**: the named file's only fixture is single-open by construction and cannot produce the hazard; built a full-pipeline test over a real loopback `TcpStream` instead. Its mutation output shows call_A's fragment arriving under call_B's `item_id` |
+| cmux-send-escape | fixed, **after a refused first attempt** | 1/1 KILLED | see below — the escaping approach was wrong and measurement is what showed it |
+| memory-injection-bounds | 4 findings fixed | 2/2 KILLED | four separate unpatched-tree repros quoted |
+| dedup-provider | 4 findings fixed | 1 SURVIVED → then KILLED | **the valuable mutation**: the crash-safe temp-then-rename pattern had no test that could tell it from a direct write. Reported as a finding, then a directory-permission test written that does kill it. Also caught a packet error — the "fifth atomic-write site" this orchestrator cited is inside a test, not production |
+| break-store-db | 3 findings, all reproduced | n/a | a **single flipped bit permanently wedges a project**: `read_record`'s `get_unwrap` panics, `PRAGMA integrity_check` still says `ok`, and every later `sessions`/`status` exits 101 until the file is hand-edited |
+| break-cli-surface | 2 findings + 12 clean negatives | n/a | `shim --name` writes an executable outside `--dir` (`check_name` guards `harness` and `profile` but not `name`, and `Path::join` discards the base for an absolute argument) |
+
+**The ruling of the batch: escaping cannot carry a backslash through cmux.**
+`cmux-send-escape` implemented the swarm's proposed fix (double the
+backslashes) and honestly flagged that it had not verified cmux unescapes them.
+Measured against a live pane: a literal `\r` **does** submit (the finding is
+real); `A\\B` renders as `A\\B`, so doubling is **not** collapsed; and
+therefore `\\r` **still submits**, leaving a stray backslash behind. cmux has
+no escape-of-escape, so the only correct move is refusal — now
+`CmuxError::PayloadHasBackslash`, whose message never echoes the payload.
+This is §88's *"verify where the report names its own thin spot"* paying for
+itself: the worker was right to doubt, and unit tests could never have shown it.
+
+**Gate reliability under self-inflicted load.** Two workers' `blast-radius.sh`
+runs came back non-zero, and both attributed correctly per §34 — failures only
+in files neither had touched, each passing alone under `--test-threads=1`, one
+across four repeated runs at load average 7.7–9.7. Measured here at the same
+moment: **12.80**. Eight concurrent workers plus an integration blast radius
+saturates this machine, and a saturated machine makes gates lie. The
+orchestrator therefore **held two validated packets rather than dispatch into
+unreliable gates** — the first time this batch that the constraint was machine
+capacity rather than review capacity, and worth recording as the real ceiling
+alongside §74's review-collision one.

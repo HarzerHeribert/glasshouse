@@ -754,7 +754,12 @@ impl<'a> Extractor<'a> {
         outcome: &mut ExtractionOutcome,
     ) {
         let body = memory.body.clone();
-        let key = normalize(&body);
+        // The key must be built the same way `existing_bodies` builds the ones
+        // already in `seen` — subject and body together — or the check is dead
+        // for every memory that recorded a subject, which is most of them: the
+        // reply schema asks the model for one. `duplicate_key` is the single
+        // definition of that key and both sides now go through it.
+        let key = duplicate_key(memory.subject.as_deref(), &body);
 
         // Phase 21: avoid duplicating an existing active memory when nothing
         // materially changed. Normalized equality is the floor — it is the

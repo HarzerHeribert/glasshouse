@@ -18,7 +18,7 @@
 use std::time::{Duration, Instant};
 
 use glasshouse::Project;
-use glasshouse::events::{EventBus, LifecycleEvent, MessageOrigin, task_outcome};
+use glasshouse::events::{EventBus, LifecycleEvent, MessageOrigin, ProcessExit, task_outcome};
 use glasshouse::launch::HarnessLaunch;
 use glasshouse::platform::exec;
 use glasshouse::session::{
@@ -484,5 +484,217 @@ fn closing_a_session_is_not_reported_as_a_crash() {
             .iter()
             .any(|recorded| matches!(recorded.event(), LifecycleEvent::ProcessExited { .. })),
         "and no exit event: a deliberate close is not a crash"
+    );
+}
+
+// -------------------------------------------------------------------------
+// A restart is not an ending: what `poll_exits` may report about a session
+// whose harness it put back.
+// -------------------------------------------------------------------------
+
+/// A harness that comes up, stays up long enough to be believed, and then
+/// dies badly.
+///
+/// The delay is what makes this shape different from `install_crashing_harness`
+/// above: `consider_restart` deliberately leaves a harness that was never
+/// healthy alone, so a restart can only be provoked by outliving
+/// `HEALTHY_AFTER` first. Unix signals itself for the same reason the crashing
+/// harness does — it is the shape of a real crash — and Windows, which has no
+/// signals, exits non-zero.
+#[cfg(unix)]
+fn install_healthy_then_crashing_harness(
+    bin_dir: &std::path::Path,
+    name: &str,
+) -> std::path::PathBuf {
+    unix_script(
+        bin_dir,
+        name,
+        "#!/bin/sh\necho STARTED\nsleep 3\nkill -9 $$\n",
+    )
+}
+
+#[cfg(windows)]
+fn install_healthy_then_crashing_harness(
+    bin_dir: &std::path::Path,
+    name: &str,
+) -> std::path::PathBuf {
+    // `ping` rather than `timeout`, which refuses to run when its input is
+    // not a console it recognises; four pings is a little over three seconds.
+    windows_script(
+        bin_dir,
+        name,
+        "@echo off\r\necho STARTED\r\nping -n 4 127.0.0.1 > nul\r\nexit /b 3\r\n",
+    )
+}
+
+/// A session that was restarted is not an exit any consumer may act on.
+///
+/// `poll_exits` notices the death, publishes `ProcessExited`, and then
+/// `consider_restart` puts the harness back — and the entry must not survive
+/// that. Every consumer of the returned vector treats an entry as terminal:
+/// `shell::run` writes `ProcessExit::session_state()` into the durable record
+/// and runs `session::native_id::capture`, and `supervision::guard_start`
+/// returns `Ok` for any record whose lifecycle is not live — so a reported
+/// restart leaves a record that offers a conversation whose harness is still
+/// holding it.
+///
+/// The assertion is made *inside* the poll loop, against the runtime as it
+/// stands at the moment of the report, because that is the moment the
+/// consumer acts in.
+#[test]
+fn a_restarted_session_is_not_reported_as_an_exit() {
+    let fixture = Fixture::new();
+    let harness = install_healthy_then_crashing_harness(&fixture.bin_dir, "healthy-crasher");
+    let bystander_harness = install_echo_harness(&fixture.bin_dir, "bystander");
+    let mut runtime = SessionRuntime::new();
+    let id = SessionId::new("restarted-session");
+    let bystander = SessionId::new("bystander-session");
+
+    // Started first, so it is the session the focus fix-up below would fall
+    // to — `poll_exits` reassigns focus to the *first* running non-headless
+    // session, not to the one that ended.
+    runtime
+        .start(
+            bystander.clone(),
+            SessionPresentation::Embedded,
+            &fixture.launch(&bystander_harness),
+        )
+        .expect("start a bystander session");
+    runtime
+        .start(
+            id.clone(),
+            SessionPresentation::Embedded,
+            &fixture.launch(&harness),
+        )
+        .expect("start the harness that dies after coming up");
+    runtime
+        .focus(&id)
+        .expect("the crashing session holds the keyboard");
+
+    // Only a harness that has once been healthy is restarted at all, so this
+    // wait is what makes the rest of the test about a restart rather than
+    // about a start that did not work.
+    drive(
+        &mut runtime,
+        "the harness to be verified healthy",
+        |runtime| runtime.get(&id).is_some_and(LiveSession::verified_healthy),
+    );
+
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        runtime.answer_terminal_queries();
+        for (ended, status) in runtime.poll_exits() {
+            if ended != id {
+                continue;
+            }
+            // Exactly what `shell::run` computes from an entry before it
+            // writes it to the record.
+            let lifecycle = ProcessExit::from_status(&status).session_state();
+            assert!(
+                !runtime.get(&id).is_some_and(LiveSession::is_running),
+                "`poll_exits` reported session `{id}` as ended ({lifecycle:?}) while its \
+                 harness is running again; a consumer writes that lifecycle to the \
+                 durable record, and nothing refuses a resume of a record that is not live"
+            );
+        }
+        if runtime
+            .get(&id)
+            .is_some_and(|session| session.restarts() >= 1)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the harness never crashed and was never put back; sessions: {runtime:?}"
+        );
+        std::thread::sleep(POLL);
+    }
+
+    let session = runtime.get(&id).expect("a restarted session is still held");
+    assert!(
+        session.is_running(),
+        "the restarted harness must be alive: {:?}",
+        session.exit()
+    );
+    assert!(
+        runtime.poll_exits().iter().all(|(ended, _)| ended != &id),
+        "and it must stay absent from later polls while it keeps running"
+    );
+    assert_eq!(
+        runtime.focused(),
+        Some(&id),
+        "a crash-and-restart must not move the keyboard to a different harness"
+    );
+
+    // The death itself is not hidden — only the claim that the session is
+    // over. The history is where a crash-and-restart is legible.
+    assert!(
+        runtime
+            .events()
+            .history_for(&id)
+            .iter()
+            .any(|recorded| matches!(recorded.event(), LifecycleEvent::ProcessExited { .. })),
+        "the exit event must still have been published for the death"
+    );
+
+    runtime.close(&id).expect("close the restarted session");
+}
+
+/// The other half: a session that stays exited is reported exactly as before.
+///
+/// A harness that dies before it was ever healthy is not restarted — Phase
+/// 10A's third exclusion — so its exit is terminal, and dropping it from
+/// `poll_exits`' return would lose the only report the record is written
+/// from.
+#[test]
+fn a_session_that_stays_exited_is_still_reported() {
+    let fixture = Fixture::new();
+    let harness = install_crashing_harness(&fixture.bin_dir, "stays-dead");
+    let mut runtime = SessionRuntime::new();
+    let id = SessionId::new("not-restarted");
+
+    runtime
+        .start(
+            id.clone(),
+            SessionPresentation::Embedded,
+            &fixture.launch(&harness),
+        )
+        .expect("start the crashing harness");
+
+    let deadline = Instant::now() + TIMEOUT;
+    let status = loop {
+        runtime.answer_terminal_queries();
+        if let Some((_, status)) = runtime
+            .poll_exits()
+            .into_iter()
+            .find(|(ended, _)| ended == &id)
+        {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "`poll_exits` never reported the exit of a session nothing put back; \
+             sessions: {runtime:?}"
+        );
+        std::thread::sleep(POLL);
+    };
+
+    let exit = ProcessExit::from_status(&status);
+    assert!(exit.is_crash(), "{exit:?} is not a crash");
+    assert!(
+        !exit.session_state().is_live(),
+        "the lifecycle a consumer records for it must not be a live one"
+    );
+
+    let session = runtime.get(&id).expect("the session is still held");
+    assert!(!session.is_running(), "and the session really is over");
+    assert_eq!(
+        session.restarts(),
+        0,
+        "a harness that was never healthy must not have been restarted"
+    );
+    assert!(
+        runtime.poll_exits().iter().all(|(ended, _)| ended != &id),
+        "an exit is reported exactly once"
     );
 }

@@ -87,10 +87,20 @@ pub enum ConfigError {
     /// what this build expects. Deliberately never followed by a write:
     /// overwriting a file we could not parse would destroy whatever the
     /// user actually has on disk.
-    #[error("configuration file `{path}` is not valid TOML: {source}")]
+    ///
+    /// The rendering goes through [`crate::secret::redact`], and the inner
+    /// error is deliberately **not** `#[source]`: `toml`'s own `Display`
+    /// quotes the whole offending line of the file under a caret, and
+    /// `main.rs` prints this with `{err:#}`, which walks the chain. A file
+    /// that carried a pasted key on the line that failed to parse would
+    /// otherwise copy it to stderr and into `glasshouse.log` — the case
+    /// `crate::secret::redact` documents itself as existing for.
+    #[error(
+        "configuration file `{path}` is not valid TOML: {}",
+        crate::secret::redact(&.source.to_string())
+    )]
     Parse {
         path: PathBuf,
-        #[source]
         source: Box<toml::de::Error>,
     },
 
@@ -732,7 +742,11 @@ pub struct ProviderConfig {
     /// **Names only — never a value.** Non-empty here replaces the
     /// template's own default credential names entirely, which is what lets
     /// a user hold several keys for the same router.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_credential_env_names"
+    )]
     credential_env: Vec<String>,
     /// Where this provider's credential is kept, when the user has put it in
     /// the operating system's own secure store. **A reference — a service
@@ -1391,6 +1405,47 @@ const CREDENTIAL_IS_A_REFERENCE: &str = "an entitlement credential is a referenc
      { service = \"...\", account = \"...\" }` for the operating system's credential store. A \
      secret does not belong in a configuration file, so what was written here is not repeated";
 
+/// The sentence a value pasted into the `env` slot gets — the same mistake
+/// as a bare string, one nesting level deeper, and refused the same way:
+/// by the rule's name, never by repeating what was written.
+const ENV_NAME_IS_NOT_A_VALUE: &str = "an entitlement credential's `env` is the NAME of an \
+     environment variable, not its value: a name may use letters, digits and `_` only and may \
+     not start with a digit, and what was written here is neither a name nor repeated";
+
+/// Whether `name` can be an environment variable name at all.
+///
+/// The portable (POSIX) character set, deliberately narrower than what
+/// `std::env::var_os` would accept: every credential shape
+/// [`crate::secret::redact`] knows about — `sk-`, `sk-or-v1-`, `ghp_` with
+/// its dots, a JWT's `.` and `=` — carries a character this refuses, so a
+/// value pasted where a name belongs is caught by shape rather than by
+/// guessing at prefixes.
+fn is_environment_variable_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Deserializes [`ProviderConfig::credential_env`], refusing any entry that
+/// cannot be an environment variable name — the same shape check
+/// [`EntitlementCredential`]'s `env` applies, and the same hole: this field
+/// is documented as "names only — never a value" but nothing enforced it, so
+/// a pasted key would be stored verbatim and later copied wherever this list
+/// is rendered.
+fn deserialize_credential_env_names<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let names: Vec<String> = Vec::deserialize(deserializer)?;
+    for name in &names {
+        if !is_environment_variable_name(name) {
+            return Err(D::Error::custom(ENV_NAME_IS_NOT_A_VALUE));
+        }
+    }
+    Ok(names)
+}
+
 impl Serialize for EntitlementCredential {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
@@ -1449,7 +1504,12 @@ impl<'de> Deserialize<'de> for EntitlementCredential {
                     }
                 }
                 match (env, service, account) {
-                    (Some(var), None, None) => Ok(EntitlementCredential::environment(var)),
+                    (Some(var), None, None) => {
+                        if !is_environment_variable_name(&var) {
+                            return Err(A::Error::custom(ENV_NAME_IS_NOT_A_VALUE));
+                        }
+                        Ok(EntitlementCredential::environment(var))
+                    }
                     (None, Some(service), Some(account)) => {
                         Ok(EntitlementCredential::os_credential(service, account))
                     }
@@ -1671,7 +1731,17 @@ impl<'de> Deserialize<'de> for ConfiguredJobKind {
 /// [`crate::routing::disposable::JobKind::as_str`] — through the three
 /// `Configured*` newtypes above, so an unknown spelling is refused by the
 /// loader rather than read as "no rule".
+///
+/// `deny_unknown_fields` is load-bearing for the same reason those newtypes
+/// are, one level up: the fields are plural, `deny_harness` for
+/// `deny_harnesses` is the natural typo, and a rule that silently does not
+/// exist is not a cosmetic default — an empty deny-list *admits*. The
+/// forward-compatibility story `ConfigError::UnsupportedVersion` tells is
+/// about `version`, and it already refuses to *write* a file it does not
+/// understand; refusing to read a rule it does not understand is the same
+/// fail-closed choice applied to the one table that grants capacity.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EntitlementConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     kind: Option<EntitlementKind>,

@@ -880,6 +880,7 @@ fn stream_events<R: Read>(
     let mut encoder = from.stream_encoder();
     let mut written = 0u64;
     let mut usage = None;
+    let mut order = canonical::Order::default();
     let client_gone = |written: u64| {
         finish(
             Outcome::ClientGone,
@@ -906,6 +907,16 @@ fn stream_events<R: Read>(
             )),
         };
         let at_end = decoder.is_done();
+        // The encoders write bytes and cannot refuse, so the one place an
+        // out-of-order provider stream can still be refused by name is here,
+        // before a delta is handed to an encoder that would attach it to
+        // whichever block is open — see `canonical::Order`.
+        let translated = translated.and_then(|events| {
+            for event in &events {
+                order.check(event)?;
+            }
+            Ok(events)
+        });
         match translated {
             Ok(canonical_events) => {
                 for event in &canonical_events {
@@ -1392,5 +1403,128 @@ mod tests {
             .unwrap_err();
         assert_eq!(wrong.field, "n");
         assert!(wrong.reason.contains("a string"));
+    }
+
+    /// A decoder that replays a scripted sequence of already-canonical
+    /// batches, ignoring the raw SSE bytes it is fed. The wire shape that
+    /// produces this exact canonical sequence from a real provider is
+    /// `anthropic::EventDecoder` (swarm finding break/gateway-translate#1):
+    /// its `require_index` only range-checks the provider's index and never
+    /// compares it to which blocks have started. Scripting the decoder here
+    /// reproduces that output directly against the real `stream_events`
+    /// path without duplicating the Anthropic wire format.
+    struct Scripted {
+        batches: std::collections::VecDeque<Result<Vec<StreamEvent>, Unsupported>>,
+        finished: bool,
+    }
+
+    impl StreamDecoder for Scripted {
+        fn feed(&mut self, _event: &SseEvent) -> Result<Vec<StreamEvent>, Unsupported> {
+            self.batches.pop_front().unwrap_or(Ok(Vec::new()))
+        }
+        fn finish(&mut self) -> Result<Vec<StreamEvent>, Unsupported> {
+            self.finished = true;
+            Ok(vec![StreamEvent::MessageStop])
+        }
+        fn is_done(&self) -> bool {
+            self.finished
+        }
+    }
+
+    fn test_finish(
+        outcome: Outcome,
+        status: u16,
+        framing: Framing,
+        tokens: Option<Tokens>,
+    ) -> (Exchange, RateLimitHeaders) {
+        (
+            Exchange {
+                outcome,
+                status,
+                provider: String::new(),
+                protocol: None,
+                host: String::new(),
+                first_byte_at: None,
+                framing: Some(framing),
+                tokens,
+            },
+            RateLimitHeaders::default(),
+        )
+    }
+
+    /// The acceptance shape from break/gateway-translate#1: `call_A`'s block
+    /// starts, `call_B`'s block starts before `call_A`'s stops, and a delta
+    /// addressed to `call_A` (index 0) arrives while `call_B` (index 1) is
+    /// the open block. Before `canonical::Order` this delta rode on whatever
+    /// block `openai_responses::EventEncoder` had open — `call_B` — so the
+    /// harness would have been told `call_B` received `call_A`'s arguments.
+    /// It must instead be refused by name, before the encoder ever sees it.
+    #[test]
+    fn stream_events_refuses_a_delta_that_would_misfile_under_another_calls_id() {
+        use std::collections::VecDeque;
+        use std::io::Cursor;
+        use std::net::TcpListener;
+
+        let mut decoder = Scripted {
+            batches: VecDeque::from([
+                Ok(vec![StreamEvent::MessageStart {
+                    id: "msg_fix".to_owned(),
+                    model: "claude-x".to_owned(),
+                    usage: canonical::Usage::default(),
+                }]),
+                Ok(vec![
+                    StreamEvent::BlockStart {
+                        index: 0,
+                        block: canonical::BlockStart::ToolUse {
+                            id: "call_A".to_owned(),
+                            name: "Bash".to_owned(),
+                        },
+                    },
+                    StreamEvent::BlockStart {
+                        index: 1,
+                        block: canonical::BlockStart::ToolUse {
+                            id: "call_B".to_owned(),
+                            name: "Read".to_owned(),
+                        },
+                    },
+                ]),
+                Ok(vec![StreamEvent::BlockDelta {
+                    index: 0,
+                    delta: canonical::Delta::InputJson("{\"command\": \"ls\"}".to_owned()),
+                }]),
+            ]),
+            finished: false,
+        };
+        let from = codec_for("openai-responses").expect("openai-responses is a registered codec");
+
+        // Three raw placeholder SSE events: `Scripted` ignores their content
+        // and returns the canned batches above instead, one per `feed` call.
+        let raw = b"event: x\ndata: {}\n\nevent: x\ndata: {}\n\nevent: x\ndata: {}\n\n".to_vec();
+        let mut events = SseReader::new(BufReader::new(Cursor::new(raw)));
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback is bindable");
+        let addr = listener.local_addr().expect("bound");
+        let mut client = TcpStream::connect(addr).expect("loopback connects");
+        let (mut server, _) = listener.accept().expect("loopback accepts");
+
+        let finish: Finish<'_> = &test_finish;
+        stream_events(&mut server, &mut events, &mut decoder, from, finish, 200);
+        drop(server);
+
+        let mut received = Vec::new();
+        client
+            .read_to_end(&mut received)
+            .expect("the client reads whatever the gateway wrote before closing");
+        let text = String::from_utf8_lossy(&received);
+
+        assert!(
+            text.contains("a delta arrived for a block that is not the open one"),
+            "expected the wrong-tool-call-id refusal, got: {text}"
+        );
+        assert!(
+            !text.contains("\"command\": \"ls\""),
+            "call_A's argument fragment must never reach the client attached to \
+             call_B's item: {text}"
+        );
     }
 }
