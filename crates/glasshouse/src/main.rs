@@ -388,6 +388,16 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     )?
                 );
             }
+            MemoryCommand::Export {
+                tracked,
+                include_findings,
+                dry_run,
+            } => {
+                print!(
+                    "{}",
+                    memory_export_tracked(&runtime, *tracked, *include_findings, *dry_run)?
+                );
+            }
         },
         Some(Command::Checkpoint { command }) => {
             return checkpoint_command(&runtime, command);
@@ -7536,6 +7546,69 @@ fn memory_extract(
     for rejection in &outcome.rejected {
         writeln!(out, "    rejected  {rejection}")?;
     }
+    Ok(out)
+}
+
+/// `glasshouse memory export --tracked` — Phase 50's tracked project
+/// knowledge, and the only production caller of
+/// [`glasshouse::memory::TrackedKnowledge::write`].
+///
+/// `tracked` gates writing outright: omitting `--tracked` prints an
+/// explanation and writes nothing, so typing the subcommand alone is never
+/// enough to put files in the tree. That is deliberately a second gate on top
+/// of the subcommand existing at all — map lines 1810/1811 ask for an
+/// explicit opt-in, not merely a discoverable one.
+fn memory_export_tracked(
+    runtime: &Runtime,
+    tracked: bool,
+    include_findings: bool,
+    dry_run: bool,
+) -> anyhow::Result<String> {
+    use std::fmt::Write as _;
+
+    use glasshouse::memory::{ProjectMemory, Selection, TrackedKnowledge};
+
+    let mut out = String::new();
+    if !tracked {
+        writeln!(
+            out,
+            "tracked project knowledge is off by default; nothing was written. \
+             Pass --tracked to opt in."
+        )?;
+        return Ok(out);
+    }
+
+    let memory = ProjectMemory::open(runtime)?;
+    let selection = Selection { include_findings };
+    let manifest = TrackedKnowledge::write(&memory, runtime.project().root(), selection, dry_run)?;
+
+    if manifest.dry_run {
+        writeln!(out, "dry run: nothing was written")?;
+    }
+    if manifest.written.is_empty() {
+        writeln!(out, "no decisions or constraints to export yet")?;
+    } else {
+        for file in &manifest.written {
+            writeln!(out, "{}  {}  {}", file.kind, file.id, file.path.display())?;
+        }
+    }
+    writeln!(out, "{}", manifest.readme.display())?;
+
+    if manifest.git_absent {
+        writeln!(
+            out,
+            "note: {} has no .git directory; the files were still written",
+            runtime.project().display_root().display()
+        )?;
+    }
+    if manifest.gitignored {
+        writeln!(
+            out,
+            "note: this project's .gitignore ignores .glasshouse/; the files were \
+             still written, and Glasshouse does not edit .gitignore"
+        )?;
+    }
+
     Ok(out)
 }
 

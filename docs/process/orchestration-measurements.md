@@ -3845,3 +3845,51 @@ package building on it.
 surprises:** 1610 (1294's shape — no completion signal), 1419/1436/1439 (no
 per-model price table), and 1834 unless launch-classifier's tier carrier lands
 first. Outcomes and tokens per closed box: **to be filled at integration.**
+
+
+## Batch 56 outcomes — seven workers, 79 lines, 65 boxes, 824 → 889 in one morning
+
+Integrated 2026-08-31 between 10:00 and 13:30 Europe/Berlin, one worker at a
+time (every one co-edited `main.rs`), each with its own blast radius on the
+merged tree.
+
+| worker | tier | lines | closed | refused | open | integration |
+|---|---|---|---|---|---|---|
+| mcp-server | Fable xhigh | 11 | 11 | 0 | 0 | `integrate.sh`, clean |
+| routing-economics | Fable xhigh | 17 | 13 | 4 (1419/1436/1439 no price table; 1440 no subscription classifier) | 0 | `integrate.sh`, clean |
+| routing-outcome | Opus high | 5 | 1 | 0 | 4 (links named) | `integrate.sh`, clean |
+| failure-taxonomy | Fable xhigh | 5 | 4 | 0 | 1 (1334 on tool rounds/repairs) | 3-way, clean; two overflow patches applied |
+| subscription-pressure | Fable xhigh | 11 | 9 | 1 (1610 — 1294's shape) | 1 (1577 background half) | 3-way, 3 keep-both blocks |
+| launch-classifier | Fable xhigh | 21 | 18 | 0 | 3 (no tier-ceiling producer) | 3-way, 7 blocks + one rustdoc link |
+| user-control | Opus high | 9 | 9 | 0 | 0 | 3-way, 12 blocks, one hand merge (the routing-off wrapper around the classifier) |
+| **total** | | **79** | **65** | **5** | **9** | |
+
+**Boxes per package: 9.3** (batch 55: 0.77). **Output tokens per closed box:
+~150k** (today's account-wide 9.69M output at 56 closed by 12:30; the day's
+final figure is in the next checkpoint) against 811k the day before and the
+250k ceiling. Every expected refusal named before dispatch was the refusal that
+came back; no worker misreported; every report carried its five artifacts, and
+two workers found and fixed defects in their own first drafts through their own
+mutations (user-control's duplicate check; assumption-guardrails' constant-
+derived assertion).
+
+**What the six-way co-edit cost.** Integration was serial and hand-merged four
+times out of seven; the merges were exactly the ones the workers' §77 notes
+predicted, and the one that needed judgement (user-control's wrapper around
+launch-classifier's block) was spelled out in both reports. Two ripples were
+not predicted by any packet: a rustdoc `-D warnings` private-item link, and
+migration 18's literal `version, 17` pins in three test files outside every
+package's blast set (`memory_provenance`, `memory_store`,
+`evaluation_observations`) — now a memory note and a packet rule.
+
+**Three parked product questions were answered from the tree, not escalated**,
+under the user's instruction not to surface things solely because they are
+complicated: Phase 43 (MCP as a transport over the existing door), Phase 51
+RC-B (the harness's own `TurnEnded` verdict), Phase 33 (framing is not
+content). Each has a package that landed the same day.
+
+**Batch 57** (dispatched 11:00–13:15, seven workers, 115 lines): assumption-
+guardrails (43, reported: 42 closed), implementation-policy (30),
+tracked-knowledge (7, reported: 7 closed), cmux-presentation (14),
+memory-commits (8), evaluation-producers (5), tier-ceiling (8). Three of them
+carry migrations 19, 20, 21 in that integration order.

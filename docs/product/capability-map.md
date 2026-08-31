@@ -1807,13 +1807,13 @@ Fixed architectural requirements
 - Git-tracked project knowledge is optional and contains only explicitly approved portable knowledge.
 - Operational SQLite state, secrets, private raw transcripts, and unredacted event data do not become tracked files.
 
-☐ Keep runtime memory outside the source repository by default.
-☐ Add an explicit opt-in command for creating tracked .glasshouse project knowledge.
-☐ Export selected durable decisions and constraints into human-readable files only when tracked knowledge is enabled.
-☐ Never export raw session histories into the repository automatically.
-☐ Never export credentials or provider metadata into tracked project knowledge.
-☐ Treat tracked human-readable memory as a projection of canonical project memory rather than requiring it for Glasshouse operation.
-☐ Allow teams to review tracked architecture decisions through normal Git workflows when this mode is enabled.
+☑ Keep runtime memory outside the source repository by default.
+☑ Add an explicit opt-in command for creating tracked .glasshouse project knowledge.
+☑ Export selected durable decisions and constraints into human-readable files only when tracked knowledge is enabled.
+☑ Never export raw session histories into the repository automatically.
+☑ Never export credentials or provider metadata into tracked project knowledge.
+☑ Treat tracked human-readable memory as a projection of canonical project memory rather than requiring it for Glasshouse operation.
+☑ Allow teams to review tracked architecture decisions through normal Git workflows when this mode is enabled.
 
 Phase 51 — Evaluation hooks
 

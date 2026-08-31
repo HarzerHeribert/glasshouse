@@ -42,6 +42,7 @@
 //! lifecycle. Migration 4's comment records why none of the three may be
 //! folded into another.
 
+pub mod export;
 pub mod extract;
 pub mod inject;
 mod policy;
@@ -49,6 +50,7 @@ pub mod search;
 pub mod snapshot;
 mod store;
 
+pub use export::{ExportError, Manifest, Selection, TrackedKnowledge, WrittenFile};
 pub use extract::{
     ExtractionModel, ExtractionOutcome, ExtractionTrigger, Extractor, ModelError,
     disposable::RoutedNoModel,

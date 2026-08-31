@@ -1506,4 +1506,34 @@ pub enum MemoryCommand {
         #[arg(long, value_name = "PATH")]
         reply_from: std::path::PathBuf,
     },
+
+    /// Write selected durable decisions and constraints as human-readable
+    /// files under `.glasshouse/knowledge/` — Phase 50's tracked project
+    /// knowledge.
+    ///
+    /// Runtime memory lives outside this repository by default and stays
+    /// there; this is the one door that copies any of it back in, and it
+    /// never opens on its own. `--tracked` is not a formality: omit it and
+    /// nothing is written, which is what keeps this an explicit opt-in
+    /// rather than something that happens because the subcommand was typed.
+    ///
+    /// Findings are left out by default — decisions and constraints are the
+    /// map's own words for what this exports — and `--include-findings`
+    /// widens that. The projection is a copy, never a requirement: deleting
+    /// `.glasshouse/knowledge/` loses nothing Glasshouse needs, and the
+    /// canonical store stays the project database this command read from.
+    Export {
+        /// Write tracked knowledge. Required: this command writes nothing
+        /// without it.
+        #[arg(long)]
+        tracked: bool,
+
+        /// Also export findings, which are left out by default.
+        #[arg(long)]
+        include_findings: bool,
+
+        /// Report what would be written without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
