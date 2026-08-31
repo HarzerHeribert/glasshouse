@@ -132,11 +132,14 @@ pub(crate) const LIFECYCLE_EVENT_KINDS: [&str; 11] = [
 /// One entry per landed producer. Variants are added as producers land, never
 /// in advance: an enum written before its writers is the same mistake as a
 /// table written before its counts.
-pub(crate) const EVALUATION_KINDS: [&str; 4] = [
+pub(crate) const EVALUATION_KINDS: [&str; 7] = [
     "memory_retrieved",
     "disposable_route_decided",
     "routing_override_decided",
     "routing_continuation_decided",
+    "routing_cost_class_observed",
+    "routing_evidence_observed",
+    "routing_outcome_observed",
 ];
 
 /// The `memory_files.provenance` values this build writes.

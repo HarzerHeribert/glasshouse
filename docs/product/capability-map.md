@@ -1832,7 +1832,7 @@ Phase 51 — Evaluation hooks
 ☐ Measure memory-extraction cost separately from interactive coding cost.
 ☐ Measure routing-model cost and request consumption separately from interactive coding cost.
 ☐ Measure how often workload-tier classification predicts successful execution without escalation.
-☐ Measure how often a low-cost or free route succeeds compared with the premium route it displaced.
+☑ Measure how often a low-cost or free route succeeds compared with the premium route it displaced.
 ☐ Measure the accuracy of estimated subscription headroom against observed throttling and resets.
 ☐ Measure how often protected quota remains available for high-tier tasks when needed.
 ☐ Measure how often a critical assumption is refuted before broad implementation versus after substantial edits.

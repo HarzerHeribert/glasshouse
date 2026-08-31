@@ -1069,6 +1069,64 @@ fn an_evaluation_rows_provenance_survives_a_routing_observations_rebuild() {
     }
 }
 
+/// **The three kinds this build's routing-outcome half adds**, both halves of
+/// what makes a new kind real: the Rust vocabulary and the schema constant
+/// agree about it, and the schema still refuses a row that names another
+/// project under it.
+///
+/// Migration 15 gives `kind` no `CHECK`, deliberately, so nothing in SQL
+/// would have caught a new kind spelled two ways — and nothing in SQL knows
+/// these three exist, so nothing would have proved the project triggers still
+/// apply to them either. Both are checked here rather than assumed from the
+/// kinds that came before.
+#[test]
+fn the_new_kinds_are_in_the_vocabulary_and_foreign_project_rows_are_refused() {
+    let tmp = tempdir();
+    let alpha = Fixture::new(tmp.path(), "alpha");
+    let beta = Fixture::new(tmp.path(), "beta");
+
+    for kind in [
+        EvaluationKind::RoutingCostClassObserved,
+        EvaluationKind::RoutingEvidenceObserved,
+        EvaluationKind::RoutingOutcomeObserved,
+    ] {
+        assert_eq!(
+            EvaluationKind::from_stored(kind.as_str()),
+            Some(kind),
+            "{kind:?} must decode back to itself, or a row this build wrote is a row it \
+             cannot read"
+        );
+
+        alpha
+            .ledger()
+            .record(
+                NewObservation::new(kind)
+                    .with_subject("completed")
+                    .with_session_id("s-local")
+                    .with_detail("fresh:claude-code:native"),
+                1_000,
+            )
+            .expect("a row of a new kind belongs in its own project");
+
+        let err = alpha
+            .db()
+            .execute(
+                "INSERT INTO evaluation_observations
+                     (project_id, observed_at, kind, outcome, subject, session_id)
+                 VALUES (?1, 1001, ?2, 'unknown', 'completed', 's-foreign')",
+                rusqlite::params![beta.runtime.project().id().as_str(), kind.as_str()],
+            )
+            .expect_err("migration 15's trigger must refuse a foreign project_id for a new kind");
+        assert!(err.to_string().contains("different project"), "got: {err}");
+    }
+
+    assert_eq!(
+        beta.ledger().recent(10).unwrap(),
+        Vec::new(),
+        "nothing leaked into the other project"
+    );
+}
+
 // -------------------------------------------------------------------------
 // 1829 / 1830 — a launch's routing decision becomes countable
 // -------------------------------------------------------------------------

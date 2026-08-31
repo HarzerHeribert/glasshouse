@@ -922,6 +922,80 @@ fn destination_backend(
     )
 }
 
+/// The cost class of the destination a launch actually routed to — map line
+/// 1835's *"low-cost or free route"* versus *"the premium route it
+/// displaced"*, as a fact rather than a guess.
+///
+/// # Why this is not `destination.backend().cost()`
+///
+/// [`destination_backend`] hardcodes `Cost::Metered` for every destination it
+/// builds, and says so: the session router reads a backend's provider,
+/// credential, model and tool semantics and never its cost, so the field is
+/// the fail-closed constant rather than a measurement. Recording *that* as a
+/// route's class would give line 1835 one bucket for ever and report a
+/// tautology.
+///
+/// So the class is read where the fact actually lives:
+/// [`ProviderConfig::cost_of`], the same one lookup `disposable_candidates`
+/// and `gateway_upstream` use, applied to the destination's own provider and
+/// model with the project layer winning over the user layer. `glasshouse::
+/// profile` and `glasshouse::routing` may not import `glasshouse::config`, so
+/// main.rs is where this can be answered at all.
+///
+/// # `None` is the third answer, and it is honest
+///
+/// A destination on a harness's own sign-in names no configured provider, and
+/// a gateway-backed one assigns its model when the session starts. Neither
+/// has a marked cost, and Glasshouse does not know what a subscription costs
+/// at the margin. That is recorded as
+/// [`glasshouse::evaluation::UNKNOWN_COST_CLASS`] and counted in its own
+/// bucket — never folded into `metered`, which would be a number nobody
+/// measured.
+fn routed_cost_class(
+    user: &UserConfig,
+    project: Option<&ProjectConfig>,
+    destination: &glasshouse::routing::session::Destination,
+) -> Option<glasshouse::routing::Cost> {
+    let model = destination.backend().model().name()?;
+    let provider = destination.backend().provider();
+    let config = project
+        .and_then(|project| project.providers().get(provider))
+        .or_else(|| user.providers().get(provider))?;
+    Some(config.cost_of(model))
+}
+
+/// Whether the pool this launch handed the router held any observed health
+/// reading for the destination it chose — map line 1854's *sparse* half.
+///
+/// The key is built exactly as [`observed_provider_health`] builds it, from
+/// the destination's own credential and model label, so a hit here means the
+/// same resource and not a resource that merely renders the same.
+///
+/// This is the whole of what the launch path can say about its evidence.
+/// `routing::evidence`'s `Confidence` belongs to the gateway's aggregate
+/// ledger, which `SessionRouter` never reads, and a
+/// [`glasshouse::routing::free::FreePool`] health entry carries neither a
+/// confidence nor an observation time — so *stale* and *incorrectly
+/// segmented*, line 1854's other two, have no producer here and are not
+/// invented.
+fn routing_evidence_for(
+    health: &glasshouse::routing::free::FreePool,
+    destination: &glasshouse::routing::session::Destination,
+) -> glasshouse::evaluation::RoutingEvidence {
+    use glasshouse::routing::free::FreeResource;
+
+    let chosen = FreeResource::new(
+        destination.backend().credential().clone(),
+        destination.backend().model().label(),
+    );
+    glasshouse::evaluation::RoutingEvidence::from_pool_hit(
+        health
+            .observed()
+            .iter()
+            .any(|(resource, _)| *resource == chosen),
+    )
+}
+
 /// Apply line 1595's protocol list, and only when there is one.
 ///
 /// See `destination_backend`: an empty list would *remove* the constructor's
@@ -1185,7 +1259,149 @@ fn route_report(
     let effective = EffectiveConfig::new(&user, project.as_ref());
 
     let recommendation = route_recommendation(runtime, &effective, parsed, to, fresh, now, task)?;
-    Ok(render_route_recommendation(&recommendation))
+    let mut report = render_route_recommendation(&recommendation);
+    report.push('\n');
+    report.push_str(&route_outcomes_section(runtime));
+    Ok(report)
+}
+
+/// How far back `glasshouse route`'s outcome section looks.
+///
+/// Thirty days, comfortably inside
+/// [`glasshouse::evaluation::Retention`]'s ninety, so the window is one a
+/// ledger that has been pruning can still answer. A person reading a
+/// recommendation wants recent behaviour; a longer window would average this
+/// month's routes with a configuration two months dead.
+const ROUTE_OUTCOME_WINDOW_DAYS: i64 = 30;
+
+/// Map lines 1834, 1835, 1845 and 1854, printed for a person — the consumer
+/// half of this package, and the reason its producers are not Cluster B.
+///
+/// # Why it lives in `glasshouse route` rather than in a command of its own
+///
+/// `route` is the report about routing: it already prints the ranking, the
+/// override, and what the ranking could not see. *How the routes this project
+/// took actually turned out* is the same subject and the same reader, and a
+/// second command would have meant a new `Command` variant in `cli.rs` —
+/// a file two other workers are editing this round (practice §77). Nothing
+/// here decides anything; the recommendation above is computed without it.
+///
+/// # The rules this rendering exists to hold
+///
+/// Every ratio prints its denominator and no ratio prints a percentage — a
+/// bare `60%` cannot be told from a `3 of 5` that is one lucky afternoon.
+/// `unknown` is its own bucket in every table, never folded into a
+/// neighbour, and a session whose harness never reported a turn end is
+/// counted as exactly that: not a failure, and not a success.
+///
+/// # Practice §65
+///
+/// The ledger is opened here, in the one function that reads it, and dropped
+/// when this returns. `route` is a command a person types; a ledger that
+/// cannot be opened costs this section and never the report.
+fn route_outcomes_section(runtime: &Runtime) -> String {
+    use glasshouse::evaluation::{EvaluationKind, EvaluationObservations};
+
+    let header = format!("Past routes in this project, last {ROUTE_OUTCOME_WINDOW_DAYS} days\n");
+    let ledger = match EvaluationObservations::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::debug!(
+                error = %format!("{err:#}"),
+                "could not open the evaluation ledger for the routing-outcome section"
+            );
+            return format!("{header}\n  the evaluation ledger could not be opened\n");
+        }
+    };
+
+    let to = glasshouse::evaluation::now_unix();
+    let from = to - ROUTE_OUTCOME_WINDOW_DAYS * 24 * 60 * 60;
+    let by_class = ledger.route_outcomes_by(EvaluationKind::RoutingCostClassObserved, from, to);
+    let by_pairing = ledger.route_outcomes_by_pairing_class(from, to);
+    let by_evidence = ledger.route_outcomes_by(EvaluationKind::RoutingEvidenceObserved, from, to);
+
+    let (by_class, by_pairing, by_evidence) = match (by_class, by_pairing, by_evidence) {
+        (Ok(class), Ok(pairing), Ok(evidence)) => (class, pairing, evidence),
+        (Err(err), _, _) | (_, Err(err), _) | (_, _, Err(err)) => {
+            // `WindowNotRetained` is the honest one: retention trimmed rows
+            // this window reaches back past, and a smaller number would be a
+            // fabrication. It is reported, not rounded away.
+            return format!("{header}\n  {err}\n");
+        }
+    };
+
+    if by_class.is_empty() {
+        return format!("{header}\n  no routed sessions recorded in this window\n");
+    }
+
+    let mut out = header;
+    out.push_str("\n  by cost class\n");
+    out.push_str(&render_route_outcome_rows(&by_class));
+    out.push_str(
+        "\n  by pairing class (task success only; line 1845's other five \
+                  quantities have no producer in this build)\n",
+    );
+    out.push_str(&render_route_outcome_rows(&by_pairing));
+    out.push_str("\n  by evidence held about the destination when it was chosen\n");
+    out.push_str(&render_route_outcome_rows(&by_evidence));
+    out.push_str(
+        "\nA session whose harness never reported a turn end is counted as neither a success \
+         nor a failure; a quiet or exited process is never read as either.\n",
+    );
+    out
+}
+
+/// One table of [`RouteOutcomeCounts`], aligned on the bucket name.
+fn render_route_outcome_rows(counts: &[glasshouse::evaluation::RouteOutcomeCounts]) -> String {
+    if counts.is_empty() {
+        return "    (nothing recorded)\n".to_owned();
+    }
+    let width = counts
+        .iter()
+        .map(|row| row.bucket.chars().count())
+        .max()
+        .unwrap_or_default();
+    counts
+        .iter()
+        .map(|row| {
+            format!(
+                "    {:width$} : {}\n",
+                row.bucket,
+                render_route_outcome_line(row)
+            )
+        })
+        .collect()
+}
+
+/// One bucket's counts, as a sentence with both its denominators in it.
+///
+/// **Never a percentage, and never a completion count without the number of
+/// turns it is out of.** The two denominators are different quantities —
+/// turns a harness reported on, and sessions that were routed — and a
+/// rendering that dropped either would let a reader divide the wrong pair.
+fn render_route_outcome_line(counts: &glasshouse::evaluation::RouteOutcomeCounts) -> String {
+    let reported = counts.reported_turns();
+    let verdicts = if reported == 0 {
+        "no reported turns".to_owned()
+    } else {
+        format!(
+            "{} of {reported} reported turns completed",
+            counts.completed
+        )
+    };
+    let sessions = format!(
+        "{} session{} routed",
+        counts.sessions,
+        if counts.sessions == 1 { "" } else { "s" }
+    );
+    if counts.sessions_without_outcome > 0 {
+        format!(
+            "{verdicts}; {sessions}, {} with no turn end reported",
+            counts.sessions_without_outcome
+        )
+    } else {
+        format!("{verdicts}; {sessions}")
+    }
 }
 
 /// `glasshouse routing-cost` — capability map line 1464: what Glasshouse's
@@ -1841,6 +2057,19 @@ fn launch_session(
                 warm.state,
                 format_age(glasshouse::provider::cache::now_unix_seconds() - warm.idle_seconds)
             );
+            // Map lines 1835 and 1854, on the branch where no session has to
+            // be minted for the route to have somewhere to land: the
+            // destination *is* the session this work continues, so its id is
+            // already the session id. The fresh branch records the same two
+            // rows once `store.create` below has produced one.
+            glasshouse::evaluation::record_routed_session(
+                runtime,
+                routed.chosen().id(),
+                routed.chosen().id(),
+                routed_cost_class(&user, project.as_ref(), routed.chosen()),
+                routing_evidence_for(&health, routed.chosen()),
+                glasshouse::evaluation::now_unix(),
+            );
             return resume_session(
                 runtime,
                 routed.chosen().id(),
@@ -2131,6 +2360,29 @@ fn launch_session(
     // session refreshed. Empty, and free, for every other harness — see
     // `session::native_id::snapshot`.
     let index_before = session::native_id::snapshot(&record.harness, runtime.project().root());
+
+    // Map lines 1835 and 1854: the route this launch chose, attributed to the
+    // session it just produced.
+    //
+    // **Here, and not beside `record_routing_decision` above, because the id
+    // does not exist up there.** A fresh launch mints its session id at
+    // `store.create`, so a decision recorded before it can carry no session
+    // and an outcome learned a turn later would have nothing to attach to.
+    // Recording the decision itself later was the alternative and it is
+    // rejected: lines 1829 and 1830 count decisions, and a launch refused
+    // while resolving its profile made a decision and never reaches this
+    // line. So the decision keeps its own moment and this row records what
+    // that decision became — two rows, never an `UPDATE` of one.
+    if let Some(routed) = &routed {
+        glasshouse::evaluation::record_routed_session(
+            runtime,
+            record.id.as_str(),
+            routed.chosen().id(),
+            routed_cost_class(&user, project.as_ref(), routed.chosen()),
+            routing_evidence_for(&health, routed.chosen()),
+            glasshouse::evaluation::now_unix(),
+        );
+    }
 
     tracing::info!(
         session = %record.id,
@@ -4081,6 +4333,35 @@ fn report_hook_with(
         // `automatic_checkpoint` are separate config fields, read by separate
         // `EffectiveConfig` methods — so turning one off leaves the other
         // exactly as it was.
+        // Map lines 1834, 1835, 1845 and 1854's outcome half — and the whole
+        // of what Glasshouse is allowed to learn about how a route turned
+        // out. `TurnEnded` is the only event that carries a harness's own
+        // verdict, `session::lifecycle::event_for` is its single construction
+        // site, and **both** outcomes are recorded: a turn that ended badly
+        // is a fact about the route as much as one that succeeded, and
+        // counting only completions would make every ratio here a fraction of
+        // an unstated denominator.
+        //
+        // A `SessionEnd`, a process exit and output going quiet all arrive
+        // somewhere else or nowhere, and none of them writes a row. The
+        // decision they belong to simply stays *unknown*, which is what the
+        // readers count it as.
+        //
+        // Ordered **before** the extraction and checkpoint triggers below,
+        // for the reason the compaction counter above is ordered first: those
+        // run on their own thread up to `EXTRACTION_BOUND`, and this process
+        // can be torn down by the harness while one is still going. A verdict
+        // the harness actually stated must not be lost to work Glasshouse
+        // chose to do about it.
+        if let LifecycleEvent::TurnEnded { outcome } = translated {
+            glasshouse::evaluation::record_routing_outcome(
+                runtime,
+                id.as_str(),
+                outcome,
+                glasshouse::evaluation::now_unix(),
+            );
+        }
+
         if matches!(
             translated,
             LifecycleEvent::TurnEnded {

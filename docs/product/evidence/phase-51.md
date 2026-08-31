@@ -130,3 +130,127 @@ shell's routing-decisions view. A person reads that table today.
 - These count decisions on the **launch** path only. The resume path
   (`main.rs`) computes the same `Routed` and still records nothing; that is a
   separate package, not a gap in these two lines.
+
+
+---
+
+# `GH-ROUTING-OUTCOME` — 2026-08-31: a routing decision's outcome is the harness's own verdict
+
+Opus specialist at high effort. **One line closed (1835); four left open, each
+with its missing link named precisely enough to package.** The mechanism the
+register's RC-B held twelve lines behind — *how does Glasshouse learn whether a
+routing decision was good?* — is now real, wired on both production paths, and
+rendered to a person. The ruling it implements is in `design-decisions.md`,
+*"Phase 51: a routing decision's outcome is the harness's own verdict, and
+nothing else."*
+
+Contract: Given a session Glasshouse routed, when the harness itself reports
+that a turn ended, Glasshouse records that turn's outcome against the routing
+decision that put the work there, so the evaluation ledger can answer how often
+a route succeeded — while preserving that a quiet or exited process is never
+read as success, and that no recorded observation is ever edited in place.
+
+**What landed.** Three new `EvaluationKind`s (`database::EVALUATION_KINDS`
+extended; the in-module pin `every_kind_the_type_can_produce_is_one_the_schema_constant_declares`
+updated — `blast-radius.sh` caught it red via `--lib` when the packet's own
+targeted command had passed):
+
+| kind | `subject` | `session_id` | `detail` | written by |
+|---|---|---|---|---|
+| `routing_cost_class_observed` | `free` / `metered` / `unknown` | the routed session | destination id | `launch_session`, both routed exits |
+| `routing_evidence_observed` | `observed` / `absent` | the routed session | destination id | same call (`record_routed_session`) |
+| `routing_outcome_observed` | `completed` / `failed` | the session whose turn ended | the destination its decision chose | `glasshouse hook`, on `TurnEnded` (`events::task_outcome`'s first production caller) |
+
+**The link is a third row, not a rewrite.** `record_routing_decision` runs
+before a fresh launch has minted a session id, and its absent `session_id` is
+deliberate — a launch refused while resolving its profile has made a routing
+decision and never reaches a session record, so moving the call would change
+what 1829/1830 count. `record_routed_session` records what the decision
+*became*, on both routed exits of `launch_session` (warm continuation, where
+the destination id already is the session id; fresh, just after
+`store.create`). Nothing is `UPDATE`d.
+
+**The reader is a section of `glasshouse route`** ("Past routes in this
+project, last 30 days"): by cost class, by pairing class, by evidence held —
+with **two denominators kept apart on purpose**: `completed`/`failed` count
+*turns*, `sessions` counts *decisions*; a reader dividing completions by
+sessions would print a rate above 1 on any project that works for an
+afternoon. A session whose harness never reported a turn end is its own bucket,
+never a success or a failure.
+
+## 1835 — CLOSED
+
+State: **COMPLETE**. *"Measure how often a low-cost or free route succeeds
+compared with the premium route it displaced."*
+
+**The finding that mattered: the packet's stated producer was a constant.**
+`main.rs::destination_backend` builds every session-router destination with
+`Cost::Metered`, hardcoded, and says so in its doc comment; `ResourceFacts` has
+no cost field. Recording that would have given the line one bucket for ever.
+The class is read instead from `ProviderConfig::cost_of` — the lookup
+`disposable_candidates` and `gateway_upstream` already use — applied to the
+chosen destination's own provider and model, project layer over user layer, in
+`main.rs::routed_cost_class` (the only crate that may import `config`). A
+destination naming no configured provider records `unknown`, counted in its
+own bucket, never folded into `metered`.
+
+Production: `main.rs :: record_routed_session, routed_cost_class`; the hook
+path's `TurnEnded` arm → `evaluation::record_routing_outcome`;
+`evaluation/mod.rs :: EvaluationObservations::{routed_destination,
+route_outcomes_by, route_outcomes_by_pairing_class}`, `RouteOutcomeCounts`;
+`main.rs :: render_route_outcomes` in `glasshouse route`.
+
+Regression (`tests/routing_outcome.rs`, 4 tests, **every one through the
+shipped binary**: `glasshouse launch` with a fake harness and two real
+direct-provider profiles, one model in `free_models`; then `glasshouse hook` as
+a separate process with a payload on stdin; then `glasshouse route` to read the
+numbers back — there is no seam short of the process, so §35 cannot apply):
+`a_completed_turn_records_the_outcome_against_the_decision_that_routed_it`,
+`a_failed_turn_records_failed_and_a_silent_exit_records_nothing`,
+`free_and_metered_route_success_is_reported_with_denominators`,
+`a_session_with_no_routing_decision_records_no_outcome`;
+`evaluation_observations` 22 (new kinds in the vocabulary; foreign-project rows
+refused); `session_hook` 19.
+
+Mutations — six, six KILLED (`mutate.sh --script`): the hook-path write dropped
+(*"one turn end, one outcome row"*); a failed turn recorded as completed
+(*"`StopFailure` is the harness stating a turn that ended badly, and recording
+it as `completed` would make every success ratio here a fabrication"*); the
+denominator dropped from the rendering; **the constant cost recorded instead of
+the configured one** (*"the route this launch took is the free one, from the
+provider's own `free_models`"*); the evidence state inverted; the route not
+attributed to the session.
+
+Limits: no Windows leg; two SQLite handles are briefly live at once on the hook
+path (session store + ledger) — §65's hazard is Windows-specific; hook latency
+argued, not measured; `glasshouse resume` attributes no route, only `launch`
+does.
+
+## The four left OPEN — each with its link
+
+- **1834** — needs **two** links: the classified tier (landing with
+  `launch-classifier`'s `TaskRequirements::minimum_tier`) **and** the
+  escalation flag — in this codebase *escalation* is `WorkloadTier::escalate`,
+  fired by `TaskClassification` when confidence is `Low`
+  (`routing/classify.rs:366-374`). Both are decision-time facts for the row; and
+  the tier exists only for a launch that named `--task` — whether a task-less
+  launch records `unknown` or nothing is a decision to make before packaging.
+- **1845** — *task success* by pairing class is produced and printed, keyed by
+  `sessions.pairing_class` through a `LEFT JOIN` (the module's rule against
+  duplicating a fact the database already holds). The other five quantities
+  (usable tool calls, repair loops, effective TTFC, reliability, user
+  overrides) are RC-C: columns since migration 11, no writer. The register's
+  note stands: *"three producers, not a join."*
+- **1854** — the *sparse* word is recorded (`observed`/`absent`: whether the
+  health pool held a reading for the chosen destination — strictly more than
+  the `unknown` the packet allowed, same row). *Stale* is not derivable:
+  `GatewayHealthReading` has no `observed_at_unix` (a change to the health
+  cache file's format, not to this ledger). *Incorrectly segmented* has no
+  fact behind it on the launch path at all.
+- **1851** — no prevention is *decided* anywhere in production:
+  `failure_domain_contribution` (`routing/interactive.rs:987`) is a −1.0
+  scoring term, never a rejection, by design decision 1 (*additive, never a
+  filter*). **Successor package, not a refusal**: the prevention is derivable
+  as *"the candidate that would have won without the failure-domain term did
+  not win with it"* — one comparison inside `best()`/`on_provider_failure` plus
+  one producer call from `gateway/session.rs`.

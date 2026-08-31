@@ -2848,3 +2848,65 @@ with `ALTER TABLE … ADD COLUMN` as `validity_conditions` was. Cluster G says a
 migration needs a design first; this is the design.
 
 Package: `GH-FAILURE-TAXONOMY`.
+
+## Phase 21K: assumptions are stated by the agent through the door, never inferred
+
+### Decided by the orchestrator, 2026-08-31
+
+Phase 21K's forty-three lines describe a guardrail against the failure mode
+where an uncertain inference silently becomes the premise of a large
+implementation. Phase 51's RC-D says its measurements (1838–1844) have no
+subject because the feature does not exist. This is the design that makes it
+exist, on the same shape as Phase 43: **a build over the existing API door.**
+
+1. **An assumption is something the agent says, through `api::protocol::Request`
+   and its MCP twin.** Glasshouse never derives one from output, never reads a
+   transcript for one, and never stores reasoning (998). The record is a concise
+   claim, current evidence, evidence-source class, uncertainty, affected scope
+   and the cheapest useful verification (1014, 1016). A claim body is untrusted
+   text and is handled with `memory/inject.rs`'s discipline.
+2. **Storage is an append-only ledger** — `task_assumptions` plus
+   `assumption_transitions`, project-scoped by migration 15's two triggers, in
+   one migration (19). The current state is the latest transition; nothing is
+   `UPDATE`d. States: proposed, probing, supported, refuted, unresolved,
+   waived_by_user (1018).
+3. **The gate is deterministic and cheap.** `Preflight` takes the factors the
+   agent states about its intended change and answers a risk class, the factor
+   that decided it, a verdict from the configured mode, and at most three
+   critical-assumption prompts. Trivial never gates. `guardrails.mode = off |
+   advisory | risk_gated` (default advisory); only security, destructive and
+   migration categories may block, and only when configured to; a per-task
+   `--guardrail force|skip|lower` exists and every automatic pause names its
+   origin and the override that lifts it (1008, 1052, 1053).
+4. **A refuted premise may become a failed-approach memory; promotion to
+   durable memory is explicit and only as a decision, constraint or finding**
+   (1019, 1020, 1017).
+5. **Notification rides the door** (`Events`, the watcher's completion line);
+   no new `lifecycle_events` kind, whose `CHECK` costs a table rebuild.
+
+What this does not build: a verifier framework (1031 uses the existing
+`SpawnSession` if at all), and any rollback of code (1044) — Glasshouse records
+the choice, it does not perform it.
+
+Package: `GH-ASSUMPTION-GUARDRAILS`.
+
+## Phase 21H–21J: the implementation policy is Glasshouse-authored text, delivered like a briefing
+
+### Decided by the orchestrator, 2026-08-31
+
+Lines 955–990 name what an agent should prefer, avoid, consider and check
+before calling an implementation complete. Glasshouse's only honest mechanism
+for a *policy* is to carry it to the agent and make it inspectable: a
+structured, versioned, Glasshouse-authored document (`policy/`), one rule per
+map line, rendered inside its own labelled block — a marker pair distinct from
+`MEMORY_MARKER`, because this text is trusted and extracted memory is not —
+delivered beside the memory briefing wherever Glasshouse briefs an agent, once
+per session, switchable off, available on demand through the door and to a
+person on the CLI, and bounded in length by a tested ceiling.
+
+A line closes only when its content is carried **and** a test proves the text
+reached the agent through the shipped binary. A line whose verb would require
+Glasshouse to perform an analysis it cannot (an unindexed-scan detector, say)
+is refused on that reading and the policy still carries the instruction.
+
+Package: `GH-IMPLEMENTATION-POLICY`.

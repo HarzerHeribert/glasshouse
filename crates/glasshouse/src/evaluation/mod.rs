@@ -133,6 +133,96 @@ pub enum EvaluationKind {
     /// (`crate::routing::session::Destination::is_fresh`); `detail` is the
     /// chosen destination's id.
     RoutingContinuationDecided,
+    /// The cost class of the destination a launch actually routed to,
+    /// attributed to **the session that launch produced** — map line 1835.
+    /// `subject` is `"free"`, `"metered"` or `"unknown"`
+    /// ([`crate::routing::Cost::as_str`], plus the third state this ledger
+    /// adds); `detail` is the chosen destination's id; `session_id` is the
+    /// session, which is what makes an outcome attachable to it later.
+    ///
+    /// **This is the link row, and it is a third row rather than a rewrite of
+    /// the two above.** [`record_routing_decision`] runs before a fresh
+    /// launch has minted a session id, and its `session_id` is absent on
+    /// purpose. Moving that call later — the other way to link a decision to
+    /// a session — would change what lines 1829 and 1830 count: a launch that
+    /// is refused while resolving its profile reaches the router and never
+    /// reaches a session record, and those two lines are about the decision,
+    /// not about what became of it. So the decision keeps its own moment and
+    /// this row records the session it turned into.
+    ///
+    /// **`unknown` is a real answer, not a gap.** A destination on a
+    /// harness's own sign-in has no configured provider and no marked model,
+    /// and Glasshouse does not know what that costs at the margin; saying so
+    /// is the [`crate::routing::Cost`] doc's own fail-closed stance carried
+    /// into a count, and a reader that folded it into `metered` would report
+    /// a number nobody measured.
+    RoutingCostClassObserved,
+    /// How much observed evidence the router actually held about the
+    /// destination it chose, at the moment it chose it — map line 1854's
+    /// *sparse* half and nothing else. `subject` is `"observed"` or
+    /// `"absent"`; `detail` is the chosen destination's id.
+    ///
+    /// **Two states, and neither is a confidence.**
+    /// [`crate::routing::evidence::AggregateReading::confidence`] belongs to
+    /// the gateway's own aggregate ledger, which the session router never
+    /// reads: `RouterInputs` carries a [`crate::routing::free::FreePool`],
+    /// and that pool's health entries carry no confidence and no timestamp.
+    /// So what can be said honestly at a launch is whether the pool held a
+    /// health reading for the chosen destination at all. *Stale* and
+    /// *incorrectly segmented* — line 1854's other two — have no producer on
+    /// this path and are not guessed at.
+    RoutingEvidenceObserved,
+    /// The harness's own verdict on one turn of a routed session — the
+    /// outcome half of map lines 1834, 1835, 1845 and 1854. `subject` is
+    /// `"completed"` or `"failed"`, from
+    /// [`crate::events::TurnOutcome`]; `detail` is the destination id the
+    /// decision chose, copied from this session's
+    /// [`Self::RoutingCostClassObserved`] row.
+    ///
+    /// **Written only from a harness's own `TurnEnded`**, which
+    /// `crate::session::lifecycle::event_for` is the single construction site
+    /// for. A process that exited, output that went quiet, and a user who
+    /// walked away all record nothing, and a decision whose session never
+    /// reports a turn end is counted as *unknown* by every reader here —
+    /// never as a failure and never as a success.
+    RoutingOutcomeObserved,
+}
+
+/// The `subject` this ledger writes for a destination whose cost class no
+/// production fact states — [`EvaluationKind::RoutingCostClassObserved`]'s
+/// third value, beside [`crate::routing::Cost`]'s two.
+pub const UNKNOWN_COST_CLASS: &str = "unknown";
+
+/// How much observed health evidence the router held about the destination it
+/// chose — the `subject` vocabulary for
+/// [`EvaluationKind::RoutingEvidenceObserved`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RoutingEvidence {
+    /// The pool the router was handed held a health reading for exactly this
+    /// destination's credential and model.
+    Observed,
+    /// It held none. The ranking still happened; it happened without any
+    /// observation of this destination's recent behaviour.
+    Absent,
+}
+
+impl RoutingEvidence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Observed => "observed",
+            Self::Absent => "absent",
+        }
+    }
+
+    /// From the one fact a caller on the launch path can establish: whether
+    /// the pool it handed the router carried this destination.
+    pub fn from_pool_hit(observed: bool) -> Self {
+        if observed {
+            Self::Observed
+        } else {
+            Self::Absent
+        }
+    }
 }
 
 impl EvaluationKind {
@@ -142,6 +232,9 @@ impl EvaluationKind {
             Self::DisposableRouteDecided => "disposable_route_decided",
             Self::RoutingOverrideDecided => "routing_override_decided",
             Self::RoutingContinuationDecided => "routing_continuation_decided",
+            Self::RoutingCostClassObserved => "routing_cost_class_observed",
+            Self::RoutingEvidenceObserved => "routing_evidence_observed",
+            Self::RoutingOutcomeObserved => "routing_outcome_observed",
         }
     }
 
@@ -157,6 +250,9 @@ impl EvaluationKind {
             "disposable_route_decided" => Some(Self::DisposableRouteDecided),
             "routing_override_decided" => Some(Self::RoutingOverrideDecided),
             "routing_continuation_decided" => Some(Self::RoutingContinuationDecided),
+            "routing_cost_class_observed" => Some(Self::RoutingCostClassObserved),
+            "routing_evidence_observed" => Some(Self::RoutingEvidenceObserved),
+            "routing_outcome_observed" => Some(Self::RoutingOutcomeObserved),
             _ => None,
         }
     }
@@ -797,6 +893,256 @@ impl EvaluationObservations {
     }
 }
 
+/// One bucket of routed sessions, and what their harnesses said about their
+/// turns — the shape map lines 1834, 1835, 1845 and 1854 all reduce to.
+///
+/// **Two different denominators, kept apart on purpose.** `sessions` counts
+/// routing decisions; `completed` and `failed` count *turns*, because a
+/// session runs many and each one is a thing the harness reported on. A
+/// reader that divided completions by sessions would produce a rate above 1
+/// on any project that works for an afternoon. Every rendering of this must
+/// print both, which is what [`Self::reported_turns`] exists to make easy.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RouteOutcomeCounts {
+    /// The vocabulary word this bucket groups on — a cost class, an evidence
+    /// state, or a session's pairing class. Never a percentage and never a
+    /// derived label.
+    pub bucket: String,
+    /// Routing decisions attributed to a session in this window.
+    pub sessions: i64,
+    /// Turns those sessions' harnesses reported as completed.
+    pub completed: i64,
+    /// Turns those sessions' harnesses reported as failed.
+    pub failed: i64,
+    /// Sessions whose harness never reported a turn end at all — **the
+    /// unknown bucket, and it is reported rather than dropped.** A quiet
+    /// process is not a failure and an exited one is not a success; a count
+    /// that silently omitted these would make every ratio here a fraction of
+    /// an unstated denominator.
+    pub sessions_without_outcome: i64,
+}
+
+impl RouteOutcomeCounts {
+    /// The denominator for the success ratio: turns a harness actually
+    /// reported on. Never includes [`Self::sessions_without_outcome`].
+    pub fn reported_turns(&self) -> i64 {
+        self.completed + self.failed
+    }
+}
+
+/// The three readers this ledger's routing-outcome half adds, kept in their
+/// own block so a second worker's reader and this one cannot land on the same
+/// lines (practice §77).
+impl EvaluationObservations {
+    /// The destination id recorded for `session_id`'s routing decision, or
+    /// [`None`] when this session has no decision row at all.
+    ///
+    /// **The `None` is what stops an outcome being invented.** A session
+    /// started by an older build, or by a path that never routed, has nothing
+    /// for an outcome to be attributed *to*, and
+    /// [`record_routing_outcome`] writes nothing for it rather than a row
+    /// pointing at no decision.
+    ///
+    /// `Some("")` is the honest third case — a decision row exists but
+    /// recorded no destination — and is deliberately not folded into
+    /// [`None`]: one means *nothing was routed*, the other means *something
+    /// was, and this ledger cannot say where to*.
+    pub fn routed_destination(&self, session_id: &str) -> Result<Option<String>, EvaluationError> {
+        let conn = self.lock();
+        let found: Option<Option<String>> = conn
+            .query_row(
+                "SELECT detail
+                   FROM evaluation_observations
+                  WHERE kind = ?1 AND session_id = ?2
+                  ORDER BY seq DESC
+                  LIMIT 1",
+                params![
+                    EvaluationKind::RoutingCostClassObserved.as_str(),
+                    session_id
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sql_err("read a session's routing decision"))?;
+        Ok(found.map(Option::unwrap_or_default))
+    }
+
+    /// Routed sessions in `[from, to]`, grouped by the `subject` of their
+    /// `decision` row, with what their harnesses reported about their turns —
+    /// **map line 1835** with [`EvaluationKind::RoutingCostClassObserved`],
+    /// and **map line 1854**'s sparse half with
+    /// [`EvaluationKind::RoutingEvidenceObserved`].
+    ///
+    /// # The window applies to every row counted
+    ///
+    /// Both the decision and the turn verdicts must fall inside `[from, to]`.
+    /// The alternative — decisions in the window, outcomes whenever — makes
+    /// the number depend on when it was asked, which is exactly the property
+    /// a rate is supposed not to have. A session routed at the very end of
+    /// the window therefore appears with no outcome, and appears in
+    /// [`RouteOutcomeCounts::sessions_without_outcome`] rather than nowhere.
+    ///
+    /// # The latest decision per session wins
+    ///
+    /// `MAX(seq)` with a bare `subject` beside it is SQLite's documented
+    /// behaviour — the bare column comes from the row the aggregate selected
+    /// — and it is what makes a session that was routed twice count once,
+    /// under the class it was last routed to.
+    pub fn route_outcomes_by(
+        &self,
+        decision: EvaluationKind,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<RouteOutcomeCounts>, EvaluationError> {
+        self.refuse_unretained_window(from)?;
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(
+                "WITH decision AS (
+                     SELECT session_id AS session_id,
+                            subject    AS bucket,
+                            MAX(seq)   AS seq
+                       FROM evaluation_observations
+                      WHERE kind = ?1
+                        AND session_id IS NOT NULL
+                        AND observed_at >= ?2
+                        AND observed_at <= ?3
+                      GROUP BY session_id
+                 ),
+                 verdict AS (
+                     SELECT session_id AS session_id,
+                            SUM(CASE WHEN subject = ?5 THEN 1 ELSE 0 END) AS completed,
+                            SUM(CASE WHEN subject = ?6 THEN 1 ELSE 0 END) AS failed
+                       FROM evaluation_observations
+                      WHERE kind = ?4
+                        AND session_id IS NOT NULL
+                        AND observed_at >= ?2
+                        AND observed_at <= ?3
+                      GROUP BY session_id
+                 )
+                 SELECT COALESCE(d.bucket, ?7),
+                        COUNT(*),
+                        COALESCE(SUM(v.completed), 0),
+                        COALESCE(SUM(v.failed), 0),
+                        SUM(CASE WHEN v.session_id IS NULL THEN 1 ELSE 0 END)
+                   FROM decision AS d
+                   LEFT JOIN verdict AS v ON v.session_id = d.session_id
+                  GROUP BY COALESCE(d.bucket, ?7)
+                  ORDER BY COALESCE(d.bucket, ?7)",
+            )
+            .map_err(sql_err("read routed sessions by decision"))?;
+        let rows = statement
+            .query_map(
+                params![
+                    decision.as_str(),
+                    from,
+                    to,
+                    EvaluationKind::RoutingOutcomeObserved.as_str(),
+                    TURN_COMPLETED,
+                    TURN_FAILED,
+                    UNKNOWN_COST_CLASS,
+                ],
+                read_outcome_row,
+            )
+            .map_err(sql_err("read routed sessions by decision"))?;
+        collect_outcome_counts(rows)
+    }
+
+    /// The same counts grouped by the **session's own pairing class** —
+    /// **map line 1845**'s *native versus cross-vendor* axis.
+    ///
+    /// # Why this joins `sessions` instead of storing the class
+    ///
+    /// `sessions.pairing_class` is written at session creation and is durable
+    /// for as long as the session is. Copying it here would be a second
+    /// source of truth for a fact this database already holds — the exact
+    /// duplication this module's header refuses for memory content, and the
+    /// same join [`Self::stale_retrievals`] already makes against `memories`.
+    ///
+    /// A row whose session is gone, or which predates the column, groups
+    /// under `unknown` rather than being dropped.
+    pub fn route_outcomes_by_pairing_class(
+        &self,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<RouteOutcomeCounts>, EvaluationError> {
+        self.refuse_unretained_window(from)?;
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(
+                "WITH decision AS (
+                     SELECT session_id AS session_id,
+                            MAX(seq)   AS seq
+                       FROM evaluation_observations
+                      WHERE kind = ?1
+                        AND session_id IS NOT NULL
+                        AND observed_at >= ?2
+                        AND observed_at <= ?3
+                      GROUP BY session_id
+                 ),
+                 verdict AS (
+                     SELECT session_id AS session_id,
+                            SUM(CASE WHEN subject = ?5 THEN 1 ELSE 0 END) AS completed,
+                            SUM(CASE WHEN subject = ?6 THEN 1 ELSE 0 END) AS failed
+                       FROM evaluation_observations
+                      WHERE kind = ?4
+                        AND session_id IS NOT NULL
+                        AND observed_at >= ?2
+                        AND observed_at <= ?3
+                      GROUP BY session_id
+                 )
+                 SELECT COALESCE(s.pairing_class, ?7),
+                        COUNT(*),
+                        COALESCE(SUM(v.completed), 0),
+                        COALESCE(SUM(v.failed), 0),
+                        SUM(CASE WHEN v.session_id IS NULL THEN 1 ELSE 0 END)
+                   FROM decision AS d
+                   LEFT JOIN sessions AS s
+                          ON s.id = d.session_id AND s.project_id = ?8
+                   LEFT JOIN verdict AS v ON v.session_id = d.session_id
+                  GROUP BY COALESCE(s.pairing_class, ?7)
+                  ORDER BY COALESCE(s.pairing_class, ?7)",
+            )
+            .map_err(sql_err("read routed sessions by pairing class"))?;
+        let rows = statement
+            .query_map(
+                params![
+                    EvaluationKind::RoutingCostClassObserved.as_str(),
+                    from,
+                    to,
+                    EvaluationKind::RoutingOutcomeObserved.as_str(),
+                    TURN_COMPLETED,
+                    TURN_FAILED,
+                    UNKNOWN_COST_CLASS,
+                    self.project_id,
+                ],
+                read_outcome_row,
+            )
+            .map_err(sql_err("read routed sessions by pairing class"))?;
+        collect_outcome_counts(rows)
+    }
+}
+
+/// One [`RouteOutcomeCounts`] row, in the column order both queries above
+/// select.
+fn read_outcome_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteOutcomeCounts> {
+    Ok(RouteOutcomeCounts {
+        bucket: row.get(0)?,
+        sessions: row.get(1)?,
+        completed: row.get(2)?,
+        failed: row.get(3)?,
+        sessions_without_outcome: row.get(4)?,
+    })
+}
+
+fn collect_outcome_counts<I>(rows: I) -> Result<Vec<RouteOutcomeCounts>, EvaluationError>
+where
+    I: Iterator<Item = rusqlite::Result<RouteOutcomeCounts>>,
+{
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(sql_err("decode a routed-session count"))
+}
+
 /// The column list every read of this table selects, in the order
 /// [`read_observation_row`] decodes them.
 ///
@@ -1177,6 +1523,164 @@ pub fn now_unix() -> i64 {
     }
 }
 
+/// The `subject` a completed turn is recorded under —
+/// [`EvaluationKind::RoutingOutcomeObserved`]'s vocabulary, spelled once so
+/// the writer below and the two readers above cannot drift apart.
+const TURN_COMPLETED: &str = "completed";
+/// The `subject` a failed turn is recorded under.
+const TURN_FAILED: &str = "failed";
+
+/// Which of the two [`crate::events::TurnOutcome`] a row records.
+///
+/// An exhaustive `match` at the single writer, for
+/// [`EvaluationKind`]'s own reason: a third outcome added to that enum must
+/// be a compile error here rather than a row silently recorded as one of the
+/// two that already exist.
+fn turn_subject(outcome: crate::events::TurnOutcome) -> &'static str {
+    match outcome {
+        crate::events::TurnOutcome::Completed => TURN_COMPLETED,
+        crate::events::TurnOutcome::Failed => TURN_FAILED,
+    }
+}
+
+/// Attribute a launch's routing decision to the session it produced — the
+/// producer for [`EvaluationKind::RoutingCostClassObserved`] and
+/// [`EvaluationKind::RoutingEvidenceObserved`], map lines 1835 and 1854.
+///
+/// Its callers are `main.rs::launch_session`'s two routed exits: the branch
+/// that continues a warm session, where the destination's id *is* the session
+/// id, and the branch that creates a fresh session record, called once that
+/// record exists and its id is real.
+///
+/// **This never fails a launch**, exactly as [`record_routing_decision`]
+/// never does, and for the same reason: it is on a person's own command path
+/// and an evaluation row is not worth a session.
+///
+/// # What is stored
+///
+/// `cost` is [`None`] when no production fact states the destination's class
+/// — a harness's own sign-in has no configured provider and no marked model —
+/// and that is recorded as [`UNKNOWN_COST_CLASS`], its own bucket in every
+/// reader here. `evidence` is whether the pool the router was handed held a
+/// reading for this destination, which is the only thing about the router's
+/// inputs that can be stated on this path.
+///
+/// Both rows carry ids and vocabulary words and nothing else: a destination
+/// id, a session id, and one word from a closed list.
+pub fn record_routed_session(
+    runtime: &Runtime,
+    session_id: &str,
+    destination_id: &str,
+    cost: Option<crate::routing::Cost>,
+    evidence: RoutingEvidence,
+    observed_at_unix: i64,
+) {
+    let class = NewObservation::new(EvaluationKind::RoutingCostClassObserved)
+        .with_subject(cost.map_or(UNKNOWN_COST_CLASS, |cost| cost.as_str()))
+        .with_session_id(session_id)
+        .with_detail(destination_id);
+    let evidence = NewObservation::new(EvaluationKind::RoutingEvidenceObserved)
+        .with_subject(evidence.as_str())
+        .with_session_id(session_id)
+        .with_detail(destination_id);
+
+    let ledger = match EvaluationObservations::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not open the evaluation ledger; the session is routed, but its route \
+                 was not attributed to it"
+            );
+            return;
+        }
+    };
+    if let Err(err) = ledger.record_all(&[class, evidence], observed_at_unix) {
+        tracing::warn!(
+            error = %err,
+            "could not attribute a route to its session; the session is routed, but its route \
+             will not be counted"
+        );
+    }
+}
+
+/// Record what the harness said about one turn of a routed session — the
+/// producer for [`EvaluationKind::RoutingOutcomeObserved`], and the outcome
+/// half of map lines 1834, 1835, 1845 and 1854.
+///
+/// Its one caller is `main.rs`'s `glasshouse hook` handler, on the arm that
+/// has already translated the harness's event into
+/// [`crate::events::LifecycleEvent::TurnEnded`]. **Nothing else may call it**,
+/// because nothing else in this build holds a verdict a harness actually
+/// stated: a process exit, output ending and a session going idle are all
+/// silence, and silence is not an outcome.
+///
+/// # A session with no routing decision records nothing
+///
+/// [`EvaluationObservations::routed_destination`] answering [`None`] means
+/// this session was never attributed to a route — it predates this build, or
+/// it was created by a path that does not route — and there is nothing for an
+/// outcome to be *about*. That is a `debug` line and no row, never a row
+/// whose decision is invented.
+///
+/// # One handle, opened here, dropped here (practice §65)
+///
+/// The hook is a separate process the harness spawns on every event, and an
+/// open SQLite handle is free on the developer's machine and billed on
+/// Windows. The lookup and the write share the one handle this function
+/// opens, and it is opened only after the caller has established that a turn
+/// really ended.
+pub fn record_routing_outcome(
+    runtime: &Runtime,
+    session_id: &str,
+    outcome: crate::events::TurnOutcome,
+    observed_at_unix: i64,
+) {
+    let ledger = match EvaluationObservations::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not open the evaluation ledger; the turn ended, but its outcome was \
+                 not counted"
+            );
+            return;
+        }
+    };
+    let destination = match ledger.routed_destination(session_id) {
+        Ok(Some(destination)) => destination,
+        Ok(None) => {
+            tracing::debug!(
+                session = session_id,
+                "no routing decision is recorded for this session, so its turn outcome is \
+                 not attributed to one"
+            );
+            return;
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not read this session's routing decision; its turn outcome was not \
+                 counted"
+            );
+            return;
+        }
+    };
+
+    let mut observation = NewObservation::new(EvaluationKind::RoutingOutcomeObserved)
+        .with_subject(turn_subject(outcome))
+        .with_session_id(session_id);
+    if !destination.is_empty() {
+        observation = observation.with_detail(destination);
+    }
+    if let Err(err) = ledger.record(observation, observed_at_unix) {
+        tracing::warn!(
+            error = %err,
+            "could not record a turn's outcome; the turn ended, but it was not counted"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1195,6 +1699,9 @@ mod tests {
             EvaluationKind::DisposableRouteDecided,
             EvaluationKind::RoutingOverrideDecided,
             EvaluationKind::RoutingContinuationDecided,
+            EvaluationKind::RoutingCostClassObserved,
+            EvaluationKind::RoutingEvidenceObserved,
+            EvaluationKind::RoutingOutcomeObserved,
         ];
         let names: Vec<&str> = declared.iter().map(|kind| kind.as_str()).collect();
         assert_eq!(
