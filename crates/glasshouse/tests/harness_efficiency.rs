@@ -148,6 +148,10 @@ fn plant(runtime: &Runtime, now: i64) -> (i64, i64) {
         route_session_for_harness(runtime, "claude-code", heavy, now);
     }
 
+    // Two codex tier rows in the strict past: the shipped `glasshouse route`
+    // under test computes its own clock, so a row stamped in this test's
+    // future is excluded until a real second elapses — deterministically past
+    // avoids that flake (was `now + i`).
     for i in 0..2 {
         let sessions = ProjectSessions::open(runtime).unwrap();
         let record = sessions
@@ -161,9 +165,14 @@ fn plant(runtime: &Runtime, now: i64) -> (i64, i64) {
             None,
             RoutingEvidence::Absent,
             heavy,
-            now + i,
+            now - 1 - i,
         );
-        record_routing_outcome(runtime, record.id.as_str(), TurnOutcome::Completed, now + i);
+        record_routing_outcome(
+            runtime,
+            record.id.as_str(),
+            TurnOutcome::Completed,
+            now - 1 - i,
+        );
     }
     {
         let sessions = ProjectSessions::open(runtime).unwrap();
