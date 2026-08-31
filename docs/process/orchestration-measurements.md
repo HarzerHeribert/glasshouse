@@ -3946,3 +3946,30 @@ and `main.rs`. All three reported within ~50 minutes. **21 lines, 21 boxes,
 Integration: two clean applies, one import-union conflict, one real
 cross-package seam (`session_affinity`'s widened signature) — found by
 `cargo check` on the merged tree, not by any report. Gate: one for the three.
+
+## Batches 59–61 outcomes — 2026-08-31, an orchestrator hand-off Opus → Fable mid-board
+
+Batch 58 landed at `1362f51`. What followed was integrated across the hand-off:
+the Opus 5 orchestrator committed 1317 (`afd9ebb`), the two prove-it packages
+(`1bd39b4` + `d584ad3`, ten lines the code already satisfied) and 1480
+(`eb44707`), then handed off HOT with two workers live and one patch staged;
+the Fable 5 successor integrated the staged patch (`1ba3f80`) and refilled the
+board. **13 boxes across the span; every mutation reported KILLED.**
+
+| package | lines | boxes | mutations | notable |
+|---|---|---|---|---|
+| rate-limit-scope | 33 1317 | 1 | see `phase-33.md` | a rate-limit failure read as provider-wide or model-specific from rows the router already keeps |
+| prove-it-misc + prove-it-39 | 1174→open, 1533, 1551, 1212, Phase 39 ×6 + | 10 | see `d584ad3` | `1bd39b4`'s message outran its evidence step; `d584ad3` repaired it. 1174 became the RED finding `hook-extraction-detach` |
+| tier-outcomes | 34F 1480 | 1 | 3/3 | committed by a background chain the predecessor armed before handing off; the successor verified it landed rather than redoing it |
+| wire-file-memory | 28 1140, 1143 | 2 | 4/4 (+1 re-run by the integrator) | patch staged by the predecessor, applied clean by the successor; `phase-28.md` created — the phase had no entry |
+
+Hand-off cost, measured: the successor's first useful act (a nudge to a stalled
+worker) came ~25 minutes after launch, most of it reconciling a second live
+orchestrator in the same checkout — the predecessor stayed up as the user's
+requirements scribe and committed Phase 56A by pathspec while the successor's
+patch sat staged. Two mechanical traps surfaced and are in memory: `cmux send`
+with `\r` does not submit in a Claude Code pane (a worker sat idle 40 minutes
+with the notice in its prompt), and a pathspec commit sweeps any uncommitted
+edit to the same file. Fill: three Phase 55 prove-its (tests-only, Green), one
+Fable translation package (T1) and one Fable entitlement package queued behind
+`subscription-rules`.
