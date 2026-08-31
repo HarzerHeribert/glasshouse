@@ -1486,14 +1486,17 @@ impl CapacityState {
                 ..
             } => Self::metered_balance(),
             ResourceKind::GlasshouseGateway => Self::delegated_to_upstream(),
-            // A configured entitlement (Phase 56A line 1963) is an account
-            // whose telemetry is 56A package 2's to read, keyed per
-            // entitlement; until that exists, nothing has read one, and its
-            // pools answer as a first-party account's do: opaque, with the
-            // plan statable and the allowance published nowhere this build
-            // looks. No launch path reaches this arm — no profile resolves
-            // to an entitlement resource yet — so nothing user-visible
-            // reports a shape for one.
+            // A configured entitlement (Phase 56A line 1963) as a bare
+            // resource: opaque, with the plan statable and the allowance
+            // published nowhere this build looks. Line 1965's resolver
+            // (`crate::config::ResolvedEntitlement::with_telemetry`) does
+            // not go through this arm — a `ResourceKind::Entitlement`
+            // carries only the account's name, so it cannot say which
+            // provider's telemetry would apply; the resolver reads the
+            // *backing provider's* own shape instead and marks the reading
+            // provider-wide. No launch path reaches this arm — no profile
+            // resolves to an entitlement resource yet — so nothing
+            // user-visible reports a shape for one.
             ResourceKind::Entitlement { .. } => Self::opaque_subscription(),
         }
     }

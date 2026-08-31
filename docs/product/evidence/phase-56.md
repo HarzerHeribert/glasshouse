@@ -583,3 +583,68 @@ Package `GH-ENTITLEMENT-ENV-SCRUB`, 2026-08-31, Sonnet at high (Amber). `foreign
 #### T2b addendum: the chat<->responses pairs land, and the outbound gains its per-protocol header
 
 Package `GH-GATEWAY-TRANSLATE-T2B`, 2026-08-31, Sonnet at high (Amber — both codecs were settled). Five supported ordered pairs now — anthropic→chat, anthropic→responses, responses→anthropic, chat→responses, responses→chat — with `openai-chat -> anthropic-messages` the one refused row left. Each new pair behind its own e2e with ids preserved and streaming in the client protocol's order; `serve` gained the per-protocol outbound-header hook (T2 finding 2): `anthropic-version` added exactly when the outbound protocol is anthropic-messages, asserted present there and absent elsewhere. 3/3 mutations KILLED. Integrator's seam fixes, all five prescribed verbatim by the report and applied on the merged tree (the table flip re-keyed every fixture that used chat<->responses to witness `Incompatible`): the stale T2b-refusal sub-check deleted, the rungs and hard-constraint witnesses moved to OpenCode-on-anthropic-only (the one refused row), and the provider table pin extended to five pairs. Lines 1948/1950/1956 remain open pending T3 (Gemini).
+
+
+---
+
+### Line 1965 — per-entitlement telemetry, every reading carrying its scope (56A step 2)
+
+Package `GH-ENTITLEMENT-TELEMETRY`, 2026-08-31, Fable 5 at xhigh (Red). One resolver (`configured_entitlements_with_telemetry`) populates 56A-1's pinned-unknown slots and two new facets, each reading scoped honestly: capacity and reset from the gateway quota cache (provider-wide in every reachable case, and SAID so — a per-account reading needs a per-credential key on the write side, deliberately not widened here); recent throttling narrowed to the account where `quota_context` rows carry the credential label, widened to provider scope by any contextless row, and `ThrottleScope` finally gains its `AccountSpecific` variant — the entitlement is the key its own doc said did not exist; the models facet reads the provider's declared catalogue and answers `HarnessDecided` for a native sign-in, never an invented list. `glasshouse status` renders all four facets with `unknown` spelled out and shared readings marked provider-wide.
+
+### Track, per entitlement, remaining capacity, time until reset, recent throttling, and the models it can serve, from the telemetry the provider actually exposes. (line 1965)
+
+Contract: Given configured entitlements, when Glasshouse renders its status, each entry tracks remaining capacity, time until reset, recent throttling, and the models it can serve, read only from telemetry the provider actually exposes — the gateway's cached per-provider rate-limit headers, the ledger's quota_context-keyed throttle rows, the provider's own fetched model catalogue — each reading carrying its scope (per-account only where keyed by this account's own credential, provider-wide where every entitlement of the provider shares it), while preserving that an entitlement with no telemetry reads unknown — a rendered word, never full, never empty, never a number — and that the credential LABEL is the only account identifier read or displayed.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's artifacts (5/5 mutations KILLED, one only after the worker found and fixed its own masked test and re-ran with the wider command — recorded as history; thirteen regression tests including two through the shipped binary; the scope words asserted in the rendered output) and the decision diffs read at review. The recorded limits are 56A-3+'s ground: per-account CAPACITY needs a per-credential key on the gateway's write side; `glasshouse resources` still renders the entitlement kind opaque.
+
+Production evidence:
+- `src/config/mod.rs` — `EffectiveConfig::configured_entitlements_with_telemetry`
+- `src/config/mod.rs` — `ResolvedEntitlement::with_telemetry / ::populate_provider_facets / ::credential_label / ::capacity_scope / ::throttling / ::models`
+- `src/config/mod.rs` — `TelemetryScope, EntitlementThrottleReading, EntitlementModels, EntitlementTelemetry`
+- `src/routing/evidence.rs` — `recent_credential_throttles, CredentialThrottles`
+- `src/routing/evidence.rs` — `ThrottleScope::AccountSpecific, count_throttles_against_other_accounts, classify_throttle_scope (account axis)`
+- `src/routing/evidence.rs` — `EvidenceLedger::observations_in_window`
+- `src/main.rs` — `status_report (the sources read once, the resolver called) + entitlement_facets (the rendered line)`
+- `src/main.rs` — `throttle_scope_section (the AccountSpecific arm)`
+
+Regression evidence:
+- `entitlement_telemetry::two_entitlements_of_one_provider_share_the_same_provider_wide_capacity_reading`
+- `entitlement_telemetry::an_entitlement_with_no_telemetry_stays_unknown_on_every_facet`
+- `entitlement_telemetry::the_models_facet_reads_the_declared_catalogue_and_never_invents_one_for_native`
+- `entitlement_telemetry::the_throttle_facet_narrows_to_the_account_and_reads_only_this_providers_rows`
+- `entitlement_telemetry::a_contextless_throttle_widens_both_accounts_readings_to_provider_scope`
+- `entitlement_telemetry::status_shows_all_four_facets_with_their_scope_through_the_shipped_binary (binary)`
+- `entitlement_telemetry::status_spells_unknown_for_an_entitlement_nothing_measured (binary)`
+- `routing::evidence::throttle_scope_tests::sibling_throttles_beside_another_account_serving_read_as_account_specific`
+- `routing::evidence::throttle_scope_tests::a_throttle_shared_by_two_accounts_stays_provider_wide`
+- `routing::evidence::throttle_scope_tests::contextless_rows_never_produce_an_account_specific_verdict`
+- `routing::evidence::credential_throttle_tests::every_row_naming_its_account_narrows_the_count_to_the_credential`
+- `routing::evidence::credential_throttle_tests::a_contextless_throttle_row_widens_the_reading_to_provider_scope`
+- `routing::evidence::credential_throttle_tests::only_informative_throttles_count_and_zero_is_provider_wide`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| config/mod.rs: 'self.remaining_capacity = state.remaining_capacity_score();' -> 'self.remaining_capacity = if self.name.ends_with("-a") { state.remaining_capacity_score() } else { None };' | `wrong-scope` | **killed** | `entitlement_telemetry::two_entitlements_of_one_provider_share_the_same_provider_wide_capacity_reading` |
+| main.rs: 'None => "capacity: unknown".to_owned(),' -> 'None => "capacity: 100%".to_owned(),' | `fabricate-unknown` | **killed** | `entitlement_telemetry::status_spells_unknown_for_an_entitlement_nothing_measured` |
+| evidence.rs: '.filter(|row| row.provider == provider)' -> '.filter(|_row| true)' | `wrong-source` | **killed** | `routing::evidence::credential_throttle_tests::every_row_naming_its_account_narrows_the_count_to_the_credential` |
+| config/mod.rs: 'self.models = Some(EntitlementModels::HarnessDecided);' -> 'self.models = Some(EntitlementModels::Declared { models: vec!["claude-3-opus".to_owned(), "alpha-m1".to_owned()], scope: TelemetryScope::ProviderWide });' | `invent-list` | **killed** | `entitlement_telemetry::the_models_facet_reads_the_declared_catalogue_and_never_invents_one_for_native` |
+| evidence.rs: 'if cross_served > 0 {' -> 'if false {' | `skip-state-update` | **killed** | `routing::evidence::throttle_scope_tests::sibling_throttles_beside_another_account_serving_read_as_account_specific` |
+
+> wrong-scope observed: assertion `left == right` failed: one provider, one reading — the two accounts share it verbatim (tests/entitlement_telemetry.rs:116); the binary test failed at :514 too
+
+> fabricate-unknown observed: panicked at tests/entitlement_telemetry.rs:568:5 (unknown is a rendered word / no % may appear); status_shows_all_four_facets failed at :546
+
+> wrong-source observed: SURVIVED against --test entitlement_telemetry alone (7 passed — the account narrowing masks the provider filter); test strengthened and re-run with --lib in the command: assertion `left == right` failed: KEY_A's own rows, not KEY_B's and not beta's (evidence.rs:4998)
+
+> invent-list observed: assertion `left == right` failed: a native sign-in's models are the harness's decision — no list, ever (tests/entitlement_telemetry.rs:232); binary test failed at :548
+
+> skip-state-update observed: assertion `left == right` failed: account A's models throttled together while account B kept serving (evidence.rs:4886)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- capacity/reset readings are provider-wide in every reachable case: the gateway quota cache is keyed by provider and its writer is settled — PerAccount capacity needs a per-credential key on the write side (56A-3+)
+- the facets reach production through `glasshouse status` only; `glasshouse resources` still renders ResourceKind::Entitlement opaque
+- models facet trusts the cached catalogue without re-checking the provider's current base URL
+- AccountSpecific still gates on MIN_CORRELATION_SAMPLE sibling-informative events; cross-account evidence alone reads Unknown
+- macOS-only run; nothing added is platform-conditional
+
+---

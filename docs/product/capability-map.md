@@ -1962,7 +1962,7 @@ Recorded 2026-08-31 from the user's instruction of record, refining Phase 56: *"
 ☑ Model an entitlement — a specific subscription or API-credit account such as Claude Max A, Claude Max B, ChatGPT Pro, OpenRouter credits, or an API key — as the unit of capacity, distinct from the vendor, the provider adapter, the wire protocol, and the harness.
 ☑ Allow several entitlements of the same vendor and plan to coexist in one pool, each with its own authentication, remaining capacity, and reset time.
 ☑ Keep the layering explicit and separately replaceable: harness, protocol adapter, authentication, entitlement, inference model.
-☐ Track, per entitlement, remaining capacity, time until reset, recent throttling, and the models it can serve, from the telemetry the provider actually exposes.
+☑ Track, per entitlement, remaining capacity, time until reset, recent throttling, and the models it can serve, from the telemetry the provider actually exposes.
 ☐ Score entitlements for a new job by available capacity, time until reset, recent throttling, session affinity, and model availability, and choose by that score rather than by round-robin.
 ☐ Burn an entitlement aggressively when its reset is near and its remainder would otherwise expire, and preserve one whose reset is far.
 ☐ Distribute independent workers across the pool while keeping a long-running session sticky to the entitlement that holds its context and cache, unless a rule or exhaustion forces a move.

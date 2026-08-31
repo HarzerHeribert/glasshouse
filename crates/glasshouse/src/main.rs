@@ -2071,6 +2071,16 @@ fn throttle_scope_section(runtime: &Runtime) -> String {
                     ),
                 );
             }
+            ThrottleScope::AccountSpecific => {
+                let _ = writeln_str(
+                    &mut out,
+                    format!(
+                        "  {route}: account-specific — this account's sibling models were \
+                         throttled together while another account of the same provider kept \
+                         serving"
+                    ),
+                );
+            }
             ThrottleScope::Unknown {
                 sample_size,
                 required,
@@ -9840,20 +9850,49 @@ fn status_report(runtime: &Runtime) -> anyhow::Result<String> {
     // here one entry per account — never merged by vendor, kind or backing,
     // because two accounts of one vendor being two resources is what makes
     // the pool a pool. A user with no `[entitlements]` entries sees no line.
+    //
+    // Map line 1965: each entry then carries its four telemetry facets —
+    // capacity band, time until reset, recent throttling, the models it can
+    // serve — from the telemetry the provider actually exposes, `unknown`
+    // spelled out where nothing exists, and every shared reading marked with
+    // its scope. The sources are read here, once, and handed to the one
+    // resolver, so two entitlements of one provider cannot be handed
+    // different provider-wide readings.
     let user = UserConfig::load(runtime.paths())?;
     let project_config = config::load_project_config(runtime.project())?;
     let effective = EffectiveConfig::new(&user, project_config.as_ref());
-    match effective.entitlement_resources() {
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+    let quota_cache = glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths());
+    let model_cache = glasshouse::provider::cache::ModelCache::new(runtime.paths());
+    // The ledger's window rows, read fail-soft: a project whose evidence
+    // ledger cannot be opened still gets its status line, with the
+    // throttling facet honestly unknown rather than "none observed".
+    let observations = glasshouse::routing::evidence::EvidenceLedger::open(runtime)
+        .and_then(|ledger| {
+            Ok(ledger.observations_in_window(
+                now_unix,
+                glasshouse::routing::evidence::CLASSIFICATION_EVIDENCE_WINDOW_SECONDS,
+            )?)
+        })
+        .map_err(|err| {
+            tracing::debug!(
+                error = %err,
+                "could not read the routing evidence ledger for the entitlements status line"
+            );
+        })
+        .ok();
+    let mut telemetry = glasshouse::config::EntitlementTelemetry::new(now_unix)
+        .with_gateway_quota(&quota_cache)
+        .with_model_catalogues(&model_cache);
+    if let Some(observations) = observations.as_deref() {
+        telemetry = telemetry.with_observations(observations);
+    }
+    match effective.configured_entitlements_with_telemetry(&telemetry) {
         Ok(entitlements) if entitlements.is_empty() => {}
         Ok(entitlements) => {
             let names: Vec<String> = entitlements
                 .iter()
-                .map(|kind| match kind {
-                    glasshouse::provider::registry::ResourceKind::Entitlement { name } => {
-                        format!("`{name}`")
-                    }
-                    other => other.label(),
-                })
+                .map(|entry| format!("`{}`", entry.name()))
                 .collect();
             let _ = writeln!(
                 out,
@@ -9861,6 +9900,15 @@ fn status_report(runtime: &Runtime) -> anyhow::Result<String> {
                 entitlements.len(),
                 names.join(", ")
             );
+            let thresholds = effective.capacity_band_thresholds().value;
+            for entry in &entitlements {
+                let _ = writeln!(
+                    out,
+                    "  `{}`  {}",
+                    entry.name(),
+                    entitlement_facets(entry, &thresholds)
+                );
+            }
         }
         Err(err) => {
             let _ = writeln!(out, "Entitlements not resolvable — {err}");
@@ -9868,6 +9916,71 @@ fn status_report(runtime: &Runtime) -> anyhow::Result<String> {
     }
 
     Ok(out)
+}
+
+/// One entitlement's four telemetry facets, as `glasshouse status` renders
+/// them — map line 1965's consumer.
+///
+/// `unknown` is a rendered word, never a number: a facet nothing measured
+/// says so. Every reading shared beyond this account carries its scope word
+/// (`provider-wide`); a reading narrowed to this account's own rows says
+/// `this account`.
+fn entitlement_facets(
+    entry: &glasshouse::config::ResolvedEntitlement,
+    thresholds: &glasshouse::provider::quota::CapacityBandThresholds,
+) -> String {
+    use glasshouse::config::{EntitlementModels, TelemetryScope};
+
+    let scope_note = |scope: TelemetryScope| format!(" ({})", scope.as_str());
+
+    let capacity = match entry.remaining_capacity() {
+        Some(score) => format!(
+            "capacity: {}{}",
+            score.band(thresholds),
+            entry.capacity_scope().map(scope_note).unwrap_or_default()
+        ),
+        None => "capacity: unknown".to_owned(),
+    };
+
+    let reset = match entry.seconds_until_reset() {
+        Some(seconds) if seconds >= 0 => format!(
+            "reset: in {seconds}s{}",
+            entry.capacity_scope().map(scope_note).unwrap_or_default()
+        ),
+        // The window already turned by this machine's clock — say so
+        // rather than rendering a negative wait.
+        Some(_) => format!(
+            "reset: due{}",
+            entry.capacity_scope().map(scope_note).unwrap_or_default()
+        ),
+        None => "reset: unknown".to_owned(),
+    };
+
+    let throttling = match entry.throttling() {
+        Some(reading) if reading.throttled() == 0 => {
+            format!("throttling: none observed{}", scope_note(reading.scope()))
+        }
+        Some(reading) => format!(
+            "throttling: {} recent{}",
+            reading.throttled(),
+            scope_note(reading.scope())
+        ),
+        None => "throttling: unknown".to_owned(),
+    };
+
+    let models = match entry.models() {
+        Some(EntitlementModels::Declared { models, scope }) => {
+            if models.len() <= 4 {
+                format!("models: {}{}", models.join(", "), scope_note(*scope))
+            } else {
+                format!("models: {} declared{}", models.len(), scope_note(*scope))
+            }
+        }
+        Some(EntitlementModels::HarnessDecided) => "models: the harness decides".to_owned(),
+        None => "models: unknown".to_owned(),
+    };
+
+    format!("{capacity} · {reset} · {throttling} · {models}")
 }
 
 /// One line of the session listing, header included.

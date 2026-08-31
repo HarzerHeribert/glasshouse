@@ -12,11 +12,13 @@
 //! `EvidenceLedger::throttle_scopes` — this file's own concern is that the
 //! shipped binary reaches it and prints what it says.
 //!
-//! Line 1317 also names two scopes this build refuses to fabricate:
-//! account-specific (no row carries an account identity) and
-//! request-pool-specific (`routing::free::is_request_pool` has no
-//! production caller — refusal register, row 531). Neither is built, and
-//! neither string appears anywhere `glasshouse route` prints.
+//! Line 1317's other two scopes: account-specific gained its producer on
+//! 2026-08-31 (56A-2 — `ThrottleScope::AccountSpecific`, keyed by the
+//! entitlement's credential label in `quota_context`), but every row this
+//! test plants is CONTEXT-LESS, so it still classifies provider/model-wide
+//! here and the string must not appear. Request-pool-specific stays
+//! unbuilt (`routing::free::is_request_pool` has no production caller —
+//! refusal register, row 531).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -258,6 +260,6 @@ fn the_route_command_prints_every_routes_throttle_scope() {
     );
     assert!(
         !stdout.contains("account-specific") && !stdout.contains("request-pool-specific"),
-        "the two scopes this build has no producer for are never printed:\n{stdout}"
+        "context-less rows never print account-specific, and request-pool-specific has no producer:\n{stdout}"
     );
 }

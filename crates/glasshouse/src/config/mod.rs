@@ -1839,6 +1839,9 @@ impl EntitlementConfig {
             layer,
             remaining_capacity: None,
             seconds_until_reset: None,
+            capacity_scope: None,
+            throttling: None,
+            models: None,
         })
     }
 }
@@ -1913,14 +1916,28 @@ pub struct ResolvedEntitlement {
     backing: EntitlementBacking,
     rules: crate::routing::EntitlementRules,
     layer: Layer,
-    /// Map line 1963's remaining-capacity slot. **Populated by 56A package 2
-    /// (per-entitlement telemetry) and always `None` in this build**: an
+    /// Map line 1963's remaining-capacity slot — map line 1965's producer is
+    /// [`Self::with_telemetry`], which populates it from a gateway-captured
+    /// per-provider reading. `None` until that resolver runs, and `None`
+    /// thereafter for an entitlement whose provider exposes nothing: an
     /// entitlement nothing has read is *unknown*, never full and never
     /// empty.
     remaining_capacity: Option<crate::provider::quota::RemainingCapacityScore>,
     /// Map line 1963's reset-time slot, in seconds. Same contract as
-    /// `remaining_capacity`: package 2 populates it, `None` is unknown.
+    /// `remaining_capacity`: [`Self::with_telemetry`] populates it, `None`
+    /// is unknown.
     seconds_until_reset: Option<i64>,
+    /// Whose reading `remaining_capacity` and `seconds_until_reset` are —
+    /// `Some` exactly when either slot is populated. One scope for the pair,
+    /// because both come from the same cached provider reading.
+    capacity_scope: Option<TelemetryScope>,
+    /// Map line 1965's recent-throttling facet. `None` until
+    /// [`Self::with_telemetry`] runs with the ledger's rows in hand —
+    /// *unknown*, never "none observed": an absence may only be reported by
+    /// a resolver that actually looked.
+    throttling: Option<EntitlementThrottleReading>,
+    /// Map line 1965's models facet. `None` is unknown, same rule as above.
+    models: Option<EntitlementModels>,
 }
 
 impl ResolvedEntitlement {
@@ -1944,9 +1961,10 @@ impl ResolvedEntitlement {
         self.credential.as_ref()
     }
 
-    /// Remaining capacity, when telemetry has read one — `None` until 56A
-    /// package 2 exists, and `None` thereafter for an entitlement whose
-    /// provider exposes nothing. Unknown, never fabricated.
+    /// Remaining capacity, when telemetry has read one — `None` until
+    /// [`Self::with_telemetry`] runs, and `None` thereafter for an
+    /// entitlement whose provider exposes nothing. Unknown, never
+    /// fabricated.
     pub fn remaining_capacity(&self) -> Option<&crate::provider::quota::RemainingCapacityScore> {
         self.remaining_capacity.as_ref()
     }
@@ -1955,6 +1973,127 @@ impl ResolvedEntitlement {
     /// read one — the same contract as [`Self::remaining_capacity`].
     pub fn seconds_until_reset(&self) -> Option<i64> {
         self.seconds_until_reset
+    }
+
+    /// Whose reading the capacity and reset slots carry — `Some` exactly
+    /// when either slot is populated, and [`TelemetryScope::ProviderWide`]
+    /// for every reading this build can take: the gateway's quota cache is
+    /// keyed by provider, so both entitlements of one provider share it.
+    pub fn capacity_scope(&self) -> Option<TelemetryScope> {
+        self.capacity_scope
+    }
+
+    /// Map line 1965's recent-throttling facet — `None` means *unknown*
+    /// (nothing consulted the ledger for this entry), never "none observed".
+    pub fn throttling(&self) -> Option<&EntitlementThrottleReading> {
+        self.throttling.as_ref()
+    }
+
+    /// Map line 1965's models facet — `None` means *unknown*.
+    pub fn models(&self) -> Option<&EntitlementModels> {
+        self.models.as_ref()
+    }
+
+    /// This account's key in the ledger's `quota_context` column — the
+    /// [`crate::routing::CredentialId::label`] the gateway stamps on every
+    /// exchange it forwards for this credential. `None` for an entry with no
+    /// credential of its own or no provider backing: such an account has no
+    /// per-account rows to be narrowed to.
+    pub fn credential_label(&self) -> Option<String> {
+        let EntitlementBacking::Provider(provider) = &self.backing else {
+            return None;
+        };
+        self.credential
+            .as_ref()
+            .map(|reference| crate::routing::CredentialId::new(provider, reference.clone()).label())
+    }
+
+    /// Map line 1965's producer — populate the four telemetry facets from
+    /// what `telemetry` actually holds, each reading carrying its scope.
+    ///
+    /// - **Capacity and reset**, for a remote-provider backing: the
+    ///   gateway-captured per-provider reading
+    ///   ([`crate::provider::telemetry::GatewayQuotaCache`]) folded into the
+    ///   provider's own capacity shape. The cache is keyed by provider and
+    ///   the gateway's write is settled, so the reading cannot be narrowed
+    ///   to one credential: it is [`TelemetryScope::ProviderWide`], shared
+    ///   verbatim by every entitlement of that provider. A local-inference
+    ///   provider is skipped outright — a local server has no account
+    ///   allowance, and the capacity model's local-inference estimate is not
+    ///   a reading about *this account*.
+    /// - **Recent throttling**: the ledger rows' informative throttles for
+    ///   the provider, narrowed to this account's own
+    ///   ([`crate::routing::evidence::recent_credential_throttles`]) when
+    ///   every throttle row names its account, provider-wide otherwise.
+    /// - **Models**: the provider's own declared catalogue
+    ///   ([`crate::provider::cache::ModelCache`]), when one was ever
+    ///   fetched; a native sign-in is [`EntitlementModels::HarnessDecided`]
+    ///   — the harness picks, and Glasshouse does not know the plan's
+    ///   models, so no list is ever invented for one.
+    ///
+    /// Every facet a source cannot answer stays `None` — unknown, never
+    /// full, never empty, never zero-observed.
+    pub fn with_telemetry(mut self, telemetry: &EntitlementTelemetry<'_>) -> Self {
+        match self.backing.clone() {
+            EntitlementBacking::Provider(provider) => {
+                self.populate_provider_facets(&provider, telemetry);
+            }
+            EntitlementBacking::NativeHarness(_) => {
+                self.models = Some(EntitlementModels::HarnessDecided);
+            }
+            EntitlementBacking::Unstated => {}
+        }
+        self
+    }
+
+    fn populate_provider_facets(&mut self, provider: &str, telemetry: &EntitlementTelemetry<'_>) {
+        use crate::provider::registry::{Locality, ResourceKind};
+
+        let kind = ResourceKind::from_direct_provider(provider);
+        if kind.locality() == Locality::Remote
+            && let Some(cache) = telemetry.gateway_quota
+            && let Some((headers, observed_at_unix)) = cache.load(provider)
+        {
+            let state = headers.apply_to(
+                crate::provider::quota::CapacityState::for_resource(&kind),
+                observed_at_unix,
+            );
+            self.remaining_capacity = state.remaining_capacity_score();
+            self.seconds_until_reset = state.seconds_until_reset(telemetry.now_unix);
+            if self.remaining_capacity.is_some() || self.seconds_until_reset.is_some() {
+                self.capacity_scope = Some(TelemetryScope::ProviderWide);
+            }
+        }
+
+        if let Some(observations) = telemetry.observations {
+            let label = self.credential_label();
+            let counted = crate::routing::evidence::recent_credential_throttles(
+                observations,
+                provider,
+                label.as_deref(),
+            );
+            self.throttling = Some(EntitlementThrottleReading {
+                throttled: counted.throttled,
+                scope: if counted.account_narrowed {
+                    TelemetryScope::PerAccount
+                } else {
+                    TelemetryScope::ProviderWide
+                },
+            });
+        }
+
+        if let Some(catalogues) = telemetry.model_catalogues {
+            self.models = catalogues
+                .load(provider)
+                .map(|catalogue| EntitlementModels::Declared {
+                    models: catalogue
+                        .models()
+                        .iter()
+                        .map(|model| model.id().to_owned())
+                        .collect(),
+                    scope: TelemetryScope::ProviderWide,
+                });
+        }
     }
 
     pub fn backing(&self) -> &EntitlementBacking {
@@ -1995,6 +2134,126 @@ impl ResolvedEntitlement {
         }
         parts.push(backing);
         parts.join(", ")
+    }
+}
+
+/// Whose reading a telemetry facet is — map line 1965's scope discipline:
+/// telemetry keyed by this account's own credential is one thing, telemetry
+/// the whole provider shares is another, and a display that showed the
+/// second as the first would be claiming per-account knowledge nothing
+/// measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelemetryScope {
+    /// Keyed by this entitlement's own credential — the reading is about
+    /// this account and no other.
+    PerAccount,
+    /// Keyed by the provider — every entitlement of that provider shares
+    /// this same reading.
+    ProviderWide,
+}
+
+impl TelemetryScope {
+    /// The display's scope word.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TelemetryScope::PerAccount => "this account",
+            TelemetryScope::ProviderWide => "provider-wide",
+        }
+    }
+}
+
+/// Map line 1965's recent-throttling facet: how many informative throttles
+/// the evidence window records against this entitlement, and whose count it
+/// is. A count of zero from a resolver that looked is "none observed" — a
+/// different fact from the `None` an unresolved entry carries, which is
+/// *unknown*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntitlementThrottleReading {
+    throttled: usize,
+    scope: TelemetryScope,
+}
+
+impl EntitlementThrottleReading {
+    /// Informative throttles in the window — this account's own when
+    /// [`Self::scope`] is [`TelemetryScope::PerAccount`], the provider's
+    /// total otherwise.
+    pub fn throttled(&self) -> usize {
+        self.throttled
+    }
+
+    pub fn scope(&self) -> TelemetryScope {
+        self.scope
+    }
+}
+
+/// Map line 1965's models facet: which models this entitlement can serve,
+/// from what its backing actually declares — never an invented list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntitlementModels {
+    /// The provider's own declared model list — the fetched
+    /// [`crate::provider::cache::ModelCatalogue`], which is per provider,
+    /// so the scope is stated on the value.
+    Declared {
+        models: Vec<String>,
+        scope: TelemetryScope,
+    },
+    /// A native sign-in: the harness picks its own models, and Glasshouse
+    /// does not know the plan's list — an answer, not an absence.
+    HarnessDecided,
+}
+
+/// The telemetry sources [`ResolvedEntitlement::with_telemetry`] reads —
+/// each one optional and each one already opened or loaded by the caller,
+/// so this resolver performs no I/O beyond the caches' own fail-soft file
+/// reads: never a probe, never a network call, never a database write
+/// (design-decisions §56A step 2's Cluster E discipline). A source left
+/// unset leaves its facets `None` — unknown — rather than fabricating an
+/// observation nothing took.
+pub struct EntitlementTelemetry<'a> {
+    gateway_quota: Option<&'a crate::provider::telemetry::GatewayQuotaCache>,
+    model_catalogues: Option<&'a crate::provider::cache::ModelCache>,
+    /// The evidence window's rows, when the caller read them —
+    /// `None` keeps the throttling facet unknown, because "none observed"
+    /// may only be said by a resolver that actually looked.
+    observations: Option<&'a [crate::routing::evidence::RoutingObservation]>,
+    now_unix: i64,
+}
+
+impl<'a> EntitlementTelemetry<'a> {
+    /// No sources at all — every facet stays unknown until a `with_*`
+    /// supplies one.
+    pub fn new(now_unix: i64) -> Self {
+        Self {
+            gateway_quota: None,
+            model_catalogues: None,
+            observations: None,
+            now_unix,
+        }
+    }
+
+    /// The gateway-captured per-provider rate-limit readings.
+    pub fn with_gateway_quota(
+        mut self,
+        cache: &'a crate::provider::telemetry::GatewayQuotaCache,
+    ) -> Self {
+        self.gateway_quota = Some(cache);
+        self
+    }
+
+    /// The fetched provider model catalogues.
+    pub fn with_model_catalogues(mut self, cache: &'a crate::provider::cache::ModelCache) -> Self {
+        self.model_catalogues = Some(cache);
+        self
+    }
+
+    /// The evidence window's observation rows, read from the project's
+    /// ledger by the caller.
+    pub fn with_observations(
+        mut self,
+        observations: &'a [crate::routing::evidence::RoutingObservation],
+    ) -> Self {
+        self.observations = Some(observations);
+        self
     }
 }
 
@@ -4614,6 +4873,9 @@ impl<'a> EffectiveConfig<'a> {
                 layer: Layer::Default,
                 remaining_capacity: None,
                 seconds_until_reset: None,
+                capacity_scope: None,
+                throttling: None,
+                models: None,
             });
         }
         Ok(resolved)
@@ -4631,6 +4893,23 @@ impl<'a> EffectiveConfig<'a> {
             .entitlements()?
             .into_iter()
             .filter(|entry| entry.layer() != Layer::Default)
+            .collect())
+    }
+
+    /// Map line 1965's resolver: the configured pool with every telemetry
+    /// facet populated from what `telemetry` actually holds — see
+    /// [`ResolvedEntitlement::with_telemetry`] for what each facet reads and
+    /// the scope every reading carries. One resolver for all entries, so two
+    /// entitlements of one provider cannot be handed different provider-wide
+    /// readings.
+    pub fn configured_entitlements_with_telemetry(
+        &self,
+        telemetry: &EntitlementTelemetry<'_>,
+    ) -> Result<Vec<ResolvedEntitlement>, EntitlementLookupError> {
+        Ok(self
+            .configured_entitlements()?
+            .into_iter()
+            .map(|entry| entry.with_telemetry(telemetry))
             .collect())
     }
 

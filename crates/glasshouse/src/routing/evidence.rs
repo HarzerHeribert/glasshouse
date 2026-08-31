@@ -1397,18 +1397,26 @@ pub fn correlate_routes(observations: &[RoutingObservation]) -> RouteCorrelation
 /// [`correlate_routes`] measures, restricted to [`FailureClass::Throttle`]
 /// and to one provider's own models rather than every route in the ledger.
 ///
-/// # Two of the map line's four scopes are not here
+/// # One of the map line's four scopes is still not here
 ///
 /// Line 1317 names four: provider-wide, model-specific, account-specific,
-/// request-pool-specific. Only the first two have a producer in this build.
-/// **Account-specific** has none: this build routes one credential per
-/// provider, and no [`RoutingObservation`] row carries an account identity —
-/// there is nothing to key a second account by. **Request-pool-specific**
-/// has neither a producer nor a consumer: `routing::free::is_request_pool`
-/// has no production caller, and the one production allowance read asks only
-/// `is_exhausted`, which a pooled and a token-priced credential both answer
-/// the same way (refusal register, row 531). Fabricating either would be
-/// exactly the invention line 1317's own "when evidence permits" refuses.
+/// request-pool-specific. Three now have a producer in this build.
+/// **Account-specific** gained its key with Phase 56A: every gateway
+/// exchange row carries the serving credential's label in
+/// [`RoutingObservation::quota_context`]
+/// (`crate::gateway::session` stamps `credential().label()` on every
+/// observation), so a second account of one provider is now something the
+/// rows can tell apart — the earlier note here that *"no row carries an
+/// account identity"* described the build before that column had its
+/// producer. The variant is still emitted only when the evidence permits:
+/// rows without a `quota_context` contribute nothing to it, and a ledger
+/// with one account's rows classifies exactly as it always did.
+/// **Request-pool-specific** still has neither a producer nor a consumer:
+/// `routing::free::is_request_pool` has no production caller, and the one
+/// production allowance read asks only `is_exhausted`, which a pooled and a
+/// token-priced credential both answer the same way (refusal register, row
+/// 531). Fabricating it would be exactly the invention line 1317's own
+/// "when evidence permits" refuses.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ThrottleScope {
     /// A throttle on this route overlapped, within
@@ -1420,6 +1428,17 @@ pub enum ThrottleScope {
     /// of the same provider recording a **non-throttle** outcome — evidence
     /// the limiter is scoped to this model alone.
     ModelSpecific,
+    /// A throttle on this route overlapped sibling-model throttles of the
+    /// **same account** while a **different account** of the same provider
+    /// (another [`RoutingObservation::quota_context`]) recorded a
+    /// non-throttle outcome in the same window — the limiter reached more
+    /// than one of this account's models, and another account kept serving
+    /// through it, which refutes provider-wide without claiming
+    /// model-specific. Never emitted from rows that carry no
+    /// `quota_context`: with no account key the sibling-model overlap still
+    /// reads [`ThrottleScope::ProviderWide`], exactly as before the key
+    /// existed.
+    AccountSpecific,
     /// Fewer than [`MIN_CORRELATION_SAMPLE`] informative throttle events for
     /// this route — line 1376's own refusal shape, reused rather than given
     /// a second minimum: this ledger keeps one answer to *how many
@@ -1465,6 +1484,59 @@ fn count_throttles_against_siblings(
     (overlaps, lone)
 }
 
+/// The account axis of [`classify_throttle_scope`]: for each informative
+/// throttle on the route that carries a [`RoutingObservation::quota_context`],
+/// whether a row of a **different** account of the same provider (any model,
+/// a different `quota_context`) was observed within
+/// [`CORRELATION_OVERLAP_TOLERANCE_SECONDS`] — and whether that other
+/// account was throttled too. Rows without a context contribute nothing on
+/// either side: an account this column cannot name is not evidence about
+/// accounts.
+///
+/// Returns `(cross_throttle, cross_served)`: throttles during which another
+/// account was also throttled, and throttles during which another account
+/// recorded a non-throttle outcome.
+fn count_throttles_against_other_accounts(
+    failing: &[&RoutingObservation],
+    provider_rows: &[&RoutingObservation],
+) -> (usize, usize) {
+    let mut cross_throttle = 0usize;
+    let mut cross_served = 0usize;
+    for failure in failing {
+        if failure.failure_class != Some(FailureClass::Throttle) {
+            continue;
+        }
+        let Some(account) = failure.quota_context.as_deref() else {
+            continue;
+        };
+        let window = failure.window();
+        let mut served = false;
+        let mut throttled = false;
+        for row in provider_rows {
+            let Some(other) = row.quota_context.as_deref() else {
+                continue;
+            };
+            if other == account {
+                continue;
+            }
+            if !overlaps_within(window, row.window(), CORRELATION_OVERLAP_TOLERANCE_SECONDS) {
+                continue;
+            }
+            if row.failure_class == Some(FailureClass::Throttle) {
+                throttled = true;
+                break;
+            }
+            served = true;
+        }
+        if throttled {
+            cross_throttle += 1;
+        } else if served {
+            cross_served += 1;
+        }
+    }
+    (cross_throttle, cross_served)
+}
+
 /// Line 1317, as a pure function over raw rows — the same shape
 /// [`correlate_routes`] takes, restricted to `route`'s own provider's other
 /// models rather than every other route in the ledger: line 1317 asks
@@ -1497,8 +1569,18 @@ pub fn classify_throttle_scope(
         .filter(|row| row.provider == route.provider && row.model != route.model)
         .filter(informative)
         .collect();
+    // The account axis reads every informative row of the provider, the
+    // failing route's own model included: another account running the *same*
+    // model is still another account.
+    let provider_rows: Vec<&RoutingObservation> = observations
+        .iter()
+        .filter(|row| row.provider == route.provider)
+        .filter(informative)
+        .collect();
 
     let (overlaps, lone) = count_throttles_against_siblings(&failing, &siblings);
+    let (cross_throttle, cross_served) =
+        count_throttles_against_other_accounts(&failing, &provider_rows);
     let sample_size = overlaps + lone;
     if sample_size < MIN_CORRELATION_SAMPLE {
         return ThrottleScope::Unknown {
@@ -1506,8 +1588,18 @@ pub fn classify_throttle_scope(
             required: MIN_CORRELATION_SAMPLE,
         };
     }
-    if overlaps > 0 {
+    if cross_throttle > 0 {
+        // Two accounts throttled in one window: the limiter provably
+        // reached past any single account, whatever the models said.
         ThrottleScope::ProviderWide
+    } else if overlaps > 0 {
+        if cross_served > 0 {
+            // This account's sibling models throttled together while a
+            // different account kept serving — see the variant's own doc.
+            ThrottleScope::AccountSpecific
+        } else {
+            ThrottleScope::ProviderWide
+        }
     } else {
         ThrottleScope::ModelSpecific
     }
@@ -1565,6 +1657,66 @@ pub fn classify_throttle_scopes(observations: &[RoutingObservation]) -> Throttle
         })
         .collect();
     ThrottleScopes { routes }
+}
+
+/// Map line 1965's recent-throttling facet, counted from raw rows: how many
+/// informative throttles the window's observations record against
+/// `provider`, and whether that count could honestly be narrowed to one
+/// account.
+///
+/// `account_narrowed` is `true` only when **every** throttle row of the
+/// provider carries a [`RoutingObservation::quota_context`] and a
+/// `credential_label` was given to narrow by — then `throttled` counts that
+/// account's own rows alone. Any context-less throttle row makes the whole
+/// reading provider-wide instead: a throttle no row attributes to an account
+/// cannot be subtracted from one, so the honest count is the provider's
+/// total, shared by every entitlement of that provider. Zero rows are a
+/// provider-wide zero for the same reason — "none observed" is an
+/// observation about the provider's rows, not about one account's.
+///
+/// The same informative-row rule as [`classify_throttle_scope`]: rows with
+/// no recorded outcome and the correlation reader's own
+/// [`CORRELATION_PURPOSE`] rows are not evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CredentialThrottles {
+    /// Informative throttles counted — the account's own when
+    /// `account_narrowed`, the provider's total otherwise.
+    pub throttled: usize,
+    /// Whether `throttled` is the named credential's own count rather than
+    /// the provider-wide total.
+    pub account_narrowed: bool,
+}
+
+/// See [`CredentialThrottles`]. `credential_label` is the
+/// [`crate::routing::CredentialId::label`] shape the gateway stamps into
+/// [`RoutingObservation::quota_context`]; `None` — an entitlement with no
+/// credential of its own — always yields the provider-wide count.
+pub fn recent_credential_throttles(
+    observations: &[RoutingObservation],
+    provider: &str,
+    credential_label: Option<&str>,
+) -> CredentialThrottles {
+    let throttles: Vec<&RoutingObservation> = observations
+        .iter()
+        .filter(|row| row.provider == provider)
+        .filter(|row| row.failure_class == Some(FailureClass::Throttle))
+        .filter(|row| row.outcome.is_some() && row.purpose.as_deref() != Some(CORRELATION_PURPOSE))
+        .collect();
+    let every_row_names_its_account =
+        !throttles.is_empty() && throttles.iter().all(|row| row.quota_context.is_some());
+    match credential_label {
+        Some(label) if every_row_names_its_account => CredentialThrottles {
+            throttled: throttles
+                .iter()
+                .filter(|row| row.quota_context.as_deref() == Some(label))
+                .count(),
+            account_narrowed: true,
+        },
+        _ => CredentialThrottles {
+            throttled: throttles.len(),
+            account_narrowed: false,
+        },
+    }
 }
 
 /// Request and token consumption for one `(purpose, harness_recorded)`
@@ -2363,31 +2515,45 @@ impl EvidenceLedger {
         now_unix: i64,
         window_seconds: i64,
     ) -> Result<ThrottleScopes, EvidenceLedgerError> {
+        Ok(classify_throttle_scopes(
+            &self.observations_in_window(now_unix, window_seconds)?,
+        ))
+    }
+
+    /// Every outcome-carrying observation in the window ending at `now_unix`
+    /// — the exact row set [`Self::throttle_scopes`] and
+    /// [`Self::route_correlations`] classify, exposed for a caller that
+    /// needs the rows themselves: map line 1965's entitlement telemetry
+    /// resolver narrows them by provider and
+    /// [`RoutingObservation::quota_context`]
+    /// ([`recent_credential_throttles`]).
+    pub fn observations_in_window(
+        &self,
+        now_unix: i64,
+        window_seconds: i64,
+    ) -> Result<Vec<RoutingObservation>, EvidenceLedgerError> {
         let earliest = now_unix.saturating_sub(window_seconds);
-        let observations = {
-            let conn = self.lock();
-            let mut statement = conn
-                .prepare(
-                    "SELECT * FROM routing_observations
-                     WHERE project_id = ?1
-                       AND observed_at >= ?2 AND observed_at <= ?3
-                       AND outcome IS NOT NULL
-                     ORDER BY observed_at ASC",
-                )
-                .map_err(sql_err("read routing observations for throttle scope"))?;
-            let rows = statement
-                .query_map(
-                    params![self.project_id, earliest, now_unix],
-                    row_to_observation,
-                )
-                .map_err(sql_err("read routing observations for throttle scope"))?;
-            let mut observations = Vec::new();
-            for row in rows {
-                observations.push(row.map_err(sql_err("read a routing observation"))??);
-            }
-            observations
-        };
-        Ok(classify_throttle_scopes(&observations))
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(
+                "SELECT * FROM routing_observations
+                 WHERE project_id = ?1
+                   AND observed_at >= ?2 AND observed_at <= ?3
+                   AND outcome IS NOT NULL
+                 ORDER BY observed_at ASC",
+            )
+            .map_err(sql_err("read routing observations in a window"))?;
+        let rows = statement
+            .query_map(
+                params![self.project_id, earliest, now_unix],
+                row_to_observation,
+            )
+            .map_err(sql_err("read routing observations in a window"))?;
+        let mut observations = Vec::new();
+        for row in rows {
+            observations.push(row.map_err(sql_err("read a routing observation"))??);
+        }
+        Ok(observations)
     }
 
     /// [`Self::summarize`] for whichever `(route, harness, context_state)`
@@ -4681,6 +4847,204 @@ mod throttle_scope_tests {
             scopes.iter().count(),
             2,
             "only the two throttled routes are stored"
+        );
+    }
+
+    /// `row` with the account key line 1965's facets read —
+    /// [`RoutingObservation::quota_context`], the credential label the
+    /// gateway stamps on every exchange.
+    fn account_row(
+        provider: &str,
+        model: &str,
+        account: &str,
+        start: i64,
+        class: Option<FailureClass>,
+    ) -> RoutingObservation {
+        let mut observation = row(provider, model, start, start + 5, class);
+        observation.quota_context = Some(account.to_owned());
+        observation
+    }
+
+    /// Line 1317's account-specific scope, now that the key exists: five
+    /// windows where account A's sibling models `x` and `y` throttled
+    /// together while account B of the same provider kept serving. Without
+    /// the account key this exact shape reads provider-wide (the sibling
+    /// models overlapped) — the other account serving through it is what
+    /// refutes that.
+    #[test]
+    fn sibling_throttles_beside_another_account_serving_read_as_account_specific() {
+        let rows: Vec<RoutingObservation> = (0..5)
+            .flat_map(|i| {
+                let at = i * 1_000;
+                [
+                    account_row("a", "x", "a/KEY_A", at, Some(FailureClass::Throttle)),
+                    account_row("a", "y", "a/KEY_A", at + 10, Some(FailureClass::Throttle)),
+                    account_row("a", "x", "a/KEY_B", at + 20, None),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            classify_throttle_scope(&rows, &route("a", "x")),
+            ThrottleScope::AccountSpecific,
+            "account A's models throttled together while account B kept serving"
+        );
+    }
+
+    /// The refuting evidence for account-specificity: the *other account*
+    /// throttled in the same window too, so the limiter provably reached
+    /// past one account and the verdict stays provider-wide.
+    #[test]
+    fn a_throttle_shared_by_two_accounts_stays_provider_wide() {
+        let rows: Vec<RoutingObservation> = (0..5)
+            .flat_map(|i| {
+                let at = i * 1_000;
+                [
+                    account_row("a", "x", "a/KEY_A", at, Some(FailureClass::Throttle)),
+                    account_row("a", "y", "a/KEY_A", at + 10, Some(FailureClass::Throttle)),
+                    account_row("a", "x", "a/KEY_B", at + 20, Some(FailureClass::Throttle)),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            classify_throttle_scope(&rows, &route("a", "x")),
+            ThrottleScope::ProviderWide,
+            "two accounts throttled in one window is the limiter reaching past either"
+        );
+    }
+
+    /// Rows with no account key classify exactly as they did before the key
+    /// existed — the account axis is evidence-permitting, never inferred:
+    /// the same five sibling-throttle windows with no `quota_context`
+    /// anywhere still read provider-wide even when a context-less row was
+    /// serving beside them.
+    #[test]
+    fn contextless_rows_never_produce_an_account_specific_verdict() {
+        let rows: Vec<RoutingObservation> = (0..5)
+            .flat_map(|i| {
+                let at = i * 1_000;
+                [
+                    throttle("a", "x", at),
+                    throttle("a", "y", at + 10),
+                    served("a", "z", at + 20),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            classify_throttle_scope(&rows, &route("a", "x")),
+            ThrottleScope::ProviderWide,
+            "no row names an account, so nothing may claim an account boundary"
+        );
+    }
+}
+
+#[cfg(test)]
+mod credential_throttle_tests {
+    use super::*;
+
+    fn row(
+        provider: &str,
+        account: Option<&str>,
+        class: Option<FailureClass>,
+    ) -> RoutingObservation {
+        RoutingObservation {
+            seq: 0,
+            project_id: "project".to_owned(),
+            observed_at_unix: 1_000,
+            provider: provider.to_owned(),
+            model: "m".to_owned(),
+            route: Some("anthropic-messages".to_owned()),
+            quota_context: account.map(str::to_owned),
+            harness: Some("claude-code".to_owned()),
+            purpose: None,
+            dispatched_at_unix: Some(995),
+            first_byte_at_unix: None,
+            first_token_at_unix: None,
+            first_tool_call_at_unix: None,
+            completed_at_unix: Some(1_000),
+            input_tokens: None,
+            output_tokens: None,
+            cached_input_tokens: None,
+            cost: None,
+            tool_rounds: None,
+            retries: None,
+            repairs: None,
+            failovers: None,
+            outcome: Some(if class.is_some() {
+                Outcome::Failed
+            } else {
+                Outcome::Succeeded
+            }),
+            failure_class: class,
+            context_state: ContextState::Unknown,
+        }
+    }
+
+    const THROTTLE: Option<FailureClass> = Some(FailureClass::Throttle);
+
+    /// Map line 1965's per-account narrowing: every throttle row of the
+    /// provider names its account, so each credential is counted its own
+    /// rows and no other's — and another provider's throttles are not this
+    /// provider's however many there are.
+    #[test]
+    fn every_row_naming_its_account_narrows_the_count_to_the_credential() {
+        let rows = vec![
+            row("alpha", Some("alpha/KEY_A"), THROTTLE),
+            row("alpha", Some("alpha/KEY_A"), THROTTLE),
+            row("alpha", Some("alpha/KEY_B"), THROTTLE),
+            row("beta", None, THROTTLE),
+            row("beta", None, THROTTLE),
+        ];
+        let counted = recent_credential_throttles(&rows, "alpha", Some("alpha/KEY_A"));
+        assert_eq!(
+            counted,
+            CredentialThrottles {
+                throttled: 2,
+                account_narrowed: true,
+            },
+            "KEY_A's own rows, not KEY_B's and not beta's"
+        );
+        let sibling = recent_credential_throttles(&rows, "alpha", Some("alpha/KEY_B"));
+        assert_eq!(sibling.throttled, 1);
+        assert!(sibling.account_narrowed);
+    }
+
+    /// One context-less throttle row makes the whole reading provider-wide:
+    /// a throttle no row attributes to an account cannot be subtracted from
+    /// one, so the honest count is the provider's total.
+    #[test]
+    fn a_contextless_throttle_row_widens_the_reading_to_provider_scope() {
+        let rows = vec![
+            row("alpha", Some("alpha/KEY_A"), THROTTLE),
+            row("alpha", None, THROTTLE),
+        ];
+        let counted = recent_credential_throttles(&rows, "alpha", Some("alpha/KEY_A"));
+        assert_eq!(
+            counted,
+            CredentialThrottles {
+                throttled: 2,
+                account_narrowed: false,
+            }
+        );
+    }
+
+    /// Zero rows are a provider-wide zero — "none observed" is a statement
+    /// about the provider's rows, never a per-account claim — and rows that
+    /// are not informative throttles (a served exchange, a correlation
+    /// probe's own row, a row with no outcome) contribute nothing.
+    #[test]
+    fn only_informative_throttles_count_and_zero_is_provider_wide() {
+        let mut probe = row("alpha", Some("alpha/KEY_A"), THROTTLE);
+        probe.purpose = Some(CORRELATION_PURPOSE.to_owned());
+        let mut outcomeless = row("alpha", Some("alpha/KEY_A"), THROTTLE);
+        outcomeless.outcome = None;
+        let rows = vec![row("alpha", Some("alpha/KEY_A"), None), probe, outcomeless];
+        let counted = recent_credential_throttles(&rows, "alpha", Some("alpha/KEY_A"));
+        assert_eq!(
+            counted,
+            CredentialThrottles {
+                throttled: 0,
+                account_narrowed: false,
+            }
         );
     }
 }
