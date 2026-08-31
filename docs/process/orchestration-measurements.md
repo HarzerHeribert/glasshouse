@@ -4036,3 +4036,55 @@ subprocess test (`v1_1907`) during the broker blast — it passes isolated, the
 classic §34 load flake; and an untracked helper (`swarm-collate.sh`) dirtied the
 tree and made `integrate.sh` refuse until committed — the swarm findings dir
 itself is gitignored, which is what keeps it collision-free.
+
+## Batch 68 — 2026-08-31 late evening, the swarm's fixes dispatched eight-wide
+
+The user's instruction was to spend the remaining weekly quota before the
+midnight reset: *"delegate aggressively … if no work packages are left to give
+out, spawn workers to find untested edge cases which could cause crashes … or
+better yet do that in parallel while working on the newer packages."* Eight
+workers dispatched in one wave, every partition file-disjoint and every
+`FORBIDDEN FILES` block naming the other seven's files:
+
+| package | tier | model / effort | source |
+|---|---|---|---|
+| session-restart-identity | Red | opus / high | swarm break/pty-session #1 |
+| translate-stream-order | Amber | sonnet / high | swarm break/gateway-translate #1 |
+| config-hardening | Amber | sonnet / high | swarm break/config-entitlements #1–#3 |
+| memory-dedup-subject | Amber | sonnet / medium | swarm break/memory #1 |
+| cmux-send-escape | Amber | sonnet / high | swarm break/cli #1 |
+| memory-injection-bounds | Amber | sonnet / high | swarm break/memory #2–#5 |
+| break-store-db | investigation | sonnet / high | NEW lane — the persistence layer the 12-agent swarm never covered |
+| break-cli-surface | investigation | sonnet / high | NEW lane — CLI dispatch/parsing edges beyond break/cli's five |
+
+**Six of the eight close no capability-map box.** They are defect fixes against
+`.agent-runtime/swarm-2026-08-31/`'s accepted findings, so every packet carries
+`lines: []` and records its proof under `gates:` instead — the facts-block
+schema already allows this, and it keeps `evidence_from_report.py` from being
+handed a box it must not authorise.
+
+**Phase −1 was re-derived from current source for all six fix packets before
+dispatch**, not taken from the swarm reports: `push_str("\\r")` still raw at
+cmux.rs:492; `deny_unknown_fields` still 0 in config/mod.rs; `duplicate_key`
+still uncalled in production; `consider_restart` still returning its `ended`
+vector unchanged at runtime.rs:1353; no `canonical::Order` in the tree;
+`MAX_OBSERVED_PATHS` absent and `break` still at inject.rs:368. Every defect
+was live at dispatch time.
+
+**A validator trap worth recording.** `validate_round.py`'s FEASIBILITY regex
+ends `\s*(?::|[-—–]|$)`, and `\s*` crosses newlines — so a block whose
+first body line is `- Producer:` has that bullet's dash consumed as the header's
+own delimiter, and the check then reports `never names: producer` for a packet
+that plainly does. Five packets failed this way at once. The fix is one lead-in
+sentence between `## FEASIBILITY` and the first bullet; the skeleton
+`new-packet.sh` emits passes only because its first body line starts `TODO`.
+
+**Two investigation lanes, each naming its successor** (§86): `break-store-db`
+→ `swarm-fixes-store`, `break-cli-surface` → `swarm-fixes-cli`. Both are
+read-only on the tree but build and run the shipped binary against scratch data
+dirs — the persistence lane is aimed squarely at the shapes unit tests cannot
+reach (two processes on one database, SIGKILL mid-migration, a truncated file,
+a schema version from the future), which is where every real Glasshouse defect
+has been found.
+
+Outcomes, boxes and cost per box: to be filled in when the wave lands.
