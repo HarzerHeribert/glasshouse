@@ -2701,7 +2701,23 @@ impl<'a> SessionStore<'a> {
 /// Build a record from a row, turning an unrecognized enum string into a
 /// typed error rather than a panic or a silent default.
 fn read_record(row: &Row<'_>) -> Result<SessionRecord, SessionStoreError> {
-    let id = SessionId(row.get_unwrap::<_, String>(0));
+    // `row.get_unwrap` panics on any conversion failure, including a TEXT
+    // column whose stored bytes are not valid UTF-8 -- which a single bit
+    // flip in an otherwise untouched database file can produce without
+    // `PRAGMA integrity_check` ever noticing, and which then crashes every
+    // future command that lists or looks up a session. `col` reports that
+    // the same way every other store in this crate reports a SQL failure.
+    fn col<T: rusqlite::types::FromSql>(
+        row: &Row<'_>,
+        index: usize,
+    ) -> Result<T, SessionStoreError> {
+        row.get(index).map_err(|source| SessionStoreError::Sql {
+            action: "read a session column",
+            source,
+        })
+    }
+
+    let id = SessionId(col::<String>(row, 0)?);
 
     fn decode<T>(
         id: &SessionId,
@@ -2716,9 +2732,9 @@ fn read_record(row: &Row<'_>) -> Result<SessionRecord, SessionStoreError> {
         })
     }
 
-    let role_text: String = row.get_unwrap(4);
-    let lifecycle_text: String = row.get_unwrap(5);
-    let presentation_text: String = row.get_unwrap(6);
+    let role_text: String = col(row, 4)?;
+    let lifecycle_text: String = col(row, 5)?;
+    let presentation_text: String = col(row, 6)?;
 
     let role = decode(
         &id,
@@ -2744,80 +2760,75 @@ fn read_record(row: &Row<'_>) -> Result<SessionRecord, SessionStoreError> {
     // newer build is then a legible error naming the column and the value,
     // which is what a person needs; a silent default would report a session
     // as having run under something it did not.
-    let model = optional(&id, "model", row.get_unwrap(11), decode_assigned_model)?;
+    let model = optional(&id, "model", col(row, 11)?, decode_assigned_model)?;
     let pairing_class = optional(
         &id,
         "pairing_class",
-        row.get_unwrap(12),
+        col(row, 12)?,
         SessionPairingClass::from_str,
     )?;
-    let protocol = optional(
-        &id,
-        "protocol",
-        row.get_unwrap(13),
-        SessionProtocol::from_str,
-    )?;
+    let protocol = optional(&id, "protocol", col(row, 13)?, SessionProtocol::from_str)?;
     let response_profile = optional(
         &id,
         "response_profile",
-        row.get_unwrap(14),
+        col(row, 14)?,
         decode_response_profile,
     )?;
     let response_mechanism = optional(
         &id,
         "response_mechanism",
-        row.get_unwrap(15),
+        col(row, 15)?,
         ResponseMechanism::from_str,
     )?;
     // The two labels are stored as the person typed them, so a stored value
     // that no longer parses — a bound tightened in a later release — is
     // reported rather than shown truncated.
-    let display_name = optional(&id, "display_name", row.get_unwrap(16), |value| {
+    let display_name = optional(&id, "display_name", col(row, 16)?, |value| {
         SessionName::parse(value).ok()
     })?;
-    let purpose = optional(&id, "purpose", row.get_unwrap(17), |value| {
+    let purpose = optional(&id, "purpose", col(row, 17)?, |value| {
         SessionPurpose::parse(value).ok()
     })?;
     // Never decoded, only wrapped: an identifier does not fail to parse the
     // way an enum's stored word can.
-    let source_session_id: Option<String> = row.get_unwrap(18);
+    let source_session_id: Option<String> = col(row, 18)?;
     let source_session_id = source_session_id.map(SessionId);
     // Never decoded either, and deliberately read as an `Option` rather than
     // with a fallback: NULL is a fact this column carries — see
     // [`SessionRecord::observed_compactions`] — and `unwrap_or(0)` here would
     // erase it at the one point every reader in the crate passes through.
-    let observed_compactions: Option<i64> = row.get_unwrap(19);
+    let observed_compactions: Option<i64> = col(row, 19)?;
     // Opaque, like `source_session_id`: a reference the presenting backend
     // understands, stored and returned as given. Validating its shape here
     // would teach this module what a backend's references look like, which
     // is the one thing line 762 says it must not learn.
-    let presentation_ref: Option<String> = row.get_unwrap(20);
+    let presentation_ref: Option<String> = col(row, 20)?;
     // Never decoded either: an object name is forty hex characters or it is
     // not one, and this column is only ever written from
     // `GitPosition::detect`, which already refuses anything else. Read as an
     // `Option` for `observed_compactions`' reason — NULL is the fact
     // "nobody has looked yet" and no fallback may erase it.
-    let last_seen_commit: Option<String> = row.get_unwrap(21);
+    let last_seen_commit: Option<String> = col(row, 21)?;
     // Opaque, like `presentation_ref`: the key of a `[entitlements.<name>]`
     // table, which is whatever a person typed in their own configuration
     // file, and this module does not know what names that file may hold. Read
     // as an `Option` for `observed_compactions`' reason — NULL is the fact
     // "the serving account was never established" and no fallback may erase
     // it into a name.
-    let entitlement: Option<String> = row.get_unwrap(22);
+    let entitlement: Option<String> = col(row, 22)?;
 
     Ok(SessionRecord {
         id,
-        project_id: row.get_unwrap(1),
-        harness: row.get_unwrap(2),
-        native_session_id: row.get_unwrap(3),
+        project_id: col(row, 1)?,
+        harness: col(row, 2)?,
+        native_session_id: col(row, 3)?,
         role,
         lifecycle,
         presentation,
-        created_at: row.get_unwrap(7),
-        last_activity_at: row.get_unwrap(8),
-        launch_profile: row.get_unwrap(9),
-        backend_resource: row.get_unwrap(10),
+        created_at: col(row, 7)?,
+        last_activity_at: col(row, 8)?,
+        launch_profile: col(row, 9)?,
+        backend_resource: col(row, 10)?,
         model,
         pairing_class,
         protocol,
@@ -5415,6 +5426,76 @@ mod tests {
                 }
                 other => panic!("expected the column and the value to be named, got: {other}"),
             }
+        }
+
+        /// A `harness` column holding bytes that are not valid UTF-8 — the
+        /// shape a single flipped bit in an otherwise-intact row produces,
+        /// invisible to `PRAGMA integrity_check` (`store-db.md` finding #1) —
+        /// must be a reported error from `get` and `list`, never a panic that
+        /// takes down every later invocation that reads a session back.
+        ///
+        /// On the unpatched tree (`row.get_unwrap` in `read_record`) this
+        /// panics with exactly:
+        ///   called `Result::unwrap()` on an `Err` value: Utf8Error(0, Utf8Error { valid_up_to: 0, error_len: Some(1) })
+        #[test]
+        fn a_hostile_harness_column_is_a_reported_error_not_a_panic() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(tmp.path(), "alpha");
+            let store = fixture.store();
+            let record = store.create(NewSession::embedded("codex")).unwrap();
+
+            fixture
+                .conn
+                .execute(
+                    "UPDATE sessions SET harness = CAST(x'ff' AS TEXT) WHERE id = ?1",
+                    [record.id.as_str()],
+                )
+                .unwrap();
+
+            let error = store
+                .get(&record.id)
+                .expect_err("a hostile column must not panic `get`");
+            assert!(
+                matches!(error, SessionStoreError::Sql { .. }),
+                "expected Sql, got {error:?}"
+            );
+
+            let error = store
+                .list()
+                .expect_err("a hostile column must not panic `list`");
+            assert!(
+                matches!(error, SessionStoreError::Sql { .. }),
+                "expected Sql, got {error:?}"
+            );
+        }
+
+        /// `entitlement` (migration 22, the newest column `read_record` reads)
+        /// is never decoded, only wrapped — same shape as `source_session_id`
+        /// and `presentation_ref` — and shares the same failure mode: a
+        /// present value that is not valid UTF-8 must surface as
+        /// [`SessionStoreError::Sql`], not a panic.
+        #[test]
+        fn a_hostile_entitlement_column_is_a_reported_error_not_a_panic() {
+            let tmp = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(tmp.path(), "alpha");
+            let store = fixture.store();
+            let record = store.create(NewSession::embedded("codex")).unwrap();
+
+            fixture
+                .conn
+                .execute(
+                    "UPDATE sessions SET entitlement = CAST(x'ff' AS TEXT) WHERE id = ?1",
+                    [record.id.as_str()],
+                )
+                .unwrap();
+
+            let error = store
+                .get(&record.id)
+                .expect_err("a hostile entitlement column must not panic `get`");
+            assert!(
+                matches!(error, SessionStoreError::Sql { .. }),
+                "expected Sql, got {error:?}"
+            );
         }
 
         /// Migration 8 applies to a database created by the previous schema, and

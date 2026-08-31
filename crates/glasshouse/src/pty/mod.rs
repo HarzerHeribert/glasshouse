@@ -360,6 +360,66 @@ impl std::fmt::Debug for PtyOutput {
     }
 }
 
+#[cfg(test)]
+impl PtyOutput {
+    /// A [`PtyOutput`] over something that is not a pseudo-terminal.
+    ///
+    /// Test-only, and deliberately so: the readers above this type are the
+    /// crate's only consumers of it, and the failures they must survive —
+    /// an interrupted read, a hangup mid-stream — cannot be produced on
+    /// demand from a real pty. Production builds one place only, in
+    /// [`PtyProcess::spawn_with`].
+    pub(crate) fn from_reader(reader: impl Read + Send + 'static) -> Self {
+        Self {
+            inner: Box::new(reader),
+        }
+    }
+}
+
+/// Read the next chunk from a terminal, retrying a read that a signal
+/// interrupted.
+///
+/// `None` means nothing more is coming — end-of-file, or an error that is not
+/// retryable. `Some(n)` is always a non-zero count.
+///
+/// # Why an interrupted read is not an ending
+///
+/// [`std::io::Read::read`] does not retry `EINTR` itself — only the
+/// `read_exact`/`read_to_end` family does — so a signal arriving while a
+/// reader thread is blocked in `read` surfaces here as
+/// [`std::io::ErrorKind::Interrupted`], and it says nothing at all about the
+/// far end.
+///
+/// Every reader above this one is the *only* thing draining its terminal, and
+/// none of them is ever restarted: `spawn_reader` is called from
+/// `SessionRuntime::start` and `consider_restart` and nowhere else, and
+/// `attach`'s two pumps are spawned once per session. Folding an interrupted
+/// read in with a hangup therefore ends that drain for good, publishes
+/// `OutputEnded` for a harness that is still alive, and leaves the
+/// pseudo-terminal to fill until the harness blocks on its own `write` — the
+/// same outcome the poisoned-lock arms in `pump` already refuse to cause, and
+/// which those arms' own comment calls far worse than a gap in the history.
+///
+/// Every other error kind still ends the loop, because that is what they mean
+/// here: a pty reports the end of a session as end-of-file on some platforms
+/// and as a read error on others, and neither is a fault to report — the exit
+/// status comes from the process, not from this.
+///
+/// Not platform-conditional. `Interrupted` is a Unix concept in practice and
+/// Windows reads essentially never produce it, so retrying it there costs a
+/// comparison on a branch that is not taken; making the arm `#[cfg(unix)]`
+/// would buy nothing and leave two spellings of one decision.
+pub(crate) fn next_chunk(reader: &mut impl Read, buffer: &mut [u8]) -> Option<usize> {
+    loop {
+        match reader.read(buffer) {
+            Ok(0) => return None,
+            Ok(read) => return Some(read),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+}
+
 /// What a session's terminal is doing with the bytes written to it.
 ///
 /// # Why anything above the pty needs to know
@@ -743,9 +803,60 @@ fn open_pty(
     )
 }
 
+/// End and reap a child that a failed spawn is about to abandon.
+///
+/// `portable_pty::Child` is `std::process::Child` on Unix (portable-pty 0.9.0,
+/// `src/lib.rs:271`), whose `Drop` neither kills nor reaps. Dropping one on an
+/// error path therefore leaves the harness running with nobody holding its
+/// terminal, and its pid unreaped for the life of this process — the two leaks
+/// [`PtyProcess::drop`] exists to prevent, on the one path where there is no
+/// `PtyProcess` yet to run it.
+///
+/// The `wait` is unconditional rather than conditional on the kill having
+/// succeeded: a child that had already exited is exactly the case that leaves
+/// a permanent zombie, and a killed one returns from `wait` immediately.
+///
+/// # Platform
+///
+/// On Unix this reaches the child's whole process group, the same way
+/// [`PtyProcess::signal`] does. On Windows it can only reach the direct child:
+/// the Job Object that makes a kill reach grandchildren is created further
+/// down `spawn`, after the point every caller of this function has failed at,
+/// so a harness whose real work lives in a grandchild (`cmd.exe` shim around
+/// `node.exe`) could still leave that grandchild behind here. That is strictly
+/// better than today's leak of both and is the most this point in `spawn` can
+/// do; moving the Job Object above the reader and writer would be the fix, and
+/// is not attempted here.
+fn end_abandoned_child(child: &mut Box<dyn portable_pty::Child + Send + Sync>) {
+    #[cfg(unix)]
+    let _ = process::signal_process(ProcessSignal::Kill, child.as_ref());
+    #[cfg(windows)]
+    {
+        let mut killer = child.clone_killer();
+        // `None` for the job: there is not one yet at any point this is
+        // called. `signal_process` treats the direct killer's result as
+        // advisory, for the inverted-result reason recorded there.
+        let _ = process::signal_process(ProcessSignal::Kill, None, killer.as_mut());
+    }
+    let _ = child.wait();
+}
+
 impl PtyProcess {
     /// Open a pseudo-terminal and spawn the command into it.
     pub fn spawn(command: TerminalCommand) -> Result<(Self, PtyOutput)> {
+        Self::spawn_with(command, |size| native_pty_system().openpty(size))
+    }
+
+    /// [`PtyProcess::spawn`], with the pseudo-terminal allocator injected.
+    ///
+    /// Same seam and same reason as [`open_pty`]'s: production passes
+    /// `native_pty_system()`, and a test passes an allocator whose master
+    /// fails in the narrow window between the child starting and this
+    /// function owning it — the window this function must not leak in.
+    fn spawn_with(
+        command: TerminalCommand,
+        allocate: impl FnMut(PtySize) -> Result<PtyPair>,
+    ) -> Result<(Self, PtyOutput)> {
         let program = command.program().to_path_buf();
         let cwd = command.cwd().to_path_buf();
 
@@ -759,9 +870,9 @@ impl PtyProcess {
 
         let (builder, size) = command.into_builder();
 
-        let pair = open_pty(size.into(), |size| native_pty_system().openpty(size))?;
+        let pair = open_pty(size.into(), allocate)?;
 
-        let child = pair.slave.spawn_command(builder).with_context(|| {
+        let mut child = pair.slave.spawn_command(builder).with_context(|| {
             format!(
                 "could not start `{}` in `{}`",
                 program.display(),
@@ -798,14 +909,27 @@ impl PtyProcess {
         // reader, that drop must never happen on a UI thread.
         drop(pair.slave);
 
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .context("could not read from the pseudo-terminal")?;
-        let writer = pair
-            .master
-            .take_writer()
-            .context("could not write to the pseudo-terminal")?;
+        // Not `?`. The harness is already running at this point and is not
+        // yet owned by a `PtyProcess`, so a bare return here abandons it:
+        // still running, holding a terminal nothing references, and never
+        // reaped. `try_clone_reader` is a `dup()` of the master fd, so
+        // `EMFILE`/`ENFILE` under many concurrent sessions reaches this by
+        // ordinary resource pressure — the same class of failure `open_pty`
+        // above already retries five times for.
+        let reader = match pair.master.try_clone_reader() {
+            Ok(reader) => reader,
+            Err(error) => {
+                end_abandoned_child(&mut child);
+                return Err(error).context("could not read from the pseudo-terminal");
+            }
+        };
+        let writer = match pair.master.take_writer() {
+            Ok(writer) => writer,
+            Err(error) => {
+                end_abandoned_child(&mut child);
+                return Err(error).context("could not write to the pseudo-terminal");
+            }
+        };
 
         #[cfg(windows)]
         let killer = child.clone_killer();
@@ -1302,6 +1426,174 @@ mod tests {
         assert!(
             message.contains("could not open a pseudo-terminal"),
             "the caller-facing context must survive: {message}"
+        );
+    }
+
+    /// An interrupted read says nothing about the far end, so `next_chunk`
+    /// must go back and read again rather than report an ending. Everything
+    /// else — end-of-file and every other error kind — still ends the loop.
+    ///
+    /// Non-vacuity: delete the `Interrupted` arm and the first assertion
+    /// fails with `None`, which is the whole defect.
+    #[test]
+    fn an_interrupted_read_is_retried_and_every_other_error_still_ends_it() {
+        use std::io::ErrorKind;
+
+        /// Yields the given results in order, then end-of-file forever.
+        struct Scripted(std::collections::VecDeque<std::io::Result<&'static [u8]>>);
+
+        impl Read for Scripted {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                match self.0.pop_front() {
+                    Some(Ok(bytes)) => {
+                        buf[..bytes.len()].copy_from_slice(bytes);
+                        Ok(bytes.len())
+                    }
+                    Some(Err(error)) => Err(error),
+                    None => Ok(0),
+                }
+            }
+        }
+
+        let mut buffer = [0u8; 32];
+
+        // Two interruptions in a row, then real bytes: the signal is not an
+        // ending however often it arrives.
+        let mut reader = Scripted(
+            [
+                Err(std::io::Error::from(ErrorKind::Interrupted)),
+                Err(std::io::Error::from(ErrorKind::Interrupted)),
+                Ok(b"harness output".as_slice()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(
+            next_chunk(&mut reader, &mut buffer),
+            Some("harness output".len()),
+            "an interrupted read must be retried, not reported as an ending"
+        );
+        assert_eq!(&buffer[..14], b"harness output");
+
+        // A real hangup still ends it.
+        let mut reader = Scripted(
+            [Err(std::io::Error::from(ErrorKind::BrokenPipe))]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            next_chunk(&mut reader, &mut buffer),
+            None,
+            "a hangup must still end the reader"
+        );
+
+        // So does end-of-file.
+        let mut reader = Scripted(std::collections::VecDeque::new());
+        assert_eq!(next_chunk(&mut reader, &mut buffer), None);
+    }
+
+    /// The window between `spawn_command` and the `PtyProcess` that owns its
+    /// child is the one place `PtyProcess::drop` cannot cover, so `spawn`
+    /// must end and reap the harness itself before returning an error.
+    ///
+    /// The assertion is the absence of the process, not the presence of an
+    /// error: `kill(pid, 0)` fails with `ESRCH` only once the pid has been
+    /// both killed **and** reaped — a zombie is still signallable by its own
+    /// parent and would answer `Ok`. That distinction is the point: the two
+    /// leaks `PtyProcess::drop`'s comment records are exactly "still running"
+    /// and "never reaped", and this rules out both.
+    ///
+    /// Non-vacuity: revert either error arm in `spawn_with` to a `?` and this
+    /// fails with the harness still alive.
+    #[cfg(unix)]
+    #[test]
+    fn a_spawn_that_fails_after_the_child_starts_leaves_no_process_behind() {
+        use std::sync::{Arc, Mutex};
+
+        /// Records the pid of whatever it spawns, then hands the child on
+        /// untouched — the test's only way to learn the identity of a child
+        /// `spawn` is about to abandon.
+        struct RecordingSlave {
+            inner: Box<dyn portable_pty::SlavePty + Send>,
+            pid: Arc<Mutex<Option<u32>>>,
+        }
+
+        impl portable_pty::SlavePty for RecordingSlave {
+            fn spawn_command(
+                &self,
+                cmd: CommandBuilder,
+            ) -> std::result::Result<Box<dyn portable_pty::Child + Send + Sync>, anyhow::Error>
+            {
+                let child = self.inner.spawn_command(cmd)?;
+                *self.pid.lock().unwrap() = child.process_id();
+                Ok(child)
+            }
+        }
+
+        /// A real master whose reader cannot be cloned — the shape of
+        /// `EMFILE` on the `dup()` that `try_clone_reader` performs.
+        struct UncloneableMaster(Box<dyn MasterPty + Send>);
+
+        impl MasterPty for UncloneableMaster {
+            fn resize(&self, size: PtySize) -> std::result::Result<(), anyhow::Error> {
+                self.0.resize(size)
+            }
+            fn get_size(&self) -> std::result::Result<PtySize, anyhow::Error> {
+                self.0.get_size()
+            }
+            fn try_clone_reader(&self) -> std::result::Result<Box<dyn Read + Send>, anyhow::Error> {
+                Err(anyhow::anyhow!("too many open files"))
+            }
+            fn take_writer(&self) -> std::result::Result<Box<dyn Write + Send>, anyhow::Error> {
+                self.0.take_writer()
+            }
+            fn process_group_leader(&self) -> Option<libc::pid_t> {
+                self.0.process_group_leader()
+            }
+            fn as_raw_fd(&self) -> Option<portable_pty::unix::RawFd> {
+                self.0.as_raw_fd()
+            }
+            fn tty_name(&self) -> Option<PathBuf> {
+                self.0.tty_name()
+            }
+        }
+
+        let pid = Arc::new(Mutex::new(None));
+        let recorded = Arc::clone(&pid);
+
+        // A harness that would outlive the test by minutes if nothing ended
+        // it, so "gone" cannot be confused with "finished on its own".
+        let command = TerminalCommand::new("/bin/sh", "/").args(["-c", "sleep 300"]);
+
+        let result = PtyProcess::spawn_with(command, move |size| {
+            let pair = native_pty_system().openpty(size)?;
+            Ok(PtyPair {
+                slave: Box::new(RecordingSlave {
+                    inner: pair.slave,
+                    pid: Arc::clone(&recorded),
+                }),
+                master: Box::new(UncloneableMaster(pair.master)),
+            })
+        });
+
+        let Err(error) = result else {
+            panic!("a master whose reader cannot be cloned must fail the spawn");
+        };
+        assert!(
+            format!("{error:#}").contains("could not read from the pseudo-terminal"),
+            "the caller-facing context must survive: {error:#}"
+        );
+
+        let pid = pid.lock().unwrap().expect("the child was started");
+        // SAFETY: signal 0 sends nothing; it only asks whether the pid is
+        // still addressable by this process.
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        let errno = std::io::Error::last_os_error().raw_os_error();
+        assert_eq!(
+            (alive, errno),
+            (-1, Some(libc::ESRCH)),
+            "the abandoned harness (pid {pid}) must be killed and reaped, not left \
+             running or left a zombie"
         );
     }
 

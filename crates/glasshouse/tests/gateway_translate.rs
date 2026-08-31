@@ -100,6 +100,10 @@ enum Answer {
     GatedStream,
     /// A provider error with an OpenAI-shaped body.
     Error,
+    /// A stream of many chunk events, each under `stream::MAX_EVENT_BYTES`,
+    /// summing well past `translate::MAX_BODY_BYTES`, and never sending
+    /// `[DONE]` — break/gateway-translate #3.
+    UnboundedEventCount,
 }
 
 /// A canned OpenAI-compatible provider: `POST /v1/chat/completions` is
@@ -278,6 +282,26 @@ fn serve(
             ];
             for event in after {
                 write_chunk(&mut stream, event.as_bytes());
+            }
+            let _ = stream.write_all(b"0\r\n\r\n");
+            let _ = stream.flush();
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+        }
+        Answer::UnboundedEventCount => {
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+            let _ = stream.write_all(head.as_bytes());
+            // Each event is comfortably under `stream::MAX_EVENT_BYTES` (one
+            // MiB) on its own; forty of them sum well past
+            // `translate::MAX_BODY_BYTES` (32 MiB), and `[DONE]` never
+            // arrives — the shape break/gateway-translate #3 describes as
+            // unbounded. A patched gateway refuses partway through this
+            // loop; an unpatched one holds all forty and then some.
+            let payload = "x".repeat(1_000_000);
+            for _ in 0..40 {
+                let chunk = format!(
+                    "data: {{\"id\":\"chatcmpl-fixture\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture-model\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{payload}\"}},\"finish_reason\":null}}]}}\n\n"
+                );
+                write_chunk(&mut stream, chunk.as_bytes());
             }
             let _ = stream.write_all(b"0\r\n\r\n");
             let _ = stream.flush();
@@ -1051,6 +1075,101 @@ fn a_provider_error_is_delivered_in_the_harnesss_error_shape_with_the_providers_
     assert_eq!(error["error"]["type"], "rate_limit_error");
     assert_eq!(error["error"]["message"], "fixture says slow down");
     assert_eq!(fixture.connections(), 1);
+}
+
+// --- break/gateway-translate #3, #4, #6 -------------------------------------------
+
+/// break/gateway-translate #3: the harness asks for a document
+/// (`claude_code_body(false)`) and the provider streams anyway — the branch
+/// that gathers a stream into the document it delivered. A provider that
+/// never stops streaming, and never sends a byte the single-event cap would
+/// refuse, must still be bounded in how much it can make the gateway hold.
+#[test]
+fn a_provider_stream_gathered_into_a_document_is_bounded_in_total_even_though_no_single_event_is() {
+    let fixture = ChatOnlyUpstream::start(Answer::UnboundedEventCount);
+    let gateway = start_gateway(upstream_from(&chat_only_provider(&fixture)), None);
+
+    let response = send_and_read(
+        gateway.address(),
+        &messages_request(gateway.token().expose(), &claude_code_body(false)),
+    );
+    let (head, body) = head_and_body(&response);
+    assert!(
+        head.starts_with("HTTP/1.1 502"),
+        "an unbounded provider stream must be refused, not accumulated whole: {head}"
+    );
+    let message = String::from_utf8_lossy(body).into_owned();
+    assert!(
+        message.contains("exceeded the size"),
+        "the refusal names the size bound: {message}"
+    );
+}
+
+/// break/gateway-translate #4: a translated refusal must be readable by the
+/// client it was written for, even when that client is still mid-upload —
+/// the 413 case, which by construction fires as soon as the declared
+/// `content-length` is read, before any of the body has to have arrived.
+#[test]
+fn a_413_refusal_is_readable_by_a_client_still_uploading_its_declared_body() {
+    let fixture = ChatOnlyUpstream::start(Answer::Completion);
+    let gateway = start_gateway(upstream_from(&chat_only_provider(&fixture)), None);
+
+    let declared_len = glasshouse::gateway::translate::MAX_BODY_BYTES + 1024;
+    let head = format!(
+        "POST /v1/messages?beta=true HTTP/1.1\r\n\
+         Host: 127.0.0.1\r\n\
+         Authorization: Bearer {}\r\n\
+         Content-Type: application/json\r\n\
+         Anthropic-Version: 2023-06-01\r\n\
+         Content-Length: {declared_len}\r\n\
+         \r\n",
+        gateway.token().expose()
+    );
+    let mut client =
+        TcpStream::connect(gateway.address()).expect("the gateway accepts connections");
+    client
+        .set_read_timeout(Some(CLIENT_TIMEOUT))
+        .expect("a non-zero timeout is valid");
+    client
+        .write_all(head.as_bytes())
+        .expect("the gateway reads the request head");
+    client.flush().expect("flush");
+
+    // Trickle a slice of the declared body slowly: a real client mid-upload
+    // when the 413 — and, on the unpatched tree, the premature
+    // `shutdown(Shutdown::Both)` — happens.
+    let chunk = vec![b'x'; 64 * 1024];
+    let mut upload_failed = false;
+    for _ in 0..4 {
+        std::thread::sleep(Duration::from_millis(30));
+        if client.write_all(&chunk).is_err() {
+            upload_failed = true;
+            break;
+        }
+    }
+    let _ = client.flush();
+
+    let mut received = Vec::new();
+    let _ = client.read_to_end(&mut received);
+    assert!(
+        !received.is_empty() && !upload_failed,
+        "the client must read the 413 it was written rather than a reset connection; \
+         upload_failed={upload_failed}, received {} bytes: {:?}",
+        received.len(),
+        String::from_utf8_lossy(&received)
+    );
+    let (head, body) = head_and_body(&received);
+    assert!(head.starts_with("HTTP/1.1 413"), "{head}");
+    assert!(
+        String::from_utf8_lossy(body).contains("exceeds the size"),
+        "{}",
+        String::from_utf8_lossy(body)
+    );
+    assert_eq!(
+        fixture.connections(),
+        0,
+        "a request refused for size never opens anything upstream"
+    );
 }
 
 // --- (e): a served target is still relayed byte for byte -------------------------

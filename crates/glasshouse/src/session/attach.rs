@@ -37,16 +37,22 @@
 //! Nothing here is reusable from inside a longer-lived interface; the
 //! session runtime that multiplexes several harnesses needs a different
 //! input path, not this one.
+//!
+//! Because it cannot be ended, the input pump must not *own* anything whose
+//! destructor matters. It holds a [`std::sync::Weak`] reference to the process
+//! for exactly that reason — see `spawn_input_pump`, whose own comment records
+//! the consequence of the alternative. (Not a link: that function is private,
+//! and this module doc is public.)
 
 use std::io::{IsTerminal, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
 use crate::launch::HarnessLaunch;
-use crate::pty::{ExitStatus, ProcessSignal, PtyOutput, PtyProcess, TerminalSize};
+use crate::pty::{ExitStatus, ProcessSignal, PtyOutput, PtyProcess, TerminalSize, next_chunk};
 use crate::shutdown::{RawModeGuard, shutdown_requested};
 
 /// How often the supervising loop wakes to poll the child and the terminal.
@@ -132,14 +138,15 @@ pub fn attach(launch: HarnessLaunch<'_>) -> Result<ExitStatus> {
             .spawn(move || pump_output(output, &output_drained))
             .context("could not start the session output reader")?;
     }
-    {
-        let process = Arc::clone(&process);
-        std::thread::Builder::new()
-            .name("glasshouse-session-input".into())
-            .spawn(move || pump_input(&process))
-            .context("could not start the session input forwarder")?;
-    }
+    spawn_input_pump(&process, std::io::stdin())?;
 
+    // Plain `?`. Nothing after `launch.spawn()` above holds a strong
+    // reference to this `Arc` except this stack frame and the forced-exit
+    // guard, which unregisters before it — so every return from here,
+    // including this one, drops the last reference and runs
+    // `PtyProcess::drop`, which kills the harness and reaps it. That is the
+    // property `spawn_input_pump` exists to keep; see its doc comment for why
+    // the pump must not own the process.
     let status = supervise(&process, size)?;
 
     // Let whatever the harness printed on its way out actually reach the
@@ -229,16 +236,58 @@ fn pump_output(mut output: PtyOutput, drained: &AtomicBool) {
         // coming. A pty reports the end of a session as end-of-file on some
         // platforms and as a read error on others, and neither is a fault to
         // report — the supervising loop already knows the exit status from
-        // the process itself.
-        let read = match output.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
+        // the process itself. A read a signal interrupted is neither, and
+        // [`next_chunk`] keeps it from ending this relay.
+        let Some(read) = next_chunk(&mut output, &mut buffer) else {
+            break;
         };
         if stdout.write_all(&buffer[..read]).is_err() || stdout.flush().is_err() {
             break;
         }
     }
     drained.store(true, Ordering::SeqCst);
+}
+
+/// Start the thread that forwards the terminal's input to the harness,
+/// **without giving it ownership of the process**.
+///
+/// # Why a `Weak` and not an `Arc`
+///
+/// The input pump cannot be cancelled (module doc), so whatever it holds it
+/// holds until the process exits. With an `Arc` clone the strong count never
+/// reaches zero, so `PtyProcess::drop` — the only thing that kills and reaps
+/// the harness on an unhappy path — never runs, and every early return in
+/// [`attach`] leaves a live harness behind: a session leader of its own
+/// (portable-pty's `pre_exec` calls `setsid`) with nothing left in this
+/// process able to reach it, which is the shape of the 2026-08-26 incident
+/// `crate::session::supervision` records. `supervise`'s `try_wait` surfaces a
+/// raw `waitpid` failure, so that return is reachable by ordinary means.
+///
+/// Two other fixes were considered and are worse. **Killing explicitly before
+/// each early return** is what the runtime's duplicate-session guard was
+/// criticised for being: correct today and remembered rather than structural,
+/// so the next `?` added to `attach` brings the leak back with nothing to
+/// catch it. **Making the pump cancellable** means interrupting a blocking
+/// read on the terminal, which has no portable answer and whose plausible
+/// answers — a poll loop, a non-blocking fd — cost keystroke latency on the
+/// one path whose whole job is to be transparent. A `Weak` costs one upgrade
+/// per keystroke and moves the guarantee into the type: the pump *cannot*
+/// keep the harness alive, whatever anyone later adds to `attach`.
+///
+/// `input` is the terminal's standard input in production and a parameter
+/// only so a test can hold this pump open without one; `stdin_hung_up` below
+/// still asks about this process's real standard input, which is what
+/// production passes here.
+fn spawn_input_pump(
+    process: &Arc<Mutex<PtyProcess>>,
+    input: impl Read + Send + 'static,
+) -> Result<()> {
+    let process = Arc::downgrade(process);
+    std::thread::Builder::new()
+        .name("glasshouse-session-input".into())
+        .spawn(move || pump_input(input, &process))
+        .context("could not start the session input forwarder")?;
+    Ok(())
 }
 
 /// Forward this process's standard input to the harness, byte for byte.
@@ -288,22 +337,32 @@ fn pump_output(mut output: PtyOutput, drained: &AtomicBool) {
 /// stray `Err` unrelated to a hangup — which this arm also catches — cannot
 /// trigger a shutdown it does not warrant. A wrong shutdown here is worse
 /// than a missed one.
-fn pump_input(process: &Mutex<PtyProcess>) {
+fn pump_input(mut input: impl Read, process: &Weak<Mutex<PtyProcess>>) {
     let mut buffer = [0u8; 4096];
-    let mut stdin = std::io::stdin();
     loop {
-        let read = match stdin.read(&mut buffer) {
-            Ok(0) | Err(_) => {
-                // Confirmed hangup, not merely inferred: only this fires
-                // shutdown. `attach` owns the terminal for the whole life of
-                // the process (module doc), so there is nothing else in it
-                // for a process-wide shutdown to wrongly take down.
-                if stdin_hung_up() {
-                    crate::shutdown::request_shutdown();
-                }
-                break;
+        // A read a signal interrupted is not a lost terminal, and treating it
+        // as one here has the sharpest version of the consequence: this
+        // thread is the only thing carrying the keyboard and it is never
+        // restarted, so the harness would go deaf for the rest of the session
+        // while `stdin_hung_up` below correctly reported no hangup, and
+        // nothing would notice. See [`next_chunk`].
+        let Some(read) = next_chunk(&mut input, &mut buffer) else {
+            // Confirmed hangup, not merely inferred: only this fires
+            // shutdown. `attach` owns the terminal for the whole life of
+            // the process (module doc), so there is nothing else in it
+            // for a process-wide shutdown to wrongly take down.
+            if stdin_hung_up() {
+                crate::shutdown::request_shutdown();
             }
-            Ok(n) => n,
+            break;
+        };
+        // Upgraded per write and dropped again before the next read, so this
+        // thread never holds the process across the blocking read above — see
+        // [`spawn_input_pump`]. A `None` means `attach` has returned and the
+        // harness is already being killed and reaped by the drop that made
+        // this upgrade fail; there is nothing left to forward input to.
+        let Some(process) = process.upgrade() else {
+            break;
         };
         // Held only for the write; the blocking read above deliberately
         // happens outside the lock so a quiet session never keeps the
@@ -311,7 +370,7 @@ fn pump_input(process: &Mutex<PtyProcess>) {
         // itself is gone, not the terminal — `supervise` already learns that
         // from the child's own exit status, so this does not request
         // shutdown too.
-        if lock(process).write_input(&buffer[..read]).is_err() {
+        if lock(&process).write_input(&buffer[..read]).is_err() {
             break;
         }
     }
@@ -426,5 +485,110 @@ mod tests {
     fn the_measured_terminal_size_is_always_usable() {
         let size = terminal_size();
         assert!(size.rows >= 1 && size.cols >= 1);
+    }
+
+    /// The input pump must not keep the harness alive, because it cannot be
+    /// ended and `PtyProcess::drop` is the only thing that kills and reaps on
+    /// an unhappy path.
+    ///
+    /// Two assertions, which together are the whole property `attach`'s error
+    /// returns depend on. That the strong count is still one with the pump
+    /// running is the structural half: nothing but this frame owns the
+    /// process, so every return from `attach` — including the `?` on
+    /// `supervise`, whose `try_wait` surfaces a raw `waitpid` failure — drops
+    /// the last reference. That the pid is unaddressable after that drop is
+    /// the half that matters to the user: `kill(pid, 0)` fails with `ESRCH`
+    /// only once the harness has been both killed and reaped, so neither an
+    /// orphaned session leader nor a zombie survives.
+    ///
+    /// Dropping the `Arc` stands in for `attach` returning; there is no way
+    /// to call `attach` itself here, because it requires a real terminal on
+    /// both standard input and standard output and refuses before it spawns
+    /// anything otherwise.
+    ///
+    /// Non-vacuity: make `spawn_input_pump` clone the `Arc` instead of
+    /// downgrading it — which is what it did before — and both assertions
+    /// fail: the count is two, and the harness is still running afterwards.
+    #[cfg(unix)]
+    #[test]
+    fn the_input_pump_does_not_keep_the_harness_alive() {
+        use std::sync::atomic::AtomicBool;
+
+        use crate::pty::{PtyProcess, TerminalCommand};
+
+        /// A terminal nobody is typing at, until the test says otherwise.
+        ///
+        /// Releasing it produces a byte rather than an end-of-file on
+        /// purpose: an ending would send the pump through its hangup check,
+        /// which asks about this *process's* real standard input and could
+        /// request a shutdown that has nothing to do with this test. A byte
+        /// sends it to the upgrade instead, which is the path under test.
+        struct QuietTerminal {
+            reading: Arc<AtomicBool>,
+            release: Arc<AtomicBool>,
+        }
+
+        impl Read for QuietTerminal {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.reading.store(true, Ordering::SeqCst);
+                while !self.release.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                buf[0] = b'x';
+                Ok(1)
+            }
+        }
+
+        // A harness that would outlive this test by minutes if nothing ended
+        // it, so "gone" cannot be mistaken for "finished on its own".
+        let (process, _output) =
+            PtyProcess::spawn(TerminalCommand::new("/bin/sh", "/").args(["-c", "sleep 300"]))
+                .expect("spawn a long-running harness");
+        let pid = process.process_id().expect("a live child has a pid");
+
+        let process = Arc::new(Mutex::new(process));
+        let reading = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        spawn_input_pump(
+            &process,
+            QuietTerminal {
+                reading: Arc::clone(&reading),
+                release: Arc::clone(&release),
+            },
+        )
+        .expect("start the input pump");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !reading.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "the input pump never started");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert_eq!(
+            Arc::strong_count(&process),
+            1,
+            "the input pump must not own the harness; with a strong reference \
+             held by a thread that cannot be cancelled, no return from `attach` \
+             can ever run `PtyProcess::drop`"
+        );
+
+        // What every return from `attach` does.
+        drop(process);
+
+        // SAFETY: signal 0 sends nothing; it only asks whether the pid is
+        // still addressable by this process. A zombie would answer `Ok`, so
+        // `ESRCH` is the reaped-and-gone answer specifically.
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        let errno = std::io::Error::last_os_error().raw_os_error();
+        assert_eq!(
+            (alive, errno),
+            (-1, Some(libc::ESRCH)),
+            "dropping the last reference must leave no harness (pid {pid}) running \
+             and no zombie behind"
+        );
+
+        // Let the pump's read return so the thread ends on the failed
+        // upgrade rather than outliving the test blocked in a read.
+        release.store(true, Ordering::SeqCst);
     }
 }

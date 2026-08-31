@@ -23,7 +23,6 @@
 //!   farewell, because [`SessionRuntime::poll_exits`] asks the process.
 
 use std::collections::VecDeque;
-use std::io::Read;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -32,7 +31,7 @@ use anyhow::{Context, Result};
 use crate::events::{EventBus, LifecycleEvent, MessageOrigin, ProcessExit, RecordedEvent};
 use crate::launch::{HarnessLaunch, OwnedHarnessLaunch};
 use crate::pty::{
-    CanonicalOverflow, ExitStatus, LineDiscipline, PtyOutput, PtyProcess, TerminalSize,
+    CanonicalOverflow, ExitStatus, LineDiscipline, PtyOutput, PtyProcess, TerminalSize, next_chunk,
 };
 use crate::session::supervision;
 use crate::session::{SessionId, SessionPresentation};
@@ -936,6 +935,55 @@ impl SessionRuntime {
             &self.events,
         )?;
 
+        // Structural, not remembered. An *exited* entry under this id is kept
+        // deliberately by `poll_exits`, so that a crashed worker's output and
+        // its crash report survive it; pushing beside that entry is precisely
+        // what the comment on the duplicate guard above describes, because
+        // `get`, `get_mut`, `focus`, `close` and `crash_report` all resolve
+        // the **first** match and the corpse is the one already in the vector.
+        // The live session would then be steerable by nobody, and a send to it
+        // would return `RuntimeError::Exited` for a harness the user can watch
+        // running.
+        //
+        // `shell::resume_session` has been calling `close` by hand to avoid
+        // exactly this, with nine lines of comment explaining why. Doing it
+        // here means the invariant holds for every caller that reuses an id —
+        // `api`, `main`, a future resume path — rather than only for the
+        // callers that happened to know.
+        //
+        // Removing rather than refusing, because refusing would make a
+        // restart-under-the-same-id impossible without the caller first
+        // knowing to close: the same remembered obligation, moved one step.
+        //
+        // **Here, and not beside the guard above**, because everything between
+        // there and this line can fail — `launch.spawn()` and `spawn_reader`
+        // both carry a `?`. Removing earlier would mean a failed restart threw
+        // away the crash report of the run that prompted it, which is the one
+        // thing the caller would then want to read.
+        if let Some(index) = self
+            .sessions
+            .iter()
+            .position(|session| session.id == id && !session.is_running())
+        {
+            self.sessions.remove(index);
+            // The same fix-up `close` does, for the same reason and with the
+            // same answer: focus must never name an entry that is gone. Doing
+            // it identically is also what keeps this from changing what
+            // `shell::resume_session` — which calls `close` and then `start` —
+            // has always done. If nothing else can hold the keyboard, the
+            // session pushed below takes it.
+            if self.focused.as_ref() == Some(&id) {
+                self.focused = self
+                    .sessions
+                    .iter()
+                    .find(|session| {
+                        session.is_running()
+                            && session.presentation != SessionPresentation::Headless
+                    })
+                    .map(|session| session.id.clone());
+            }
+        }
+
         let focusable = presentation != SessionPresentation::Headless;
         self.sessions.push(LiveSession {
             id: id.clone(),
@@ -1791,9 +1839,12 @@ fn pump(
         // pseudo-terminal reports the end of a session as end-of-file on some
         // platforms and as a read error on others, and neither is a fault —
         // the exit status comes from the process, not from here.
-        let read = match output.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
+        //
+        // The one exception is a read a signal interrupted, which is not an
+        // ending and must not stop this thread — see [`next_chunk`], which
+        // owns that decision for every reader in the crate.
+        let Some(read) = next_chunk(&mut output, &mut buffer) else {
+            break;
         };
         let chunk = &buffer[..read];
 
@@ -1843,6 +1894,132 @@ fn short(id: &SessionId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An interrupted read is not an ending, and `pump` is where that matters
+    /// most: it is the only thing draining a session's pseudo-terminal and
+    /// nothing ever restarts it.
+    ///
+    /// Two properties, and both are needed. That output arriving *after* the
+    /// interruption still reaches the scrollback proves the read was retried
+    /// rather than abandoned. That no `OutputEnded` has been published while
+    /// the harness is still there proves the other half of the defect — a
+    /// live session declared finished — because a consumer that believes the
+    /// output ended stops waiting for more.
+    ///
+    /// The reader blocks after its second chunk rather than returning
+    /// end-of-file, because a `pump` that ran to completion would publish
+    /// `OutputEnded` legitimately and the assertion would prove nothing.
+    ///
+    /// Non-vacuity: delete `next_chunk`'s `Interrupted` arm and this times
+    /// out waiting for output the reader already produced.
+    #[test]
+    fn an_interrupted_read_neither_ends_the_reader_nor_the_session_output() {
+        use std::io::ErrorKind;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        /// One interruption, one chunk, then a live-but-quiet terminal.
+        struct InterruptedThenQuiet {
+            step: AtomicUsize,
+            release: Arc<AtomicBool>,
+        }
+
+        impl std::io::Read for InterruptedThenQuiet {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                match self.step.fetch_add(1, Ordering::SeqCst) {
+                    0 => Err(std::io::Error::from(ErrorKind::Interrupted)),
+                    1 => {
+                        let bytes = b"after the signal";
+                        buf[..bytes.len()].copy_from_slice(bytes);
+                        Ok(bytes.len())
+                    }
+                    // Blocked in a read on a terminal nobody is typing at,
+                    // which is what a healthy quiet session looks like.
+                    _ => {
+                        while !self.release.load(Ordering::SeqCst) {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Ok(0)
+                    }
+                }
+            }
+        }
+
+        let release = Arc::new(AtomicBool::new(false));
+        let output = PtyOutput::from_reader(InterruptedThenQuiet {
+            step: AtomicUsize::new(0),
+            release: Arc::clone(&release),
+        });
+
+        let scrollback = Arc::new(Mutex::new(Scrollback::new(DEFAULT_SCROLLBACK_BYTES)));
+        let screen = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0)));
+        let pending_queries = Arc::new(Mutex::new(Vec::new()));
+        let ended = Arc::new(OutputEnd::default());
+        let events = EventBus::new();
+        let session = SessionId::new("interrupted-reader");
+
+        let reader = {
+            let (scrollback, screen, pending_queries, ended, events, session) = (
+                Arc::clone(&scrollback),
+                Arc::clone(&screen),
+                Arc::clone(&pending_queries),
+                Arc::clone(&ended),
+                events.clone(),
+                session.clone(),
+            );
+            std::thread::spawn(move || {
+                pump(
+                    output,
+                    &scrollback,
+                    &screen,
+                    &pending_queries,
+                    &ended,
+                    &events,
+                    &session,
+                )
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if scrollback
+                .lock()
+                .unwrap()
+                .text()
+                .contains("after the signal")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the reader stopped at the interrupted read: nothing after it \
+                 reached the scrollback"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            !events
+                .history_for(&session)
+                .iter()
+                .any(|recorded| recorded.event() == &LifecycleEvent::OutputEnded),
+            "a live session must not be told its output ended: {:?}",
+            events.history_for(&session)
+        );
+
+        release.store(true, Ordering::SeqCst);
+        reader.join().expect("the reader thread must not panic");
+
+        // And the real ending is still reported, so the retry did not cost
+        // the event it exists to protect.
+        assert!(
+            events
+                .history_for(&session)
+                .iter()
+                .any(|recorded| recorded.event() == &LifecycleEvent::OutputEnded),
+            "end-of-file must still end the output: {:?}",
+            events.history_for(&session)
+        );
+    }
 
     /// Phase 10A's thirteenth line, as a structural guard rather than a
     /// promise — *"never deliver two inputs to the same session

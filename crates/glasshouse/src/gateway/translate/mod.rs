@@ -467,9 +467,15 @@ pub(super) fn serve(
         .route_named(pair.to)
         .expect("a pair is placed only against a protocol the serving backend routes");
 
+    // Written with the socket left open: every caller below either drains
+    // the rest of the client's body through `settle` (which closes once it
+    // has drained) or has already consumed the whole body itself, so a
+    // shutdown here would only race the drain — killing the read half the
+    // client is still writing into and turning the refusal `settle` exists
+    // to deliver into the network error it exists to prevent.
     let refuse = |out: &mut TcpStream, status: StatusCode, message: &str| {
         let body = from.encode_error(from.error_kind(status.as_u16()), message);
-        let _ = write_document(out, status, &body);
+        let _ = write_document_open(out, status, &body);
     };
 
     if head.method != ureq::http::Method::POST {
@@ -508,7 +514,11 @@ pub(super) fn serve(
             RateLimitHeaders::default(),
         );
     }
-    let mut body = Vec::with_capacity(length as usize);
+    // Reserved for what a real request looks like, not for what this one
+    // declared: `take` below bounds the result either way, and a
+    // declaration is not a delivery. 64 KiB covers a Claude Code request
+    // head-on and the vector grows for anything larger.
+    let mut body = Vec::with_capacity(length.min(64 * 1024) as usize);
     if (&mut reader).take(length).read_to_end(&mut body).is_err() || body.len() as u64 != length {
         return (
             exchange(Outcome::ClientGone, 0, upstream, pair, route),
@@ -682,14 +692,35 @@ pub(super) fn serve(
         // The harness asked for a document and the provider streamed anyway:
         // gather the stream into the document it delivered.
         let mut gathered = Vec::new();
+        // One event is bounded by `stream::MAX_EVENT_BYTES`; the number of
+        // events accumulated here is not, and this is the one branch that
+        // holds them all rather than writing each one out as it arrives.
+        let mut held = 0u64;
         loop {
             match events.next_event() {
-                Ok(Some(event)) => match decoder.feed(&event) {
-                    Ok(more) => gathered.extend(more),
-                    Err(unsupported) => {
-                        return untranslatable(out, from, pair, unsupported, &finish);
+                Ok(Some(event)) => {
+                    held += event.data.len() as u64;
+                    if held > MAX_BODY_BYTES {
+                        return untranslatable(
+                            out,
+                            from,
+                            pair,
+                            Unsupported::new(
+                                "body",
+                                "the provider's stream exceeded the size the Glasshouse \
+                                 gateway will hold to answer a request that did not ask for \
+                                 a stream",
+                            ),
+                            &finish,
+                        );
                     }
-                },
+                    match decoder.feed(&event) {
+                        Ok(more) => gathered.extend(more),
+                        Err(unsupported) => {
+                            return untranslatable(out, from, pair, unsupported, &finish);
+                        }
+                    }
+                }
                 Ok(None) => match decoder.finish() {
                     Ok(more) => {
                         gathered.extend(more);
@@ -981,7 +1012,15 @@ fn stream_events<R: Read>(
     )
 }
 
-fn write_document(out: &mut TcpStream, status: StatusCode, body: &[u8]) -> std::io::Result<()> {
+/// One document, written with the connection left open: for a refusal that
+/// still owes the client a drain of whatever it is still sending — `out` is
+/// a `try_clone` of the same socket as the reader doing that draining, so a
+/// shutdown here would close the read half out from under it too.
+fn write_document_open(
+    out: &mut TcpStream,
+    status: StatusCode,
+    body: &[u8],
+) -> std::io::Result<()> {
     let headers = vec![
         ("content-type".to_owned(), b"application/json".to_vec()),
         (
@@ -992,7 +1031,13 @@ fn write_document(out: &mut TcpStream, status: StatusCode, body: &[u8]) -> std::
     ];
     http::write_head(out, status, &headers)?;
     out.write_all(body)?;
-    out.flush()?;
+    out.flush()
+}
+
+/// One document, and the connection closed after it: for every answer that
+/// is not followed by a drain of the client's own socket.
+fn write_document(out: &mut TcpStream, status: StatusCode, body: &[u8]) -> std::io::Result<()> {
+    write_document_open(out, status, body)?;
     let _ = out.shutdown(Shutdown::Both);
     Ok(())
 }

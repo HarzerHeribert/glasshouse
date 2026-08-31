@@ -698,3 +698,84 @@ fn a_session_that_stays_exited_is_still_reported() {
         "an exit is reported exactly once"
     );
 }
+
+/// Phase 10A's fifth line as an invariant the runtime holds by itself:
+/// *"refuse to start a session that would duplicate a live, verified session
+/// of the same record."*
+///
+/// The refusal covers a **live** duplicate. The other half — an id whose
+/// session has exited — is not a refusal at all, because `poll_exits`
+/// deliberately keeps an exited session so its output and its crash report
+/// survive it, and starting under that id is a legitimate thing to do. What
+/// must not happen is *two* entries: `get`, `focus`, `close` and
+/// `crash_report` all resolve the first match, so the corpse would answer for
+/// the harness the user is watching run, and a send to it would come back
+/// `Exited`.
+///
+/// `shell::resume_session` avoids this by calling `close` before `start`, and
+/// has nine lines of comment saying why. This asserts the property where the
+/// vector is, so a caller that does not know cannot lose it.
+///
+/// Non-vacuity: delete the removal in `SessionRuntime::start` and this fails
+/// with two sessions, the first of them dead.
+#[test]
+fn starting_under_an_exited_session_s_id_leaves_one_live_session_not_two() {
+    let fixture = Fixture::new();
+    let short_lived = install_quiet_harness(&fixture.bin_dir, "quiet");
+    let long_lived = install_echo_harness(&fixture.bin_dir, "echoer");
+    let mut runtime = SessionRuntime::new();
+    let id = SessionId::new("reused-identifier");
+
+    runtime
+        .start(
+            id.clone(),
+            SessionPresentation::Embedded,
+            &fixture.launch(&short_lived),
+        )
+        .expect("start the short-lived harness");
+
+    drive(&mut runtime, "the first harness to exit", |runtime| {
+        exited(runtime, &id)
+    });
+    assert_eq!(
+        runtime.len(),
+        1,
+        "the exited session is kept on purpose, so the reuse below is the real case"
+    );
+
+    runtime
+        .start(
+            id.clone(),
+            SessionPresentation::Embedded,
+            &fixture.launch(&long_lived),
+        )
+        .expect("starting under the id of a session that has exited is allowed");
+
+    assert_eq!(
+        runtime.len(),
+        1,
+        "two `LiveSession`s under one identifier: {runtime:?}"
+    );
+    let session = runtime.get(&id).expect("the id must still resolve");
+    assert!(
+        session.is_running(),
+        "the id must resolve the live harness, not the corpse: {session:?}"
+    );
+    assert!(
+        session.exit().is_none(),
+        "and it must not be carrying the previous run's exit: {session:?}"
+    );
+    assert_eq!(
+        runtime.focused(),
+        Some(&id),
+        "focus must not be left naming an entry that is gone"
+    );
+
+    // The consequence the defect produced, asserted directly: a session the
+    // user can watch running accepts input rather than answering `Exited`.
+    runtime
+        .send_text(&id, "hello")
+        .expect("the live session must be the one a send reaches");
+
+    runtime.close(&id).expect("close the live session");
+}

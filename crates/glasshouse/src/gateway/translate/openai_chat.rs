@@ -1053,9 +1053,10 @@ struct ChunkDecoder {
     started: bool,
     open: Option<Open>,
     next_index: usize,
-    /// Every tool slot that has opened a block, so a continuation for a slot
-    /// whose block has already closed is refused rather than misfiled.
-    slots: Vec<(u64, usize)>,
+    /// Every tool slot that has opened a block, with the block index and the
+    /// id it opened under, so a continuation for a closed block — or one
+    /// that names a different call — is refused rather than misfiled.
+    slots: Vec<(u64, usize, String)>,
     finish: Option<StopReason>,
     usage: Option<Usage>,
     done: bool,
@@ -1078,6 +1079,23 @@ impl ChunkDecoder {
         events.push(StreamEvent::BlockStart { index, block });
         index
     }
+
+    /// Close the message: what `[DONE]` means, and the only way `done` is
+    /// ever set. A stream that reaches [`StreamDecoder::finish`] without
+    /// having called this was cut before its terminator, and is refused
+    /// there rather than completed here.
+    fn complete(&mut self) -> Result<Vec<StreamEvent>, Unsupported> {
+        self.done = true;
+        let mut events = Vec::new();
+        self.close_open(&mut events);
+        events.push(StreamEvent::MessageDelta {
+            stop_reason: self.finish.unwrap_or(StopReason::EndTurn),
+            stop_sequence: None,
+            usage: self.usage.unwrap_or_default(),
+        });
+        events.push(StreamEvent::MessageStop);
+        Ok(events)
+    }
 }
 
 impl StreamDecoder for ChunkDecoder {
@@ -1086,7 +1104,7 @@ impl StreamDecoder for ChunkDecoder {
             return Ok(Vec::new());
         }
         if event.data.trim() == "[DONE]" {
-            return self.finish();
+            return self.complete();
         }
         let value: Value = serde_json::from_str(&event.data)
             .map_err(|_| Unsupported::new("chunk", "a stream chunk was not a JSON document"))?;
@@ -1181,32 +1199,56 @@ impl StreamDecoder for ChunkDecoder {
                 let id_path = call.at("id");
                 let index_path = call.at("index");
                 call.finish()?;
-                let known = self.slots.iter().any(|(known, _)| *known == slot);
-                let index = if !known {
-                    let Some(id) = id else {
-                        return Err(Unsupported::new(
-                            id_path,
-                            "a tool call opened without an id, so its result could never be \
-                             matched to it",
-                        ));
-                    };
-                    let name = name.unwrap_or_default();
-                    let index = self.open_block(BlockStart::ToolUse { id, name }, &mut events);
-                    self.open = Some(Open::Tool { index, slot });
-                    self.slots.push((slot, index));
-                    index
-                } else {
-                    match self.open {
-                        Some(Open::Tool {
-                            index,
-                            slot: open_slot,
-                        }) if open_slot == slot => index,
-                        _ => {
+                let opened = self
+                    .slots
+                    .iter()
+                    .find(|(known, _, _)| *known == slot)
+                    .map(|(_, _, opened)| opened.clone());
+                let index = match opened {
+                    None => {
+                        let Some(id) = id else {
                             return Err(Unsupported::new(
-                                index_path,
-                                "tool-call fragments interleaved across calls cannot be \
-                                 re-ordered into sequential blocks",
+                                id_path,
+                                "a tool call opened without an id, so its result could never be \
+                                 matched to it",
                             ));
+                        };
+                        let name = name.unwrap_or_default();
+                        let index = self.open_block(
+                            BlockStart::ToolUse {
+                                id: id.clone(),
+                                name,
+                            },
+                            &mut events,
+                        );
+                        self.open = Some(Open::Tool { index, slot });
+                        self.slots.push((slot, index, id));
+                        index
+                    }
+                    Some(opened) => {
+                        // An id that contradicts the one the slot opened
+                        // with is a second call reusing the slot: appending
+                        // its arguments to the first call would run the
+                        // first tool with the second one's input.
+                        if id.is_some_and(|id| id != opened) {
+                            return Err(Unsupported::new(
+                                id_path,
+                                "a tool-call fragment repeated a slot under a different id; its \
+                                 arguments cannot be matched to the call that opened the slot",
+                            ));
+                        }
+                        match self.open {
+                            Some(Open::Tool {
+                                index,
+                                slot: open_slot,
+                            }) if open_slot == slot => index,
+                            _ => {
+                                return Err(Unsupported::new(
+                                    index_path,
+                                    "tool-call fragments interleaved across calls cannot be \
+                                     re-ordered into sequential blocks",
+                                ));
+                            }
                         }
                     }
                 };
@@ -1233,16 +1275,15 @@ impl StreamDecoder for ChunkDecoder {
                 "the provider's stream ended before it sent a single chunk",
             ));
         }
-        self.done = true;
-        let mut events = Vec::new();
-        self.close_open(&mut events);
-        events.push(StreamEvent::MessageDelta {
-            stop_reason: self.finish.unwrap_or(StopReason::EndTurn),
-            stop_sequence: None,
-            usage: self.usage.unwrap_or_default(),
-        });
-        events.push(StreamEvent::MessageStop);
-        Ok(events)
+        // The stream ended without `[DONE]` — the only way `self.done` is
+        // ever set is `complete`, above, and this method is not it. What
+        // arrived is a truncated message, and completing it here would hand
+        // the harness a partial answer wearing `end_turn`.
+        Err(Unsupported::new(
+            "[DONE]",
+            "the provider's stream ended before `data: [DONE]`, so the message it delivered is \
+             truncated and not finished",
+        ))
     }
 
     fn is_done(&self) -> bool {
@@ -1642,6 +1683,51 @@ mod tests {
         assert_eq!(refusal.field, "choices[0].delta.tool_calls[0].id");
     }
 
+    /// break/gateway-translate #5: a provider that restarts slot numbering
+    /// per call reuses `index: 0` for a second, unrelated tool call. On the
+    /// unpatched decoder the second call's `id` was read and dropped, and
+    /// its arguments were appended to the *first* call's block under the
+    /// *first* call's id — canonical.rs's own header: "a wrong id here runs
+    /// the wrong tool."
+    #[test]
+    fn a_tool_call_that_reuses_a_slot_under_a_different_id_is_refused_rather_than_misfiled() {
+        let mut decoder = ChunkDecoder::default();
+        decoder
+            .feed(&SseEvent {
+                event: None,
+                data: r#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_A","type":"function","function":{"name":"Bash","arguments":""}}]},"finish_reason":null}]}"#.to_owned(),
+            })
+            .expect("the first call opens its block");
+        let refusal = decoder
+            .feed(&SseEvent {
+                event: None,
+                data: r#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_B","type":"function","function":{"name":"Read","arguments":"{}"}}]},"finish_reason":null}]}"#.to_owned(),
+            })
+            .expect_err("a slot reused under a different id must be refused, not misfiled");
+        assert_eq!(refusal.field, "choices[0].delta.tool_calls[0].id");
+        assert!(
+            refusal.reason.contains("different id"),
+            "{}",
+            refusal.reason
+        );
+
+        // The ordinary case this must not break: a continuation fragment
+        // that carries no id at all still continues the open call.
+        let mut decoder = ChunkDecoder::default();
+        decoder
+            .feed(&SseEvent {
+                event: None,
+                data: r#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_A","type":"function","function":{"name":"Bash","arguments":""}}]},"finish_reason":null}]}"#.to_owned(),
+            })
+            .unwrap();
+        decoder
+            .feed(&SseEvent {
+                event: None,
+                data: r#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"ls\"}"}}]},"finish_reason":null}]}"#.to_owned(),
+            })
+            .expect("a continuation with no id keeps continuing the open call");
+    }
+
     #[test]
     fn a_second_choice_in_a_stream_is_refused_by_name() {
         let mut decoder = ChunkDecoder::default();
@@ -1658,8 +1744,13 @@ mod tests {
         );
     }
 
+    /// break/gateway-translate #2: a provider connection that dies mid-answer
+    /// — after real content, before `[DONE]` — must not be delivered as a
+    /// normally-ended message. On the unpatched decoder this returned
+    /// `Ok([BlockStop, MessageDelta{stop_reason: EndTurn}, MessageStop])`,
+    /// indistinguishable from a real, complete answer.
     #[test]
-    fn a_stream_that_ends_without_done_still_closes_the_message_and_an_empty_one_is_refused() {
+    fn a_stream_that_ends_without_done_is_refused_as_truncated_rather_than_closed() {
         let mut decoder = ChunkDecoder::default();
         decoder
             .feed(&SseEvent {
@@ -1667,7 +1758,34 @@ mod tests {
                 data: r#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#.to_owned(),
             })
             .unwrap();
-        let closing = decoder.finish().unwrap();
+        let refusal = decoder
+            .finish()
+            .expect_err("a stream cut before `[DONE]` must not complete cleanly");
+        assert_eq!(refusal.field, "[DONE]");
+        assert!(refusal.reason.contains("truncated"), "{}", refusal.reason);
+
+        let mut empty = ChunkDecoder::default();
+        assert_eq!(empty.finish().unwrap_err().field, "chunk");
+    }
+
+    /// The sibling of the truncation case: `[DONE]` still closes the message
+    /// normally, and a second `finish` after it is the harmless no-op every
+    /// other codec's terminator gives.
+    #[test]
+    fn a_stream_that_ends_with_done_closes_the_message_and_a_later_finish_is_a_no_op() {
+        let mut decoder = ChunkDecoder::default();
+        decoder
+            .feed(&SseEvent {
+                event: None,
+                data: r#"{"id":"c","model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#.to_owned(),
+            })
+            .unwrap();
+        let closing = decoder
+            .feed(&SseEvent {
+                event: None,
+                data: "[DONE]".to_owned(),
+            })
+            .expect("`[DONE]` completes the message");
         assert!(matches!(closing[0], StreamEvent::BlockStop { index: 0 }));
         assert!(matches!(
             closing[1],
@@ -1677,8 +1795,7 @@ mod tests {
             }
         ));
         assert_eq!(closing[2], StreamEvent::MessageStop);
-
-        let mut empty = ChunkDecoder::default();
-        assert_eq!(empty.finish().unwrap_err().field, "chunk");
+        assert!(decoder.is_done());
+        assert_eq!(decoder.finish().unwrap(), Vec::new());
     }
 }
