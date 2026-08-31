@@ -3815,3 +3815,32 @@ have taken.
    `time scripts/integrate.sh <names>` once and add the row; until then the
    sizing argument rests on the target count alone, which is enough for the
    ordering but not for a budget.
+
+## Batch 56 — six workers at once, 74 lines, sized by mechanism at Fable tier
+
+Dispatched 2026-08-31 ~02:30–02:45 by the first Fable 5 orchestrator session,
+under the user's instruction to use Fable for larger packages, go more parallel,
+and not surface decisions solely because they are complicated.
+
+| worker | model / effort | lines | shape |
+|---|---|---|---|
+| launch-classifier | Fable xhigh | 21 | join + build: router request schema, classification on the acting launch path, tier as hard constraint, routing latency |
+| mcp-server | Fable xhigh | 11 | build over an existing seam: stdio MCP transport onto `api::protocol::Request` dispatch |
+| subscription-pressure | Fable xhigh | 11 | build: capacity bands and reset proximity reach the session router |
+| routing-economics | Fable xhigh | 17 | producers for the six 34C refusals (reliability, latency, RPM), fallback chain, local-only, overhead report |
+| routing-outcome | Opus high | 5 | Cluster B join: `task_outcome` → evaluation rows; RC-B ruled |
+| user-control | Opus high | 9 | flags + evidence + two seams (mute, input precedence) |
+
+**What this batch tests.** (1) Whether a 10–20-line package at Fable tier holds
+together — batch 55 averaged 0.77 boxes per package; the mechanism-sized outlier
+closed five. (2) A **six-way** co-edit on `main.rs` (previous record: three-way,
+clean) — every packet was told to keep `main.rs` to the call site and put logic
+in its own module. (3) Whether two rulings the previous orchestrator parked for
+the user (Phase 43 MCP scope; Phase 51 RC-B outcome learning) hold when made
+from the tree — both are recorded in `design-decisions.md` and each has a
+package building on it.
+
+**Expected refusals, stated before dispatch so they cannot be counted as
+surprises:** 1610 (1294's shape — no completion signal), 1419/1436/1439 (no
+per-model price table), and 1834 unless launch-classifier's tier carrier lands
+first. Outcomes and tokens per closed box: **to be filled at integration.**

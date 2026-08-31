@@ -2736,3 +2736,73 @@ rather than queueing behind it.
 4. **Do not fabricate a value to fill a column.** Map line 1294's refusal is the
    standing example: *"a fabricated value here does not degrade the policy, it
    inverts it."* A column production cannot honestly fill stays absent.
+
+## Phase 43: the MCP surface is a transport over the existing API door
+
+### Decided by the orchestrator, 2026-08-31
+
+The register's Cluster R said Phase 43 was *"a design decision for the user"*
+because an MCP server exposing worker spawning, messaging and interruption adds
+an external control surface, and needs a dependency choice, a transport
+decision, and a security model. All three are decided here, from what the tree
+already contains, and none of them broadens product scope: every one of the
+ten "expose X through MCP" lines names an operation `api::protocol::Request`
+already performs for `glasshouse api serve`.
+
+1. **Transport: JSON-RPC 2.0 over stdio, newline-delimited, hand-rolled on
+   `serde_json`.** No new dependency. The MCP handshake is `initialize`,
+   `notifications/initialized`, `tools/list`, `tools/call`, `ping` — a few
+   hundred lines. A dependency that pulls an async runtime into a binary that
+   has none is the thing this project has refused every time it came up.
+2. **Every tool is a thin adapter onto an existing `Request` variant and goes
+   through the same `dispatch` the Unix door uses.** That is how line 1702
+   ("restrict MCP tools to the active project scope") is inherited rather than
+   re-implemented: `SessionApi::resolve` refuses a foreign session, and
+   migration 11/15's triggers refuse a foreign `project_id` at the database.
+   The MCP layer opens no store of its own — a source-scan test enforces it.
+3. **Dangerous operations are separate, explicitly named tools** (1703):
+   `glasshouse_spawn_session`, `glasshouse_send_message`,
+   `glasshouse_interrupt_session` — never one `control` tool with an `action`
+   field — annotated non-read-only, so a harness that gates by tool name or
+   annotation can gate exactly those three.
+4. **Origin is always `RequestOrigin::Machine`.** An MCP caller is a program.
+5. **One project per server process.** The server binds to the `Runtime` it
+   was started in and offers no argument that names a project, a path or a
+   database.
+
+Package: `GH-MCP-SERVER`. What it must not do: reach a store directly, add a
+dependency, or offer any operation the Unix door does not already offer.
+
+## Phase 51: a routing decision's outcome is the harness's own verdict, and nothing else
+
+### Decided by the orchestrator, 2026-08-31
+
+The register's RC-B held twelve lines behind one question — *"how does
+Glasshouse learn whether a routing decision was good?"* — and said no line may
+be packaged until a person answers, because inventing a proxy would be a
+fabricated denominator of the kind line 1294 refuses.
+
+**The answer is the one signal that is not a proxy.** A harness reports
+`TurnEnded { outcome: Completed | Failed }` through its own hook; Glasshouse
+translates it at `session::lifecycle::event_for` (single construction site,
+source-scan tested); `events::task_outcome` reads it — and has **zero
+production callers** (Cluster B). That verdict is the harness's own statement
+about its own turn. It is recorded against the routing decision that put the
+work in that session, as a **second row** (`routing_outcome_observed`), never
+an `UPDATE`.
+
+What is deliberately **not** learned: process exit, output going quiet, the
+person's next action, elapsed time. The capability map's standing rule — *do
+not infer successful task completion solely because a child process became
+quiet* — is the rule here too. A decision whose session never reports a turn
+end has outcome *unknown*, and unknown is its own bucket in every ratio, with
+its denominator printed.
+
+This answers the *routing* half of RC-B (1834, 1835, 1854, and the success
+quantity of 1845). It does **not** answer the *memory* half (1821, 1823, 1824,
+1825, 1831 — "was the retrieved memory useful", "did an old decision cause
+complexity") — a completed turn says nothing about whether a memory helped. Those
+stay open with the same missing producer they had, and a future ruling must
+find a signal that is the agent's own statement, not a correlation.
+
+Package: `GH-ROUTING-OUTCOME`.
