@@ -689,24 +689,147 @@ fn fresh_destination_id(harness: glasshouse::integrations::IntegrationId, profil
     format!("fresh:{}:{profile}", harness.slug())
 }
 
-/// Phase 56 line 1946's producer on the routing path: the entitlement a
-/// destination running `profile` would charge, as the router carries it.
-///
-/// One lookup — `EffectiveConfig::entitlement_for` — shared with the launch
-/// announcement (`announce_entitlement`), so the entitlement the router
-/// refused or admitted is the one the person is told about. `glasshouse::
-/// routing` may not import `glasshouse::config`, which is why the resolution
-/// happens here and the router receives a value. `None` is a real answer (no
-/// entry describes this resource) and leaves the destination without a
-/// entitlement constraint; a contradiction in the tables is an error that
-/// stops the routing decision rather than a guess about which entry meant it.
-fn destination_entitlement(
-    effective: &EffectiveConfig<'_>,
-    profile: &glasshouse::profile::LaunchProfile,
-) -> anyhow::Result<Option<glasshouse::routing::Entitlement>> {
-    Ok(effective
-        .entitlement_for(profile.harness, &profile.backend)?
-        .map(|resolved| resolved.to_routing()))
+/// A fresh-destination id carrying the entitlement axis — 56A line 1953,
+/// used only when **several** entitlements back one profile, so a project
+/// with zero or one entitlement per resource keeps exactly the ids it has
+/// always had (and every test pinned on them keeps passing). The `@` is the
+/// router's own convention: `SessionRouter`'s override matching treats the
+/// un-suffixed id as naming the profile and picks the best-ranked account
+/// among its candidates.
+fn entitled_fresh_destination_id(
+    harness: glasshouse::integrations::IntegrationId,
+    profile: &str,
+    entitlement: &str,
+) -> String {
+    format!("fresh:{}:{profile}@{entitlement}", harness.slug())
+}
+
+/// Phase 56A line 1953's producer: every pool entry that backs `backend` on
+/// `harness` — `EffectiveConfig::entitlement_for`'s matching rule without
+/// its one-account assumption, because the axis exists exactly for the case
+/// where several entries legitimately match (two Claude accounts behind one
+/// provider), each of which becomes its own candidate. The gateway's
+/// upstream is assigned when a session starts, so no entry matches it here
+/// (56A-4's ground, unchanged).
+fn pool_entitlements_for<'p>(
+    pool: &'p [glasshouse::config::ResolvedEntitlement],
+    harness: glasshouse::integrations::IntegrationId,
+    backend: &glasshouse::profile::BackendResource,
+) -> Vec<&'p glasshouse::config::ResolvedEntitlement> {
+    use glasshouse::config::EntitlementBacking;
+    use glasshouse::profile::BackendResource;
+
+    let wanted = match backend {
+        BackendResource::Native => EntitlementBacking::NativeHarness(harness),
+        BackendResource::DirectProvider { provider } => {
+            EntitlementBacking::Provider(provider.clone())
+        }
+        BackendResource::GlasshouseGateway => return Vec::new(),
+    };
+    pool.iter()
+        .filter(|entry| *entry.backing() == wanted)
+        .collect()
+}
+
+/// A resolved entitlement as the router carries it, 56A-2's facets included
+/// — the bridge `ResolvedEntitlement::to_routing` deliberately leaves to
+/// this caller, because the capacity band is derived against the user's own
+/// thresholds. Every facet the telemetry could not answer stays `None`, and
+/// the router's terms then contribute nothing and say so.
+fn routing_entitlement(
+    resolved: &glasshouse::config::ResolvedEntitlement,
+    thresholds: &glasshouse::provider::quota::CapacityBandThresholds,
+) -> glasshouse::routing::Entitlement {
+    use glasshouse::config::{EntitlementModels, TelemetryScope};
+    use glasshouse::routing::{EntitlementModelsFacet, EntitlementThrottleFacet};
+
+    resolved
+        .to_routing()
+        .with_capacity(
+            resolved
+                .remaining_capacity()
+                .map(|score| score.band(thresholds)),
+            resolved.seconds_until_reset(),
+        )
+        .with_throttling(resolved.throttling().map(|reading| {
+            EntitlementThrottleFacet::new(
+                reading.throttled(),
+                reading.scope() == TelemetryScope::PerAccount,
+            )
+        }))
+        .with_models(resolved.models().map(|models| match models {
+            EntitlementModels::Declared { models, .. } => {
+                EntitlementModelsFacet::Declared(models.clone())
+            }
+            EntitlementModels::HarnessDecided => EntitlementModelsFacet::HarnessDecided,
+        }))
+}
+
+/// A pool candidate's backend, carrying **this account's own** credential
+/// reference in place of the provider pool's first-declared name — what
+/// makes two candidates of one provider two resources to the health pool,
+/// the cache-locality rule and the quota label. A name only, like every
+/// `CredentialId`; an entry with no credential of its own keeps the
+/// provider-level default.
+fn backend_for_entitlement(
+    backend: &glasshouse::routing::Backend,
+    entitlement: &glasshouse::config::ResolvedEntitlement,
+) -> glasshouse::routing::Backend {
+    use glasshouse::routing::{Backend, CredentialId};
+
+    let Some(reference) = entitlement.credential() else {
+        return backend.clone();
+    };
+    Backend::new(
+        backend.provider().to_owned(),
+        backend.protocol().to_owned(),
+        backend.model().clone(),
+        CredentialId::new(backend.provider().to_owned(), reference.clone()),
+        backend.cost(),
+        backend.tools(),
+    )
+}
+
+/// 56A line 1969's binding half, beside line 1973's child-env scrub: the
+/// launch's secret store with every **foreign** entitlement's credential
+/// reference refused. `profile::resolve` binds a direct-provider launch to
+/// "the first credential reference that currently resolves" out of the
+/// provider's declared pool — a rule written before the broker existed —
+/// so with the pool brokered, the resolution the overlay sees must only be
+/// able to answer with the serving account's own reference, or the process
+/// would authenticate as whichever account is listed first while the
+/// announcement names another. Same filter as
+/// `EffectiveConfig::foreign_entitlement_credential_refs`, wrapped rather
+/// than re-derived; everything that is not an entitlement credential
+/// resolves exactly as before.
+struct EntitlementScopedSecrets<'a> {
+    inner: &'a dyn glasshouse::secret::SecretStore,
+    foreign: Vec<glasshouse::secret::SecretRef>,
+}
+
+impl glasshouse::secret::SecretStore for EntitlementScopedSecrets<'_> {
+    fn resolve(
+        &self,
+        reference: &glasshouse::secret::SecretRef,
+    ) -> Option<glasshouse::secret::Secret> {
+        if self.foreign.contains(reference) {
+            return None;
+        }
+        self.inner.resolve(reference)
+    }
+
+    fn is_present(&self, reference: &glasshouse::secret::SecretRef) -> bool {
+        // The same answer `resolve` gives, without producing a value: a
+        // foreign account's credential is not present *to this launch*.
+        !self.foreign.contains(reference) && self.inner.is_present(reference)
+    }
+
+    fn describe(&self) -> &'static str {
+        // The underlying store's own label: this wrapper narrows which
+        // references answer, not where values come from, and a diagnostic
+        // naming a store the user has never heard of would mislead.
+        self.inner.describe()
+    }
 }
 
 /// Phase 56 line 1954's *"announce which subscription served each session"*,
@@ -801,9 +924,49 @@ fn routing_destinations(
     use glasshouse::routing::session::{Destination, SessionContextFacts};
 
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
-    let telemetry = glasshouse::provider::resources::GatheredTelemetry::new().gather_gateway_quota(
-        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths()),
-    );
+    let quota_cache = glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths());
+    let telemetry = glasshouse::provider::resources::GatheredTelemetry::new()
+        .gather_gateway_quota(&quota_cache);
+
+    // 56A step 3: the entitlement pool, resolved once for the whole set with
+    // 56A-2's telemetry facets — the same sources `status_report` reads, in
+    // the same fail-soft way. The ledger handle is opened, read and dropped
+    // here, before the session store below opens its own (practice §65); a
+    // ledger that cannot be opened leaves the throttling facet honestly
+    // unknown rather than "none observed". A contradiction in the
+    // `[entitlements]` tables stops the routing decision, exactly as the
+    // per-destination lookup it replaces did — but a provider several
+    // entries back is not a contradiction any more: it is line 1953's axis.
+    let model_cache = glasshouse::provider::cache::ModelCache::new(runtime.paths());
+    let observations = glasshouse::routing::evidence::EvidenceLedger::open(runtime)
+        .and_then(|ledger| {
+            Ok(ledger.observations_in_window(
+                now_unix,
+                glasshouse::routing::evidence::CLASSIFICATION_EVIDENCE_WINDOW_SECONDS,
+            )?)
+        })
+        .map_err(|err| {
+            tracing::debug!(
+                error = %err,
+                "could not read the routing evidence ledger for the entitlement pool's facets"
+            );
+        })
+        .ok();
+    let mut entitlement_telemetry = glasshouse::config::EntitlementTelemetry::new(now_unix)
+        .with_gateway_quota(&quota_cache)
+        .with_model_catalogues(&model_cache);
+    if let Some(observations) = observations.as_deref() {
+        entitlement_telemetry = entitlement_telemetry.with_observations(observations);
+    }
+    let pool: Vec<glasshouse::config::ResolvedEntitlement> = effective
+        .entitlements()?
+        .into_iter()
+        .map(|entry| entry.with_telemetry(&entitlement_telemetry))
+        .collect();
+    // The same thresholds the entitlements status line renders bands with —
+    // the plain user-configured set, so a band a person read there and the
+    // band the router weighs cannot disagree.
+    let band_thresholds = effective.capacity_band_thresholds().value;
 
     let mut destinations = Vec::new();
 
@@ -869,8 +1032,16 @@ fn routing_destinations(
         let ceiling = destination_tier_ceiling(effective, &backend);
         // Phase 56 line 1954's producer: the entitlement this session's
         // profile charges, so a rule the user has since written applies to
-        // continuing it exactly as it applies to starting a fresh one.
-        let entitlement = destination_entitlement(effective, &profile)?;
+        // continuing it exactly as it applies to starting a fresh one. When
+        // SEVERAL pool entries back the session's provider, no record says
+        // which account actually served it — the serving account of an
+        // existing session is 56A-4's rebinding ground — so the destination
+        // honestly carries none rather than a guess.
+        let matches = pool_entitlements_for(&pool, harness, &profile.backend);
+        let entitlement = match matches.as_slice() {
+            [only] => Some(routing_entitlement(only, &band_thresholds)),
+            _ => None,
+        };
         destinations.push(
             with_capacity(
                 with_provider_protocols(
@@ -930,25 +1101,63 @@ fn routing_destinations(
         };
         let profile = profile.value;
         let (backend, protocols) = destination_backend(effective, &profile, None);
-        let ceiling = destination_tier_ceiling(effective, &backend);
-        let fresh_entitlement = destination_entitlement(effective, &profile)?;
-        destinations.push(
-            with_capacity(
-                with_provider_protocols(
-                    Destination::fresh(
-                        fresh_destination_id(harness, &name),
-                        harness,
-                        profile.name.clone(),
-                        backend,
-                        checkpoint,
+        let capacity = destination_capacity(&profile, effective, &telemetry, now_unix);
+        // 56A line 1953 — the entitlement axis. One entry backing this
+        // profile's resource (or none) keeps exactly the single candidate,
+        // and the id, this function has always built. Several entries
+        // produce one candidate EACH: the same harness and profile ranked
+        // across every account that may serve it, each candidate carrying
+        // that account's own entitlement (rules and 56A-2 facets) and its
+        // own credential reference. Nothing is pre-filtered by the rules
+        // here — a denied entitlement's candidate is refused by name by the
+        // router's own hard constraint, which already exists and must stay
+        // the one place that decides.
+        let matches = pool_entitlements_for(&pool, harness, &profile.backend);
+        if matches.len() > 1 {
+            for resolved in matches {
+                let backend = backend_for_entitlement(&backend, resolved);
+                let ceiling = destination_tier_ceiling(effective, &backend);
+                destinations.push(
+                    with_capacity(
+                        with_provider_protocols(
+                            Destination::fresh(
+                                entitled_fresh_destination_id(harness, &name, resolved.name()),
+                                harness,
+                                profile.name.clone(),
+                                backend,
+                                checkpoint,
+                            ),
+                            protocols.clone(),
+                        ),
+                        capacity.clone(),
+                    )
+                    .with_tier_ceiling(ceiling)
+                    .with_entitlement(Some(routing_entitlement(resolved, &band_thresholds))),
+                );
+            }
+        } else {
+            let ceiling = destination_tier_ceiling(effective, &backend);
+            let fresh_entitlement = matches
+                .first()
+                .map(|resolved| routing_entitlement(resolved, &band_thresholds));
+            destinations.push(
+                with_capacity(
+                    with_provider_protocols(
+                        Destination::fresh(
+                            fresh_destination_id(harness, &name),
+                            harness,
+                            profile.name.clone(),
+                            backend,
+                            checkpoint,
+                        ),
+                        protocols,
                     ),
-                    protocols,
-                ),
-                destination_capacity(&profile, effective, &telemetry, now_unix),
-            )
-            .with_tier_ceiling(ceiling)
-            .with_entitlement(fresh_entitlement),
-        );
+                    capacity,
+                )
+                .with_tier_ceiling(ceiling)
+                .with_entitlement(fresh_entitlement),
+            );
+        }
     }
 
     Ok(destinations)
@@ -998,9 +1207,15 @@ fn fresh_destination_profile(
     id: &str,
     harness: glasshouse::integrations::IntegrationId,
 ) -> Option<&str> {
-    id.strip_prefix("fresh:")?
+    let profile = id
+        .strip_prefix("fresh:")?
         .strip_prefix(harness.slug())?
-        .strip_prefix(':')
+        .strip_prefix(':')?;
+    // 56A line 1953: a pool candidate's id carries its entitlement after an
+    // `@` (`fresh:<harness>:<profile>@<entitlement>`); the profile is the
+    // part before it. A profile whose own name contains `@` cannot be named
+    // through such an identifier — recorded, not guessed around.
+    Some(profile.split_once('@').map_or(profile, |(name, _)| name))
 }
 
 /// A session record's warmth, or `None` when it is not a warm session at all.
@@ -4014,14 +4229,36 @@ fn launch_session(
     // half does, and it is the router's (above). A contradiction in the
     // `[entitlements]` tables is refused here for the same reason a bad
     // profile is: it must cost nothing.
-    let entitlement =
-        match effective.entitlement_for(launch_profile.harness, &launch_profile.backend) {
+    //
+    // 56A line 1969, the routing half: when the router chose a candidate
+    // that carries an entitlement, THAT entry serves — resolved by name from
+    // the same tables, never re-derived through the one-account lookup,
+    // which a provider several accounts legitimately back would refuse as
+    // ambiguous. The one-account lookup remains the answer for a launch the
+    // router never saw (routing off) and for a chosen candidate no entry
+    // describes; with routing off, a several-account provider is still
+    // refused, because without the broker's ranking there is nothing honest
+    // to pick an account by.
+    let chosen_entitlement_name = routed
+        .as_ref()
+        .and_then(|routed| routed.chosen().entitlement())
+        .map(|entitlement| entitlement.name().to_owned());
+    let entitlement = match &chosen_entitlement_name {
+        Some(name) => match effective.entitlements() {
+            Ok(pool) => pool.into_iter().find(|entry| entry.name() == name),
+            Err(err) => {
+                eprintln!("glasshouse: {err}");
+                return Ok(ExitCode::FAILURE);
+            }
+        },
+        None => match effective.entitlement_for(launch_profile.harness, &launch_profile.backend) {
             Ok(entitlement) => entitlement,
             Err(err) => {
                 eprintln!("glasshouse: {err}");
                 return Ok(ExitCode::FAILURE);
             }
-        };
+        },
+    };
     if let Some(entitlement) = &entitlement
         && let Some(refused) = entitlement.rules().refusal(launch_profile.harness, None)
     {
@@ -4175,11 +4412,23 @@ fn launch_session(
         }
     };
 
+    // 56A line 1969: the overlay may only resolve the serving account's own
+    // credential — see `EntitlementScopedSecrets`. With zero or one
+    // configured entitlement the foreign list is empty or names other
+    // resources' accounts, and resolution answers exactly as before. The
+    // gateway's own upstream resolution above deliberately keeps the
+    // unwrapped store: which account serves a gateway-backed session is
+    // assigned when the session starts (56A-4), not at this launch.
+    let scoped_secrets = EntitlementScopedSecrets {
+        inner: &secrets,
+        foreign: effective
+            .foreign_entitlement_credential_refs(entitlement.as_ref().map(|e| e.name())),
+    };
     let resolution = glasshouse::profile::Resolution {
         adapter: selection.adapter(),
         acknowledged_bypass,
         provider: provider.as_ref(),
-        secrets: &secrets,
+        secrets: &scoped_secrets,
     };
     // Phase 9J line 576: the user's configured native-pairing preference and
     // corrections, resolved here — the same place `provider` above is — and

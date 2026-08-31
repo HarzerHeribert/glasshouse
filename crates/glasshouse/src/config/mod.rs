@@ -2108,9 +2108,17 @@ impl ResolvedEntitlement {
         self.layer
     }
 
-    /// The router's view: name and rules, nothing else.
+    /// The router's view: name, rules, and whether a user or project
+    /// actually wrote the entry — the synthesised harness-default carries
+    /// `configured = false`, which is what keeps the router's pool terms
+    /// inert for a user who configured nothing (56A step 3's preservation
+    /// clause). The 56A-2 telemetry facets are attached by the caller that
+    /// resolved them (`main.rs::routing_entitlement`), because the band they
+    /// carry is derived against the user's own thresholds, which this
+    /// method does not hold.
     pub fn to_routing(&self) -> crate::routing::Entitlement {
         crate::routing::Entitlement::new(self.name.clone(), self.rules.clone())
+            .with_configured(self.layer != Layer::Default)
     }
 
     /// What the announcement says inside the parentheses after the name:
@@ -5010,6 +5018,27 @@ impl<'a> EffectiveConfig<'a> {
                 Some(SecretRef::Environment { var }) => Some(var.clone()),
                 _ => None,
             })
+            .collect()
+    }
+
+    /// The credential **references** of every entitlement that is not the
+    /// one serving — [`Self::foreign_entitlement_credential_vars`]'s twin
+    /// for the resolution side (56A line 1969): a launch bound to the
+    /// pool's chosen account must not *resolve* a sibling account's
+    /// credential either, or the overlay's "first reference that resolves"
+    /// rule would quietly re-bind the process to whichever account is
+    /// listed first. Same filter, same `None`-scrubs-everything contract,
+    /// and both reference shapes rather than only the environment one — an
+    /// OS-credential reference has no variable to scrub from a child, but
+    /// it can absolutely be resolved, so the resolution side must know it.
+    pub fn foreign_entitlement_credential_refs(&self, serving: Option<&str>) -> Vec<SecretRef> {
+        let Ok(entitlements) = self.entitlements() else {
+            return Vec::new();
+        };
+        entitlements
+            .iter()
+            .filter(|entry| serving != Some(entry.name()))
+            .filter_map(|entry| entry.credential().cloned())
             .collect()
     }
 

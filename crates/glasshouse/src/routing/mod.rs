@@ -69,6 +69,7 @@ pub mod pressure;
 pub mod request;
 pub mod session;
 
+use crate::provider::quota::CapacityBand;
 use crate::secret::SecretRef;
 
 /// Which credential, by name — never by value.
@@ -624,7 +625,7 @@ impl std::fmt::Display for HardConstraint {
 /// a disposable job has a [`disposable::JobKind`] and neither a harness nor
 /// a tier of its own. No caller can raise the wrong part: each asks only the
 /// question its work actually poses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntitlementRefusal {
     /// The rules do not admit this harness.
     Harness(crate::integrations::IntegrationId),
@@ -633,6 +634,14 @@ pub enum EntitlementRefusal {
     /// The rules do not admit this kind of bounded support job — the third
     /// clause of map line 1947, consumed by `disposable::DisposableRouting`.
     JobKind(disposable::JobKind),
+    /// Map line 1953's model half: the entitlement's **declared** model list
+    /// is known and does not name the model this destination would serve.
+    /// Raised only from a [`EntitlementModelsFacet::Declared`] facet — a
+    /// harness-decided or unknown facet constrains nothing, exactly as an
+    /// unknown tier ceiling never raises [`HardConstraint::WorkloadTier`].
+    /// Carries the model's name (which is why this enum is no longer
+    /// `Copy`), so the refusal a person reads says which model.
+    Model(String),
 }
 
 impl std::fmt::Display for EntitlementRefusal {
@@ -641,6 +650,7 @@ impl std::fmt::Display for EntitlementRefusal {
             Self::Harness(harness) => write!(f, "harness `{}`", harness.slug()),
             Self::Tier(tier) => write!(f, "the `{tier}` tier"),
             Self::JobKind(kind) => write!(f, "the `{kind}` job kind"),
+            Self::Model(model) => write!(f, "the `{model}` model"),
         }
     }
 }
@@ -789,27 +799,161 @@ impl EntitlementRules {
     }
 }
 
+/// Map line 1965's recent-throttling facet, as the router carries it: how
+/// many informative throttles the evidence window recorded against this
+/// entitlement, and whether that count could honestly be narrowed to this
+/// account's own credential — 56A-2's `AccountSpecific` narrowing, reduced
+/// to the one bit the score's evidence sentence needs. The caller resolves
+/// it (`crate::config`'s telemetry resolver); this module reads no ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntitlementThrottleFacet {
+    throttled: usize,
+    account_scoped: bool,
+}
+
+impl EntitlementThrottleFacet {
+    pub fn new(throttled: usize, account_scoped: bool) -> Self {
+        Self {
+            throttled,
+            account_scoped,
+        }
+    }
+
+    /// Informative throttles in the window — this account's own when
+    /// [`Self::is_account_scoped`], the provider's shared total otherwise.
+    pub fn throttled(&self) -> usize {
+        self.throttled
+    }
+
+    pub fn is_account_scoped(&self) -> bool {
+        self.account_scoped
+    }
+
+    /// The scope word an explanation renders — the same two words
+    /// `glasshouse status` prints for the same facet, so a reading cannot
+    /// claim per-account knowledge nothing measured.
+    pub fn scope_word(&self) -> &'static str {
+        if self.account_scoped {
+            "this account"
+        } else {
+            "provider-wide"
+        }
+    }
+}
+
+/// Map line 1965's models facet, as the router carries it: which models this
+/// entitlement can serve, from what its backing actually declares — never an
+/// invented list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntitlementModelsFacet {
+    /// The provider's own declared model list — the fetched catalogue,
+    /// carried by name.
+    Declared(Vec<String>),
+    /// A native sign-in: the harness picks its own models, and Glasshouse
+    /// does not know the plan's list — an answer, not an absence, and one
+    /// that constrains nothing.
+    HarnessDecided,
+}
+
+impl EntitlementModelsFacet {
+    /// Whether these models admit `model`. Only a declared list that does
+    /// not name it answers `false`; [`Self::HarnessDecided`] constrains
+    /// nothing, because the harness's own choice is not Glasshouse's to
+    /// second-guess.
+    pub fn serves(&self, model: &str) -> bool {
+        match self {
+            Self::Declared(models) => models.iter().any(|declared| declared == model),
+            Self::HarnessDecided => true,
+        }
+    }
+}
+
 /// An entitlement as the router sees it — map lines 1946 and 1962: a named
 /// resource with rules, separate from the harness that consumes it.
 ///
-/// Exactly two facts, because they are the two the router acts on: the name,
-/// so a refusal and an announcement can say which entitlement; and the
-/// rules. Which plan it is, which vendor bills it, which credential
-/// authenticates it and which harness's sign-in it stands for are
-/// configuration facts the router never decides on, and they stay in
+/// Two facts the router acts on structurally — the name, so a refusal and an
+/// announcement can say which entitlement; and the rules — plus, since 56A
+/// step 3 (lines 1953/1966–1969), the **telemetry facets the score reads**:
+/// capacity band, seconds until reset, recent throttling, and the models the
+/// backing declares. Every facet is a value the *caller resolved* from
+/// 56A-2's telemetry (`crate::config`'s
+/// `EffectiveConfig::configured_entitlements_with_telemetry` reads the
+/// sources; `main.rs` derives the band against the user's own thresholds)
+/// and `None` means **unknown** — a facet nothing measured contributes
+/// nothing to the score and says so, never a guessed number. Which plan it
+/// is, which vendor bills it and which credential authenticates it stay in
 /// `crate::config` (`ResolvedEntitlement`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entitlement {
     name: String,
     rules: EntitlementRules,
+    /// Whether a user or project actually wrote this entry, as opposed to
+    /// the default a harness's own sign-in is synthesised with. The score's
+    /// pool gate counts configured entries only: a user with zero or one
+    /// configured entitlement has no pool to choose across, and the five
+    /// entitlement terms stay inert for them by this bit.
+    configured: bool,
+    capacity_band: Option<CapacityBand>,
+    seconds_until_reset: Option<i64>,
+    throttling: Option<EntitlementThrottleFacet>,
+    models: Option<EntitlementModelsFacet>,
 }
 
 impl Entitlement {
+    /// A named entitlement with rules and no telemetry read — every facet
+    /// unknown, and `configured` true: a caller building one by hand is
+    /// describing a real entry (the synthesised harness-default arrives
+    /// through [`Self::with_configured`], from the one resolver that
+    /// synthesises it).
     pub fn new(name: impl Into<String>, rules: EntitlementRules) -> Self {
         Self {
             name: name.into(),
             rules,
+            configured: true,
+            capacity_band: None,
+            seconds_until_reset: None,
+            throttling: None,
+            models: None,
         }
+    }
+
+    /// See the `configured` field. `false` marks the default entry a
+    /// harness's own sign-in gets when the user configured none.
+    #[must_use]
+    pub fn with_configured(mut self, configured: bool) -> Self {
+        self.configured = configured;
+        self
+    }
+
+    /// Attach what 56A-2's telemetry read about this account's remaining
+    /// capacity: the band the caller derived against the user's own
+    /// thresholds, and the seconds until the allowance resets. `None` is
+    /// unknown, never full and never empty.
+    #[must_use]
+    pub fn with_capacity(
+        mut self,
+        band: Option<CapacityBand>,
+        seconds_until_reset: Option<i64>,
+    ) -> Self {
+        self.capacity_band = band;
+        self.seconds_until_reset = seconds_until_reset;
+        self
+    }
+
+    /// Attach the recent-throttling facet. `None` is unknown — nothing
+    /// consulted the ledger — never "none observed".
+    #[must_use]
+    pub fn with_throttling(mut self, throttling: Option<EntitlementThrottleFacet>) -> Self {
+        self.throttling = throttling;
+        self
+    }
+
+    /// Attach the models facet. `None` is unknown — no catalogue was ever
+    /// read — which constrains nothing.
+    #[must_use]
+    pub fn with_models(mut self, models: Option<EntitlementModelsFacet>) -> Self {
+        self.models = models;
+        self
     }
 
     pub fn name(&self) -> &str {
@@ -818,6 +962,45 @@ impl Entitlement {
 
     pub fn rules(&self) -> &EntitlementRules {
         &self.rules
+    }
+
+    pub fn is_configured(&self) -> bool {
+        self.configured
+    }
+
+    pub fn capacity_band(&self) -> Option<CapacityBand> {
+        self.capacity_band
+    }
+
+    pub fn seconds_until_reset(&self) -> Option<i64> {
+        self.seconds_until_reset
+    }
+
+    pub fn throttling(&self) -> Option<&EntitlementThrottleFacet> {
+        self.throttling.as_ref()
+    }
+
+    pub fn models(&self) -> Option<&EntitlementModelsFacet> {
+        self.models.as_ref()
+    }
+
+    /// Line 1953's model half, as the hard constraint the session router
+    /// raises: a candidate whose entitlement **declares** its models and
+    /// does not declare this destination's is refused by name. A
+    /// harness-decided facet, an unknown facet, and a destination whose
+    /// model the harness picks itself ([`AssignedModel::HarnessDefault`])
+    /// all constrain nothing — "nobody has said" is not "cannot", the same
+    /// rule every other gate in `session::hard_constraint` follows.
+    pub fn model_constraint(&self, model: &AssignedModel) -> Result<(), HardConstraint> {
+        if let (Some(models), Some(name)) = (&self.models, model.name())
+            && !models.serves(name)
+        {
+            return Err(HardConstraint::Entitlement {
+                entitlement: self.name.clone(),
+                refused: EntitlementRefusal::Model(name.to_owned()),
+            });
+        }
+        Ok(())
     }
 
     /// [`EntitlementRules::refusal`], as the hard constraint the router

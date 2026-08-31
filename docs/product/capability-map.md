@@ -1950,7 +1950,7 @@ Recorded 2026-08-31 from the user's instruction of record: *"I want to be able t
 ☐ Keep a harness's native tooling — editing, shell, repository, and tool-call behaviour — intact when it is served by a non-native provider, and refuse the pairing by name when it cannot be kept.
 ☑ Record per-harness task efficiency — tokens, wall-clock, request count, and outcome by task class — so that harness choice can rest on evidence rather than on which vendor bills for it.
 ☐ Prefer, for a stated task the user has not assigned a harness to, the harness with the better observed efficiency for that task class, and say why.
-☐ Give the routing candidate set a subscription and model axis, so the same harness is ranked across every subscription allowed to serve it.
+☑ Give the routing candidate set a subscription and model axis, so the same harness is ranked across every subscription allowed to serve it.
 ☐ Never charge a task to a subscription the user's rules did not allow for that harness or tier, and announce which subscription served each session.
 ☐ Keep the decoupling opt-in per launch profile, so an existing profile keeps its native pairing until the user changes it.
 ☐ Cover each supported harness/provider/protocol pairing with an end-to-end test through the shipped binary against a fixture upstream before offering it.
@@ -1963,10 +1963,10 @@ Recorded 2026-08-31 from the user's instruction of record, refining Phase 56: *"
 ☑ Allow several entitlements of the same vendor and plan to coexist in one pool, each with its own authentication, remaining capacity, and reset time.
 ☑ Keep the layering explicit and separately replaceable: harness, protocol adapter, authentication, entitlement, inference model.
 ☑ Track, per entitlement, remaining capacity, time until reset, recent throttling, and the models it can serve, from the telemetry the provider actually exposes.
-☐ Score entitlements for a new job by available capacity, time until reset, recent throttling, session affinity, and model availability, and choose by that score rather than by round-robin.
-☐ Burn an entitlement aggressively when its reset is near and its remainder would otherwise expire, and preserve one whose reset is far.
-☐ Distribute independent workers across the pool while keeping a long-running session sticky to the entitlement that holds its context and cache, unless a rule or exhaustion forces a move.
-☐ Present the whole pool to every harness through the broker, so that a single harness process is no longer bound to one account's quota.
+☑ Score entitlements for a new job by available capacity, time until reset, recent throttling, session affinity, and model availability, and choose by that score rather than by round-robin.
+☑ Burn an entitlement aggressively when its reset is near and its remainder would otherwise expire, and preserve one whose reset is far.
+☑ Distribute independent workers across the pool while keeping a long-running session sticky to the entitlement that holds its context and cache, unless a rule or exhaustion forces a move.
+☑ Present the whole pool to every harness through the broker, so that a single harness process is no longer bound to one account's quota.
 ☐ Fall back across the pool in a stated order on exhaustion or throttling — subscription to subscription to API credits — and record every fallback with its reason.
 ☐ Let the user state per-entitlement rules — allowed harnesses, tiers, job kinds, and spend ceilings — and never let the broker exceed them.
 ☐ Show the pool in one inspectable view — each entitlement's capacity, reset, throttle history, and what it served — and announce the entitlement that served each session.

@@ -44,7 +44,7 @@
 //! `crate::session` nor `crate::checkpoint`, for the reason
 //! [`crate::config::pairing::ContinuitySource`] gives.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use crate::config::pairing::{ContinuitySource, WarmSession};
@@ -2034,6 +2034,538 @@ pub fn switching_and_bootstrap_cost(
 }
 
 // ---------------------------------------------------------------------------
+// Phase 56A step 3, lines 1953 and 1966–1969 — the entitlement pool's own
+// terms: the pool enters the candidate set (main.rs widens it, one candidate
+// per entitlement allowed to serve the harness), and the score chooses.
+//
+// Five factors, map line 1966's own list: available capacity (band), time
+// until reset, recent throttling, session affinity, and model availability.
+// The affinity factor is deliberately NOT a new term — it **is**
+// [`session_affinity`], because the entitlement holding a warm session's
+// context scores exactly what that session's warmth already says, and a
+// second number for the same fact would be the double-count this module
+// refuses everywhere. Stickiness (line 1968) is therefore the affinity
+// term's weight, not a second mechanism, and
+// [`entitlement_stickiness_note`] says so in the explanation.
+//
+// Two rules every term below obeys:
+//
+// - **an unknown facet contributes NOTHING and says so** — never a guessed
+//   number, the same stance `quota_pressure` takes for an unread quota;
+// - **the terms are live only when the candidate set actually offers a
+//   choice of configured entitlements** ([`EntitlementPoolView`], two or
+//   more distinct configured names). A user with zero or one configured
+//   entitlement has no pool for a score to choose across, and their ranking
+//   must stay byte-for-byte what it was — the packet's own preservation
+//   clause, enforced structurally rather than hoped for.
+// ---------------------------------------------------------------------------
+
+/// Line 1966's capacity factor, by band. Plenty earns the most, and the
+/// magnitudes are graded so that one band's step (0.15) is a *slight* lead —
+/// the lead the distribution rule (line 1968) must be able to overcome —
+/// while the drop into the reserve band is priced like the protected thing
+/// it is.
+const ENTITLEMENT_CAPACITY_PLENTY: f64 = 0.3;
+const ENTITLEMENT_CAPACITY_HEALTHY: f64 = 0.15;
+const ENTITLEMENT_CAPACITY_TIGHT: f64 = -0.15;
+const ENTITLEMENT_CAPACITY_RESERVE: f64 = -0.5;
+
+/// An entitlement whose band reads **exhausted** — line 1968's one capacity
+/// case that must move even a warm session. Sized against this module's own
+/// scale: it must clear a live zero-idle session's warmth (`1.5`), the hot
+/// prompt-cache and intact-context facets a short-idle session can carry
+/// (`0.4 + 0.3`), and the cold bootstrap the fresh sibling pays (`1.0`) —
+/// `3.2` in all — because an account with nothing left cannot serve the next
+/// turn, and staying warm on a resource that cannot answer is not warmth. It
+/// deliberately does **not** also clear the task-identity facets (same task
+/// `0.5` + touched files `0.6`): a session demonstrably mid-task on the
+/// named files is not yanked by a band reading alone.
+const ENTITLEMENT_EXHAUSTED_PENALTY: f64 = -3.5;
+
+/// Line 1968's distribution half: what each **live** session already charged
+/// to the same entitlement (elsewhere in this candidate set) costs a
+/// candidate. One step must outweigh a *slight* capacity lead — one band
+/// (`0.15`) — so two simultaneous fresh choices do not both land on the
+/// entitlement that was marginally ahead, and must not outweigh a full
+/// plenty-to-tight gap, so real capacity still decides when the pool is
+/// genuinely uneven.
+const ENTITLEMENT_IN_FLIGHT_LOAD: f64 = -0.2;
+
+/// Line 1967, the burn half: what a low-band entitlement whose reset is
+/// inside [`RESET_BURN_HORIZON_SECONDS`] earns. The user's instruction of
+/// record (design-decisions §56A): *"A at 12% resetting in 1h20m and B at
+/// 61% resetting in 4d ⇒ burn A"* — capacity that would expire unused is the
+/// cheapest capacity there is, so the full weight of the strongest
+/// established preference on this module's scale (`1.0`), enough to overturn
+/// the reserve-band's own capacity penalty (`-0.5`) plus a healthy sibling's
+/// lead (`+0.15`).
+const RESET_BURN: f64 = 1.0;
+
+/// Line 1967, the preserve half: what a low-band entitlement whose reset is
+/// at or past [`RESET_PRESERVE_HORIZON_SECONDS`] pays — *"A at 12% resetting
+/// in 4d ⇒ preserve A, route B"*. Smaller than the burn half on purpose: the
+/// capacity factor already penalises the low band once, and this term adds
+/// the map's own extra reason to look elsewhere, not a second copy of the
+/// band.
+const RESET_PRESERVE: f64 = -0.4;
+
+/// Line 1967's "near". Two hours — comfortably containing the user's own
+/// 1h20m example, and, on the scale of the multi-hour subscription windows
+/// the 56A instruction describes, a remainder with under two hours to live
+/// cannot plausibly be banked for later work. Deliberately **not**
+/// `pressure::RESET_RELIEF_HORIZON_SECONDS` (300s): that figure prices an
+/// API window's imminence, and reusing it here would make the user's own
+/// example read as "distant".
+const RESET_BURN_HORIZON_SECONDS: i64 = 2 * 3600;
+
+/// Line 1967's "far": a day or more away is fully "preserve" — the user's
+/// four-day example with a wide margin — and between the two horizons the
+/// term fades linearly, so a reset crossing either boundary does not jump.
+const RESET_PRESERVE_HORIZON_SECONDS: i64 = 24 * 3600;
+
+/// Line 1966's throttling factor: per informative throttle recorded against
+/// this entitlement in the evidence window, bounded. The same shape and
+/// scale as [`HEALTH_FAILURE_PENALTY`], because both read observed
+/// misbehaviour of the serving resource; account-scoped where 56A-2's
+/// narrowing could honestly narrow it, and the evidence sentence says whose
+/// count it is either way.
+const ENTITLEMENT_THROTTLE_PENALTY: f64 = -0.2;
+const ENTITLEMENT_THROTTLE_FLOOR: f64 = -0.6;
+
+/// Line 1966's model-availability factor: the entitlement's declared
+/// catalogue names the model this destination would serve — an established
+/// fact, on the same scale as [`TIER_FIT_HEADROOM`]. The negative case is
+/// not priced here at all: a declared list that does *not* name the model is
+/// [`super::Entitlement::model_constraint`]'s hard refusal, and such a
+/// candidate never reaches the score.
+const ENTITLEMENT_MODEL_AVAILABLE: f64 = 0.2;
+
+/// What the candidate set offers along the entitlement axis — the two
+/// set-level facts the pool terms read, computed once per `choose` from the
+/// eligible candidates because only the router holds the set (the same
+/// reason the private `alternatives_for` helper lives here).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EntitlementPoolView {
+    /// Distinct **configured** entitlement names among the candidates — the
+    /// pool gate. The synthesised harness-default entries do not count
+    /// toward the gate (a user who configured nothing has no pool), but a
+    /// candidate carrying one is still scored once the gate is open: the
+    /// map's own pool names native sign-ins as members.
+    configured: BTreeSet<String>,
+    /// Live sessions per entitlement name, by destination id — line 1968's
+    /// in-flight load, so a candidate can ask "who else is drawing on my
+    /// account right now" without counting itself.
+    live: BTreeMap<String, Vec<String>>,
+}
+
+impl EntitlementPoolView {
+    /// Read the axis off a candidate set.
+    pub fn of(destinations: &[Destination]) -> Self {
+        let mut view = Self::default();
+        for destination in destinations {
+            let Some(entitlement) = destination.entitlement() else {
+                continue;
+            };
+            if entitlement.is_configured() {
+                view.configured.insert(entitlement.name().to_owned());
+            }
+            if let Continuation::Existing(warm) = destination.continuation()
+                && warm.state == crate::config::pairing::WarmSessionState::Live
+            {
+                view.live
+                    .entry(entitlement.name().to_owned())
+                    .or_default()
+                    .push(destination.id().to_owned());
+            }
+        }
+        view
+    }
+
+    /// Whether the set carries two or more distinct configured entitlements
+    /// — the gate every pool term checks first.
+    pub fn offers_a_choice(&self) -> bool {
+        self.configured.len() >= 2
+    }
+
+    pub fn configured_count(&self) -> usize {
+        self.configured.len()
+    }
+
+    /// How many **live** sessions other than `excluding_id` are charged to
+    /// `entitlement` in this candidate set.
+    pub fn live_sessions_elsewhere(&self, entitlement: &str, excluding_id: &str) -> usize {
+        self.live
+            .get(entitlement)
+            .map(|ids| ids.iter().filter(|id| *id != excluding_id).count())
+            .unwrap_or(0)
+    }
+
+    /// The inert sentence every pool term renders when the gate is closed —
+    /// one wording, so the explanation cannot say two different things about
+    /// one fact.
+    fn no_choice_evidence(&self) -> String {
+        format!(
+            "inert: the candidate set carries {} configured entitlement{} — the pool axis \
+             separates nothing until there are two (lines 1953, 1966)",
+            self.configured.len(),
+            if self.configured.len() == 1 { "" } else { "s" },
+        )
+    }
+}
+
+/// The two gates every pool term shares: the set must offer a choice, and
+/// the candidate must carry an entitlement at all. `Err` is the finished
+/// inert contribution.
+fn entitlement_axis<'a>(
+    term: &'static str,
+    destination: &'a Destination,
+    pool: &EntitlementPoolView,
+) -> Result<&'a super::Entitlement, Contribution> {
+    if !pool.offers_a_choice() {
+        return Err(Contribution::new(term, 0.0, pool.no_choice_evidence()));
+    }
+    match destination.entitlement() {
+        Some(entitlement) => Ok(entitlement),
+        None => Err(Contribution::new(
+            term,
+            0.0,
+            "no entitlement describes this destination's resource — nothing to score on the \
+             pool axis, and nothing is guessed",
+        )),
+    }
+}
+
+/// Line 1966's capacity factor, with line 1968's distribution built in: the
+/// entitlement's own band, minus a load step per live session elsewhere in
+/// the set already charged to the same account. The load half is what
+/// spreads independent fresh choices across the pool — the second of two
+/// simultaneous choices sees the first's live session and the marginally
+/// leading account stops leading.
+pub fn entitlement_capacity(destination: &Destination, pool: &EntitlementPoolView) -> Contribution {
+    const TERM: &str = "entitlement capacity";
+    let entitlement = match entitlement_axis(TERM, destination, pool) {
+        Ok(entitlement) => entitlement,
+        Err(inert) => return inert,
+    };
+    let Some(band) = entitlement.capacity_band() else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "`{}`'s remaining capacity is unknown — nothing measured it, so it contributes \
+                 nothing, never a guessed number",
+                entitlement.name()
+            ),
+        );
+    };
+    if band == CapacityBand::Exhausted {
+        return Contribution::new(
+            TERM,
+            ENTITLEMENT_EXHAUSTED_PENALTY,
+            format!(
+                "`{}` reads exhausted — an account with nothing left cannot serve the next \
+                 turn, and this is the one band reading that outweighs a warm session's \
+                 context (line 1968)",
+                entitlement.name()
+            ),
+        );
+    }
+    let band_weight = match band {
+        CapacityBand::Plenty => ENTITLEMENT_CAPACITY_PLENTY,
+        CapacityBand::Healthy => ENTITLEMENT_CAPACITY_HEALTHY,
+        CapacityBand::Tight => ENTITLEMENT_CAPACITY_TIGHT,
+        CapacityBand::Reserve => ENTITLEMENT_CAPACITY_RESERVE,
+        CapacityBand::Exhausted => unreachable!("returned above"),
+    };
+    let live_elsewhere = pool.live_sessions_elsewhere(entitlement.name(), destination.id());
+    let magnitude = band_weight + live_elsewhere as f64 * ENTITLEMENT_IN_FLIGHT_LOAD;
+    let mut evidence = format!(
+        "`{}` is in the {band} band — the pool's capacity axis, read from 56A-2's telemetry",
+        entitlement.name()
+    );
+    if live_elsewhere > 0 {
+        use std::fmt::Write as _;
+        let _ = write!(
+            evidence,
+            "; {live_elsewhere} live session{} in this set already draw{} on it, so independent \
+             work spreads to a sibling account rather than piling on (line 1968)",
+            if live_elsewhere == 1 { "" } else { "s" },
+            if live_elsewhere == 1 { "s" } else { "" },
+        );
+    }
+    Contribution::new(TERM, magnitude, evidence)
+}
+
+/// Line 1967 — the reset-boundary rule, as its own named term. Reads ONLY
+/// the entitlement's reset facet and its capacity band: a **low** band
+/// (tight or reserve) with a **near** reset is burned (its remainder would
+/// otherwise expire), the same band with a **far** reset is preserved, and
+/// the two fade into each other linearly between the horizons. A healthy
+/// band has no scarce remainder to burn or preserve; an exhausted one has
+/// nothing left to burn; an unknown reset contributes nothing.
+pub fn entitlement_reset_boundary(
+    destination: &Destination,
+    pool: &EntitlementPoolView,
+) -> Contribution {
+    const TERM: &str = "reset boundary";
+    let entitlement = match entitlement_axis(TERM, destination, pool) {
+        Ok(entitlement) => entitlement,
+        Err(inert) => return inert,
+    };
+    let Some(band) = entitlement.capacity_band() else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "`{}`'s capacity band is unknown — this term reads the reset beside the band, \
+                 and without the band nobody can say whether a remainder would expire",
+                entitlement.name()
+            ),
+        );
+    };
+    let Some(seconds) = entitlement.seconds_until_reset() else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "`{}`'s reset is unknown — an unknown reset contributes nothing (line 1967)",
+                entitlement.name()
+            ),
+        );
+    };
+    if band == CapacityBand::Exhausted {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "`{}` reads exhausted — there is no remainder left to burn, and the capacity \
+                 term already prices the band",
+                entitlement.name()
+            ),
+        );
+    }
+    if band > CapacityBand::Tight {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "`{}` is in the {band} band — no scarce remainder to burn before a reset or to \
+                 preserve past one",
+                entitlement.name()
+            ),
+        );
+    }
+    let urgency = burn_urgency(seconds);
+    let magnitude = RESET_BURN * urgency + RESET_PRESERVE * (1.0 - urgency);
+    let evidence = if urgency >= 1.0 {
+        format!(
+            "`{}` is in the {band} band and resets in {seconds}s, inside the \
+             {RESET_BURN_HORIZON_SECONDS}s burn horizon — its remainder would otherwise \
+             expire, so it is burned aggressively (line 1967)",
+            entitlement.name()
+        )
+    } else if urgency <= 0.0 {
+        format!(
+            "`{}` is in the {band} band and resets in {seconds}s, at or past the \
+             {RESET_PRESERVE_HORIZON_SECONDS}s preserve horizon — a low remainder with a far \
+             reset is preserved, and the work routes to a sibling (line 1967)",
+            entitlement.name()
+        )
+    } else {
+        format!(
+            "`{}` is in the {band} band and resets in {seconds}s, between the burn and \
+             preserve horizons — {:.0}% of the burn preference applies (line 1967)",
+            entitlement.name(),
+            urgency * 100.0
+        )
+    };
+    Contribution::new(TERM, magnitude, evidence)
+}
+
+/// How much of the burn preference applies at `seconds` until reset: `1.0`
+/// inside [`RESET_BURN_HORIZON_SECONDS`] (a reset already past is the
+/// clearest reason of all to stop conserving), `0.0` at or past
+/// [`RESET_PRESERVE_HORIZON_SECONDS`], linear between.
+fn burn_urgency(seconds: i64) -> f64 {
+    if seconds <= 0 {
+        // A reset already reached — or a stale reading from the deliberately
+        // un-staled capacity cache whose window has since closed — means the
+        // remainder has rolled over: there is nothing left to burn before it
+        // expires, so it is no more urgent than a distant reset. Without this
+        // guard a negative `seconds` slips under the burn horizon and scores
+        // the maximum +1.0, making the router prefer the *stalest* account
+        // over a fresh healthy one (caught by the 2026-08-31 investigation
+        // swarm; it inverts this line's own intent).
+        0.0
+    } else if seconds <= RESET_BURN_HORIZON_SECONDS {
+        1.0
+    } else if seconds >= RESET_PRESERVE_HORIZON_SECONDS {
+        0.0
+    } else {
+        1.0 - (seconds - RESET_BURN_HORIZON_SECONDS) as f64
+            / (RESET_PRESERVE_HORIZON_SECONDS - RESET_BURN_HORIZON_SECONDS) as f64
+    }
+}
+
+/// Line 1966's throttling factor: what the evidence window's informative
+/// throttles against this entitlement cost it, account-scoped where 56A-2's
+/// narrowing could honestly narrow the count and provider-wide otherwise —
+/// and the evidence sentence says which, because a shared reading shown as a
+/// per-account one would claim knowledge nothing measured.
+pub fn entitlement_throttling(
+    destination: &Destination,
+    pool: &EntitlementPoolView,
+) -> Contribution {
+    const TERM: &str = "entitlement throttling";
+    let entitlement = match entitlement_axis(TERM, destination, pool) {
+        Ok(entitlement) => entitlement,
+        Err(inert) => return inert,
+    };
+    let Some(throttling) = entitlement.throttling() else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "`{}`'s recent throttling is unknown — nothing consulted the ledger for it, \
+                 and \"none observed\" may only be said by a resolver that looked",
+                entitlement.name()
+            ),
+        );
+    };
+    if throttling.throttled() == 0 {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "no recent throttle is recorded against `{}` ({})",
+                entitlement.name(),
+                throttling.scope_word()
+            ),
+        );
+    }
+    let magnitude = (throttling.throttled() as f64 * ENTITLEMENT_THROTTLE_PENALTY)
+        .max(ENTITLEMENT_THROTTLE_FLOOR);
+    Contribution::new(
+        TERM,
+        magnitude,
+        format!(
+            "{} recent throttle{} recorded against `{}` ({})",
+            throttling.throttled(),
+            if throttling.throttled() == 1 { "" } else { "s" },
+            entitlement.name(),
+            throttling.scope_word()
+        ),
+    )
+}
+
+/// Line 1966's model-availability factor. Only the established-positive case
+/// carries weight: a declared catalogue naming this destination's model. The
+/// established-negative case is [`super::Entitlement::model_constraint`]'s
+/// hard refusal and never reaches a score; harness-decided, an unknown
+/// facet, and a harness-picked model all contribute nothing and say why.
+pub fn entitlement_model_availability(
+    destination: &Destination,
+    pool: &EntitlementPoolView,
+) -> Contribution {
+    const TERM: &str = "entitlement model availability";
+    let entitlement = match entitlement_axis(TERM, destination, pool) {
+        Ok(entitlement) => entitlement,
+        Err(inert) => return inert,
+    };
+    let Some(models) = entitlement.models() else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "`{}`'s model list is unknown — no catalogue was ever read, which is not a \
+                 `no`",
+                entitlement.name()
+            ),
+        );
+    };
+    match models {
+        super::EntitlementModelsFacet::HarnessDecided => Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "`{}` is a native sign-in whose models the harness decides — nothing to check \
+                 a destination's model against, and no list is invented",
+                entitlement.name()
+            ),
+        ),
+        super::EntitlementModelsFacet::Declared(declared) => {
+            let Some(model) = destination.backend().model().name() else {
+                return Contribution::new(
+                    TERM,
+                    0.0,
+                    format!(
+                        "the harness picks this destination's model itself, so `{}`'s declared \
+                         list of {} constrains and earns nothing",
+                        entitlement.name(),
+                        declared.len()
+                    ),
+                );
+            };
+            if models.serves(model) {
+                Contribution::new(
+                    TERM,
+                    ENTITLEMENT_MODEL_AVAILABLE,
+                    format!(
+                        "`{}`'s declared catalogue names `{model}` — established to serve this \
+                         destination's model",
+                        entitlement.name()
+                    ),
+                )
+            } else {
+                // Unreachable through `choose` — the hard constraint removed
+                // such a candidate — but this is a public function, and a
+                // direct caller is owed the honest sentence rather than a
+                // panic.
+                Contribution::new(
+                    TERM,
+                    0.0,
+                    format!(
+                        "`{}`'s declared catalogue does not name `{model}` — a hard entitlement \
+                         constraint removes such a candidate before any score is taken",
+                        entitlement.name()
+                    ),
+                )
+            }
+        }
+    }
+}
+
+/// Line 1968's stickiness, said where a reader looks for it: a zero-weight
+/// note on an existing session's explanation stating that keeping the
+/// session on the entitlement holding its context is the `session affinity`
+/// term's weight — one mechanism, priced once — and naming the two things
+/// that do move it (a rule, through 56A-1's hard constraint; an exhausted
+/// band, through [`entitlement_capacity`]). `None` for a fresh destination,
+/// which holds no context to be sticky about, and outside a live pool.
+fn entitlement_stickiness_note(
+    destination: &Destination,
+    pool: &EntitlementPoolView,
+    affinity_magnitude: f64,
+) -> Option<Contribution> {
+    if !pool.offers_a_choice() || destination.is_fresh() {
+        return None;
+    }
+    let entitlement = destination.entitlement()?;
+    Some(Contribution::new(
+        "entitlement stickiness",
+        0.0,
+        format!(
+            "`{}` holds this session's context, and keeping the session there is already \
+             priced by the `session affinity` term ({affinity_magnitude:+.3}) — stickiness is \
+             that term's weight, not a second mechanism; only a rule that now denies this work \
+             (the hard entitlement constraint) or an exhausted capacity band moves it \
+             (line 1968)",
+            entitlement.name()
+        ),
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Phase 35C, lines 1559–1565 — the tier-movement decision.
 //
 // Escalation and downgrade are one decision, made once per `choose` over the
@@ -2862,9 +3394,20 @@ impl SessionRouter {
     /// preference, and a preference does not remove a candidate (design
     /// decision 1, "additive, never a filter").
     fn gate(&self, destinations: &[Destination], inputs: &RouterInputs<'_>) -> Gate {
+        // Line 1953's model half is part of the entitlement AXIS: it fires
+        // only when the offered set actually carries a pool (two or more
+        // configured entitlements). A user with zero or one entitlement
+        // keeps today's launches — their possibly-stale model catalogue may
+        // not refuse the only account they have — which is the same
+        // preservation clause the score's pool gate enforces, read off the
+        // raw offered set because a refusal must not depend on what some
+        // *other* constraint already removed.
+        let entitlement_axis = EntitlementPoolView::of(destinations).offers_a_choice();
         let capability_survivors: Vec<&Destination> = destinations
             .iter()
-            .filter(|destination| hard_constraint(destination, inputs, None).is_ok())
+            .filter(|destination| {
+                hard_constraint(destination, inputs, None, entitlement_axis).is_ok()
+            })
             .collect();
         let movement = decide_tier_movement(&capability_survivors, inputs, self.retry_after);
         let gate_tier = match &movement {
@@ -2873,7 +3416,7 @@ impl SessionRouter {
         };
         let (eligible, rejected) =
             apply_hard_constraints(destinations.to_vec(), |destination: &Destination| {
-                hard_constraint(destination, inputs, gate_tier)
+                hard_constraint(destination, inputs, gate_tier, entitlement_axis)
             });
         Gate {
             eligible,
@@ -3022,6 +3565,10 @@ impl SessionRouter {
             .into_iter()
             .map(super::EligibleCandidate::into_inner)
             .collect();
+        // The entitlement axis of the eligible set (lines 1953/1966–1969),
+        // computed once like the alternatives below: a candidate a hard
+        // constraint removed is not a pool member anything can be spread to.
+        let pool = EntitlementPoolView::of(&candidates);
         let mut scored: Vec<(Destination, RoutingExplanation)> = candidates
             .iter()
             .enumerate()
@@ -3042,7 +3589,14 @@ impl SessionRouter {
                     scope: ReserveScope::Interactive,
                     user_override: self.reserve_overridden(destination),
                 };
-                let explanation = score(destination, current, inputs, &pressure, movement.as_ref());
+                let explanation = score(
+                    destination,
+                    current,
+                    inputs,
+                    &pressure,
+                    movement.as_ref(),
+                    &pool,
+                );
                 (destination.clone(), explanation)
             })
             .collect();
@@ -3105,9 +3659,15 @@ impl SessionRouter {
             return (0, None);
         };
         match choice {
-            DestinationChoice::To(id) => match scored.iter().position(|(d, _)| d.id() == id) {
+            DestinationChoice::To(id) => match scored
+                .iter()
+                .position(|(d, _)| destination_answers_to(d.id(), id))
+            {
                 Some(index) => (index, None),
-                None => match rejected.iter().find(|(d, _)| d.id() == id) {
+                None => match rejected
+                    .iter()
+                    .find(|(d, _)| destination_answers_to(d.id(), id))
+                {
                     Some((_, constraint)) => (
                         0,
                         Some(OverrideRefusal::Ineligible(id.clone(), constraint.clone())),
@@ -3135,6 +3695,22 @@ impl SessionRouter {
     }
 }
 
+/// Whether a destination's id answers to the name an override used: its
+/// exact id, or — for a fresh candidate the entitlement axis split into
+/// several (`fresh:<harness>:<profile>@<entitlement>`, line 1953) — the
+/// shared `fresh:<harness>:<profile>` prefix. So `--to` naming the profile
+/// still works on a pool: the person chose the profile, and the ranking
+/// still chooses the account among that profile's candidates (line 1969's
+/// "bound to the pool's choice, not to one account"), because
+/// `apply_override` scans `scored` best-first. An exact id, `@` suffix
+/// included, pins the account too.
+fn destination_answers_to(destination_id: &str, named: &str) -> bool {
+    destination_id == named
+        || (destination_id.len() > named.len()
+            && destination_id.starts_with(named)
+            && destination_id.as_bytes()[named.len()] == b'@')
+}
+
 /// Lines 1595 to 1600, in the order a reader compares them: what the harness
 /// can do, what the session already holds, what the provider has cached, what
 /// is left of the quota, how the provider has behaved, and what the move
@@ -3145,6 +3721,7 @@ fn score(
     inputs: &RouterInputs<'_>,
     pressure: &PressureInputs<'_>,
     movement: Option<&TierMovement>,
+    pool: &EntitlementPoolView,
 ) -> RoutingExplanation {
     let mut explanation = RoutingExplanation::new();
     if let Some(answer) = &inputs.requirements.classification {
@@ -3164,7 +3741,21 @@ fn score(
         explanation.push(cost_preference(destination));
         explanation.push(tier_movement_note(movement));
     }
-    explanation.push(session_affinity(destination, current, &inputs.requirements));
+    let affinity = session_affinity(destination, current, &inputs.requirements);
+    let affinity_magnitude = affinity.magnitude();
+    explanation.push(affinity);
+    // Phase 56A lines 1953/1966–1969: the pool's own terms, right after the
+    // affinity factor they share line 1966 with. Inert — every one of them,
+    // saying so — for a candidate set that carries fewer than two configured
+    // entitlements, which is what keeps a zero-or-one-entitlement user's
+    // ranking byte-for-byte what it was.
+    if let Some(note) = entitlement_stickiness_note(destination, pool, affinity_magnitude) {
+        explanation.push(note);
+    }
+    explanation.push(entitlement_capacity(destination, pool));
+    explanation.push(entitlement_reset_boundary(destination, pool));
+    explanation.push(entitlement_throttling(destination, pool));
+    explanation.push(entitlement_model_availability(destination, pool));
     explanation.push(prompt_cache_state(destination, current));
     explanation.push(quota_pressure(destination));
     // Phase 35D, lines 1570–1577: the band the quota reading falls in, and
@@ -3275,6 +3866,7 @@ fn hard_constraint(
     destination: &Destination,
     inputs: &RouterInputs<'_>,
     minimum_tier: Option<WorkloadTier>,
+    entitlement_axis: bool,
 ) -> Result<(), HardConstraint> {
     // Phase 56 line 1954, asked first: the user's own rule about what a
     // entitlement may be charged for is the strongest statement in this
@@ -3286,6 +3878,15 @@ fn hard_constraint(
     // (`super::EntitlementRules::refusal`).
     if let Some(entitlement) = destination.entitlement() {
         entitlement.constraint(destination.harness(), minimum_tier)?;
+        // Line 1953's model half, asked on both passes like the harness
+        // half (the destination's model is known independently of any
+        // tier), and only when the offered set carries the entitlement axis
+        // at all — see `gate` for why a pool of one is exempt. A declared
+        // catalogue that does not name the model refuses the candidate by
+        // name; harness-decided and unknown facets constrain nothing.
+        if entitlement_axis {
+            entitlement.model_constraint(destination.backend().model())?;
+        }
     }
     if inputs.requirements.needs_tool_calls
         && destination.backend().tools() == ToolSemantics::KnownAbsent
@@ -3361,5 +3962,31 @@ struct OneWarmSession(WarmSession);
 impl ContinuitySource for OneWarmSession {
     fn warm_session(&self, _key: &pairing::EvidenceKey) -> Option<WarmSession> {
         Some(self.0)
+    }
+}
+
+#[cfg(test)]
+mod burn_urgency_tests {
+    use super::{RESET_BURN_HORIZON_SECONDS, RESET_PRESERVE_HORIZON_SECONDS, burn_urgency};
+
+    /// Line 1967's reset-boundary term: a reset within the burn horizon is
+    /// urgent (+1.0), at or past the preserve horizon it is not (0.0) — and a
+    /// reset ALREADY PAST (negative seconds, routine over the persisted,
+    /// deliberately un-staled capacity cache) must score 0.0, never the max
+    /// +1.0 an unguarded `<= horizon` gave it. The 2026-08-31 investigation
+    /// swarm caught the unguarded form rewarding the *stalest* account over a
+    /// fresh healthy one, inverting this line's own intent.
+    #[test]
+    fn a_reset_already_past_is_not_urgent() {
+        assert_eq!(burn_urgency(4_800), 1.0, "1h20m — the user's burn example");
+        assert_eq!(burn_urgency(RESET_BURN_HORIZON_SECONDS), 1.0);
+        assert_eq!(burn_urgency(RESET_PRESERVE_HORIZON_SECONDS), 0.0);
+        assert_eq!(burn_urgency(0), 0.0, "resetting now is already replenished");
+        assert_eq!(burn_urgency(-1), 0.0, "one second past reset");
+        assert_eq!(
+            burn_urgency(-345_600),
+            0.0,
+            "days past — the stale-cache case"
+        );
     }
 }
