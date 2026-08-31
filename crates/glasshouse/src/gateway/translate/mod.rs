@@ -4,9 +4,10 @@
 //!
 //! # Codecs around one canonical form, and a table of pairs
 //!
-//! [`canonical`] is the one form. `anthropic` and `openai_chat` are the
-//! codecs, each decoding its wire into that form and encoding out of it, in
-//! both the request and the response direction and for streams. A **pair**
+//! [`canonical`] is the one form. `anthropic`, `openai_chat` and
+//! `openai_responses` are the codecs, each decoding its wire into that form
+//! and encoding out of it, in both the request and the response direction
+//! and for streams. A **pair**
 //! is a decoder and an encoder meeting in the middle, and [`pairs`] is the
 //! table that lists every ordered pair of wire protocols exactly once —
 //! supported, or refused with its reason. The table is consulted by two
@@ -50,6 +51,7 @@ pub mod stream;
 
 mod anthropic;
 mod openai_chat;
+mod openai_responses;
 
 use std::io::{BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -117,9 +119,10 @@ impl Pair {
     }
 }
 
-const NOT_YET_T2: &str = "not yet: T2 — the OpenAI Responses codec is not written";
 const NOT_YET_REVERSE: &str = "not yet: both codecs exist, but the pair has no end-to-end test through the shipped \
      binary against a fixture upstream, and no pair is offered before its test (1956)";
+const NOT_YET_T2B: &str = "not yet: T2b — both codecs exist, but the pair has no end-to-end test through the \
+     shipped binary against a fixture upstream, and no pair is offered before its test (1956)";
 const SAME_PROTOCOL: &str =
     "same protocol: the relay carries it byte for byte and no codec is entered";
 
@@ -141,10 +144,14 @@ const TABLE: [Pair; 9] = [
         to: "openai-chat",
         status: PairStatus::Supported,
     },
+    // T2: Claude Code served by an OpenAI-Responses entitlement — a
+    // ChatGPT/Codex-plan-shaped upstream. Supported only because its own
+    // end-to-end test exists: `tests/gateway_translate_responses.rs`,
+    // `a_claude_code_request_is_translated_to_openai_responses_and_back_with_ids_preserved`.
     Pair {
         from: "anthropic-messages",
         to: "openai-responses",
-        status: PairStatus::Refused(NOT_YET_T2),
+        status: PairStatus::Supported,
     },
     Pair {
         from: "openai-chat",
@@ -159,17 +166,21 @@ const TABLE: [Pair; 9] = [
     Pair {
         from: "openai-chat",
         to: "openai-responses",
-        status: PairStatus::Refused(NOT_YET_T2),
+        status: PairStatus::Refused(NOT_YET_T2B),
     },
+    // T2's mirror: a Codex-shaped client served by an Anthropic Messages
+    // entitlement. Supported only because its own end-to-end test exists:
+    // `tests/gateway_translate_responses.rs`,
+    // `a_codex_request_is_translated_to_anthropic_messages_and_back_with_ids_preserved`.
     Pair {
         from: "openai-responses",
         to: "anthropic-messages",
-        status: PairStatus::Refused(NOT_YET_T2),
+        status: PairStatus::Supported,
     },
     Pair {
         from: "openai-responses",
         to: "openai-chat",
-        status: PairStatus::Refused(NOT_YET_T2),
+        status: PairStatus::Refused(NOT_YET_T2B),
     },
     Pair {
         from: "openai-responses",
@@ -252,6 +263,17 @@ pub(super) trait Codec: Sync {
     /// stripped — the path a client of this protocol posts an inference
     /// request to, and the path the gateway posts to a provider of it.
     fn endpoint(&self) -> &'static str;
+    /// What this codec cannot encode out of the canonical form, refused by
+    /// name before anything is opened upstream.
+    ///
+    /// The canonical form was built from fields both T1 wires carry, so the
+    /// default refuses nothing — but [`Codec::encode_request`] is
+    /// infallible, and a codec whose wire has no home for a canonical field
+    /// must refuse it here rather than drop it there. OpenAI Responses is
+    /// the first such wire: it has no stop-sequence parameter.
+    fn refuse_unencodable(&self, _request: &Request) -> Result<(), Unsupported> {
+        Ok(())
+    }
     fn decode_request(&self, body: &[u8]) -> Result<Request, Unsupported>;
     fn encode_request(&self, request: &Request) -> Vec<u8>;
     fn decode_response(&self, body: &[u8]) -> Result<Response, Unsupported>;
@@ -283,13 +305,36 @@ pub(super) trait StreamEncoder {
     fn encode(&mut self, event: &StreamEvent) -> Vec<u8>;
 }
 
-const CODECS: [&dyn Codec; 2] = [&anthropic::Anthropic, &openai_chat::OpenAiChat];
+const CODECS: [&dyn Codec; 3] = [
+    &anthropic::Anthropic,
+    &openai_chat::OpenAiChat,
+    &openai_responses::OpenAiResponses,
+];
 
 fn codec_for(protocol: &str) -> Option<&'static dyn Codec> {
     CODECS
         .iter()
         .copied()
         .find(|codec| codec.protocol() == protocol)
+}
+
+/// The target a translated request is posted to at a provider of `codec`'s
+/// protocol: the exact path that protocol's own native client sends, because
+/// every provider's declared base URL is composed for that client.
+///
+/// Claude Code sends `POST /v1/messages` and the Anthropic-serving base URLs
+/// carry no `/v1`; Codex sends `POST /responses` and OpenAI-Chat clients
+/// `POST /chat/completions` against base URLs that already carry it (see the
+/// provider templates and `profile::ingress_targets`, each read off real
+/// request lines). Composing `base + endpoint()` alone would mis-address an
+/// Anthropic-serving provider — `…/api/messages` instead of
+/// `…/api/v1/messages` — which the T2 mirror pair was the first to reach.
+fn outbound_target(codec: &dyn Codec) -> String {
+    if codec.protocol() == anthropic::PROTOCOL {
+        format!("{VERSION_SEGMENT}{}", codec.endpoint())
+    } else {
+        codec.endpoint().to_owned()
+    }
 }
 
 // --- placement ------------------------------------------------------------------
@@ -457,7 +502,13 @@ pub(super) fn serve(
         );
     }
 
-    let request = match from.decode_request(&body) {
+    // Decode on the harness's codec, then let the provider's codec refuse,
+    // by name, any canonical field its wire has no home for — both before
+    // anything is opened upstream.
+    let request = match from.decode_request(&body).and_then(|request| {
+        to.refuse_unencodable(&request)?;
+        Ok(request)
+    }) {
         Ok(request) => request,
         Err(unsupported) => {
             let refusal = TranslationRefusal::new(pair, unsupported);
@@ -471,7 +522,7 @@ pub(super) fn serve(
     };
     let translated = to.encode_request(&request);
 
-    let Some(uri) = route.uri_for(to.endpoint()) else {
+    let Some(uri) = route.uri_for(&outbound_target(to)) else {
         refuse(
             out,
             StatusCode::BAD_REQUEST,
@@ -1136,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn exactly_the_first_pair_is_supported_and_every_other_row_carries_a_reason() {
+    fn exactly_the_supported_pairs_are_supported_and_every_other_row_carries_a_reason() {
         let supported: Vec<String> = TABLE
             .iter()
             .filter(|pair| pair.is_supported())
@@ -1144,7 +1195,11 @@ mod tests {
             .collect();
         assert_eq!(
             supported,
-            vec!["anthropic-messages->openai-chat".to_owned()]
+            vec![
+                "anthropic-messages->openai-chat".to_owned(),
+                "anthropic-messages->openai-responses".to_owned(),
+                "openai-responses->anthropic-messages".to_owned(),
+            ]
         );
         for pair in TABLE.iter().filter(|pair| !pair.is_supported()) {
             let reason = pair.refusal().expect("a refused pair has a reason");
@@ -1157,7 +1212,11 @@ mod tests {
             assert!(codec_for(pair.to).is_some(), "{}", pair.to);
         }
         assert!(is_supported("anthropic-messages", "openai-chat"));
+        assert!(is_supported("anthropic-messages", "openai-responses"));
+        assert!(is_supported("openai-responses", "anthropic-messages"));
         assert!(!is_supported("openai-chat", "anthropic-messages"));
+        assert!(!is_supported("openai-responses", "openai-chat"));
+        assert!(!is_supported("openai-chat", "openai-responses"));
         assert!(!is_supported("anthropic-messages", "anthropic-messages"));
         assert!(!is_supported("anthropic-messages", "gemini"));
     }
@@ -1202,15 +1261,30 @@ mod tests {
             place("/v1/messagesomethingelse", &served_chat),
             Placement::Unplaceable
         ));
+        // The two T2 pairs place: Claude Code at a Responses-only provider,
+        // and a Codex-shaped client at an Anthropic-only one.
+        assert!(matches!(
+            place("/v1/messages", &["openai-responses"]),
+            Placement::Translate(pair) if pair.slug() == "anthropic-messages->openai-responses"
+        ));
+        assert!(matches!(
+            place("/responses", &["anthropic-messages"]),
+            Placement::Translate(pair) if pair.slug() == "openai-responses->anthropic-messages"
+        ));
+        // ... and a served Responses target never enters the codec.
+        assert!(matches!(
+            place("/v1/responses", &["openai-responses", "anthropic-messages"]),
+            Placement::Unplaceable
+        ));
         // A refused pair is answered with the pair and the reason.
-        match place("/v1/messages", &["openai-responses"]) {
+        match place("/v1/chat/completions", &["openai-responses"]) {
             Placement::PairRefused { from, refused } => {
-                assert_eq!(from, "anthropic-messages");
+                assert_eq!(from, "openai-chat");
                 assert_eq!(refused.len(), 1);
-                assert_eq!(refused[0].slug(), "anthropic-messages->openai-responses");
+                assert_eq!(refused[0].slug(), "openai-chat->openai-responses");
                 let message = pair_refusal_message(from, &refused);
-                assert!(message.contains("anthropic-messages->openai-responses"));
-                assert!(message.contains("not yet: T2"));
+                assert!(message.contains("openai-chat->openai-responses"));
+                assert!(message.contains("not yet: T2b"));
             }
             other => panic!("expected a refused pair, got {other:?}"),
         }
@@ -1248,7 +1322,35 @@ mod tests {
         assert!(rows.ignored.contains(&"usage.service_tier"));
         let rows = field_rows("openai-chat").unwrap();
         assert!(rows.refused.iter().any(|(field, _)| *field == "n"));
-        assert!(field_rows("openai-responses").is_none());
+        let rows = field_rows("openai-responses").unwrap();
+        assert!(
+            rows.refused
+                .iter()
+                .any(|(field, _)| *field == "previous_response_id")
+        );
+        assert!(rows.ignored.contains(&"output[].id"));
+        assert!(field_rows("gemini").is_none());
+    }
+
+    #[test]
+    fn a_translated_request_is_posted_to_the_targets_native_clients_send() {
+        // The convention every provider base URL is composed for — see
+        // `outbound_target`'s own doc. The Anthropic path carries the
+        // version segment because Claude Code sends it and the Anthropic
+        // base URLs omit it; the OpenAI paths omit it because their clients
+        // do and their base URLs carry it.
+        assert_eq!(
+            outbound_target(codec_for("anthropic-messages").unwrap()),
+            "/v1/messages"
+        );
+        assert_eq!(
+            outbound_target(codec_for("openai-chat").unwrap()),
+            "/chat/completions"
+        );
+        assert_eq!(
+            outbound_target(codec_for("openai-responses").unwrap()),
+            "/responses"
+        );
     }
 
     #[test]

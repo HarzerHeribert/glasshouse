@@ -164,9 +164,9 @@ pub enum PairingClass {
     ProtocolCompatible,
     /// Neither speaks the other's wire and an explicit translation adapter
     /// exists for the pair. See [`crate::provider::translation_available`],
-    /// which is always `false` in V1 — so this class is representable and
-    /// currently unreachable, which is the map's own stance on translation
-    /// rather than a gap here.
+    /// answered from the gateway's pair table — three supported pairs as of
+    /// T2 (2026-08-31), so this class is reachable, and
+    /// `exactly_the_supported_pairs_are_translated` pins exactly which.
     ProtocolTranslated,
     /// Nothing establishes a relationship. An unattributed model, a harness
     /// that declares no protocols, a launch profile that names no model.
@@ -825,10 +825,8 @@ fn protocol_fit(
     if served.iter().any(|other| spoken.contains(other)) {
         return ProtocolFit::Compatible;
     }
-    // The one caller of the translation seam. V1 answers `false` for every
-    // pair — see `provider::translation_available` — so this arm is
-    // representable and unreachable today, which is the map's stance rather
-    // than a gap.
+    // The one caller of the translation seam — answered from the gateway's
+    // pair table, which supports three pairs as of T2 (2026-08-31).
     if spoken
         .iter()
         .any(|to| crate::provider::translation_available(route, *to))
@@ -1300,22 +1298,46 @@ mod tests {
         assert_eq!(compatible.protocol_fit(), ProtocolFit::Compatible);
         assert_eq!(compatible.class(), PairingClass::ProtocolCompatible);
 
+        // T2 made Codex on an Anthropic-only route a *translated* pairing
+        // (openai-responses <-> anthropic-messages is in the gateway's
+        // table), so the incompatible case moved to a chat-only route:
+        // openai-chat <-> openai-responses stays refused ("not yet: T2b").
+        let mut translated = query(IntegrationId::Codex, "claude-fable-5");
+        translated.route.protocol = Some(WireProtocol::AnthropicMessages);
+        translated.provider_protocols = vec![WireProtocol::AnthropicMessages];
+        let translated = classify(&translated, &none());
+        assert_eq!(translated.protocol_fit(), ProtocolFit::Translated);
+        assert_eq!(translated.class(), PairingClass::ProtocolTranslated);
+
         let mut incompatible = query(IntegrationId::Codex, "claude-fable-5");
-        incompatible.route.protocol = Some(WireProtocol::AnthropicMessages);
-        incompatible.provider_protocols = vec![WireProtocol::AnthropicMessages];
+        incompatible.route.protocol = Some(WireProtocol::OpenAiChat);
+        incompatible.provider_protocols = vec![WireProtocol::OpenAiChat];
         let incompatible = classify(&incompatible, &none());
         assert_eq!(incompatible.protocol_fit(), ProtocolFit::Incompatible);
         assert_eq!(incompatible.class(), PairingClass::Unknown);
     }
 
     /// Exactly the pairs the gateway's translation table supports are
-    /// translated — one today: an Anthropic Messages harness served from an
-    /// OpenAI Chat upstream (T1, 2026-08-31, `gateway::translate`). If this
-    /// fails, a codec pair was added or removed; the pair table in
+    /// translated — three today: an Anthropic Messages harness served from
+    /// an OpenAI Chat upstream (T1, 2026-08-31), and both directions of
+    /// Anthropic Messages <-> OpenAI Responses (T2, 2026-08-31, each behind
+    /// its own end-to-end test in `tests/gateway_translate_responses.rs`).
+    /// If this fails, a codec pair was added or removed; the pair table in
     /// `gateway::translate` and `docs/product/evidence/phase-56.md` are what
     /// should be re-read, and this pin updated with them.
     #[test]
     fn exactly_the_supported_pairs_are_translated() {
+        let supported = [
+            (WireProtocol::AnthropicMessages, WireProtocol::OpenAiChat),
+            (
+                WireProtocol::AnthropicMessages,
+                WireProtocol::OpenAiResponses,
+            ),
+            (
+                WireProtocol::OpenAiResponses,
+                WireProtocol::AnthropicMessages,
+            ),
+        ];
         for from in [
             WireProtocol::AnthropicMessages,
             WireProtocol::OpenAiResponses,
@@ -1326,11 +1348,9 @@ mod tests {
                 WireProtocol::OpenAiResponses,
                 WireProtocol::OpenAiChat,
             ] {
-                let expected =
-                    from == WireProtocol::AnthropicMessages && to == WireProtocol::OpenAiChat;
                 assert_eq!(
                     crate::provider::translation_available(from, to),
-                    expected,
+                    supported.contains(&(from, to)),
                     "{from} -> {to}: the translation table disagrees with this pin"
                 );
             }

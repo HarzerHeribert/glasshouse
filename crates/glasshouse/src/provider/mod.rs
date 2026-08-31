@@ -324,9 +324,10 @@ impl ProtocolCompatibleProvider<'_> {
 ///
 /// Translation still never happens because two protocols merely looked
 /// close: a row is supported only behind its own end-to-end test through
-/// the shipped binary against a fixture upstream (line 1956), and the first
-/// row — Claude Code's Anthropic Messages served by an OpenAI-Chat
-/// entitlement — is the only one today.
+/// the shipped binary against a fixture upstream (line 1956). Three rows
+/// carry one today — Claude Code's Anthropic Messages served by an
+/// OpenAI-Chat entitlement (T1), and both directions of Anthropic Messages
+/// <-> OpenAI Responses (T2).
 pub fn translation_available(from: WireProtocol, to: WireProtocol) -> bool {
     crate::gateway::translate::is_supported(from.slug(), to.slug())
 }
@@ -819,9 +820,10 @@ mod tests {
 
     /// Line 410 and Phase 56: translation is never implicit. Every ordered
     /// pair of `WireProtocol` — including each with itself — has exactly one
-    /// row in the gateway's table, exactly one pair is supported, and a
-    /// protocol is never "translated" to itself. The table may not name the
-    /// enum, so this is the test that holds it complete against it.
+    /// row in the gateway's table, exactly the three pairs with end-to-end
+    /// tests are supported, and a protocol is never "translated" to itself.
+    /// The table may not name the enum, so this is the test that holds it
+    /// complete against it.
     #[test]
     fn every_wire_protocol_pair_has_exactly_one_row_in_the_gateway_table() {
         const ALL: [WireProtocol; 3] = [
@@ -831,6 +833,17 @@ mod tests {
         ];
         let table = crate::gateway::translate::pairs();
         assert_eq!(table.len(), ALL.len() * ALL.len());
+        let supported = [
+            (WireProtocol::AnthropicMessages, WireProtocol::OpenAiChat),
+            (
+                WireProtocol::AnthropicMessages,
+                WireProtocol::OpenAiResponses,
+            ),
+            (
+                WireProtocol::OpenAiResponses,
+                WireProtocol::AnthropicMessages,
+            ),
+        ];
         for &from in &ALL {
             for &to in &ALL {
                 let rows = table
@@ -838,9 +851,11 @@ mod tests {
                     .filter(|pair| pair.from == from.slug() && pair.to == to.slug())
                     .count();
                 assert_eq!(rows, 1, "{from} -> {to} has {rows} rows");
-                let supported =
-                    from == WireProtocol::AnthropicMessages && to == WireProtocol::OpenAiChat;
-                assert_eq!(translation_available(from, to), supported, "{from} -> {to}");
+                assert_eq!(
+                    translation_available(from, to),
+                    supported.contains(&(from, to)),
+                    "{from} -> {to}"
+                );
             }
         }
     }

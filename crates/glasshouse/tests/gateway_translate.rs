@@ -995,31 +995,6 @@ fn a_request_the_pair_cannot_carry_is_refused_by_name_and_nothing_is_opened_upst
     );
     assert_eq!(fixture.connections(), 0);
 
-    // A refused pair: the provider serves only OpenAI Responses, so the
-    // `404` names `anthropic-messages->openai-responses` and the table's reason.
-    let responses_only = ChatOnlyUpstream::start(Answer::Completion);
-    let gateway = start_gateway(
-        upstream_serving(&[(
-            "openai-responses",
-            &["/responses"],
-            &responses_only.base_url(),
-        )]),
-        None,
-    );
-    let response = send_and_read(
-        gateway.address(),
-        &messages_request(gateway.token().expose(), &claude_code_body(false)),
-    );
-    let (head, body) = head_and_body(&response);
-    assert!(head.starts_with("HTTP/1.1 404"), "{head}");
-    let message = String::from_utf8_lossy(body).into_owned();
-    assert!(
-        message.contains("anthropic-messages->openai-responses"),
-        "{message}"
-    );
-    assert!(message.contains("not yet: T2"), "{message}");
-    assert_eq!(responses_only.connections(), 0);
-
     // The reverse pair — an OpenAI Chat client at an Anthropic-only provider
     // — has both codecs and is still refused by name, because it has no
     // end-to-end test of its own yet (1956). A table that marked it

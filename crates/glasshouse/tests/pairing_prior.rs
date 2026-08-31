@@ -321,11 +321,13 @@ fn a_pinned_preference_is_explained_as_a_hard_rule_not_a_score() {
 /// only way to produce the type the scorer accepts.
 #[test]
 fn a_candidate_that_fails_a_hard_constraint_cannot_be_scored() {
+    // Codex on an openai-chat-only route: still incompatible after T2 made
+    // its anthropic-messages route a translated pairing.
     let incompatible = glasshouse::harness::pairing::classify(
         &{
             let mut q = query(IntegrationId::Codex, "claude-fable-5");
-            q.route.protocol = Some(WireProtocol::AnthropicMessages);
-            q.provider_protocols = vec![WireProtocol::AnthropicMessages];
+            q.route.protocol = Some(WireProtocol::OpenAiChat);
+            q.provider_protocols = vec![WireProtocol::OpenAiChat];
             q
         },
         &no_overrides(),

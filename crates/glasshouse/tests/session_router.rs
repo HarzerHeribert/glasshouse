@@ -669,13 +669,21 @@ fn the_overview_explains_the_winner_the_alternatives_and_the_rejections() {
         backend("anthropic", "claude-opus-4", "ANTHROPIC_API_KEY"),
         None,
     );
-    // A harness that declares protocols, none of which this provider serves:
-    // `ProtocolFit::Incompatible`, which is a hard constraint here.
+    // A harness that declares protocols, none of which this provider serves
+    // or the gateway translates to one it does: `ProtocolFit::Incompatible`,
+    // which is a hard constraint here. Codex on an openai-chat-only backend
+    // since T2 — its anthropic-messages route became a translated pairing.
     let unreachable = Destination::existing(
         "unreachable",
         IntegrationId::Codex,
         "default",
-        backend("anthropic", "claude-opus-4", "ANTHROPIC_API_KEY"),
+        backend_on(
+            "chat",
+            "claude-opus-4",
+            "ANTHROPIC_API_KEY",
+            "openai-chat",
+            ToolSemantics::Verified,
+        ),
         live(0),
     );
 
@@ -874,11 +882,19 @@ fn an_override_cannot_overrule_a_hard_constraint_and_reports_the_refusal() {
         backend("anthropic", "claude-opus-4", "ANTHROPIC_API_KEY"),
         live(0),
     );
+    // Codex on an openai-chat-only backend: still incompatible after T2,
+    // unlike the anthropic-messages route this fixture used to name.
     let unreachable = Destination::existing(
         "unreachable",
         IntegrationId::Codex,
         "default",
-        backend("anthropic", "claude-opus-4", "ANTHROPIC_API_KEY"),
+        backend_on(
+            "chat",
+            "claude-opus-4",
+            "ANTHROPIC_API_KEY",
+            "openai-chat",
+            ToolSemantics::Verified,
+        ),
         live(0),
     );
 

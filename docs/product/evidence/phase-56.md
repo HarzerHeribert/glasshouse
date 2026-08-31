@@ -469,3 +469,105 @@ Recorded scope limits — stated by the worker, not discovered later:
 - a contradiction in the [entitlements] tables degrades support-work candidates to no-entitlement with a tracing::warn (a launch is refused outright on the same tables; failing memory extraction over it would punish the wrong actor)
 
 ---
+
+
+---
+
+### T2 addendum to lines 1948, 1950, 1956 — the OpenAI Responses codec and two more pairs
+
+Package `GH-GATEWAY-TRANSLATE-T2`, 2026-08-31, Fable 5 at xhigh (Red). The `openai_responses` codec against T1's canonical form (function-call items <-> tool blocks with ids preserved; instructions <-> system; stop/incomplete reasons; usage), two table rows flipped, the pairing pin's expected set updated in the worker's OWN reviewed diff this time, and T2b (responses<->chat) refused by name until its e2e. 4/4 mutations KILLED with output quoted. Integrator's one seam fix, prescribed verbatim by the report: the T1 e2e block that pinned anthropic->responses as *refused* (a behaviour this package changed) deleted; the refusal-by-name behaviour keeps two live witnesses.
+
+**Three findings recorded, each with a successor:** (1) `protocol_fit`'s translation arm asks the table BACKWARDS — T1's shipped pairing classifies `Incompatible` while the gateway translates it, masked in T2's pairs by symmetry; successor `GH-PROTOCOL-FIT-DIRECTION` (dispatched). (2) A translated request toward an Anthropic-serving provider carries no `anthropic-version` header — tolerated by OpenRouter, required by api.anthropic.com; a per-protocol outbound-header hook is owed before a real Anthropic upstream is used through translation. (3) If real Codex sends `prompt_cache_key`/`include`/`reasoning` unconditionally, pair 2 refuses every real request by name — a live-Codex probe is the successor's first check, as `DISABLE_PROMPT_CACHING=1` was T1's.
+
+### Serve any supported harness through Glasshouse's bundled API gateway from any subscription or model whose wire protocol the gateway can translate to the harness's native protocol. (line 1948)
+
+Contract: Given a supported harness and an entitlement whose wire protocol the gateway can translate to the harness's native protocol, when the harness sends its native request to the bundled gateway, Glasshouse serves it through the translated pair end to end, while preserving the byte-for-byte relay for every natively served target.
+
+State: PARTIALLY VERIFIED — ruled 2026-08-31 by the orchestrator, agreeing with the worker's `open`: the line quantifies over every supported pair; three exist now (T1's anthropic->chat, and T2's anthropic<->responses both ways, each behind its own end-to-end test through the shipped binary — ids preserved, streaming in each protocol's own order, refusal by name with nothing opened upstream, the byte-for-byte relay for served targets re-witnessed). Remaining: T2b (responses<->chat, refused by name), T3 (Gemini codec and adapter).
+
+Production evidence:
+- `src/gateway/translate/openai_responses.rs` — `OpenAiResponses (full Codec impl)`
+- `src/gateway/translate/mod.rs` — `TABLE (two rows flipped) / outbound_target / serve`
+- `src/gateway/ingress.rs` — `unrouted (unchanged, protocol-generic consumer)`
+
+Regression evidence:
+- `gateway_translate_responses::a_claude_code_request_is_translated_to_openai_responses_and_back_with_ids_preserved`
+- `gateway_translate_responses::a_codex_request_is_translated_to_anthropic_messages_and_back_with_ids_preserved`
+- `gateway_translate_responses::a_served_responses_target_is_relayed_byte_for_byte_even_though_the_codec_exists`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| ingress.rs: before `let Some(uri) = route.uri_for(&head.target) else {`, insert `if let translate::Placement::Translate(pair) = translate::place(&head.target, &["anthropic-messages"]) { return translate::serve(head, reader, out, upstream, serving, agent, pair); }` | `served-target-enters-codec` | **killed** | `gateway_translate_responses::a_served_responses_target_is_relayed_byte_for_byte_even_though_the_codec_exists` |
+| translate/mod.rs TABLE: openai-responses->openai-chat `PairStatus::Refused(NOT_YET_T2B)` -> `PairStatus::Supported` | `refused-pair-marked-supported` | **killed** | `harness::pairing::tests::exactly_the_supported_pairs_are_translated` |
+
+> served-target-enters-codec observed: panicked at tests/gateway_translate_responses.rs:164: assertion `left == right` failed: exactly one request at the fixture (the mutated gateway refused the relay-only body; the fixture saw nothing)
+
+> refused-pair-marked-supported observed: panicked at src/harness/pairing.rs:1353: assertion `left == right` failed: openai-responses -> openai-chat: the translation table disagrees with this pin
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Same launch link as T1: proven through gateway::start_if_required_with_degrade_sink with production profile::gateway_upstream, not under `glasshouse launch` — profile::apply_gateway still refuses (T1's witness test, still green); this line stays open until that packet lands
+- The line quantifies over every translatable pair; Gemini (T3) and openai-chat<->openai-responses (T2b) remain refused by name
+- Only macOS ran
+
+---
+
+### Keep a harness's native tooling — editing, shell, repository, and tool-call behaviour — intact when it is served by a non-native provider, and refuse the pairing by name when it cannot be kept. (line 1950)
+
+Contract: Given a harness served through a translated pair, when tool definitions, tool calls, tool results (erroring included), parallel calls, stop reasons and system prompts cross the gateway, Glasshouse preserves them with ids verbatim in both directions, while refusing per request, by field name and before anything is opened upstream, whatever the pair cannot carry.
+
+State: PARTIALLY VERIFIED — ruled 2026-08-31 by the orchestrator, agreeing with the worker's `open`: the line quantifies over every supported pair; three exist now (T1's anthropic->chat, and T2's anthropic<->responses both ways, each behind its own end-to-end test through the shipped binary — ids preserved, streaming in each protocol's own order, refusal by name with nothing opened upstream, the byte-for-byte relay for served targets re-witnessed). Remaining: T2b (responses<->chat, refused by name), T3 (Gemini codec and adapter).
+
+Production evidence:
+- `src/gateway/translate/openai_responses.rs` — `decode_request / encode_request / decode_response / encode_response / EventDecoder / EventEncoder / REFUSED_FIELDS`
+- `src/gateway/translate/mod.rs` — `Codec::refuse_unencodable (new hook) + serve's call to it`
+
+Regression evidence:
+- `gateway_translate_responses::a_claude_code_request_is_translated_to_openai_responses_and_back_with_ids_preserved`
+- `gateway_translate_responses::a_streamed_claude_code_request_is_translated_event_by_event_in_anthropics_order`
+- `gateway_translate_responses::a_streamed_codex_request_is_translated_event_by_event_in_the_responses_order`
+- `gateway_translate_responses::a_request_the_responses_pair_cannot_carry_is_refused_by_name_and_nothing_opens_upstream`
+- `gateway_translate_responses::a_codex_request_the_pair_cannot_carry_is_refused_by_name_and_nothing_opens_upstream`
+- `gateway::translate::openai_responses::tests::every_refused_request_field_is_refused_by_its_name`
+- `gateway::translate::openai_responses::tests::a_request_round_trips_through_the_openai_responses_wire (and response/stream round-trips)`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| openai_responses.rs decode_output_item: `blocks.push(Block::ToolUse { id, name, input });` -> `blocks.push(Block::ToolUse { id: format!("call_minted_{}", blocks.len()), name, input });` | `swap-function-call-id` | **killed** | `gateway_translate_responses::a_claude_code_request_is_translated_to_openai_responses_and_back_with_ids_preserved` |
+| openai_responses.rs stop_reason_of: `.any(|block| matches!(block, Block::ToolUse { .. }))` -> `.any(|_block| false)` | `drop-stop-reason-mapping` | **killed** | `gateway_translate_responses::a_claude_code_request_is_translated_to_openai_responses_and_back_with_ids_preserved` |
+
+> swap-function-call-id observed: panicked at tests/gateway_translate_responses.rs:821: assertion `left == right` failed: the tool_use id is the fixture's call_id, verbatim
+
+> drop-stop-reason-mapping observed: panicked at tests/gateway_translate_responses.rs:818: assertion `left == right` failed (the client's stop_reason must be tool_use)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- is_error crosses as the TOOL_ERROR_MARKER first-line convention (no wire field exists on function_call_output), same decision as T1's chat codec
+- StopSequence cannot be said on the Responses wire (no stop sequences exist there); unreachable through the pair since no decodable request can set one — requests carrying stop_sequences are refused by name via refuse_unencodable
+- An empty reasoning output item is skipped by name; a non-empty one is refused — a Responses upstream running a reasoning model at non-default include settings will be refused per request
+
+---
+
+### Cover each supported harness/provider/protocol pairing with an end-to-end test through the shipped binary against a fixture upstream before offering it. (line 1956)
+
+Contract: Given a harness/provider/protocol pairing, when it is offered as supported, Glasshouse has covered it end to end against a fixture upstream before offering it, while preserving that unoffered pairs stay refused by name.
+
+State: PARTIALLY VERIFIED — ruled 2026-08-31 by the orchestrator, agreeing with the worker's `open`: the line quantifies over every supported pair; three exist now (T1's anthropic->chat, and T2's anthropic<->responses both ways, each behind its own end-to-end test through the shipped binary — ids preserved, streaming in each protocol's own order, refusal by name with nothing opened upstream, the byte-for-byte relay for served targets re-witnessed). Remaining: T2b (responses<->chat, refused by name), T3 (Gemini codec and adapter).
+
+Production evidence:
+- `src/gateway/translate/mod.rs` — `TABLE (each supported row commented with its e2e test)`
+
+Regression evidence:
+- `tests/gateway_translate_responses.rs: 7 tests, fixtures speak only the provider's protocol and record requests`
+- `harness::pairing::tests::exactly_the_supported_pairs_are_translated (pin, three ordered pairs)`
+- `gateway::translate::tests::exactly_the_supported_pairs_are_supported_and_every_other_row_carries_a_reason`
+- `provider::tests::every_wire_protocol_pair_has_exactly_one_row_in_the_gateway_table`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| (same mutation as line 1948's second row — one mutation, two lines it defends) | `refused-pair-marked-supported` | **killed** | `harness::pairing::tests::exactly_the_supported_pairs_are_translated` |
+
+> refused-pair-marked-supported observed: panicked at src/harness/pairing.rs:1353 (see above)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- 'Through the shipped binary' is satisfied to exactly T1's depth: the binary's own gateway door, real sockets, production upstream builder — not `glasshouse launch` (blocked at profile::apply_gateway, witness still green); same reason T1's ruling left these PARTIALLY VERIFIED
+
+---
