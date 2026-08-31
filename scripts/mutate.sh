@@ -302,10 +302,28 @@ run_script() {
     exit 2
   fi
   local any_fail=0
-  local sfile sfind sreplace sname stestargs
-  while IFS=$'\t' read -r sfile sfind sreplace sname stestargs || [ -n "${sfile:-}" ]; do
-    [ -z "${sfile:-}" ] && continue
-    case "$sfile" in \#*) continue ;; esac
+  local sfile sfind sreplace sname stestargs sline sconv sfields
+  # Tab is an IFS *whitespace* character, so `IFS=$'\t' read` collapses a run
+  # of tabs and shifts every later field one to the left. A DELETION mutation
+  # has an empty replacement -- the most valuable kind there is -- so the
+  # collapse hit exactly the rows that mattered: `sreplace` took the mutation's
+  # NAME (mutating the wrong text), and `stestargs` came out empty, which makes
+  # `cargo test` run the WHOLE WORKSPACE and reports that failure as a KILLED.
+  # A false KILLED manufactures a conclusion, which is the failure mode the
+  # refusal register's "third verification tool" entry is about.
+  #
+  # Split on a separator that is not IFS whitespace, so empty fields survive.
+  while IFS= read -r sline || [ -n "${sline:-}" ]; do
+    [ -z "${sline:-}" ] && continue
+    case "$sline" in \#*) continue ;; esac
+    sfields=$(awk -F'\t' '{print NF}' <<< "$sline")
+    if [ "$sfields" -ne 5 ]; then
+      echo "mutate.sh: refusing row with $sfields tab-separated fields, need 5: $sline" >&2
+      any_fail=1
+      continue
+    fi
+    sconv=${sline//$'\t'/$'\x1f'}
+    IFS=$'\x1f' read -r sfile sfind sreplace sname stestargs <<< "$sconv"
     MODE="cargo"
     # shellcheck disable=SC2206  # intentional word-splitting of test args
     TEST_ARGS=($stestargs)

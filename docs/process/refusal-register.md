@@ -1171,3 +1171,60 @@ by fewest-open finds the residue, not the opportunity.**
 anyway**, having checked only the map and the register. The ledger is the third
 place a refusal can live and it was not consulted. `discover.py --phase <id>`
 prints the entry alongside the open lines for exactly this reason.
+
+## The register's own rows go stale, and three of them did — 2026-08-31
+
+Checked while choosing batch 57's refill, and each was checked *because* the
+row said the work was buildable. **A stale "buildable" row costs a dispatch;
+a stale "refused" row costs nothing.** That asymmetry is why these are
+recorded here rather than left to the next reader.
+
+| row | said | is now |
+|---|---|---|
+| **P2** — a caller that dispatches a Classification job | *"buildable today, ~38 open lines"* | **CLOSED by `58e4d2c`.** `classify_with_routing_model` (`main.rs:4453`) is called from `main.rs:154` and `:2130`, and `classify_for_routing` (`:2066`) from `:1881` and `:2580`. The census's *"its only production caller hardcodes `None`"* is no longer true. |
+| **P2's note 4** — *"`NewObservation` has no `with_purpose` builder"* | a gap | **EXISTS** at `routing/evidence.rs:624`. |
+| **P7** — a retrieval-quality signal | *"buildable, no migration"*, closing 1129 | **1129 is REFUSED IN THE SOURCE.** `memory/inject.rs:59-60` and `:200-239`: *"Glasshouse has no honest retrieval-confidence signal to threshold today"*, and it distinguishes the *relevance* BM25 gives from the *confidence* the line asks for — a confidence derived from BM25 *"would be high for"* a match nothing should inject. The score is produced and carried now (`Scored`, `search_scored`); the consumer is the part that was ruled against. **Do not package 1129.** 939 and 1094 are untouched by this. |
+
+### And the handoff's refill list is a fourth place a refusal can live
+
+`.agent-runtime/CONTINUATION.md` offered **514** as a ready candidate. This
+register has had it as **"REFUSED — missing caller"** since batch 50. A
+checkpoint is written under time pressure at the end of a session and is not
+re-checked against the register; **the register outranks it.** Read this file
+before taking a candidate from a handoff, exactly as before taking one from
+the map.
+
+## A THIRD verification tool was answering about the wrong question — and this one manufactured a KILLED
+
+**Found 2026-08-31 by `GH-IMPLEMENTATION-POLICY`; fixed the same day.**
+
+`scripts/mutate.sh --script` parsed its rows with
+`while IFS=$'\t' read -r file find replace name testargs`. **Tab is an IFS
+*whitespace* character**, so a run of tabs collapses into one delimiter and
+every later field shifts left. A row with an **empty replacement** — which is
+exactly what a *deletion* mutation is, section 35's own shape and the most valuable kind
+there is — therefore became four fields:
+
+- `replace` received the mutation's **name**, so the wrong text was substituted;
+- `testargs` came out **empty**, so `TEST_ARGS=()` and `cargo test` ran the
+  **whole workspace**, whose failure was then reported as a **KILLED for the
+  mutation you named**.
+
+Both of that package's *"delete the delivery call"* rows came back KILLED from a
+command that was never the one named. Re-run with a compiling non-empty
+replacement (`if false { deliver_policy(...); }`), one of them was a **real
+SURVIVED**: every assertion reached `deliver_policy` through `spawn_session`,
+and the `Request::SendMessage` call site was a caller no test entered through.
+The worker closed it with a test rather than by adjusting the claim.
+
+**This is the third instance of one shape** — after `blast-radius.sh` and
+`mutate.sh`'s own `--file` resolution — and the first to *manufacture* a
+verdict rather than lose one. A false SURVIVED costs a look; **a false KILLED
+retires a question that was never asked.**
+
+Fixed by splitting on `\x1f` (not IFS whitespace, so empty fields survive) and
+refusing any row that is not exactly five tab-separated fields. **Every
+`--script` mutation reported before 2026-08-31 whose replacement was empty is
+unreliable.** Batch 57's other packages were checked and are not affected —
+their deletion-shaped mutations all used compiling non-empty replacements
+(`-> let landed: Option<String> = None;`, `-> match (landed, false)`).
