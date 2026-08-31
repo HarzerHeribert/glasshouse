@@ -157,10 +157,28 @@ prove broad cross-platform behavior.
 Update the evidence ledger, check the map only at **COMPLETE**, update the
 handoff, and create one accurate coherent commit. The Opus orchestrator is the
 only role that integrates, commits, or changes project-status records. Leave
-main clean at coherent boundaries. Push to origin when a contract's evidence
-needs CI: cross-platform claims are unprovable without real runners, and a
-green local suite is precisely the state in which a platform-specific defect
-stays hidden. Pushing for CI is the orchestrator's job and nobody else's.
+main clean at coherent boundaries.
+
+**Pushing to origin is rationed, and the ration is the point.** Cross-platform
+claims are unprovable without real runners, and a green local suite is precisely
+the state in which a platform-specific defect stays hidden — that is why the
+push exists. But `.github/workflows/ci.yml` fires **seven jobs** per push
+(`test` and `msrv` each across ubuntu/macos/windows, plus `lint`), and on
+private-repo billing **macOS bills at 10× and Windows at 2×**, so one push can
+cost hundreds of billable minutes and a monthly allowance dies in roughly ten.
+The user's instruction of record, 2026-08-31: *"this projects CI is way too
+demanding to be ran on github fully … only run in the github CI in the future
+when absolutely necessary."*
+
+So: **the local gate is the gate.** `scripts/ci-local.sh` covers macOS and Linux
+and drives a real **Windows VM** (`--windows-vm`); this machine *is* the macOS
+coverage, which makes the GitHub macOS leg the most redundant and most expensive
+job in the matrix. Push only when a specific contract cannot be settled locally
+or on the VM, batch a session's commits into **at most one** push, say in the
+commit why the run was needed — and never push a `claude/**` worker branch,
+which costs another seven jobs. Every push also sends the user a failure email,
+so noise here is a cost to a person, not only to quota. Pushing at all remains
+the orchestrator's job and nobody else's.
 
 ### 9. Continue or checkpoint
 
