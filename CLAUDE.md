@@ -392,7 +392,9 @@ of seven packets on it.
 
 **Continuity and housekeeping:** `continuity-watch.sh` (`--role
 worker|orchestrator`) · `orchestrator-heartbeat.sh` · `usage-snapshot.py` ·
-`reap-worktrees.sh` · `ask-user.sh`
+`reap-worktrees.sh` · `ask-user.sh` · `stale-workspaces.sh` (`--watch 900` —
+arm it in the first turn; it names every provably redundant cmux pane and
+nags until each is closed, because two sessions left fifteen behind)
 
 **Hooks (`scripts/hooks/`), which enforce rather than remind:**
 `guard-worktree-boundary.sh` · `guard-destructive-git.sh` ·
