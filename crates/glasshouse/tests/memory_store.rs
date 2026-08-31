@@ -369,8 +369,8 @@ fn a_version_three_database_gains_the_memory_table_with_its_sessions_intact() {
         })
         .unwrap();
     assert_eq!(
-        version, 17,
-        "the launch must have applied migrations 4 through 17"
+        version, 18,
+        "the launch must have applied migrations 4 through 18"
     );
 
     // The session recorded before the migration is untouched.

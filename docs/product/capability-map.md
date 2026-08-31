@@ -1709,15 +1709,15 @@ Fixed architectural requirements
 - Routing and automation remain visible, explainable, and overridable.
 - Explicit user pins, exclusions, and manual selections are binding constraints until the user changes them or they become technically impossible, in which case Glasshouse must report the conflict.
 
-☐ Allow the user to disable automatic routing for the current Glasshouse instance.
-☐ Allow the user to pin a task to a specific harness.
-☐ Allow the user to pin a task to a specific existing session.
-☐ Allow the user to force a fresh session.
-☐ Allow the user to force a checkpoint before migration.
-☐ Allow the user to prevent a session from receiving orchestrator-generated messages temporarily.
-☐ Allow the user to take over an orchestrated worker directly.
-☐ Make user input take precedence over automated orchestration when both target the same session.
-☐ Surface automation decisions instead of silently moving work between sessions.
+☑ Allow the user to disable automatic routing for the current Glasshouse instance.
+☑ Allow the user to pin a task to a specific harness.
+☑ Allow the user to pin a task to a specific existing session.
+☑ Allow the user to force a fresh session.
+☑ Allow the user to force a checkpoint before migration.
+☑ Allow the user to prevent a session from receiving orchestrator-generated messages temporarily.
+☑ Allow the user to take over an orchestrated worker directly.
+☑ Make user input take precedence over automated orchestration when both target the same session.
+☑ Surface automation decisions instead of silently moving work between sessions.
 
 Phase 45 — Failure handling
 

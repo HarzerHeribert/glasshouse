@@ -758,8 +758,8 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
         })
         .unwrap();
     assert_eq!(
-        version, 17,
-        "the launch must have applied migrations 6 through 17"
+        version, 18,
+        "the launch must have applied migrations 6 through 18"
     );
     drop(conn);
 
@@ -1029,8 +1029,8 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
         })
         .unwrap();
     assert_eq!(
-        version, 17,
-        "the launch must have applied migrations 7 through 17"
+        version, 18,
+        "the launch must have applied migrations 7 through 18"
     );
     drop(conn);
 

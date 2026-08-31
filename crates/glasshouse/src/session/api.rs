@@ -54,6 +54,12 @@ pub enum ApiError {
     },
     #[error("session `{id}` is not live in this Glasshouse")]
     NotLive { id: SessionId },
+    #[error(
+        "a person has been typing into session `{id}`; machine messages to it are refused \
+         for another {seconds}s so they do not land in the middle of what that person is \
+         doing. The user has the keyboard. An interrupt is never refused this way."
+    )]
+    UserHasTheKeyboard { id: SessionId, seconds: u64 },
     #[error(transparent)]
     Store(#[from] SessionStoreError),
     #[error(transparent)]
@@ -133,6 +139,28 @@ impl<'a> SessionApi<'a> {
     /// which is what every caller inside this process does; only the control
     /// door has a caller it did not write, and only that door can know
     /// whether a person is on the other end of it.
+    ///
+    /// # A person at this session's keyboard outranks a machine — line 1719
+    ///
+    /// Machine text is **refused** with
+    /// [`ApiError::UserHasTheKeyboard`] while a person has put something into
+    /// this same session within
+    /// [`crate::session::runtime::USER_INPUT_PRECEDENCE`]. Refused rather than queued,
+    /// which is this seam's existing rule and not a new one:
+    /// `super::runtime::SessionRuntime::deliver` already refuses a
+    /// concurrent delivery instead of queuing it, because *"queuing would
+    /// deliver it eventually, out of the order its sender believed"* — and a
+    /// message held for ten seconds and then typed into whatever the person
+    /// is now doing is that failure with a delay in front of it. A refusal a
+    /// caller can read is the answer it can act on.
+    ///
+    /// The rule is taken **here**, at the one seam every machine sender in
+    /// this process passes through — the control door's `send_message`, the
+    /// task a spawn delivers, an injected memory briefing, and a worker
+    /// completion pumped into an orchestrator — rather than at any one of
+    /// them, so there is no machine write path that quietly is not subject to
+    /// it. It is deliberately **not** applied to
+    /// [`SessionApi::interrupt`]: see that method.
     pub fn send_text(
         &mut self,
         id: &SessionId,
@@ -143,6 +171,11 @@ impl<'a> SessionApi<'a> {
         if self.live.get(id).is_none() {
             return Err(ApiError::NotLive { id: id.clone() });
         }
+        if origin == MessageOrigin::Machine
+            && let Some(refusal) = self.machine_delivery_refusal(id)
+        {
+            return Err(refusal);
+        }
         let mut line = String::with_capacity(text.len() + 1);
         line.push_str(text);
         line.push('\r');
@@ -150,11 +183,60 @@ impl<'a> SessionApi<'a> {
         Ok(())
     }
 
+    /// The refusal a machine-originated line to `id` would be given right
+    /// now, or `None` if it would be delivered — capability map line 1719.
+    ///
+    /// [`SessionApi::send_text`] takes this decision itself, so no caller has
+    /// to ask, and it is **private on purpose**.
+    ///
+    /// It was briefly public, so the control door could refuse a machine
+    /// message before opening this project's memory store for a briefing it
+    /// was about to throw away. That saved one SQLite open and cost the whole
+    /// rule: with a copy of the check in front of this seam, mutating the
+    /// check *inside* [`SessionApi::send_text`] away left the entire suite
+    /// green, because nothing ever reached the seam to be refused by it. A
+    /// rule with two enforcement points is a rule with one that nobody
+    /// watches.
+    ///
+    /// So there is one enforcement point, this is its only caller, and a
+    /// caller that wants to know without sending has to ask by sending. The
+    /// wasted memory open on a refused message is the price, and it is paid
+    /// only on the path where a person is already using the session.
+    ///
+    /// It reads state and changes none, and it resolves through the same
+    /// project-scope check every other method starts with, so a foreign
+    /// session is refused as foreign here too rather than answered.
+    fn machine_delivery_refusal(&self, id: &SessionId) -> Option<ApiError> {
+        if let Err(err) = self.resolve(id) {
+            return Some(err);
+        }
+        let remaining = self
+            .live
+            .user_input_precedence(id, std::time::Instant::now())?;
+        Some(ApiError::UserHasTheKeyboard {
+            id: id.clone(),
+            // Rounded **up**: a refusal that says `0s` while still refusing
+            // reads as a bug, and the caller's next question is "how long do
+            // I wait", which has to be an answer that works.
+            seconds: remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0),
+        })
+    }
+
     /// Interrupt a live session, on behalf of `origin`.
     ///
     /// An interrupt is an intervention like any other line, and carries the
     /// same attribution for the same reason: `origin` is the caller's to
     /// state. See [`SessionApi::send_text`].
+    ///
+    /// # It is never refused for line 1719, and never muted for line 1717
+    ///
+    /// Both of those controls exist so a person is not talked over. An
+    /// interrupt is not talking: it is the one verb that *stops* a session,
+    /// and it is what a person reaches for when a worker is running away with
+    /// itself. A control that could leave a runaway harness unstoppable for
+    /// ten seconds — or for however long a mute was set — would have taken
+    /// something away in the name of giving the person control. So text is
+    /// held back and a stop never is.
     pub fn interrupt(&mut self, id: &SessionId, origin: MessageOrigin) -> Result<(), ApiError> {
         self.resolve(id)?;
         if self.live.get(id).is_none() {
@@ -622,6 +704,126 @@ mod tests {
                 .map(|session| session.scrollback().contains("got:hello"))
                 .unwrap_or(false)
         });
+    }
+
+    /// **Capability map line 1719, the expiry half.**
+    ///
+    /// `tests/user_control.rs` proves the refusal through the shipped binary,
+    /// which is where a rule about a person at a keyboard belongs. It cannot
+    /// prove that the window *ends* without sleeping through
+    /// [`crate::session::runtime::USER_INPUT_PRECEDENCE`], and a test that slept ten
+    /// seconds to observe a constant would be paid for on every run of this
+    /// suite forever.
+    ///
+    /// So the clock is the argument. `note_user_input` takes the moment as a
+    /// parameter and every production caller passes `Instant::now()` — this
+    /// passes a moment on the far side of the window, through **the same
+    /// call the binary makes**, rather than through a `#[cfg(test)]` door
+    /// beside it.
+    #[test]
+    fn a_machine_message_is_delivered_once_the_persons_window_has_passed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let store = fixture.store();
+        let record = store.create(NewSession::embedded("claude-code")).unwrap();
+
+        let mut live = SessionRuntime::new();
+        start_live_session(
+            &fixture,
+            &mut live,
+            record.id.clone(),
+            &bin_dir,
+            install_looping_echo_harness,
+        );
+
+        // A person, a moment further back than the window is wide. The
+        // window has closed, so the machine line is delivered — and
+        // delivered to a real process rather than merely permitted, which
+        // the harness's own echo is what proves.
+        //
+        // This half runs **first** because the mark never moves backwards
+        // (see [`SessionRuntime::note_user_input`]): a test that stamped
+        // `now` and then backdated would be asserting against a rule that
+        // deliberately ignores the second call.
+        live.note_user_input(
+            &record.id,
+            Instant::now()
+                - crate::session::runtime::USER_INPUT_PRECEDENCE
+                - Duration::from_secs(1),
+        );
+        {
+            let mut api = SessionApi::new(&store, &mut live);
+            api.send_text(&record.id, "after-the-window", MessageOrigin::Machine)
+                .expect("the window has passed, so the machine line is delivered");
+        }
+        drive(&mut live, "the harness to echo the machine line", |live| {
+            live.get(&record.id)
+                .map(|session| session.scrollback().contains("got:after-the-window"))
+                .unwrap_or(false)
+        });
+
+        // The same person, now. The machine is refused, and the refusal
+        // names a time — asserted so the half above cannot pass on a build
+        // where nothing is ever refused.
+        live.note_user_input(&record.id, Instant::now());
+        {
+            let mut api = SessionApi::new(&store, &mut live);
+            match api.send_text(&record.id, "too-soon", MessageOrigin::Machine) {
+                Err(ApiError::UserHasTheKeyboard { seconds, .. }) => assert!(
+                    seconds > 0,
+                    "a refusal naming no remaining time reads as a bug"
+                ),
+                other => panic!(
+                    "a machine line must be refused while a person holds the keyboard, and \
+                     this was {other:?}"
+                ),
+            }
+        }
+    }
+
+    /// The mark never moves backwards, so a person typing steadily keeps the
+    /// keyboard rather than losing it to the age of their first line.
+    ///
+    /// Written because the obvious implementation — assign whatever arrives —
+    /// is wrong in exactly one direction and in a way no timing test would
+    /// catch: two calls in the natural order both extend the window, and only
+    /// an out-of-order pair distinguishes "keep the later" from "keep the
+    /// last".
+    #[test]
+    fn an_older_keystroke_does_not_shorten_the_window_a_newer_one_opened() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let store = fixture.store();
+        let record = store.create(NewSession::embedded("claude-code")).unwrap();
+
+        let mut live = SessionRuntime::new();
+        start_live_session(
+            &fixture,
+            &mut live,
+            record.id.clone(),
+            &bin_dir,
+            install_looping_echo_harness,
+        );
+
+        let now = Instant::now();
+        live.note_user_input(&record.id, now);
+        live.note_user_input(
+            &record.id,
+            now - crate::session::runtime::USER_INPUT_PRECEDENCE - Duration::from_secs(1),
+        );
+
+        let mut api = SessionApi::new(&store, &mut live);
+        assert!(
+            matches!(
+                api.send_text(&record.id, "still-refused", MessageOrigin::Machine),
+                Err(ApiError::UserHasTheKeyboard { .. })
+            ),
+            "the stale mark must not have replaced the live one"
+        );
     }
 
     /// The load-bearing test of the batch: a machine-sent line and a typed

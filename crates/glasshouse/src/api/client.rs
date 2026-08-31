@@ -182,6 +182,68 @@ pub fn interrupt(runtime: &Runtime, session: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Stop this project's control API delivering orchestrator messages to one
+/// session, for `seconds` — map line 1717.
+///
+/// A person's own messages are unaffected, and so is an interrupt: muting a
+/// worker is how you get it to yourself, not how you lose the ability to stop
+/// it. The door caps the duration and its answer says what was actually
+/// granted, which is why this prints the door's number rather than the one
+/// that was asked for.
+///
+/// The mute lives in the `glasshouse api serve` process and nowhere else, so
+/// restarting that process clears every mute it was holding. Said here, on
+/// the command a person runs, rather than only in the protocol.
+pub fn mute(runtime: &Runtime, session: &str, seconds: u64) -> anyhow::Result<()> {
+    let result = call(
+        runtime,
+        &serde_json::json!({
+            "op": "mute_session",
+            "session": session,
+            "seconds": seconds,
+        }),
+    )?;
+    let granted = result
+        .get("muted_for_seconds")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(seconds);
+    println!(
+        "glasshouse: session `{session}` will refuse orchestrator messages for {granted}s; \
+         your own messages and interrupts still reach it"
+    );
+    if result.get("capped").and_then(serde_json::Value::as_bool) == Some(true) {
+        eprintln!(
+            "glasshouse: {seconds}s is longer than this door will mute a session for, so it \
+             granted {granted}s"
+        );
+    }
+    eprintln!(
+        "glasshouse: a mute lives in the `glasshouse api serve` process; restarting it lifts \
+         every mute"
+    );
+    Ok(())
+}
+
+/// Lift a mute before it expires — map line 1717.
+///
+/// Safe to run against a session nobody muted: the door answers with what it
+/// found, and this says which it was rather than reporting the harmless case
+/// as a failure.
+pub fn unmute(runtime: &Runtime, session: &str) -> anyhow::Result<()> {
+    let result = call(
+        runtime,
+        &serde_json::json!({
+            "op": "unmute_session",
+            "session": session,
+        }),
+    )?;
+    match result.get("was_muted").and_then(serde_json::Value::as_bool) {
+        Some(false) => println!("glasshouse: session `{session}` was not muted"),
+        _ => println!("glasshouse: session `{session}` accepts orchestrator messages again"),
+    }
+    Ok(())
+}
+
 /// Show the recent terminal output of a live session in this project — map
 /// line 745.
 ///

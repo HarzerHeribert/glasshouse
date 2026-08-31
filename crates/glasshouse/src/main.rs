@@ -250,6 +250,8 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             from_checkpoint,
             to,
             fresh,
+            no_routing,
+            checkpoint_first,
             headless,
             task,
             harness_args,
@@ -262,6 +264,8 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             from_checkpoint,
             to,
             fresh,
+            no_routing,
+            checkpoint_first,
             headless,
             task,
             harness_args,
@@ -283,6 +287,8 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     to: to.as_deref(),
                     fresh: *fresh,
                     task: task.as_deref(),
+                    no_routing: *no_routing,
+                    checkpoint_first: *checkpoint_first,
                 },
                 &response,
                 *headless,
@@ -291,8 +297,18 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         }
         Some(Command::Resume {
             session,
+            checkpoint_first,
             harness_args,
         }) => {
+            // Line 1716's resume half. Taken here, before `resume_session`
+            // opens anything: the session being left is whichever this
+            // project was most recently in, and that is a fact about the
+            // store rather than about the resume, so it is established and
+            // its handle closed before the resume's own is opened (practice
+            // §65).
+            if *checkpoint_first {
+                checkpoint_before_moving(&runtime, Some(session))?;
+            }
             return resume_session(
                 &runtime,
                 session,
@@ -406,6 +422,15 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             }
             ApiCommand::Read { session, max_bytes } => {
                 api::read_output(&runtime, session, *max_bytes)?;
+            }
+            // Line 1717's two verbs. Client-side they are the same shape as
+            // the three above: one connection, one request, the door's own
+            // sentence back.
+            ApiCommand::Mute { session, seconds } => {
+                api::mute(&runtime, session, *seconds)?;
+            }
+            ApiCommand::Unmute { session } => {
+                api::unmute(&runtime, session)?;
             }
         },
         // The MCP door — the same handlers `api serve` answers with, over
@@ -547,6 +572,18 @@ struct LaunchDestination<'a> {
     /// be able to do (Phase 34D). `None` classifies nothing and reproduces
     /// the launch exactly as it was before classification existed.
     task: Option<&'a str>,
+    /// `--no-routing`: take no routing decision for this launch at all —
+    /// capability map line 1712.
+    ///
+    /// Not a fifth way of naming a destination, which is why it sits here
+    /// beside them rather than being folded into one: the four fields above
+    /// say *where*, and this one says *stop deciding*. With it set, the four
+    /// above are still read and still obeyed — a person who says both "do
+    /// not rank" and "go here" has said two compatible things.
+    no_routing: bool,
+    /// `--checkpoint-first`: check point the session this work is leaving
+    /// before it moves — capability map line 1716.
+    checkpoint_first: bool,
 }
 
 /// The identifier `--to` takes for "a new session under this profile".
@@ -2335,6 +2372,8 @@ fn launch_session(
         to,
         fresh,
         task,
+        no_routing,
+        checkpoint_first,
     } = destination;
     // Map line 1849: the routing decision is timed from here. Whether the
     // figure is ever recorded is decided by whether a task was stated.
@@ -2391,104 +2430,184 @@ fn launch_session(
         }
     }
     let fresh_profile = named_profile.unwrap_or(glasshouse::profile::NATIVE_PROFILE_NAME);
-    let destinations = routing_destinations(
-        runtime,
-        &effective,
-        selection.id(),
-        DestinationScope::Launchable {
-            profile: fresh_profile,
-        },
-    )?;
-    let overrides = effective.pairing_overrides();
-    // **Map line 1599's bridge, on the path that acts.** The live pool a
-    // gateway fills still does not exist here — that gateway is started
-    // further down, and only for a profile that needs one — but what a
-    // gateway *exports* does: `provider::telemetry::GatewayHealthReading`s,
-    // persisted to `GatewayHealthCache` under this run's own data directory,
-    // by whichever earlier `glasshouse run` or `glasshouse launch` served the
-    // work. `observed_provider_health` reads them into the pool
-    // `provider_health` looks in, and its own doc has the two hazards that
-    // make it a design rather than a wiring — the rendered `credential_label`
-    // against a `CredentialId`, and unix seconds against an epoch-less
-    // `Instant`. Neither is guessed at; a reading that cannot be attributed
-    // without guessing is not attributed, which leaves exactly the inert
-    // `0.0` this line had before the bridge.
+
+    // -----------------------------------------------------------------------
+    // Line 1712: the off switch, and it is taken **here** — before
+    // `routing_destinations` opens this project's session store, its quota
+    // cache and its health cache, and before anything classifies this
+    // launch's task.
     //
-    // The reading comes from a *previous* process. That is the whole point:
-    // the health of a provider is not a fact this launch can observe about a
-    // session it has not started yet.
-    let health = observed_provider_health(runtime, &destinations);
-    // Phase 34D, on the path that acts: what the work *is* decides what the
-    // destination must be able to do. `None` — no `--task` — hands the
-    // router `TaskRequirements::default()` and asks nothing, which is this
-    // launch exactly as it was before classification existed.
     let sticky_cache =
         ClassificationStickyCache::new(runtime.paths(), runtime.project().id().as_str());
-    let classified = classify_for_routing(
-        runtime,
-        &effective,
-        RoutingClassificationSite {
-            task,
-            moment: glasshouse::routing::session::RoutingMoment::SessionStart,
-            harness: Some(selection.id()),
-            harness_named: harness.is_some(),
-            to,
-            fresh,
-            destinations: &destinations,
-            health: &health,
-            sticky: Some(&sticky_cache),
-        },
-    );
-    let inputs = glasshouse::routing::session::RouterInputs {
-        overrides: &overrides,
-        health: &health,
-        now: std::time::Instant::now(),
-        requirements: classified
-            .as_ref()
-            .map(|classified| classified.answer.requirements())
-            .unwrap_or_default(),
-    };
-    // Line 1602 on the path that acts, not only on the one that reports.
+    // # Why routing off does not report what it would have done
     //
-    // Two of these are the user's flags. The other two are statements they
-    // already made by typing something else, and reading them as anything but
-    // "this launch is a fresh one" would be a router overruling a person:
-    // `--profile` names the profile a *new* session should run under, and
-    // `--from-checkpoint` hands a new session its opening prompt. Neither is
-    // a thing to do to a session that is already going.
-    let user_override = if to.is_some() || fresh {
-        routing_override(to, fresh)
-    } else if from_checkpoint.is_some() {
-        glasshouse::routing::session::RoutingOverride::fresh()
-    } else if let Some(name) = profile_name {
-        glasshouse::routing::session::RoutingOverride::to(fresh_destination_id(
-            selection.id(),
-            name,
-        ))
-    } else {
-        glasshouse::routing::session::RoutingOverride::none()
-    };
-    let routed = session_router(&effective, user_override).choose(
-        glasshouse::routing::session::RoutingMoment::SessionStart,
-        None,
-        &destinations,
-        &inputs,
-    );
-    if let Some(classified) = &classified {
-        // The classification the decision just acted on, in the same words
-        // `glasshouse route --task` prints — including whether line 1459's
-        // conservative rules fired. And the end of what routing added to
-        // this launch (line 1849), recorded before anything below opens a
-        // ledger handle of its own.
-        eprintln!("glasshouse: {}", classified.answer.explain());
-        record_routing_latency(
-            runtime,
-            routing_started,
-            routing_started_at_unix,
-            selection.id(),
-            &classified.answer,
-        );
+    // The obvious courtesy is to rank anyway and print *"routing is off; it
+    // would have continued session X"*. That is exactly the work the person
+    // turned off. The ranking's inputs are not free: three on-disk stores are
+    // opened to build the destinations — practice §65 is this project's
+    // record of what an unnecessary open handle costs on the platform it does
+    // not develop on, where SQLite's locks are mandatory rather than advisory
+    // — and the task classification on this path can reach a routing model.
+    // Doing all of it to render one sentence would make "off" mean "the same
+    // work, silently, and then a message about it".
+    //
+    // So the line says routing is off and where that was decided, and points
+    // at `glasshouse route`, which answers *"what would have happened"* on
+    // demand and starts nothing. Asking is a thing a person does
+    // deliberately; being charged for the answer is not.
+    // -----------------------------------------------------------------------
+    let automatic = effective.automatic_routing();
+    let routing_off = no_routing || !automatic.value;
+    if routing_off {
+        if no_routing {
+            eprintln!(
+                "glasshouse: automatic routing is off for this launch (--no-routing), so no \
+                 ranking was taken. `glasshouse route` shows what it would have chosen, \
+                 without starting anything."
+            );
+        } else {
+            eprintln!(
+                "glasshouse: automatic routing is off {}, so no ranking was taken. \
+                 `glasshouse route` shows what it would have chosen, without starting \
+                 anything.",
+                automatic.layer.describe_source()
+            );
+        }
+        // A `--to` naming a session this project already has is the one thing
+        // that still moves work into an existing session with the ranking
+        // off. It is not the ranking deciding — it is the person, and turning
+        // the ranking off was never a statement about their own flags.
+        //
+        // A `fresh:<harness>:<profile>` identifier falls through instead: it
+        // names a session that does not exist yet, and starting it is what
+        // the rest of this function already does under `fresh_profile`, which
+        // `named_profile` has already read that identifier's profile out of.
+        if let Some(id) = to
+            && fresh_destination_profile(id, selection.id()).is_none()
+        {
+            eprintln!(
+                "glasshouse: continuing session `{id}` because you named it; with routing off, \
+                 nothing else was considered."
+            );
+            if checkpoint_first {
+                checkpoint_before_moving(runtime, Some(id))?;
+            }
+            return resume_session(
+                runtime,
+                id,
+                harness_args,
+                headless,
+                RouteOnResume::AlreadyRouted,
+            );
+        }
     }
+
+    // Line 1712 again: with the ranking off, none of this runs at all —
+    // not the three stores `routing_destinations` opens, not the health
+    // bridge, not `choose`. `routed` is `None`, which the tail below already
+    // handles as "there was no routing decision", and the fresh destination
+    // is the profile this launch resolved on its own.
+    let (routed, classified, health) = if routing_off {
+        (None, None, glasshouse::routing::free::FreePool::new())
+    } else {
+        let destinations = routing_destinations(
+            runtime,
+            &effective,
+            selection.id(),
+            DestinationScope::Launchable {
+                profile: fresh_profile,
+            },
+        )?;
+        let overrides = effective.pairing_overrides();
+        // **Map line 1599's bridge, on the path that acts.** The live pool a
+        // gateway fills still does not exist here — that gateway is started
+        // further down, and only for a profile that needs one — but what a
+        // gateway *exports* does: `provider::telemetry::GatewayHealthReading`s,
+        // persisted to `GatewayHealthCache` under this run's own data directory,
+        // by whichever earlier `glasshouse run` or `glasshouse launch` served the
+        // work. `observed_provider_health` reads them into the pool
+        // `provider_health` looks in, and its own doc has the two hazards that
+        // make it a design rather than a wiring — the rendered `credential_label`
+        // against a `CredentialId`, and unix seconds against an epoch-less
+        // `Instant`. Neither is guessed at; a reading that cannot be attributed
+        // without guessing is not attributed, which leaves exactly the inert
+        // `0.0` this line had before the bridge.
+        //
+        // The reading comes from a *previous* process. That is the whole point:
+        // the health of a provider is not a fact this launch can observe about a
+        // session it has not started yet.
+        let health = observed_provider_health(runtime, &destinations);
+        // Phase 34D, on the path that acts: what the work *is* decides what the
+        // destination must be able to do. `None` — no `--task` — hands the
+        // router `TaskRequirements::default()` and asks nothing, which is this
+        // launch exactly as it was before classification existed.
+        let classified = classify_for_routing(
+            runtime,
+            &effective,
+            RoutingClassificationSite {
+                task,
+                moment: glasshouse::routing::session::RoutingMoment::SessionStart,
+                harness: Some(selection.id()),
+                harness_named: harness.is_some(),
+                to,
+                fresh,
+                destinations: &destinations,
+                health: &health,
+                sticky: Some(&sticky_cache),
+            },
+        );
+        let inputs = glasshouse::routing::session::RouterInputs {
+            overrides: &overrides,
+            health: &health,
+            now: std::time::Instant::now(),
+            requirements: classified
+                .as_ref()
+                .map(|classified| classified.answer.requirements())
+                .unwrap_or_default(),
+        };
+        // Line 1602 on the path that acts, not only on the one that reports.
+        //
+        // Two of these are the user's flags. The other two are statements they
+        // already made by typing something else, and reading them as anything but
+        // "this launch is a fresh one" would be a router overruling a person:
+        // `--profile` names the profile a *new* session should run under, and
+        // `--from-checkpoint` hands a new session its opening prompt. Neither is
+        // a thing to do to a session that is already going.
+        let user_override = if to.is_some() || fresh {
+            routing_override(to, fresh)
+        } else if from_checkpoint.is_some() {
+            glasshouse::routing::session::RoutingOverride::fresh()
+        } else if let Some(name) = profile_name {
+            glasshouse::routing::session::RoutingOverride::to(fresh_destination_id(
+                selection.id(),
+                name,
+            ))
+        } else {
+            glasshouse::routing::session::RoutingOverride::none()
+        };
+        let routed = session_router(&effective, user_override).choose(
+            glasshouse::routing::session::RoutingMoment::SessionStart,
+            None,
+            &destinations,
+            &inputs,
+        );
+        if let Some(classified) = &classified {
+            // The classification the decision just acted on, in the same words
+            // `glasshouse route --task` prints — including whether line 1459's
+            // conservative rules fired. And the end of what routing added to
+            // this launch (line 1849), recorded before anything below opens a
+            // ledger handle of its own.
+            eprintln!("glasshouse: {}", classified.answer.explain());
+            record_routing_latency(
+                runtime,
+                routing_started,
+                routing_started_at_unix,
+                selection.id(),
+                &classified.answer,
+            );
+        }
+        (routed, classified, health)
+    };
 
     // A destination the router chose is announced before anything happens,
     // never after: a person who did not want their previous session continued
@@ -2506,8 +2625,27 @@ fn launch_session(
             routed.overrode(),
             glasshouse::evaluation::now_unix(),
         );
+        // -------------------------------------------------------------------
+        // Line 1720: *"surface automation decisions instead of silently
+        // moving work between sessions."* Every automated outcome this
+        // function can reach says so here, before it happens — an override
+        // that was refused, an override that was honoured, a continuation, or
+        // a fresh session the ranking chose over destinations it could have
+        // continued. The one case with nothing to announce is a project with
+        // no alternative: a ranking of one destination moved nothing.
+        // -------------------------------------------------------------------
         if let Some(refusal) = routed.override_refused() {
-            eprintln!("glasshouse: {refusal}");
+            eprintln!(
+                "glasshouse: your routing override was not applied — {refusal}. The ranking's \
+                 own choice was used instead."
+            );
+        }
+        if let Some(automatic) = routed.overrode() {
+            eprintln!(
+                "glasshouse: going to `{}` because you named it; the ranking would have chosen \
+                 `{automatic}`. `glasshouse route` says why.",
+                routed.chosen().id()
+            );
         }
         if let glasshouse::routing::session::Continuation::Existing(warm) =
             routed.chosen().continuation()
@@ -2534,6 +2672,13 @@ fn launch_session(
             );
             // Line 1467: the session this work landed on is the sticky one.
             remember_classification(&sticky_cache, classified.as_ref(), routed.chosen().id());
+            // Line 1716, on the path that migrates. Taken before
+            // `resume_session` so the checkpoint describes the moment the
+            // work left, and after the announcement above so the order a
+            // person reads matches the order things happened.
+            if checkpoint_first {
+                checkpoint_before_moving(runtime, Some(routed.chosen().id()))?;
+            }
             return resume_session(
                 runtime,
                 routed.chosen().id(),
@@ -2542,6 +2687,38 @@ fn launch_session(
                 RouteOnResume::AlreadyRouted,
             );
         }
+        // A fresh session the *ranking* chose, with sessions it could have
+        // continued and did not. Said out loud for the same reason the
+        // continuation above is: the person is about to start over, and the
+        // moment to learn that this project already had somewhere warm to go
+        // is before the new session exists rather than after.
+        //
+        // Only when the ranking chose it. A `--fresh` the person typed is
+        // already reported by the override line above, and repeating it as an
+        // automation decision would attribute their own choice to Glasshouse.
+        if routed.overrode().is_none() {
+            let continuable = routed
+                .considered()
+                .iter()
+                .filter(|(destination, _)| !destination.is_fresh())
+                .count();
+            if continuable > 0 {
+                eprintln!(
+                    "glasshouse: starting a new session; the ranking weighed {continuable} \
+                     session(s) this project could have continued and preferred a new one. \
+                     `glasshouse route` says why, and `--to <id>` overrules it."
+                );
+            }
+        }
+    }
+
+    // Line 1716 on every path that did **not** migrate into an existing
+    // session — the fresh launches, and a project with nothing recorded. The
+    // flag is a no-op here and says so rather than passing silently, because
+    // a person who asked for a checkpoint and got none needs to know which of
+    // the two happened.
+    if checkpoint_first {
+        checkpoint_before_moving(runtime, None)?;
     }
 
     // The chosen fresh destination names the profile this launch resolves.
@@ -2553,11 +2730,13 @@ fn launch_session(
     let requested_profile = routed
         .as_ref()
         .map(|routed| routed.chosen().launch_profile().to_owned())
-        .unwrap_or_else(|| {
-            profile_name
-                .unwrap_or(glasshouse::profile::NATIVE_PROFILE_NAME)
-                .to_owned()
-        });
+        // …and, since line 1712, the ordinary answer whenever routing is off:
+        // the profile this launch already resolved, which is `--profile`, the
+        // profile named inside a `--to fresh:<harness>:<profile>`, or the
+        // implied Native one. Reading `fresh_profile` rather than
+        // `profile_name` is what makes a `--to` identifier mean the same
+        // thing with the ranking off as it does with it on.
+        .unwrap_or_else(|| fresh_profile.to_owned());
 
     // Resolve the launch profile *before* anything is recorded or started.
     // A refusal here must cost nothing: no session record, no process. See
@@ -5666,6 +5845,122 @@ fn active_session(
         }
         None => Ok(store.list()?.into_iter().next()),
     }
+}
+
+/// Check point the session this work is leaving, before it moves —
+/// capability map line 1716.
+///
+/// `moving_to` is where the work is going: a session identifier when this
+/// launch or resume is continuing one, and `None` when it is starting a new
+/// session. The session being **left** is whichever this project was most
+/// recently active in, which is the same `active_session` rule
+/// `glasshouse checkpoint save` and `Request::TakeCheckpoint` use for "the
+/// current session".
+///
+/// # Three of the four cases are a no-op, and each says which
+///
+/// Nothing is being left when this project has no recorded session, when the
+/// launch is starting a fresh one, or when the destination *is* the session
+/// already in hand. Writing a checkpoint for any of those would produce a
+/// handoff describing a migration that did not happen. The flag says so
+/// instead of passing silently: a person who asked for a checkpoint and did
+/// not get one needs to know which of the two occurred, and a silent no-op is
+/// indistinguishable from a checkpoint that was taken (practice §68's shape).
+///
+/// # It invents nothing, and it fails loudly
+///
+/// The handoff records only what Glasshouse knows: which session was left,
+/// where the work went, the Git position and this project's binding memories,
+/// all through the same [`Checkpoint::capture`] the two existing checkpoint
+/// paths use. It does not read the session's terminal for an objective —
+/// `checkpoint_command`'s own doc says why that would be a confident fiction.
+///
+/// A failure here **stops the launch**. The person asked for a checkpoint
+/// before the move; moving anyway would lose exactly what they asked to keep.
+fn checkpoint_before_moving(runtime: &Runtime, moving_to: Option<&str>) -> anyhow::Result<()> {
+    // Its own scope, closed before the caller opens the session store the
+    // resume path needs — practice §65: two live connections to one SQLite
+    // database in one process is invisible on Unix and a lock on Windows.
+    let leaving = {
+        let sessions = ProjectSessions::open(runtime)?;
+        let store = sessions.store();
+        let Some(record) = active_session(&sessions, None)? else {
+            eprintln!(
+                "glasshouse: --checkpoint-first had nothing to check point: this project has \
+                 no recorded session to leave."
+            );
+            return Ok(());
+        };
+        let Some(destination) = moving_to else {
+            eprintln!(
+                "glasshouse: --checkpoint-first had nothing to check point: this starts a new \
+                 session and leaves nothing behind."
+            );
+            return Ok(());
+        };
+        // Resolved through the store so a short identifier — the twelve
+        // characters `glasshouse sessions` prints — compares equal to the
+        // full one. Comparing the strings would make `--to <short id>` look
+        // like a different session from the one it names.
+        let destination = store.resolve_id(destination)?;
+        if destination == record.id {
+            eprintln!(
+                "glasshouse: --checkpoint-first had nothing to check point: session {} is \
+                 already where this work is.",
+                short_id(&record.id)
+            );
+            return Ok(());
+        }
+        (record, destination)
+    };
+    let (record, destination) = leaving;
+
+    let checkpoints = ProjectCheckpoints::open(runtime)?;
+    let store = checkpoints.store();
+    let stored = store.save(Checkpoint::capture(
+        &record.id,
+        &record.harness,
+        // The person asked for it by passing the flag, which is exactly what
+        // `Manual` means here. There is deliberately no new reason: the
+        // stored vocabulary is fixed by a `CHECK` constraint in the schema,
+        // and a third spelling would be a migration for a distinction the
+        // handoff text below already carries.
+        CheckpointReason::Manual,
+        store.now(),
+        runtime.project().root(),
+        Handoff {
+            objective: format!(
+                "preserve session {} before this project's work moved to {}",
+                short_id(&record.id),
+                short_id(&destination)
+            ),
+            implementation_state: format!(
+                "Glasshouse took this checkpoint because --checkpoint-first was passed to a \
+                 command that moved work out of session {}. Nothing here was read from that \
+                 session's terminal: what Glasshouse knows is which session was left, where \
+                 the work went, this project's Git position, and its binding memories.",
+                short_id(&record.id)
+            ),
+            decisions: Vec::new(),
+            memory: binding_memory_lines(runtime),
+            failed_approaches: Vec::new(),
+            files: Vec::new(),
+            test_state: None,
+            next_actions: vec![format!(
+                "continue in session {}, or reopen this one with `glasshouse resume {}`",
+                short_id(&destination),
+                short_id(&record.id)
+            )],
+        },
+    ))?;
+
+    eprintln!(
+        "glasshouse: checkpoint {} saved for session {} before this work moved to {}.",
+        stored.id.short(),
+        short_id(&record.id),
+        short_id(&destination)
+    );
+    Ok(())
 }
 
 /// The checkpoint a command means: the one named, or the most recent.

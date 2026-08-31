@@ -183,11 +183,48 @@ pub enum Request {
     /// [`Request::SendMessage`]: an interrupt is an intervention too, and a
     /// person's `Ctrl-C` through `glasshouse api interrupt` is a different
     /// fact from an orchestrator deciding to stop a worker.
+    ///
+    /// Never refused by a mute (line 1717) or by a person holding the
+    /// keyboard (line 1719) — see `session::api::SessionApi::interrupt` for
+    /// why the one verb that *stops* a session is the one verb neither
+    /// control may hold back.
     Interrupt {
         session: String,
         #[serde(default)]
         origin: RequestOrigin,
     },
+    /// Stop delivering orchestrator-generated messages to one session, for a
+    /// stated time — capability map line 1717.
+    ///
+    /// While a session is muted, [`Request::SendMessage`] carrying
+    /// [`RequestOrigin::Machine`] is refused with the remaining time named.
+    /// [`RequestOrigin::User`] is unaffected — the point of muting a worker
+    /// is to work in it yourself — and [`Request::Interrupt`] is unaffected
+    /// whoever sends it.
+    ///
+    /// `seconds` is required and must be non-zero: *temporarily* is the whole
+    /// of what this verb offers, and a mute with no end would be a session
+    /// quietly excluded from orchestration with nothing to say when it came
+    /// back. It is capped at `unix::MAX_MUTE_SECONDS` server-side, so a
+    /// caller may ask for less and cannot ask for more.
+    ///
+    /// # It does not survive a restart, deliberately
+    ///
+    /// The state lives in the `glasshouse api serve` process that owns the
+    /// session's pseudo-terminal and nowhere else. That process is the only
+    /// thing that can deliver a machine message to a session in the first
+    /// place — a door that has just started is not running the session that
+    /// was muted — so there is no interval in which a lost mute lets a
+    /// message through that a persisted one would have stopped. Nothing is
+    /// migrated and nothing is written to disk.
+    MuteSession { session: String, seconds: u64 },
+    /// Lift a mute before it expires — capability map line 1717.
+    ///
+    /// Answers `ok` whether or not the session was muted, and says which it
+    /// was: unmuting a session nobody muted is the state the caller asked
+    /// for, not a failure. A session that is not this project's is still
+    /// refused as foreign.
+    UnmuteSession { session: String },
     /// The tail of one live session's terminal output — capability map line
     /// 745, *"allow the user to enter any orchestrated worker while it is
     /// running."*

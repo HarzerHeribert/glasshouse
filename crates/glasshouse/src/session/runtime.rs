@@ -47,6 +47,35 @@ pub const DEFAULT_SCROLLBACK_BYTES: usize = 256 * 1024;
 /// Size of one read from a pseudo-terminal.
 const READ_CHUNK: usize = 8 * 1024;
 
+/// How long a person keeps the keyboard after putting something into a
+/// session — capability map line 1719.
+///
+/// For this long after a person's own input reaches a session, machine text
+/// aimed at that same session is **refused**, and told why. A person and an
+/// orchestrator addressing one harness are two hands on one keyboard, and the
+/// harness cannot tell them apart: it sees one stream of bytes into one line
+/// editor. This project has already paid for what happens when they collide —
+/// see `SessionRuntime::deliver`, where *"a second message into a worker
+/// mid-turn ended that turn and stranded it"* is recorded as the reason a
+/// concurrent delivery is refused rather than queued.
+///
+/// # Why ten seconds, and why it is a constant
+///
+/// It is long enough to cover the gap between a person's line landing and the
+/// harness taking the turn it starts — the window in which an orchestrator's
+/// message would either be swallowed by the line editor or end that turn —
+/// and short enough that an orchestrator blocked by it is blocked for one
+/// visible moment rather than for a stretch anyone would have to plan around.
+///
+/// It is deliberately **not** configuration. A setting here would be a knob
+/// for turning off the rule that a person outranks a machine at their own
+/// keyboard, and a person who wants an orchestrator's message delivered while
+/// they type has a way to say so already: wait, or use a different session.
+/// The one control the map does ask for — a person stopping machine messages
+/// *entirely*, for a time they name — is line 1717's mute, which is a
+/// separate verb with an explicit duration.
+pub const USER_INPUT_PRECEDENCE: Duration = Duration::from_secs(10);
+
 /// How long [`SessionRuntime::crash_report`] will wait for a dead session's
 /// reader thread to finish before reporting what it has.
 ///
@@ -402,6 +431,16 @@ pub struct LiveSession {
     /// Set by [`SessionRuntime::close`] and friends: an ending the user asked
     /// for is not an unexpected exit and must never be restarted.
     ended_deliberately: bool,
+    /// When a person last put something into this session — capability map
+    /// line 1719.
+    ///
+    /// Written by [`SessionRuntime::note_user_input`], and read by
+    /// [`SessionRuntime::user_input_precedence`] to answer the one question
+    /// that line asks: *is a person currently using this session?* `None` is
+    /// "nobody has, in this process's lifetime", which is also what a
+    /// restarted Glasshouse sees — see that method for why that is the right
+    /// answer rather than a gap to be filled from the event log.
+    last_user_input: Option<Instant>,
     /// Held for the whole of one delivery — Phase 10A's thirteenth line.
     ///
     /// *"Never deliver two inputs to the same session concurrently."* Today
@@ -917,6 +956,7 @@ impl SessionRuntime {
             restarts: 0,
             restart_halted: None,
             ended_deliberately: false,
+            last_user_input: None,
             delivery: Arc::new(Mutex::new(())),
         });
         if self.focused.is_none() && focusable {
@@ -986,6 +1026,11 @@ impl SessionRuntime {
         // of it. Recorded as such, and never merged with a machine-sent line:
         // the harness cannot tell them apart, which is exactly why Glasshouse
         // has to.
+        //
+        // Line 1719: the same fact, kept where a *decision* can read it. The
+        // event below is a record for later; this is the state a machine
+        // message arriving a second from now is refused against.
+        self.note_user_input(&id, Instant::now());
         self.events.publish(
             &id,
             LifecycleEvent::TextDelivered {
@@ -1056,6 +1101,12 @@ impl SessionRuntime {
         origin: MessageOrigin,
     ) -> Result<(), RuntimeError> {
         self.write_input(id, text.as_bytes())?;
+        // Line 1719, on the other half of the same seam: a line a person
+        // typed at the shell's prompt, or sent through `glasshouse api send`,
+        // is a person using this session exactly as a keystroke is.
+        if origin == MessageOrigin::UserKeystroke {
+            self.note_user_input(id, Instant::now());
+        }
         self.events.publish(
             id,
             LifecycleEvent::TextDelivered {
@@ -1092,9 +1143,80 @@ impl SessionRuntime {
         if let Some(session) = self.sessions.iter_mut().find(|session| &session.id == id) {
             session.ended_deliberately = true;
         }
+        // Line 1719. A person's `Ctrl-C` is a person using this session, and
+        // starts the same window a typed line does: somebody who has just
+        // stopped a worker is about to say why, and a machine line landing in
+        // between is the collision the window exists to prevent.
+        if origin == MessageOrigin::UserKeystroke {
+            self.note_user_input(id, Instant::now());
+        }
         self.events
             .publish(id, LifecycleEvent::InterruptDelivered { origin });
         Ok(())
+    }
+
+    /// Record that a person put something into this session at `at` —
+    /// capability map line 1719.
+    ///
+    /// Called by every path a person's own input reaches a session by:
+    /// [`SessionRuntime::write_to_focused`] (the keyboard),
+    /// [`SessionRuntime::send_text_from`] (the shell's send-a-line prompt and
+    /// `glasshouse api send`), and [`SessionRuntime::interrupt_from`].
+    ///
+    /// `at` is a parameter rather than read from the clock here so that the
+    /// window's *expiry* is testable without a test sleeping through it. Every
+    /// production caller passes `Instant::now()`; a test that needs to stand
+    /// on the far side of [`USER_INPUT_PRECEDENCE`] passes a moment that far
+    /// in the past, which is the same call the binary makes rather than a
+    /// door beside it.
+    ///
+    /// Never moves the mark backwards: two inputs in the window leave the
+    /// later one standing, so a person typing steadily keeps the keyboard
+    /// rather than losing it to the age of their first line.
+    ///
+    /// A session this runtime does not hold is silently ignored — there is
+    /// nothing to protect and nothing to say, and every caller here has
+    /// already established liveness by writing to it.
+    pub fn note_user_input(&mut self, id: &SessionId, at: Instant) {
+        if let Some(session) = self.sessions.iter_mut().find(|session| &session.id == id) {
+            let later = match session.last_user_input {
+                Some(previous) if previous >= at => previous,
+                _ => at,
+            };
+            session.last_user_input = Some(later);
+        }
+    }
+
+    /// How much longer a person holds this session's keyboard at `now`, or
+    /// `None` if nobody does — capability map line 1719.
+    ///
+    /// `Some(remaining)` is a refusal a caller owes the machine on the other
+    /// end of it, with the time named; see
+    /// [`crate::session::api::SessionApi::send_text`], which is where the
+    /// refusal is actually taken.
+    ///
+    /// # A restart answers `None`, and that is the honest answer
+    ///
+    /// This lives in memory, in the process that owns the pseudo-terminal,
+    /// and is gone when that process is. It is not read back from the event
+    /// log — which does record `text_delivered` with its origin — because a
+    /// process that has just started owns no pseudo-terminal anybody typed
+    /// into: the sessions it holds are the ones *it* started, and a person
+    /// cannot have been typing into a terminal that did not exist. The rule
+    /// protects a live collision, so the state has exactly the lifetime of
+    /// the thing it protects.
+    pub fn user_input_precedence(&self, id: &SessionId, now: Instant) -> Option<Duration> {
+        let last = self
+            .sessions
+            .iter()
+            .find(|session| &session.id == id)?
+            .last_user_input?;
+        // `filter` rather than `checked_sub` alone: a duration that has run
+        // out to exactly zero is over, and `Some(0s)` would be a refusal
+        // naming no remaining time at all.
+        USER_INPUT_PRECEDENCE
+            .checked_sub(now.saturating_duration_since(last))
+            .filter(|remaining| !remaining.is_zero())
     }
 
     /// Tell a session's pseudo-terminal its window changed size.

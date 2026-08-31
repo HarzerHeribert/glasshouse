@@ -98,7 +98,7 @@ pub use mcp::serve as serve_mcp;
 mod client;
 
 #[cfg(unix)]
-pub use client::{interrupt, read_output, send_message};
+pub use client::{interrupt, mute, read_output, send_message, unmute};
 #[cfg(unix)]
 pub use unix::serve;
 

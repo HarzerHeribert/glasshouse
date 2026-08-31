@@ -314,6 +314,17 @@ pub enum Command {
         /// picks out exactly one session.
         session: String,
 
+        /// Check point the session this work is leaving, before it moves —
+        /// capability map line 1716.
+        ///
+        /// The resume half of `glasshouse launch --checkpoint-first`, and it
+        /// means the same thing: if resuming this session moves the work out
+        /// of the one this project was most recently in, that session gets a
+        /// checkpoint first. Resuming the session you were already in leaves
+        /// nothing, and says so.
+        #[arg(long)]
+        checkpoint_first: bool,
+
         /// Arguments passed straight through to the harness, after `--`.
         #[arg(last = true, allow_hyphen_values = true)]
         harness_args: Vec<String>,
@@ -394,6 +405,40 @@ pub enum Command {
         /// to that, once, without changing any configuration.
         #[arg(long, conflicts_with = "to")]
         fresh: bool,
+
+        /// Take no routing decision for this launch — capability map line
+        /// 1712.
+        ///
+        /// Glasshouse normally ranks this project's warm sessions against a
+        /// new one and continues the best of them. This turns that off for
+        /// one launch: what `--to`, `--fresh` and `--profile` say still
+        /// happens, and with none of them the session is a new one under the
+        /// profile this launch would have used anyway.
+        ///
+        /// The same switch, standing, is `automatic = false` under
+        /// `[routing]` in this project's or your own configuration. A launch
+        /// with routing off does **not** compute the ranking in order to tell
+        /// you what it would have chosen — see `glasshouse route`, which
+        /// answers that question without starting anything.
+        #[arg(long)]
+        no_routing: bool,
+
+        /// Check point the session this work is leaving, before it moves —
+        /// capability map line 1716.
+        ///
+        /// Only does something when this launch continues a session that is
+        /// not the one this project was most recently working in: that is
+        /// what "leaving" means, and it is the only case where anything could
+        /// be lost. A fresh launch, or one that continues the session you
+        /// were already in, says that no checkpoint was needed rather than
+        /// writing one nobody can use.
+        ///
+        /// The checkpoint records what Glasshouse knows — which session was
+        /// left, where the work went, this project's Git position and its
+        /// binding memories — and invents no objective from the session's
+        /// terminal. See `glasshouse checkpoint save` for why.
+        #[arg(long)]
+        checkpoint_first: bool,
 
         /// Run the session with no terminal of its own.
         ///
@@ -507,6 +552,40 @@ pub enum Command {
         /// to that, once, without changing any configuration.
         #[arg(long, conflicts_with = "to")]
         fresh: bool,
+
+        /// Take no routing decision for this launch — capability map line
+        /// 1712.
+        ///
+        /// Glasshouse normally ranks this project's warm sessions against a
+        /// new one and continues the best of them. This turns that off for
+        /// one launch: what `--to`, `--fresh` and `--profile` say still
+        /// happens, and with none of them the session is a new one under the
+        /// profile this launch would have used anyway.
+        ///
+        /// The same switch, standing, is `automatic = false` under
+        /// `[routing]` in this project's or your own configuration. A launch
+        /// with routing off does **not** compute the ranking in order to tell
+        /// you what it would have chosen — see `glasshouse route`, which
+        /// answers that question without starting anything.
+        #[arg(long)]
+        no_routing: bool,
+
+        /// Check point the session this work is leaving, before it moves —
+        /// capability map line 1716.
+        ///
+        /// Only does something when this launch continues a session that is
+        /// not the one this project was most recently working in: that is
+        /// what "leaving" means, and it is the only case where anything could
+        /// be lost. A fresh launch, or one that continues the session you
+        /// were already in, says that no checkpoint was needed rather than
+        /// writing one nobody can use.
+        ///
+        /// The checkpoint records what Glasshouse knows — which session was
+        /// left, where the work went, this project's Git position and its
+        /// binding memories — and invents no objective from the session's
+        /// terminal. See `glasshouse checkpoint save` for why.
+        #[arg(long)]
+        checkpoint_first: bool,
 
         /// Run the session with no terminal of its own.
         ///
@@ -738,6 +817,44 @@ pub enum ApiCommand {
         #[arg(long, value_name = "BYTES")]
         max_bytes: Option<usize>,
     },
+    /// Stop this project's control API delivering orchestrator messages to
+    /// one session, for a time you name — capability map line 1717.
+    ///
+    /// This is how a person takes a worker for themselves without stopping
+    /// it. While it is muted, a message from an orchestrator is refused with
+    /// the remaining time named; your own `glasshouse api send` still
+    /// arrives, and `glasshouse api interrupt` is never muted — a person who
+    /// has quieted a worker must still be able to stop one that is running
+    /// away.
+    ///
+    /// The mute lives in the `glasshouse api serve` process that owns the
+    /// session, so restarting that process lifts it. Nothing is written to
+    /// this project's database.
+    ///
+    /// As with `send`, `interrupt` and `read`, there is no `--socket`.
+    Mute {
+        /// The session to mute, as `glasshouse sessions` lists it.
+        #[arg(long, value_name = "ID")]
+        session: String,
+
+        /// How long to mute it for, in seconds.
+        ///
+        /// Required: *temporarily* is the whole of what this offers, and a
+        /// mute with no end would be a session quietly out of the
+        /// orchestrator's reach with nothing to say when it came back. The
+        /// door caps it and tells you what it granted.
+        #[arg(long = "for", value_name = "SECONDS")]
+        seconds: u64,
+    },
+    /// Lift a mute before it expires — capability map line 1717.
+    ///
+    /// Safe against a session nobody muted: it says which it was rather than
+    /// failing.
+    Unmute {
+        /// The session to unmute, as `glasshouse sessions` lists it.
+        #[arg(long, value_name = "ID")]
+        session: String,
+    },
 }
 
 #[cfg(test)]
@@ -793,6 +910,8 @@ mod tests {
             from_checkpoint,
             to,
             fresh,
+            no_routing,
+            checkpoint_first,
             headless,
             task,
             harness_args,
@@ -815,6 +934,12 @@ mod tests {
         // answer stands.
         assert_eq!(to, None);
         assert!(!fresh);
+        // And the two controls this launch did not ask for. Line 1712's off
+        // switch and line 1716's checkpoint are opt-in for the same reason
+        // every other flag here is: a plain `glasshouse launch` must keep
+        // meaning exactly what it meant before either existed.
+        assert!(!no_routing);
+        assert!(!checkpoint_first);
         // Opt-in, like `--headless`: a launch that does not name a checkpoint
         // is the plain launch it has always been.
         assert_eq!(from_checkpoint, None);

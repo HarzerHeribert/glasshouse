@@ -2070,6 +2070,32 @@ pub struct RoutingConfig {
     /// layer recorded neither scope's policy; see [`ReservePoliciesConfig`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reserve: Option<ReservePoliciesConfig>,
+    /// Whether the session router decides where a launch's work goes —
+    /// capability map line 1712, *"allow the user to disable automatic
+    /// routing for the current Glasshouse instance."*
+    ///
+    /// `None` means this layer never said, exactly like every other field
+    /// here; `Some(false)` is a person saying *stop deciding for me*, and
+    /// [`EffectiveConfig::automatic_routing`] resolves it project over user
+    /// over a default of `true`.
+    ///
+    /// # This is not [`RoutingModelChoice::Deterministic`]
+    ///
+    /// The two are easy to confuse and turn off different things.
+    /// [`RoutingConfig::model`] chooses **what classifies a request** — a
+    /// model, or deterministic heuristics — and a launch is ranked either
+    /// way. This field turns the **ranking on the launch path** off
+    /// altogether: `glasshouse launch` stops asking whether this project
+    /// already has a session worth continuing, and starts the session the
+    /// person's own flags describe.
+    ///
+    /// Off means off, including the *diagnosis*: see
+    /// `main.rs::launch_session` for why a launch with routing disabled does
+    /// not compute the ranking in order to report what it would have chosen.
+    /// `glasshouse route` still answers that question on demand, because
+    /// asking it is a thing a person does deliberately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    automatic: Option<bool>,
 }
 
 impl RoutingConfig {
@@ -2108,6 +2134,17 @@ impl RoutingConfig {
 
     pub fn set_prefer_free(&mut self, value: Option<bool>) -> &mut Self {
         self.prefer_free = value;
+        self
+    }
+
+    /// Whether this layer recorded an answer to *"may the router decide where
+    /// a launch goes"* — map line 1712.
+    pub fn automatic(&self) -> Option<bool> {
+        self.automatic
+    }
+
+    pub fn set_automatic(&mut self, value: Option<bool>) -> &mut Self {
+        self.automatic = value;
         self
     }
 
@@ -2247,6 +2284,7 @@ impl RoutingConfig {
             && self.model_fallback.is_none()
             && self.classification_local_only.is_none()
             && self.reserve.is_none()
+            && self.automatic.is_none()
     }
 }
 
@@ -3115,6 +3153,27 @@ impl<'a> EffectiveConfig<'a> {
             return Layered::new(value, Layer::Project);
         }
         if let Some(value) = self.user.routing().prefer_free() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(true, Layer::Default)
+    }
+
+    /// Whether `glasshouse launch` may rank destinations at all — capability
+    /// map line 1712.
+    ///
+    /// Project over user over a default of `true`, like every other routing
+    /// preference: the ranking is what Glasshouse has always done, so the
+    /// default has to be the behaviour that existed before this switch did.
+    ///
+    /// `false` does not mean *"route badly"* — it means the launch path takes
+    /// no routing decision. What the person's own flags say still happens:
+    /// see `main.rs::launch_session`, which reads this before it opens
+    /// anything the ranking would have needed.
+    pub fn automatic_routing(&self) -> Layered<bool> {
+        if let Some(value) = self.project.and_then(|p| p.routing().automatic()) {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.routing().automatic() {
             return Layered::new(value, Layer::User);
         }
         Layered::new(true, Layer::Default)

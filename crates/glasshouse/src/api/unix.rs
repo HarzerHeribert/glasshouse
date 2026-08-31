@@ -32,7 +32,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use glasshouse::Runtime;
 use glasshouse::checkpoint::store::{ProjectCheckpoints, StoreError as CheckpointStoreError};
@@ -51,7 +51,7 @@ use glasshouse::session::{
     SessionRuntime, SessionStore,
 };
 
-use super::protocol::{Request, Response};
+use super::protocol::{Request, RequestOrigin, Response};
 
 /// The socket file's name inside the project's own state directory, when
 /// nothing overrides it.
@@ -157,6 +157,39 @@ const MAX_RECENT_OUTPUT_BYTES: usize = 64 * 1024;
 /// needs nothing from the session type it does not already have.
 type Injected = Arc<Mutex<HashMap<String, HashSet<MemoryId>>>>;
 
+/// The sessions a person has temporarily muted, and when each mute runs out
+/// — capability map line 1717.
+///
+/// # Why this is in memory, like [`Injected`] and for a sharper reason
+///
+/// A mute is a statement about deliveries *this process* is going to make.
+/// The only thing that can send a machine message into a session is the
+/// process holding that session's pseudo-terminal, and that is this one; a
+/// door that has just started is not running any session that was muted
+/// before it started. So a mute lost with the process is a mute whose
+/// subject is gone too, and there is no window in which forgetting it lets a
+/// message through that a persisted mute would have stopped.
+///
+/// That is the whole argument for keeping it out of SQLite, and it is worth
+/// stating because the alternative — a `muted_until` column — would have
+/// been a migration, a reconciliation against a runtime the database cannot
+/// see, and a row that outlives what it is about.
+///
+/// Keyed by the session id's string, like [`Injected`], for the same reason.
+type Muted = Arc<Mutex<HashMap<String, Instant>>>;
+
+/// The longest a session may be muted in one call — capability map line
+/// 1717's *"temporarily"*, made a number.
+///
+/// Twelve hours is longer than any working session and far short of
+/// indefinite: a person who wants a worker left alone for the afternoon can
+/// say so, and a mute nobody remembers setting still ends inside a day.
+/// Applied as a cap rather than a refusal, like every other bound on this
+/// door — a caller may ask for less and cannot ask for more — and the
+/// response says what was actually granted, so an asked-for week is visibly
+/// not what happened.
+const MAX_MUTE_SECONDS: u64 = 12 * 60 * 60;
+
 /// The most memory identifiers remembered per session before this door stops
 /// growing the set.
 ///
@@ -214,6 +247,10 @@ pub(crate) struct ServerContext {
     watches: Arc<Watches>,
     recorder: EventRecorder,
     injected: Injected,
+    /// Line 1717's record, alongside the runtime whose sessions it is about
+    /// — a field here rather than a parameter threaded through the socket
+    /// door, so the stdio door cannot forget it.
+    muted: Muted,
 }
 
 impl ServerContext {
@@ -239,6 +276,8 @@ impl ServerContext {
         // Line 1135's record, alongside the runtime whose sessions it is
         // about.
         let injected: Injected = Arc::new(Mutex::new(HashMap::new()));
+        // Line 1717's record, in the same place and for the same reason.
+        let muted: Muted = Arc::new(Mutex::new(HashMap::new()));
 
         let context = Self {
             runtime: runtime.clone(),
@@ -247,6 +286,7 @@ impl ServerContext {
             watches,
             recorder,
             injected,
+            muted,
         };
         context.start_tick();
         Ok(context)
@@ -266,6 +306,7 @@ impl ServerContext {
             &self.watches,
             &self.recorder,
             &self.injected,
+            &self.muted,
         )
     }
 
@@ -628,6 +669,7 @@ fn dispatch(
     watches: &Watches,
     recorder: &EventRecorder,
     injected: &Injected,
+    muted: &Muted,
 ) -> Response {
     let store = sessions.store();
 
@@ -690,6 +732,46 @@ fn dispatch(
             origin,
         } => {
             let id = SessionId::new(session);
+            // Line 1717's mute, answered **before** this door opens the
+            // project's memory store below — the one control that lives here
+            // rather than at the seam.
+            //
+            // Here because a mute is this door's own state and this door's
+            // own policy: it is about *requests an orchestrator makes*, not
+            // about every write into a pseudo-terminal, and the answer has to
+            // be a `Response::Error` naming the remaining time. Early because
+            // `select_memory` opens the memory database behind SQLite's busy
+            // timeout, and paying that for a request already decided against
+            // is the acquisition-on-an-unwatched-path practice §65 records
+            // the cost of.
+            //
+            // **Line 1719 is deliberately not checked here.** It is taken at
+            // `SessionApi::send_text`, the one seam every machine write in
+            // this process passes through, and a second copy of it on this
+            // path would be a rule with two enforcement points that can
+            // drift — and, measured: the mutation
+            // `1719-the-seam-admits-everything` SURVIVED while this check
+            // existed, because the door answered first and nothing in the
+            // suite ever reached the seam. One rule, one place.
+            //
+            // Only machine-originated messages are checked. A mute exists to
+            // stop a person being talked over and has nothing to say about
+            // the person themselves.
+            if origin == RequestOrigin::Machine {
+                {
+                    let mut guard = lock(live);
+                    let api = SessionApi::new(&store, &mut guard);
+                    // Project scope first, before the mute map is touched: a
+                    // session that is not this project's is refused for being
+                    // foreign, never for being muted.
+                    if let Err(err) = api.state(&id) {
+                        return Response::err(api_error(err));
+                    }
+                }
+                if let Some(remaining) = mute_remaining(muted, &id) {
+                    return Response::err(mute_refusal(&id, remaining));
+                }
+            }
             // Selected before the runtime lock is taken: opening the
             // project's memory goes through `database::open`, which can wait
             // on a busy timeout, and nothing that waits may hold the lock
@@ -703,6 +785,11 @@ fn dispatch(
                 Err(err) => Response::err(api_error(err)),
             }
         }
+        // Deliberately not gated by a mute or by line 1719's precedence
+        // window, whoever sends it — see `SessionApi::interrupt`, which
+        // carries the reason: a control that could leave a runaway harness
+        // unstoppable would have taken something away in the name of giving
+        // the person control.
         Request::Interrupt { session, origin } => {
             let mut guard = lock(live);
             let mut api = SessionApi::new(&store, &mut guard);
@@ -711,6 +798,10 @@ fn dispatch(
                 Err(err) => Response::err(api_error(err)),
             }
         }
+        Request::MuteSession { session, seconds } => {
+            mute_session(&store, live, muted, &session, seconds)
+        }
+        Request::UnmuteSession { session } => unmute_session(&store, live, muted, &session),
         // Through `SessionApi::recent_output`, never into the runtime's
         // scrollback directly, for the reason `ListSessions` above goes
         // through `SessionApi::list`: that seam is where project scope is
@@ -979,6 +1070,128 @@ fn lock_injected(
     injected
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn lock_muted(muted: &Muted) -> std::sync::MutexGuard<'_, HashMap<String, Instant>> {
+    muted
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// How much longer `id` is muted for, or `None` — capability map line 1717.
+///
+/// Expiry happens **here**, on the read, and the expired entry is removed as
+/// it is found. There is no sweeper: a mute nobody asks about has nobody to
+/// affect, and a map keyed by live sessions in a process that owns them
+/// cannot grow past the sessions that process started.
+///
+/// Says nothing about project scope. Every caller resolves the session
+/// through [`SessionApi`] first, so a foreign id never reaches this.
+fn mute_remaining(muted: &Muted, id: &SessionId) -> Option<Duration> {
+    let now = Instant::now();
+    let mut map = lock_muted(muted);
+    let until = *map.get(id.as_str())?;
+    match until.checked_duration_since(now) {
+        Some(remaining) if !remaining.is_zero() => Some(remaining),
+        _ => {
+            map.remove(id.as_str());
+            None
+        }
+    }
+}
+
+/// What a machine caller is told when the session it addressed is muted.
+///
+/// Names the remaining time, because the caller's next question is when to
+/// try again, and names the two things a mute does not touch — a person's own
+/// message, and an interrupt — because a caller that read this as "this
+/// session is unreachable" would stop being able to stop a runaway worker.
+///
+/// Carries no part of the refused text: what an orchestrator was about to say
+/// is not a fact about the mute, and this sentence travels to a caller and
+/// into whatever logs it.
+fn mute_refusal(id: &SessionId, remaining: Duration) -> String {
+    format!(
+        "session `{id}` is muted for another {}s: a person asked Glasshouse to stop \
+         delivering orchestrator messages to it. Their own messages still arrive, and an \
+         interrupt is never muted. `glasshouse api unmute --session {id}` lifts it early.",
+        // Rounded up, for `SessionApi::send_text`'s reason: a refusal naming
+        // `0s` while still refusing reads as a bug.
+        remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0)
+    )
+}
+
+/// `Request::MuteSession` — capability map line 1717.
+///
+/// Scope-checked through [`SessionApi`] before any state is touched, like
+/// every other verb on this door, and **not** gated on the session being
+/// live: muting a session whose process has stopped is a statement about
+/// deliveries, and a session that is about to be restarted is exactly one
+/// somebody might want left alone first.
+fn mute_session(
+    store: &SessionStore<'_>,
+    live: &Mutex<SessionRuntime>,
+    muted: &Muted,
+    session: &str,
+    seconds: u64,
+) -> Response {
+    let id = SessionId::new(session);
+    {
+        let mut guard = lock(live);
+        let api = SessionApi::new(store, &mut guard);
+        if let Err(err) = api.state(&id) {
+            return Response::err(api_error(err));
+        }
+    }
+    // Refused rather than accepted as a mute that is over before it is
+    // recorded. A zero here is the shape this project keeps paying for — an
+    // empty result indistinguishable from a successful one (practice §68) —
+    // and the caller is still there to be told.
+    if seconds == 0 {
+        return Response::err(format!(
+            "a mute needs a duration: `{session}` was asked to be muted for 0 seconds, which \
+             would be no mute at all. Ask for the time you want, or use `unmute` to lift one."
+        ));
+    }
+    let granted = seconds.min(MAX_MUTE_SECONDS);
+    lock_muted(muted).insert(
+        id.as_str().to_owned(),
+        Instant::now() + Duration::from_secs(granted),
+    );
+    Response::ok(serde_json::json!({
+        "session": id.as_str(),
+        "muted_for_seconds": granted,
+        // Said out loud, never silently: a caller that asked for a week and
+        // got twelve hours has to be able to see that from the answer.
+        "capped": granted < seconds,
+    }))
+}
+
+/// `Request::UnmuteSession` — capability map line 1717.
+///
+/// Idempotent, and says which it was. Lifting a mute nobody set is the state
+/// the caller asked for; reporting it as an error would make "make sure this
+/// session is reachable" a call you cannot safely make twice.
+fn unmute_session(
+    store: &SessionStore<'_>,
+    live: &Mutex<SessionRuntime>,
+    muted: &Muted,
+    session: &str,
+) -> Response {
+    let id = SessionId::new(session);
+    {
+        let mut guard = lock(live);
+        let api = SessionApi::new(store, &mut guard);
+        if let Err(err) = api.state(&id) {
+            return Response::err(api_error(err));
+        }
+    }
+    let was_muted = mute_remaining(muted, &id).is_some();
+    lock_muted(muted).remove(id.as_str());
+    Response::ok(serde_json::json!({
+        "session": id.as_str(),
+        "was_muted": was_muted,
+    }))
 }
 
 /// Choose the project memory a session about to be given `task` should have —
@@ -2190,6 +2403,29 @@ fn pump_watches(state: &WatchState, live: &Mutex<SessionRuntime>, watches: &Watc
                         "dropping a worker watch: the session to notify is gone"
                     );
                     dropped.push(index);
+                    break;
+                }
+                // Line 1719: a person is typing into the orchestrator right
+                // now. This is the one delivery on this door with no caller
+                // to refuse to, so it is **deferred** rather than refused —
+                // the cursor is wound back to before this completion and the
+                // next tick tries again, a few milliseconds later.
+                //
+                // Winding the cursor back is the whole of it, and it has to
+                // be exact: the collection loop above advances `cursor` past
+                // every row it read, so without this the completion would be
+                // dropped for the life of the watch and an orchestrator would
+                // wait forever for a worker that had already finished. Only
+                // this completion and what follows it are re-read; the
+                // completions already delivered in this batch have lower
+                // sequence numbers and stay behind the cursor.
+                Err(ApiError::UserHasTheKeyboard { .. }) => {
+                    tracing::debug!(
+                        notify = %watch.notify,
+                        seq = completion.seq,
+                        "holding a worker completion: a person is using the session to notify"
+                    );
+                    watch.cursor = completion.seq.saturating_sub(1);
                     break;
                 }
                 Err(err) => tracing::warn!(

@@ -2253,6 +2253,27 @@ fn a_persons_intervention_and_the_orchestrators_own_are_different_rows() {
          them for a reason that has nothing to do with who sent them"
     );
 
+    // The orchestrator first, speaking the protocol straight into the door.
+    //
+    // The orchestrator goes first since capability map line 1719: a machine
+    // line into a session a person has just used is refused for
+    // `session::runtime::USER_INPUT_PRECEDENCE`, which is a rule
+    // `tests/user_control.rs` proves and this test has no business asserting
+    // the opposite of. Nothing here depends on the order — both rows are
+    // still written, through one door, into one worker, and the question is
+    // which origin each carries.
+    let machine = server.call(serde_json::json!({
+        "op": "send_message",
+        "session": worker,
+        "text": BY_THE_AGENT,
+    }));
+    assert_eq!(machine["status"], "ok", "{machine}");
+    wait_for("the worker to read the orchestrator's line", || {
+        fixture
+            .received(&root, &worker)
+            .is_some_and(|text| text.contains(BY_THE_AGENT))
+    });
+
     // A person, in a process of their own, running the shipped client.
     let typed = fixture.client(
         &root,
@@ -2269,19 +2290,6 @@ fn a_persons_intervention_and_the_orchestrators_own_are_different_rows() {
             .is_some_and(|text| text.contains(BY_A_PERSON))
     });
 
-    // The orchestrator, speaking the protocol straight into the door.
-    let machine = server.call(serde_json::json!({
-        "op": "send_message",
-        "session": worker,
-        "text": BY_THE_AGENT,
-    }));
-    assert_eq!(machine["status"], "ok", "{machine}");
-    wait_for("the worker to read the orchestrator's line", || {
-        fixture
-            .received(&root, &worker)
-            .is_some_and(|text| text.contains(BY_THE_AGENT))
-    });
-
     // The viewport (§17): both deliveries demonstrably happened, so the rows
     // being alike is a fact about the rows and not about an empty log.
     let rows = server.deliveries_to(&worker);
@@ -2294,19 +2302,19 @@ fn a_persons_intervention_and_the_orchestrators_own_are_different_rows() {
     );
 
     assert_eq!(
-        rows[0]["origin"], "user_keystroke",
-        "the first delivery was made by `glasshouse api send`, a process a \
-         person started from their own terminal, and the log must say so — \
-         this is the first of the two events line 740's ordering is over, \
-         and until the door carried an origin it was unwritable: {}",
-        rows[0]
-    );
-    assert_eq!(
-        rows[1]["origin"], "machine",
-        "the second delivery was the orchestrator speaking the protocol \
+        rows[0]["origin"], "machine",
+        "the first delivery was the orchestrator speaking the protocol \
          straight into the door with no origin field at all, so it must \
          still be `machine` — the default is what keeps every caller written \
          before the field existed meaning what it meant: {}",
+        rows[0]
+    );
+    assert_eq!(
+        rows[1]["origin"], "user_keystroke",
+        "the second delivery was made by `glasshouse api send`, a process a \
+         person started from their own terminal, and the log must say so — \
+         this is the second of the two events line 740's ordering is over, \
+         and until the door carried an origin it was unwritable: {}",
         rows[1]
     );
 

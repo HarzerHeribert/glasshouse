@@ -437,6 +437,17 @@ fn an_intervention_is_recorded_with_the_origin_that_says_who_made_it() {
 /// what rules that out — and the ordering (`seq`) is what proves four rows
 /// rather than two were written.
 ///
+/// # Why the machine speaks first, since line 1719
+///
+/// The order used to be person-then-machine and is now the other way round,
+/// because a machine line **into a session a person has just used** is
+/// refused for `session::runtime::USER_INPUT_PRECEDENCE` — that is line
+/// 1719, and `tests/user_control.rs` is where it is proven. Nothing this test
+/// asserts depends on which order the two arrive in: it is about the field
+/// being read rather than defaulted, and both rows are still written through
+/// one verb into one session in one log. Reversing it keeps that and stops
+/// this test asserting the opposite of a rule the same binary now enforces.
+///
 /// # An origin the protocol does not know is refused, not defaulted
 ///
 /// The last section asserts that `"origin": "orchestrator"` — a plausible
@@ -463,7 +474,7 @@ fn the_origin_a_request_states_is_the_origin_recorded() {
     // Same length, so `bytes` cannot be what distinguishes the rows.
     assert_eq!(BY_A_PERSON.len(), BY_THE_AGENT.len());
 
-    for (text, origin) in [(BY_A_PERSON, "user"), (BY_THE_AGENT, "machine")] {
+    for (text, origin) in [(BY_THE_AGENT, "machine"), (BY_A_PERSON, "user")] {
         let sent = server.call(serde_json::json!({
             "op": "send_message",
             "session": worker,
@@ -487,7 +498,7 @@ fn the_origin_a_request_states_is_the_origin_recorded() {
         .collect();
     assert_eq!(
         delivered,
-        vec!["user_keystroke".to_owned(), "machine".to_owned()],
+        vec!["machine".to_owned(), "user_keystroke".to_owned()],
         "the door must record the origin each request stated, in the order \
          the requests were made — both lines went through the same verb into \
          the same session and differ only in that field: {:?}",
