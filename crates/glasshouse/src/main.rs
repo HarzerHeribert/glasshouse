@@ -745,40 +745,6 @@ fn announce_entitlement(
     }
 }
 
-/// Map line 1973's isolation, on the path that actually leaks: the child
-/// process inherits this whole process's environment, so every *other*
-/// entitlement's environment-variable credential would ride along into a
-/// session charged to one account — two accounts' keys mixed in one child,
-/// which is exactly what the line forbids. This names the variables to
-/// remove from a launch: the environment-shaped credential reference of
-/// every entitlement that is not the one serving this session. The serving
-/// entitlement's own variable stays; an OS-credential reference has no
-/// variable to leak; and a user with no `[entitlements]` entries gets an
-/// empty list, so nothing about an unconfigured launch changes.
-///
-/// Called with the launch's resolved entitlement name, or `None` for a
-/// session no entitlement describes — which scrubs every entitlement's
-/// variable, because a session charged to no account has no business
-/// carrying any account's key. Tables that do not resolve scrub nothing:
-/// the launch path has already refused or reported that error before any
-/// process exists.
-fn foreign_entitlement_credential_vars(
-    effective: &EffectiveConfig<'_>,
-    serving: Option<&str>,
-) -> Vec<String> {
-    let Ok(entitlements) = effective.entitlements() else {
-        return Vec::new();
-    };
-    entitlements
-        .iter()
-        .filter(|entry| serving != Some(entry.name()))
-        .filter_map(|entry| match entry.credential() {
-            Some(glasshouse::secret::SecretRef::Environment { var }) => Some(var.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
 /// Which destinations a caller can actually *use*, which is not the same
 /// question as which ones exist.
 ///
@@ -4430,8 +4396,7 @@ fn launch_session(
     // account is not serving. Removed before the overlay applies, so the
     // overlay's own `env` entries — the serving credential among them —
     // always win per key.
-    for var in
-        foreign_entitlement_credential_vars(&effective, entitlement.as_ref().map(|e| e.name()))
+    for var in effective.foreign_entitlement_credential_vars(entitlement.as_ref().map(|e| e.name()))
     {
         launch = launch.env_remove(var);
     }
@@ -8276,10 +8241,9 @@ fn resume_session(
     // `launch_session` applies, for the same reason: the child inherits this
     // process's environment, and another account's credential variable has
     // no business in it.
-    for var in foreign_entitlement_credential_vars(
-        &effective,
-        resume_entitlement.as_ref().map(|e| e.name()),
-    ) {
+    for var in
+        effective.foreign_entitlement_credential_vars(resume_entitlement.as_ref().map(|e| e.name()))
+    {
         launch = launch.env_remove(var);
     }
     let launch = launch;

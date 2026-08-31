@@ -1159,9 +1159,31 @@ fn start_session(
             tracing::warn!(session = %record.id, error = %err, "could not install lifecycle hooks");
         }
     }
-    let launch = HarnessLaunch::new(selection.into_executable(), app_runtime.project())
+    let mut launch = HarnessLaunch::new(selection.into_executable(), app_runtime.project())
         .args(args)
         .size(size);
+    // Map line 1973: the same scrub `main.rs::launch_session` applies before
+    // its overlay — this path builds its own `HarnessLaunch`, and the child
+    // would otherwise inherit every configured entitlement's credential
+    // variable from this process's own environment, not only the one
+    // serving this session.
+    let entitlement =
+        match effective.entitlement_for(launch_profile.harness, &launch_profile.backend) {
+            Ok(entitlement) => entitlement,
+            Err(err) => {
+                tracing::warn!(
+                    session = %record.id,
+                    error = %err,
+                    "could not resolve the serving entitlement for the credential scrub"
+                );
+                None
+            }
+        };
+    for var in effective.foreign_entitlement_credential_vars(entitlement.as_ref().map(|e| e.name()))
+    {
+        launch = launch.env_remove(var);
+    }
+    let launch = launch;
     if let Err(err) = live.start(record.id.clone(), record.presentation, &launch) {
         // A session that never started will never be polled for its exit, so
         // its snapshot has nothing left to pair with.
@@ -1293,9 +1315,40 @@ fn resume_session(
     // here would only mean the entry was already gone, which is fine.
     let _ = live.close(&resumable.id);
 
-    let launch = HarnessLaunch::new(selection.into_executable(), app_runtime.project())
+    // Map line 1973, on the path that continues a session — the same scrub
+    // `start_session` applies above, and `main.rs::resume_session` applies on
+    // the CLI path, for the same reason: this process's environment would
+    // otherwise leak every configured entitlement's credential variable into
+    // the resumed child, not only the one serving this session. The record's
+    // own launch profile, the way `main.rs::resume_session` reads it, with
+    // the same fallback to the implied Native profile for a session that
+    // recorded none. Resolved before `selection` is consumed below.
+    let resume_profile = record
+        .launch_profile
+        .as_deref()
+        .and_then(|name| effective.launch_profile(name, selection.id()).ok())
+        .map(|layered| layered.value)
+        .unwrap_or_else(|| crate::profile::LaunchProfile::native(selection.id()));
+    let entitlement =
+        match effective.entitlement_for(resume_profile.harness, &resume_profile.backend) {
+            Ok(entitlement) => entitlement,
+            Err(err) => {
+                tracing::warn!(
+                    session = %resumable.id,
+                    error = %err,
+                    "could not resolve the serving entitlement for the credential scrub"
+                );
+                None
+            }
+        };
+    let mut launch = HarnessLaunch::new(selection.into_executable(), app_runtime.project())
         .args(args)
         .size(size);
+    for var in effective.foreign_entitlement_credential_vars(entitlement.as_ref().map(|e| e.name()))
+    {
+        launch = launch.env_remove(var);
+    }
+    let launch = launch;
     if let Err(err) = live.start(resumable.id.clone(), record.presentation, &launch) {
         if let Err(store_err) = store.set_lifecycle(&resumable.id, SessionLifecycle::Failed) {
             tracing::warn!(
@@ -5731,5 +5784,170 @@ mod native_session_facts_tests {
         assert!(record.protocol.is_some(), "record: {record:?}");
         assert!(record.response_profile.is_some(), "record: {record:?}");
         assert!(record.response_mechanism.is_some(), "record: {record:?}");
+    }
+}
+
+/// Map line 1973's scrub, through [`start_session`] itself — the production
+/// function, not `tests/entitlement_shell_scrub.rs`'s seam one layer below
+/// it — proving the scrub this package adds is actually wired in here, not
+/// merely declared beside it. Same shape as `native_session_facts_tests`
+/// above: a real `SessionRuntime`, a fake installed harness, no terminal.
+#[cfg(test)]
+mod shell_entitlement_scrub_tests {
+    use super::*;
+
+    const VAR_B: &str = "GLASSHOUSE_SHELL_SCRUB_UNIT_TEST_ONLY_B";
+    const VALUE_B: &str = "fake-shell-scrub-unit-b-0123456789abcdef";
+
+    /// Like `native_session_facts_tests::runtime_with_fake_claude_code`, but
+    /// the installed harness dumps its own environment instead of exiting
+    /// silently, and the user config also configures one provider-backed
+    /// entitlement — `claude-b`, carrying an environment-shaped credential
+    /// that no native launch may serve.
+    fn runtime_with_env_dumping_harness_and_an_entitlement() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        crate::Runtime,
+        std::path::PathBuf,
+    ) {
+        use clap::Parser;
+
+        let data = tempfile::tempdir().expect("tempdir");
+        let workspace = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(workspace.path().join(".git")).expect("create .git");
+        let workspace_root =
+            std::fs::canonicalize(workspace.path()).expect("canonicalize workspace root");
+
+        let bin_dir = data.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let env_log = data.path().join("env.log");
+        let harness = install_env_dumping_harness(&bin_dir, &env_log);
+        let escaped = harness.display().to_string().replace('\\', "\\\\");
+        std::fs::write(
+            data.path().join("config.toml"),
+            format!(
+                "version = 1\n\n\
+                 [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\n\
+                 [entitlements.claude-b]\nvendor = \"claude\"\nprovider = \"beta-probe\"\n\
+                 credential = {{ env = \"{VAR_B}\" }}\n"
+            ),
+        )
+        .expect("write user config");
+
+        let cli = crate::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+            "--config-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = crate::bootstrap(&cli, &workspace_root).unwrap();
+        (data, workspace, runtime, env_log)
+    }
+
+    #[cfg(unix)]
+    fn install_env_dumping_harness(
+        bin_dir: &std::path::Path,
+        env_log: &std::path::Path,
+    ) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = bin_dir.join("fake-claude-env-dump");
+        // `export -p` is a shell builtin, so the scrubbed environment this
+        // fixture spawns under cannot break it.
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\nexport -p > '{}'\nexit 0\n", env_log.display()),
+        )
+        .expect("write fake harness");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    #[cfg(windows)]
+    fn install_env_dumping_harness(
+        bin_dir: &std::path::Path,
+        env_log: &std::path::Path,
+    ) -> std::path::PathBuf {
+        let path = bin_dir.join("fake-claude-env-dump.cmd");
+        std::fs::write(
+            &path,
+            format!(
+                "@echo off\r\nset > \"{}\"\r\nexit /b 0\r\n",
+                env_log.display()
+            ),
+        )
+        .expect("write fake harness");
+        path
+    }
+
+    /// A configured entitlement's environment-shaped credential must not
+    /// reach a session it does not serve. `start_session`'s launch is
+    /// always Native, served only by the harness's own default sign-in
+    /// (which carries no credential of its own) — so `claude-b`'s variable,
+    /// inherited from this test process, must be scrubbed before the child
+    /// spawns. This is the mutation `foreign_entitlement_credential_vars`
+    /// returning an empty list, or the `env_remove` loop being dropped here,
+    /// would both survive if this test did not exist.
+    #[test]
+    fn a_shell_started_native_session_does_not_carry_a_configured_entitlements_variable() {
+        let (_data, _workspace, runtime, env_log) =
+            runtime_with_env_dumping_harness_and_an_entitlement();
+        let sessions = ProjectSessions::open(&runtime).expect("open project sessions");
+        let mut live = SessionRuntime::new();
+        let mut index_snapshots = HashMap::new();
+
+        // SAFETY: unique to this test and removed before it can panic.
+        unsafe {
+            std::env::set_var(VAR_B, VALUE_B);
+        }
+        let start_result = start_session(
+            &runtime,
+            &mut live,
+            &sessions,
+            SessionPresentation::Embedded,
+            TerminalSize::new(24, 80),
+            &mut index_snapshots,
+        );
+        start_result.expect("starting a session from the shell must succeed");
+
+        let id = sessions
+            .store()
+            .list()
+            .expect("list sessions")
+            .into_iter()
+            .next()
+            .expect("one session was recorded")
+            .id;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if live
+                .poll_exits()
+                .into_iter()
+                .any(|(exited, _)| exited == id)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fake harness never exited"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        unsafe {
+            std::env::remove_var(VAR_B);
+        }
+
+        let child_env =
+            std::fs::read_to_string(&env_log).expect("the fake harness dumped its environment");
+        assert!(
+            !child_env.contains(VAR_B) && !child_env.contains(VALUE_B),
+            "a configured entitlement's credential reached a native session it does not \
+             serve:\n{child_env}"
+        );
     }
 }

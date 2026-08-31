@@ -4702,6 +4702,38 @@ impl<'a> EffectiveConfig<'a> {
         }
     }
 
+    /// Map line 1973's isolation, on the path that actually leaks: the child
+    /// process inherits this whole process's environment, so every *other*
+    /// entitlement's environment-variable credential would ride along into a
+    /// session charged to one account — two accounts' keys mixed in one
+    /// child, which is exactly what the line forbids. This names the
+    /// variables to remove from a launch: the environment-shaped credential
+    /// reference of every entitlement that is not the one serving this
+    /// session. The serving entitlement's own variable stays; an
+    /// OS-credential reference has no variable to leak; and a user with no
+    /// `[entitlements]` entries gets an empty list, so nothing about an
+    /// unconfigured launch changes.
+    ///
+    /// Called with the launch's resolved entitlement name, or `None` for a
+    /// session no entitlement describes — which scrubs every entitlement's
+    /// variable, because a session charged to no account has no business
+    /// carrying any account's key. Tables that do not resolve scrub nothing:
+    /// the launch path has already refused or reported that error before any
+    /// process exists.
+    pub fn foreign_entitlement_credential_vars(&self, serving: Option<&str>) -> Vec<String> {
+        let Ok(entitlements) = self.entitlements() else {
+            return Vec::new();
+        };
+        entitlements
+            .iter()
+            .filter(|entry| serving != Some(entry.name()))
+            .filter_map(|entry| match entry.credential() {
+                Some(SecretRef::Environment { var }) => Some(var.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The entitlement charged for work sent to `provider` — map line 1947's
     /// job-kind clause, for the disposable router: a bounded support job has
     /// no harness and no launch profile, only the provider its candidate
