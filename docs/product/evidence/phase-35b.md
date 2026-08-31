@@ -447,3 +447,56 @@ Regression evidence:
 Recorded scope limits — stated by the worker, not discovered later:
 - The winning profile is offered second so caller order cannot explain it; the three-way ordering exact > headroom > not-established is proven pairwise, not as a total order over all five tiers.
 
+### Lines 1533 and 1551 — affinity and switching cost in the INTERACTIVE score, proved
+
+Package `GH-PROVE-IT-MISC`, 2026-08-31, Sonnet at medium (Green): mechanisms the recon found already in production, proved by tests only. Four mutations, four killed in the worker's tree. **1174 is NOT closed by this package** — its test (`precompact_memory.rs`) failed one run in three on the merged tree even single-threaded (model called once, no memory stored within a 10 s bounded wait); see `.agent-runtime/defect-hook-extraction-may-lose-its-write.md`. The existing 35B entry had proved the disposable router's absence of these terms; these tests are scoped to `SessionRouting::choose`.
+
+
+### Include existing session affinity in candidate scoring. (line 1533)
+
+Contract: Given two otherwise-equal destinations differing only in existing-session warmth, when the interactive SessionRouter scores them, the warmer one wins and its explanation carries a non-zero, differing session-affinity contribution
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator: a line the code already satisfied, proved by a test and a killed mutation (GH-MAP-SIDE-EFFECT-AUDIT's finding; no production change).
+
+Production evidence:
+- `src/routing/session.rs` — `session_affinity, called from score() at :3083, score() called from choose() at :2961`
+
+Regression evidence:
+- `interactive_score_terms::a_warm_candidates_explanation_carries_session_affinity_and_it_moves_the_ranking`
+- `interactive_score_terms::the_interactive_routers_explanation_names_both_terms`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/routing/session.rs: delete explanation.push(session_affinity(...)) at score()'s line 3083 | `skip-state-update` | **killed** | `interactive_score_terms::a_warm_candidates_explanation_carries_session_affinity_and_it_moves_the_ranking` |
+
+> skip-state-update observed: assertion `left == right` failed: the warmer session did not win: session affinity is not deciding anything
+
+Recorded scope limits — stated by the worker, not discovered later:
+- docs/product/evidence/phase-35b.md's existing entry proves the disposable-job scorer's absence of this term; this closes only the interactive router's presence of it
+
+
+---
+
+
+### Include session-switching and bootstrap cost in candidate scoring. (line 1551)
+
+Contract: Given two otherwise-equal destinations differing only in whether they require a fresh-session bootstrap, when the interactive SessionRouter scores them, the cheaper-to-reach one wins and its explanation carries a non-zero switching-and-bootstrap-cost contribution that is worse for the bootstrapping candidate
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator: a line the code already satisfied, proved by a test and a killed mutation (GH-MAP-SIDE-EFFECT-AUDIT's finding; no production change).
+
+Production evidence:
+- `src/routing/session.rs` — `switching_and_bootstrap_cost, called from score() at :3093, score() called from choose() at :2961`
+
+Regression evidence:
+- `interactive_score_terms::a_candidate_needing_a_bootstrap_carries_switching_and_bootstrap_cost_and_it_moves_the_ranking`
+- `interactive_score_terms::the_interactive_routers_explanation_names_both_terms`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/routing/session.rs: delete explanation.push(switching_and_bootstrap_cost(...)) at score()'s line 3093 | `skip-state-update` | **killed** | `interactive_score_terms::a_candidate_needing_a_bootstrap_carries_switching_and_bootstrap_cost_and_it_moves_the_ranking` |
+
+> skip-state-update observed: panicked on .expect("every candidate must be scored for switching and bootstrap cost") -- the contribution no longer exists in the explanation
+
+Recorded scope limits — stated by the worker, not discovered later:
+- same correction and same gap as 1533: the existing evidence entry covers the disposable scorer only
+

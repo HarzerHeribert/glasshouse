@@ -98,3 +98,183 @@ Recorded scope limits — stated by the worker, not discovered later:
 - SPLIT VERDICT. The `reliably` clause is measured for CLASSIFICATION only. Extraction has no reliability record — `routing_observations` rows carry no purpose for an extraction call — so extraction's verdict rests on the metered gate alone. If the ledger wants the clause proven for both jobs, record this as 1611-partial until the extraction purpose stamp (`evaluation-producers`) has a reader.
 - The reliability floor never filters a pinned model, and rows written before GH-ROUTING-ECONOMICS carry no outcome and count toward neither side.
 
+### Lines 1621–1624, 1626–1628 — the disposable-job interface, proved; 1625 refused
+
+Package `GH-PROVE-IT-39`, 2026-08-31, Sonnet at medium (Green): the recon found these seven lines already satisfied by `JobKind` + `ExtractionModel` + `ConfiguredModel`; this package added `tests/disposable_interface.rs` — one test and one killed mutation per line, plus a structural scan for 1626–1628 in the shape of Phase 9E's `SecretRef` test. Zero production change. **1625 refused, and stays open:** the line names reranking, and no reranking job exists (Cluster Q); a tripwire fails the moment a `JobKind` variant appears. Eight mutations, eight killed.
+
+### Define disposable jobs as bounded internal LLM calls rather than native interactive sessions or coding harnesses. (line 1621)
+
+Contract: Given a disposable job, when Glasshouse names its kind, it draws from exactly {Classification, MemoryExtraction, Reranking, Evaluation} and DisposableRouting::choose accepts no other kind — while preserving that the closure is enforced by the type system, not a runtime check.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator: a line the code already satisfied, proved by a test and a killed mutation (GH-MAP-SIDE-EFFECT-AUDIT's finding; no production change).
+
+Production evidence:
+- `src/routing/disposable.rs` — `JobKind`
+- `src/routing/disposable.rs` — `JobKind::as_str`
+- `src/routing/disposable.rs` — `DisposableRouting::choose`
+
+Regression evidence:
+- `disposable_interface::job_kind_is_a_closed_vocabulary_of_bounded_internal_calls`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/routing/disposable.rs: Self::Reranking => "reranking", -> Self::Reranking => "unknown", | `rename-the-name` | **killed** | `disposable_interface::job_kind_is_a_closed_vocabulary_of_bounded_internal_calls` |
+
+> rename-the-name observed: assertion `left == right` failed: the closed vocabulary a disposable job may name itself with has changed
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Proves the vocabulary is closed and named correctly today; does not prove no future variant will ever be session-shaped — only that today's four are not.
+
+
+---
+
+
+### Add a simple provider interface for non-interactive disposable LLM jobs. (line 1622)
+
+Contract: Given something that answers an extraction prompt, when it implements only ExtractionModel::describe and ::complete, Extractor::run calls both exactly once per run and succeeds — while preserving that complete_observed's default forwarding is what makes the two-method implementation sufficient.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator: a line the code already satisfied, proved by a test and a killed mutation (GH-MAP-SIDE-EFFECT-AUDIT's finding; no production change).
+
+Production evidence:
+- `src/memory/extract/mod.rs` — `ExtractionModel`
+- `src/memory/extract/mod.rs` — `Extractor::run`
+
+Regression evidence:
+- `disposable_interface::a_minimal_extraction_model_impl_drives_extractor_run_through_both_its_methods`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/memory/extract/mod.rs: ExtractionOutcome::empty(trigger, self.model.describe(), chunk) -> ExtractionOutcome::empty(trigger, String::new(), chunk) | `drop-the-name` | **killed** | `disposable_interface::a_minimal_extraction_model_impl_drives_extractor_run_through_both_its_methods` |
+
+> drop-the-name observed: assertion `left == right` failed: Extractor::run must call ExtractionModel::describe() to name the resource
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Proves the minimal two-method shape drives a real run through a bootstrapped project; does not exercise the ten other ExtractionModel implementations already in the crate.
+
+
+---
+
+
+### Allow OpenAI-compatible gateways to be configured through the disposable-job interface. (line 1623)
+
+Contract: Given a provider naming the OpenAI chat-completions protocol, when ConfiguredModel::new builds a client for it, the endpoint is exactly {base_url}/chat/completions — while preserving that the field itself stays private and this is proved through Debug, the only external surface that exposes it.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator: a line the code already satisfied, proved by a test and a killed mutation (GH-MAP-SIDE-EFFECT-AUDIT's finding; no production change).
+
+Production evidence:
+- `src/memory/extract/model.rs` — `ConfiguredModel::new`
+
+Regression evidence:
+- `disposable_interface::an_openai_compatible_gateway_reaches_the_chat_completions_path`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/memory/extract/model.rs: endpoint: format!("{base_url}/chat/completions"), -> endpoint: format!("{base_url}/v1/completions"), | `change-the-path` | **killed** | `disposable_interface::an_openai_compatible_gateway_reaches_the_chat_completions_path` |
+
+> change-the-path observed: the endpoint must be the base URL with /chat/completions appended: ... assertion failed
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Proves the endpoint string shape only, not the request body's wire schema (private fn, not reachable from an integration test) — the body's shape is covered instead by 1626-1628's structural scan of the same file.
+
+
+---
+
+
+### Allow local Ollama or llama.cpp endpoints to be configured through the disposable-job interface. (line 1624)
+
+Contract: Given Ollama's real default local endpoint http://127.0.0.1:11434/v1, when ConfiguredModel::new builds a client for it, it reaches the same generic {base_url}/chat/completions path and the same generic '... via openai-chat' description as any hosted provider — while preserving that no code branches on that port or on the words ollama/llama.cpp.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator: a line the code already satisfied, proved by a test and a killed mutation (GH-MAP-SIDE-EFFECT-AUDIT's finding; no production change).
+
+Production evidence:
+- `src/memory/extract/model.rs` — `ConfiguredModel::new`
+- `src/memory/extract/model.rs` — `ConfiguredModel::describe`
+
+Regression evidence:
+- `disposable_interface::a_local_ollama_endpoint_round_trips_with_no_port_special_case`
+- `disposable_interface::a_non_openai_chat_protocol_is_refused_even_on_a_loopback_host`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/memory/extract/model.rs: endpoint: format!("{base_url}/chat/completions"), -> endpoint: if base_url.contains("11434") { format!("{base_url}/api/chat") } else { format!("{base_url}/chat/completions") }, | `special-case-the-port` | **killed** | `disposable_interface::a_local_ollama_endpoint_round_trips_with_no_port_special_case` |
+
+> special-case-the-port observed: Ollama's default endpoint must reach the generic chat-completions path, unmodified: ... assertion failed
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Proves no special-casing exists in ConfiguredModel::new today; a special case introduced anywhere else in the call chain (e.g. at a caller in main.rs) is not covered by this test.
+
+
+---
+
+
+### Keep disposable jobs distinct from first-class interactive harness sessions. (line 1626)
+
+Contract: Given the disposable-model call path, when its production source is scanned, it carries no Pty, SessionId, tool_calls, or function_call surface — while preserving that the scan excludes the file's own #[cfg(test)] module, so an unrelated test-fixture field cannot false-positive it.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator: a line the code already satisfied, proved by a test and a killed mutation (GH-MAP-SIDE-EFFECT-AUDIT's finding; no production change).
+
+Production evidence:
+- `src/memory/extract/model.rs (whole production section, pre-#[cfg(test)])`
+
+Regression evidence:
+- `disposable_interface::disposable_model_calls_carry_no_pty_session_or_tool_surface`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/memory/extract/model.rs doc comment: /// `credential` is resolved by the caller, because resolving a -> /// `credential` is resolved by the caller, because resolving a SessionId or a | `introduce-the-surface` | **killed** | `disposable_interface::disposable_model_calls_carry_no_pty_session_or_tool_surface` |
+
+> introduce-the-surface observed: assertion failed: !production_source.contains(forbidden) (forbidden = SessionId)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Text scan, not a type-level proof (SecretRef's stricter form does not apply here — Debug/Serialize cannot express 'has no PTY'). A forbidden term hidden via string concatenation or an alias import would not be caught.
+
+
+---
+
+
+### Do not give disposable jobs an autonomous coding-agent loop, unrestricted repository tools, or native-session identity. (line 1627)
+
+Contract: Given the disposable-model call path, it carries no tool_calls or function_call surface and names no SessionId — while preserving the same scan-scope exclusion as 1626, since this is the same test.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator: a line the code already satisfied, proved by a test and a killed mutation (GH-MAP-SIDE-EFFECT-AUDIT's finding; no production change).
+
+Production evidence:
+- `src/memory/extract/model.rs (whole production section, pre-#[cfg(test)])`
+
+Regression evidence:
+- `disposable_interface::disposable_model_calls_carry_no_pty_session_or_tool_surface`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/memory/extract/model.rs doc comment: /// `credential` is resolved by the caller, because resolving a -> /// `credential` is resolved by the caller, because resolving a SessionId or a | `introduce-the-surface` | **killed** | `disposable_interface::disposable_model_calls_carry_no_pty_session_or_tool_surface` |
+
+> introduce-the-surface observed: assertion failed: !production_source.contains(forbidden) (forbidden = SessionId)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Same as 1626's limit: a text scan, and shares that test/mutation rather than adding a second one — the three lines (1626-1628) are one mechanism, `ConfiguredModel::call`'s single HTTP POST.
+
+
+---
+
+
+### Do not pretend a disposable API call is a user-enterable worker session. (line 1628)
+
+Contract: Given the disposable-model call, the request body is non-streaming ("stream": false) — one bounded call, never a user-enterable ongoing session.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator: a line the code already satisfied, proved by a test and a killed mutation (GH-MAP-SIDE-EFFECT-AUDIT's finding; no production change).
+
+Production evidence:
+- `src/memory/extract/model.rs` — `ConfiguredModel::body`
+
+Regression evidence:
+- `disposable_interface::disposable_model_calls_carry_no_pty_session_or_tool_surface`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/memory/extract/model.rs: "stream": false, -> "stream": true, | `flip-the-flag` | **killed** | `disposable_interface::disposable_model_calls_carry_no_pty_session_or_tool_surface` |
+
+> flip-the-flag observed: assertion failed: production_source.contains("\"stream\": false")
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Text scan of the literal, not a live HTTP call — proves the request Glasshouse builds asks for a non-streaming reply; does not exercise a real provider's response handling for that field.
+

@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1027 / 1292 mandatory capabilities (79%)** — 265 open across 47 phases.
+**1037 / 1292 mandatory capabilities (80%)** — 255 open across 47 phases.
 
 ## Where the work is
 
@@ -44,6 +44,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
+| Phase 39 | Gateway-backed disposable jobs | **2** | 7 | `1614` |
 | Phase 34C | Automatic routing-model selection | **3** | 10 | `1429` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 33C | Failure, quota, and route correlation | **4** | 11 | `1362` |
@@ -55,17 +56,16 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 31 | Compaction-aware behavior | **6** | 1 | `1167` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **6** | 0 | `1858` |
 | Phase 47 | Observability without spectacle | **7** | 8 | `1750` |
-| Phase 32A | Unified quota and capacity model | **9** | 12 | `1196` |
-| Phase 39 | Gateway-backed disposable jobs | **9** | 0 | `1614` |
+| Phase 32A | Unified quota and capacity model | **8** | 13 | `1196` |
 | Phase 32E | Burn rate and exhaustion forecasting | **10** | 0 | `1272` |
 | Phase 32G | Provider-aware request-cost estimation | **10** | 0 | `1296` |
 | Phase 35A | Candidate generation | **10** | 1 | `1504` |
 | Phase 54A | Setup and portability completion criteria | **10** | 0 | `1897` |
 | Phase 9K | Harness-aware response profiles | **11** | 26 | `578` |
 | Phase 34F | Model capability and tier calibration | **11** | 0 | `1473` |
+| Phase 35B | Candidate scoring | **11** | 14 | `1523` |
 | Phase 32C | Subscription capacity estimation | **12** | 0 | `1242` |
 | Phase 56 | Harness–subscription decoupling: choose the harness, route the subscription and model | **12** | 0 | `1941` |
-| Phase 35B | Candidate scoring | **13** | 12 | `1523` |
 | Phase 33B | Reliability-adjusted agent performance | **14** | 0 | `1345` |
 | Phase 55 | V1 completion definition | **23** | 0 | `1910` |
 | Phase 51 | Evaluation hooks | **25** | 12 | `1818` |
@@ -76,7 +76,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~232 open lines are not.
+other ~220 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -180,6 +180,11 @@ these unwrapped.
 
 - **1608** ☐ Prefer cheap resources for simple repository summarization when no valuable warm session already exists.
 - **1610** ☐ Avoid migrating a nearly completed task solely to preserve a small amount of quota.
+
+### Phase 39 — Gateway-backed disposable jobs  (2 open, 7 closed)
+
+- **1625** ☐ Use disposable jobs for classification, memory extraction, reranking, and other bounded support tasks.
+- **1629** ☐ Record which resource performed important memory extraction or classification for debugging.
 
 ### Phase 34C — Automatic routing-model selection  (3 open, 10 closed)
 

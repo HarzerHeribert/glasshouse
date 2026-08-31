@@ -1209,7 +1209,7 @@ Phase 32A — Unified quota and capacity model
 ☐ Track remaining monetary budget independently from provider quota when the user has configured a spending ceiling.
 ☐ Track the current quota window start when known.
 ☑ Track the current quota reset time when known.
-☐ Track rolling-window capacity separately from fixed calendar-window capacity.
+☑ Track rolling-window capacity separately from fixed calendar-window capacity.
 ☐ Track concurrent-request limits when they materially affect routability.
 ☑ Track requests-per-minute limits when known.
 ☐ Track tokens-per-minute limits when known.
@@ -1530,7 +1530,7 @@ Fixed architectural requirements
 ☑ Score every routing candidate using an inspectable weighted function.
 ☑ Include workload-tier fit in candidate scoring.
 ☑ Include hard capability satisfaction as a prerequisite rather than a soft bonus.
-☐ Include existing session affinity in candidate scoring.
+☑ Include existing session affinity in candidate scoring.
 ☐ Include context quality in candidate scoring.
 ☐ Include prompt-cache temperature in candidate scoring.
 ☑ Include normalized remaining capacity in candidate scoring.
@@ -1548,7 +1548,7 @@ Fixed architectural requirements
 ☑ Reduce the influence of performance observations with small samples, low confidence, or stale windows.
 ☑ Include time until quota reset in candidate scoring.
 ☑ Include protected-reserve policy in candidate scoring.
-☐ Include session-switching and bootstrap cost in candidate scoring.
+☑ Include session-switching and bootstrap cost in candidate scoring.
 ☑ Include user preference and pinning as explicit high-priority policy inputs.
 ☑ Avoid collapsing hard constraints and soft preferences into one opaque model-generated score.
 ☑ Return the top candidate plus a concise explanation of the most important reasons it won.
@@ -1618,14 +1618,14 @@ Fixed architectural requirements
 - Disposable jobs are bounded internal model calls for support functions such as classification, extraction, or reranking.
 - They are not interactive Glasshouse sessions, hidden harnesses, or autonomous coding workers and receive no unrestricted repository tool surface.
 
-☐ Define disposable jobs as bounded internal LLM calls rather than native interactive sessions or coding harnesses.
-☐ Add a simple provider interface for non-interactive disposable LLM jobs.
-☐ Allow OpenAI-compatible gateways to be configured through the disposable-job interface.
-☐ Allow local Ollama or llama.cpp endpoints to be configured through the disposable-job interface.
+☑ Define disposable jobs as bounded internal LLM calls rather than native interactive sessions or coding harnesses.
+☑ Add a simple provider interface for non-interactive disposable LLM jobs.
+☑ Allow OpenAI-compatible gateways to be configured through the disposable-job interface.
+☑ Allow local Ollama or llama.cpp endpoints to be configured through the disposable-job interface.
 ☐ Use disposable jobs for classification, memory extraction, reranking, and other bounded support tasks.
-☐ Keep disposable jobs distinct from first-class interactive harness sessions.
-☐ Do not give disposable jobs an autonomous coding-agent loop, unrestricted repository tools, or native-session identity.
-☐ Do not pretend a disposable API call is a user-enterable worker session.
+☑ Keep disposable jobs distinct from first-class interactive harness sessions.
+☑ Do not give disposable jobs an autonomous coding-agent loop, unrestricted repository tools, or native-session identity.
+☑ Do not pretend a disposable API call is a user-enterable worker session.
 ☐ Record which resource performed important memory extraction or classification for debugging.
 
 Phase 40 — Fresh-session handoff

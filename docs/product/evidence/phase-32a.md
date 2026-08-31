@@ -672,3 +672,33 @@ and the same mutation SURVIVED the same target before the test existed.
 Two rendering rows were added anyway (`tokens/minute`, `max concurrent`), each
 mutation-killed, so the dimensions are visible as unknown rather than absent —
 which is what 32A's own vocabulary demands.
+
+### Line 1212 — rolling and calendar windows tracked separately, proved
+
+Package `GH-PROVE-IT-MISC`, 2026-08-31, Sonnet at medium (Green): mechanisms the recon found already in production, proved by tests only. Four mutations, four killed in the worker's tree. **1174 is NOT closed by this package** — its test (`precompact_memory.rs`) failed one run in three on the merged tree even single-threaded (model called once, no memory stored within a 10 s bounded wait); see `.agent-runtime/defect-hook-extraction-may-lose-its-write.md`.
+
+
+### Track rolling-window capacity separately from fixed calendar-window capacity. (line 1212)
+
+Contract: Given a provider whose rolling-window and calendar-window quota reset independently, when Glasshouse observes either via its own producer, it tracks the two windows as distinct values, neither overwriting the other, regardless of application order
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator: a line the code already satisfied, proved by a test and a killed mutation (GH-MAP-SIDE-EFFECT-AUDIT's finding; no production change).
+
+Production evidence:
+- `src/provider/quota.rs` — `Windows::rolling/calendar, WindowCapacity`
+- `src/provider/telemetry.rs` — `RateLimitHeaders::apply_to (rolling, from response headers), ProviderUsage::apply_to (calendar, from a usage-endpoint body)`
+
+Regression evidence:
+- `quota_windows::a_rolling_reset_header_populates_only_the_rolling_window`
+- `quota_windows::a_calendar_reset_body_populates_only_the_calendar_window`
+- `quota_windows::a_rolling_and_a_calendar_reset_are_tracked_as_two_distinct_values`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/provider/quota.rs: Windows::calendar() returns &self.rolling instead of &self.calendar | `skip-state-update` | **killed** | `quota_windows::a_calendar_reset_body_populates_only_the_calendar_window, quota_windows::a_rolling_and_a_calendar_reset_are_tracked_as_two_distinct_values` |
+
+> skip-state-update observed: assertion `left == right` failed: the calendar window must carry its own reading, not the rolling window's
+
+Recorded scope limits — stated by the worker, not discovered later:
+- exercises the two producer functions directly, not through the shipped binary's telemetry-fetch path; header-parsing edge cases stay provider/telemetry.rs's own unit-test suite's responsibility
+
