@@ -613,22 +613,42 @@ fn gateway_reason_from_sql(value: &str) -> Option<GatewayFailure> {
 /// to `Completed` would manufacture the one claim about the work itself that
 /// the whole event model is careful never to invent.
 fn read_row(row: &rusqlite::Row<'_>) -> Result<LoggedEvent, EventLogError> {
-    let seq: i64 = row.get_unwrap(0);
-    let session = SessionId::new(row.get_unwrap::<_, String>(1));
-    let at: i64 = row.get_unwrap(2);
-    let kind: String = row.get_unwrap(3);
-    let turn_outcome: Option<String> = row.get_unwrap(4);
-    let origin: Option<String> = row.get_unwrap(5);
-    let bytes: Option<i64> = row.get_unwrap(6);
-    let exit_code: Option<i64> = row.get_unwrap(7);
-    let exit_signal: Option<String> = row.get_unwrap(8);
-    let resource: Option<String> = row.get_unwrap(9);
-    let gateway_reason: Option<String> = row.get_unwrap(10);
-    let gateway_provider: Option<String> = row.get_unwrap(11);
-    let gateway_model: Option<String> = row.get_unwrap(12);
-    let gateway_cause: Option<String> = row.get_unwrap(13);
-    let observed_harness: Option<String> = row.get_unwrap(14);
-    let observed_event: Option<String> = row.get_unwrap(15);
+    // `row.get_unwrap` panics on any conversion failure, including a TEXT
+    // column whose stored bytes are not valid UTF-8 -- which a single bit
+    // flip in an otherwise untouched database file can produce without
+    // `PRAGMA integrity_check` ever noticing, and which then crashes every
+    // future command that reads this log. `col` reports that the same way
+    // every other store in this crate reports a SQL failure. (`seq` is the
+    // table's `INTEGER PRIMARY KEY` -- the rowid itself, guaranteed a valid
+    // 64-bit integer by the file format rather than a record value that
+    // corruption could reinterpret -- so it could use `col` too but cannot
+    // exercise the failure path `col` exists for.)
+    fn col<T: rusqlite::types::FromSql>(
+        row: &rusqlite::Row<'_>,
+        index: usize,
+    ) -> Result<T, EventLogError> {
+        row.get(index).map_err(|source| EventLogError::Sql {
+            action: "read an event column",
+            source,
+        })
+    }
+
+    let seq: i64 = col(row, 0)?;
+    let session = SessionId::new(col::<String>(row, 1)?);
+    let at: i64 = col(row, 2)?;
+    let kind: String = col(row, 3)?;
+    let turn_outcome: Option<String> = col(row, 4)?;
+    let origin: Option<String> = col(row, 5)?;
+    let bytes: Option<i64> = col(row, 6)?;
+    let exit_code: Option<i64> = col(row, 7)?;
+    let exit_signal: Option<String> = col(row, 8)?;
+    let resource: Option<String> = col(row, 9)?;
+    let gateway_reason: Option<String> = col(row, 10)?;
+    let gateway_provider: Option<String> = col(row, 11)?;
+    let gateway_model: Option<String> = col(row, 12)?;
+    let gateway_cause: Option<String> = col(row, 13)?;
+    let observed_harness: Option<String> = col(row, 14)?;
+    let observed_event: Option<String> = col(row, 15)?;
 
     let missing = |column: &'static str| EventLogError::MissingValue {
         seq,
@@ -1176,5 +1196,35 @@ mod tests {
             ),
             "got {error:?}"
         );
+    }
+
+    /// A `session_id` column holding bytes that are not valid UTF-8 — the
+    /// shape a single flipped bit in an otherwise-intact row produces,
+    /// invisible to `PRAGMA integrity_check` — must be a reported error, not
+    /// a panic that takes down every later invocation that reads this log.
+    #[test]
+    fn a_hostile_column_is_a_reported_error_not_a_panic() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE lifecycle_events (
+                 seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, at INTEGER,
+                 kind TEXT, turn_outcome TEXT, origin TEXT, bytes INTEGER,
+                 exit_code INTEGER, exit_signal TEXT, resource TEXT,
+                 gateway_reason TEXT, gateway_provider TEXT, gateway_model TEXT,
+                 gateway_cause TEXT, observed_harness TEXT, observed_event TEXT);
+             INSERT INTO lifecycle_events (session_id, at, kind)
+             VALUES (CAST(x'7b22ff7d' AS TEXT), 1, 'session_started');",
+        )
+        .unwrap();
+
+        let error = conn
+            .query_row(
+                &format!("SELECT {ALL_COLUMNS} FROM lifecycle_events"),
+                [],
+                |row| Ok(read_row(row)),
+            )
+            .unwrap()
+            .expect_err("a hostile column must not panic the caller");
+        assert!(matches!(&error, EventLogError::Sql { .. }), "got {error:?}");
     }
 }

@@ -848,3 +848,316 @@ fn a_launch_on_a_pooled_provider_is_bound_to_the_chosen_account() {
          process is bound to the pool's choice:\n{child}"
     );
 }
+
+// ===========================================================================
+// Half three — Phase 56A step 4, capability map line 1972: the durable link
+// (migration 22's `sessions.entitlement`) and the `glasshouse entitlements`
+// view that makes it answerable.
+//
+// The writer's proof runs through the shipped binary for practice §35's
+// reason: nothing that builds a `NewSession` by hand can fail on a build
+// where `launch_session` stops filling the column, and that call site is the
+// only thing the map line is about.
+// ===========================================================================
+
+/// A third account nothing has ever measured — the pool's untelemetered
+/// entry, whose telemetry facets must every one read `unknown`.
+///
+/// A harness's own sign-in, which is `tests/entitlement_telemetry.rs`'s idiom
+/// for this case and the honest one: it has no provider, so no quota cache
+/// row and no `quota_context`-keyed throttle row can exist for it, and it
+/// needs no credential reference of its own — which matters here, because map
+/// line 1973 refuses two entries that name one credential and the loader says
+/// so by name.
+fn pool_config_with_an_unmeasured_account() -> String {
+    format!(
+        "{}\n[entitlements.spare]\nnative_harness = \"codex\"\n",
+        pool_config()
+    )
+}
+
+/// **The writer, through the acting path — line 1972's durable half.** The
+/// broker chooses `claude-b` (claude-a's account is throttled), the launch
+/// announces it, and the session record the launch wrote carries that same
+/// name. The announcement and the column agree because they are the same
+/// binding read twice, which is the property that stops the view from
+/// lying about what served.
+///
+/// The `backend_resource` assertion is the point of the whole column: both
+/// accounts are `direct-provider:alpha-probe`, so the coarse slug that
+/// column has always held cannot tell them apart, and the new one can.
+#[test]
+fn the_session_record_names_the_entitlement_that_served_it() {
+    let binary = Binary::with_config(&pool_config());
+
+    {
+        let runtime = binary.runtime();
+        let ledger = EvidenceLedger::open(&runtime).unwrap();
+        let now = now_unix();
+        for age in [600, 300] {
+            ledger
+                .record(
+                    NewObservation::new("alpha-probe", "some-model")
+                        .with_route(Some("anthropic-messages"))
+                        .with_harness(Some("claude-code"))
+                        .with_quota_context(Some(LABEL_A))
+                        .with_timing(Some(now - age), Some(now - age + 5))
+                        .with_outcome(Outcome::Failed)
+                        .with_failure_class(Some(FailureClass::Throttle)),
+                    now - age + 5,
+                )
+                .unwrap();
+        }
+    }
+
+    let out = binary.glasshouse(&["launch", "claude-code", "--headless", "--profile", "alpha"]);
+    let said = Binary::both_streams(&out);
+    assert!(out.status.success(), "the launch must succeed:\n{said}");
+    assert!(
+        said.contains("entitlement `claude-b`"),
+        "the announcement names the pool's choice:\n{said}"
+    );
+
+    let runtime = binary.runtime();
+    let sessions = glasshouse::session::ProjectSessions::open(&runtime).unwrap();
+    let records = sessions.store().list().unwrap();
+    assert_eq!(records.len(), 1, "one launch, one record: {records:#?}");
+    let record = &records[0];
+    assert_eq!(
+        record.entitlement.as_deref(),
+        Some("claude-b"),
+        "the record carries the account that actually served, and it is the one \
+         the launch announced:\n{said}"
+    );
+    assert_eq!(
+        record.backend_resource.as_deref(),
+        Some("direct-provider:alpha-probe"),
+        "both accounts slug to this one value — which is exactly why the \
+         entitlement column had to exist"
+    );
+}
+
+/// **Two accounts of one vendor are two values where `backend_resource` is
+/// one.** The case the coarse slug is structurally unable to express, stated
+/// directly against the store: same harness, same resource, two accounts,
+/// and the records differ on exactly one field.
+///
+/// Deliberately not a launch: this is a claim about what the *column* can
+/// hold, and a launch would only be able to exercise one account per run.
+#[test]
+fn two_accounts_of_one_vendor_are_two_values_where_backend_resource_is_one() {
+    use glasshouse::session::{NewSession, ProjectSessions};
+
+    let binary = Binary::with_config(&pool_config());
+    let runtime = binary.runtime();
+    let sessions = ProjectSessions::open(&runtime).unwrap();
+    let store = sessions.store();
+
+    let first = store
+        .create(
+            NewSession::embedded("claude-code")
+                .with_backend_resource(Some("direct-provider:alpha-probe".to_owned()))
+                .with_entitlement(Some("claude-a".to_owned())),
+        )
+        .unwrap();
+    let second = store
+        .create(
+            NewSession::embedded("claude-code")
+                .with_backend_resource(Some("direct-provider:alpha-probe".to_owned()))
+                .with_entitlement(Some("claude-b".to_owned())),
+        )
+        .unwrap();
+
+    let read_first = store.get(&first.id).unwrap().unwrap();
+    let read_second = store.get(&second.id).unwrap().unwrap();
+
+    assert_eq!(
+        read_first.backend_resource, read_second.backend_resource,
+        "the coarse slug cannot tell the two accounts apart"
+    );
+    assert_eq!(read_first.entitlement.as_deref(), Some("claude-a"));
+    assert_eq!(read_second.entitlement.as_deref(), Some("claude-b"));
+    assert_ne!(
+        read_first.entitlement, read_second.entitlement,
+        "the entitlement column is what separates them"
+    );
+}
+
+/// **The view names every configured entitlement, and an account nothing
+/// measured reads `unknown`.** Three entries; the gateway's quota cache
+/// holds a reading for `alpha-probe` only, so `spare` has no capacity, no
+/// reset and no throttle reading of its own — and it must still appear, with
+/// `unknown` spelled out on each. Never full, never empty, never a number:
+/// 56A step 2's Cluster E discipline, now on the view line 1972 asks for.
+#[test]
+fn the_view_names_every_entitlement_and_spells_unknown_for_one_nothing_measured() {
+    let binary = Binary::with_config(&pool_config_with_an_unmeasured_account());
+
+    {
+        let runtime = binary.runtime();
+        let quota = GatewayQuotaCache::new(runtime.paths());
+        let now = now_unix();
+        quota.store(
+            "alpha-probe",
+            &RateLimitHeaders::read(vec![
+                ("ratelimit-limit", "300"),
+                ("ratelimit-remaining", "240"),
+                ("ratelimit-reset", "600"),
+            ]),
+            now - 30,
+        );
+    }
+
+    let out = binary.glasshouse(&["entitlements"]);
+    let view = Binary::both_streams(&out);
+    assert!(out.status.success(), "the view must render:\n{view}");
+
+    for name in ["claude-a", "claude-b", "spare"] {
+        assert!(
+            view.contains(&format!("`{name}`")),
+            "every configured entitlement appears, `{name}` included:\n{view}"
+        );
+    }
+
+    let spare = view
+        .lines()
+        .skip_while(|line| !line.starts_with("`spare`"))
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        spare.contains("capacity: unknown"),
+        "an account nothing measured has no capacity — never full, never \
+         empty, never a number:\n{spare}"
+    );
+    assert!(spare.contains("reset: unknown"), "and no reset:\n{spare}");
+    assert!(
+        spare.contains("throttling: unknown"),
+        "and no throttle history — `unknown`, not `none observed`, which only \
+         a resolver that actually looked may say:\n{spare}"
+    );
+    assert!(
+        spare.contains("served: nothing recorded"),
+        "the sessions table WAS read and holds no row for this account, which \
+         is a measured zero rather than an unknown:\n{spare}"
+    );
+
+    // The measured account is the contrast: the same view, with a reading.
+    let measured = view
+        .lines()
+        .skip_while(|line| !line.starts_with("`claude-a`"))
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !measured.contains("capacity: unknown"),
+        "the account the cache does describe reads its band, not unknown:\n{measured}"
+    );
+
+    assert!(
+        !view.contains(VALUE_A) && !view.contains(VALUE_B),
+        "an entitlement is named, never its secret — no credential value may \
+         reach this view:\n{view}"
+    );
+}
+
+/// **The view answers *what it served*, from migration 22's column.** A
+/// launch is recorded against `claude-b`, and the view attributes it to that
+/// account and to no other. This is the facet the coarse `backend_resource`
+/// could never have produced, and it is the reason the column exists.
+#[test]
+fn the_view_reports_what_each_entitlement_served() {
+    let binary = Binary::with_config(&pool_config());
+
+    {
+        let runtime = binary.runtime();
+        let ledger = EvidenceLedger::open(&runtime).unwrap();
+        let now = now_unix();
+        for age in [600, 300] {
+            ledger
+                .record(
+                    NewObservation::new("alpha-probe", "some-model")
+                        .with_route(Some("anthropic-messages"))
+                        .with_harness(Some("claude-code"))
+                        .with_quota_context(Some(LABEL_A))
+                        .with_timing(Some(now - age), Some(now - age + 5))
+                        .with_outcome(Outcome::Failed)
+                        .with_failure_class(Some(FailureClass::Throttle)),
+                    now - age + 5,
+                )
+                .unwrap();
+        }
+    }
+
+    let launched =
+        binary.glasshouse(&["launch", "claude-code", "--headless", "--profile", "alpha"]);
+    assert!(
+        launched.status.success(),
+        "the launch must succeed:\n{}",
+        Binary::both_streams(&launched)
+    );
+
+    let out = binary.glasshouse(&["entitlements"]);
+    let view = Binary::both_streams(&out);
+    assert!(out.status.success(), "the view must render:\n{view}");
+
+    let served = view
+        .lines()
+        .skip_while(|line| !line.starts_with("`claude-b`"))
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        served.contains("served: 1 session —"),
+        "the account that served is credited with the session:\n{view}"
+    );
+
+    let idle = view
+        .lines()
+        .skip_while(|line| !line.starts_with("`claude-a`"))
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        idle.contains("served: nothing recorded"),
+        "and the account that did not serve is credited with nothing:\n{view}"
+    );
+}
+
+/// **A session charged to an entry the configuration no longer describes is
+/// still reported.** Recorded history does not vanish when a person edits a
+/// file, and a view that silently dropped those rows would under-report what
+/// the pool has served — while still, correctly, not inventing a row for an
+/// account that is no longer configured.
+#[test]
+fn the_view_still_reports_sessions_charged_to_an_entry_no_longer_configured() {
+    use glasshouse::session::{NewSession, ProjectSessions};
+
+    let binary = Binary::with_config(&pool_config());
+    {
+        let runtime = binary.runtime();
+        let sessions = ProjectSessions::open(&runtime).unwrap();
+        sessions
+            .store()
+            .create(
+                NewSession::embedded("claude-code")
+                    .with_entitlement(Some("retired-account".to_owned())),
+            )
+            .unwrap();
+    }
+
+    let out = binary.glasshouse(&["entitlements"]);
+    let view = Binary::both_streams(&out);
+    assert!(out.status.success(), "the view must render:\n{view}");
+    assert!(
+        view.contains("Also served, by entries no longer configured: `retired-account`"),
+        "the recorded row is reported rather than dropped:\n{view}"
+    );
+    let configured_rows: Vec<&str> = view.lines().filter(|line| line.starts_with('`')).collect();
+    assert_eq!(
+        configured_rows.len(),
+        2,
+        "the two configured entries get rows and the retired one does not — it \
+         is reported as history, never promoted back into the pool:\n{view}"
+    );
+}

@@ -262,7 +262,7 @@ impl<'a> CheckpointStore<'a> {
             .query_row(
                 "SELECT id, document FROM checkpoints WHERE id = ?1",
                 [id.as_str()],
-                |row| Ok((row.get_unwrap(0), row.get_unwrap(1))),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(|source| StoreError::Sql {
@@ -345,10 +345,7 @@ impl<'a> CheckpointStore<'a> {
             })?;
         let rows = statement
             .query_map([], |row| {
-                Ok((
-                    row.get_unwrap::<_, String>(0),
-                    row.get_unwrap::<_, String>(1),
-                ))
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
             .map_err(|source| StoreError::Sql {
                 action: "list checkpoints",
@@ -416,9 +413,7 @@ impl<'a> CheckpointStore<'a> {
     ) -> Result<Option<Stored>, StoreError> {
         let row: Option<(String, String)> = self
             .conn
-            .query_row(sql, params, |row| {
-                Ok((row.get_unwrap(0), row.get_unwrap(1)))
-            })
+            .query_row(sql, params, |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()
             .map_err(|source| StoreError::Sql {
                 action: "read the most recent checkpoint",
@@ -756,5 +751,43 @@ mod tests {
             StoreError::Format { id, .. } => assert_eq!(id.as_str(), "deadbeef"),
             other => panic!("expected Format, got {other:?}"),
         }
+    }
+
+    /// A `document` column holding bytes that are not valid UTF-8 — the shape
+    /// a single flipped bit in an otherwise-intact row produces, invisible to
+    /// `PRAGMA integrity_check` — must be a reported error from every reader,
+    /// never a panic that takes down every later invocation. `get` here
+    /// stands in for `list`, `latest_for`, and `latest`, which route through
+    /// the same `first` helper and the same conversion.
+    #[test]
+    fn a_hostile_document_column_is_a_reported_error_not_a_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let project_id = fixture.runtime.project().id().as_str().to_owned();
+        fixture
+            .conn
+            .execute(
+                "INSERT INTO checkpoints (id, project_id, session_id, created_at, reason, document) \
+                 VALUES ('c0ffee00', ?1, 's', 1, 'manual', CAST(x'7b22ff7d' AS TEXT))",
+                [&project_id],
+            )
+            .unwrap();
+
+        let store = fixture.store();
+        let error = store
+            .get(&CheckpointId::new("c0ffee00"))
+            .expect_err("a hostile column must not panic the caller");
+        assert!(
+            matches!(error, StoreError::Sql { .. }),
+            "expected Sql, got {error:?}"
+        );
+
+        let error = store
+            .list()
+            .expect_err("list must not panic on the same hostile row");
+        assert!(
+            matches!(error, StoreError::Sql { .. }),
+            "expected Sql, got {error:?}"
+        );
     }
 }

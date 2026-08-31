@@ -116,9 +116,14 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// migration's own doc comment for why both live in one migration, why
 /// neither carries a `CHECK`, and why the trigger is a column beside
 /// `memories.source_commit` rather than something derived from it.
+/// Version 22 adds `sessions.entitlement`, capability map line 1972: which
+/// configured `[entitlements.<name>]` account served this session. See the
+/// migration's own doc comment for why `backend_resource` could not answer
+/// it, why the column holds a name and never a credential, and why it is
+/// nullable with no `CHECK`.
 /// Later migrations are appended to [`MIGRATIONS`], and this constant moves
 /// with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 21;
+const SUPPORTED_SCHEMA_VERSION: i64 = 22;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -2240,6 +2245,64 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
     ALTER TABLE sessions ADD COLUMN last_seen_commit TEXT;
     ALTER TABLE memories ADD COLUMN extraction_trigger TEXT;
     ",
+    // 22: which entitlement served this session — capability map line 1972's
+    // durable half, *"what it served"*.
+    //
+    // # Why `backend_resource` could not answer this
+    //
+    // `sessions.backend_resource` has held the resolved resource since its
+    // own `ADD COLUMN` above, and it stores
+    // `crate::profile::BackendResource::slug`, whose whole vocabulary is
+    // three coarse words: `native`, `direct-provider:<provider>`, and
+    // `glasshouse-gateway`. Phase 56A's unit of capacity is the
+    // **entitlement** — two Claude accounts of one vendor, each with its own
+    // credential, capacity and reset — and both of those accounts slug to
+    // the same `native`. So the one question line 1972 asks of the durable
+    // record, *which account served this session*, is the one question
+    // `backend_resource` is structurally unable to answer, and no widening
+    // of its vocabulary would help: it names a **kind** of resource, and the
+    // entitlement is an **instance**.
+    //
+    // # What may write it, and from what
+    //
+    // `SessionStore::create`, once, from `NewSession::entitlement`, which
+    // only `main.rs`'s launch path fills — from
+    // `ResolvedEntitlement::name`, the `[entitlements.<name>]` table key,
+    // for the entitlement that path has already resolved and announced
+    // (`announce_entitlement`). That is the router's own winner where the
+    // router ran (`Routed::chosen`'s `Destination::entitlement`, re-resolved
+    // by name), and the one-account lookup where it did not. Nothing else
+    // writes the column and nothing derives it: a session whose serving
+    // account was never established records `NULL` rather than a guess.
+    //
+    // # A name, and never a credential
+    //
+    // The value is the entry's **name** — the key a person typed in their
+    // own configuration file. An entitlement's authentication is a
+    // `crate::secret::SecretRef`, a reference resolved through the operating
+    // system's secret storage at the moment of use, and it does not travel
+    // this way: the `sessions` table's own doc says why (this database is
+    // backed up casually and checked into nothing). The name is the same
+    // string `glasshouse status` already prints, so this column adds no
+    // fact that was not already displayable.
+    //
+    // # `ADD COLUMN`, nullable, no `CHECK`, no index
+    //
+    // Migration 20's shape and its stated rationale — validation in Rust,
+    // not in SQL — unchanged. `NULL` backfills every existing row, which is
+    // the honest reading for a session recorded before Glasshouse could
+    // observe which account served it, and it is a **different fact** from
+    // any name: `launch_profile`'s `None` draws exactly this distinction and
+    // for exactly this reason. No `CHECK`, because the set of valid values
+    // is the user's own `[entitlements]` tables — it is not a fixed
+    // vocabulary this schema could enumerate, and it changes when a person
+    // edits a configuration file rather than when Glasshouse ships. No
+    // index: the reads are a session's own row and one bounded pass over a
+    // project's sessions for `glasshouse entitlements`, and migration 15's
+    // closing note applies.
+    "
+    ALTER TABLE sessions ADD COLUMN entitlement TEXT;
+    ",
 ];
 
 pub(crate) const PROJECT_ID_KEY: &str = "project_id";
@@ -2732,9 +2795,13 @@ mod tests {
     /// and it goes before all of them, being the newest. Migration 19 is two
     /// statements for migration 15's reason — each table takes its indexes
     /// and triggers with it — and migration 20 is one for migration 16's:
-    /// nothing indexes `presentation_ref` and it carries no `CHECK`. Newest
-    /// first, so 20 leads.
+    /// nothing indexes `presentation_ref` and it carries no `CHECK`.
+    /// Migrations 21 and 22 are each one statement for the same reason —
+    /// nothing indexes `last_seen_commit`, `extraction_trigger` or
+    /// `entitlement` and none of the three carries a `CHECK`. Newest first,
+    /// so 22 leads.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        ALTER TABLE sessions DROP COLUMN entitlement;
         ALTER TABLE memories DROP COLUMN extraction_trigger;
         ALTER TABLE sessions DROP COLUMN last_seen_commit;
         ALTER TABLE sessions DROP COLUMN presentation_ref;
@@ -2936,6 +3003,7 @@ mod tests {
         // `duplicate column name` — `UNDO_MIGRATIONS_ABOVE_THIRTEEN`'s own
         // lesson.
         const UNDO_18: &str = "
+            ALTER TABLE sessions DROP COLUMN entitlement;
             ALTER TABLE memories DROP COLUMN extraction_trigger;
             ALTER TABLE sessions DROP COLUMN last_seen_commit;
             ALTER TABLE sessions DROP COLUMN presentation_ref;
@@ -3075,6 +3143,7 @@ mod tests {
         // fails with `duplicate column name` instead of proving anything about
         // 19. A migration 21 owes this constant its own line.
         const UNDO_19: &str = "
+            ALTER TABLE sessions DROP COLUMN entitlement;
             ALTER TABLE memories DROP COLUMN extraction_trigger;
             ALTER TABLE sessions DROP COLUMN last_seen_commit;
             ALTER TABLE sessions DROP COLUMN presentation_ref;
@@ -3254,6 +3323,7 @@ mod tests {
         use crate::session::{NewSession, ProjectSessions, SessionId, SessionPresentation};
 
         const UNDO_20: &str = "
+            ALTER TABLE sessions DROP COLUMN entitlement;
             ALTER TABLE memories DROP COLUMN extraction_trigger;
             ALTER TABLE sessions DROP COLUMN last_seen_commit;
             ALTER TABLE sessions DROP COLUMN presentation_ref;
@@ -3372,6 +3442,7 @@ mod tests {
         use crate::session::{NewSession, ProjectSessions};
 
         const UNDO: &str = "
+            ALTER TABLE sessions DROP COLUMN entitlement;
             ALTER TABLE memories DROP COLUMN extraction_trigger;
             ALTER TABLE sessions DROP COLUMN last_seen_commit;
             DELETE FROM schema_migrations WHERE version >= 21;
@@ -3433,10 +3504,15 @@ mod tests {
             let conn = Connection::open(&db_path).unwrap();
             let mut expected = session_columns_at_18.clone();
             expected.push("last_seen_commit".to_owned());
+            // Migration 22 runs in the same forward pass and appends its own
+            // column after this one. Named here rather than left out: this
+            // assertion is about *append-only*, and a migration that
+            // reordered or rebuilt the table is exactly what it must catch.
+            expected.push("entitlement".to_owned());
             assert_eq!(
                 columns_of(&conn, "sessions"),
                 expected,
-                "exactly one column, appended"
+                "one column per migration, each appended"
             );
             let mut expected = memory_columns_at_18.clone();
             expected.push("extraction_trigger".to_owned());
@@ -3517,6 +3593,142 @@ mod tests {
         assert_eq!(schema_version(&db_path), 20);
     }
 
+    /// Migration proof for migration 22: a version-21 database holding a
+    /// session written the way a version-21 build wrote it opens, migrates to
+    /// 22 adding exactly one column — appended, never a rebuild — reads the
+    /// pre-migration row as *no account recorded* rather than as a name,
+    /// carries a name written through the real writer, and the undo takes the
+    /// whole schema back to exactly what it was at 21, keeping every row.
+    ///
+    /// The `None` assertion is the one this migration most needs, and it is
+    /// migration 20's lesson repeated: a column written `NOT NULL DEFAULT ''`
+    /// would pass every other check here and would then tell `glasshouse
+    /// entitlements` that every session recorded before the upgrade was
+    /// served by an entitlement named by the empty string. *Nothing recorded*
+    /// and *an account* are different facts, and only `NULL` keeps them apart.
+    ///
+    /// Named for what the migration does rather than for its number, for the
+    /// reason the memory-commit proof above states.
+    ///
+    /// One connection at a time throughout (practice §65): every handle is
+    /// dropped before the next is opened and before the re-bootstrap.
+    #[test]
+    fn the_entitlement_migration_adds_its_column_and_undoes_cleanly() {
+        use crate::session::{NewSession, ProjectSessions};
+
+        const UNDO: &str = "
+            ALTER TABLE sessions DROP COLUMN entitlement;
+            DELETE FROM schema_migrations WHERE version >= 22;
+        ";
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let db_path = fixture.runtime.database_path();
+        let project_id = stored_project_id(&db_path);
+
+        // Back to 21, with a session row written the way a version-21 build
+        // wrote it: it has no column to name an account in.
+        let (schema_at_21, session_columns_at_21) = {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(UNDO).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, project_id, harness, role, lifecycle, \
+                 presentation, created_at, last_activity_at, backend_resource) \
+                 VALUES (\'pre-migration\', ?1, \'claude-code\', \'normal\', \'idle\', \
+                 \'embedded\', 1, 1, \'direct-provider:alpha-probe\')",
+                [&project_id],
+            )
+            .unwrap();
+            (whole_schema(&conn), columns_of(&conn, "sessions"))
+        };
+        assert_eq!(schema_version(&db_path), 21, "the rollback must land on 21");
+        assert!(
+            !session_columns_at_21
+                .iter()
+                .any(|column| column == "entitlement"),
+            "{session_columns_at_21:?}"
+        );
+
+        // Forward: an ordinary bootstrap, exactly as a real upgrade happens.
+        let migrated = fixture.rebootstrap().unwrap();
+        assert_eq!(
+            schema_version(&migrated.database_path()),
+            SUPPORTED_SCHEMA_VERSION,
+            "the launch must have applied the entitlement migration"
+        );
+        assert_eq!(
+            SUPPORTED_SCHEMA_VERSION, 22,
+            "a fresh database reports the version this migration ships"
+        );
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let mut expected = session_columns_at_21.clone();
+            expected.push("entitlement".to_owned());
+            assert_eq!(
+                columns_of(&conn, "sessions"),
+                expected,
+                "exactly one column, appended"
+            );
+        }
+
+        // The pre-migration row reads as *nothing recorded*, and a row
+        // written now carries what the real writer gave it.
+        {
+            let sessions = ProjectSessions::open(&migrated).unwrap();
+            let store = sessions.store();
+            let pre = store
+                .get(&crate::session::SessionId::new("pre-migration"))
+                .unwrap()
+                .expect("the pre-migration session survived");
+            assert_eq!(
+                pre.entitlement, None,
+                "a row from before the column existed was served by no account                  this build can name — not by one named the empty string"
+            );
+            assert_eq!(
+                pre.backend_resource.as_deref(),
+                Some("direct-provider:alpha-probe"),
+                "and everything the old row did hold survived the upgrade"
+            );
+
+            let fresh = store.create(NewSession::embedded("claude-code")).unwrap();
+            assert_eq!(
+                fresh.entitlement, None,
+                "a session created without one records no account, never a guess"
+            );
+            let named = store
+                .create(
+                    NewSession::embedded("claude-code")
+                        .with_entitlement(Some("claude-b".to_owned())),
+                )
+                .unwrap();
+            assert_eq!(named.entitlement.as_deref(), Some("claude-b"));
+            assert_eq!(
+                store
+                    .get(&named.id)
+                    .unwrap()
+                    .expect("the session was recorded")
+                    .entitlement
+                    .as_deref(),
+                Some("claude-b"),
+                "and it survives the round trip through the column"
+            );
+        }
+
+        // Back again: the whole schema is what it was at 21, and every row is
+        // still there.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(UNDO).unwrap();
+            assert_eq!(whole_schema(&conn), schema_at_21);
+            assert_eq!(columns_of(&conn, "sessions"), session_columns_at_21);
+            let sessions: i64 = conn
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(sessions, 3, "dropping the column drops no rows");
+        }
+        assert_eq!(schema_version(&db_path), 21);
+    }
+
     /// Migration proof for migration 17: a version-16 database opens,
     /// migrates to 17, keeps every memory it had, and comes out with a table
     /// that accepts an association — plus the index and the two triggers, and
@@ -3551,7 +3763,8 @@ mod tests {
             // **every** migration above the version it claims, or the
             // re-run fails — `UNDO_MIGRATIONS_ABOVE_THIRTEEN`'s own lesson.
             conn.execute_batch(
-                "ALTER TABLE memories DROP COLUMN extraction_trigger;
+                "ALTER TABLE sessions DROP COLUMN entitlement;
+                ALTER TABLE memories DROP COLUMN extraction_trigger;
                  ALTER TABLE sessions DROP COLUMN last_seen_commit;
                 ALTER TABLE sessions DROP COLUMN presentation_ref;
                  DROP TABLE assumption_transitions;

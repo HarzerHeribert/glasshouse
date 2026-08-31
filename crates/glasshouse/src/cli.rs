@@ -78,6 +78,22 @@ pub enum Command {
     /// than a count — a harness's setup problems, a session's seven facts,
     /// and a resource's quota detail are what those three commands are for.
     Status,
+    /// Show the entitlement pool — every configured account, one row each.
+    ///
+    /// Map line 1972's inspectable view. Per entitlement: how much of its
+    /// allowance is left, when that allowance resets, what throttling has
+    /// recently been observed against it, and what it has actually served —
+    /// the sessions this project recorded against that account.
+    ///
+    /// Every configured entitlement appears, including one nothing has ever
+    /// measured, which reads `unknown` on each facet it has no reading for.
+    /// `unknown` is a rendered word and never a number: an account no
+    /// telemetry describes is not a full one and it is not an empty one.
+    ///
+    /// Accounts are named, never their credentials. An entitlement's
+    /// authentication is a reference into the operating system's own secret
+    /// storage, and nothing here resolves one.
+    Entitlements,
     /// Report detected harnesses, optional integrations, and setup problems.
     Doctor,
     /// Reopen the first-run setup wizard.

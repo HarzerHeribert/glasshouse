@@ -86,6 +86,9 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         Some(Command::Status) => {
             print!("{}", status_report(&runtime)?);
         }
+        Some(Command::Entitlements) => {
+            print!("{}", entitlements_report(&runtime)?);
+        }
         Some(Command::Doctor) => {
             print!("{}", glasshouse::integrations::doctor_report(&runtime));
         }
@@ -4540,7 +4543,26 @@ fn launch_session(
             // if this launch is a `--from-checkpoint` handoff. `None` for
             // every other launch — a session not started from a checkpoint
             // must never record an invented source.
-            .with_source_session(bootstrap.as_ref().map(|(_, source)| source.clone())),
+            .with_source_session(bootstrap.as_ref().map(|(_, source)| source.clone()))
+            // Phase 56A line 1972, the durable half: the account that will be
+            // charged for this session, recorded by name so that
+            // `glasshouse entitlements` can answer *what it served* later.
+            //
+            // `entitlement` is the value resolved above and already announced
+            // to the user by `announce_entitlement` — deliberately the same
+            // binding and not a second lookup, so what a person was told and
+            // what the record says cannot disagree. Where the router ran that
+            // is `Routed::chosen`'s own account re-resolved by name; where it
+            // did not (a routing-off launch), it is the one-account lookup,
+            // which refuses a several-account provider rather than guessing.
+            // Either way it is the entitlement that serves, which is the only
+            // thing this column may hold.
+            //
+            // `backend_resource` above stays exactly as it was: it records
+            // the KIND of resource and this records the INSTANCE, and the two
+            // accounts of one vendor that motivate the column both slug to
+            // `native` there.
+            .with_entitlement(entitlement.as_ref().map(|entry| entry.name().to_owned())),
     )?;
     // Line 1467, the fresh half: the session just recorded is the one the
     // next low-risk turn will be in.
@@ -10110,33 +10132,10 @@ fn status_report(runtime: &Runtime) -> anyhow::Result<String> {
     let user = UserConfig::load(runtime.paths())?;
     let project_config = config::load_project_config(runtime.project())?;
     let effective = EffectiveConfig::new(&user, project_config.as_ref());
-    let now_unix = glasshouse::provider::cache::now_unix_seconds();
-    let quota_cache = glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths());
-    let model_cache = glasshouse::provider::cache::ModelCache::new(runtime.paths());
-    // The ledger's window rows, read fail-soft: a project whose evidence
-    // ledger cannot be opened still gets its status line, with the
-    // throttling facet honestly unknown rather than "none observed".
-    let observations = glasshouse::routing::evidence::EvidenceLedger::open(runtime)
-        .and_then(|ledger| {
-            Ok(ledger.observations_in_window(
-                now_unix,
-                glasshouse::routing::evidence::CLASSIFICATION_EVIDENCE_WINDOW_SECONDS,
-            )?)
-        })
-        .map_err(|err| {
-            tracing::debug!(
-                error = %err,
-                "could not read the routing evidence ledger for the entitlements status line"
-            );
-        })
-        .ok();
-    let mut telemetry = glasshouse::config::EntitlementTelemetry::new(now_unix)
-        .with_gateway_quota(&quota_cache)
-        .with_model_catalogues(&model_cache);
-    if let Some(observations) = observations.as_deref() {
-        telemetry = telemetry.with_observations(observations);
-    }
-    match effective.configured_entitlements_with_telemetry(&telemetry) {
+    // One resolver, one set of sources — `entitlement_pool_with_telemetry`,
+    // which `glasshouse entitlements` reads through as well so the two
+    // commands cannot describe one account differently.
+    match entitlement_pool_with_telemetry(runtime, &effective) {
         Ok(entitlements) if entitlements.is_empty() => {}
         Ok(entitlements) => {
             let names: Vec<String> = entitlements
@@ -10174,6 +10173,175 @@ fn status_report(runtime: &Runtime) -> anyhow::Result<String> {
 /// says so. Every reading shared beyond this account carries its scope word
 /// (`provider-wide`); a reading narrowed to this account's own rows says
 /// `this account`.
+/// The configured entitlement pool with map line 1965's telemetry resolved
+/// against it — the sources read **once** and handed to the one resolver.
+///
+/// Extracted so `glasshouse status`'s entitlement lines and `glasshouse
+/// entitlements`' view cannot read different sources and disagree about the
+/// same account. Every read is fail-soft in the same way it already was: a
+/// project whose evidence ledger will not open still gets its pool, with the
+/// throttling facet honestly `unknown` rather than "none observed".
+fn entitlement_pool_with_telemetry(
+    runtime: &Runtime,
+    effective: &EffectiveConfig,
+) -> anyhow::Result<Vec<glasshouse::config::ResolvedEntitlement>> {
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+    let quota_cache = glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths());
+    let model_cache = glasshouse::provider::cache::ModelCache::new(runtime.paths());
+    let observations = glasshouse::routing::evidence::EvidenceLedger::open(runtime)
+        .and_then(|ledger| {
+            Ok(ledger.observations_in_window(
+                now_unix,
+                glasshouse::routing::evidence::CLASSIFICATION_EVIDENCE_WINDOW_SECONDS,
+            )?)
+        })
+        .map_err(|err| {
+            tracing::debug!(
+                error = %err,
+                "could not read the routing evidence ledger for the entitlement pool"
+            );
+        })
+        .ok();
+    let mut telemetry = glasshouse::config::EntitlementTelemetry::new(now_unix)
+        .with_gateway_quota(&quota_cache)
+        .with_model_catalogues(&model_cache);
+    if let Some(observations) = observations.as_deref() {
+        telemetry = telemetry.with_observations(observations);
+    }
+    Ok(effective.configured_entitlements_with_telemetry(&telemetry)?)
+}
+
+/// `glasshouse entitlements` — map line 1972's inspectable view of the pool.
+///
+/// A pure function returning a `String`, like [`status_report`] and
+/// `resources_report`: what it prints is testable without a terminal, which
+/// is the only reason a view of this kind can be asserted at all.
+///
+/// # Every configured entitlement, including the ones nothing measured
+///
+/// The rows come from the **configuration**, not from the telemetry and not
+/// from the sessions table, so an account no reading describes still gets a
+/// row and reads `unknown` on the facets it has no reading for. An
+/// entitlement missing from the view because nothing had measured it is the
+/// exact failure 56A step 2's Cluster E discipline exists to prevent: unknown
+/// is a rendered word, never full, never empty, never a number.
+///
+/// # Why `served` is *not* one of those unknowns
+///
+/// The four telemetry facets are `unknown` when nobody looked. `served` is
+/// different in kind: this function **does** look, at every session row this
+/// project recorded, and an account with no rows has a *measured* zero. That
+/// is `SessionRecord::observed_compactions`' distinction, and rendering
+/// "nothing recorded" where the sessions table is empty rather than `unknown`
+/// is what keeps the two apart.
+///
+/// # Names, never credentials
+///
+/// An entitlement is named by its `[entitlements.<name>]` key and described
+/// by its kind and vendor. Its `credential` is a `config::SecretRef` and this
+/// function never touches it — nothing here opens a secret store, and there
+/// is no branch on which this view could print a value.
+fn entitlements_report(runtime: &Runtime) -> anyhow::Result<String> {
+    use std::collections::BTreeMap;
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Entitlement pool");
+    let _ = writeln!(out, "================");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Project  {}", runtime.project().name());
+    let _ = writeln!(out);
+
+    let user = UserConfig::load(runtime.paths())?;
+    let project_config = config::load_project_config(runtime.project())?;
+    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+    let entitlements = entitlement_pool_with_telemetry(runtime, &effective)?;
+
+    // What each account served, from migration 22's column. One pass over
+    // the project's own sessions — the same `list()` `glasshouse status` and
+    // `glasshouse sessions` read, so this view is scoped to the active
+    // project exactly as the rest of the sessions table is, and it can see
+    // no other project's rows.
+    let sessions = ProjectSessions::open(runtime)?;
+    let records = sessions.store().list()?;
+    let mut served: BTreeMap<&str, (usize, &glasshouse::session::SessionRecord)> = BTreeMap::new();
+    for record in &records {
+        let Some(name) = record.entitlement.as_deref() else {
+            continue;
+        };
+        served
+            .entry(name)
+            // `list()` is ordered by activity, newest first, so the first row
+            // an account is seen on is its most recent one and later rows
+            // only raise the count.
+            .and_modify(|(count, _)| *count += 1)
+            .or_insert((1, record));
+    }
+
+    if entitlements.is_empty() {
+        let _ = writeln!(
+            out,
+            "No `[entitlements]` entries are configured, so Glasshouse describes no pool."
+        );
+        let _ = writeln!(
+            out,
+            "Add one under `[entitlements.<name>]` to name an account it may charge."
+        );
+    } else {
+        let thresholds = effective.capacity_band_thresholds().value;
+        for entry in &entitlements {
+            let _ = writeln!(out, "`{}`  ({})", entry.name(), entry.describe());
+            // The same renderer `glasshouse status` uses, deliberately: the
+            // two commands describing one account differently would be a
+            // defect nobody could act on.
+            let _ = writeln!(out, "  {}", entitlement_facets(entry, &thresholds));
+            let _ = writeln!(out, "  served: {}", served_phrase(served.get(entry.name())));
+            let _ = writeln!(out);
+        }
+    }
+
+    // Sessions charged to an account the configuration no longer describes.
+    // Recorded history does not vanish when a person edits a file, and a view
+    // that silently dropped those rows would under-report what the pool has
+    // served.
+    let configured: Vec<&str> = entitlements.iter().map(|entry| entry.name()).collect();
+    let orphaned: Vec<&str> = served
+        .keys()
+        .copied()
+        .filter(|name| !configured.contains(name))
+        .collect();
+    if !orphaned.is_empty() {
+        let _ = writeln!(
+            out,
+            "Also served, by entries no longer configured: {}",
+            orphaned
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    Ok(out)
+}
+
+/// How the view says what an account served.
+///
+/// Split out so the "nothing recorded" wording has one home and cannot drift
+/// into the `unknown` the telemetry facets use — see
+/// [`entitlements_report`]'s own note on why these are different facts.
+fn served_phrase(entry: Option<&(usize, &glasshouse::session::SessionRecord)>) -> String {
+    match entry {
+        None => "nothing recorded".to_owned(),
+        Some((count, latest)) => format!(
+            "{count} session{} — most recently {} ({})",
+            if *count == 1 { "" } else { "s" },
+            short_id(&latest.id),
+            format_age(latest.last_activity_at)
+        ),
+    }
+}
+
 fn entitlement_facets(
     entry: &glasshouse::config::ResolvedEntitlement,
     thresholds: &glasshouse::provider::quota::CapacityBandThresholds,

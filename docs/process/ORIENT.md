@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1086 / 1305 mandatory capabilities (83%)** — 219 open across 48 phases.
+**1087 / 1305 mandatory capabilities (83%)** — 218 open across 48 phases.
 
 ## Where the work is
 
@@ -49,9 +49,9 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 55 | V1 completion definition | **2** | 21 | `1910` |
 | Phase 28 | File-aware memory lookup | **3** | 2 | `1137` |
 | Phase 34C | Automatic routing-model selection | **3** | 10 | `1429` |
+| Phase 56A | Entitlement pool and subscription broker: several accounts, one scheduler | **3** | 10 | `1958` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 33C | Failure, quota, and route correlation | **4** | 11 | `1362` |
-| Phase 56A | Entitlement pool and subscription broker: several accounts, one scheduler | **4** | 9 | `1958` |
 | Phase 24 | Memory reranking | **5** | 1 | `1082` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
 | Phase 33A | Routing evidence ledger | **5** | 10 | `1327` |
@@ -77,7 +77,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~179 open lines are not.
+other ~175 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -206,6 +206,12 @@ these unwrapped.
 - **1436** ☐ Filter automatic candidates by maximum marginal routing cost.
 - **1439** ☐ Prefer a cheap metered model over an unreliable free model when failed routing attempts would cost more time than the price difference.
 - **1440** ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
+
+### Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler  (3 open, 10 closed)
+
+- **1970** ☐ Fall back across the pool in a stated order on exhaustion or throttling — subscription to subscription to API credits — and record every fallback with its reason.
+- **1971** ☐ Let the user state per-entitlement rules — allowed harnesses, tiers, job kinds, and spend ceilings — and never let the broker exceed them.
+- **1974** ☐ Cover the broker with an end-to-end test against fixture entitlements, including a reset boundary and an exhaustion fallback, before offering it.
 
 ## Practice sections, by number
 

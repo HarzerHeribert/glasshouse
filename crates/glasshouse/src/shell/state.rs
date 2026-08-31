@@ -4993,6 +4993,7 @@ mod tests {
             observed_compactions: None,
             presentation_ref: None,
             last_seen_commit: None,
+            entitlement: None,
         }
     }
 
@@ -5609,6 +5610,7 @@ mod native_input_tests {
             observed_compactions: None,
             presentation_ref: None,
             last_seen_commit: None,
+            entitlement: None,
         };
         let mut state = ShellState::new("p", "/p", "0.1.0", vec![record]);
         state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -5724,6 +5726,7 @@ mod settings_tests {
             observed_compactions: None,
             presentation_ref: None,
             last_seen_commit: None,
+            entitlement: None,
         }
     }
 
@@ -7246,6 +7249,7 @@ mod overview_tests {
             observed_compactions: None,
             presentation_ref: None,
             last_seen_commit: None,
+            entitlement: None,
         }
     }
 

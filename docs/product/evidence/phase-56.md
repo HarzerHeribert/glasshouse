@@ -656,3 +656,108 @@ Package `GH-ENTITLEMENT-BROKER`, 2026-08-31, Fable 5 at xhigh (Red). The pool be
 **One defect the investigation swarm caught before this box was ticked, fixed in this commit:** `burn_urgency` returned the maximum `+1.0` for any `seconds <= RESET_BURN_HORIZON` — including a **negative** `seconds`, i.e. a reset already in the past, which is routine over the persisted, deliberately un-staled capacity cache. That made the router prefer the *stalest* account over a fresh healthy one — the inverse of 1967's intent. Guarded `seconds <= 0 => 0.0` (a reset already reached has rolled the remainder over — nothing to burn), with a `burn_urgency_tests::a_reset_already_past_is_not_urgent` unit test. The broker's own reset examples (positive seconds) are unchanged.
 
 **Recorded limits (accepted, queued as follow-up fixes — swarm findings routing-broker #1/#3):** an empty cached `ModelCatalogue` deserialises to `Declared(vec![])`, so `model_constraint` would refuse every candidate on that provider (an empty catalogue file makes a profile unlaunchable) — the model gate is guarded to fire only with ≥2 configured entitlements, bounding but not closing this; and the pool gate is set-wide rather than per-`(harness, profile)`, so an unrelated second entitlement can switch the pool terms on for a single-account resource. Neither inverts a closed contract; both are queued (`swarm-fixes-*`). Also: a full blast during the concurrent 12-agent swarm flaked `v1_criteria_setup::v1_1907` once (a real-binary subprocess+fixture test) — it passes twice isolated; noted as load-sensitive, not a broker regression.
+
+---
+
+### Line 1972 — the pool in one inspectable view, and the account that served each session (56A step 4)
+
+Package `GH-ENTITLEMENT-FALLBACK-VIEW`, 2026-08-31, Opus 5 at high (Red).
+**COMPLETE.** Line 1970 was **refused, not attempted** — see below.
+
+Contract: given the user's `[entitlements.<name>]` entries, `glasshouse
+entitlements` shows the whole pool in one view — every configured account named,
+each with its remaining capacity, its time until reset, the throttling recently
+observed against it, and what it served — and the entitlement that will serve a
+session is announced when it starts; while preserving that an account no
+telemetry describes still appears and reads `unknown` on every facet nothing
+measured (never full, never empty, never a number), and that an entitlement is
+named and never its credential.
+
+**Why a new column was necessary, asserted rather than argued.**
+`SessionRecord.backend_resource` holds `BackendResource::slug`, whose entire
+vocabulary is `native`, `direct-provider:<provider>`, `glasshouse-gateway` — a
+*kind* of resource. Phase 56A's unit of capacity is the *instance*, and the two
+Claude accounts that motivate the phase both slug to `native`.
+`two_accounts_of_one_vendor_are_two_values_where_backend_resource_is_one` pins
+exactly that: the two records' `backend_resource` are equal while their
+`entitlement` differ. Migration 22 adds `sessions.entitlement TEXT`, nullable,
+no CHECK, no index — migration 20's shape and its stated rationale (validation
+in Rust, not in SQL).
+
+**The writer resolves the same value the announcement uses**, deliberately not a
+second lookup, so what a person is told and what the record says cannot
+disagree. The worker established, before wiring it, that `entitlement` at the
+launch site is the router's own winner re-resolved by name and never a
+separately-ranked one; the only other branch (`entitlement_for`) is taken when
+the router did not run, and it *refuses* a several-account provider as ambiguous
+rather than picking one. **Resume deliberately does not write** — its lookup is
+the ambiguous one and yields `None` on a pooled provider, so overwriting there
+would replace a well-established fact with a weaker one. `create` is the only
+writer, and that is a decision, not an omission.
+
+**`served` is deliberately not one of the unknowns.** The four telemetry facets
+read `unknown` when nobody looked; `served` *did* look — at every session row the
+project recorded — so an account with no rows has a measured zero and reads
+`nothing recorded`. Sessions charged to an entry the configuration no longer
+describes are still rendered: recorded history does not vanish when someone edits
+a file.
+
+Production: `database.rs` (migration 22, `SUPPORTED_SCHEMA_VERSION` 21→22) ·
+`session/store.rs` (`SessionRecord::entitlement`, `NewSession::with_entitlement`,
+`ALL_COLUMNS`, the `INSERT`, `read_record`) · `cli.rs` (`Command::Entitlements`) ·
+`main.rs` (`entitlements_report`, `served_phrase`,
+`entitlement_pool_with_telemetry` — extracted and shared with `status_report`, so
+two commands cannot describe one account differently — and the dispatch arm).
+
+Regression: `database::tests::the_entitlement_migration_adds_its_column_and_undoes_cleanly` ·
+`entitlement_broker::{the_session_record_names_the_entitlement_that_served_it,
+two_accounts_of_one_vendor_are_two_values_where_backend_resource_is_one,
+the_view_names_every_entitlement_and_spells_unknown_for_one_nothing_measured,
+the_view_reports_what_each_entitlement_served,
+the_view_still_reports_sessions_charged_to_an_entry_no_longer_configured}`.
+**Three of the five acceptance tests run through the shipped binary** (§35):
+nothing that builds a `NewSession` by hand can fail on a build where
+`launch_session` stops filling the column, and that call site is the whole of
+what this line is about.
+
+**5/5 mutations KILLED**, every restore byte-identical:
+
+| vocabulary | change | killed by | observed |
+|---|---|---|---|
+| `drop-migration-column` | the migration's column renamed away | `the_session_record_names_the_entitlement_that_served_it` | the **launch itself fails** — the INSERT names the column, so an absent one is a loud error at the moment of recording rather than a silently dropped fact |
+| `skip-state-update` | `.with_entitlement(...)` → `.with_entitlement(None)` | same | "the record carries the account that actually served, and it is the one the launch announced" |
+| `wrong-source` | `read_record`'s column read → `None` | `two_accounts_of_one_vendor_...` | `read_first.entitlement` was not `Some("claude-a")` |
+| `fabricate-unknown` | `"capacity: unknown"` → `"capacity: 100%"` | `the_view_names_every_entitlement_and_spells_unknown...` | an account nothing measured has no capacity — never full, never empty, never a number |
+| `bypass-fallback` | `served_phrase(served.get(..))` → `served_phrase(None)` | `the_view_reports_what_each_entitlement_served` | the served count vanished |
+
+**Line 1970 — REFUSED, and the refusal is the right outcome.** Its order
+("subscription to subscription to API credits") is an order over *kinds*, and
+both ways to express it were barred: routing on `EntitlementKind` would falsify
+that field's own documented invariant — *"No rule depends on it — so a wrong
+`kind` misdescribes an entitlement and never misroutes one"* — and the field is
+`Option` and absent by default; the alternative needed a new `EntitlementConfig`
+field held by another worker. **Nothing dead was left behind**: no unused purpose
+constant, no unreachable ordering function, because production code with no
+production caller is the shape `cluster-b.py` exists to find. The user ruled on
+it the same evening; the ruling is recorded in `design-decisions.md` §Phase 56A,
+"Step 4's fallback order", and makes the order **tier-preserving** with the
+subscription/API distinction taken from `EntitlementBacking` rather than `kind`.
+
+The worker also answered, from the code, the architectural question the packet
+posed: the order applies **at selection time** inside `choose` and therefore at
+all three call sites, because every pool candidate is `Native` or
+`DirectProvider` — backends where Glasshouse is *not* in the inference path, so
+it never sees the 429 and there is no use-time refusal to retry on. The record
+belongs only at the acting sites, since `glasshouse route` reports and records
+nothing.
+
+Recorded limits — stated by the worker, not discovered later:
+- resume does not write the column (above); a pooled resume still reads `None`
+- the Linux and Windows legs were not run; nothing added is platform-conditional
+- `routing/session.rs` and `routing/evidence.rs` are **untouched** — they are
+  line 1970's files
+- packet errors the worker caught and the packet had wrong: the migration ripple
+  is wider than the recon's nine `version, 21` pins (four rollback batches need a
+  `DROP COLUMN`, plus a tenth pin in `tests/session_context.rs` phrased so the
+  grep missed it), and `SessionRecord` has no `Default`, so the new field broke
+  seven test-only struct literals in four files

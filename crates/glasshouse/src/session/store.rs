@@ -553,6 +553,32 @@ pub struct SessionRecord {
     ///
     /// Written only by [`SessionStore::record_seen_commit`].
     pub last_seen_commit: Option<String>,
+    /// Which configured `[entitlements.<name>]` account served this session,
+    /// by **name** — map line 1972's *"what it served"*, made answerable of
+    /// the durable record.
+    ///
+    /// [`Self::backend_resource`] cannot answer this and no widening of it
+    /// could: it holds a
+    /// [`crate::profile::BackendResource::slug`], whose whole vocabulary is
+    /// `native`, `direct-provider:<provider>` and `glasshouse-gateway` — a
+    /// **kind** of resource. Two Claude accounts of one vendor, which is
+    /// precisely Phase 56A's unit of capacity, both slug to `native`. This
+    /// column names the **instance**.
+    ///
+    /// `None` means the serving account was never established — a session
+    /// recorded before this column existed, a launch under a resource no
+    /// `[entitlements]` entry describes, or a gateway-backed profile whose
+    /// upstream is assigned after launch. All three are the same fact,
+    /// *"nothing recorded"*, and the column does not distinguish them; it is
+    /// [`Self::launch_profile`]'s `None` and it is never a name.
+    ///
+    /// A name, never a credential: an entitlement authenticates through a
+    /// [`crate::secret::SecretRef`] resolved at the moment of use, and this
+    /// struct's own doc says why nothing else may travel here.
+    ///
+    /// Written only by [`SessionStore::create`], from
+    /// [`NewSession::entitlement`].
+    pub entitlement: Option<String>,
 }
 
 impl SessionRecord {
@@ -916,6 +942,10 @@ pub struct NewSession {
     /// The session this one is being bootstrapped from, if this launch is a
     /// `--from-checkpoint` handoff. See [`SessionRecord::source_session_id`].
     pub source_session_id: Option<SessionId>,
+    /// The entitlement that will serve this session, by name. See
+    /// [`SessionRecord::entitlement`] for what `None` means and for why a
+    /// name is the only thing that may go here.
+    pub entitlement: Option<String>,
 }
 
 impl NewSession {
@@ -936,6 +966,7 @@ impl NewSession {
             response_profile: None,
             response_mechanism: None,
             source_session_id: None,
+            entitlement: None,
         }
     }
 
@@ -1025,6 +1056,13 @@ impl NewSession {
     /// [`SessionRecord::source_session_id`].
     pub fn with_source_session(mut self, source_session_id: Option<SessionId>) -> Self {
         self.source_session_id = source_session_id;
+        self
+    }
+
+    /// Record which entitlement will serve this session, by name. See
+    /// [`SessionRecord::entitlement`].
+    pub fn with_entitlement(mut self, entitlement: Option<String>) -> Self {
+        self.entitlement = entitlement;
         self
     }
 }
@@ -1233,7 +1271,8 @@ const ALL_COLUMNS: &str = "id, project_id, harness, native_session_id, role, \
                            launch_profile, backend_resource, model, pairing_class, \
                            protocol, response_profile, response_mechanism, \
                            display_name, purpose, source_session_id, \
-                           observed_compactions, presentation_ref, last_seen_commit";
+                           observed_compactions, presentation_ref, last_seen_commit, \
+                           entitlement";
 
 /// An open project database plus the sessions inside it.
 ///
@@ -1515,6 +1554,12 @@ impl<'a> SessionStore<'a> {
             // a claim about a repository nobody read. So the first hook that
             // does read one records it, and does not call it a boundary.
             last_seen_commit: None,
+            // Unlike `last_seen_commit`, this one the caller CAN establish:
+            // the launch path resolves and announces the serving entitlement
+            // before anything is recorded, so it is supplied rather than
+            // discovered later. `None` when that path established none, which
+            // is a fact and not a gap.
+            entitlement: new.entitlement,
         };
 
         self.conn
@@ -1524,9 +1569,10 @@ impl<'a> SessionStore<'a> {
                  launch_profile, backend_resource, model, pairing_class, protocol, \
                  response_profile, response_mechanism, process_id, \
                  process_started_at, process_host, supervision, source_session_id, \
-                 observed_compactions, presentation_ref, last_seen_commit) \
+                 observed_compactions, presentation_ref, last_seen_commit, \
+                 entitlement) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
-                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
                 rusqlite::params![
                     record.id.as_str(),
                     &record.project_id,
@@ -1564,6 +1610,7 @@ impl<'a> SessionStore<'a> {
                     record.observed_compactions,
                     &record.presentation_ref,
                     &record.last_seen_commit,
+                    &record.entitlement,
                 ],
             )
             .map_err(|source| SessionStoreError::Sql {
@@ -2751,6 +2798,13 @@ fn read_record(row: &Row<'_>) -> Result<SessionRecord, SessionStoreError> {
     // `Option` for `observed_compactions`' reason — NULL is the fact
     // "nobody has looked yet" and no fallback may erase it.
     let last_seen_commit: Option<String> = row.get_unwrap(21);
+    // Opaque, like `presentation_ref`: the key of a `[entitlements.<name>]`
+    // table, which is whatever a person typed in their own configuration
+    // file, and this module does not know what names that file may hold. Read
+    // as an `Option` for `observed_compactions`' reason — NULL is the fact
+    // "the serving account was never established" and no fallback may erase
+    // it into a name.
+    let entitlement: Option<String> = row.get_unwrap(22);
 
     Ok(SessionRecord {
         id,
@@ -2775,6 +2829,7 @@ fn read_record(row: &Row<'_>) -> Result<SessionRecord, SessionStoreError> {
         observed_compactions,
         presentation_ref,
         last_seen_commit,
+        entitlement,
     })
 }
 
@@ -2864,8 +2919,12 @@ mod tests {
     /// migration 16's reason, and migration 19's two tables are two
     /// statements for migration 15's — each drop takes its indexes and
     /// triggers with it — and they go first, newest migration undone first.
-    /// Migration 20's column is the newest of all, so it leads.
+    /// Migrations 21 and 22 are each one statement for migration 16's reason
+    /// as well: nothing indexes `last_seen_commit`, `extraction_trigger` or
+    /// `entitlement`, and none of the three carries a `CHECK`. Migration 22's
+    /// column is the newest of all, so it leads.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        ALTER TABLE sessions DROP COLUMN entitlement;
         ALTER TABLE memories DROP COLUMN extraction_trigger;
         ALTER TABLE sessions DROP COLUMN last_seen_commit;
 
@@ -4095,6 +4154,15 @@ mod tests {
                 // The only strings that can reach it come from files Git
                 // itself wrote.
                 "sessions.last_seen_commit",
+                // Migration 22. The key of an `[entitlements.<name>]` table
+                // — the name a person typed in their own configuration file,
+                // and the same string `glasshouse status` already prints. An
+                // entitlement's authentication is a `config::SecretRef`, a
+                // reference resolved through the operating system's secret
+                // storage at the moment of use; no value it names can reach
+                // this column, because the only writer copies
+                // `ResolvedEntitlement::name` and nothing else.
+                "sessions.entitlement",
                 // Migration 19: the six fields an agent states about a
                 // premise and their bookkeeping. Free text, sanitized by the
                 // writer and bounded; no column is named for, or shaped
@@ -4233,7 +4301,8 @@ mod tests {
         fixture
             .conn
             .execute_batch(
-                "ALTER TABLE sessions DROP COLUMN last_seen_commit;
+                "ALTER TABLE sessions DROP COLUMN entitlement;
+                 ALTER TABLE sessions DROP COLUMN last_seen_commit;
                 ALTER TABLE sessions DROP COLUMN presentation_ref;
                  ALTER TABLE sessions DROP COLUMN observed_compactions;
                  ALTER TABLE sessions DROP COLUMN launch_profile;
@@ -4271,8 +4340,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 21,
-            "the launch must have applied migrations 3 through 21"
+            version, 22,
+            "the launch must have applied migrations 3 through 22"
         );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
@@ -4463,8 +4532,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 21,
-            "the launch must have applied migrations 2 through 21"
+            version, 22,
+            "the launch must have applied migrations 2 through 22"
         );
 
         let store = SessionStore::new(&reopened).unwrap();
@@ -5417,8 +5486,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 21,
-                "the launch must have applied migrations 8 through 21"
+                version, 22,
+                "the launch must have applied migrations 8 through 22"
             );
 
             let after = SessionStore::new(&reopened)
@@ -5546,8 +5615,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 21,
-                "the reopen must have applied migrations 12 through 21"
+                version, 22,
+                "the reopen must have applied migrations 12 through 22"
             );
 
             let after = SessionStore::new(&reopened)

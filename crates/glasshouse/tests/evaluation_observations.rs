@@ -324,7 +324,7 @@ fn a_ledger_that_cannot_be_written_does_not_fail_the_retrieval() {
             })
             .unwrap();
         assert_eq!(
-            version, 21,
+            version, 22,
             "the database must still claim the current schema version, so nothing \
              rebuilds the table"
         );
@@ -775,6 +775,10 @@ fn a_version_fourteen_database_migrates_forward_keeping_every_row() {
             // Every migration above 14, newest first: 20's column, 19's
             // two tables, 18's column, 17's table, 16's column, 15's table.
             "ALTER TABLE memories DROP COLUMN extraction_trigger;
+             -- Migration 22's column, newest of all, so it leads: a rollback
+             -- undoes every migration above the version it claims, or the
+             -- re-run meets a column it has already added.
+             ALTER TABLE sessions DROP COLUMN entitlement;
              ALTER TABLE sessions DROP COLUMN last_seen_commit;
             ALTER TABLE sessions DROP COLUMN presentation_ref;
              DROP TABLE assumption_transitions;
@@ -803,8 +807,8 @@ fn a_version_fourteen_database_migrates_forward_keeping_every_row() {
         })
         .unwrap();
     assert_eq!(
-        version, 21,
-        "the launch must have applied migrations 15 through 21"
+        version, 22,
+        "the launch must have applied migrations 15 through 22"
     );
 
     let memory = migrated.memory();

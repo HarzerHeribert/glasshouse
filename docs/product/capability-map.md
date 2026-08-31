@@ -1969,7 +1969,7 @@ Recorded 2026-08-31 from the user's instruction of record, refining Phase 56: *"
 ☑ Present the whole pool to every harness through the broker, so that a single harness process is no longer bound to one account's quota.
 ☐ Fall back across the pool in a stated order on exhaustion or throttling — subscription to subscription to API credits — and record every fallback with its reason.
 ☐ Let the user state per-entitlement rules — allowed harnesses, tiers, job kinds, and spend ceilings — and never let the broker exceed them.
-☐ Show the pool in one inspectable view — each entitlement's capacity, reset, throttle history, and what it served — and announce the entitlement that served each session.
+☑ Show the pool in one inspectable view — each entitlement's capacity, reset, throttle history, and what it served — and announce the entitlement that served each session.
 ☑ Keep every entitlement's credential isolated: tokens and keys never mixed across accounts, never logged, never written into a project file.
 ☐ Cover the broker with an end-to-end test against fixture entitlements, including a reset boundary and an exhaustion fallback, before offering it.
 

@@ -2514,6 +2514,7 @@ mod tests {
             observed_compactions: None,
             presentation_ref: None,
             last_seen_commit: None,
+            entitlement: None,
         }
     }
 
