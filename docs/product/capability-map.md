@@ -1313,9 +1313,9 @@ Phase 33 — Resource health
 ☑ Track recent observed latency for gateway-backed resources where measurable.
 ☑ Track known quota or usage state when a provider or harness exposes it.
 ☑ Track known quota reset time when it is exposed.
-☐ Track recent rate-limit responses separately from transport or model failures.
+☑ Track recent rate-limit responses separately from transport or model failures.
 ☐ Track whether a rate-limit failure appears to be provider-wide, model-specific, account-specific, or request-pool-specific when evidence permits.
-☐ Feed rate-limit events back into the unified capacity estimator.
+☑ Feed rate-limit events back into the unified capacity estimator.
 ☑ Treat provider-declared Retry-After or equivalent cooldown information as authoritative for temporary scheduling blocks.
 ☑ Treat unavailable quota telemetry as unknown rather than inventing a percentage.
 ☑ Allow a resource to be temporarily marked degraded after repeated failures.
@@ -1361,8 +1361,8 @@ Phase 33B — Reliability-adjusted agent performance
 
 Phase 33C — Failure, quota, and route correlation
 
-☐ Classify failures at least as throttle, exhausted quota, upstream 5xx, timeout, stream abort, empty completion, credential failure, request incompatibility, or unknown.
-☐ Keep temporary cadence throttling separate from exhausted long-window quota and from provider health failures.
+☑ Classify failures at least as throttle, exhausted quota, upstream 5xx, timeout, stream abort, empty completion, credential failure, request incompatibility, or unknown.
+☑ Keep temporary cadence throttling separate from exhausted long-window quota and from provider health failures.
 ☐ Learn or parse provider cadence separately from Retry-After remainder values when evidence permits.
 ☐ Reserve known paced capacity at dispatch so concurrent workers do not all consume the same apparent allowance.
 ☐ Avoid retrying a paced route in place when the current cadence makes the retry predictably unavailable.

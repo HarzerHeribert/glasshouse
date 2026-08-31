@@ -62,13 +62,30 @@
 //!   **These two boxes stay open.** A component that reads the response
 //!   stream's own framing (the harness adapter, or a body-aware layer this
 //!   project has not built) is what would have to supply them.
-//! - **`tool_rounds`, `retries`, `repairs`, `failovers`: not supplied.** The
-//!   gateway serves one HTTP request per connection
-//!   (`crate::gateway::ingress::serve`'s own "why one request per
-//!   connection") and has no notion of a *turn* spanning several of them; a
-//!   harness may make several exchanges for what a user experiences as one
-//!   turn, and only something above the gateway — the harness, or the
-//!   session it belongs to — can count rounds across that boundary.
+//! - **`tool_rounds`, `repairs`: not supplied.** The gateway serves one HTTP
+//!   request per connection (`crate::gateway::ingress::serve`'s own "why one
+//!   request per connection") and has no notion of a *turn* spanning several
+//!   of them; a harness may make several exchanges for what a user
+//!   experiences as one turn, and only something above the gateway — the
+//!   harness, or the session it belongs to — can count rounds across that
+//!   boundary. A *repair* is a concept nothing in this tree holds at all.
+//! - **`retries`: `0`, and it is a count, not a default.** The gateway
+//!   forwards each request exactly once — `crate::gateway::ingress::forward`
+//!   calls `Agent::run` once, and `ureq` 3 performs no transparent retry —
+//!   so every gateway row says so. A harness's own retries are separate
+//!   connections and separate rows.
+//! - **`failovers`: supplied.** Whether *this* exchange's outcome moved the
+//!   session to another backend is decided by
+//!   `crate::gateway::session::SessionRouting::observe_exchange` in the same
+//!   connection thread, before the row is written, so the row can carry it:
+//!   `1` for a `ChangeCause::Failover`, else `0`. A credential rotation
+//!   within one provider is deliberately **not** a failover here — Phase 9I
+//!   line 537 keeps the two apart, and so does this column.
+//! - **`failure_class`: supplied, from framing alone.** Capability map line
+//!   1364's nine-way vocabulary, [`FailureClass`], decided by
+//!   `crate::gateway::session`'s `failure_class` from the status, the
+//!   rate-limit headers, the byte count and how the stream ended — never
+//!   from a byte of the body. `None` on a served exchange.
 //! - **`input_tokens`, `output_tokens`, `cached_input_tokens`,
 //!   `cost_micro_usd`: not supplied *by this producer*.** Same reason as the
 //!   timing columns above: reading them means parsing a response body this
@@ -284,6 +301,225 @@ pub struct ObservedCost {
     pub confidence: CostConfidence,
 }
 
+/// What kind of failure one exchange was, judged from the status line, the
+/// headers, byte counts and timing alone — capability map line 1364's
+/// vocabulary, and lines 1316 and 1365's separation: a rate-limit response is
+/// counted apart from a transport or model failure, and cadence throttling
+/// apart from a spent long-window quota.
+///
+/// `None` on a [`RoutingObservation`] means the exchange completed and no
+/// failure was seen — a served turn — **or** that the row was written before
+/// `routing_observations.failure_class` existed (`crate::database` migration
+/// 18). The two are not told apart, exactly as every other nullable column on
+/// this row treats a pre-migration `NULL`; [`FailureClassCounts`] keeps such
+/// rows out of *served* by reading [`Outcome`] beside this.
+///
+/// # Stored as text with no SQL `CHECK`
+///
+/// The column carries no `CHECK`, for the reason
+/// `crate::database::EVALUATION_KINDS` gives: a vocabulary that will grow must
+/// not cost a table rebuild per value. The vocabulary lives here —
+/// [`FailureClass::ALL`], [`FailureClass::as_str`], `from_stored` — and
+/// `crate::database::FAILURE_CLASSES` is pinned against it by a test.
+///
+/// # What decides each value, and what is never read to decide it
+///
+/// The one place a value is chosen is `crate::gateway::session`'s
+/// `failure_class`, beside `classify`. Every rule there is over a status
+/// code, a rate-limit header the relay already reads in order to forward it,
+/// a byte count the relay already keeps in order to relay the body, or how
+/// the stream ended as its own framing said it would. **No rule reads a byte
+/// of the body**: a `200` whose body describes a model error is [`None`]
+/// here, because the body is exactly what the relay cannot read — the same
+/// caveat [`Outcome`] already carries. The design ruling is recorded in
+/// `docs/product/design-decisions.md` under *"Phase 33: framing is not
+/// content"*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FailureClass {
+    /// `429` from a per-window cadence limit: the provider asked for a pause
+    /// and its own headers say the window reopens soon, or say nothing.
+    Throttle,
+    /// The account or the long window is spent: `402`, or a `429` whose
+    /// headers say nothing remains until a reset far enough out to be a quota
+    /// rather than a cadence — see `crate::gateway::session`'s
+    /// `EXHAUSTED_QUOTA_HORIZON_SECONDS`.
+    ExhaustedQuota,
+    /// The provider answered `5xx`.
+    Upstream5xx,
+    /// The provider did not answer in time.
+    Timeout,
+    /// The provider answered, and then its response stream ended before its
+    /// own framing said it would — short of a declared length, or before the
+    /// terminating chunk.
+    StreamAbort,
+    /// The provider answered a success status and a body was permitted, and
+    /// zero bytes of one arrived.
+    EmptyCompletion,
+    /// `401` or `403`: the credential, not the provider.
+    CredentialFailure,
+    /// Any other `4xx`: the request, not the provider.
+    RequestIncompatibility,
+    /// The provider could not be reached, for a reason this vocabulary does
+    /// not name — a refused connection, an unresolvable host, a TLS failure.
+    Unknown,
+}
+
+impl FailureClass {
+    /// Every class, in the order capability map line 1364 lists them.
+    pub const ALL: [FailureClass; 9] = [
+        Self::Throttle,
+        Self::ExhaustedQuota,
+        Self::Upstream5xx,
+        Self::Timeout,
+        Self::StreamAbort,
+        Self::EmptyCompletion,
+        Self::CredentialFailure,
+        Self::RequestIncompatibility,
+        Self::Unknown,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Throttle => "throttle",
+            Self::ExhaustedQuota => "exhausted_quota",
+            Self::Upstream5xx => "upstream_5xx",
+            Self::Timeout => "timeout",
+            Self::StreamAbort => "stream_abort",
+            Self::EmptyCompletion => "empty_completion",
+            Self::CredentialFailure => "credential_failure",
+            Self::RequestIncompatibility => "request_incompatibility",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_stored(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|class| class.as_str() == value)
+    }
+
+    /// Whether this class says something about the **provider's health**, as
+    /// distinct from its cadence limit, its account's quota, the credential,
+    /// or the request — capability map line 1365's third figure.
+    ///
+    /// A throttle and a spent quota are pacing facts about a window; a
+    /// credential failure is about a key; a request incompatibility is about
+    /// what the harness sent. None of those says the provider is unwell.
+    /// Everything else does: it answered `5xx`, took too long, cut its own
+    /// stream, produced nothing, or could not be reached at all.
+    pub fn is_provider_health(self) -> bool {
+        match self {
+            Self::Upstream5xx
+            | Self::Timeout
+            | Self::StreamAbort
+            | Self::EmptyCompletion
+            | Self::Unknown => true,
+            Self::Throttle
+            | Self::ExhaustedQuota
+            | Self::CredentialFailure
+            | Self::RequestIncompatibility => false,
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|class| *class == self)
+            .expect("every class is in ALL")
+    }
+}
+
+impl std::fmt::Display for FailureClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+/// How many exchanges in one window fell into each [`FailureClass`], beside
+/// the denominator they are out of — capability map line 1316's count of
+/// rate-limit responses *separately from* transport or model failures, and
+/// line 1365's three figures, which this type refuses to add together: there
+/// is no `failures()` total here on purpose.
+///
+/// Counts, not rates, so unlike [`RoutingSummary`]'s aggregates they are not
+/// withheld below [`MIN_SAMPLE_FOR_SUMMARY`]: two throttles out of two
+/// exchanges is a true statement about two exchanges, and it is the
+/// denominator printed beside it that keeps a reader from mistaking it for a
+/// rate.
+///
+/// # Which rows count
+///
+/// A row is folded in only when it recorded an [`Outcome`] at all — the
+/// gateway producer always does; `crate::memory::extract`'s rows never do and
+/// are not gateway exchanges, so they are neither served nor failed here. A
+/// row with a class is counted under it. A row with no class and a
+/// [`Outcome::Succeeded`] is *served*. A row with no class and any other
+/// outcome is *unclassified*: written before migration 18, or by a producer
+/// that recorded a verdict without a kind — counted in the denominator so it
+/// is not silently absent, and never mistaken for served.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FailureClassCounts {
+    served: usize,
+    unclassified: usize,
+    by_class: [usize; FailureClass::ALL.len()],
+}
+
+impl FailureClassCounts {
+    /// Fold one row in — see the type's own doc for which rows count.
+    pub fn record(&mut self, outcome: Option<Outcome>, class: Option<FailureClass>) {
+        match (outcome, class) {
+            (None, _) => {}
+            (Some(_), Some(class)) => self.by_class[class.index()] += 1,
+            (Some(Outcome::Succeeded), None) => self.served += 1,
+            (Some(_), None) => self.unclassified += 1,
+        }
+    }
+
+    /// Every exchange these counts are out of — the denominator.
+    pub fn observed(&self) -> usize {
+        self.served + self.unclassified + self.by_class.iter().sum::<usize>()
+    }
+
+    /// Whether anything at all was folded in.
+    pub fn is_empty(&self) -> bool {
+        self.observed() == 0
+    }
+
+    /// Exchanges that completed with no failure seen.
+    pub fn served(&self) -> usize {
+        self.served
+    }
+
+    /// Exchanges that recorded a non-success outcome and no class — see the
+    /// type's own doc.
+    pub fn unclassified(&self) -> usize {
+        self.unclassified
+    }
+
+    pub fn count(&self, class: FailureClass) -> usize {
+        self.by_class[class.index()]
+    }
+
+    /// Line 1365's first figure: temporary cadence throttling.
+    pub fn cadence_throttled(&self) -> usize {
+        self.count(FailureClass::Throttle)
+    }
+
+    /// Line 1365's second figure: an exhausted long-window quota.
+    pub fn exhausted_quota(&self) -> usize {
+        self.count(FailureClass::ExhaustedQuota)
+    }
+
+    /// Line 1365's third figure: the provider itself failing — every class
+    /// [`FailureClass::is_provider_health`] says yes to, and none it says no
+    /// to.
+    pub fn provider_health_failures(&self) -> usize {
+        FailureClass::ALL
+            .into_iter()
+            .filter(|class| class.is_provider_health())
+            .map(|class| self.count(class))
+            .sum()
+    }
+}
+
 /// What one producer has to say about one measurable turn — capability map
 /// lines 1330 to 1334, before it is stored.
 ///
@@ -317,6 +553,8 @@ pub struct NewObservation {
     pub repairs: Option<i64>,
     pub failovers: Option<i64>,
     pub outcome: Option<Outcome>,
+    /// What kind of failure this was, when it was one — see [`FailureClass`].
+    pub failure_class: Option<FailureClass>,
 
     pub context_state: ContextState,
 }
@@ -346,6 +584,7 @@ impl NewObservation {
             repairs: None,
             failovers: None,
             outcome: None,
+            failure_class: None,
             context_state: ContextState::Unknown,
         }
     }
@@ -443,6 +682,39 @@ impl NewObservation {
         self
     }
 
+    /// What kind of failure this exchange was — capability map line 1364.
+    /// `None` is a served exchange, and it stays `None` rather than becoming
+    /// a class that means "nothing": a row with no failure has no kind of
+    /// failure to name.
+    pub fn with_failure_class(mut self, failure_class: Option<FailureClass>) -> Self {
+        self.failure_class = failure_class;
+        self
+    }
+
+    /// How many times this exchange's own outcome moved the session to
+    /// another backend — capability map line 1334's `failovers`, the one of
+    /// its four counters a gateway exchange can honestly supply, because the
+    /// failover it caused is decided in the same connection thread before
+    /// its row is written (`crate::gateway::session::SessionRouting::observe_exchange`).
+    ///
+    /// A `u32` here and an `i64` in the ledger, so a negative count cannot be
+    /// built even though the column's `CHECK` would refuse it anyway. `None`
+    /// is "this producer did not count", as for every other nullable column.
+    pub fn with_failovers(mut self, failovers: Option<u32>) -> Self {
+        self.failovers = failovers.map(i64::from);
+        self
+    }
+
+    /// How many times the request was re-sent in place before this outcome —
+    /// line 1334's `retries`. The gateway forwards each request exactly once
+    /// (`ureq` 3 has no transparent retry, and `crate::gateway::ingress::forward`
+    /// calls `Agent::run` once), so its producer writes `Some(0)`: a count it
+    /// took, not a count it declined to take.
+    pub fn with_retries(mut self, retries: Option<u32>) -> Self {
+        self.retries = retries.map(i64::from);
+        self
+    }
+
     pub fn with_context_state(mut self, context_state: ContextState) -> Self {
         self.context_state = context_state;
         self
@@ -481,6 +753,9 @@ pub struct RoutingObservation {
     pub repairs: Option<i64>,
     pub failovers: Option<i64>,
     pub outcome: Option<Outcome>,
+    /// `None` for a served exchange, and for every row written before
+    /// migration 18 — see [`FailureClass`].
+    pub failure_class: Option<FailureClass>,
 
     pub context_state: ContextState,
 }
@@ -624,6 +899,11 @@ pub struct RoutingSummary {
     /// Fraction of observations with a known outcome that were
     /// [`Outcome::Failed`] — line 1339's "failure rates."
     pub failure_rate: Option<AggregateReading<f64>>,
+    /// How many of this identity's exchanges in the window fell into each
+    /// [`FailureClass`], with their denominator — lines 1316 and 1365. Counts
+    /// rather than rates, so **not** withheld below [`MIN_SAMPLE_FOR_SUMMARY`]
+    /// like the four aggregates above; see [`FailureClassCounts`]' own doc.
+    pub failure_classes: FailureClassCounts,
 }
 
 /// How much weight [`ewma`] gives the most recent observation.
@@ -980,7 +1260,7 @@ impl EvidenceLedger {
                 input_tokens, output_tokens, cached_input_tokens,
                 cost_micro_usd, cost_confidence,
                 tool_rounds, retries, repairs, failovers, outcome,
-                context_state
+                context_state, failure_class
             ) VALUES (
                 ?1, ?2,
                 ?3, ?4, ?5, ?6, ?7, ?8,
@@ -988,7 +1268,7 @@ impl EvidenceLedger {
                 ?14, ?15, ?16,
                 ?17, ?18,
                 ?19, ?20, ?21, ?22, ?23,
-                ?24
+                ?24, ?25
             )",
             params![
                 self.project_id,
@@ -1015,6 +1295,7 @@ impl EvidenceLedger {
                 new.failovers,
                 new.outcome.map(Outcome::as_str),
                 new.context_state.as_str(),
+                new.failure_class.map(FailureClass::as_str),
             ],
         )
         .map_err(sql_err("record a routing observation"))?;
@@ -1129,7 +1410,85 @@ impl EvidenceLedger {
             ),
             ewma_duration_ms: ewma_duration_aggregate(&observations),
             failure_rate: failure_rate_aggregate(&observations),
+            failure_classes: failure_class_counts(&observations),
         })
+    }
+
+    /// Every provider's [`FailureClassCounts`] over the window ending at
+    /// `now_unix` — capability map lines 1316 and 1365's reader, at the grain
+    /// `glasshouse resources` renders: one entry per provider, across every
+    /// model, route, harness and context state it was observed under.
+    ///
+    /// Per provider rather than per [`ObservationQuery`] identity because
+    /// the question these two lines ask — *is this provider throttling me,
+    /// out of quota, or unwell?* — is about the resource, and
+    /// `crate::provider::resources` keys its health rendering by provider
+    /// name exactly as [`crate::provider::telemetry::GatewayHealthCache`]
+    /// does. Blending across context states is harmless here because these
+    /// are counts of failures, not the latency figures line 1337 forbids
+    /// averaging across a cache boundary.
+    ///
+    /// One `GROUP BY` rather than a row-by-row read: the ledger may hold a
+    /// long session's every exchange, and a report should not pull each of
+    /// them into memory to count nine buckets.
+    pub fn failure_classes_by_provider(
+        &self,
+        now_unix: i64,
+        window_seconds: i64,
+    ) -> Result<std::collections::BTreeMap<String, FailureClassCounts>, EvidenceLedgerError> {
+        let earliest = now_unix.saturating_sub(window_seconds);
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(
+                "SELECT provider, outcome, failure_class, COUNT(*) AS n
+                 FROM routing_observations
+                 WHERE observed_at >= ?1 AND observed_at <= ?2
+                 GROUP BY provider, outcome, failure_class",
+            )
+            .map_err(sql_err("count routing failures by class"))?;
+        let rows = statement
+            .query_map(params![earliest, now_unix], |row| {
+                let provider: String = row.get("provider")?;
+                let outcome: Option<String> = row.get("outcome")?;
+                let class: Option<String> = row.get("failure_class")?;
+                let n: i64 = row.get("n")?;
+                Ok((provider, outcome, class, n))
+            })
+            .map_err(sql_err("count routing failures by class"))?;
+
+        let mut out: std::collections::BTreeMap<String, FailureClassCounts> = Default::default();
+        for row in rows {
+            let (provider, outcome, class, n) =
+                row.map_err(sql_err("count routing failures by class"))?;
+            // A stored value this build does not recognise is reported, not
+            // guessed at — the same refusal `row_to_observation` makes. A
+            // grouped row has no single `seq` to name, so `-1` says so.
+            let outcome = match outcome {
+                None => None,
+                Some(text) => Some(Outcome::from_stored(&text).ok_or_else(|| {
+                    EvidenceLedgerError::UnknownValue {
+                        seq: -1,
+                        column: "outcome",
+                        value: text,
+                    }
+                })?),
+            };
+            let class = match class {
+                None => None,
+                Some(text) => Some(FailureClass::from_stored(&text).ok_or_else(|| {
+                    EvidenceLedgerError::UnknownValue {
+                        seq: -1,
+                        column: "failure_class",
+                        value: text,
+                    }
+                })?),
+            };
+            let counts = out.entry(provider).or_default();
+            for _ in 0..n.max(0) {
+                counts.record(outcome, class);
+            }
+        }
+        Ok(out)
     }
 
     /// [`Self::summarize`] for whichever `(route, harness, context_state)`
@@ -1487,6 +1846,14 @@ fn failure_rate_aggregate(observations: &[RoutingObservation]) -> Option<Aggrega
     ))
 }
 
+fn failure_class_counts(observations: &[RoutingObservation]) -> FailureClassCounts {
+    let mut counts = FailureClassCounts::default();
+    for observation in observations {
+        counts.record(observation.outcome, observation.failure_class);
+    }
+    counts
+}
+
 fn row_to_observation(
     row: &Row<'_>,
 ) -> rusqlite::Result<Result<RoutingObservation, EvidenceLedgerError>> {
@@ -1501,6 +1868,21 @@ fn row_to_observation(
                 return Ok(Err(EvidenceLedgerError::UnknownValue {
                     seq,
                     column: "outcome",
+                    value: text,
+                }));
+            }
+        },
+    };
+
+    let failure_class_text: Option<String> = row.get("failure_class")?;
+    let failure_class = match failure_class_text {
+        None => None,
+        Some(text) => match FailureClass::from_stored(&text) {
+            Some(class) => Some(class),
+            None => {
+                return Ok(Err(EvidenceLedgerError::UnknownValue {
+                    seq,
+                    column: "failure_class",
                     value: text,
                 }));
             }
@@ -1570,6 +1952,7 @@ fn row_to_observation(
         repairs: row.get("repairs")?,
         failovers: row.get("failovers")?,
         outcome,
+        failure_class,
         context_state,
     }))
 }
@@ -1817,6 +2200,211 @@ mod tests {
             row.first_byte_at_unix, None,
             "this producer never supplies it"
         );
+        assert_eq!(
+            row.failure_class, None,
+            "a served row has no kind of failure"
+        );
+        assert_eq!(row.failovers, None, "this test's producer did not count");
+        assert_eq!(row.retries, None);
+    }
+
+    /// Migration 18's column and line 1334's two counters the gateway can
+    /// supply, through the real schema and back — including the value the
+    /// `outcome` `CHECK` two columns over would never have allowed a
+    /// vocabulary to grow into.
+    #[test]
+    fn a_failure_class_and_the_two_counters_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let ledger = fixture.ledger();
+
+        for (i, class) in FailureClass::ALL.iter().enumerate() {
+            ledger
+                .record(
+                    observation("anyrouter", "claude-opus-4-1")
+                        .with_outcome(Outcome::Failed)
+                        .with_failure_class(Some(*class))
+                        .with_failovers(Some(u32::from(i == 0)))
+                        .with_retries(Some(0)),
+                    1_000 + i as i64,
+                )
+                .unwrap();
+        }
+
+        let mut rows = ledger
+            .recent(
+                ObservationQuery {
+                    provider: "anyrouter",
+                    model: "claude-opus-4-1",
+                    route: Some("anthropic-messages"),
+                    harness: Some("claude-code"),
+                },
+                20,
+            )
+            .unwrap();
+        rows.sort_by_key(|row| row.seq);
+        assert_eq!(rows.len(), FailureClass::ALL.len());
+        for (row, class) in rows.iter().zip(FailureClass::ALL) {
+            assert_eq!(row.failure_class, Some(class));
+            assert_eq!(row.retries, Some(0));
+        }
+        assert_eq!(rows[0].failovers, Some(1));
+        assert!(rows[1..].iter().all(|row| row.failovers == Some(0)));
+    }
+
+    /// Which rows count, per [`FailureClassCounts`]' own doc: a row with no
+    /// outcome is nobody's exchange; a class is counted under itself; a
+    /// success with no class is served; anything else with no class is
+    /// unclassified — and line 1365's third figure excludes the two classes
+    /// that say nothing about the provider's health.
+    #[test]
+    fn failure_class_counts_keep_served_unclassified_and_each_class_apart() {
+        let mut counts = FailureClassCounts::default();
+        assert!(counts.is_empty());
+
+        counts.record(None, None);
+        counts.record(None, Some(FailureClass::Throttle));
+        assert!(
+            counts.is_empty(),
+            "rows without an outcome are not exchanges"
+        );
+
+        counts.record(Some(Outcome::Succeeded), None);
+        counts.record(Some(Outcome::Failed), None);
+        counts.record(Some(Outcome::Unknown), None);
+        counts.record(Some(Outcome::Failed), Some(FailureClass::Throttle));
+        counts.record(Some(Outcome::Failed), Some(FailureClass::Throttle));
+        counts.record(Some(Outcome::Failed), Some(FailureClass::ExhaustedQuota));
+        counts.record(Some(Outcome::Failed), Some(FailureClass::Upstream5xx));
+        counts.record(Some(Outcome::Failed), Some(FailureClass::StreamAbort));
+        counts.record(Some(Outcome::Failed), Some(FailureClass::CredentialFailure));
+        counts.record(
+            Some(Outcome::Failed),
+            Some(FailureClass::RequestIncompatibility),
+        );
+
+        assert_eq!(counts.served(), 1);
+        assert_eq!(counts.unclassified(), 2);
+        assert_eq!(counts.cadence_throttled(), 2);
+        assert_eq!(counts.exhausted_quota(), 1);
+        assert_eq!(
+            counts.provider_health_failures(),
+            2,
+            "upstream 5xx and stream abort; never the credential or the request"
+        );
+        assert_eq!(counts.count(FailureClass::CredentialFailure), 1);
+        assert_eq!(counts.observed(), 10);
+    }
+
+    /// [`EvidenceLedger::summarize`] carries the counts for its identity, and
+    /// — being counts, not rates — does not withhold them below
+    /// [`MIN_SAMPLE_FOR_SUMMARY`] the way it withholds `failure_rate`.
+    #[test]
+    fn summarize_counts_failure_classes_even_below_the_sample_floor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let ledger = fixture.ledger();
+        for at in [1_000, 1_001] {
+            ledger
+                .record(
+                    observation("anyrouter", "claude-opus-4-1")
+                        .with_outcome(Outcome::Failed)
+                        .with_failure_class(Some(FailureClass::Throttle)),
+                    at,
+                )
+                .unwrap();
+        }
+        let summary = ledger
+            .summarize(
+                ObservationQuery {
+                    provider: "anyrouter",
+                    model: "claude-opus-4-1",
+                    route: Some("anthropic-messages"),
+                    harness: Some("claude-code"),
+                },
+                ContextState::Unknown,
+                1_100,
+                1_000,
+            )
+            .unwrap();
+        assert!(summary.failure_rate.is_none(), "two is below the floor");
+        assert_eq!(summary.failure_classes.cadence_throttled(), 2);
+        assert_eq!(summary.failure_classes.observed(), 2);
+    }
+
+    /// [`EvidenceLedger::failure_classes_by_provider`] counts every model,
+    /// route and harness of a provider together, within the window only, and
+    /// leaves an outcome-less row (the extraction producer's shape) out.
+    #[test]
+    fn failure_classes_by_provider_counts_across_identities_within_the_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let ledger = fixture.ledger();
+        let now = 10_000;
+
+        ledger
+            .record(
+                observation("anyrouter", "claude-opus-4-1")
+                    .with_outcome(Outcome::Failed)
+                    .with_failure_class(Some(FailureClass::Throttle)),
+                now - 10,
+            )
+            .unwrap();
+        ledger
+            .record(
+                NewObservation::new("anyrouter", "claude-sonnet-4-5")
+                    .with_outcome(Outcome::Failed)
+                    .with_failure_class(Some(FailureClass::Upstream5xx)),
+                now - 20,
+            )
+            .unwrap();
+        ledger
+            .record(
+                observation("anyrouter", "claude-opus-4-1").with_outcome(Outcome::Succeeded),
+                now - 30,
+            )
+            .unwrap();
+        // No outcome: not an exchange, not counted.
+        ledger
+            .record(
+                NewObservation::new("anyrouter", "claude-opus-4-1"),
+                now - 40,
+            )
+            .unwrap();
+        // Outside the window.
+        ledger
+            .record(
+                observation("anyrouter", "claude-opus-4-1")
+                    .with_outcome(Outcome::Failed)
+                    .with_failure_class(Some(FailureClass::ExhaustedQuota)),
+                now - 1_001,
+            )
+            .unwrap();
+        // Another provider entirely.
+        ledger
+            .record(
+                observation("groq", "llama")
+                    .with_outcome(Outcome::Failed)
+                    .with_failure_class(Some(FailureClass::CredentialFailure)),
+                now - 5,
+            )
+            .unwrap();
+
+        let by_provider = ledger.failure_classes_by_provider(now, 1_000).unwrap();
+        assert_eq!(by_provider.len(), 2, "{by_provider:?}");
+        let anyrouter = &by_provider["anyrouter"];
+        assert_eq!(anyrouter.observed(), 3);
+        assert_eq!(anyrouter.cadence_throttled(), 1);
+        assert_eq!(anyrouter.provider_health_failures(), 1);
+        assert_eq!(anyrouter.served(), 1);
+        assert_eq!(
+            anyrouter.exhausted_quota(),
+            0,
+            "yesterday's row is outside the window"
+        );
+        let groq = &by_provider["groq"];
+        assert_eq!(groq.count(FailureClass::CredentialFailure), 1);
+        assert_eq!(groq.observed(), 1);
     }
 
     /// The ledger's own append-oriented promise, proven rather than assumed:

@@ -91,9 +91,14 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// ran. See the migration's own doc comment for why it is a join table
 /// rather than a column, why `path` is repo-relative and `/`-separated, and
 /// why its `provenance` says `observed` and must never say `referenced`.
+/// Version 18 adds `routing_observations.failure_class`, capability map line
+/// 1364's nine-way failure vocabulary — one nullable `TEXT` column with no
+/// `CHECK`, for migration 15's reason. See the migration's own doc comment
+/// for why it is a column beside `outcome` rather than a widening of it, and
+/// [`FAILURE_CLASSES`] for where the vocabulary actually lives.
 /// Later migrations are appended to [`MIGRATIONS`], and this constant moves
 /// with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 17;
+const SUPPORTED_SCHEMA_VERSION: i64 = 18;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -140,6 +145,41 @@ pub(crate) const EVALUATION_KINDS: [&str; 7] = [
     "routing_cost_class_observed",
     "routing_evidence_observed",
     "routing_outcome_observed",
+];
+
+/// The `routing_observations.failure_class` values this build writes —
+/// capability map line 1364's vocabulary, migration 18.
+///
+/// **Deliberately not a SQL `CHECK`**, for [`EVALUATION_KINDS`]' reasons: a
+/// failure vocabulary is exactly the kind that grows as providers invent new
+/// ways to fail, and `outcome`'s own four-value `CHECK` two columns over is
+/// what this column must not repeat. The vocabulary lives in Rust —
+/// [`crate::routing::evidence::FailureClass`], an exhaustive `match` at the
+/// single writer, and this constant pinned against it by
+/// `every_failure_class_the_type_supports_is_one_the_schema_records`.
+///
+/// Nine entries, and all nine are the map line's own words. `timeout` has a
+/// mapping at the writer (`ureq::Error::Timeout`) but the upstream agent sets
+/// no timeout today (`crate::gateway::upstream::agent`), so no row this build
+/// writes will carry it until one does — recorded here rather than left for
+/// the first reader to wonder about.
+///
+/// `#[cfg(test)]` for [`MEMORY_FILE_PROVENANCE`]'s reason, not
+/// [`EVALUATION_KINDS`]': the production reader
+/// (`crate::routing::evidence::row_to_observation`) reports an unrecognised
+/// value through `FailureClass::from_stored`, not through this list, so the
+/// pinning test is this constant's only consumer.
+#[cfg(test)]
+const FAILURE_CLASSES: [&str; 9] = [
+    "throttle",
+    "exhausted_quota",
+    "upstream_5xx",
+    "timeout",
+    "stream_abort",
+    "empty_completion",
+    "credential_failure",
+    "request_incompatibility",
+    "unknown",
 ];
 
 /// The `memory_files.provenance` values this build writes.
@@ -1870,6 +1910,43 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
         SELECT RAISE(ABORT, 'memory file association belongs to a different project');
     END;
     ",
+    // 18: `routing_observations.failure_class` — capability map line 1364's
+    // nine-way failure classification, and lines 1316 and 1365's separation
+    // of a rate-limit response from a transport or model failure, and of
+    // cadence throttling from a spent long-window quota.
+    //
+    // # A column beside `outcome`, not a widening of it
+    //
+    // `outcome` answers *did the turn succeed* and carries a four-value
+    // `CHECK`; this answers *what kind of failure was it* and carries none.
+    // Widening `outcome`'s `CHECK` would cost a table rebuild per new value
+    // (migration 7's lesson, restated at migration 15) and would blur two
+    // questions into one column. A served exchange has an `outcome` and no
+    // `failure_class`; a failed one has both.
+    //
+    // # `ADD COLUMN`, nullable, no `CHECK`, no index
+    //
+    // Migration 10's shape for `validity_conditions`: an `ALTER TABLE … ADD
+    // COLUMN` backfills every existing row with `NULL`, which is the honest
+    // reading for a row written before the classification existed — "this
+    // build recorded no kind here", never "no failure". No `CHECK`, for
+    // `FAILURE_CLASSES`' reason: the vocabulary lives in Rust and is pinned
+    // by a test. No index: the reads that want this column
+    // (`EvidenceLedger::failure_classes_by_provider`) are a `GROUP BY` over
+    // a time window already served by `routing_observations_by_route_time`,
+    // and migration 15's closing note applies — measure before indexing.
+    //
+    // # What may write it, and from what
+    //
+    // The gateway's connection thread, from the status line, the rate-limit
+    // headers it already reads to forward them, the byte count it already
+    // keeps to relay the body, and how the stream ended as its framing said.
+    // Never from a byte of the body: `crate::gateway::ingress` remains
+    // structurally unable to carry one, and the design ruling that framing
+    // is not content is in `docs/product/design-decisions.md`.
+    "
+    ALTER TABLE routing_observations ADD COLUMN failure_class TEXT;
+    ",
 ];
 
 pub(crate) const PROJECT_ID_KEY: &str = "project_id";
@@ -2355,10 +2432,14 @@ mod tests {
     /// `observed_compactions`, and a column-scoped `CHECK` goes with the
     /// column it is written on. Migration 17 is one statement for migration
     /// 15's reason — dropping `memory_files` takes its index and its two
-    /// triggers with it — and it goes **first**, because the rollback runs
-    /// newest-migration-first for the same reason the ladder runs
-    /// oldest-first.
+    /// triggers with it — and it goes first among the tables, because the
+    /// rollback runs newest-migration-first for the same reason the ladder
+    /// runs oldest-first. Migration 18 is one statement for migration 16's
+    /// reason — nothing indexes `failure_class` and it carries no `CHECK` —
+    /// and it goes before all of them, being the newest.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        ALTER TABLE routing_observations DROP COLUMN failure_class;
+
         DROP TABLE memory_files;
 
         ALTER TABLE sessions DROP COLUMN observed_compactions;
@@ -2474,6 +2555,186 @@ mod tests {
         assert_eq!(FileAssociation::from_stored(""), None);
     }
 
+    /// Migration 18's `failure_class` carries **no** `CHECK`, so nothing in
+    /// SQL pins it — this test is the guarantee, exactly as
+    /// `EVALUATION_KINDS`' and [`MEMORY_FILE_PROVENANCE`]'s own are.
+    ///
+    /// Two independently written spellings: [`FAILURE_CLASSES`], beside the
+    /// migration where a schema reader looks, and
+    /// [`crate::routing::evidence::FailureClass`], which the writer stores.
+    /// Neither is derived from the other, which is why this is not a
+    /// tautology. Nine, in capability map line 1364's own order.
+    #[test]
+    fn every_failure_class_the_type_supports_is_one_the_schema_records() {
+        use crate::routing::evidence::FailureClass;
+
+        let declared: Vec<&str> = FailureClass::ALL
+            .iter()
+            .map(|class| class.as_str())
+            .collect();
+        assert_eq!(
+            declared,
+            FAILURE_CLASSES.to_vec(),
+            "a failure class was added, renamed or reordered on one side only"
+        );
+        assert_eq!(FAILURE_CLASSES.len(), 9, "the map line names nine");
+
+        for class in FailureClass::ALL {
+            assert_eq!(FailureClass::from_stored(class.as_str()), Some(class));
+        }
+        // A spelling nothing writes reads as unrecognised, never as a class.
+        assert_eq!(FailureClass::from_stored("rate_limited"), None);
+        assert_eq!(FailureClass::from_stored(""), None);
+    }
+
+    /// The column names of `table`, in declaration order.
+    fn columns_of(conn: &Connection, table: &str) -> Vec<String> {
+        let mut statement = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>("name"))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// Everything `sqlite_master` holds, in a stable order — the whole
+    /// schema as one comparable value.
+    fn whole_schema(conn: &Connection) -> Vec<(String, String, Option<String>)> {
+        let mut statement = conn
+            .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// Migration proof for 18: a version-17 database that already holds a
+    /// routing observation opens, migrates to 18 adding exactly one column,
+    /// reads the old row's `failure_class` as unknown rather than as a class,
+    /// records a classified row through the real writer, and the undo takes
+    /// the whole schema back to exactly what it was — every table, index and
+    /// trigger.
+    ///
+    /// One connection at a time throughout (practice §65): every handle is
+    /// dropped before the next is opened and before the re-bootstrap.
+    #[test]
+    fn migration_18_adds_failure_class_and_undoes_cleanly() {
+        use crate::routing::evidence::{
+            EvidenceLedger, FailureClass, NewObservation, ObservationQuery, Outcome,
+        };
+
+        const UNDO_18: &str = "
+            ALTER TABLE routing_observations DROP COLUMN failure_class;
+            DELETE FROM schema_migrations WHERE version >= 18;
+        ";
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let db_path = fixture.runtime.database_path();
+        let project_id = stored_project_id(&db_path);
+
+        // Back to 17, with a row written the way a version-17 build wrote
+        // them — no `failure_class` to name.
+        let (schema_at_17, columns_at_17) = {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(UNDO_18).unwrap();
+            conn.execute(
+                "INSERT INTO routing_observations (project_id, observed_at, provider, model, outcome)
+                 VALUES (?1, 1, 'pre-migration', 'm', 'failed')",
+                [&project_id],
+            )
+            .unwrap();
+            (
+                whole_schema(&conn),
+                columns_of(&conn, "routing_observations"),
+            )
+        };
+        assert_eq!(schema_version(&db_path), 17, "the rollback must land on 17");
+        assert!(
+            !columns_at_17.iter().any(|column| column == "failure_class"),
+            "{columns_at_17:?}"
+        );
+
+        // Forward: an ordinary bootstrap, exactly as a real upgrade happens.
+        let migrated = fixture.rebootstrap().unwrap();
+        assert_eq!(
+            schema_version(&migrated.database_path()),
+            SUPPORTED_SCHEMA_VERSION,
+            "the launch must have applied migration 18"
+        );
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let columns = columns_of(&conn, "routing_observations");
+            let mut expected = columns_at_17.clone();
+            expected.push("failure_class".to_owned());
+            assert_eq!(columns, expected, "exactly one column, appended");
+        }
+
+        // The pre-migration row reads as *unknown kind*, never as a class,
+        // and a row written now carries the class it was given.
+        {
+            let ledger = EvidenceLedger::open(&migrated).unwrap();
+            let pre = ledger
+                .recent(
+                    ObservationQuery {
+                        provider: "pre-migration",
+                        model: "m",
+                        route: None,
+                        harness: None,
+                    },
+                    1,
+                )
+                .unwrap();
+            assert_eq!(pre.len(), 1);
+            assert_eq!(pre[0].outcome, Some(Outcome::Failed));
+            assert_eq!(
+                pre[0].failure_class, None,
+                "a row from before the column existed has no kind, not an `unknown` kind"
+            );
+
+            ledger
+                .record(
+                    NewObservation::new("post-migration", "m")
+                        .with_outcome(Outcome::Failed)
+                        .with_failure_class(Some(FailureClass::Throttle)),
+                    2,
+                )
+                .unwrap();
+            let post = ledger
+                .recent(
+                    ObservationQuery {
+                        provider: "post-migration",
+                        model: "m",
+                        route: None,
+                        harness: None,
+                    },
+                    1,
+                )
+                .unwrap();
+            assert_eq!(post[0].failure_class, Some(FailureClass::Throttle));
+        }
+
+        // Back again: the whole schema is what it was at 17, byte for byte,
+        // and the rows are still there.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(UNDO_18).unwrap();
+            assert_eq!(whole_schema(&conn), schema_at_17);
+            assert_eq!(columns_of(&conn, "routing_observations"), columns_at_17);
+            let rows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM routing_observations", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 2, "dropping the column drops no rows");
+        }
+        assert_eq!(schema_version(&db_path), 17);
+    }
+
     /// Migration proof for migration 17: a version-16 database opens,
     /// migrates to 17, keeps every memory it had, and comes out with a table
     /// that accepts an association — plus the index and the two triggers, and
@@ -2504,8 +2765,13 @@ mod tests {
         let db_path = fixture.runtime.database_path();
         {
             let conn = Connection::open(&db_path).unwrap();
+            // Migration 18 is undone first: a rollback undoes **every**
+            // migration above the version it claims, or the re-run fails
+            // with `duplicate column name` — `UNDO_MIGRATIONS_ABOVE_THIRTEEN`'s
+            // own lesson, paid once more here when 18 arrived.
             conn.execute_batch(
-                "DROP TABLE memory_files;
+                "ALTER TABLE routing_observations DROP COLUMN failure_class;
+                 DROP TABLE memory_files;
                  DELETE FROM schema_migrations WHERE version >= 17;",
             )
             .unwrap();

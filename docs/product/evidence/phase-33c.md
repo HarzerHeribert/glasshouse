@@ -174,3 +174,124 @@ categories are unproducible. That is a true statement about the build and a
 false reason to doubt the tick, which is why it survived three readings without
 resolving. It is ruling 3 of the sweep's three options: the tick is right and
 the entry describes a clause the box does not require.
+
+
+---
+
+# `GH-FAILURE-TAXONOMY` — 2026-08-31: framing is not content, and the relay now says what kind of failure it saw
+
+Fable specialist at xhigh. **Five lines against one ruling**: *"Phase 33: framing
+is not content — the relay may count and timestamp what it never reads"*
+(`design-decisions.md`). Cluster L's boundary moves exactly as far as that
+ruling says: the relay observes the status line, the headers it already
+forwards, the byte count it already keeps to relay the body, and how the stream
+ended — and **never a byte of body content**, which a structural scan
+(`an_exchange_has_nowhere_to_put_a_body`, now also covering `Framing` and
+`StreamEnd`) enforces.
+
+Contract: Given a gateway-backed exchange, when the provider answers or fails
+to, Glasshouse records **what kind** of failure it was — throttle, exhausted
+quota, upstream 5xx, timeout, stream abort, empty completion, credential
+failure, request incompatibility, or unknown — so rate-limit responses are
+counted apart from transport and model failures and cadence throttling apart
+from a spent window, while preserving that the relay never reads, buffers or
+interprets response content.
+
+**Production.** `gateway::ingress::forward` gained `Framing { declared, relayed,
+ended: Complete | Truncated | Aborted | ClientClosed }` on `Exchange`, filled by
+a `Counted<R>` reader that sees each `read`'s byte count and never its buffer
+(`relayed = None` when no body was permitted — HEAD/204/304 — so "nothing
+arrived" and "nothing was allowed" stay two facts). `gateway::session::failure_class`
+maps status + `RateLimitHeaders` + framing to `routing::evidence::FailureClass`
+(`classify`, the routing verdict, is untouched — the record is a sibling, and
+takes the headers the verdict deliberately narrows away). **Migration 18**
+(`ALTER TABLE routing_observations ADD COLUMN failure_class TEXT`, nullable, no
+`CHECK`, no index; `database::FAILURE_CLASSES` pinned by a test);
+`record_routing_observation` takes an `ExchangeReading` and writes the class,
+`failovers` (1 for this exchange's own `ChangeCause::Failover`, 0 for a
+credential rotation — the code's own vocabulary keeps them apart) and
+`retries = 0` (a count: `forward` calls `Agent::run` once and `ureq` 3.4.0 has
+no transparent retry, verified in its source). A `2xx` whose stream was cut or
+whose permitted body never came now records `outcome = failed`. Readers:
+`EvidenceLedger::failure_classes_by_provider`, `FailureClassCounts` (**with no
+`failures()` total on purpose** — 1365's three figures cannot be summed),
+`provider/resources.rs::render_failure_classes` beside the health line;
+`main.rs::resources_report` gathers the counts (the one line the worker handed
+over, applied at integration).
+
+Gates on the integrated tree: fmt, clippy `-D warnings`, rustdoc clean;
+`gateway_failure_taxonomy` 7; `gateway_retry_after` 2; `routing_evidence` 13;
+`gateway_degrade` 3; blast radius and the full `--lib` run recorded in
+`.agent-runtime/blast-ft.log` (the worker's own runs were red only on the
+schema-bump ripple in two files outside its scope, whose verified patches were
+applied at integration — `session::store::tests` 64/64, `session_context`
+18/18 with them). Eight mutations, eight KILLED.
+
+## 1364 — CLOSED
+
+*"Classify failures at least as throttle, exhausted quota, upstream 5xx,
+timeout, stream abort, empty completion, credential failure, request
+incompatibility, or unknown."* Nine classes decided at one site from
+status/headers/framing; eight driven live through a real `TcpStream` and the
+production entry point (`each_failure_class_is_recorded_from_status_headers_and_framing_alone`);
+`Timeout` unit-tested at the classifier because **the shipped agent sets no
+timeout by its own documented decision** (a streaming response may go minutes
+between events) — recorded as a limit, and `upstream.rs`'s `timeout_connect`
+named as the one-line producer. Limits: a close-delimited response cut
+mid-stream reads `Complete` (no served protocol answers that way); a `200`
+whose body describes a model error is served — the body is what the relay
+cannot read.
+
+## 1365 — CLOSED
+
+Throttle vs exhausted quota is *read*, never guessed: `429` is `ExhaustedQuota`
+iff `remaining == Some(0)` **and** the window reopens ≥
+`EXHAUSTED_QUOTA_HORIZON_SECONDS = 300` after `first_byte_at` (reset field,
+else `retry-after`), else `Throttle`; `402` is `ExhaustedQuota` (the 9H live
+finding); provider health is the third bucket by construction
+(`FailureClass::is_provider_health`: 5xx, timeout, stream abort, empty
+completion, unknown). `resources` renders *cadence throttled N, quota exhausted
+N, provider unhealthy N — of N exchange(s), N served*. Killed:
+`throttle_and_exhausted_quota_are_told_apart_by_headers_not_guessed`;
+`resources_renders_cadence_quota_and_health_as_three_figures_with_denominators`.
+Limit: the 300-second horizon is a documented judgement, one constant to lift.
+
+## 1316 — CLOSED at integration (the worker reported *partial*)
+
+*"Track recent rate-limit responses separately from transport or model
+failures."* Every exchange's class is recorded in production; the per-provider
+"recent, by class" reader and rendering were built and tested through
+`GatheredTelemetry::report()`; the worker left it *partial* by §35 because
+`main.rs::resources_report` did not yet call `gather_failure_classes` — the
+one-line patch it handed over is applied on the integrated tree, so the reader
+has its production caller. **Ruling: COMPLETE**, with the honest note that the
+call site itself is exercised by the existing `provider_discovery`
+shipped-binary tests of `glasshouse resources` and by the blast radius, not by a
+test the worker could write from its files.
+
+## 1318 — CLOSED
+
+*"Feed rate-limit events back into the unified capacity estimator."* The loop
+was intact and unevidenced: a relayed `429` carrying `X-RateLimit-Limit: 300`,
+`-Remaining: 0`, `-Reset: 3600` through a gateway started with a
+`GatewayQuotaCache` moves the band `observed_capacity` reports from `unknown`
+to `exhausted`, `capacity 0%`
+(`a_rate_limited_response_changes_the_capacity_band_the_estimator_reports`);
+mutating the `cache.store(..)` call away kills it (§35).
+
+## 1334 — OPEN, on exactly two quantities
+
+`failovers` and `retries` are now written honestly and the outcome proxy is
+improved; **`tool_rounds` and `repairs`** need a turn structure and a body this
+layer cannot see — a tool round spans several connections and only the harness
+or the session above the gateway can count it; a repair is a concept nothing
+in the tree holds. `outcome` remains a transport-level proxy for the
+user-visible verdict.
+
+Packet errors the worker recorded, all accepted: migration 16 and 17 were
+already taken (this is 18); the packet's field names would have failed the
+relay's own structural scan (`body_bytes_relayed` → `Framing.relayed`);
+`ended` needed a fourth variant (`ClientClosed`) for the two inbound-hop close
+paths; `Timeout` has no live producer (kept because the map names it and the
+mapping is real code on the path — in tension with `database.rs`'s "variants
+follow producers" rule, and said so).

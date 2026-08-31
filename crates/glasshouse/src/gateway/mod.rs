@@ -611,7 +611,11 @@ fn accept_loop(
                         // failure to count. `session::stated_retry_after`
                         // narrows the headers to that one duration; nothing
                         // else from them travels into a routing decision.
-                        routing.observe_exchange(
+                        // What this exchange did to the assignment is kept
+                        // for its own evidence row below — capability map
+                        // line 1334's `failovers`, known here and nowhere
+                        // else, because this is the thread that decided it.
+                        let effect = routing.observe_exchange(
                             &upstream,
                             &exchange,
                             observed_at_instant,
@@ -636,13 +640,23 @@ fn accept_loop(
                         // Phase 33A's production producer — see
                         // `crate::gateway::session::SessionRouting::record_routing_observation`
                         // for exactly what this can and cannot supply.
+                        //
+                        // `quota` is borrowed here for line 1364/1365's
+                        // throttle-versus-exhausted-quota reading and moved
+                        // into `observe_quota_headers` below unchanged; see
+                        // `session::ExchangeReading::quota` for why this
+                        // borrow is a record and not a routing decision.
                         if let Some(ledger) = &evidence_ledger {
                             routing.record_routing_observation(
                                 ledger,
                                 &exchange,
-                                dispatched_at,
-                                completed_at,
-                                dispatched_assignment,
+                                session::ExchangeReading {
+                                    quota: &quota,
+                                    dispatched_at_unix: dispatched_at,
+                                    completed_at_unix: completed_at,
+                                    assignment: dispatched_assignment,
+                                    effect,
+                                },
                             );
                         }
                         // Capability map line 1229's gateway half — a passive

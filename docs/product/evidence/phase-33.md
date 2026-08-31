@@ -613,3 +613,10 @@ Gates the worker ran (re-run the decisive ones yourself):
 - cargo fmt --all -- --check: clean
 - scripts/blast-radius.sh: every traced target passed (lib 1548, events_log 6, memory_snapshot 8, routing_evidence 13, cargo doc clean)
 
+
+
+---
+
+## From `GH-FAILURE-TAXONOMY` (2026-08-31)
+
+**1316 and 1318 are CLOSED** and **1325/1317 stay as ruled above**. The relay now records a nine-way `failure_class` per exchange from status, headers and framing (never body content — the ruling *"framing is not content"* in `design-decisions.md`), so rate-limit responses are counted apart from transport and model failures (1316), and a relayed 429's own headers are proven to move the capacity estimator's band (1318). Full entry, mutations and limits: `phase-33c.md`, *GH-FAILURE-TAXONOMY*.

@@ -75,6 +75,24 @@
 //! read to relay them, and the clock is read after they land rather than
 //! after any of the body that follows, so this stays a timing read and never
 //! a parse of what the bytes mean.
+//!
+//! # A fourth thing may now be recorded: how the stream was framed, and how it ended
+//!
+//! Capability map line 1364's `stream abort` and `empty completion`, under
+//! the ruling recorded in `docs/product/design-decisions.md` as *"framing is
+//! not content — the relay may count and timestamp what it never reads"*.
+//! [`forward`] already handles the length the provider declared (it re-states
+//! it on the way out), already counts the bytes it moves (`Outcome::Forwarded`
+//! has carried that count since this module was written), and already learns
+//! from `ureq` whether the provider's stream ended cleanly or failed short —
+//! because a short read is an `io::Error` it has to handle to relay at all.
+//! [`Framing`] carries those three facts, and nothing else: a declared
+//! length, a relayed count, and a [`StreamEnd`]. The observer that counts is
+//! [`Counted`], which sees how many bytes each `read` returned and never the
+//! buffer they landed in. No byte of the body is inspected, decoded, buffered
+//! beyond what forwarding already buffers, or matched against anything — the
+//! boundary that stays is the one this module has always kept, and the
+//! source-scan tests in `tests/gateway_failure_taxonomy.rs` hold it.
 
 use std::io::{BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -112,6 +130,10 @@ const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// request that has already been refused.
 const DRAIN_CAP: u64 = 1024 * 1024;
 
+/// [`transport_detail`]'s phrase for a timeout — see that function's own doc
+/// for why this one phrase has a name.
+pub(super) const TRANSPORT_TIMEOUT_DETAIL: &str = "the provider did not answer in time";
+
 /// How long a refused request is given to finish sending before the socket
 /// closes underneath it.
 ///
@@ -122,11 +144,12 @@ const SETTLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What happened on one connection. **The only value that reaches a log.**
 ///
-/// Every field is an outcome, a status, a count, a name, or one clock
-/// reading. There is nowhere here to put a request body, a response body, a
-/// header value, a token or a credential — which is a stronger statement
-/// than a promise not to log one, and `an_exchange_has_nowhere_to_put_a_body`
-/// checks it against this declaration.
+/// Every field is an outcome, a status, a count, a name, one clock reading,
+/// or how the stream was framed and ended. There is nowhere here to put a
+/// request body, a response body, a header value, a token or a credential —
+/// which is a stronger statement than a promise not to log one, and
+/// `an_exchange_has_nowhere_to_put_a_body` checks it against this
+/// declaration.
 #[derive(Debug)]
 pub(super) struct Exchange {
     pub(super) outcome: Outcome,
@@ -149,6 +172,100 @@ pub(super) struct Exchange {
     /// provider could not be reached at all. See this module's own "a third
     /// thing may now be recorded" for what this may and may not become.
     pub(super) first_byte_at: Option<i64>,
+    /// How the provider's response was framed and how its stream ended —
+    /// `None` on every path where no response arrived, exactly like
+    /// `first_byte_at`. See this module's own "a fourth thing may now be
+    /// recorded".
+    pub(super) framing: Option<Framing>,
+}
+
+/// How the provider's response was framed and how its stream ended — the
+/// facts this relay must already handle to move the bytes at all, and
+/// nothing it had to look inside them to learn. Capability map line 1364's
+/// `stream abort` and `empty completion`; see the module's own "a fourth
+/// thing may now be recorded".
+///
+/// Every field is a count or a way of ending.
+/// `an_exchange_has_nowhere_to_put_a_body` scans this declaration under the
+/// same rule as [`Exchange`]'s and [`Outcome`]'s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Framing {
+    /// The length the provider declared, when it declared one. `None` for a
+    /// chunked or close-delimited stream, whose length nobody knew in
+    /// advance.
+    pub(super) declared: Option<u64>,
+    /// How many bytes of the response were relayed, or `None` when the
+    /// framing said none could follow at all — a `HEAD` response, a `204`,
+    /// a `304` — so that "nothing arrived" and "nothing was permitted" stay
+    /// two different facts. A size, never what the bytes were.
+    pub(super) relayed: Option<u64>,
+    pub(super) ended: StreamEnd,
+}
+
+/// How the provider's response stream ended, judged only against what its
+/// own framing said should happen.
+///
+/// A close-delimited stream — no declared length, no chunking — has no way
+/// to say where it meant to end, so one that was cut off reads as
+/// [`StreamEnd::Complete`]. Recorded as a limit rather than guessed at: no
+/// provider protocol this gateway serves answers close-delimited in
+/// practice, and inventing a verdict for one would be reading intent into
+/// silence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StreamEnd {
+    /// Where the framing said it would: the declared length was reached, the
+    /// terminating chunk arrived, or no body was permitted in the first
+    /// place.
+    Complete,
+    /// The provider's stream stopped short of the length it declared.
+    Truncated,
+    /// The provider's unbounded stream failed before its terminating chunk.
+    Aborted,
+    /// The harness closed its side first. The provider's stream was left
+    /// unread past that point, so how it would have ended is not known, and
+    /// nothing about the provider is concluded from it.
+    ClientClosed,
+}
+
+impl StreamEnd {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Truncated => "truncated",
+            Self::Aborted => "aborted",
+            Self::ClientClosed => "client-closed",
+        }
+    }
+}
+
+/// A reader that counts what passes through it and remembers whether the
+/// provider's side failed — the bounded, streaming, non-buffering observer
+/// the design ruling permits, and the whole of it.
+///
+/// It sees `n`, the number of bytes each `read` returned, and never `buf`:
+/// nothing here can tell one byte from another, and it holds no buffer of
+/// its own. An `Interrupted` read is passed through untouched, exactly as
+/// [`super::http::pump`] retries it, and is not a failure.
+struct Counted<R> {
+    inner: R,
+    relayed: u64,
+    upstream_failed: bool,
+}
+
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self.inner.read(buf) {
+            Ok(read) => {
+                self.relayed += read as u64;
+                Ok(read)
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => Err(err),
+            Err(err) => {
+                self.upstream_failed = true;
+                Err(err)
+            }
+        }
+    }
 }
 
 /// How a connection ended.
@@ -206,12 +323,26 @@ impl Exchange {
             Outcome::ClientGone => ("client-gone", None, None, None),
             Outcome::Idle => ("idle", None, None, None),
         };
+        // Three more counts-or-names, never a byte of what was relayed:
+        // the length the provider declared, how much of it arrived, and how
+        // the stream ended as its framing said it should.
+        let (declared, relayed, ended) = match &self.framing {
+            Some(framing) => (
+                framing.declared,
+                framing.relayed,
+                Some(framing.ended.as_str()),
+            ),
+            None => (None, None, None),
+        };
         tracing::debug!(
             outcome,
             status = self.status,
             upstream_status = ?upstream_status,
             bytes = ?bytes,
             detail = ?detail,
+            declared = ?declared,
+            relayed = ?relayed,
+            ended = ?ended,
             provider = %self.provider,
             protocol = ?self.protocol,
             host = %self.host,
@@ -521,14 +652,27 @@ fn forward(
     // close.
     headers.push(("connection".to_owned(), b"close".to_vec()));
 
+    // The framing, as known before a byte of the body has moved: what the
+    // provider declared, and whether a body may follow at all. `relayed` is
+    // `Some(0)` rather than `None` the moment a body is permitted, so a
+    // stream that then delivers nothing reads as *empty*, not as *no body
+    // was expected*.
+    let mut framing = Framing {
+        declared: declared_length,
+        relayed: carries_body.then_some(0),
+        ended: StreamEnd::Complete,
+    };
+
     if http::write_head(out, status, &headers).is_err() {
         // The provider did answer — its headers were captured above — even
         // though the harness never saw them: the client going away here is a
         // fact about the inbound hop, not about whether the outbound one
         // produced a reading.
+        framing.ended = StreamEnd::ClientClosed;
         return (
             Exchange {
                 first_byte_at,
+                framing: Some(framing),
                 ..exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route))
             },
             quota,
@@ -537,12 +681,47 @@ fn forward(
 
     let mut moved = 0;
     if carries_body {
-        match http::pump(body.as_reader(), out, chunked) {
-            Ok(bytes) => moved = bytes,
+        // `Counted` is the observer: it sees how many bytes each read
+        // returned and whether the provider's side failed, and `pump` still
+        // does every byte of the moving. The relayed count is read off the
+        // observer on every path, including the two where `pump` returns no
+        // count of its own.
+        let mut counted = Counted {
+            inner: body.as_reader(),
+            relayed: 0,
+            upstream_failed: false,
+        };
+        let pumped = http::pump(&mut counted, out, chunked);
+        moved = counted.relayed;
+        framing.relayed = Some(moved);
+        match pumped {
+            Ok(_) => {
+                // A clean end from `ureq` that nonetheless fell short of the
+                // declared length is a truncation too; `ureq` reports that
+                // as an error today, and this comparison does not depend on
+                // it continuing to.
+                if declared_length.is_some_and(|declared| moved < declared) {
+                    framing.ended = StreamEnd::Truncated;
+                }
+            }
+            Err(_) if counted.upstream_failed => {
+                // The provider's stream failed under the relay. The harness
+                // has been sent exactly what arrived and the socket closes
+                // short — short of the `content-length` it was told, or
+                // without the terminating chunk — which is how it learns
+                // the stream was cut, and nothing here pretends otherwise
+                // by writing a terminator the provider never sent.
+                framing.ended = match declared_length {
+                    Some(_) => StreamEnd::Truncated,
+                    None => StreamEnd::Aborted,
+                };
+            }
             Err(_) => {
+                framing.ended = StreamEnd::ClientClosed;
                 return (
                     Exchange {
                         first_byte_at,
+                        framing: Some(framing),
                         ..exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route))
                     },
                     quota,
@@ -557,6 +736,7 @@ fn forward(
     (
         Exchange {
             first_byte_at,
+            framing: Some(framing),
             ..exchange(
                 Outcome::Forwarded {
                     upstream_status: status.as_u16(),
@@ -649,12 +829,20 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 ///
 /// The variant *is* read from the error, so the answer is a real
 /// observation and not a constant.
+///
+/// [`TRANSPORT_TIMEOUT_DETAIL`] is the one phrase named outside this
+/// function, because `super::session`'s `failure_class` tells a timeout from
+/// every other transport failure by it — capability map line 1364's
+/// `timeout`. The upstream agent (`super::upstream::agent`) sets no timeout
+/// today, for the reason its own doc gives, so this arm is a mapping with no
+/// live producer until one is configured; the constant exists so that the
+/// day one is, nothing else has to change.
 fn transport_detail(err: &ureq::Error) -> &'static str {
     match err {
         ureq::Error::HostNotFound => "the provider's host name did not resolve",
         ureq::Error::ConnectionFailed => "the connection to the provider could not be made",
         ureq::Error::Io(_) => "the connection to the provider failed",
-        ureq::Error::Timeout(_) => "the provider did not answer in time",
+        ureq::Error::Timeout(_) => TRANSPORT_TIMEOUT_DETAIL,
         ureq::Error::Tls(_) | ureq::Error::Rustls(_) | ureq::Error::Pem(_) => {
             "the TLS connection to the provider could not be established"
         }
@@ -775,8 +963,9 @@ fn exchange(outcome: Outcome, status: u16, upstream: &Upstream, route: Option<&R
         host: route.map(Route::host).unwrap_or_default(),
         // Every caller of this helper returns before a response ever
         // arrived; [`forward`]'s own three post-response returns override
-        // this with the real reading via struct-update syntax.
+        // both of these with the real readings via struct-update syntax.
         first_byte_at: None,
+        framing: None,
     }
 }
 
@@ -934,6 +1123,11 @@ mod tests {
                 protocol: Some("anthropic-messages".to_owned()),
                 host: "openrouter.ai".to_owned(),
                 first_byte_at: Some(1_700_000_000),
+                framing: Some(Framing {
+                    declared: Some(4096),
+                    relayed: Some(4096),
+                    ended: StreamEnd::Complete,
+                }),
             };
             let line = recorded(&exchange);
 
@@ -1000,17 +1194,35 @@ mod tests {
         // to refuse: an owned string is somewhere foreign text can be kept,
         // and a borrowed static one is not.
         let body_shaped = ["Vec<u8>", "[u8]", "Bytes", "body", "payload", "content"];
+        let body_shaped_or_foreign_text = {
+            let mut list = body_shaped.to_vec();
+            list.push("String");
+            list
+        };
         for (name, header, forbidden) in [
             (
                 "Exchange",
                 "pub(super) struct Exchange {",
                 body_shaped.to_vec(),
             ),
-            ("Outcome", "pub(super) enum Outcome {", {
-                let mut list = body_shaped.to_vec();
-                list.push("String");
-                list
-            }),
+            (
+                "Outcome",
+                "pub(super) enum Outcome {",
+                body_shaped_or_foreign_text.clone(),
+            ),
+            // The framing facts are counts and a way of ending, and the scan
+            // holds them to `Outcome`'s stricter list: a `String` here would
+            // be somewhere a chunk of the stream could be kept.
+            (
+                "Framing",
+                "pub(super) struct Framing {",
+                body_shaped_or_foreign_text.clone(),
+            ),
+            (
+                "StreamEnd",
+                "pub(super) enum StreamEnd {",
+                body_shaped_or_foreign_text,
+            ),
         ] {
             let declaration = declaration_of(header);
             assert!(
@@ -1026,6 +1238,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A reader that hands over three bytes and then fails, the way `ureq`
+    /// fails a body that ends short of its `content-length`
+    /// (`io::ErrorKind::UnexpectedEof`).
+    struct ShortReader {
+        served: bool,
+    }
+
+    impl Read for ShortReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.served {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "planted short read",
+                ));
+            }
+            self.served = true;
+            buf[..3].copy_from_slice(b"abc");
+            Ok(3)
+        }
+    }
+
+    /// The observer counts what passed and remembers that the provider's
+    /// side failed — and `pump`, which does the moving, still surfaces the
+    /// error rather than swallowing it into a clean count.
+    #[test]
+    fn the_counting_reader_counts_what_passed_and_remembers_an_upstream_failure() {
+        let mut counted = Counted {
+            inner: ShortReader { served: false },
+            relayed: 0,
+            upstream_failed: false,
+        };
+        let mut out = Vec::new();
+        let pumped = http::pump(&mut counted, &mut out, false);
+        assert!(pumped.is_err(), "the short read must surface as an error");
+        assert_eq!(counted.relayed, 3);
+        assert!(counted.upstream_failed);
+        assert_eq!(
+            out, b"abc",
+            "what did arrive was relayed before the failure"
+        );
+    }
+
+    /// The other side of the same distinction: a reader that ends cleanly is
+    /// not an upstream failure, and the count agrees with `pump`'s own.
+    #[test]
+    fn the_counting_reader_agrees_with_pump_on_a_stream_that_ends_cleanly() {
+        let mut counted = Counted {
+            inner: &b"twelve bytes"[..],
+            relayed: 0,
+            upstream_failed: false,
+        };
+        let mut out = Vec::new();
+        let moved = http::pump(&mut counted, &mut out, true).expect("a clean stream pumps");
+        assert_eq!(moved, 12);
+        assert_eq!(counted.relayed, moved);
+        assert!(!counted.upstream_failed);
     }
 
     #[test]

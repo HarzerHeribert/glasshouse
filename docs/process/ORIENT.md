@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**849 / 1280 mandatory capabilities (66%)** — 431 open across 60 phases.
+**853 / 1280 mandatory capabilities (67%)** — 427 open across 60 phases.
 
 ## Where the work is
 
@@ -40,6 +40,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 21F | Memory retrieval quality | **2** | 9 | `927` |
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
+| Phase 33 | Resource health | **3** | 12 | `1309` |
 | Phase 34A | Workload tiers | **3** | 7 | `1393` |
 | Phase 34B | Routing-model role | **3** | 12 | `1406` |
 | Phase 34C | Automatic routing-model selection | **3** | 10 | `1429` |
@@ -47,7 +48,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 54 | Criteria before deeper cmux coupling | **4** | 0 | `1885` |
 | Phase 24 | Memory reranking | **5** | 1 | `1082` |
 | Phase 28 | File-aware memory lookup | **5** | 0 | `1137` |
-| Phase 33 | Resource health | **5** | 10 | `1309` |
 | Phase 33A | Routing evidence ledger | **5** | 10 | `1327` |
 | Phase 34E | Router economics | **5** | 4 | `1461` |
 | Phase 53 | Criteria before adding graph storage | **5** | 0 | `1872` |
@@ -58,6 +58,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 47 | Observability without spectacle | **7** | 8 | `1750` |
 | Phase 50 | Tracked project knowledge as an optional feature | **7** | 0 | `1803` |
 | Phase 29 | Memory commits | **8** | 0 | `1145` |
+| Phase 33C | Failure, quota, and route correlation | **8** | 7 | `1362` |
 | Phase 35D | Routing under subscription pressure | **8** | 0 | `1568` |
 | Phase 36 | Session affinity | **8** | 0 | `1579` |
 | Phase 21J | Implementation review checklist | **9** | 0 | `980` |
@@ -69,7 +70,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 21H | Simplicity-first implementation policy | **10** | 0 | `953` |
 | Phase 32E | Burn rate and exhaustion forecasting | **10** | 0 | `1272` |
 | Phase 32G | Provider-aware request-cost estimation | **10** | 0 | `1296` |
-| Phase 33C | Failure, quota, and route correlation | **10** | 5 | `1362` |
 | Phase 54A | Setup and portability completion criteria | **10** | 0 | `1897` |
 | Phase 9K | Harness-aware response profiles | **11** | 26 | `578` |
 | Phase 21I | Production-aware implementation checks | **11** | 0 | `966` |
@@ -89,7 +89,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~398 open lines are not.
+other ~391 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -175,6 +175,12 @@ these unwrapped.
 
 - **1263** ☐ Lower the score when user-defined spending budget is close to exhaustion.
 - **1267** ☐ Treat unlimited local inference as high-capacity but still account for measured latency and concurrency.
+
+### Phase 33 — Resource health  (3 open, 12 closed)
+
+- **1317** ☐ Track whether a rate-limit failure appears to be provider-wide, model-specific, account-specific, or request-pool-specific when evidence permits.
+- **1323** ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
+- **1325** ☐ Record whether a health observation came from a real task, a retry, a repair attempt, or an explicit probe.
 
 ### Phase 34A — Workload tiers  (3 open, 7 closed)
 

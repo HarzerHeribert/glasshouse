@@ -5741,6 +5741,12 @@ fn resources_report(
     telemetry = telemetry.gather_gateway_health(
         &glasshouse::provider::telemetry::GatewayHealthCache::new(runtime.paths()),
     );
+    // Capability map lines 1316/1365: recent failures by class, from the
+    // project's routing evidence ledger. Fail-soft: a project with no ledger
+    // yet renders `unknown` on that line, as the caches do.
+    if let Ok(ledger) = glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
+        telemetry = telemetry.gather_failure_classes(&ledger, now_unix);
+    }
     if !no_harness {
         telemetry = telemetry.gather_harness_status(now_unix);
     }

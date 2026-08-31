@@ -2744,6 +2744,8 @@ mod tests {
     /// migration 15's reason — dropping a table takes its index and its two
     /// triggers with it — and it goes first, newest migration undone first.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        ALTER TABLE routing_observations DROP COLUMN failure_class;
+
         DROP TABLE memory_files;
 
         ALTER TABLE sessions DROP COLUMN observed_compactions;
@@ -3789,6 +3791,7 @@ mod tests {
                 "routing_observations.failovers",
                 "routing_observations.outcome",
                 "routing_observations.context_state",
+                "routing_observations.failure_class",
                 "schema_migrations.version",
                 "sessions.id",
                 "sessions.project_id",
@@ -3991,8 +3994,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 17,
-            "the launch must have applied migrations 3 through 17"
+            version, 18,
+            "the launch must have applied migrations 3 through 18"
         );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
@@ -4181,8 +4184,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 17,
-            "the launch must have applied migrations 2 through 17"
+            version, 18,
+            "the launch must have applied migrations 2 through 18"
         );
 
         let store = SessionStore::new(&reopened).unwrap();
@@ -5135,8 +5138,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 17,
-                "the launch must have applied migrations 8 through 17"
+                version, 18,
+                "the launch must have applied migrations 8 through 18"
             );
 
             let after = SessionStore::new(&reopened)
@@ -5264,8 +5267,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 17,
-                "the reopen must have applied migrations 12 through 17"
+                version, 18,
+                "the reopen must have applied migrations 12 through 18"
             );
 
             let after = SessionStore::new(&reopened)

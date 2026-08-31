@@ -37,7 +37,7 @@ use crate::config::pairing::{
 };
 use crate::provider::telemetry::RateLimitHeaders;
 use crate::routing::evidence::{
-    EvidenceLedger, NewObservation, ObservedEvidenceSource, Outcome as RoutingOutcome,
+    EvidenceLedger, FailureClass, NewObservation, ObservedEvidenceSource, Outcome as RoutingOutcome,
 };
 use crate::routing::free::{FreePool, FreeResource, WorkloadOutcome};
 use crate::routing::interactive::{
@@ -47,7 +47,7 @@ use crate::routing::interactive::{
 };
 use crate::routing::{AssignedModel, Backend, CacheLocality};
 
-use super::ingress::{Exchange, Outcome};
+use super::ingress::{Exchange, Framing, Outcome, StreamEnd, TRANSPORT_TIMEOUT_DETAIL};
 use super::upstream::Upstream;
 
 /// Everything one gateway knows about which backend is serving it.
@@ -95,6 +95,67 @@ struct State {
 struct Observation {
     workload: WorkloadOutcome,
     failure: Option<ProviderFailure>,
+}
+
+/// What observing one exchange did to the session's assignment — returned
+/// by [`SessionRouting::observe_exchange`] so the same connection thread can
+/// write it onto the exchange's own evidence row, capability map line 1334's
+/// `failovers`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExchangeEffect {
+    /// The assignment stands.
+    Unchanged,
+    /// Another of the same provider's credentials took over — Phase 9I line
+    /// 537. **Not a failover**: the provider serving the session did not
+    /// change, and the routing record keeps the two apart
+    /// (`ChangeCause::CredentialRotation` beside `ChangeCause::Failover`),
+    /// so this column does too.
+    RotatedCredential,
+    /// The session moved to another backend — Phase 9H line 512.
+    FailedOver,
+}
+
+impl ExchangeEffect {
+    /// Line 1334's `failovers` for the exchange this describes: `1` when it
+    /// caused one, else `0`. A count rather than a flag because the column
+    /// is one, and because a later producer that spans several exchanges may
+    /// have more than one to report.
+    pub(super) fn failovers(self) -> u32 {
+        match self {
+            Self::FailedOver => 1,
+            Self::Unchanged | Self::RotatedCredential => 0,
+        }
+    }
+}
+
+/// What the accept loop knows about one finished exchange that [`Exchange`]
+/// itself does not carry — handed to
+/// [`SessionRouting::record_routing_observation`] as one value, because every
+/// field is a fact about the same exchange and only the connection thread
+/// that served it holds all of them at once.
+pub(super) struct ExchangeReading<'a> {
+    /// This response's own rate-limit headers, exactly as `ingress::serve`
+    /// returned them. Read here for one purpose — capability map lines 1364
+    /// and 1365's distinction between a cadence throttle and a spent quota,
+    /// in [`failure_class`] — and for nothing else. This is not the
+    /// narrowing [`stated_retry_after`] performs for a *routing decision*
+    /// being undone: what is written from these headers is a class name,
+    /// never a header value, and nothing here changes where a session is
+    /// routed.
+    pub(super) quota: &'a RateLimitHeaders,
+    /// The instant the accept loop handed the connection to `ingress::serve`
+    /// — an honest upper-bound proxy for dispatch, see
+    /// `crate::routing::evidence`'s own header.
+    pub(super) dispatched_at_unix: i64,
+    /// The instant `ingress::serve` returned.
+    pub(super) completed_at_unix: i64,
+    /// The assignment as of dispatch — see the method's own doc for why this
+    /// is a snapshot rather than a fresh read.
+    pub(super) assignment: Option<Assignment>,
+    /// What observing this same exchange did to the assignment —
+    /// [`SessionRouting::observe_exchange`]'s own return, so the row can say
+    /// whether *this* exchange caused a failover.
+    pub(super) effect: ExchangeEffect,
 }
 
 impl SessionRouting {
@@ -328,22 +389,38 @@ impl SessionRouting {
     /// provider's response arrive — and is `None` on every exchange that
     /// never reached a provider, exactly like every other honest absence this
     /// method reads off `exchange` rather than invents.
+    ///
+    /// # What the row's `outcome` means now that a `failure_class` sits beside it
+    ///
+    /// `outcome` still answers *did the turn succeed*, at the transport level
+    /// this producer can see. Before framing was observed, a `2xx` was
+    /// always [`RoutingOutcome::Succeeded`]; a `2xx` whose stream was cut
+    /// short, or whose body was permitted and never came, is now
+    /// [`RoutingOutcome::Failed`] with the class that says why. The
+    /// invariant this keeps is simple and a test holds it: a row carries a
+    /// failure class exactly when its outcome is not a success.
+    ///
+    /// `retries` is written as `0` on every row — a count, not a default:
+    /// `ingress::forward` calls `Agent::run` once and `ureq` performs no
+    /// transparent retry. `tool_rounds` and `repairs` stay `NULL`; see the
+    /// ledger's own header for why nothing at this layer can count them.
     pub(super) fn record_routing_observation(
         &self,
         ledger: &EvidenceLedger,
         exchange: &Exchange,
-        dispatched_at_unix: i64,
-        completed_at_unix: i64,
-        assignment: Option<Assignment>,
+        reading: ExchangeReading<'_>,
     ) {
+        let failure_class = failure_class(exchange, reading.quota);
         let outcome = match &exchange.outcome {
             Outcome::Forwarded {
                 upstream_status, ..
-            } => Some(if (200..400).contains(upstream_status) {
-                RoutingOutcome::Succeeded
-            } else {
-                RoutingOutcome::Failed
-            }),
+            } => Some(
+                if (200..400).contains(upstream_status) && failure_class.is_none() {
+                    RoutingOutcome::Succeeded
+                } else {
+                    RoutingOutcome::Failed
+                },
+            ),
             Outcome::Unreachable { .. } => Some(RoutingOutcome::Failed),
             Outcome::Unauthenticated
             | Outcome::Declined
@@ -355,7 +432,7 @@ impl SessionRouting {
             return;
         };
 
-        let Some(assignment) = assignment else {
+        let Some(assignment) = reading.assignment else {
             return;
         };
 
@@ -366,14 +443,20 @@ impl SessionRouting {
         .with_route(exchange.protocol.clone())
         .with_harness(Some(assignment.harness().to_owned()))
         .with_quota_context(Some(assignment.backend().credential().label()))
-        .with_timing(Some(dispatched_at_unix), Some(completed_at_unix))
+        .with_timing(
+            Some(reading.dispatched_at_unix),
+            Some(reading.completed_at_unix),
+        )
         .with_first_byte_at(exchange.first_byte_at)
-        .with_outcome(outcome);
+        .with_outcome(outcome)
+        .with_failure_class(failure_class)
+        .with_failovers(Some(reading.effect.failovers()))
+        .with_retries(Some(0));
 
         // Best-effort, exactly like `observe_quota_headers`'s own write to
         // `GatewayQuotaCache`: the accept loop cannot fail a real session's
         // exchange over a full disk or a locked database.
-        if let Err(err) = ledger.record(new, completed_at_unix) {
+        if let Err(err) = ledger.record(new, reading.completed_at_unix) {
             tracing::debug!(
                 error = %err,
                 "could not record a routing observation"
@@ -405,6 +488,12 @@ impl SessionRouting {
     /// provider said nothing, and it must stay `None` all the way down: the
     /// free pool's own bounded backoff is what applies then, and a wait
     /// nobody stated is not a fact to record.
+    ///
+    /// Returns what this exchange did to the assignment, so the accept loop
+    /// can write it onto the exchange's own evidence row — capability map
+    /// line 1334's `failovers`. Every early return is
+    /// [`ExchangeEffect::Unchanged`]: an exchange that said nothing moved
+    /// nothing.
     pub(super) fn observe_exchange(
         &self,
         upstream: &Upstream,
@@ -413,18 +502,18 @@ impl SessionRouting {
         ledger: Option<&EvidenceLedger>,
         now_unix: i64,
         stated_retry_after: Option<Duration>,
-    ) {
+    ) -> ExchangeEffect {
         let Some(observation) = classify(exchange, stated_retry_after) else {
             // Nothing reached the provider — an unauthenticated caller, a
             // malformed head, a target belonging to no protocol. Recording
             // health for a request the provider never saw would be inventing
             // a signal.
-            return;
+            return ExchangeEffect::Unchanged;
         };
 
         let mut state = self.lock();
         let Some(current) = state.assignment.clone() else {
-            return;
+            return ExchangeEffect::Unchanged;
         };
         let credential = current.backend().credential().clone();
         let model = model_key(current.backend().model());
@@ -459,12 +548,12 @@ impl SessionRouting {
                     cache,
                 });
                 state.assignment = Some(to);
-                return;
+                return ExchangeEffect::RotatedCredential;
             }
         }
 
         let Some(failure) = observation.failure else {
-            return;
+            return ExchangeEffect::Unchanged;
         };
 
         let candidates =
@@ -515,6 +604,9 @@ impl SessionRouting {
                         cache,
                     });
                     state.assignment = Some(to);
+                    ExchangeEffect::FailedOver
+                } else {
+                    ExchangeEffect::Unchanged
                 }
             }
             FailureResponse::OfferMigration {
@@ -534,6 +626,7 @@ impl SessionRouting {
                     "a Glasshouse gateway backend failed and the only compatible replacement \
                      serves a different model, which is a migration rather than a failover"
                 );
+                ExchangeEffect::Unchanged
             }
             FailureResponse::Stay { reason } => {
                 let detail = match &reason {
@@ -559,6 +652,7 @@ impl SessionRouting {
                     detail,
                     "a Glasshouse gateway backend failed and the session stayed where it was"
                 );
+                ExchangeEffect::Unchanged
             }
         }
     }
@@ -703,6 +797,115 @@ fn classify(exchange: &Exchange, stated_retry_after: Option<Duration>) -> Option
     }
 }
 
+/// How far out a `429`'s own reset must be before the refusal is read as a
+/// spent long-window quota rather than a cadence limit — capability map line
+/// 1365's boundary between the two, and [`failure_class`]'s one constant.
+///
+/// Five minutes. Every per-minute cadence limit this project has read off a
+/// real host (`crate::provider::telemetry`'s AnyRouter and Groq fixtures:
+/// `w=60`, per-minute request and token pools) reopens within a minute, and
+/// a `Retry-After` on one is seconds to a couple of minutes. A window that
+/// reopens in hours, or at midnight, is a quota. Five minutes sits between
+/// the two with room on both sides. A constant rather than a configuration
+/// because nothing measured yet says a user needs to move it; the day one
+/// does, this is the one number to lift.
+pub(super) const EXHAUSTED_QUOTA_HORIZON_SECONDS: i64 = 300;
+
+/// What kind of failure one exchange was — capability map line 1364's
+/// nine-way vocabulary, decided here and nowhere else, from the status line,
+/// the rate-limit headers, the byte count and how the stream ended. `None`
+/// for a served exchange, and for every exchange that never reached the
+/// provider, on the same reasoning as [`classify`]: nothing can be said about
+/// a provider that never saw the request.
+///
+/// # Every rule, and what it reads
+///
+/// - `401`, `403` → [`FailureClass::CredentialFailure`]; `402` →
+///   [`FailureClass::ExhaustedQuota`] — the account cannot pay, the
+///   `phase-9h` live finding [`classify`] records above.
+/// - `429` → [`FailureClass::Throttle`], **unless** the response's own
+///   headers say nothing remains (`remaining = 0`) and the window reopens at
+///   or beyond [`EXHAUSTED_QUOTA_HORIZON_SECONDS`] from when the response
+///   arrived — then [`FailureClass::ExhaustedQuota`]. The reopening instant
+///   is the provider's reset field when it sent one, else its
+///   `Retry-After`; with neither, or with anything remaining, a `429` is a
+///   throttle. Line 1365: cadence throttling stays apart from a spent
+///   window, and the distinction is *read*, never guessed.
+/// - any other `4xx` → [`FailureClass::RequestIncompatibility`]; `5xx` →
+///   [`FailureClass::Upstream5xx`].
+/// - `2xx`/`3xx` are decided by framing alone: a stream that ended short of
+///   its declared length or before its terminating chunk →
+///   [`FailureClass::StreamAbort`]; a body that was permitted and never
+///   came, zero bytes and a clean end → [`FailureClass::EmptyCompletion`];
+///   otherwise served, `None`.
+/// - a transport failure → [`FailureClass::Timeout`] when
+///   `ingress::transport_detail` said so, else [`FailureClass::Unknown`]
+///   with the detail still on the exchange's own log line.
+///
+/// # What is never read
+///
+/// No byte of the body. A `200` whose body describes a model error is
+/// served here, and the ledger's own header says so; the harness that
+/// received the body is the thing that can read it.
+pub(super) fn failure_class(exchange: &Exchange, quota: &RateLimitHeaders) -> Option<FailureClass> {
+    match &exchange.outcome {
+        Outcome::Forwarded {
+            upstream_status, ..
+        } => match *upstream_status {
+            401 | 403 => Some(FailureClass::CredentialFailure),
+            402 => Some(FailureClass::ExhaustedQuota),
+            429 => Some(if quota_is_exhausted(quota, exchange.first_byte_at) {
+                FailureClass::ExhaustedQuota
+            } else {
+                FailureClass::Throttle
+            }),
+            400..=499 => Some(FailureClass::RequestIncompatibility),
+            500..=599 => Some(FailureClass::Upstream5xx),
+            _ => match exchange.framing {
+                Some(Framing {
+                    ended: StreamEnd::Truncated | StreamEnd::Aborted,
+                    ..
+                }) => Some(FailureClass::StreamAbort),
+                Some(Framing {
+                    relayed: Some(0),
+                    ended: StreamEnd::Complete,
+                    ..
+                }) => Some(FailureClass::EmptyCompletion),
+                _ => None,
+            },
+        },
+        Outcome::Unreachable { detail } => Some(if *detail == TRANSPORT_TIMEOUT_DETAIL {
+            FailureClass::Timeout
+        } else {
+            FailureClass::Unknown
+        }),
+        Outcome::Unauthenticated
+        | Outcome::Declined
+        | Outcome::Unrouted
+        | Outcome::ClientGone
+        | Outcome::Idle => None,
+    }
+}
+
+/// [`failure_class`]'s `429` rule: nothing remains, and the window reopens
+/// no sooner than [`EXHAUSTED_QUOTA_HORIZON_SECONDS`] after the response was
+/// observed. `observed_at_unix` is the exchange's `first_byte_at`, which is
+/// set on every forwarded exchange; a reset field with no observation
+/// instant to anchor it is read as the delta the IETF field specifies.
+fn quota_is_exhausted(quota: &RateLimitHeaders, observed_at_unix: Option<i64>) -> bool {
+    if quota.remaining() != Some(0) {
+        return false;
+    }
+    let reopens_in = match observed_at_unix {
+        Some(observed) => quota
+            .resets_at_unix(observed)
+            .map(|at| at.saturating_sub(observed)),
+        None => quota.reset(),
+    }
+    .or_else(|| quota.retry_after_seconds());
+    reopens_in.is_some_and(|seconds| seconds >= EXHAUSTED_QUOTA_HORIZON_SECONDS)
+}
+
 /// Map line 1735: whether one finished exchange says the gateway's own
 /// upstream failed, separately from anything about the harness process that
 /// sent the request — and separately from [`classify`]'s question, which is
@@ -803,6 +1006,7 @@ mod tests {
             // No response ever arrived — this outcome exists precisely
             // because the provider could not be reached at all.
             first_byte_at: None,
+            framing: None,
         }
     }
 
@@ -829,17 +1033,374 @@ mod tests {
     }
 
     fn rate_limited_exchange(provider: &str) -> Exchange {
+        forwarded_exchange(provider, 429, Some(0), Some(0), StreamEnd::Complete)
+    }
+
+    /// A forwarded exchange with the framing `ingress::forward` would have
+    /// recorded for it: what was declared, what arrived, and how it ended.
+    fn forwarded_exchange(
+        provider: &str,
+        status: u16,
+        declared: Option<u64>,
+        relayed: Option<u64>,
+        ended: StreamEnd,
+    ) -> Exchange {
         Exchange {
             outcome: Outcome::Forwarded {
-                upstream_status: 429,
-                bytes: 0,
+                upstream_status: status,
+                bytes: relayed.unwrap_or(0),
             },
-            status: 429,
+            status,
             provider: provider.to_owned(),
             protocol: Some("anthropic-messages".to_owned()),
             host: String::new(),
             first_byte_at: Some(1_700_000_000),
+            framing: Some(Framing {
+                declared,
+                relayed,
+                ended,
+            }),
         }
+    }
+
+    fn no_headers() -> RateLimitHeaders {
+        RateLimitHeaders::default()
+    }
+
+    /// The mapping from what the relay observed to line 1364's vocabulary,
+    /// one case per class and the served case beside them — every input a
+    /// status, a header, a count or a way of ending, and not one a byte of
+    /// a body.
+    #[test]
+    fn every_failure_class_is_decided_from_status_headers_and_framing_alone() {
+        let served = forwarded_exchange("p", 200, Some(512), Some(512), StreamEnd::Complete);
+        assert_eq!(failure_class(&served, &no_headers()), None);
+
+        let chunked_served = forwarded_exchange("p", 200, None, Some(9_000), StreamEnd::Complete);
+        assert_eq!(failure_class(&chunked_served, &no_headers()), None);
+
+        for (status, expected) in [
+            (401, FailureClass::CredentialFailure),
+            (403, FailureClass::CredentialFailure),
+            (402, FailureClass::ExhaustedQuota),
+            (429, FailureClass::Throttle),
+            (400, FailureClass::RequestIncompatibility),
+            (404, FailureClass::RequestIncompatibility),
+            (413, FailureClass::RequestIncompatibility),
+            (500, FailureClass::Upstream5xx),
+            (503, FailureClass::Upstream5xx),
+            (529, FailureClass::Upstream5xx),
+        ] {
+            let exchange = forwarded_exchange("p", status, Some(40), Some(40), StreamEnd::Complete);
+            assert_eq!(
+                failure_class(&exchange, &no_headers()),
+                Some(expected),
+                "status {status}"
+            );
+        }
+
+        let truncated = forwarded_exchange("p", 200, Some(1000), Some(100), StreamEnd::Truncated);
+        assert_eq!(
+            failure_class(&truncated, &no_headers()),
+            Some(FailureClass::StreamAbort)
+        );
+        let aborted = forwarded_exchange("p", 200, None, Some(100), StreamEnd::Aborted);
+        assert_eq!(
+            failure_class(&aborted, &no_headers()),
+            Some(FailureClass::StreamAbort)
+        );
+        // A stream cut at zero bytes is an abort, not an empty completion:
+        // the framing said more was coming.
+        let cut_at_zero = forwarded_exchange("p", 200, Some(1000), Some(0), StreamEnd::Truncated);
+        assert_eq!(
+            failure_class(&cut_at_zero, &no_headers()),
+            Some(FailureClass::StreamAbort)
+        );
+
+        let empty = forwarded_exchange("p", 200, Some(0), Some(0), StreamEnd::Complete);
+        assert_eq!(
+            failure_class(&empty, &no_headers()),
+            Some(FailureClass::EmptyCompletion)
+        );
+        // No body was *permitted* — a `204`, or a `HEAD` — so nothing is
+        // missing from it.
+        let no_body_permitted = forwarded_exchange("p", 204, None, None, StreamEnd::Complete);
+        assert_eq!(failure_class(&no_body_permitted, &no_headers()), None);
+
+        let timed_out = Exchange {
+            outcome: Outcome::Unreachable {
+                detail: TRANSPORT_TIMEOUT_DETAIL,
+            },
+            ..unreachable_exchange("p")
+        };
+        assert_eq!(
+            failure_class(&timed_out, &no_headers()),
+            Some(FailureClass::Timeout)
+        );
+        assert_eq!(
+            failure_class(&unreachable_exchange("p"), &no_headers()),
+            Some(FailureClass::Unknown)
+        );
+
+        // Never reached the provider: nothing to classify, the same filter
+        // `classify` applies.
+        for outcome in [
+            Outcome::Unauthenticated,
+            Outcome::Declined,
+            Outcome::Unrouted,
+            Outcome::ClientGone,
+            Outcome::Idle,
+        ] {
+            let exchange = Exchange {
+                outcome,
+                ..unreachable_exchange("p")
+            };
+            assert_eq!(failure_class(&exchange, &no_headers()), None);
+        }
+    }
+
+    /// Line 1365's boundary, read off the headers rather than guessed: a
+    /// `429` is a spent quota only when nothing remains **and** the window
+    /// reopens at or beyond the horizon; anything else about it is a
+    /// throttle.
+    #[test]
+    fn a_429_is_exhausted_quota_only_when_nothing_remains_until_a_reset_beyond_the_horizon() {
+        let exchange = rate_limited_exchange("p");
+        let horizon = EXHAUSTED_QUOTA_HORIZON_SECONDS.to_string();
+        let just_under = (EXHAUSTED_QUOTA_HORIZON_SECONDS - 1).to_string();
+
+        let cases: [(&[(&str, &str)], FailureClass); 8] = [
+            (&[("retry-after", "2")], FailureClass::Throttle),
+            (
+                &[
+                    ("x-ratelimit-remaining", "0"),
+                    ("x-ratelimit-reset", "3600"),
+                ],
+                FailureClass::ExhaustedQuota,
+            ),
+            (
+                &[
+                    ("x-ratelimit-remaining", "0"),
+                    ("x-ratelimit-reset", &horizon),
+                ],
+                FailureClass::ExhaustedQuota,
+            ),
+            (
+                &[
+                    ("x-ratelimit-remaining", "0"),
+                    ("x-ratelimit-reset", &just_under),
+                ],
+                FailureClass::Throttle,
+            ),
+            (
+                &[
+                    ("x-ratelimit-remaining", "5"),
+                    ("x-ratelimit-reset", "3600"),
+                ],
+                FailureClass::Throttle,
+            ),
+            (
+                &[("x-ratelimit-remaining", "0"), ("retry-after", "3600")],
+                FailureClass::ExhaustedQuota,
+            ),
+            (&[("x-ratelimit-remaining", "0")], FailureClass::Throttle),
+            (
+                // An absolute reset an hour past the response's own arrival.
+                &[
+                    ("ratelimit-remaining", "0"),
+                    ("ratelimit-reset", "1700003600"),
+                ],
+                FailureClass::ExhaustedQuota,
+            ),
+        ];
+        for (headers, expected) in cases {
+            let quota = RateLimitHeaders::read(headers.iter().copied());
+            assert_eq!(
+                failure_class(&exchange, &quota),
+                Some(expected),
+                "headers {headers:?}"
+            );
+        }
+    }
+
+    /// The row's `outcome` and its `failure_class` agree by construction:
+    /// a class exactly when the outcome is not a success. Driven through the
+    /// real writer against a real ledger, and read back through the public
+    /// reader.
+    #[test]
+    fn record_routing_observation_writes_the_class_the_failover_count_and_zero_retries() {
+        use crate::routing::evidence::ObservationQuery;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = ledger_fixture(tmp.path());
+        let upstream = Upstream::with_failover(vec![upstream_backend("openrouter")])
+            .expect("one backend is not none");
+        let routing = SessionRouting::new();
+        routing.bind(
+            "claude-code",
+            "anthropic-messages",
+            AssignedModel::named("the-routed-model"),
+            &upstream,
+        );
+        let assignment = routing.assignment();
+        let exhausted = RateLimitHeaders::read(vec![
+            ("x-ratelimit-remaining", "0"),
+            ("x-ratelimit-reset", "7200"),
+        ]);
+
+        let cases = [
+            (
+                rate_limited_exchange("openrouter"),
+                &exhausted,
+                ExchangeEffect::Unchanged,
+            ),
+            (
+                forwarded_exchange("openrouter", 200, Some(64), Some(64), StreamEnd::Complete),
+                &no_headers(),
+                ExchangeEffect::Unchanged,
+            ),
+            (
+                forwarded_exchange(
+                    "openrouter",
+                    200,
+                    Some(1000),
+                    Some(100),
+                    StreamEnd::Truncated,
+                ),
+                &no_headers(),
+                ExchangeEffect::FailedOver,
+            ),
+        ];
+        for (i, (exchange, quota, effect)) in cases.iter().enumerate() {
+            routing.record_routing_observation(
+                &ledger,
+                exchange,
+                ExchangeReading {
+                    quota,
+                    dispatched_at_unix: 1_700_000_000 + i as i64,
+                    completed_at_unix: 1_700_000_001 + i as i64,
+                    assignment: assignment.clone(),
+                    effect: *effect,
+                },
+            );
+        }
+
+        let mut rows = ledger
+            .recent(
+                ObservationQuery {
+                    provider: "openrouter",
+                    model: "the-routed-model",
+                    route: Some("anthropic-messages"),
+                    harness: Some("claude-code"),
+                },
+                10,
+            )
+            .unwrap();
+        rows.sort_by_key(|row| row.dispatched_at_unix);
+        assert_eq!(rows.len(), 3);
+
+        assert_eq!(rows[0].failure_class, Some(FailureClass::ExhaustedQuota));
+        assert_eq!(rows[0].outcome, Some(RoutingOutcome::Failed));
+        assert_eq!(rows[1].failure_class, None);
+        assert_eq!(rows[1].outcome, Some(RoutingOutcome::Succeeded));
+        assert_eq!(rows[2].failure_class, Some(FailureClass::StreamAbort));
+        assert_eq!(
+            rows[2].outcome,
+            Some(RoutingOutcome::Failed),
+            "a 2xx whose stream was cut is not a success at the transport level either"
+        );
+        assert_eq!(rows[2].failovers, Some(1));
+        for row in &rows[..2] {
+            assert_eq!(row.failovers, Some(0));
+        }
+        for row in &rows {
+            assert_eq!(row.retries, Some(0), "the gateway forwards exactly once");
+            assert_eq!(row.tool_rounds, None);
+            assert_eq!(row.repairs, None);
+            assert_eq!(
+                row.failure_class.is_some(),
+                row.outcome != Some(RoutingOutcome::Succeeded),
+                "a class exactly when the outcome is not a success: {row:?}"
+            );
+        }
+    }
+
+    /// What `observe_exchange` says it did is what it did: a real failover
+    /// answers `FailedOver`, a rotation within the provider answers
+    /// `RotatedCredential` and is not counted as a failover, and an exchange
+    /// with nowhere to go answers `Unchanged`.
+    #[test]
+    fn observe_exchange_reports_what_it_did_to_the_assignment() {
+        let three = Upstream::with_failover(vec![
+            upstream_backend("first"),
+            upstream_backend("second"),
+            upstream_backend("third"),
+        ])
+        .expect("three backends is not none");
+        let routing = SessionRouting::new();
+        routing.bind(
+            "claude-code",
+            "anthropic-messages",
+            AssignedModel::named("the-routed-model"),
+            &three,
+        );
+        let effect = routing.observe_exchange(
+            &three,
+            &unreachable_exchange("first"),
+            Instant::now(),
+            None,
+            0,
+            None,
+        );
+        assert_eq!(effect, ExchangeEffect::FailedOver);
+        assert_eq!(effect.failovers(), 1);
+
+        let alone = Upstream::with_failover(vec![upstream_backend("only")])
+            .expect("one backend is not none");
+        let routing = SessionRouting::new();
+        routing.bind(
+            "claude-code",
+            "anthropic-messages",
+            AssignedModel::named("the-routed-model"),
+            &alone,
+        );
+        let effect = routing.observe_exchange(
+            &alone,
+            &unreachable_exchange("only"),
+            Instant::now(),
+            None,
+            0,
+            None,
+        );
+        assert_eq!(effect, ExchangeEffect::Unchanged);
+        assert_eq!(effect.failovers(), 0);
+
+        let two_keys = Upstream::with_failover(vec![
+            upstream_backend_with_credential("openrouter", "OPENROUTER_KEY_A"),
+            upstream_backend_with_credential("openrouter", "OPENROUTER_KEY_B"),
+        ])
+        .expect("two backends is not none");
+        let routing = SessionRouting::new();
+        routing.bind(
+            "claude-code",
+            "anthropic-messages",
+            AssignedModel::named("the-routed-model"),
+            &two_keys,
+        );
+        let effect = routing.observe_exchange(
+            &two_keys,
+            &forwarded_exchange("openrouter", 401, Some(0), Some(0), StreamEnd::Complete),
+            Instant::now(),
+            None,
+            0,
+            None,
+        );
+        assert_eq!(effect, ExchangeEffect::RotatedCredential);
+        assert_eq!(
+            effect.failovers(),
+            0,
+            "a rotation within one provider is not a failover"
+        );
     }
 
     /// The §36 proof for this package's own wiring, not
@@ -1214,17 +1775,7 @@ mod tests {
         );
         routing.observe_exchange(
             &upstream,
-            &Exchange {
-                outcome: Outcome::Forwarded {
-                    upstream_status: 200,
-                    bytes: 0,
-                },
-                status: 200,
-                provider: "openrouter".to_owned(),
-                protocol: Some("anthropic-messages".to_owned()),
-                host: String::new(),
-                first_byte_at: Some(1_700_000_000),
-            },
+            &forwarded_exchange("openrouter", 200, Some(0), Some(0), StreamEnd::Complete),
             now,
             None,
             0,

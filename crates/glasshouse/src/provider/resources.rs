@@ -52,6 +52,7 @@ use crate::provider::telemetry::{
     RateLimitHeaders, apply_harness_report, apply_provider_headers, apply_user_configuration,
     read_harness_plan,
 };
+use crate::routing::evidence::{EvidenceLedger, FailureClass, FailureClassCounts};
 
 /// The status interface of a harness that has one, as a command line
 /// Glasshouse constructs itself.
@@ -214,7 +215,22 @@ pub struct GatheredTelemetry {
     /// different facts about a resource, and line 1324 asks that a reader
     /// never be able to conflate them by construction.
     health: BTreeMap<String, Vec<GatewayHealthReading>>,
+    /// Capability map lines 1316 and 1365: what the routing evidence ledger
+    /// recorded about each provider's failures over
+    /// [`FAILURE_CLASS_WINDOW_SECONDS`], by kind. A third map beside the two
+    /// above for the same reason `health` is beside `providers`: a throttle
+    /// count, a cooldown and a remaining-quota reading are three facts, and
+    /// none may stand in for another.
+    failure_classes: BTreeMap<String, FailureClassCounts>,
 }
+
+/// How far back `glasshouse resources` counts failures by class — capability
+/// map line 1316's "recent". A day: long enough that a session's worth of
+/// exchanges is in view, short enough that yesterday's outage does not
+/// colour today's reading. Not the ledger's own routing window
+/// (`crate::gateway::session::FAILOVER_EVIDENCE_WINDOW_SECONDS` is a
+/// routing decision's horizon; this is a report's).
+pub const FAILURE_CLASS_WINDOW_SECONDS: i64 = 24 * 60 * 60;
 
 impl GatheredTelemetry {
     pub fn new() -> Self {
@@ -320,6 +336,55 @@ impl GatheredTelemetry {
         self
     }
 
+    /// Record what the routing evidence ledger counted about a provider's
+    /// failures, by kind — capability map lines 1316 and 1365's own seam,
+    /// independent of every seam above.
+    pub fn with_provider_failure_classes(
+        mut self,
+        provider: impl Into<String>,
+        counts: FailureClassCounts,
+    ) -> Self {
+        self.failure_classes.insert(provider.into(), counts);
+        self
+    }
+
+    /// Fold in every provider's failure counts over the last
+    /// [`FAILURE_CLASS_WINDOW_SECONDS`] from the project's routing evidence
+    /// ledger — capability map lines 1316 and 1365's bridge from the gateway
+    /// that recorded the rows to this `glasshouse resources` invocation.
+    ///
+    /// One `GROUP BY` over the ledger
+    /// ([`EvidenceLedger::failure_classes_by_provider`]), no network, no
+    /// subprocess. Fail-soft exactly as [`Self::gather_gateway_quota`] and
+    /// [`Self::gather_gateway_health`] are: a ledger that cannot be read
+    /// folds in nothing rather than failing the report, and the reason is
+    /// logged at debug level.
+    ///
+    /// **Not yet called from `glasshouse resources`.** The caller this method
+    /// exists for is `main.rs::resources_report`, which is outside this
+    /// package's files; the call it needs is one line beside its
+    /// `gather_gateway_health` call, with an [`EvidenceLedger::open`] on the
+    /// `runtime` it already holds — see the package report. Tests exercise
+    /// this method against a real ledger, which proves the gather and the
+    /// rendering without claiming the production reach it does not yet have
+    /// (practice §35).
+    pub fn gather_failure_classes(mut self, ledger: &EvidenceLedger, now_unix: i64) -> Self {
+        match ledger.failure_classes_by_provider(now_unix, FAILURE_CLASS_WINDOW_SECONDS) {
+            Ok(by_provider) => {
+                for (provider, counts) in by_provider {
+                    self = self.with_provider_failure_classes(provider, counts);
+                }
+            }
+            Err(err) => {
+                tracing::debug!(
+                    error = %err,
+                    "could not count routing failures by class for the resources report"
+                );
+            }
+        }
+        self
+    }
+
     fn for_harness(&self, harness: IntegrationId) -> Option<&HarnessTelemetry> {
         self.harness.get(harness.slug())
     }
@@ -333,6 +398,13 @@ impl GatheredTelemetry {
     /// invent a reading" half, at the one place a renderer can ask.
     fn for_provider_health(&self, provider: &str) -> &[GatewayHealthReading] {
         self.health.get(provider).map_or(&[], |readings| readings)
+    }
+
+    /// The failure counts gathered for `provider`, or `None` when the ledger
+    /// had no exchange of it in the window — line 1316's reader, at the one
+    /// place a renderer can ask.
+    fn for_provider_failure_classes(&self, provider: &str) -> Option<&FailureClassCounts> {
+        self.failure_classes.get(provider)
     }
 }
 
@@ -542,6 +614,14 @@ fn render_resource(
     // never be scored as one.
     render_health(out, kind, telemetry, options);
 
+    // Capability map lines 1316 and 1365: what kind of failures this
+    // resource has produced recently, as three separate figures and a
+    // per-class list — beside the health reading above, never folded into
+    // it. A resource cooling down and a resource that answered `503` twice
+    // are both "unhealthy" to a reader who only sees one line; the second
+    // line is what tells them apart.
+    render_failure_classes(out, kind, telemetry, options);
+
     // Capability map line 1236.
     match state.last_observed_at_unix() {
         Some(at) => {
@@ -716,6 +796,74 @@ fn render_health(
             reading.model, reading.credential_label, reading.consecutive_failures
         );
     }
+}
+
+/// Capability map lines 1316 and 1365: what the routing evidence ledger has
+/// recorded about this resource's failures over the last
+/// [`FAILURE_CLASS_WINDOW_SECONDS`], by kind.
+///
+/// **Three figures, never one.** Cadence throttling, an exhausted quota and
+/// provider ill-health have three different remedies — wait a minute; wait
+/// for the window or pay; route elsewhere — and line 1365 asks that they
+/// never be summed into a single "failures" number a reader would have to
+/// take apart again. [`FailureClassCounts`] has no total on purpose, and
+/// this renderer prints none. Every figure is printed beside the number of
+/// exchanges it is out of, so "throttled 3" of 4 and "throttled 3" of 400
+/// read as the different facts they are.
+///
+/// Only a [`ResourceKind::DirectProvider`] can have a count: the ledger keys
+/// rows by the provider name the gateway forwarded to, exactly the key
+/// [`render_health`] uses. A native subscription and the gateway resource
+/// itself print `unknown`, as they do for health. And a provider nothing
+/// has been recorded for prints `unknown` too — line 1324's "never invent a
+/// reading", one line down.
+fn render_failure_classes(
+    out: &mut String,
+    kind: &ResourceKind,
+    telemetry: &GatheredTelemetry,
+    options: ReportOptions,
+) {
+    let counts = match kind {
+        ResourceKind::DirectProvider { provider, .. } => {
+            telemetry.for_provider_failure_classes(provider)
+        }
+        _ => None,
+    };
+    let Some(counts) = counts.filter(|counts| !counts.is_empty()) else {
+        let _ = writeln!(
+            out,
+            "  failures 24h    {UNKNOWN_TELEMETRY} — no routing observation has been recorded \
+             for this resource"
+        );
+        return;
+    };
+    let _ = writeln!(
+        out,
+        "  failures 24h    cadence throttled {}, quota exhausted {}, provider unhealthy {} — \
+         of {} exchange(s), {} served",
+        counts.cadence_throttled(),
+        counts.exhausted_quota(),
+        counts.provider_health_failures(),
+        counts.observed(),
+        counts.served(),
+    );
+    let mut by_class: Vec<String> = FailureClass::ALL
+        .into_iter()
+        .filter(|class| options.verbose || counts.count(*class) > 0)
+        .map(|class| format!("{} {}", describe_failure_class(class), counts.count(class)))
+        .collect();
+    if counts.unclassified() > 0 {
+        by_class.push(format!("unclassified {}", counts.unclassified()));
+    }
+    if !by_class.is_empty() {
+        let _ = writeln!(out, "  by class        {}", by_class.join(", "));
+    }
+}
+
+/// A [`FailureClass`] as a reader sees it: the stored name with its
+/// underscores opened out, so the report and the ledger spell one vocabulary.
+fn describe_failure_class(class: FailureClass) -> String {
+    class.as_str().replace('_', " ")
 }
 
 /// Capability map lines 1210 and 1211: when this resource's quota window
@@ -2418,5 +2566,205 @@ mod tests {
         render_rate_ceilings(&mut out, &state, options());
 
         assert!(!out.contains("tokens/minute"), "{out}");
+    }
+
+    // --- lines 1316 and 1365, through the same production rendering function ----
+
+    use crate::routing::evidence::Outcome as RoutingOutcome;
+
+    fn counts(
+        throttle: usize,
+        exhausted: usize,
+        upstream: usize,
+        served: usize,
+    ) -> FailureClassCounts {
+        let mut counts = FailureClassCounts::default();
+        for _ in 0..throttle {
+            counts.record(Some(RoutingOutcome::Failed), Some(FailureClass::Throttle));
+        }
+        for _ in 0..exhausted {
+            counts.record(
+                Some(RoutingOutcome::Failed),
+                Some(FailureClass::ExhaustedQuota),
+            );
+        }
+        for _ in 0..upstream {
+            counts.record(
+                Some(RoutingOutcome::Failed),
+                Some(FailureClass::Upstream5xx),
+            );
+        }
+        for _ in 0..served {
+            counts.record(Some(RoutingOutcome::Succeeded), None);
+        }
+        counts
+    }
+
+    /// Line 1365 at the rendering function `main.rs::resources_report`
+    /// calls: three figures, each with the denominator, and no line that
+    /// adds them up.
+    #[test]
+    fn three_failure_figures_render_separately_with_their_denominator() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let telemetry = GatheredTelemetry::new()
+            .with_provider_failure_classes("anyrouter", counts(3, 1, 2, 12));
+        let row = anyrouter_row(&report(&effective, &telemetry, options()));
+
+        assert!(
+            row.contains(
+                "failures 24h    cadence throttled 3, quota exhausted 1, provider unhealthy 2 — \
+                 of 18 exchange(s), 12 served"
+            ),
+            "{row}"
+        );
+        assert!(
+            row.contains("by class        throttle 3, exhausted quota 1, upstream 5xx 2"),
+            "{row}"
+        );
+        // Nothing sums the three: neither the total failures (6) nor the
+        // total with served (18) appears as a failures figure.
+        assert!(!row.contains("failures 24h    6"), "{row}");
+        assert!(!row.contains("6 failure"), "{row}");
+    }
+
+    /// Line 1316 at the same function: rate-limit responses counted apart
+    /// from transport and model failures — a provider that was only ever
+    /// throttled shows zero under provider health, and the other way round.
+    #[test]
+    fn rate_limit_responses_are_counted_apart_from_provider_failures() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+
+        let throttled_only =
+            GatheredTelemetry::new().with_provider_failure_classes("anyrouter", counts(4, 0, 0, 1));
+        let row = anyrouter_row(&report(&effective, &throttled_only, options()));
+        assert!(
+            row.contains("cadence throttled 4, quota exhausted 0, provider unhealthy 0"),
+            "{row}"
+        );
+
+        let failing_only =
+            GatheredTelemetry::new().with_provider_failure_classes("anyrouter", counts(0, 0, 4, 1));
+        let row = anyrouter_row(&report(&effective, &failing_only, options()));
+        assert!(
+            row.contains("cadence throttled 0, quota exhausted 0, provider unhealthy 4"),
+            "{row}"
+        );
+    }
+
+    /// Line 1324's rule applied to this line: a resource nothing has been
+    /// recorded for says `unknown`, never zero.
+    #[test]
+    fn a_resource_with_no_recorded_exchange_prints_unknown_failures_not_zero() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let row = anyrouter_row(&report(&effective, &GatheredTelemetry::new(), options()));
+        assert!(
+            row.contains("failures 24h    unknown — no routing observation has been recorded"),
+            "{row}"
+        );
+        assert!(!row.contains("cadence throttled 0"), "{row}");
+    }
+
+    /// The verbose view lists every class, zero or not — line 1761's debug
+    /// view applied here; the quiet view lists only what happened.
+    #[test]
+    fn the_verbose_view_lists_every_class_and_the_quiet_view_only_the_nonzero_ones() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let telemetry =
+            GatheredTelemetry::new().with_provider_failure_classes("anyrouter", counts(1, 0, 0, 0));
+
+        let quiet = anyrouter_row(&report(&effective, &telemetry, options()));
+        assert!(quiet.contains("by class        throttle 1\n"), "{quiet}");
+
+        let verbose = anyrouter_row(&report(
+            &effective,
+            &telemetry,
+            ReportOptions {
+                verbose: true,
+                ..options()
+            },
+        ));
+        for class in FailureClass::ALL {
+            assert!(
+                verbose.contains(&format!(
+                    "{} {}",
+                    describe_failure_class(class),
+                    telemetry_count(&telemetry, class)
+                )),
+                "verbose must list `{class}`: {verbose}"
+            );
+        }
+    }
+
+    fn telemetry_count(telemetry: &GatheredTelemetry, class: FailureClass) -> usize {
+        telemetry
+            .for_provider_failure_classes("anyrouter")
+            .map_or(0, |counts| counts.count(class))
+    }
+
+    /// The gather path against a real ledger, so the bridge from the rows
+    /// the gateway writes to the line `glasshouse resources` prints is
+    /// proven end to end minus the one `main.rs` call the report names.
+    #[test]
+    fn gather_failure_classes_reads_a_real_ledger_into_the_rendered_report() {
+        use crate::routing::evidence::NewObservation;
+        use crate::{Cli, Runtime};
+        use clap::Parser;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace").join("proj");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let cli = Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            tmp.path().join("data").to_str().unwrap(),
+            "--config-dir",
+            tmp.path().join("config").to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime: Runtime = crate::bootstrap(&cli, &root).unwrap();
+        let ledger = EvidenceLedger::open(&runtime).unwrap();
+
+        for (class, outcome) in [
+            (Some(FailureClass::Throttle), RoutingOutcome::Failed),
+            (Some(FailureClass::Throttle), RoutingOutcome::Failed),
+            (Some(FailureClass::Upstream5xx), RoutingOutcome::Failed),
+            (None, RoutingOutcome::Succeeded),
+        ] {
+            ledger
+                .record(
+                    NewObservation::new("anyrouter", "some-model")
+                        .with_outcome(outcome)
+                        .with_failure_class(class),
+                    NOW - 60,
+                )
+                .unwrap();
+        }
+        // Outside the window: yesterday's outage must not colour today's
+        // reading.
+        ledger
+            .record(
+                NewObservation::new("anyrouter", "some-model")
+                    .with_outcome(RoutingOutcome::Failed)
+                    .with_failure_class(Some(FailureClass::ExhaustedQuota)),
+                NOW - FAILURE_CLASS_WINDOW_SECONDS - 1,
+            )
+            .unwrap();
+
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        let telemetry = GatheredTelemetry::new().gather_failure_classes(&ledger, NOW);
+        let row = anyrouter_row(&report(&effective, &telemetry, options()));
+        assert!(
+            row.contains(
+                "cadence throttled 2, quota exhausted 0, provider unhealthy 1 — of 4 \
+                 exchange(s), 1 served"
+            ),
+            "{row}"
+        );
     }
 }

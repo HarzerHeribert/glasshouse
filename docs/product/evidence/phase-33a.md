@@ -530,3 +530,10 @@ target. Approved.
 - `mean_time_to_first_byte_ms` is a **mean**, not a median, computed in SQL over
   rows carrying both `first_byte_at` and `dispatched_at`.
 - Says nothing about the disposable path, which does not go through the gateway.
+
+
+---
+
+## From `GH-FAILURE-TAXONOMY` (2026-08-31) — 1334 stays OPEN on two quantities
+
+`failovers` (this exchange's own `ChangeCause::Failover`, 0/1) and `retries` (0 — the gateway forwards exactly once, verified in `ureq` 3.4.0's source) are now written on every row, and a 2xx whose stream was cut or whose permitted body never came records `outcome = failed`. **`tool_rounds` and `repairs`** still need a turn structure and a body this layer cannot see. 1331–1333 are unchanged: first real token, padding-vs-token and token counts require reading content, which the ruling does not permit. Full entry: `phase-33c.md`.
