@@ -12,6 +12,7 @@ mod database;
 pub mod evaluation;
 pub mod events;
 pub mod gateway;
+pub mod guardrails;
 pub mod harness;
 pub mod integrations;
 pub mod launch;

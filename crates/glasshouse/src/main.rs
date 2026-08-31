@@ -15,6 +15,7 @@ use glasshouse::config::{self, EffectiveConfig, ProjectConfig, UserConfig};
 use glasshouse::events::{
     EventBus, EventLog, LifecycleEvent, Observation, ProcessExit, TurnOutcome,
 };
+use glasshouse::guardrails::{AssumptionStore, GuardrailOverride};
 use glasshouse::integrations::Discovery;
 use glasshouse::launch::HarnessLaunch;
 use glasshouse::onboarding;
@@ -254,6 +255,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             checkpoint_first,
             headless,
             task,
+            guardrail,
             harness_args,
         })
         | Some(Command::Run {
@@ -268,6 +270,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             checkpoint_first,
             headless,
             task,
+            guardrail,
             harness_args,
         }) => {
             let response =
@@ -278,6 +281,16 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                         return Ok(ExitCode::FAILURE);
                     }
                 };
+            // Phase 21K line 1008: refused here, before anything is
+            // resolved or recorded, so a misspelt override costs nothing.
+            let guardrail = match guardrail.as_deref().map(parse_guardrail_override) {
+                Some(Ok(kind)) => Some(kind),
+                Some(Err(err)) => {
+                    eprintln!("glasshouse: {err}");
+                    return Ok(ExitCode::FAILURE);
+                }
+                None => None,
+            };
             return launch_session(
                 &runtime,
                 harness.as_deref(),
@@ -293,6 +306,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 &response,
                 *headless,
                 harness_args,
+                guardrail,
             );
         }
         Some(Command::Resume {
@@ -414,6 +428,17 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             force,
         }) => {
             return run_shim(harness, profile, dir, name.as_deref(), *force);
+        }
+        // Phase 21K line 1048: what agents have stated, and what became of
+        // it — read from the ledger, never inferred from a transcript.
+        Some(Command::Assumptions { session, limit }) => {
+            match assumptions_report(&runtime, session.as_deref(), *limit) {
+                Ok(report) => print!("{report}"),
+                Err(err) => {
+                    eprintln!("glasshouse: {err:#}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
         }
         Some(Command::Api { command }) => match command {
             ApiCommand::Serve { socket } => {
@@ -2375,6 +2400,7 @@ fn launch_session(
     response: &ResponseRequest,
     headless: bool,
     harness_args: &[String],
+    guardrail: Option<GuardrailOverride>,
 ) -> anyhow::Result<ExitCode> {
     let LaunchDestination {
         profile: profile_name,
@@ -3008,6 +3034,33 @@ fn launch_session(
     // Line 1467, the fresh half: the session just recorded is the one the
     // next low-risk turn will be in.
     remember_classification(&sticky_cache, classified.as_ref(), record.id.as_str());
+
+    // Phase 21K line 1008: the person's per-task guardrail override,
+    // recorded before the harness starts so that no preflight the agent runs
+    // in this session answers without it. Best effort, like the hook
+    // installation below: a launch is not refused for a bookkeeping row,
+    // but the failure is said out loud, because a session gated against the
+    // user's stated wish is the one outcome the override exists to prevent.
+    if let Some(kind) = guardrail {
+        match glasshouse::guardrails::record_override(
+            runtime,
+            record.id.as_str(),
+            kind,
+            glasshouse::guardrails::Origin::User,
+        ) {
+            Ok(row) => tracing::info!(
+                session = %record.id,
+                guardrail = %kind,
+                seq = row.seq,
+                "recorded a per-task guardrail override"
+            ),
+            Err(err) => eprintln!(
+                "glasshouse: warning: `--guardrail {kind}` could not be recorded for session \
+                 {}: {err:#}",
+                record.id
+            ),
+        }
+    }
 
     // Read before the harness runs, for a harness that keeps its identifiers
     // in one shared index: such an index carries no per-entry timestamp, so
@@ -7940,6 +7993,240 @@ fn session_detail(runtime: &Runtime, session: &str) -> anyhow::Result<String> {
             .as_ref()
             .map_or_else(|| "-".to_string(), |c| c.task_continuity.to_string()),
     );
+
+    // Phase 21K lines 1048 and 1049: the session's open premises and its
+    // last gate, on a handle opened after the session store's is gone
+    // (practice §65), and bounded so the normal view is not flooded.
+    drop(store);
+    drop(sessions);
+    out.push_str(&assumption_section(runtime, &id));
+    Ok(out)
+}
+
+/// How many open premises `glasshouse sessions show` lists before it says
+/// how many more there are — line 1048's *"without flooding"*.
+const SHOWN_OPEN_PREMISES: usize = 3;
+
+/// The `sessions show` lines for a session's assumptions: a count line, at
+/// most [`SHOWN_OPEN_PREMISES`] open premises, the last gate and the
+/// override in force. A ledger that cannot be read collapses to `-`, like
+/// every other field above it.
+fn assumption_section(runtime: &Runtime, id: &glasshouse::session::SessionId) -> String {
+    use glasshouse::guardrails::{AssumptionState, TransitionKind, quote};
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let mut line = |label: &str, value: &str| {
+        let _ = writeln!(out, "{label:<19}{value}");
+    };
+
+    let Ok(ledger) = AssumptionStore::open(runtime) else {
+        line("assumptions", "-");
+        return out;
+    };
+    let session = id.as_str();
+    let (Ok(counts), Ok(open)) = (
+        ledger.counts(Some(session)),
+        ledger.open_for_session(session),
+    ) else {
+        line("assumptions", "-");
+        return out;
+    };
+    let count_of = |state: AssumptionState| {
+        counts
+            .iter()
+            .find(|(s, _)| *s == state)
+            .map_or(0, |(_, n)| *n)
+    };
+    let total: i64 = counts.iter().map(|(_, n)| n).sum();
+    if total == 0 {
+        line("assumptions", "none stated");
+    } else {
+        line(
+            "assumptions",
+            &format!(
+                "{} open · {} supported · {} refuted · {} waived",
+                open.len(),
+                count_of(AssumptionState::Supported),
+                count_of(AssumptionState::Refuted),
+                count_of(AssumptionState::WaivedByUser)
+            ),
+        );
+    }
+    for view in open.iter().take(SHOWN_OPEN_PREMISES) {
+        line(
+            "  open premise",
+            &format!(
+                "[{}] {} ({})",
+                view.state,
+                quote(&view.record.claim, 96),
+                view.record.id.short()
+            ),
+        );
+    }
+    if open.len() > SHOWN_OPEN_PREMISES {
+        line(
+            "",
+            &format!(
+                "… and {} more; `glasshouse assumptions --session {}`",
+                open.len() - SHOWN_OPEN_PREMISES,
+                short_id(id)
+            ),
+        );
+    }
+    if let Ok(gates) = ledger.session_events(session, Some(TransitionKind::Gate), 1)
+        && let Some(gate) = gates.first()
+    {
+        line(
+            "  last gate",
+            &format!(
+                "{} — {}",
+                gate.subject.as_deref().unwrap_or("?"),
+                format_age(gate.at)
+            ),
+        );
+    }
+    if let Ok(Some((kind, row))) = ledger.latest_override(session) {
+        line(
+            "  guardrail",
+            &format!(
+                "{kind} (recorded by {}, {})",
+                row.origin,
+                format_age(row.at)
+            ),
+        );
+    }
+    out
+}
+
+/// `--guardrail`'s value, or a refusal naming the three spellings.
+fn parse_guardrail_override(value: &str) -> anyhow::Result<GuardrailOverride> {
+    GuardrailOverride::from_stored(value.trim()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "`{value}` is not a guardrail override; use one of {}",
+            GuardrailOverride::spellings()
+        )
+    })
+}
+
+/// `glasshouse assumptions [--session <id>] [--limit N]` — Phase 21K lines
+/// 1048, 1049, 1051.
+///
+/// Every line is read from the ledger and rendered through
+/// `guardrails::quote`, so what an agent stated reaches the terminal with
+/// nothing in it that could act on the terminal. The session, when named,
+/// is resolved through the session store's own prefix rule and that handle
+/// is dropped before the ledger's is opened.
+fn assumptions_report(
+    runtime: &Runtime,
+    session: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<String> {
+    use glasshouse::guardrails::{AssumptionState, TransitionKind, quote};
+    use std::fmt::Write as _;
+
+    let session = match session {
+        Some(named) => {
+            let sessions = ProjectSessions::open(runtime)?;
+            let id = sessions.store().resolve_id(named)?;
+            Some(id.as_str().to_owned())
+        }
+        None => None,
+    };
+    let ledger = AssumptionStore::open(runtime)?;
+    let counts = ledger.counts(session.as_deref())?;
+    let views = ledger.list(session.as_deref(), limit)?;
+
+    let mut out = String::new();
+    match &session {
+        Some(id) => writeln!(out, "assumptions stated for session {id}")?,
+        None => writeln!(out, "assumptions stated in this project")?,
+    }
+    let summary = counts
+        .iter()
+        .map(|(state, n)| format!("{state} {n}"))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    writeln!(out, "{summary}")?;
+    if views.is_empty() {
+        writeln!(
+            out,
+            "\nnone recorded — an agent states one through the control API's \
+             record_assumption or the glasshouse_record_assumption tool; nothing is inferred"
+        )?;
+    }
+    for view in &views {
+        let record = &view.record;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "{}  {:<14} {}/{}  {}{}",
+            record.id.short(),
+            view.state,
+            record.uncertainty,
+            record.evidence_source,
+            format_age(record.created_at),
+            record
+                .session_id
+                .as_deref()
+                .filter(|_| session.is_none())
+                .map(|s| format!("  session {}", &s[..s.len().min(8)]))
+                .unwrap_or_default()
+        )?;
+        writeln!(out, "    claim         {}", quote(&record.claim, 280))?;
+        writeln!(out, "    evidence      {}", quote(&record.evidence, 200))?;
+        writeln!(out, "    affects       {}", quote(&record.affected, 200))?;
+        writeln!(
+            out,
+            "    verify        {}",
+            quote(&record.verification, 200)
+        )?;
+        let latest = &view.latest;
+        let mut trail = format!(
+            "{} by {} {}",
+            latest.state.map_or("-", AssumptionState::as_str),
+            latest.origin,
+            format_age(latest.at)
+        );
+        if let Some(response) = latest.response {
+            let _ = write!(trail, ", response {response}");
+        }
+        if let Some(note) = &latest.note {
+            let _ = write!(trail, " — {}", quote(note, 200));
+        }
+        if view.transitions > 1 {
+            let _ = write!(trail, " ({} transitions)", view.transitions);
+        }
+        writeln!(out, "    latest        {trail}")?;
+    }
+
+    if let Some(id) = &session {
+        let events = ledger.session_events(id, None, 20)?;
+        if !events.is_empty() {
+            writeln!(out)?;
+            writeln!(out, "gates, overrides and budgets for this session")?;
+            for event in &events {
+                let what = match event.kind {
+                    TransitionKind::Gate => "gate",
+                    TransitionKind::Override => "override",
+                    TransitionKind::BudgetExceeded => "budget exceeded",
+                    TransitionKind::Transition => "transition",
+                };
+                writeln!(
+                    out,
+                    "  {:<16} {:<32} {}{}",
+                    what,
+                    event.subject.as_deref().unwrap_or("-"),
+                    format_age(event.at),
+                    event
+                        .note
+                        .as_deref()
+                        .map(|note| format!("  — {}", quote(note, 120)))
+                        .unwrap_or_default()
+                )?;
+            }
+        }
+    }
     Ok(out)
 }
 
@@ -8574,6 +8861,7 @@ mod tests {
             &ResponseRequest::default(),
             false,
             &[],
+            None,
         )
         .unwrap();
         assert_eq!(status, ExitCode::FAILURE);
@@ -8608,6 +8896,7 @@ mod tests {
             &ResponseRequest::default(),
             false,
             &[],
+            None,
         )
         .unwrap();
         assert_eq!(status, ExitCode::FAILURE);

@@ -2742,8 +2742,13 @@ mod tests {
     /// column-scoped `CHECK` goes with the column it is written on, so it is
     /// one statement. Migration 17's `memory_files` is one statement for
     /// migration 15's reason — dropping a table takes its index and its two
-    /// triggers with it — and it goes first, newest migration undone first.
+    /// triggers with it. Migration 18's column is one statement for
+    /// migration 16's reason, and migration 19's two tables are two
+    /// statements for migration 15's — each drop takes its indexes and
+    /// triggers with it — and they go first, newest migration undone first.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        DROP TABLE assumption_transitions;
+        DROP TABLE task_assumptions;
         ALTER TABLE routing_observations DROP COLUMN failure_class;
 
         DROP TABLE memory_files;
@@ -3641,6 +3646,17 @@ mod tests {
         assert_eq!(
             columns,
             vec![
+                "assumption_transitions.seq",
+                "assumption_transitions.project_id",
+                "assumption_transitions.assumption_id",
+                "assumption_transitions.session_id",
+                "assumption_transitions.at",
+                "assumption_transitions.kind",
+                "assumption_transitions.state",
+                "assumption_transitions.origin",
+                "assumption_transitions.subject",
+                "assumption_transitions.response",
+                "assumption_transitions.note",
                 "checkpoints.id",
                 "checkpoints.project_id",
                 "checkpoints.session_id",
@@ -3841,6 +3857,21 @@ mod tests {
                 // outside the process. There is no string here for anything
                 // to be typed into.
                 "sessions.observed_compactions",
+                // Migration 19: the six fields an agent states about a
+                // premise and their bookkeeping. Free text, sanitized by the
+                // writer and bounded; no column is named for, or shaped
+                // like, a credential.
+                "task_assumptions.id",
+                "task_assumptions.project_id",
+                "task_assumptions.session_id",
+                "task_assumptions.created_at",
+                "task_assumptions.origin",
+                "task_assumptions.claim",
+                "task_assumptions.evidence",
+                "task_assumptions.evidence_source",
+                "task_assumptions.uncertainty",
+                "task_assumptions.affected",
+                "task_assumptions.verification",
             ],
             "the project database schema changed; confirm the new column cannot \
              hold a provider credential before updating this list"
@@ -3875,6 +3906,7 @@ mod tests {
         assert_eq!(
             tables,
             vec![
+                "assumption_transitions",
                 "checkpoints",
                 "evaluation_observations",
                 "lifecycle_events",
@@ -3889,6 +3921,7 @@ mod tests {
                 "routing_observations",
                 "schema_migrations",
                 "sessions",
+                "task_assumptions",
             ],
             "no table defining launch profiles may exist in the project database"
         );
@@ -3983,6 +4016,8 @@ mod tests {
                  DROP TABLE IF EXISTS routing_observations;
                  DROP TABLE IF EXISTS evaluation_observations;
                  DROP TABLE IF EXISTS memory_files;
+                 DROP TABLE IF EXISTS assumption_transitions;
+                 DROP TABLE IF EXISTS task_assumptions;
                  DELETE FROM schema_migrations WHERE version >= 3;",
             )
             .unwrap();
@@ -3994,8 +4029,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 18,
-            "the launch must have applied migrations 3 through 18"
+            version, 19,
+            "the launch must have applied migrations 3 through 19"
         );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
@@ -4172,6 +4207,8 @@ mod tests {
                  DROP TABLE IF EXISTS routing_observations;
                  DROP TABLE IF EXISTS evaluation_observations;
                  DROP TABLE IF EXISTS memory_files;
+                 DROP TABLE IF EXISTS assumption_transitions;
+                 DROP TABLE IF EXISTS task_assumptions;
                  DELETE FROM schema_migrations WHERE version >= 2;",
             )
             .unwrap();
@@ -4184,8 +4221,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 18,
-            "the launch must have applied migrations 2 through 18"
+            version, 19,
+            "the launch must have applied migrations 2 through 19"
         );
 
         let store = SessionStore::new(&reopened).unwrap();
@@ -5138,8 +5175,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 18,
-                "the launch must have applied migrations 8 through 18"
+                version, 19,
+                "the launch must have applied migrations 8 through 19"
             );
 
             let after = SessionStore::new(&reopened)
@@ -5267,8 +5304,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 18,
-                "the reopen must have applied migrations 12 through 18"
+                version, 19,
+                "the reopen must have applied migrations 12 through 19"
             );
 
             let after = SessionStore::new(&reopened)

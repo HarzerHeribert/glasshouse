@@ -993,64 +993,64 @@ Phase 21K — Assumption-aware implementation guardrails
 
 Intent
 
-☐ Counter the model-independent failure mode in which an uncertain inference silently becomes a premise for a large implementation and is disproven only after substantial work.
-☐ Treat model confidence, repetition, eloquence, and reasoning length as presentation characteristics rather than evidence.
-☐ Require concise externalized assumptions and evidence without requesting or storing private chain-of-thought.
-☐ Reduce discarded implementation work and time-to-correction rather than attempting to eliminate all uncertainty.
-☐ Keep the mechanism harness- and model-independent so the same policy can apply to Claude Code, Codex, Antigravity, gateway-backed agents, and future harnesses.
+☑ Counter the model-independent failure mode in which an uncertain inference silently becomes a premise for a large implementation and is disproven only after substantial work.
+☑ Treat model confidence, repetition, eloquence, and reasoning length as presentation characteristics rather than evidence.
+☑ Require concise externalized assumptions and evidence without requesting or storing private chain-of-thought.
+☑ Reduce discarded implementation work and time-to-correction rather than attempting to eliminate all uncertainty.
+☑ Keep the mechanism harness- and model-independent so the same policy can apply to Claude Code, Codex, Antigravity, gateway-backed agents, and future harnesses.
 
 Risk-based activation
 
-☐ Classify an intended change by uncertainty, reversibility, blast radius, expected implementation cost, security or data-integrity impact, and dependency on unfamiliar behavior.
-☐ Let trivial, local, easily reversible edits proceed without an assumption gate.
-☐ Trigger a lightweight assumption preflight before substantial architecture changes, broad refactors, migrations, unfamiliar integrations, destructive operations, or changes whose premise is weakly evidenced.
-☐ Keep the preflight short enough that it does not become another source of speculative over-planning.
-☐ Allow the user to force, skip, or lower the guardrail for a specific task.
-☐ Never interpret a long plan as a substitute for validating the few premises on which the plan depends.
+☑ Classify an intended change by uncertainty, reversibility, blast radius, expected implementation cost, security or data-integrity impact, and dependency on unfamiliar behavior.
+☑ Let trivial, local, easily reversible edits proceed without an assumption gate.
+☑ Trigger a lightweight assumption preflight before substantial architecture changes, broad refactors, migrations, unfamiliar integrations, destructive operations, or changes whose premise is weakly evidenced.
+☑ Keep the preflight short enough that it does not become another source of speculative over-planning.
+☑ Allow the user to force, skip, or lower the guardrail for a specific task.
+☑ Never interpret a long plan as a substitute for validating the few premises on which the plan depends.
 
 Critical-assumption record
 
-☐ Ask for only the small set of critical assumptions whose falsity would materially change or invalidate the proposed implementation.
-☐ Represent each critical assumption with a concise claim, current evidence, evidence source, uncertainty, affected scope, and a practical falsification signal.
-☐ Distinguish observed facts, explicit user requirements, current repository evidence, externally verified facts, experiment results, and unverified inference.
-☐ Record the cheapest useful verification step when an assumption remains uncertain.
-☐ Keep transient task assumptions separate from durable project decisions until they have been supported and accepted.
-☐ Track task assumptions at least as proposed, probing, supported, refuted, unresolved, or waived-by-user.
-☐ Convert a refuted premise into a failed-approach record when preserving it can prevent future repetition.
-☐ Promote an assumption into durable project memory only when it becomes a decision, constraint, finding, or validated hypothesis worth retaining.
+☑ Ask for only the small set of critical assumptions whose falsity would materially change or invalidate the proposed implementation.
+☑ Represent each critical assumption with a concise claim, current evidence, evidence source, uncertainty, affected scope, and a practical falsification signal.
+☑ Distinguish observed facts, explicit user requirements, current repository evidence, externally verified facts, experiment results, and unverified inference.
+☑ Record the cheapest useful verification step when an assumption remains uncertain.
+☑ Keep transient task assumptions separate from durable project decisions until they have been supported and accepted.
+☑ Track task assumptions at least as proposed, probing, supported, refuted, unresolved, or waived-by-user.
+☑ Convert a refuted premise into a failed-approach record when preserving it can prevent future repetition.
+☑ Promote an assumption into durable project memory only when it becomes a decision, constraint, finding, or validated hypothesis worth retaining.
 
 Evidence before expansion
 
-☐ Prefer direct evidence from current requirements, source code, executable tests, configuration, schemas, runtime behavior, primary documentation, and bounded experiments over a model’s narrative explanation.
-☐ Require stronger evidence as implementation cost, irreversibility, security impact, data risk, or architectural blast radius increases.
-☐ Verify the highest-leverage premise before broadening an edit across many files or subsystems when verification is practical.
-☐ Prefer a read-only inspection, minimal reproduction, executable probe, failing test, walking skeleton, or narrow vertical slice before a large implementation.
-☐ Establish a relevant baseline before changing behavior when later success would otherwise be difficult to distinguish from pre-existing state.
-☐ Label unresolved inference honestly and time-box exploratory work when direct verification is unavailable.
-☐ Do not ask a second model merely whether the first model sounds correct; require a verifier to cite independent repository, runtime, test, or primary-source evidence.
-☐ Use a fresh session or different harness for high-impact adversarial verification when independence is worth its additional cost.
-☐ Treat reviewer agreement without new evidence as weak confirmation because different agents can share the same mistaken premise.
+☑ Prefer direct evidence from current requirements, source code, executable tests, configuration, schemas, runtime behavior, primary documentation, and bounded experiments over a model’s narrative explanation.
+☑ Require stronger evidence as implementation cost, irreversibility, security impact, data risk, or architectural blast radius increases.
+☑ Verify the highest-leverage premise before broadening an edit across many files or subsystems when verification is practical.
+☑ Prefer a read-only inspection, minimal reproduction, executable probe, failing test, walking skeleton, or narrow vertical slice before a large implementation.
+☑ Establish a relevant baseline before changing behavior when later success would otherwise be difficult to distinguish from pre-existing state.
+☑ Label unresolved inference honestly and time-box exploratory work when direct verification is unavailable.
+☑ Do not ask a second model merely whether the first model sounds correct; require a verifier to cite independent repository, runtime, test, or primary-source evidence.
+☑ Use a fresh session or different harness for high-impact adversarial verification when independence is worth its additional cost.
+☑ Treat reviewer agreement without new evidence as weak confirmation because different agents can share the same mistaken premise.
 
 Bounded implementation and correction
 
-☐ Create a recoverable checkpoint before a high-risk experiment or broad implementation begins.
-☐ Define an initial implementation budget using a coarse bound such as files touched, expected tool rounds, elapsed-time class, or milestone before re-evaluation.
-☐ Prefer the smallest implementation slice capable of confirming or falsifying the approach.
-☐ Re-evaluate critical assumptions when the planned footprint expands materially, verification results contradict the premise, or the initial budget is exceeded.
-☐ Pause expansion when an agent begins adding adapters, compatibility layers, or secondary mechanisms primarily to protect an unverified premise.
-☐ When a critical premise is refuted, stop compounding the implementation and explicitly choose rollback, repair, re-plan, preserve as an experiment, or ask the user.
-☐ Preserve useful evidence and a concise failed-approach record even when the implementation itself is discarded.
-☐ Never silently rewrite the task history to make a failed premise appear as though it had always been understood correctly.
+☑ Create a recoverable checkpoint before a high-risk experiment or broad implementation begins.
+☑ Define an initial implementation budget using a coarse bound such as files touched, expected tool rounds, elapsed-time class, or milestone before re-evaluation.
+☑ Prefer the smallest implementation slice capable of confirming or falsifying the approach.
+☑ Re-evaluate critical assumptions when the planned footprint expands materially, verification results contradict the premise, or the initial budget is exceeded.
+☑ Pause expansion when an agent begins adding adapters, compatibility layers, or secondary mechanisms primarily to protect an unverified premise.
+☑ When a critical premise is refuted, stop compounding the implementation and explicitly choose rollback, repair, re-plan, preserve as an experiment, or ask the user.
+☑ Preserve useful evidence and a concise failed-approach record even when the implementation itself is discarded.
+☑ Never silently rewrite the task history to make a failed premise appear as though it had always been understood correctly.
 ☐ Preserve user changes and unrelated worker changes when rolling back or isolating an invalidated experiment.
 
 User and orchestrator visibility
 
-☐ Surface critical assumptions, their evidence state, and unresolved high-impact premises in the task or session view without flooding the normal terminal experience.
-☐ Show when an assumption gate was triggered and which risk factor triggered it.
-☐ Notify the user or orchestrator when a critical premise becomes refuted or when the implementation budget is materially exceeded.
-☐ Offer inspect, continue, verify, checkpoint, handoff, re-plan, and stop as explicit responses to a guardrail event.
-☐ Keep advisory warnings non-blocking by default except for separately configured security, destructive-action, or data-integrity policies.
-☐ Make every automatic pause, reviewer spawn, or handoff attributable and manually overridable.
+☑ Surface critical assumptions, their evidence state, and unresolved high-impact premises in the task or session view without flooding the normal terminal experience.
+☑ Show when an assumption gate was triggered and which risk factor triggered it.
+☑ Notify the user or orchestrator when a critical premise becomes refuted or when the implementation budget is materially exceeded.
+☑ Offer inspect, continue, verify, checkpoint, handoff, re-plan, and stop as explicit responses to a guardrail event.
+☑ Keep advisory warnings non-blocking by default except for separately configured security, destructive-action, or data-integrity policies.
+☑ Make every automatic pause, reviewer spawn, or handoff attributable and manually overridable.
 
 Phase 22 — Memory lifecycle and supersession
 

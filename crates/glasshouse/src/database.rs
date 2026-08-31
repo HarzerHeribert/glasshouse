@@ -96,9 +96,16 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// `CHECK`, for migration 15's reason. See the migration's own doc comment
 /// for why it is a column beside `outcome` rather than a widening of it, and
 /// [`FAILURE_CLASSES`] for where the vocabulary actually lives.
+/// Version 19 adds `task_assumptions` and `assumption_transitions`, Phase
+/// 21K's ledger of the premises an agent *states* a change rests on — two
+/// tables, project-scoped by migration 15's two triggers and made append-only
+/// by a third on each, prunable like migration 15's ledger and unlike
+/// migration 5's stream. See the migration's own doc comment for why the
+/// current state of an assumption is its latest transition and nothing is
+/// ever `UPDATE`d, and [`crate::guardrails::store`] for the writer.
 /// Later migrations are appended to [`MIGRATIONS`], and this constant moves
 /// with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 18;
+const SUPPORTED_SCHEMA_VERSION: i64 = 19;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -1947,6 +1954,172 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
     "
     ALTER TABLE routing_observations ADD COLUMN failure_class TEXT;
     ",
+    // 19: Phase 21K's assumption ledger — the few premises an agent states a
+    // substantial change rests on, and what became of each.
+    //
+    // # What a row is, and what no row is
+    //
+    // `task_assumptions` holds the six fields capability map lines 1014 and
+    // 1016 name — claim, current evidence, evidence-source class,
+    // uncertainty, affected scope, cheapest verification — and who stated
+    // them, for which session, when. **Nothing here was inferred.** Every
+    // row was said through `api::protocol::Request::RecordAssumption` or its
+    // MCP twin; Glasshouse reads no transcript and no output for one (line
+    // 998), and there is no column that could hold reasoning if it did.
+    //
+    // `assumption_transitions` is the append-only history. A row naming an
+    // `assumption_id` moves it to one of line 1018's six states — or
+    // re-states the current one with a response or a note — and **the
+    // current state is the latest such row** (`MAX(seq)`), which is why the
+    // assumption row itself carries no `state` column: there is exactly one
+    // place a state can be, so it can never be two things at once. A row
+    // with no `assumption_id` is a session-level event (`kind` is `gate`,
+    // `override` or `budget_exceeded`): the fact that a preflight fired and
+    // which factor fired it (line 1049), the per-task override a person
+    // recorded (line 1008), a budget found exceeded (line 1050). The two
+    // table constraints say exactly that: a row is about an assumption or a
+    // session, and an assumption row always carries a state.
+    //
+    // # No `CHECK` on any vocabulary, for migration 15's reason
+    //
+    // `state`, `kind`, `origin`, `evidence_source`, `uncertainty` and
+    // `response` are each a vocabulary that lives in Rust —
+    // `crate::guardrails`' enums, one stored spelling per variant, an
+    // exhaustive `match` at the single writer — and none of them gets a SQL
+    // `CHECK`, because a `CHECK` is what cost `lifecycle_events` a table
+    // rebuild for its eleventh value. `CHECK (x <> '')` is kept where a
+    // value is required: an empty spelling is a missing one, not a strange
+    // one.
+    //
+    // # Append-only by trigger, prunable by design
+    //
+    // A `BEFORE UPDATE` trigger on each table refuses every edit, so *"no
+    // `UPDATE` of a recorded transition"* is the schema's guarantee and not
+    // only the store's method list. **No `DELETE` trigger**, deliberately:
+    // task assumptions are transient (line 1017 — what is worth keeping is
+    // promoted into `memories`), so this ledger keeps the evaluation ledger's
+    // bounds (`crate::guardrails::store::Retention`: 90 days or 100,000
+    // transitions) and is trimmed oldest-first in the writer's own
+    // transaction. `AUTOINCREMENT` means a trimmed `seq` is never reused, so
+    // a watcher's cursor can never come to mean a different row.
+    //
+    // # Project scope
+    //
+    // Migration 15's two triggers, copied exactly, on both tables. The
+    // database path comes from `Runtime` and nowhere else, and every
+    // session-keyed request goes through `SessionApi` before this store is
+    // opened, so a foreign session identifier is refused before a row could
+    // be written for it.
+    //
+    // # Bare ids, no `REFERENCES`
+    //
+    // `assumption_id` and `session_id` are migration 12's rule: a pointed-at
+    // row may be trimmed, and a read that cannot resolve one reports that
+    // rather than losing the transition.
+    "
+    CREATE TABLE task_assumptions (
+        id               TEXT    PRIMARY KEY,
+        project_id       TEXT    NOT NULL,
+        session_id       TEXT,
+        created_at       INTEGER NOT NULL,
+        origin           TEXT    NOT NULL CHECK (origin <> ''),
+
+        -- The six fields, and only these. Free text is sanitized by the
+        -- writer; the vocabularies are Rust's.
+        claim            TEXT    NOT NULL CHECK (claim <> ''),
+        evidence         TEXT    NOT NULL,
+        evidence_source  TEXT    NOT NULL CHECK (evidence_source <> ''),
+        uncertainty      TEXT    NOT NULL CHECK (uncertainty <> ''),
+        affected         TEXT    NOT NULL,
+        verification     TEXT    NOT NULL
+    );
+
+    CREATE INDEX task_assumptions_by_session
+        ON task_assumptions (session_id, created_at DESC);
+
+    CREATE TRIGGER task_assumptions_reject_foreign_project_insert
+    BEFORE INSERT ON task_assumptions
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'task assumption belongs to a different project');
+    END;
+
+    CREATE TRIGGER task_assumptions_reject_foreign_project_update
+    BEFORE UPDATE OF project_id ON task_assumptions
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'task assumption belongs to a different project');
+    END;
+
+    CREATE TRIGGER task_assumptions_never_edited
+    BEFORE UPDATE ON task_assumptions
+    FOR EACH ROW
+    BEGIN
+        SELECT RAISE(ABORT, 'a task assumption is never edited: its state lives in assumption_transitions');
+    END;
+
+    CREATE TABLE assumption_transitions (
+        seq            INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id     TEXT    NOT NULL,
+        assumption_id  TEXT,
+        session_id     TEXT,
+        at             INTEGER NOT NULL,
+
+        -- transition | gate | override | budget_exceeded. Rust's vocabulary.
+        kind           TEXT    NOT NULL CHECK (kind <> ''),
+        -- One of the six states for an assumption row; NULL for a
+        -- session-level row unless the row is a waiver.
+        state          TEXT,
+        origin         TEXT    NOT NULL CHECK (origin <> ''),
+        -- Machine-written, in the vocabulary of `kind`.
+        subject        TEXT,
+        -- One of the seven responses to a guardrail event, when one was chosen.
+        response       TEXT,
+        -- Free text from the caller, sanitized by the writer.
+        note           TEXT,
+
+        CHECK (assumption_id IS NOT NULL OR session_id IS NOT NULL),
+        CHECK (assumption_id IS NULL OR state IS NOT NULL)
+    );
+
+    CREATE INDEX assumption_transitions_by_assumption
+        ON assumption_transitions (assumption_id, seq DESC);
+    CREATE INDEX assumption_transitions_by_session
+        ON assumption_transitions (session_id, seq DESC);
+
+    CREATE TRIGGER assumption_transitions_reject_foreign_project_insert
+    BEFORE INSERT ON assumption_transitions
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'assumption transition belongs to a different project');
+    END;
+
+    CREATE TRIGGER assumption_transitions_reject_foreign_project_update
+    BEFORE UPDATE OF project_id ON assumption_transitions
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'assumption transition belongs to a different project');
+    END;
+
+    CREATE TRIGGER assumption_transitions_append_only
+    BEFORE UPDATE ON assumption_transitions
+    FOR EACH ROW
+    BEGIN
+        SELECT RAISE(ABORT, 'assumption_transitions is append-only: a transition is never edited');
+    END;
+    ",
 ];
 
 pub(crate) const PROJECT_ID_KEY: &str = "project_id";
@@ -2438,6 +2611,9 @@ mod tests {
     /// reason — nothing indexes `failure_class` and it carries no `CHECK` —
     /// and it goes before all of them, being the newest.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        DROP TABLE assumption_transitions;
+        DROP TABLE task_assumptions;
+
         ALTER TABLE routing_observations DROP COLUMN failure_class;
 
         DROP TABLE memory_files;
@@ -2627,7 +2803,20 @@ mod tests {
             EvidenceLedger, FailureClass, NewObservation, ObservationQuery, Outcome,
         };
 
+        // Reaches past 18 on purpose. This test rolls the database back to
+        // 17 and lets an ordinary bootstrap migrate it forward again, so the
+        // rollback has to undo **every** migration above 17 — not just its
+        // own. Leaving 19's tables in place would land a "17" that still held
+        // them, and the re-bootstrap would fail on `CREATE TABLE
+        // task_assumptions` rather than prove anything about 18.
+        //
+        // The two drops are 19's, in `UNDO_MIGRATIONS_ABOVE_THIRTEEN`'s order;
+        // a migration 20 owes this constant its own line, exactly as it owes
+        // that one.
         const UNDO_18: &str = "
+            DROP TABLE assumption_transitions;
+            DROP TABLE task_assumptions;
+
             ALTER TABLE routing_observations DROP COLUMN failure_class;
             DELETE FROM schema_migrations WHERE version >= 18;
         ";
@@ -2664,7 +2853,7 @@ mod tests {
         assert_eq!(
             schema_version(&migrated.database_path()),
             SUPPORTED_SCHEMA_VERSION,
-            "the launch must have applied migration 18"
+            "the launch must have applied migration 18 and everything above it"
         );
         {
             let conn = Connection::open(&db_path).unwrap();
@@ -2735,6 +2924,186 @@ mod tests {
         assert_eq!(schema_version(&db_path), 17);
     }
 
+    /// Migration proof for 19: a version-18 database opens, migrates to 19
+    /// adding exactly two tables with their indexes and triggers, accepts an
+    /// assumption and a transition through the real writer, refuses an edit
+    /// to either, and the undo takes the whole schema back to exactly what
+    /// it was — every table, index and trigger — with `schema_migrations`
+    /// at 18.
+    ///
+    /// The trigger check is by name: migration 15's two scope triggers and
+    /// one append-only trigger per table, and **no `DELETE` trigger** — a
+    /// future migration that added one would quietly make a prunable ledger
+    /// permanent, which is the defect migration 5 documents.
+    ///
+    /// One connection at a time throughout (practice §65).
+    #[test]
+    fn migration_19_adds_the_assumption_tables_and_undoes_cleanly() {
+        use crate::guardrails::{
+            AssumptionState, AssumptionStore, EvidenceSource, NewAssumption, NewTransition, Origin,
+            Uncertainty,
+        };
+
+        const UNDO_19: &str = "
+            DROP TABLE assumption_transitions;
+            DROP TABLE task_assumptions;
+            DELETE FROM schema_migrations WHERE version >= 19;
+        ";
+
+        fn schema_of(conn: &Connection) -> Vec<(String, String, Option<String>)> {
+            let mut statement = conn
+                .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        }
+        fn names_of(conn: &Connection, kind: &str, table: &str) -> Vec<String> {
+            let mut statement = conn
+                .prepare(
+                    "SELECT name FROM sqlite_master WHERE type = ?1 AND tbl_name = ?2 \
+                     ORDER BY name",
+                )
+                .unwrap();
+            statement
+                .query_map([kind, table], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let db_path = fixture.runtime.database_path();
+
+        // Back to 18.
+        let schema_at_18 = {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(UNDO_19).unwrap();
+            schema_of(&conn)
+        };
+        assert_eq!(schema_version(&db_path), 18, "the rollback must land on 18");
+        assert!(
+            !schema_at_18
+                .iter()
+                .any(|(_, name, _)| name.starts_with("task_assumptions")
+                    || name.starts_with("assumption_transitions")),
+            "{schema_at_18:?}"
+        );
+
+        // Forward: an ordinary bootstrap, exactly as a real upgrade happens.
+        let migrated = fixture.rebootstrap().unwrap();
+        assert_eq!(
+            schema_version(&migrated.database_path()),
+            SUPPORTED_SCHEMA_VERSION,
+            "the launch must have applied migration 19"
+        );
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            assert_eq!(
+                names_of(&conn, "table", "task_assumptions"),
+                ["task_assumptions"]
+            );
+            assert_eq!(
+                names_of(&conn, "table", "assumption_transitions"),
+                ["assumption_transitions"]
+            );
+            assert_eq!(
+                names_of(&conn, "index", "task_assumptions"),
+                [
+                    "sqlite_autoindex_task_assumptions_1",
+                    "task_assumptions_by_session"
+                ]
+            );
+            assert_eq!(
+                names_of(&conn, "index", "assumption_transitions"),
+                [
+                    "assumption_transitions_by_assumption",
+                    "assumption_transitions_by_session"
+                ]
+            );
+            assert_eq!(
+                names_of(&conn, "trigger", "task_assumptions"),
+                [
+                    "task_assumptions_never_edited",
+                    "task_assumptions_reject_foreign_project_insert",
+                    "task_assumptions_reject_foreign_project_update"
+                ],
+                "two scope triggers and one append-only trigger, and no DELETE trigger"
+            );
+            assert_eq!(
+                names_of(&conn, "trigger", "assumption_transitions"),
+                [
+                    "assumption_transitions_append_only",
+                    "assumption_transitions_reject_foreign_project_insert",
+                    "assumption_transitions_reject_foreign_project_update"
+                ]
+            );
+        }
+
+        // The real writer, through the migrated schema.
+        let recorded = {
+            let mut store = AssumptionStore::open(&migrated).unwrap();
+            let record = store
+                .record(NewAssumption {
+                    session: Some("s1".to_owned()),
+                    claim: "written through migration 19".to_owned(),
+                    evidence: "this test".to_owned(),
+                    evidence_source: EvidenceSource::Experiment,
+                    uncertainty: Uncertainty::Low,
+                    affected: "database.rs".to_owned(),
+                    verification: "the undo below".to_owned(),
+                    origin: Origin::Agent,
+                })
+                .unwrap();
+            let moved = store
+                .transition(
+                    &record.id,
+                    NewTransition::to(AssumptionState::Refuted, Origin::Agent),
+                )
+                .unwrap();
+            assert_eq!(moved.state, Some(AssumptionState::Refuted));
+            assert_eq!(
+                store.get(&record.id).unwrap().unwrap().state,
+                AssumptionState::Refuted
+            );
+            record
+        };
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let err = conn
+                .execute(
+                    "UPDATE assumption_transitions SET state = 'supported' WHERE assumption_id = ?1",
+                    [recorded.id.as_str()],
+                )
+                .unwrap_err();
+            assert!(err.to_string().contains("append-only"), "{err}");
+            let err = conn
+                .execute(
+                    "UPDATE task_assumptions SET claim = 'edited' WHERE id = ?1",
+                    [recorded.id.as_str()],
+                )
+                .unwrap_err();
+            assert!(err.to_string().contains("never edited"), "{err}");
+            let rows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM assumption_transitions", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 2, "the first state and the move");
+        }
+
+        // Back again: the whole schema is what it was at 18, byte for byte.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(UNDO_19).unwrap();
+            assert_eq!(schema_of(&conn), schema_at_18);
+        }
+        assert_eq!(schema_version(&db_path), 18);
+    }
+
     /// Migration proof for migration 17: a version-16 database opens,
     /// migrates to 17, keeps every memory it had, and comes out with a table
     /// that accepts an association — plus the index and the two triggers, and
@@ -2765,12 +3134,13 @@ mod tests {
         let db_path = fixture.runtime.database_path();
         {
             let conn = Connection::open(&db_path).unwrap();
-            // Migration 18 is undone first: a rollback undoes **every**
-            // migration above the version it claims, or the re-run fails
-            // with `duplicate column name` — `UNDO_MIGRATIONS_ABOVE_THIRTEEN`'s
-            // own lesson, paid once more here when 18 arrived.
+            // Migrations 19 and 18 are undone first: a rollback undoes
+            // **every** migration above the version it claims, or the
+            // re-run fails — `UNDO_MIGRATIONS_ABOVE_THIRTEEN`'s own lesson.
             conn.execute_batch(
-                "ALTER TABLE routing_observations DROP COLUMN failure_class;
+                "DROP TABLE assumption_transitions;
+                 DROP TABLE task_assumptions;
+                 ALTER TABLE routing_observations DROP COLUMN failure_class;
                  DROP TABLE memory_files;
                  DELETE FROM schema_migrations WHERE version >= 17;",
             )

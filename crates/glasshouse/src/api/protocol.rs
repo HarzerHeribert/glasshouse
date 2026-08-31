@@ -10,6 +10,10 @@
 //! verb this file does not name.
 
 use glasshouse::events::MessageOrigin;
+use glasshouse::guardrails::{
+    AssumptionState, ChangeFactors, EvidenceSource, GuardrailOverride, GuardrailResponse, Origin,
+    PromotionKind, Uncertainty,
+};
 use glasshouse::memory::snapshot::SnapshotBudget;
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +26,13 @@ pub(super) fn default_memory_limit() -> usize {
 
 fn default_events_limit() -> usize {
     200
+}
+
+/// How many assumptions [`Request::ListAssumptions`] returns when the caller
+/// does not say. `pub(super)` for `super::mcp`'s listing tool, for
+/// [`default_memory_limit`]'s reason.
+pub(super) fn default_assumptions_limit() -> usize {
+    50
 }
 
 /// Matches `cli.rs`'s own `default_value` for `glasshouse route --moment`, so
@@ -126,6 +137,17 @@ impl RequestOrigin {
             Self::Machine => MessageOrigin::Machine,
         }
     }
+
+    /// The assumption ledger's vocabulary for the same fact — Phase 21K.
+    /// A machine on this door is the agent working in the session; the
+    /// third value, `glasshouse`, is never a caller's to claim and has no
+    /// spelling here.
+    pub fn guardrail_origin(self) -> Origin {
+        match self {
+            Self::User => Origin::User,
+            Self::Machine => Origin::Agent,
+        }
+    }
 }
 
 /// One control-API call.
@@ -163,6 +185,14 @@ pub enum Request {
         /// same as before this field existed.
         #[serde(default)]
         task: Option<String>,
+        /// A per-task guardrail override — Phase 21K line 1008: `force`,
+        /// `skip` or `lower`. Recorded on the new session's assumption
+        /// ledger the moment its record exists, so every later
+        /// [`Request::Preflight`] for it answers under that override and
+        /// names it. Absent means no override, which is what every spawn
+        /// before this field existed meant.
+        #[serde(default)]
+        guardrail: Option<GuardrailOverride>,
     },
     /// Send one line of text to a live session.
     ///
@@ -340,11 +370,22 @@ pub enum Request {
     /// many events one call returns; it is capped server-side regardless of
     /// what is asked for, so a caller cannot pull an unbounded response by
     /// naming a large number.
+    ///
+    /// **Since Phase 21K the answer carries a second, independent stream**:
+    /// `assumptions` — the guardrail ledger's notifications (a `refuted`
+    /// transition, an exceeded budget; capability map line 1050), newer
+    /// than `assumptions_after` and bounded by the same `limit`, with
+    /// `assumptions_head` as the cursor to pass next time. Two cursors
+    /// rather than one because the two ledgers number their rows
+    /// independently, and folding one into the other's `seq` would be
+    /// exactly the `lifecycle_events` widening the design ruling refuses.
     Events {
         #[serde(default)]
         after: i64,
         #[serde(default = "default_events_limit")]
         limit: usize,
+        #[serde(default)]
+        assumptions_after: i64,
     },
     /// Register interest in one worker session's completion events, to be
     /// delivered into an orchestrator session — capability map line 733.
@@ -449,6 +490,113 @@ pub enum Request {
         /// --document` makes.
         #[serde(default)]
         document: bool,
+    },
+    /// Ask the guardrail about an intended change — Phase 21K lines
+    /// 1004–1009, 1013, 1036, 1049, 1052, 1053.
+    ///
+    /// `change` is what the agent **states** about the change: files and
+    /// subsystems touched, reversibility, blast radius, the flags for a
+    /// migration, a destructive operation, a security or data-integrity
+    /// impact, an unfamiliar integration, an architectural change or a broad
+    /// refactor, the evidence class its premise rests on, and a coarse
+    /// budget (with what has been spent, when re-evaluating). Nothing is
+    /// read from the session to fill any of it in, and an unknown field —
+    /// `reasoning`, `transcript` — is refused rather than ignored.
+    ///
+    /// Answers a risk class, **which factor** decided it, a verdict from the
+    /// configured mode and the session's per-task override, at most three
+    /// critical-assumption prompts, a page of guidance in the map's own
+    /// words, and the seven explicit responses. Trivial never gates, and
+    /// answers with no prompts at all.
+    ///
+    /// With a `session` — this project's, or refused — the preflight is also
+    /// **recorded**: a gate row on the session's ledger says it fired and
+    /// why; a budget found exceeded is a second row and the answer lists the
+    /// session's open assumptions to re-evaluate (line 1039); and a
+    /// substantial change takes a checkpoint through the same path
+    /// [`Request::TakeCheckpoint`] uses, unless `guardrails.mode` is `off`
+    /// (line 1036). Without a session the answer is the same and nothing is
+    /// written.
+    Preflight {
+        #[serde(default)]
+        session: Option<String>,
+        #[serde(default)]
+        change: ChangeFactors,
+    },
+    /// State one critical assumption — Phase 21K lines 998, 1014–1016.
+    ///
+    /// **Six fields, all required, and nothing else.** The claim (one
+    /// sentence; refused over the ceiling rather than cut), the current
+    /// evidence, its source class (`observed`, `user_requirement`,
+    /// `repository`, `external`, `experiment`, `inference`), the uncertainty
+    /// (`low`, `medium`, `high`), the affected scope (`affected`), and the cheapest
+    /// useful verification step. There is no field for the reasoning that
+    /// produced the claim and no column for one. Every field is treated as
+    /// untrusted text.
+    ///
+    /// Recorded in the `proposed` state. `origin` defaults to the machine,
+    /// as on every other verb here, and becomes the ledger's `agent`.
+    RecordAssumption {
+        #[serde(default)]
+        session: Option<String>,
+        claim: String,
+        evidence: String,
+        evidence_source: EvidenceSource,
+        uncertainty: Uncertainty,
+        affected: String,
+        verification: String,
+        #[serde(default)]
+        origin: RequestOrigin,
+    },
+    /// Append a transition — Phase 21K lines 1018, 1019, 1041, 1051.
+    ///
+    /// `state` moves the assumption; absent, the current state is
+    /// re-stated, which is how a `response` or a `note` is recorded without
+    /// a move. `response` is one of the seven a preflight offers, and is the
+    /// door *"accepting the chosen one as a transition note"*. A transition
+    /// to `waived_by_user` is refused unless `origin` is `user` — the door
+    /// cannot check that, but it can insist it be said.
+    ///
+    /// `record_failed_approach`, with `state: refuted`, writes one
+    /// `failed_attempt` memory through the existing store, with provenance
+    /// naming the assumption (line 1019); the transition's `subject` is the
+    /// memory's id. Without the flag, a refutation writes no memory at all.
+    UpdateAssumption {
+        /// An assumption identifier, or an unambiguous leading part of one.
+        assumption: String,
+        #[serde(default)]
+        state: Option<AssumptionState>,
+        #[serde(default)]
+        note: Option<String>,
+        #[serde(default)]
+        response: Option<GuardrailResponse>,
+        #[serde(default)]
+        record_failed_approach: bool,
+        #[serde(default)]
+        origin: RequestOrigin,
+    },
+    /// This project's assumptions with their current states, newest first —
+    /// Phase 21K line 1048. With a `session`, that session's only, plus its
+    /// session-level events (gates, overrides, budgets). `limit` is capped
+    /// server-side at `unix::MAX_ASSUMPTIONS_LIMIT`.
+    ListAssumptions {
+        #[serde(default)]
+        session: Option<String>,
+        #[serde(default = "default_assumptions_limit")]
+        limit: usize,
+    },
+    /// Promote a **supported** assumption into durable project memory —
+    /// Phase 21K lines 1017, 1020 — as a `decision`, a `constraint` or a
+    /// `finding`, and as nothing else. Any other state is refused: a task
+    /// assumption stays apart from project decisions until it has been
+    /// supported *and* somebody explicitly promoted it. Never automatic.
+    PromoteAssumption {
+        assumption: String,
+        kind: PromotionKind,
+        #[serde(default)]
+        note: Option<String>,
+        #[serde(default)]
+        origin: RequestOrigin,
     },
     /// Take a checkpoint for a session.
     TakeCheckpoint {

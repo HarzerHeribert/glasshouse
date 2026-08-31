@@ -467,6 +467,18 @@ pub enum Command {
         /// `--task` leaves the launch exactly as it has always been.
         #[arg(long, value_name = "TEXT")]
         task: Option<String>,
+        /// Force, skip, or lower the assumption guardrail for this task —
+        /// `force`, `skip` or `lower`.
+        ///
+        /// Recorded on the new session's assumption ledger before the
+        /// harness starts, so every preflight the agent runs in it answers
+        /// under this override and names it. `skip` records a
+        /// `waived_by_user` row saying you waived the gate; `force` gates
+        /// every substantial change whatever `guardrails.mode` says; `lower`
+        /// keeps a substantial change advisory and lets an ordinary one
+        /// proceed. Trivial edits never gate either way.
+        #[arg(long, value_name = "force|skip|lower")]
+        guardrail: Option<String>,
 
         /// Arguments passed straight through to the harness, after `--`.
         ///
@@ -614,6 +626,10 @@ pub enum Command {
         /// `--task` leaves the launch exactly as it has always been.
         #[arg(long, value_name = "TEXT")]
         task: Option<String>,
+        /// Force, skip, or lower the assumption guardrail for this task —
+        /// `force`, `skip` or `lower`. The same override `launch` takes.
+        #[arg(long, value_name = "force|skip|lower")]
+        guardrail: Option<String>,
 
         /// Arguments passed straight through to the harness, after `--`.
         ///
@@ -656,6 +672,26 @@ pub enum Command {
         /// Overwrite a file already at the destination.
         #[arg(long)]
         force: bool,
+    },
+    /// Show the assumptions agents have stated in this project, and what
+    /// became of each — Phase 21K.
+    ///
+    /// An assumption is a premise an agent said a substantial change rests
+    /// on, through the control API or its MCP tools, with its evidence, the
+    /// evidence's source class, its uncertainty, the scope it affects and
+    /// the cheapest way to check it. Glasshouse never infers one from an
+    /// agent's output; this prints only what was stated. Each is shown with
+    /// its current state — proposed, probing, supported, refuted, unresolved
+    /// or waived-by-user — and, for one session, the gates that fired for
+    /// it, which factor fired them, and any override you recorded.
+    Assumptions {
+        /// One session's only, by its identifier or the leading part of it.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+
+        /// At most this many assumptions, newest first.
+        #[arg(long, value_name = "N", default_value_t = 50)]
+        limit: usize,
     },
     /// Run the local, project-scoped control API — Phase 42.
     ///
@@ -914,11 +950,13 @@ mod tests {
             checkpoint_first,
             headless,
             task,
+            guardrail,
             harness_args,
         }) = cli.command
         else {
             panic!("expected a launch command");
         };
+        assert_eq!(guardrail, None, "no override unless `--guardrail` is given");
         assert_eq!(harness.as_deref(), Some("claude-code"));
         assert_eq!(profile, None);
         // Opt-in, like every routing flag: a launch that describes no task

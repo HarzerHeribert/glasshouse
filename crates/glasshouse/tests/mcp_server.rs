@@ -25,23 +25,39 @@ use serde_json::{Value, json};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The eight tools the packet names, and the whole surface: a ninth would be
-/// a new decision, and a missing one a regression.
-const EXPECTED_TOOLS: [&str; 8] = [
+/// The eight tools Phase 43's packet names plus Phase 21K's five guardrail
+/// tools, and the whole surface: a fourteenth would be a new decision, and a
+/// missing one a regression.
+const EXPECTED_TOOLS: [&str; 13] = [
     "glasshouse_get_checkpoint",
     "glasshouse_interrupt_session",
+    "glasshouse_list_assumptions",
     "glasshouse_list_sessions",
+    "glasshouse_preflight",
+    "glasshouse_promote_assumption",
     "glasshouse_recent_output",
+    "glasshouse_record_assumption",
     "glasshouse_search_memory",
     "glasshouse_send_message",
     "glasshouse_session_status",
     "glasshouse_spawn_session",
+    "glasshouse_update_assumption",
 ];
 
 const STATE_CHANGING_TOOLS: [&str; 3] = [
     "glasshouse_spawn_session",
     "glasshouse_send_message",
     "glasshouse_interrupt_session",
+];
+
+/// Phase 21K's four writers: they append to the project's assumption ledger
+/// (and, on request, write one memory or take one checkpoint) and touch no
+/// session's state — not read-only, and not destructive.
+const LEDGER_WRITING_TOOLS: [&str; 4] = [
+    "glasshouse_preflight",
+    "glasshouse_record_assumption",
+    "glasshouse_update_assumption",
+    "glasshouse_promote_assumption",
 ];
 
 // -------------------------------------------------------------------------
@@ -323,7 +339,7 @@ fn an_orchestrator_can_initialize_list_tools_and_list_sessions_over_stdio() {
     assert_eq!(
         names(&tools),
         EXPECTED_TOOLS,
-        "the catalogue is the eight tools, exactly"
+        "the catalogue is the thirteen tools, exactly"
     );
     for tool in &tools {
         assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
@@ -443,6 +459,17 @@ fn state_changing_tools_are_separate_and_marked_so_a_harness_can_gate_them() {
             continue;
         }
         let entry = tool(&tools, name);
+        if LEDGER_WRITING_TOOLS.contains(&name) {
+            assert_eq!(
+                entry["annotations"]["readOnlyHint"], false,
+                "`{name}` writes to the ledger and must say so: {entry}"
+            );
+            assert_eq!(
+                entry["annotations"]["destructiveHint"], false,
+                "`{name}` only appends and must say so: {entry}"
+            );
+            continue;
+        }
         assert_eq!(
             entry["annotations"]["readOnlyHint"], true,
             "`{name}` only reads and must say so: {entry}"

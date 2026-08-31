@@ -339,6 +339,8 @@ fn a_version_three_database_gains_the_memory_table_with_its_sessions_intact() {
              DROP TABLE IF EXISTS routing_observations;
              DROP TABLE IF EXISTS evaluation_observations;
              DROP TABLE IF EXISTS memory_files;
+             DROP TABLE IF EXISTS assumption_transitions;
+             DROP TABLE IF EXISTS task_assumptions;
              DELETE FROM schema_migrations WHERE version >= 4;",
         )
         .unwrap();
@@ -369,8 +371,8 @@ fn a_version_three_database_gains_the_memory_table_with_its_sessions_intact() {
         })
         .unwrap();
     assert_eq!(
-        version, 18,
-        "the launch must have applied migrations 4 through 18"
+        version, 19,
+        "the launch must have applied migrations 4 through 19"
     );
 
     // The session recorded before the migration is untouched.

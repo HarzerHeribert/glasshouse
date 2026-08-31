@@ -74,7 +74,14 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::protocol::default_recent_output_bytes;
-use super::protocol::{Request, RequestOrigin, Response, default_memory_limit};
+use glasshouse::guardrails::{
+    AssumptionState, BlastRadius, ChangeFactors, EvidenceSource, GuardrailOverride,
+    GuardrailResponse, PromotionKind, Uncertainty,
+};
+
+use super::protocol::{
+    Request, RequestOrigin, Response, default_assumptions_limit, default_memory_limit,
+};
 use super::unix::ServerContext;
 
 /// The protocol revision this server implements.
@@ -100,7 +107,14 @@ const INVALID_PARAMS: i64 = -32602;
 const INSTRUCTIONS: &str = "Every tool acts on the one Glasshouse project this server was started in; \
      there is no argument for naming another. Three tools change a session's state and say so: \
      glasshouse_spawn_session starts a harness process, glasshouse_send_message injects input into \
-     a running harness, glasshouse_interrupt_session interrupts one. The other five only read.";
+     a running harness, glasshouse_interrupt_session interrupts one. Four tools write to this \
+     project's assumption ledger and nothing else: glasshouse_preflight (which may also take a \
+     checkpoint), glasshouse_record_assumption, glasshouse_update_assumption and \
+     glasshouse_promote_assumption. Before a substantial change — a migration, a destructive \
+     operation, a security or data-integrity change, an unfamiliar integration, a broad refactor \
+     — call glasshouse_preflight and state what you know about the change; then record the few \
+     critical assumptions it asks for, with their evidence. Glasshouse never infers an assumption \
+     from your output: it records only what you state. The remaining six tools only read.";
 
 /// Serve MCP on this process's stdin and stdout until stdin reaches EOF.
 ///
@@ -411,14 +425,19 @@ const READ_ONLY: Annotations = Annotations {
     idempotent: true,
 };
 
-/// The eight tools, and the whole of what this door can do.
+/// The thirteen tools, and the whole of what this door can do.
 ///
 /// Every entry maps onto exactly one [`Request`] variant, and the request's
 /// own handler decides everything after that — bounds, scope, and errors —
 /// which is why the descriptions below say what the operation *is* and not
-/// how it is checked. A ninth tool would be a ninth entry here and nothing
-/// else; a tool that reached past `ServerContext::handle` cannot be written
-/// in this file without the source-scanning test noticing.
+/// how it is checked. A fourteenth tool would be a fourteenth entry here and
+/// nothing else; a tool that reached past `ServerContext::handle` cannot be
+/// written in this file without the source-scanning test noticing.
+///
+/// The five guardrail tools (Phase 21K) are the design ruling's *"MCP
+/// twins"* of the five assumption requests: same fields, same handlers, and
+/// `deny_unknown_fields` on every argument type so a `reasoning` field is
+/// a `-32602` rather than something silently dropped.
 const TOOLS: &[Tool] = &[
     Tool {
         name: "glasshouse_list_sessions",
@@ -477,6 +496,11 @@ const TOOLS: &[Tool] = &[
                         "type": "string",
                         "description": "A task delivered to the session as its first message, the instant it is live.",
                     },
+                    "guardrail": {
+                        "type": "string",
+                        "enum": GuardrailOverride::ALL.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+                        "description": "A per-task assumption-guardrail override for the new session: `force` gates every substantial change, `skip` waives the gate (recorded as waived_by_user), `lower` keeps it advisory. Absent means the configured mode applies.",
+                    },
                 }),
                 &["harness"],
             )
@@ -487,12 +511,14 @@ const TOOLS: &[Tool] = &[
                 args,
                 role,
                 task,
+                guardrail,
             } = serde_json::from_value(arguments)?;
             Ok(Request::SpawnSession {
                 harness,
                 args,
                 role,
                 task,
+                guardrail,
             })
         },
     },
@@ -647,7 +673,298 @@ const TOOLS: &[Tool] = &[
             })
         },
     },
+    Tool {
+        name: "glasshouse_preflight",
+        title: "Assumption preflight",
+        description: "Ask the guardrail about a change you intend to make, BEFORE making it. \
+                      State what you know: the footprint (files touched) and subsystems, reversibility, blast \
+                      radius, whether it is a migration, destructive, security- or \
+                      data-integrity-relevant, an unfamiliar integration, an architectural \
+                      change or a broad refactor, the evidence class its premise rests on, and a \
+                      coarse budget (with `spent` when re-evaluating). Answers a risk class, the \
+                      factor that decided it, a verdict (proceed | advisory | gated), at most \
+                      three critical-assumption prompts, guidance, and the seven explicit \
+                      responses. Trivial, local, reversible edits answer `proceed` with no \
+                      prompts. With a session, the gate is recorded on that session's ledger \
+                      and a substantial change takes a checkpoint first. Writes to the ledger \
+                      only.",
+        annotations: Annotations {
+            read_only: false,
+            // Additive: a gate row, possibly a checkpoint; nothing existing
+            // is changed.
+            destructive: false,
+            idempotent: false,
+        },
+        input_schema: || {
+            object_schema(
+                json!({
+                    "session": SESSION_PROPERTY,
+                    "change": change_schema(),
+                }),
+                &["change"],
+            )
+        },
+        build: |arguments| {
+            let PreflightArguments { session, change } = serde_json::from_value(arguments)?;
+            Ok(Request::Preflight { session, change })
+        },
+    },
+    Tool {
+        name: "glasshouse_record_assumption",
+        title: "Record assumption",
+        description: "Record one critical assumption a change rests on, in six fields and no \
+                      more: a one-sentence claim, its current evidence, the evidence's source \
+                      class, the uncertainty, the affected scope, and the cheapest useful \
+                      verification step. Recorded as `proposed`. Glasshouse never infers an \
+                      assumption from your output — record only what you actually assume, and \
+                      never your reasoning. Writes to the ledger only.",
+        annotations: Annotations {
+            read_only: false,
+            destructive: false,
+            idempotent: false,
+        },
+        input_schema: || {
+            object_schema(
+                json!({
+                    "session": SESSION_PROPERTY,
+                    "claim": {
+                        "type": "string",
+                        "description": "The premise, in one sentence (at most 280 characters).",
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": "What currently supports it.",
+                    },
+                    "evidence_source": {
+                        "type": "string",
+                        "enum": EvidenceSource::ALL.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+                        "description": "What class of evidence that is. `inference` means unverified.",
+                    },
+                    "uncertainty": {
+                        "type": "string",
+                        "enum": Uncertainty::ALL.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+                    },
+                    "affected": {
+                        "type": "string",
+                        "description": "The affected scope: what the change depends on it for, and what is wrong if it is false.",
+                    },
+                    "verification": {
+                        "type": "string",
+                        "description": "The cheapest useful step that would confirm or falsify it.",
+                    },
+                }),
+                &[
+                    "claim",
+                    "evidence",
+                    "evidence_source",
+                    "uncertainty",
+                    "affected",
+                    "verification",
+                ],
+            )
+        },
+        build: |arguments| {
+            let RecordAssumptionArguments {
+                session,
+                claim,
+                evidence,
+                evidence_source,
+                uncertainty,
+                affected,
+                verification,
+            } = serde_json::from_value(arguments)?;
+            Ok(Request::RecordAssumption {
+                session,
+                claim,
+                evidence,
+                evidence_source,
+                uncertainty,
+                affected,
+                verification,
+                origin: RequestOrigin::Machine,
+            })
+        },
+    },
+    Tool {
+        name: "glasshouse_update_assumption",
+        title: "Update assumption",
+        description: "Append a transition to an assumption: move it to proposed | probing | \
+                      supported | refuted | unresolved (waived_by_user is a person's decision and \
+                      is refused here), or leave the state and record a response (inspect | \
+                      continue | verify | checkpoint | handoff | re-plan | stop) or a note. With \
+                      `state: refuted` and `record_failed_approach: true`, one failed-attempt \
+                      memory is written with provenance naming the assumption, so the approach \
+                      is not repeated. Transitions only ever append; nothing is edited. Writes to \
+                      the ledger (and, when asked, one memory) only.",
+        annotations: Annotations {
+            read_only: false,
+            destructive: false,
+            idempotent: false,
+        },
+        input_schema: || {
+            object_schema(
+                json!({
+                    "assumption": {
+                        "type": "string",
+                        "description": "An assumption id as glasshouse_list_assumptions lists it, or an unambiguous leading part of one.",
+                    },
+                    "state": {
+                        "type": "string",
+                        "enum": ["proposed", "probing", "supported", "refuted", "unresolved"],
+                        "description": "The new state. Absent re-states the current one.",
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "What was learned, in a sentence.",
+                    },
+                    "response": {
+                        "type": "string",
+                        "enum": GuardrailResponse::ALL.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+                        "description": "The explicit response chosen to a guardrail event, when this transition is one.",
+                    },
+                    "record_failed_approach": {
+                        "type": "boolean",
+                        "description": "With `state: refuted`: write one failed-attempt memory naming this assumption.",
+                    },
+                }),
+                &["assumption"],
+            )
+        },
+        build: |arguments| {
+            let UpdateAssumptionArguments {
+                assumption,
+                state,
+                note,
+                response,
+                record_failed_approach,
+            } = serde_json::from_value(arguments)?;
+            Ok(Request::UpdateAssumption {
+                assumption,
+                state,
+                note,
+                response,
+                record_failed_approach,
+                origin: RequestOrigin::Machine,
+            })
+        },
+    },
+    Tool {
+        name: "glasshouse_list_assumptions",
+        title: "List assumptions",
+        description: "This project's recorded assumptions with their current states, newest \
+                      first, and the counts per state — for one session when given, with that \
+                      session's gates, overrides and budget events. Read-only.",
+        annotations: READ_ONLY,
+        input_schema: || {
+            object_schema(
+                json!({
+                    "session": SESSION_PROPERTY,
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "At most this many assumptions. Capped server-side regardless.",
+                    },
+                }),
+                &[],
+            )
+        },
+        build: |arguments| {
+            let ListAssumptionsArguments { session, limit } = serde_json::from_value(arguments)?;
+            Ok(Request::ListAssumptions { session, limit })
+        },
+    },
+    Tool {
+        name: "glasshouse_promote_assumption",
+        title: "Promote assumption",
+        description: "Promote a SUPPORTED assumption into this project's durable memory as a \
+                      decision, a constraint or a finding — and as nothing else. Any other state \
+                      is refused: a task assumption stays apart from project decisions until it \
+                      has been supported and somebody explicitly promotes it. Writes one memory \
+                      and one ledger transition.",
+        annotations: Annotations {
+            read_only: false,
+            destructive: false,
+            idempotent: false,
+        },
+        input_schema: || {
+            object_schema(
+                json!({
+                    "assumption": {
+                        "type": "string",
+                        "description": "An assumption id, or an unambiguous leading part of one.",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": PromotionKind::ALL.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Why it is worth keeping, in a sentence.",
+                    },
+                }),
+                &["assumption", "kind"],
+            )
+        },
+        build: |arguments| {
+            let PromoteAssumptionArguments {
+                assumption,
+                kind,
+                note,
+            } = serde_json::from_value(arguments)?;
+            Ok(Request::PromoteAssumption {
+                assumption,
+                kind,
+                note,
+                origin: RequestOrigin::Machine,
+            })
+        },
+    },
 ];
+
+/// The schema of `glasshouse_preflight`'s `change` argument — one property
+/// per field of `guardrails::ChangeFactors`, and `additionalProperties:
+/// false` so that a `reasoning` or a `transcript` is refused here as it is
+/// by the type.
+fn change_schema() -> Value {
+    let budget = json!({
+        "type": "object",
+        "properties": {
+            "footprint": { "type": "integer", "minimum": 0, "description": "How many files." },
+            "tool_rounds": { "type": "integer", "minimum": 0 },
+            "elapsed_minutes": { "type": "integer", "minimum": 0 },
+        },
+        "additionalProperties": false,
+    });
+    json!({
+        "type": "object",
+        "description": "What you know about the intended change. Every field optional; an absent flag means `false`, an absent footprint means one file.",
+        "properties": {
+            "description": { "type": "string", "description": "One line, for a person to read. Never classified." },
+            "footprint": { "type": "integer", "minimum": 0, "description": "How many files the change touches." },
+            "subsystems": { "type": "array", "items": { "type": "string" } },
+            "reversible": { "type": "boolean", "description": "Whether it can be undone easily. Default true." },
+            "blast_radius": {
+                "type": "string",
+                "enum": BlastRadius::ALL.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+            },
+            "premise_evidence": {
+                "type": "string",
+                "enum": EvidenceSource::ALL.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+                "description": "What class of evidence the change's premise rests on. `inference` marks it weakly evidenced.",
+            },
+            "security": { "type": "boolean" },
+            "data_integrity": { "type": "boolean" },
+            "migration": { "type": "boolean" },
+            "destructive": { "type": "boolean" },
+            "unfamiliar_integration": { "type": "boolean" },
+            "architecture": { "type": "boolean" },
+            "broad_refactor": { "type": "boolean" },
+            "budget": budget,
+            "spent": budget,
+        },
+        "additionalProperties": false,
+    })
+}
 
 /// The one argument five tools share: a session identifier, as
 /// `glasshouse_list_sessions` lists it. There is deliberately no project
@@ -756,6 +1073,8 @@ struct SpawnArguments {
     role: Option<String>,
     #[serde(default)]
     task: Option<String>,
+    #[serde(default)]
+    guardrail: Option<GuardrailOverride>,
 }
 
 #[derive(Deserialize)]
@@ -790,6 +1109,63 @@ struct CheckpointArguments {
     checkpoint: Option<String>,
     #[serde(default)]
     document: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightArguments {
+    #[serde(default)]
+    session: Option<String>,
+    /// Required, unlike the wire request's own `change`: a tool call that
+    /// states nothing about the change would be asking the gate to guess,
+    /// and an empty object is the honest way to say "one local reversible
+    /// edit".
+    change: ChangeFactors,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordAssumptionArguments {
+    #[serde(default)]
+    session: Option<String>,
+    claim: String,
+    evidence: String,
+    evidence_source: EvidenceSource,
+    uncertainty: Uncertainty,
+    affected: String,
+    verification: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateAssumptionArguments {
+    assumption: String,
+    #[serde(default)]
+    state: Option<AssumptionState>,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    response: Option<GuardrailResponse>,
+    #[serde(default)]
+    record_failed_approach: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListAssumptionsArguments {
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default = "default_assumptions_limit")]
+    limit: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromoteAssumptionArguments {
+    assumption: String,
+    kind: PromotionKind,
+    #[serde(default)]
+    note: Option<String>,
 }
 
 #[cfg(test)]
@@ -867,6 +1243,9 @@ mod tests {
             Some("integer") => json!(1),
             Some("boolean") => json!(true),
             Some("array") => json!([]),
+            // An empty object is the one sample every object-typed argument
+            // accepts: `ChangeFactors` defaults every field.
+            Some("object") => json!({}),
             other => panic!("unexpected property type {other:?}"),
         }
     }

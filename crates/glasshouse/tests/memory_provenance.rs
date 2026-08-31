@@ -620,7 +620,9 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
     {
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute_batch(
-            "DROP TRIGGER memories_reject_broken_event_range_insert;
+            "DROP TABLE IF EXISTS assumption_transitions;
+             DROP TABLE IF EXISTS task_assumptions;
+             DROP TRIGGER memories_reject_broken_event_range_insert;
              DROP TRIGGER memories_reject_broken_event_range_update;
              DROP INDEX memories_by_source_session;
 
@@ -758,8 +760,8 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
         })
         .unwrap();
     assert_eq!(
-        version, 18,
-        "the launch must have applied migrations 6 through 18"
+        version, 19,
+        "the launch must have applied migrations 6 through 19"
     );
     drop(conn);
 
@@ -871,7 +873,9 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
     {
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute_batch(
-            "DROP INDEX lifecycle_events_by_session;
+            "DROP TABLE IF EXISTS assumption_transitions;
+             DROP TABLE IF EXISTS task_assumptions;
+             DROP INDEX lifecycle_events_by_session;
              DROP TRIGGER lifecycle_events_reject_foreign_project_insert;
              DROP TRIGGER lifecycle_events_are_append_only_update;
              DROP TRIGGER lifecycle_events_are_append_only_delete;
@@ -1029,8 +1033,8 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
         })
         .unwrap();
     assert_eq!(
-        version, 18,
-        "the launch must have applied migrations 7 through 18"
+        version, 19,
+        "the launch must have applied migrations 7 through 19"
     );
     drop(conn);
 

@@ -54,6 +54,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
+use crate::guardrails::{self, BlockingCategory, GuardrailMode};
 use crate::integrations::IntegrationId;
 use crate::paths::RuntimePaths;
 use crate::project::{Project, ScopeError};
@@ -2288,6 +2289,53 @@ impl RoutingConfig {
     }
 }
 
+/// The `[guardrails]` table — Phase 21K, capability map lines 1008, 1052.
+///
+/// Two preferences, both optional so that a project can override one
+/// without restating the other, and both `None` for "this layer never
+/// decided" — the same three-state reasoning [`RoutingConfig::model`] gives.
+/// The vocabularies are [`crate::guardrails`]' own, so a value this file
+/// accepts is a value the gate understands, and the shipped defaults live
+/// with the gate (`Policy::default_policy`) rather than here.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuardrailsConfig {
+    /// `off`, `advisory` (the default) or `risk_gated`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<GuardrailMode>,
+    /// Which categories may answer `gated` under `risk_gated`. Only the four
+    /// [`BlockingCategory`] names parse; anything else is a load error that
+    /// names the vocabulary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blocking: Option<Vec<BlockingCategory>>,
+}
+
+impl GuardrailsConfig {
+    /// Whether this layer recorded nothing at all — the `skip_serializing_if`
+    /// predicate, so a user who never touched the guardrails has no
+    /// `[guardrails]` table in their file.
+    pub fn is_unset(&self) -> bool {
+        self.mode.is_none() && self.blocking.is_none()
+    }
+
+    pub fn mode(&self) -> Option<GuardrailMode> {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: Option<GuardrailMode>) -> &mut Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn blocking(&self) -> Option<&[BlockingCategory]> {
+        self.blocking.as_deref()
+    }
+
+    pub fn set_blocking(&mut self, blocking: Option<Vec<BlockingCategory>>) -> &mut Self {
+        self.blocking = blocking;
+        self
+    }
+}
+
 /// User-level Glasshouse configuration: `<config_dir>/config.toml`.
 ///
 /// Unknown top-level keys and unknown fields inside known tables are
@@ -2359,6 +2407,13 @@ pub struct UserConfig {
     /// the provider table, turns memory extraction into an outbound request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     memory_extraction_model: Option<ExtractionModelRef>,
+    /// The assumption guardrail's mode and blocking list — Phase 21K. Skipped
+    /// when empty for the same reason `routing` is. Read by
+    /// [`EffectiveConfig::guardrail_mode`] and
+    /// [`EffectiveConfig::guardrail_blocking`] alone, so setting it never
+    /// touches another automatic behaviour.
+    #[serde(default, skip_serializing_if = "GuardrailsConfig::is_unset")]
+    guardrails: GuardrailsConfig,
 }
 
 impl Default for UserConfig {
@@ -2375,6 +2430,7 @@ impl Default for UserConfig {
             memory_extraction: None,
             automatic_checkpoint: None,
             memory_extraction_model: None,
+            guardrails: GuardrailsConfig::default(),
         }
     }
 }
@@ -2459,6 +2515,15 @@ impl UserConfig {
     pub fn set_memory_extraction_model(&mut self, model: Option<ExtractionModelRef>) -> &mut Self {
         self.memory_extraction_model = model;
         self
+    }
+
+    /// This layer's `[guardrails]` table — see [`GuardrailsConfig`].
+    pub fn guardrails(&self) -> &GuardrailsConfig {
+        &self.guardrails
+    }
+
+    pub fn guardrails_mut(&mut self) -> &mut GuardrailsConfig {
+        &mut self.guardrails
     }
 
     /// This layer's recorded decision on automatic task-boundary
@@ -2553,6 +2618,11 @@ pub struct ProjectConfig {
     /// [`EffectiveConfig::memory_extraction_model`] for how the two layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     memory_extraction_model: Option<ExtractionModelRef>,
+    /// A project may set its own guardrail mode and blocking list — see
+    /// [`UserConfig::guardrails`] for the table this mirrors and
+    /// [`EffectiveConfig::guardrail_mode`] for how the two layer.
+    #[serde(default, skip_serializing_if = "GuardrailsConfig::is_unset")]
+    guardrails: GuardrailsConfig,
 }
 
 impl Default for ProjectConfig {
@@ -2568,6 +2638,7 @@ impl Default for ProjectConfig {
             memory_extraction: None,
             automatic_checkpoint: None,
             memory_extraction_model: None,
+            guardrails: GuardrailsConfig::default(),
         }
     }
 }
@@ -2644,6 +2715,15 @@ impl ProjectConfig {
     pub fn set_memory_extraction_model(&mut self, model: Option<ExtractionModelRef>) -> &mut Self {
         self.memory_extraction_model = model;
         self
+    }
+
+    /// This layer's `[guardrails]` table — see [`GuardrailsConfig`].
+    pub fn guardrails(&self) -> &GuardrailsConfig {
+        &self.guardrails
+    }
+
+    pub fn guardrails_mut(&mut self) -> &mut GuardrailsConfig {
+        &mut self.guardrails
     }
 
     /// This layer's recorded decision on automatic task-boundary
@@ -3093,6 +3173,52 @@ impl<'a> EffectiveConfig<'a> {
             return Layered::new(value, Layer::User);
         }
         Layered::new(true, Layer::Default)
+    }
+
+    /// `guardrails.mode`, and which layer set it — Phase 21K line 1052.
+    /// Project first, then user, then [`Layer::Default`] carrying
+    /// `advisory`, matching every other lookup on this type.
+    ///
+    /// Deliberately independent of every other automatic behaviour: it
+    /// reads its own table, so turning the guardrail off never turns off
+    /// memory extraction or checkpoints, and vice versa.
+    pub fn guardrail_mode(&self) -> Layered<GuardrailMode> {
+        if let Some(value) = self.project.and_then(|p| p.guardrails().mode()) {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.guardrails().mode() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(GuardrailMode::Advisory, Layer::Default)
+    }
+
+    /// `guardrails.blocking`, and which layer set it. [`Layer::Default`]
+    /// carries the design ruling's list, [`guardrails::DEFAULT_BLOCKING`].
+    /// A layer that records an explicit empty list means *nothing may
+    /// block*, which is a different fact from recording nothing.
+    pub fn guardrail_blocking(&self) -> Layered<Vec<BlockingCategory>> {
+        if let Some(value) = self.project.and_then(|p| p.guardrails().blocking()) {
+            return Layered::new(value.to_vec(), Layer::Project);
+        }
+        if let Some(value) = self.user.guardrails().blocking() {
+            return Layered::new(value.to_vec(), Layer::User);
+        }
+        Layered::new(guardrails::DEFAULT_BLOCKING.to_vec(), Layer::Default)
+    }
+
+    /// Both guardrail preferences as the gate reads them, each with the
+    /// phrase naming its layer, and no per-task override — the door adds
+    /// that from the session's own ledger.
+    pub fn guardrail_policy(&self) -> guardrails::Policy {
+        let mode = self.guardrail_mode();
+        let blocking = self.guardrail_blocking();
+        guardrails::Policy {
+            mode: mode.value,
+            mode_source: mode.layer.describe_source(),
+            blocking: blocking.value,
+            blocking_source: blocking.layer.describe_source(),
+            override_: None,
+        }
     }
 
     /// Resolve which routing model classifies requests, reporting which
