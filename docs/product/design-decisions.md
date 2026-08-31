@@ -2806,3 +2806,45 @@ stay open with the same missing producer they had, and a future ruling must
 find a signal that is the agent's own statement, not a correlation.
 
 Package: `GH-ROUTING-OUTCOME`.
+
+## Phase 33: framing is not content — the relay may count and timestamp what it never reads
+
+### Decided by the orchestrator, 2026-08-31
+
+Cluster L in the refusal register holds Phase 33A's 1331–1334 and Phase 33C's
+1364 behind one sentence from `gateway/ingress.rs`: the body *"stays a byte
+stream this function never parses."* Its own closing paragraph names the way
+out — *"either `gateway::ingress` gains a bounded, streaming, non-buffering
+observer that counts and timestamps without interpreting content, or these
+lines stay open"* — and the 1331 ruling in `handoff.md` asked the narrower
+question outright: *may the relay observe response FRAMING without reading
+content?*
+
+**Yes.** The relay already handles the status line, every header, the declared
+`content_length`, and the byte stream it copies — `settle` already counts bytes
+toward a cap. Metadata the relay must handle in order to forward is not the
+body's content. A byte count, the fact that the count fell short of the
+declared length, the fact that the peer closed before the terminating chunk,
+and a timestamp are framing facts. **The boundary that stays**: no byte of the
+body is inspected, decoded, matched, or buffered beyond what forwarding
+already buffers. A source-scan test enforces it.
+
+What this unblocks: a nine-way failure classification (1364) from status,
+headers, transport detail and framing; rate-limit responses counted apart from
+transport and model failures (1316); cadence throttling told apart from an
+exhausted window by the rate-limit headers the gateway already parses (1365);
+the `failovers` column written from the assignment change the exchange caused
+(part of 1334).
+
+What it does **not** unblock, so nobody stretches it: *time to first real
+token*, *time to first tool call* (1331), padding-vs-token (1332), token counts
+(1333), tool rounds and repairs (1334) — every one requires reading content.
+
+**The migration.** `routing_observations.outcome` keeps its four-value `CHECK`;
+it answers a different question. Migration 16 adds one nullable `failure_class
+TEXT` with **no `CHECK`** — migration 15's reason: a vocabulary that will grow
+must not cost a table rebuild — pinned by a Rust constant and a test, added
+with `ALTER TABLE … ADD COLUMN` as `validity_conditions` was. Cluster G says a
+migration needs a design first; this is the design.
+
+Package: `GH-FAILURE-TAXONOMY`.
