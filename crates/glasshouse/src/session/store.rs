@@ -462,6 +462,15 @@ pub struct SessionRecord {
     pub role: SessionRole,
     pub lifecycle: SessionLifecycle,
     pub presentation: SessionPresentation,
+    /// Where an [`SessionPresentation::External`] session is presented, as
+    /// an opaque reference the presenting backend understands — line 760.
+    /// `None` means no pane was recorded: either the session is not
+    /// external, or it was recorded before this column existed, and this
+    /// module does not distinguish the two. Stored and returned, never
+    /// interpreted here: what the string means is the presenting
+    /// integration's business, and this module names no integration (line
+    /// 762).
+    pub presentation_ref: Option<String>,
     /// Seconds since the Unix epoch.
     pub created_at: i64,
     /// Seconds since the Unix epoch.
@@ -865,6 +874,9 @@ pub struct NewSession {
     pub harness: String,
     pub role: SessionRole,
     pub presentation: SessionPresentation,
+    /// See [`SessionRecord::presentation_ref`]. Only meaningful with
+    /// [`SessionPresentation::External`]; stored as given either way.
+    pub presentation_ref: Option<String>,
     /// Usually `None`: most harnesses only reveal an identifier once they are
     /// running.
     pub native_session_id: Option<String>,
@@ -898,6 +910,7 @@ impl NewSession {
             harness: harness.into(),
             role: SessionRole::Normal,
             presentation: SessionPresentation::Embedded,
+            presentation_ref: None,
             native_session_id: None,
             launch_profile: None,
             backend_resource: None,
@@ -917,6 +930,13 @@ impl NewSession {
 
     pub fn with_presentation(mut self, presentation: SessionPresentation) -> Self {
         self.presentation = presentation;
+        self
+    }
+
+    /// Record where an external session is presented. See
+    /// [`SessionRecord::presentation_ref`].
+    pub fn with_presentation_ref(mut self, presentation_ref: Option<String>) -> Self {
+        self.presentation_ref = presentation_ref;
         self
     }
 
@@ -1197,7 +1217,7 @@ const ALL_COLUMNS: &str = "id, project_id, harness, native_session_id, role, \
                            launch_profile, backend_resource, model, pairing_class, \
                            protocol, response_profile, response_mechanism, \
                            display_name, purpose, source_session_id, \
-                           observed_compactions";
+                           observed_compactions, presentation_ref";
 
 /// An open project database plus the sessions inside it.
 ///
@@ -1469,6 +1489,7 @@ impl<'a> SessionStore<'a> {
             // every session Glasshouse ever starts, and the column would then
             // be carrying no information at all.
             observed_compactions: Some(0),
+            presentation_ref: new.presentation_ref,
         };
 
         self.conn
@@ -1478,9 +1499,9 @@ impl<'a> SessionStore<'a> {
                  launch_profile, backend_resource, model, pairing_class, protocol, \
                  response_profile, response_mechanism, process_id, \
                  process_started_at, process_host, supervision, source_session_id, \
-                 observed_compactions) \
+                 observed_compactions, presentation_ref) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
-                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
                 rusqlite::params![
                     record.id.as_str(),
                     &record.project_id,
@@ -1516,6 +1537,7 @@ impl<'a> SessionStore<'a> {
                         .map(Supervision::as_str),
                     record.source_session_id.as_ref().map(SessionId::as_str),
                     record.observed_compactions,
+                    &record.presentation_ref,
                 ],
             )
             .map_err(|source| SessionStoreError::Sql {
@@ -2211,6 +2233,30 @@ impl<'a> SessionStore<'a> {
         )
     }
 
+    /// Record where a session is presented now — line 760, for a session
+    /// that was recorded before it reached the place it is shown: a
+    /// continued session picked up inside an external pane.
+    ///
+    /// Two columns, written together, because they are one fact: a
+    /// presentation that names a pane and a pane without a presentation
+    /// would each be half an answer. Like a rename, it does not count as
+    /// session activity. The reference is stored as given — see
+    /// [`SessionRecord::presentation_ref`] for why this module never
+    /// interprets it.
+    pub fn set_presentation(
+        &self,
+        id: &SessionId,
+        presentation: SessionPresentation,
+        presentation_ref: Option<&str>,
+    ) -> Result<SessionRecord, SessionStoreError> {
+        self.update(
+            id,
+            "UPDATE sessions SET presentation = ?2, presentation_ref = ?3 WHERE id = ?1",
+            rusqlite::params![id.as_str(), presentation.as_str(), presentation_ref],
+            "record where a session is presented",
+        )
+    }
+
     /// Remove a session's purpose tag.
     pub fn clear_purpose(&self, id: &SessionId) -> Result<SessionRecord, SessionStoreError> {
         self.update(
@@ -2635,6 +2681,11 @@ fn read_record(row: &Row<'_>) -> Result<SessionRecord, SessionStoreError> {
     // [`SessionRecord::observed_compactions`] — and `unwrap_or(0)` here would
     // erase it at the one point every reader in the crate passes through.
     let observed_compactions: Option<i64> = row.get_unwrap(19);
+    // Opaque, like `source_session_id`: a reference the presenting backend
+    // understands, stored and returned as given. Validating its shape here
+    // would teach this module what a backend's references look like, which
+    // is the one thing line 762 says it must not learn.
+    let presentation_ref: Option<String> = row.get_unwrap(20);
 
     Ok(SessionRecord {
         id,
@@ -2657,6 +2708,7 @@ fn read_record(row: &Row<'_>) -> Result<SessionRecord, SessionStoreError> {
         purpose,
         source_session_id,
         observed_compactions,
+        presentation_ref,
     })
 }
 
@@ -2746,7 +2798,9 @@ mod tests {
     /// migration 16's reason, and migration 19's two tables are two
     /// statements for migration 15's — each drop takes its indexes and
     /// triggers with it — and they go first, newest migration undone first.
+    /// Migration 20's column is the newest of all, so it leads.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        ALTER TABLE sessions DROP COLUMN presentation_ref;
         DROP TABLE assumption_transitions;
         DROP TABLE task_assumptions;
         ALTER TABLE routing_observations DROP COLUMN failure_class;
@@ -3476,6 +3530,93 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
+    // Phase 17 line 760 — an external session's pane, as opaque metadata.
+
+    /// The reference survives a round trip exactly as given, an embedded
+    /// session records none, and the store never interprets the string:
+    /// a value no backend would accept is stored and returned all the same,
+    /// because deciding what a reference means is the presenting
+    /// integration's job (line 762), not this module's.
+    #[test]
+    fn an_external_sessions_presentation_ref_round_trips_and_is_never_interpreted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let store = fixture.store();
+
+        let external = store
+            .create(
+                NewSession::embedded("claude-code")
+                    .with_presentation(SessionPresentation::External)
+                    .with_presentation_ref(Some("workspace:349".to_owned())),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get(&external.id)
+                .unwrap()
+                .unwrap()
+                .presentation_ref
+                .as_deref(),
+            Some("workspace:349")
+        );
+
+        let embedded = store.create(NewSession::embedded("claude-code")).unwrap();
+        assert_eq!(
+            store.get(&embedded.id).unwrap().unwrap().presentation_ref,
+            None,
+            "a session with no pane records no pane"
+        );
+
+        let opaque = store
+            .create(
+                NewSession::embedded("claude-code")
+                    .with_presentation(SessionPresentation::External)
+                    .with_presentation_ref(Some("not-a-cmux-ref".to_owned())),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get(&opaque.id)
+                .unwrap()
+                .unwrap()
+                .presentation_ref
+                .as_deref(),
+            Some("not-a-cmux-ref"),
+            "the store stores; it does not decide what a reference looks like"
+        );
+    }
+
+    /// A session recorded somewhere else and then continued inside a pane
+    /// has its presentation and its pane rewritten together, and its
+    /// activity clock untouched.
+    #[test]
+    fn a_continued_session_can_be_moved_into_a_pane_afterwards() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let store = fixture.store();
+
+        let record = store.create(NewSession::embedded("claude-code")).unwrap();
+        assert_eq!(record.presentation, SessionPresentation::Embedded);
+        assert_eq!(record.presentation_ref, None);
+
+        let moved = store
+            .set_presentation(
+                &record.id,
+                SessionPresentation::External,
+                Some("workspace:349"),
+            )
+            .unwrap();
+        assert_eq!(moved.presentation, SessionPresentation::External);
+        assert_eq!(moved.presentation_ref.as_deref(), Some("workspace:349"));
+        assert_eq!(
+            moved.last_activity_at, record.last_activity_at,
+            "moving a session is not session activity"
+        );
+        let read_back = store.get(&record.id).unwrap().unwrap();
+        assert_eq!(read_back.presentation, SessionPresentation::External);
+        assert_eq!(read_back.presentation_ref.as_deref(), Some("workspace:349"));
+    }
+
     // Phase 2 line 186 — presentation mode.
     // ---------------------------------------------------------------
 
@@ -3646,6 +3787,14 @@ mod tests {
         assert_eq!(
             columns,
             vec![
+                // Migration 19 (carried from `assumption-guardrails`). The
+                // premises an agent states, their evidence class, scope and
+                // verification, and the transitions between six states —
+                // free text a caller supplied, sanitized by that package's
+                // writer, and vocabularies that live in Rust. That package's
+                // own review of these columns is the authority; they are
+                // listed here so this tree's ladder (1..20) is the schema
+                // this test sees.
                 "assumption_transitions.seq",
                 "assumption_transitions.project_id",
                 "assumption_transitions.assumption_id",
@@ -3857,6 +4006,13 @@ mod tests {
                 // outside the process. There is no string here for anything
                 // to be typed into.
                 "sessions.observed_compactions",
+                // Migration 20. A cmux workspace reference of the shape
+                // `workspace:<n>`, written only from what cmux itself
+                // printed or from a reference a person typed on the command
+                // line, and validated to that shape before it is ever handed
+                // back. A pane number is not a place a credential could be
+                // put.
+                "sessions.presentation_ref",
                 // Migration 19: the six fields an agent states about a
                 // premise and their bookkeeping. Free text, sanitized by the
                 // writer and bounded; no column is named for, or shaped
@@ -3906,6 +4062,8 @@ mod tests {
         assert_eq!(
             tables,
             vec![
+                // Migration 19 (carried from `assumption-guardrails`): a
+                // ledger of stated premises, not a profile definition.
                 "assumption_transitions",
                 "checkpoints",
                 "evaluation_observations",
@@ -3993,7 +4151,8 @@ mod tests {
         fixture
             .conn
             .execute_batch(
-                "ALTER TABLE sessions DROP COLUMN observed_compactions;
+                "ALTER TABLE sessions DROP COLUMN presentation_ref;
+                 ALTER TABLE sessions DROP COLUMN observed_compactions;
                  ALTER TABLE sessions DROP COLUMN launch_profile;
                  ALTER TABLE sessions DROP COLUMN backend_resource;
                  ALTER TABLE sessions DROP COLUMN model;
@@ -4029,8 +4188,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 19,
-            "the launch must have applied migrations 3 through 19"
+            version, 20,
+            "the launch must have applied migrations 3 through 20"
         );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
@@ -4221,8 +4380,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 19,
-            "the launch must have applied migrations 2 through 19"
+            version, 20,
+            "the launch must have applied migrations 2 through 20"
         );
 
         let store = SessionStore::new(&reopened).unwrap();
@@ -5175,8 +5334,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 19,
-                "the launch must have applied migrations 8 through 19"
+                version, 20,
+                "the launch must have applied migrations 8 through 20"
             );
 
             let after = SessionStore::new(&reopened)
@@ -5304,8 +5463,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 19,
-                "the reopen must have applied migrations 12 through 19"
+                version, 20,
+                "the reopen must have applied migrations 12 through 20"
             );
 
             let after = SessionStore::new(&reopened)

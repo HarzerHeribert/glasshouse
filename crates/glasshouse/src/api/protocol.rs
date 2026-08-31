@@ -193,6 +193,21 @@ pub enum Request {
         /// before this field existed meant.
         #[serde(default)]
         guardrail: Option<GuardrailOverride>,
+        /// Where the spawned session is presented — Phase 17 lines 757 and
+        /// 761. Absent means headless in this process, exactly as this verb
+        /// always spawned. `cmux` asks for a new cmux workspace in the
+        /// project root, running an ordinary Glasshouse launch: the answer
+        /// then carries `presentation_ref` (the workspace) and `session` once
+        /// the pane has recorded itself. When cmux is not available the
+        /// spawn still succeeds — headless, here — and the answer says so in
+        /// `presentation_note`; an unknown backend is refused by name.
+        ///
+        /// A session presented this way is recorded by the launch inside
+        /// the pane, which takes no `role`: it is recorded as `normal`, and a
+        /// `task` reaches it through cmux's own `send` rather than through
+        /// this door's session runtime, which never holds it.
+        #[serde(default)]
+        presentation: Option<String>,
     },
     /// Send one line of text to a live session.
     ///

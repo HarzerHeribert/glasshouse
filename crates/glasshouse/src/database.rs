@@ -103,9 +103,15 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// migration 5's stream. See the migration's own doc comment for why the
 /// current state of an assumption is its latest transition and nothing is
 /// ever `UPDATE`d, and [`crate::guardrails::store`] for the writer.
+/// Version 20 adds `sessions.presentation_ref`, Phase 17 line 760's optional
+/// presentation metadata — one nullable `TEXT` column naming the cmux
+/// workspace a session is presented in, with no `CHECK` for migration 15's
+/// reason. See the migration's own doc comment for why it is a column beside
+/// `presentation` rather than a widening of it, and
+/// [`crate::integrations::cmux`] for the only code that ever reads it back.
 /// Later migrations are appended to [`MIGRATIONS`], and this constant moves
 /// with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 19;
+const SUPPORTED_SCHEMA_VERSION: i64 = 20;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -2120,6 +2126,43 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
         SELECT RAISE(ABORT, 'assumption_transitions is append-only: a transition is never edited');
     END;
     ",
+    // 20: `sessions.presentation_ref` — Phase 17 line 760, *"record the cmux
+    // surface or pane identifier as optional session presentation
+    // metadata."*
+    //
+    // # A column beside `presentation`, not a widening of it
+    //
+    // `presentation` answers *where is this session shown* with one of three
+    // words and carries a `CHECK`; this answers *which pane*, and only for a
+    // session whose answer to the first question is `external`. Folding the
+    // reference into `presentation` (`external:workspace:349`) would make one
+    // column carry two facts and would break every reader that matches the
+    // three words, including the shell's — which is exactly the layer line
+    // 762 keeps ignorant of cmux.
+    //
+    // # `ADD COLUMN`, nullable, no `CHECK`, no index
+    //
+    // Migration 18's shape. Every existing row backfills to `NULL`, which is
+    // the honest reading: a session recorded before this column existed was
+    // presented somewhere Glasshouse did not write down, which is a different
+    // fact from a session recorded now with no pane. No `CHECK` on the shape
+    // (`workspace:<n>` / `surface:<n>`): the validation lives in Rust, at the
+    // one place the value is handed back to cmux
+    // (`integrations::cmux::PaneRef::parse`), so a cmux that changed its
+    // reference syntax would be met in one file rather than by a table
+    // rebuild. No index: the only reads are a session's own row and a short
+    // bounded poll after a pane is opened.
+    //
+    // # What may write it, and from what
+    //
+    // `SessionStore::create`, once, from `NewSession::presentation_ref`,
+    // which only `main.rs`'s launch path fills — from the reference cmux
+    // itself printed (`cmux identify --json`), or from one a caller supplied
+    // by hand. Nothing in `session/**` interprets the string; the session
+    // abstraction stores and returns it and learns nothing else (line 762).
+    "
+    ALTER TABLE sessions ADD COLUMN presentation_ref TEXT;
+    ",
 ];
 
 pub(crate) const PROJECT_ID_KEY: &str = "project_id";
@@ -2609,8 +2652,14 @@ mod tests {
     /// rollback runs newest-migration-first for the same reason the ladder
     /// runs oldest-first. Migration 18 is one statement for migration 16's
     /// reason — nothing indexes `failure_class` and it carries no `CHECK` —
-    /// and it goes before all of them, being the newest.
+    /// and it goes before all of them, being the newest. Migration 19 is two
+    /// statements for migration 15's reason — each table takes its indexes
+    /// and triggers with it — and migration 20 is one for migration 16's:
+    /// nothing indexes `presentation_ref` and it carries no `CHECK`. Newest
+    /// first, so 20 leads.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        ALTER TABLE sessions DROP COLUMN presentation_ref;
+
         DROP TABLE assumption_transitions;
         DROP TABLE task_assumptions;
 
@@ -2803,20 +2852,14 @@ mod tests {
             EvidenceLedger, FailureClass, NewObservation, ObservationQuery, Outcome,
         };
 
-        // Reaches past 18 on purpose. This test rolls the database back to
-        // 17 and lets an ordinary bootstrap migrate it forward again, so the
-        // rollback has to undo **every** migration above 17 — not just its
-        // own. Leaving 19's tables in place would land a "17" that still held
-        // them, and the re-bootstrap would fail on `CREATE TABLE
-        // task_assumptions` rather than prove anything about 18.
-        //
-        // The two drops are 19's, in `UNDO_MIGRATIONS_ABOVE_THIRTEEN`'s order;
-        // a migration 20 owes this constant its own line, exactly as it owes
-        // that one.
+        // Migrations 20 and 19 are undone first: a rollback undoes every
+        // migration above the version it claims, or the re-run fails with
+        // `duplicate column name` — `UNDO_MIGRATIONS_ABOVE_THIRTEEN`'s own
+        // lesson.
         const UNDO_18: &str = "
+            ALTER TABLE sessions DROP COLUMN presentation_ref;
             DROP TABLE assumption_transitions;
             DROP TABLE task_assumptions;
-
             ALTER TABLE routing_observations DROP COLUMN failure_class;
             DELETE FROM schema_migrations WHERE version >= 18;
         ";
@@ -2944,7 +2987,15 @@ mod tests {
             Uncertainty,
         };
 
+        // Reaches past 19, for `UNDO_18`'s reason exactly: this test rolls
+        // back to 18 and lets an ordinary bootstrap migrate forward again, so
+        // it must undo EVERY migration above 18. Leaving 20's column standing
+        // lands an "18" that still has `presentation_ref`, and the re-bootstrap
+        // fails with `duplicate column name` instead of proving anything about
+        // 19. A migration 21 owes this constant its own line.
         const UNDO_19: &str = "
+            ALTER TABLE sessions DROP COLUMN presentation_ref;
+
             DROP TABLE assumption_transitions;
             DROP TABLE task_assumptions;
             DELETE FROM schema_migrations WHERE version >= 19;
@@ -3104,6 +3155,111 @@ mod tests {
         assert_eq!(schema_version(&db_path), 18);
     }
 
+    /// Migration proof for 20: a version-19 database that already holds a
+    /// session written the way a version-19 build wrote it migrates forward
+    /// adding exactly one column, appended; the old row reads as *no pane
+    /// recorded*, never as an empty or invented reference; a row written now
+    /// carries the reference it was given; and the undo takes the whole
+    /// schema back to exactly what it was at 19, keeping every row.
+    ///
+    /// The `None` assertion is the one this migration most needs: a column
+    /// written `NOT NULL DEFAULT ''` would pass every other check here and
+    /// would hand `integrations::cmux::PaneRef::parse` an empty string for
+    /// every session recorded before the upgrade.
+    #[test]
+    fn migration_20_adds_presentation_ref_and_undoes_cleanly() {
+        use crate::session::{NewSession, ProjectSessions, SessionId, SessionPresentation};
+
+        const UNDO_20: &str = "
+            ALTER TABLE sessions DROP COLUMN presentation_ref;
+            DELETE FROM schema_migrations WHERE version >= 20;
+        ";
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let db_path = fixture.runtime.database_path();
+        let project_id = stored_project_id(&db_path);
+
+        // Back to 19, with a row written the way a version-19 build wrote
+        // them — no `presentation_ref` to name.
+        let (schema_at_19, columns_at_19) = {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(UNDO_20).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, project_id, harness, role, lifecycle, \
+                 presentation, created_at, last_activity_at) \
+                 VALUES ('pre-migration', ?1, 'claude-code', 'normal', 'stopped', \
+                 'external', 1, 1)",
+                [&project_id],
+            )
+            .unwrap();
+            (whole_schema(&conn), columns_of(&conn, "sessions"))
+        };
+        assert_eq!(schema_version(&db_path), 19, "the rollback must land on 19");
+        assert!(
+            !columns_at_19
+                .iter()
+                .any(|column| column == "presentation_ref"),
+            "{columns_at_19:?}"
+        );
+
+        // Forward: an ordinary bootstrap, exactly as a real upgrade happens.
+        let migrated = fixture.rebootstrap().unwrap();
+        assert_eq!(
+            schema_version(&migrated.database_path()),
+            SUPPORTED_SCHEMA_VERSION,
+            "the launch must have applied migration 20"
+        );
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let columns = columns_of(&conn, "sessions");
+            let mut expected = columns_at_19.clone();
+            expected.push("presentation_ref".to_owned());
+            assert_eq!(columns, expected, "exactly one column, appended");
+        }
+
+        // The pre-migration row reads as *no pane recorded*, and a row
+        // written now carries the reference it was given — through the real
+        // store, which is the only writer.
+        {
+            let sessions = ProjectSessions::open(&migrated).unwrap();
+            let store = sessions.store();
+            let pre = store
+                .get(&SessionId::new("pre-migration"))
+                .unwrap()
+                .expect("the pre-migration row survives");
+            assert_eq!(pre.presentation, SessionPresentation::External);
+            assert_eq!(
+                pre.presentation_ref, None,
+                "a row from before the column existed has no pane, not an empty one"
+            );
+
+            let post = store
+                .create(
+                    NewSession::embedded("claude-code")
+                        .with_presentation(SessionPresentation::External)
+                        .with_presentation_ref(Some("workspace:349".to_owned())),
+                )
+                .unwrap();
+            let read_back = store.get(&post.id).unwrap().unwrap();
+            assert_eq!(read_back.presentation_ref.as_deref(), Some("workspace:349"));
+        }
+
+        // Back again: the whole schema is what it was at 19, byte for byte,
+        // and both rows are still there.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(UNDO_20).unwrap();
+            assert_eq!(whole_schema(&conn), schema_at_19);
+            assert_eq!(columns_of(&conn, "sessions"), columns_at_19);
+            let rows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(rows, 2, "dropping the column drops no rows");
+        }
+        assert_eq!(schema_version(&db_path), 19);
+    }
+
     /// Migration proof for migration 17: a version-16 database opens,
     /// migrates to 17, keeps every memory it had, and comes out with a table
     /// that accepts an association — plus the index and the two triggers, and
@@ -3138,7 +3294,8 @@ mod tests {
             // **every** migration above the version it claims, or the
             // re-run fails — `UNDO_MIGRATIONS_ABOVE_THIRTEEN`'s own lesson.
             conn.execute_batch(
-                "DROP TABLE assumption_transitions;
+                "ALTER TABLE sessions DROP COLUMN presentation_ref;
+                 DROP TABLE assumption_transitions;
                  DROP TABLE task_assumptions;
                  ALTER TABLE routing_observations DROP COLUMN failure_class;
                  DROP TABLE memory_files;

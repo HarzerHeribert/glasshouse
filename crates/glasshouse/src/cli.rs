@@ -479,6 +479,28 @@ pub enum Command {
         /// proceed. Trivial edits never gate either way.
         #[arg(long, value_name = "force|skip|lower")]
         guardrail: Option<String>,
+        /// Present the session in an external backend instead of this
+        /// terminal. `cmux` is the only backend today.
+        ///
+        /// With cmux available — Glasshouse is running inside a cmux
+        /// surface and `cmux ping` answers — Glasshouse opens a new cmux
+        /// workspace in the project root and runs this same launch inside
+        /// it. The session is recorded as `external` with the workspace it
+        /// lives in, and `glasshouse sessions focus` brings it to the front.
+        /// Without cmux, the launch says so and runs embedded, exactly as it
+        /// would have without this flag.
+        #[arg(long, value_name = "BACKEND", conflicts_with = "presentation_ref")]
+        presentation: Option<String>,
+
+        /// Record this session as presented in an external pane. The
+        /// process inside a pane opened by `--presentation` passes this.
+        ///
+        /// Takes a cmux reference (`workspace:<n>` or `surface:<n>`), or
+        /// `caller`, which asks cmux which workspace this process is in. It
+        /// changes nothing about how the session runs; it only records
+        /// where it is shown.
+        #[arg(long, value_name = "REF", hide = true)]
+        presentation_ref: Option<String>,
 
         /// Arguments passed straight through to the harness, after `--`.
         ///
@@ -630,6 +652,28 @@ pub enum Command {
         /// `force`, `skip` or `lower`. The same override `launch` takes.
         #[arg(long, value_name = "force|skip|lower")]
         guardrail: Option<String>,
+        /// Present the session in an external backend instead of this
+        /// terminal. `cmux` is the only backend today.
+        ///
+        /// With cmux available — Glasshouse is running inside a cmux
+        /// surface and `cmux ping` answers — Glasshouse opens a new cmux
+        /// workspace in the project root and runs this same launch inside
+        /// it. The session is recorded as `external` with the workspace it
+        /// lives in, and `glasshouse sessions focus` brings it to the front.
+        /// Without cmux, the launch says so and runs embedded, exactly as it
+        /// would have without this flag.
+        #[arg(long, value_name = "BACKEND", conflicts_with = "presentation_ref")]
+        presentation: Option<String>,
+
+        /// Record this session as presented in an external pane. The
+        /// process inside a pane opened by `--presentation` passes this.
+        ///
+        /// Takes a cmux reference (`workspace:<n>` or `surface:<n>`), or
+        /// `caller`, which asks cmux which workspace this process is in. It
+        /// changes nothing about how the session runs; it only records
+        /// where it is shown.
+        #[arg(long, value_name = "REF", hide = true)]
+        presentation_ref: Option<String>,
 
         /// Arguments passed straight through to the harness, after `--`.
         ///
@@ -951,6 +995,8 @@ mod tests {
             headless,
             task,
             guardrail,
+            presentation,
+            presentation_ref,
             harness_args,
         }) = cli.command
         else {
@@ -962,6 +1008,10 @@ mod tests {
         // Opt-in, like every routing flag: a launch that describes no task
         // classifies nothing and routes exactly as it always has.
         assert_eq!(task, None);
+        // Opt-in like `--headless`: a launch that names no presentation
+        // backend and no pane is shown where it always was.
+        assert_eq!(presentation, None);
+        assert_eq!(presentation_ref, None);
         // Opt-in like every other launch flag: a launch that names no
         // response profile and no role leaves the harness's own
         // communication behaviour untouched.
@@ -988,6 +1038,65 @@ mod tests {
         // Hyphenated arguments after `--` reach the harness untouched rather
         // than being parsed as Glasshouse options.
         assert_eq!(harness_args, vec!["--resume", "--model=x"]);
+    }
+
+    /// `--presentation` and `--presentation-ref` are two halves of one
+    /// mechanism — the outer process passes the first, the process inside
+    /// the pane the second — and a launch naming both would be claiming to
+    /// be on both sides of the pane at once.
+    #[test]
+    fn parses_a_presentation_backend_and_a_pane_ref_but_never_both() {
+        let cli = Cli::try_parse_from([
+            "glasshouse",
+            "launch",
+            "claude-code",
+            "--presentation",
+            "cmux",
+        ])
+        .unwrap();
+        let Some(Command::Launch {
+            presentation,
+            presentation_ref,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected a launch command");
+        };
+        assert_eq!(presentation.as_deref(), Some("cmux"));
+        assert_eq!(presentation_ref, None);
+
+        let cli = Cli::try_parse_from([
+            "glasshouse",
+            "run",
+            "claude-code",
+            "--presentation-ref",
+            "caller",
+        ])
+        .unwrap();
+        let Some(Command::Run {
+            presentation,
+            presentation_ref,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected a run command");
+        };
+        assert_eq!(presentation, None);
+        assert_eq!(presentation_ref.as_deref(), Some("caller"));
+
+        assert!(
+            Cli::try_parse_from([
+                "glasshouse",
+                "launch",
+                "claude-code",
+                "--presentation",
+                "cmux",
+                "--presentation-ref",
+                "workspace:3",
+            ])
+            .is_err(),
+            "both halves at once must be refused by the parser"
+        );
     }
 
     #[test]
@@ -1315,6 +1424,17 @@ pub enum SessionCommand {
         /// Remove the session's purpose instead of setting one.
         #[arg(long, conflicts_with = "purpose")]
         clear: bool,
+    },
+
+    /// Bring a session's external pane to the front.
+    ///
+    /// Only for a session presented in cmux — `glasshouse sessions` shows it
+    /// as `external workspace:<n>`. Glasshouse asks cmux to select that
+    /// workspace, and nothing else. A session presented in this terminal or
+    /// running headless has no pane to focus, and this says so.
+    Focus {
+        /// The session, or the leading part of its identifier.
+        session: String,
     },
 
     /// Retire Glasshouse's record of a session.

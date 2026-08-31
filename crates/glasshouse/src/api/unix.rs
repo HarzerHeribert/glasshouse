@@ -21,6 +21,7 @@
 //! matter of discipline.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 #[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
@@ -42,13 +43,14 @@ use glasshouse::events::{
     EventBus, EventLog, EventLogSink, EventSink, GatewayFailure, LifecycleEvent, LoggedEvent,
     MessageOrigin, TurnOutcome,
 };
+use glasshouse::integrations::cmux;
 use glasshouse::launch::HarnessLaunch;
 use glasshouse::memory::inject::{self, Injection};
 use glasshouse::memory::{MemoryId, ProjectMemory};
 use glasshouse::session::api::{ApiError, SessionApi};
 use glasshouse::session::{
-    NewSession, ProjectSessions, SessionId, SessionLifecycle, SessionPresentation, SessionRole,
-    SessionRuntime, SessionStore,
+    HarnessSelection, NewSession, ProjectSessions, SessionId, SessionLifecycle,
+    SessionPresentation, SessionRole, SessionRuntime, SessionStore,
 };
 
 use glasshouse::guardrails::{
@@ -723,6 +725,7 @@ fn dispatch(
             role,
             task,
             guardrail,
+            presentation,
         } => spawn_session(
             runtime,
             &store,
@@ -732,6 +735,7 @@ fn dispatch(
             role.as_deref(),
             task,
             guardrail,
+            presentation.as_deref(),
             injected,
         ),
         // Line 1125's *"routed task"* is not only a spawn's own. This verb
@@ -796,11 +800,23 @@ fn dispatch(
             // on a busy timeout, and nothing that waits may hold the lock
             // every live session's I/O runs through.
             let briefing = select_memory(runtime, &id, &text, injected);
-            let mut guard = lock(live);
-            let mut api = SessionApi::new(&store, &mut guard);
-            deliver_memory(&mut api, &id, briefing, injected);
-            match api.send_text(&id, &text, origin.message_origin()) {
-                Ok(()) => Response::ok(serde_json::json!({})),
+            // The door first, always — Phase 17 line 758. The lock is
+            // released before any fallback: reaching a pane spawns `cmux`,
+            // and nothing that waits on a child process may hold the lock
+            // every live session's I/O runs through.
+            let attempt = {
+                let mut guard = lock(live);
+                let mut api = SessionApi::new(&store, &mut guard);
+                deliver_memory(&mut api, &id, briefing, injected);
+                api.send_text(&id, &text, origin.message_origin())
+            };
+            match attempt {
+                Ok(()) => Response::ok(serde_json::json!({ "via": "door" })),
+                // `NotLive` is the one refusal a pane can answer: the
+                // session exists in this project (`resolve` passed) and no
+                // runtime here holds it — which is exactly what a session
+                // launched inside a cmux pane looks like from this process.
+                Err(ApiError::NotLive { .. }) => send_through_pane(&store, &id, &text),
                 Err(err) => Response::err(api_error(err)),
             }
         }
@@ -974,6 +990,8 @@ fn session_summary(record: &glasshouse::session::SessionRecord) -> serde_json::V
         "harness": record.harness,
         "role": record.role.as_str(),
         "lifecycle": lifecycle_str(record.lifecycle),
+        "presentation": record.presentation.as_str(),
+        "presentation_ref": record.presentation_ref,
         "backend_resource": record.backend_resource,
         "model": record.model.as_ref().map(|m| m.label().to_owned()),
         "protocol": record.protocol.as_ref().map(|p| format!("{p:?}")),
@@ -1043,6 +1061,7 @@ fn spawn_session(
     role: Option<&str>,
     task: Option<String>,
     guardrail: Option<GuardrailOverride>,
+    presentation: Option<&str>,
     injected: &Injected,
 ) -> Response {
     let role = match parse_role(role) {
@@ -1062,6 +1081,26 @@ fn spawn_session(
         Ok(selection) => selection,
         Err(err) => return Response::err(err),
     };
+
+    // Phase 17 lines 757 and 761 — presented in cmux when asked *and* when
+    // cmux answers. When it does not, the spawn is the headless one this
+    // verb always did, and the answer says why: line 755's rule, applied
+    // through the door.
+    let mut presentation_note = None;
+    match presentation.map(cmux::Backend::parse).transpose() {
+        Err(err) => return Response::err(err),
+        Ok(Some(cmux::Backend::Cmux)) => match cmux::detect() {
+            cmux::Availability::Available(control) => {
+                return spawn_in_cmux(runtime, store, &control, &selection, args, task);
+            }
+            cmux::Availability::Absent(reason) => {
+                presentation_note = Some(format!(
+                    "cmux is not available ({reason}); the session runs headless in this Glasshouse"
+                ));
+            }
+        },
+        Ok(None) => {}
+    }
 
     let record = match store.create(
         NewSession::embedded(selection.id().slug())
@@ -1161,7 +1200,141 @@ fn spawn_session(
         }
     }
 
-    Response::ok(serde_json::json!({ "session": record.id.as_str() }))
+    let mut result = serde_json::json!({ "session": record.id.as_str() });
+    if let Some(note) = presentation_note {
+        result["presentation"] = "headless".into();
+        result["presentation_note"] = note.into();
+    }
+    Response::ok(result)
+}
+
+/// Open a cmux workspace running an ordinary `glasshouse launch` of the
+/// selected harness, wait briefly for it to record itself, and deliver the
+/// task through cmux — Phase 17 lines 757 and 761 through the door.
+///
+/// This process starts nothing else and holds nothing: the session belongs
+/// to the launch inside the pane, which records it (`External`, with the
+/// workspace) and installs its own hooks. That is also why the `role` this
+/// door parsed is not carried — `launch` takes none, so the pane's session
+/// is recorded as `normal`; the answer's `presentation` says which path was
+/// taken so a caller can tell.
+///
+/// `focus: false`: an orchestrator spawning a worker must not have its own
+/// view taken away.
+fn spawn_in_cmux(
+    runtime: &Runtime,
+    store: &SessionStore<'_>,
+    control: &impl cmux::CmuxControl,
+    selection: &HarnessSelection,
+    args: Vec<String>,
+    task: Option<String>,
+) -> Response {
+    let executable = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(err) => {
+            return Response::err(format!(
+                "cannot locate this glasshouse executable for the pane to run: {err}"
+            ));
+        }
+    };
+    let paths = runtime.paths();
+    let root = runtime.project().display_root().to_path_buf();
+    let global: Vec<OsString> = vec![
+        "--scope".into(),
+        root.as_os_str().to_owned(),
+        "--data-dir".into(),
+        paths.data_dir().as_os_str().to_owned(),
+        "--config-dir".into(),
+        paths.config_dir().as_os_str().to_owned(),
+    ];
+    let mut launch: Vec<OsString> = vec![
+        "launch".into(),
+        selection.id().slug().into(),
+        "--presentation-ref".into(),
+        "caller".into(),
+    ];
+    if !args.is_empty() {
+        launch.push("--".into());
+        launch.extend(args.iter().map(OsString::from));
+    }
+    let workspace = cmux::NewWorkspace {
+        name: format!("glasshouse {}", selection.id().slug()),
+        cwd: root,
+        command: cmux::pane_command(&executable, &global, &launch),
+        focus: false,
+    };
+
+    let before = match cmux::recorded_panes(store) {
+        Ok(before) => before,
+        Err(err) => return Response::err(err),
+    };
+    let pane = match control.create_workspace(&workspace) {
+        Ok(pane) => pane,
+        Err(err) => {
+            return Response::err(format!(
+                "cmux could not open a workspace for the session: {err}"
+            ));
+        }
+    };
+    let session = match cmux::await_session_at(store, &pane, &before, cmux::RECORD_WAIT) {
+        Ok(session) => session,
+        Err(err) => return Response::err(err),
+    };
+    let task_delivery = match (task, &session) {
+        (None, _) => serde_json::Value::Null,
+        (Some(task), Some(_)) => match control.send_line(&pane, &task) {
+            Ok(()) => "cmux".into(),
+            Err(err) => {
+                return Response::err(format!(
+                    "the session was spawned in cmux {pane} but its task could not be \
+                     delivered: {err}"
+                ));
+            }
+        },
+        (Some(_), None) => {
+            "not delivered: the session has not recorded itself in the pane yet".into()
+        }
+    };
+    Response::ok(serde_json::json!({
+        "session": session.as_ref().map(SessionId::as_str),
+        "presentation": "external",
+        "presentation_ref": pane.as_str(),
+        "task_delivery": task_delivery,
+    }))
+}
+
+/// Line 758's fallback: a session this door cannot reach, but which has a
+/// pane, is reached through cmux — and the answer says so. A session with
+/// no pane gets the same `NotLive` refusal it always did, and a pane cmux
+/// cannot reach right now is reported with the reason, never retried
+/// silently.
+fn send_through_pane(store: &SessionStore<'_>, id: &SessionId, text: &str) -> Response {
+    let not_live = api_error(ApiError::NotLive { id: id.clone() });
+    let record = match store.get(id) {
+        Ok(Some(record)) => record,
+        Ok(None) => return Response::err(not_live),
+        Err(err) => return Response::err(err),
+    };
+    let Some(reference) = record.presentation_ref.as_deref() else {
+        return Response::err(not_live);
+    };
+    match cmux::detect() {
+        cmux::Availability::Absent(reason) => Response::err(format!(
+            "{not_live}; it is presented in cmux {reference}, and cmux is not available from \
+             here to reach it ({reason})"
+        )),
+        cmux::Availability::Available(control) => {
+            match cmux::send_line(reference, text, &control) {
+                Ok(pane) => Response::ok(serde_json::json!({
+                    "via": "cmux",
+                    "presentation_ref": pane.as_str(),
+                })),
+                Err(err) => Response::err(format!(
+                    "{not_live}; delivering through its cmux pane failed: {err}"
+                )),
+            }
+        }
+    }
 }
 
 /// Take the injection ledger's lock, ignoring poisoning, for the reason

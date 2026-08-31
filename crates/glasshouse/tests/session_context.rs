@@ -200,10 +200,11 @@ fn a_schema_fifteen_database_migrates_forward_and_its_sessions_read_as_uncounted
 
     {
         let conn = fixture.db();
-        // Every migration above 15 is undone, newest first: 19's two
-        // tables, 18's column, 17's table, then 16's column.
+        // Every migration above 15 is undone, newest first: 20's
+        // column, 19's two tables, 18's column, 17's table, then 16's.
         conn.execute_batch(
-            "DROP TABLE assumption_transitions;
+            "ALTER TABLE sessions DROP COLUMN presentation_ref;
+             DROP TABLE assumption_transitions;
              DROP TABLE task_assumptions;
              ALTER TABLE routing_observations DROP COLUMN failure_class;
              DROP TABLE memory_files;
@@ -222,8 +223,8 @@ fn a_schema_fifteen_database_migrates_forward_and_its_sessions_read_as_uncounted
     let conn = Connection::open(migrated.database_path()).unwrap();
     assert_eq!(
         schema_version(&conn),
-        19,
-        "the launch must have applied migrations 16 through 19"
+        20,
+        "the launch must have applied migrations 16 through 20"
     );
     drop(conn);
 

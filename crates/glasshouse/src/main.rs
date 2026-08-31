@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -16,7 +17,7 @@ use glasshouse::events::{
     EventBus, EventLog, LifecycleEvent, Observation, ProcessExit, TurnOutcome,
 };
 use glasshouse::guardrails::{AssumptionStore, GuardrailOverride};
-use glasshouse::integrations::Discovery;
+use glasshouse::integrations::{Discovery, cmux};
 use glasshouse::launch::HarnessLaunch;
 use glasshouse::onboarding;
 use glasshouse::platform::HostPlatform;
@@ -223,6 +224,13 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     return Ok(ExitCode::FAILURE);
                 }
             },
+            Some(SessionCommand::Focus { session }) => match focus_session(&runtime, session) {
+                Ok(report) => print!("{report}"),
+                Err(err) => {
+                    eprintln!("glasshouse: {err}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            },
             Some(SessionCommand::Close { session }) => match close_session(&runtime, session) {
                 Ok(report) => print!("{report}"),
                 Err(err) => {
@@ -256,6 +264,8 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             headless,
             task,
             guardrail,
+            presentation,
+            presentation_ref,
             harness_args,
         })
         | Some(Command::Run {
@@ -271,6 +281,8 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             headless,
             task,
             guardrail,
+            presentation,
+            presentation_ref,
             harness_args,
         }) => {
             let response =
@@ -291,6 +303,38 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 }
                 None => None,
             };
+            // Phase 17: the pane's command is assembled here, from the raw
+            // flags, because this is the one place that has all of them —
+            // `launch_session` receives the launch already interpreted.
+            let external = match external_presentation(
+                presentation.as_deref(),
+                presentation_ref.as_deref(),
+                || {
+                    let executable = std::env::current_exe()?;
+                    let launch = pane_launch_args(PaneLaunch {
+                        harness: harness.as_deref(),
+                        response_profile: response_profile.as_deref(),
+                        response_role: response_role.as_deref(),
+                        profile: profile.as_deref(),
+                        from_checkpoint: from_checkpoint.as_deref(),
+                        to: to.as_deref(),
+                        fresh: *fresh,
+                        headless: *headless,
+                        harness_args,
+                    });
+                    Ok(cmux::pane_command(
+                        &executable,
+                        &pane_global_args(cli, &runtime),
+                        &launch,
+                    ))
+                },
+            ) {
+                Ok(external) => external,
+                Err(err) => {
+                    eprintln!("glasshouse: {err}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            };
             return launch_session(
                 &runtime,
                 harness.as_deref(),
@@ -305,6 +349,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 },
                 &response,
                 *headless,
+                external,
                 harness_args,
                 guardrail,
             );
@@ -2393,12 +2438,20 @@ fn routing_caveats(
     out
 }
 
+// Eight, and the eighth arrived at integration: `external` is Phase 17's and
+// `guardrail` is Phase 21K's, written by two packages that never shared a
+// tree. Neither belongs in `LaunchDestination` -- that bundle answers *where
+// the work goes*, and one of these says where the session is *shown* while
+// the other says how hard its premises are *gated*. Folding either in to
+// satisfy a lint would put an unrelated fact in a named type.
+#[allow(clippy::too_many_arguments)]
 fn launch_session(
     runtime: &Runtime,
     harness: Option<&str>,
     destination: LaunchDestination<'_>,
     response: &ResponseRequest,
     headless: bool,
+    external: ExternalPresentation,
     harness_args: &[String],
     guardrail: Option<GuardrailOverride>,
 ) -> anyhow::Result<ExitCode> {
@@ -2465,6 +2518,46 @@ fn launch_session(
             return Ok(ExitCode::FAILURE);
         }
     }
+    // -----------------------------------------------------------------------
+    // Phase 17 lines 754, 755, 757 and 761 — external presentation.
+    //
+    // Decided after the harness and the profile have been refused or
+    // accepted, so a launch that would fail is refused *here*, in this
+    // terminal, and never as a pane that opens and dies — and before the
+    // router runs, because a launch that hands itself to a pane has not
+    // routed anything: the launch inside the pane does all of that, once.
+    //
+    // Absence is a first-class path: every way cmux can be unavailable is a
+    // reason printed and a session that runs embedded, byte for byte as it
+    // would have without the flag.
+    // -----------------------------------------------------------------------
+    // "Here" is wherever this launch was going anyway: the flag asked for
+    // a pane on top of that, and without one nothing else changes.
+    let here = if headless { "headless" } else { "embedded" };
+    let hosted_pane: Option<cmux::PaneRef> = match &external {
+        ExternalPresentation::Embedded => None,
+        ExternalPresentation::SpawnIn { pane_command } => match cmux::detect() {
+            cmux::Availability::Available(control) => {
+                return open_cmux_pane(runtime, &control, selection.id().slug(), pane_command);
+            }
+            cmux::Availability::Absent(reason) => {
+                eprintln!("glasshouse: cmux is not available ({reason}); the session runs {here}");
+                None
+            }
+        },
+        // A reference given by hand is metadata the caller asserted;
+        // recording it asks cmux nothing.
+        ExternalPresentation::HostedBy(cmux::PaneRefRequest::Given(pane)) => Some(pane.clone()),
+        ExternalPresentation::HostedBy(request @ cmux::PaneRefRequest::Caller) => {
+            match cmux::resolve_pane_ref(request, &cmux::detect()) {
+                Ok(pane) => Some(pane),
+                Err(reason) => {
+                    eprintln!("glasshouse: {reason}; the session runs {here}");
+                    None
+                }
+            }
+        }
+    };
     let fresh_profile = named_profile.unwrap_or(glasshouse::profile::NATIVE_PROFILE_NAME);
 
     // -----------------------------------------------------------------------
@@ -2714,6 +2807,19 @@ fn launch_session(
             // person reads matches the order things happened.
             if checkpoint_first {
                 checkpoint_before_moving(runtime, Some(routed.chosen().id()))?;
+            }
+            // Phase 17 line 760, on the branch that continues rather than
+            // mints: the session this pane now hosts was recorded somewhere
+            // else, so its record is moved here before it is resumed. Opened
+            // and dropped before `resume_session` opens its own connection —
+            // sequential, never two live handles (practice §65).
+            if let Some(pane) = &hosted_pane {
+                let sessions = ProjectSessions::open(runtime)?;
+                sessions.store().set_presentation(
+                    &SessionId::new(routed.chosen().id()),
+                    SessionPresentation::External,
+                    Some(pane.as_str()),
+                )?;
             }
             return resume_session(
                 runtime,
@@ -2997,7 +3103,14 @@ fn launch_session(
     // value `run_headless` starts the session under, so a session's stored
     // presentation and its running one cannot disagree — which is what lets
     // the shell's overview say `headless` about a session it did not start.
-    let presentation = if headless {
+    //
+    // `External` when a pane hosts this process (Phase 17 line 760): the
+    // runtime below still starts the session as embedded or headless —
+    // that is what it *is* to the pane's terminal — and only the record
+    // says the pane is where a person will find it.
+    let presentation = if hosted_pane.is_some() {
+        SessionPresentation::External
+    } else if headless {
         SessionPresentation::Headless
     } else {
         SessionPresentation::Embedded
@@ -3015,6 +3128,7 @@ fn launch_session(
     let record = store.create(
         NewSession::embedded(selection.id().slug())
             .with_presentation(presentation)
+            .with_presentation_ref(hosted_pane.as_ref().map(|pane| pane.as_str().to_owned()))
             .with_native_session_id(native.clone())
             .with_launch_profile(Some(launch_profile.name.clone()))
             .with_backend_resource(Some(launch_profile.backend.slug()))
@@ -3208,6 +3322,213 @@ fn launch_session(
         eprintln!("glasshouse: the harness {status}");
     }
     Ok(exit_code_for(&status))
+}
+
+/// Where a launch is presented, beyond this terminal — Phase 17 lines 757
+/// and 761, decided from `--presentation` and `--presentation-ref` before
+/// anything is resolved.
+///
+/// The two flags are the two sides of one pane: the outer process asks to
+/// *spawn into* a backend, and the process it starts inside the pane is told
+/// it is *hosted by* one. `clap` refuses both on one command line.
+#[derive(Debug)]
+enum ExternalPresentation {
+    /// Neither flag: the session is shown where it always was.
+    Embedded,
+    /// `--presentation <backend>`: open a pane and run this launch again
+    /// inside it. `pane_command` is the whole command line the pane runs,
+    /// already quoted for the shell.
+    SpawnIn { pane_command: String },
+    /// `--presentation-ref <ref|caller>`: this process is the one inside the
+    /// pane; record where it is and otherwise launch normally.
+    HostedBy(cmux::PaneRefRequest),
+}
+
+/// Read the two flags into an [`ExternalPresentation`], building the pane's
+/// command only when one is actually needed.
+///
+/// An unknown backend and a malformed reference are both refused here, by
+/// name, before a harness is selected or a database opened: a launch that
+/// cannot say where it wants to be shown has not asked for anything yet.
+fn external_presentation(
+    backend: Option<&str>,
+    reference: Option<&str>,
+    pane_command: impl FnOnce() -> anyhow::Result<String>,
+) -> anyhow::Result<ExternalPresentation> {
+    match (backend, reference) {
+        (Some(word), _) => {
+            let cmux::Backend::Cmux = cmux::Backend::parse(word)?;
+            Ok(ExternalPresentation::SpawnIn {
+                pane_command: pane_command()?,
+            })
+        }
+        (None, Some(reference)) => Ok(ExternalPresentation::HostedBy(cmux::PaneRefRequest::parse(
+            reference,
+        )?)),
+        (None, None) => Ok(ExternalPresentation::Embedded),
+    }
+}
+
+/// The process-wide flags a pane's Glasshouse needs to be *this* Glasshouse:
+/// the same project, the same data and configuration directories — resolved
+/// values, not whatever the pane's login shell would derive — and the same
+/// logging choices. Nothing else: no credential is a flag, and none becomes
+/// one here.
+fn pane_global_args(cli: &Cli, runtime: &Runtime) -> Vec<OsString> {
+    let paths = runtime.paths();
+    let mut args: Vec<OsString> = vec![
+        "--scope".into(),
+        runtime.project().display_root().as_os_str().to_owned(),
+        "--data-dir".into(),
+        paths.data_dir().as_os_str().to_owned(),
+        "--config-dir".into(),
+        paths.config_dir().as_os_str().to_owned(),
+    ];
+    if cli.allow_unsafe_scope {
+        args.push("--allow-unsafe-scope".into());
+    }
+    if let Some(level) = &cli.log_level {
+        args.push("--log-level".into());
+        args.push(level.into());
+    }
+    if let Some(file) = &cli.log_file {
+        args.push("--log-file".into());
+        args.push(file.into());
+    }
+    if cli.log_stderr {
+        args.push("--log-stderr".into());
+    }
+    args
+}
+
+/// The launch a pane runs: the same launch the person typed, minus
+/// `--presentation` and plus `--presentation-ref caller`, so the process
+/// inside the pane records where it is and otherwise does exactly what this
+/// one would have done. One field per flag `launch` takes, so a flag added
+/// to `Command::Launch` and not carried here is a compile error at the call
+/// site rather than a pane that silently ignores it.
+struct PaneLaunch<'a> {
+    harness: Option<&'a str>,
+    response_profile: Option<&'a str>,
+    response_role: Option<&'a str>,
+    profile: Option<&'a str>,
+    from_checkpoint: Option<&'a str>,
+    to: Option<&'a str>,
+    fresh: bool,
+    headless: bool,
+    harness_args: &'a [String],
+}
+
+fn pane_launch_args(launch: PaneLaunch<'_>) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec!["launch".into()];
+    if let Some(harness) = launch.harness {
+        args.push(harness.into());
+    }
+    for (flag, value) in [
+        ("--response-profile", launch.response_profile),
+        ("--response-role", launch.response_role),
+        ("--profile", launch.profile),
+        ("--from-checkpoint", launch.from_checkpoint),
+        ("--to", launch.to),
+    ] {
+        if let Some(value) = value {
+            args.push(flag.into());
+            args.push(value.into());
+        }
+    }
+    if launch.fresh {
+        args.push("--fresh".into());
+    }
+    if launch.headless {
+        args.push("--headless".into());
+    }
+    args.push("--presentation-ref".into());
+    args.push("caller".into());
+    if !launch.harness_args.is_empty() {
+        args.push("--".into());
+        args.extend(launch.harness_args.iter().map(OsString::from));
+    }
+    args
+}
+
+/// Open a cmux workspace in the project root running `pane_command`, wait
+/// briefly for the session inside it to record itself, and say what
+/// happened — Phase 17 lines 757 and 761.
+///
+/// This process starts nothing else: no harness, no record, no runtime. The
+/// pane hosts a normal launch, and that launch is what writes the session
+/// down (with `External` and the workspace it asked cmux for). The wait is
+/// bounded and its expiry is reported, not treated as failure — the pane is
+/// real either way, and `glasshouse sessions` lists the session once it has
+/// recorded itself.
+fn open_cmux_pane(
+    runtime: &Runtime,
+    control: &impl cmux::CmuxControl,
+    harness: &str,
+    pane_command: &str,
+) -> anyhow::Result<ExitCode> {
+    let sessions = ProjectSessions::open(runtime)?;
+    let store = sessions.store();
+    let before = cmux::recorded_panes(&store)?;
+    let workspace = cmux::NewWorkspace {
+        name: format!("glasshouse {harness}"),
+        cwd: runtime.project().display_root().to_path_buf(),
+        command: pane_command.to_owned(),
+        // A person asked to see it.
+        focus: true,
+    };
+    let pane = control
+        .create_workspace(&workspace)
+        .map_err(|err| anyhow::anyhow!("cmux could not open a workspace for the session: {err}"))?;
+    match cmux::await_session_at(&store, &pane, &before, cmux::RECORD_WAIT)? {
+        Some(id) => println!("glasshouse: session {id} is running in cmux {pane}"),
+        None => println!(
+            "glasshouse: opened cmux {pane}; the session has not recorded itself yet — \
+             `glasshouse sessions` lists it once it has"
+        ),
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `glasshouse sessions focus` — Phase 17 line 759. One `workspace select`
+/// through the integration, for a session that has a pane; a session that
+/// has none, or a cmux that is not available, is reported rather than
+/// guessed around.
+fn focus_session(runtime: &Runtime, session: &str) -> anyhow::Result<String> {
+    let sessions = ProjectSessions::open(runtime)?;
+    let store = sessions.store();
+    let id = store.resolve_id(session)?;
+    let record = store
+        .get(&id)?
+        .ok_or_else(|| anyhow::anyhow!("session `{id}` is not in this project"))?;
+    let Some(reference) = record.presentation_ref.as_deref() else {
+        anyhow::bail!(
+            "session `{id}` has no external pane to focus; it is presented {}",
+            record.presentation
+        );
+    };
+    match cmux::detect() {
+        cmux::Availability::Absent(reason) => anyhow::bail!(
+            "session `{id}` is presented in cmux {reference}, but cmux is not available \
+             from here ({reason})"
+        ),
+        cmux::Availability::Available(control) => {
+            let pane = cmux::focus(reference, &control)?;
+            Ok(format!(
+                "glasshouse: focused cmux {pane} for session {id}\n"
+            ))
+        }
+    }
+}
+
+/// The `PRESENTED` cell: the presentation word, followed by the pane when
+/// one is recorded — `external workspace:349`. The word alone for every
+/// other session, exactly as before the pane existed.
+fn presented_cell(record: &SessionRecord) -> String {
+    match record.presentation_ref.as_deref() {
+        Some(reference) => format!("{} {reference}", record.presentation),
+        None => record.presentation.to_string(),
+    }
 }
 
 /// Run a harness session that never takes this terminal — Phase 4's headless
@@ -7731,6 +8052,15 @@ fn session_report(runtime: &Runtime) -> anyhow::Result<String> {
         ));
     }
 
+    // The one column whose width depends on the data: `external
+    // workspace:<n>` is wider than any presentation word, and a listing with
+    // no pane in it is laid out exactly as it was before panes existed.
+    let presented_width = records
+        .iter()
+        .map(|record| presented_cell(record).len())
+        .chain(std::iter::once(PRESENTED_WIDTH))
+        .max()
+        .unwrap_or(PRESENTED_WIDTH);
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -7744,7 +8074,8 @@ fn session_report(runtime: &Runtime) -> anyhow::Result<String> {
             "STATE",
             "ROLE",
             "PRESENTED",
-            "LAST ACTIVITY"
+            "LAST ACTIVITY",
+            presented_width,
         )
     );
     for record in &records {
@@ -7772,8 +8103,9 @@ fn session_report(runtime: &Runtime) -> anyhow::Result<String> {
                 record.launch_profile.as_deref().unwrap_or("-"),
                 disposition_word(record),
                 &record.role.to_string(),
-                &record.presentation.to_string(),
+                &presented_cell(record),
                 &format_age(record.last_activity_at),
+                presented_width,
             )
         );
     }
@@ -7850,6 +8182,10 @@ fn status_report(runtime: &Runtime) -> anyhow::Result<String> {
 /// The header and the rows go through the same function so their columns
 /// cannot drift apart — the usual way a hand-aligned table stops lining up is
 /// someone widening a column in one of the two format strings.
+/// The `PRESENTED` column's width when no row needs more: the header's own
+/// length, which every presentation word fits inside.
+const PRESENTED_WIDTH: usize = "PRESENTED".len();
+
 #[allow(clippy::too_many_arguments)]
 fn session_row(
     session: &str,
@@ -7861,14 +8197,18 @@ fn session_row(
     role: &str,
     presented: &str,
     activity: &str,
+    presented_width: usize,
 ) -> String {
     // Widths fit the longest value each column can hold: `resumable`,
-    // `orchestrator`, `embedded`. `name` and `purpose` are the two the user
-    // controls, and they are truncated by the format rather than bounded
-    // here — the store already refuses anything longer than 64 and 32.
+    // `orchestrator`. `presented` is the one column sized by the listing —
+    // see `session_report` — because `external workspace:<n>` is wider than
+    // any presentation word and a listing without one should not pay for
+    // it. `name` and `purpose` are the two the user controls, and they are
+    // truncated by the format rather than bounded here — the store already
+    // refuses anything longer than 64 and 32.
     format!(
         "{session:<12}  {name:<16}  {purpose:<10}  {harness:<14}  {profile:<12}  {state:<9}  \
-         {role:<12}  {presented:<9}  {activity}"
+         {role:<12}  {presented:<presented_width$}  {activity}"
     )
 }
 
@@ -7931,6 +8271,10 @@ fn session_detail(runtime: &Runtime, session: &str) -> anyhow::Result<String> {
     line("lifecycle", record.lifecycle.as_str());
     line("role", record.role.as_str());
     line("presented", record.presentation.as_str());
+    line(
+        "presentation ref",
+        record.presentation_ref.as_deref().unwrap_or("-"),
+    );
     line(
         "launch profile",
         record.launch_profile.as_deref().unwrap_or("-"),
@@ -8860,6 +9204,7 @@ mod tests {
             },
             &ResponseRequest::default(),
             false,
+            ExternalPresentation::Embedded,
             &[],
             None,
         )
@@ -8895,6 +9240,7 @@ mod tests {
             },
             &ResponseRequest::default(),
             false,
+            ExternalPresentation::Embedded,
             &[],
             None,
         )
@@ -9157,6 +9503,7 @@ mod tests {
             "ROLE",
             "PRESENTED",
             "LAST",
+            PRESENTED_WIDTH,
         );
         let row = session_row(
             "abc123",
@@ -9168,6 +9515,7 @@ mod tests {
             "orchestrator",
             "embedded",
             "2h ago",
+            PRESENTED_WIDTH,
         );
 
         let starts = |line: &str| -> Vec<usize> {

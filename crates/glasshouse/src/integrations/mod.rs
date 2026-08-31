@@ -16,6 +16,7 @@
 //! - Nothing here ever prints or logs a secret value. See
 //!   [`providers`] for the structural guarantee behind that.
 
+pub mod cmux;
 pub mod providers;
 pub mod version;
 
@@ -809,7 +810,7 @@ fn presence_without_executable(id: IntegrationId) -> Vec<String> {
 /// real process environment (parallel test runs share it; mutation would
 /// corrupt unrelated tests). Mirrors the injected-resolver pattern of
 /// [`detect_one_with`] and [`resolve_first_usable_with`].
-fn presence_without_executable_with(
+pub(crate) fn presence_without_executable_with(
     id: IntegrationId,
     env: impl Fn(&str) -> Option<String>,
 ) -> Vec<String> {

@@ -519,6 +519,11 @@ const TOOLS: &[Tool] = &[
                 role,
                 task,
                 guardrail,
+                // The MCP tool does not offer a presentation backend yet:
+                // Phase 17's expose-and-focus is a person's workflow first
+                // (line 1895), and the tool's schema grows only once use
+                // asks for it.
+                presentation: None,
             })
         },
     },

@@ -751,16 +751,16 @@ Phase 16 — Worker transparency
 
 Phase 17 — cmux optional integration
 
-☐ Detect whether Glasshouse is running in an environment where cmux control capabilities are available.
-☐ Keep all core Glasshouse functionality operational when cmux is absent.
-☐ Implement cmux support behind a separate optional integration module.
-☐ Allow Glasshouse to spawn a worker in a new cmux pane when the user requests external presentation.
-☐ Allow Glasshouse to send text to a known cmux-backed session through the cmux integration.
-☐ Allow Glasshouse to focus a cmux pane associated with a session.
-☐ Record the cmux surface or pane identifier as optional session presentation metadata.
-☐ Allow a session to be created directly in external-cmux presentation mode.
-☐ Keep the underlying Glasshouse session abstraction independent from whether presentation is embedded or in cmux.
-☐ Treat cmux as a workspace and presentation backend rather than as Glasshouse’s orchestration core.
+☑ Detect whether Glasshouse is running in an environment where cmux control capabilities are available.
+☑ Keep all core Glasshouse functionality operational when cmux is absent.
+☑ Implement cmux support behind a separate optional integration module.
+☑ Allow Glasshouse to spawn a worker in a new cmux pane when the user requests external presentation.
+☑ Allow Glasshouse to send text to a known cmux-backed session through the cmux integration.
+☑ Allow Glasshouse to focus a cmux pane associated with a session.
+☑ Record the cmux surface or pane identifier as optional session presentation metadata.
+☑ Allow a session to be created directly in external-cmux presentation mode.
+☑ Keep the underlying Glasshouse session abstraction independent from whether presentation is embedded or in cmux.
+☑ Treat cmux as a workspace and presentation backend rather than as Glasshouse’s orchestration core.
 
 Phase 18 — Raw event recording
 
@@ -1889,10 +1889,10 @@ Fixed architectural requirements
 - cmux remains an optional presentation integration.
 - Core session ownership, PTY management, routing, memory, and lifecycle semantics must not depend on cmux.
 
-☐ Keep cmux optional until repeated usage proves external-pane workflows are essential.
-☐ Avoid depending on undocumented cmux internals when a stable command or API surface exists.
-☐ Keep embedded Glasshouse sessions fully functional even if cmux changes or disappears.
-☐ Add richer cmux workspace automation only after the basic expose-and-focus workflow proves useful.
+☑ Keep cmux optional until repeated usage proves external-pane workflows are essential.
+☑ Avoid depending on undocumented cmux internals when a stable command or API surface exists.
+☑ Keep embedded Glasshouse sessions fully functional even if cmux changes or disappears.
+☑ Add richer cmux workspace automation only after the basic expose-and-focus workflow proves useful.
 
 Phase 54A — Setup and portability completion criteria
 

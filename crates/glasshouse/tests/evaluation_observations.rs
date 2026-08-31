@@ -324,7 +324,7 @@ fn a_ledger_that_cannot_be_written_does_not_fail_the_retrieval() {
             })
             .unwrap();
         assert_eq!(
-            version, 19,
+            version, 20,
             "the database must still claim the current schema version, so nothing \
              rebuilds the table"
         );
@@ -772,9 +772,10 @@ fn a_version_fourteen_database_migrates_forward_keeping_every_row() {
     {
         let conn = Connection::open(&db_path).unwrap();
         conn.execute_batch(
-            // Every migration above 14, newest first: 19's two tables,
-            // 18's column, 17's table, 16's column, then 15's table.
-            "DROP TABLE assumption_transitions;
+            // Every migration above 14, newest first: 20's column, 19's
+            // two tables, 18's column, 17's table, 16's column, 15's table.
+            "ALTER TABLE sessions DROP COLUMN presentation_ref;
+             DROP TABLE assumption_transitions;
              DROP TABLE task_assumptions;
              ALTER TABLE routing_observations DROP COLUMN failure_class;
              DROP TABLE memory_files;
@@ -800,8 +801,8 @@ fn a_version_fourteen_database_migrates_forward_keeping_every_row() {
         })
         .unwrap();
     assert_eq!(
-        version, 19,
-        "the launch must have applied migrations 15 through 19"
+        version, 20,
+        "the launch must have applied migrations 15 through 20"
     );
 
     let memory = migrated.memory();

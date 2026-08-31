@@ -336,6 +336,7 @@ fn a_version_three_database_gains_the_memory_table_with_its_sessions_intact() {
              ALTER TABLE sessions DROP COLUMN supervision_reason;
              ALTER TABLE sessions DROP COLUMN source_session_id;
              ALTER TABLE sessions DROP COLUMN observed_compactions;
+             ALTER TABLE sessions DROP COLUMN presentation_ref;
              DROP TABLE IF EXISTS routing_observations;
              DROP TABLE IF EXISTS evaluation_observations;
              DROP TABLE IF EXISTS memory_files;
@@ -371,8 +372,8 @@ fn a_version_three_database_gains_the_memory_table_with_its_sessions_intact() {
         })
         .unwrap();
     assert_eq!(
-        version, 19,
-        "the launch must have applied migrations 4 through 19"
+        version, 20,
+        "the launch must have applied migrations 4 through 20"
     );
 
     // The session recorded before the migration is untouched.

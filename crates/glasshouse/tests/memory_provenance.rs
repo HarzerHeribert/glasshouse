@@ -709,6 +709,13 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
              -- already added.
              ALTER TABLE sessions DROP COLUMN observed_compactions;
 
+             -- Migration 20's column, for the same reason.
+             ALTER TABLE sessions DROP COLUMN presentation_ref;
+
+             -- Migration 19's tables, for migration 15's reason.
+             DROP TABLE IF EXISTS assumption_transitions;
+             DROP TABLE IF EXISTS task_assumptions;
+
              DROP TABLE IF EXISTS routing_observations;
 
              -- Migration 15's table, for the same reason: a rollback that
@@ -760,8 +767,8 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
         })
         .unwrap();
     assert_eq!(
-        version, 19,
-        "the launch must have applied migrations 6 through 19"
+        version, 20,
+        "the launch must have applied migrations 6 through 20"
     );
     drop(conn);
 
@@ -983,6 +990,13 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
              -- already added.
              ALTER TABLE sessions DROP COLUMN observed_compactions;
 
+             -- Migration 20's column, for the same reason.
+             ALTER TABLE sessions DROP COLUMN presentation_ref;
+
+             -- Migration 19's tables, for migration 15's reason.
+             DROP TABLE IF EXISTS assumption_transitions;
+             DROP TABLE IF EXISTS task_assumptions;
+
              DROP TABLE IF EXISTS routing_observations;
 
              -- Migration 15's table, for the same reason: a rollback that
@@ -1033,8 +1047,8 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
         })
         .unwrap();
     assert_eq!(
-        version, 19,
-        "the launch must have applied migrations 7 through 19"
+        version, 20,
+        "the launch must have applied migrations 7 through 20"
     );
     drop(conn);
 

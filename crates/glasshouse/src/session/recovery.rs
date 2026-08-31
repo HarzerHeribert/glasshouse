@@ -288,6 +288,7 @@ mod tests {
             purpose: None,
             source_session_id: None,
             observed_compactions: None,
+            presentation_ref: None,
         }
     }
 
