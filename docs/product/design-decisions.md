@@ -2038,7 +2038,13 @@ costs a material share of it is not, however small its absolute price.
   "explicit opt-in" indistinguishable from a default, which is the exact wording
   `MeteredUse`'s own doc warns against.
 - **Nothing here authorises spending premium interactive capacity on bookkeeping.**
-  Map line 1611 and the Product Rule at line 2236 still stand.
+  Map line 1611 and the map's *Product Rules* list still stand — *"Free resources
+  should be used aggressively for suitable work but never treated as equivalent
+  merely because their monetary price is zero"* and *"A cheap routing model
+  should protect premium capacity only when the routing overhead is materially
+  smaller than the resources it saves"* (cited by name: the list's line number
+  moves every time a phase is inserted above it, and this citation had rotted
+  twice).
 
 ### The sub-question this leaves genuinely open, and it must not be faked
 
