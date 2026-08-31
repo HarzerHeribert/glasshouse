@@ -1626,7 +1626,7 @@ Fixed architectural requirements
 ☑ Keep disposable jobs distinct from first-class interactive harness sessions.
 ☑ Do not give disposable jobs an autonomous coding-agent loop, unrestricted repository tools, or native-session identity.
 ☑ Do not pretend a disposable API call is a user-enterable worker session.
-☐ Record which resource performed important memory extraction or classification for debugging.
+☑ Record which resource performed important memory extraction or classification for debugging.
 
 Phase 40 — Fresh-session handoff
 
@@ -1922,11 +1922,11 @@ Fixed architectural requirements
 ☑ Consider V1 usable when every interactive native, direct-provider, or gateway-backed session records a real owning harness and launch profile.
 ☐ Consider V1 usable when a compatible vendor-native pairing receives an inspectable initial prior without overriding stronger observed evidence or user choice.
 ☐ Consider V1 usable when a response profile can control user-facing communication without reducing verification or replacing native harness coding instructions.
-☐ Consider V1 usable when a worker completion event can reliably wake or notify the orchestrator.
-☐ Consider V1 usable when the user can enter and directly control any orchestrated worker.
-☐ Consider V1 usable when project-specific durable memory can store the six initial memory kinds.
-☐ Consider V1 usable when project memory can be searched with FTS5.
-☐ Consider V1 usable when a small portable checkpoint can hand work from one harness to another.
+☑ Consider V1 usable when a worker completion event can reliably wake or notify the orchestrator.
+☑ Consider V1 usable when the user can enter and directly control any orchestrated worker.
+☑ Consider V1 usable when project-specific durable memory can store the six initial memory kinds.
+☑ Consider V1 usable when project memory can be searched with FTS5.
+☑ Consider V1 usable when a small portable checkpoint can hand work from one harness to another.
 ☑ Consider V1 usable when a simple router can choose between an existing relevant session and a fresh session using inspectable rules.
 ☑ Consider V1 usable when at least one authoritative or observed provider quota can be displayed in native units.
 ☑ Consider V1 usable when opaque subscription capacity can be represented as unknown or estimated without fabricating exact token counts.
@@ -1935,7 +1935,7 @@ Fixed architectural requirements
 ☑ Consider V1 usable when a substantial high-risk task can record a small set of critical assumptions with evidence state and create a checkpoint before broad implementation.
 ☑ Consider V1 usable when routing explanations show workload tier, session affinity, resource capacity, and the primary reason for selection.
 ☑ Consider V1 usable when at least one gateway-backed route records classified success and failure outcomes plus TTFT or TTFC and can cite that evidence in a routing explanation.
-☐ Consider V1 usable when cmux integration can expose or spawn a session externally without being required for normal operation.
+☑ Consider V1 usable when cmux integration can expose or spawn a session externally without being required for normal operation.
 ☑ Consider V1 complete only after project-isolation and cross-contamination tests pass.
 
 Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model
@@ -1946,9 +1946,9 @@ Recorded 2026-08-31 from the user's instruction of record: *"I want to be able t
 ☑ Treat a subscription — a Claude, ChatGPT/Codex, or Gemini plan, or an API key — as a routing resource with its own rules, separate from any harness that consumes it.
 ☑ Allow a subscription rule to state which harnesses, workload tiers, and job kinds the subscription may serve, and which it must never serve.
 ☐ Serve any supported harness through Glasshouse's bundled API gateway from any subscription or model whose wire protocol the gateway can translate to the harness's native protocol.
-☐ Translate between wire protocols at the gateway for concrete harness/provider pairs as each is required, recording every supported pairing and every refused one by name.
+☑ Translate between wire protocols at the gateway for concrete harness/provider pairs as each is required, recording every supported pairing and every refused one by name.
 ☐ Keep a harness's native tooling — editing, shell, repository, and tool-call behaviour — intact when it is served by a non-native provider, and refuse the pairing by name when it cannot be kept.
-☐ Record per-harness task efficiency — tokens, wall-clock, request count, and outcome by task class — so that harness choice can rest on evidence rather than on which vendor bills for it.
+☑ Record per-harness task efficiency — tokens, wall-clock, request count, and outcome by task class — so that harness choice can rest on evidence rather than on which vendor bills for it.
 ☐ Prefer, for a stated task the user has not assigned a harness to, the harness with the better observed efficiency for that task class, and say why.
 ☐ Give the routing candidate set a subscription and model axis, so the same harness is ranked across every subscription allowed to serve it.
 ☐ Never charge a task to a subscription the user's rules did not allow for that harness or tier, and announce which subscription served each session.

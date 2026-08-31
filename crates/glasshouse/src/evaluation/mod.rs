@@ -76,7 +76,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::Runtime;
 use crate::database::{EVALUATION_KINDS, PROJECT_ID_KEY};
-use crate::routing::evidence::MIN_SAMPLE_FOR_SUMMARY;
+use crate::routing::evidence::{MIN_SAMPLE_FOR_SUMMARY, UNKNOWN_HARNESS};
 
 /// What was decided — the `evaluation_observations.kind` vocabulary, in Rust
 /// because migration 15 deliberately gives that column no SQL `CHECK`.
@@ -1416,6 +1416,116 @@ pub enum TierOutcomeVerdict {
         failed: i64,
         sample_size: i64,
     },
+}
+
+/// Map line 1951's own reader — kept in its own block, practice §77, so it
+/// cannot land on the same lines as another worker's.
+impl EvaluationObservations {
+    /// [`Self::outcomes_by_tier`]'s join, with a harness dimension added —
+    /// **map line 1951**'s outcome-and-task-class half. `sessions.harness`
+    /// is joined the same way [`Self::route_outcomes_by_pairing_class`]
+    /// joins `sessions.pairing_class`: a session whose row is gone, or which
+    /// predates the join, groups under [`UNKNOWN_HARNESS`] rather than being
+    /// dropped, and the tier bucket keeps [`Self::outcomes_by_tier`]'s own
+    /// fallback and gate — `TierOutcome::from_counts` is reused unchanged so
+    /// the two readers cannot drift on what counts as enough evidence.
+    pub fn outcomes_by_tier_and_harness(
+        &self,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<HarnessTierOutcome>, EvaluationError> {
+        self.refuse_unretained_window(from)?;
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(
+                "WITH decision AS (
+                     SELECT session_id AS session_id,
+                            subject    AS bucket,
+                            MAX(seq)   AS seq
+                       FROM evaluation_observations
+                      WHERE kind = ?1
+                        AND session_id IS NOT NULL
+                        AND observed_at >= ?2
+                        AND observed_at <= ?3
+                      GROUP BY session_id
+                 ),
+                 verdict AS (
+                     SELECT session_id AS session_id,
+                            SUM(CASE WHEN subject = ?5 THEN 1 ELSE 0 END) AS completed,
+                            SUM(CASE WHEN subject = ?6 THEN 1 ELSE 0 END) AS failed
+                       FROM evaluation_observations
+                      WHERE kind = ?4
+                        AND session_id IS NOT NULL
+                        AND observed_at >= ?2
+                        AND observed_at <= ?3
+                      GROUP BY session_id
+                 )
+                 SELECT COALESCE(s.harness, ?8),
+                        COALESCE(d.bucket, ?7),
+                        COUNT(*),
+                        COALESCE(SUM(v.completed), 0),
+                        COALESCE(SUM(v.failed), 0),
+                        SUM(CASE WHEN v.session_id IS NULL THEN 1 ELSE 0 END)
+                   FROM decision AS d
+                   LEFT JOIN sessions AS s
+                          ON s.id = d.session_id AND s.project_id = ?9
+                   LEFT JOIN verdict AS v ON v.session_id = d.session_id
+                  GROUP BY COALESCE(s.harness, ?8), COALESCE(d.bucket, ?7)
+                  ORDER BY COALESCE(s.harness, ?8), COALESCE(d.bucket, ?7)",
+            )
+            .map_err(sql_err("read routed sessions by harness and tier"))?;
+        let rows = statement
+            .query_map(
+                params![
+                    EvaluationKind::RoutingTierObserved.as_str(),
+                    from,
+                    to,
+                    EvaluationKind::RoutingOutcomeObserved.as_str(),
+                    TURN_COMPLETED,
+                    TURN_FAILED,
+                    UNKNOWN_COST_CLASS,
+                    UNKNOWN_HARNESS,
+                    self.project_id,
+                ],
+                read_harness_outcome_row,
+            )
+            .map_err(sql_err("read routed sessions by harness and tier"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (harness, counts) =
+                row.map_err(sql_err("decode a routed-session count by harness"))?;
+            out.push(HarnessTierOutcome {
+                harness,
+                outcome: TierOutcome::from_counts(counts),
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// One [`EvaluationObservations::outcomes_by_tier_and_harness`] row — map
+/// line 1951's outcome half: which harness, which task class (the tier
+/// bucket [`TierOutcome::bucket`] already carries), and the same verdict
+/// [`EvaluationObservations::outcomes_by_tier`] computes for the tier alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessTierOutcome {
+    pub harness: String,
+    pub outcome: TierOutcome,
+}
+
+fn read_harness_outcome_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(String, RouteOutcomeCounts)> {
+    Ok((
+        row.get(0)?,
+        RouteOutcomeCounts {
+            bucket: row.get(1)?,
+            sessions: row.get(2)?,
+            completed: row.get(3)?,
+            failed: row.get(4)?,
+            sessions_without_outcome: row.get(5)?,
+        },
+    ))
 }
 
 /// The one reader whose kind carries no `session_id` — map line 1851's

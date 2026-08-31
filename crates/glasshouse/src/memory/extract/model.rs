@@ -554,6 +554,9 @@ fn transport_error(err: &ureq::Error) -> ModelError {
         ureq::Error::BadUri(_) => ModelError::Failed {
             phrase: "the extraction model's base URL is not a usable URL",
         },
+        ureq::Error::Io(_) => ModelError::Failed {
+            phrase: "the extraction model could not be reached",
+        },
         _ => ModelError::Unavailable,
     }
 }
@@ -944,6 +947,20 @@ mod tests {
                 std::io::ErrorKind::TimedOut
             ))),
             ModelError::TimedOut
+        );
+    }
+
+    /// A connection refused before any reply is a configured model that could
+    /// not be reached, not the "nothing is configured" catch-all.
+    #[test]
+    fn a_refused_connection_names_the_model_as_unreachable() {
+        assert_eq!(
+            transport_error(&ureq::Error::Io(std::io::Error::from(
+                std::io::ErrorKind::ConnectionRefused
+            ))),
+            ModelError::Failed {
+                phrase: "the extraction model could not be reached",
+            }
         );
     }
 }

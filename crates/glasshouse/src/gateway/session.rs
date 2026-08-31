@@ -469,7 +469,22 @@ impl SessionRouting {
         .with_outcome(outcome)
         .with_failure_class(failure_class)
         .with_failovers(Some(reading.effect.failovers()))
-        .with_retries(Some(0));
+        .with_retries(Some(0))
+        // Phase 56: a translated exchange has a parsed response, so its
+        // usage is exact where the provider stated it. A relayed exchange
+        // carries `None` here and writes the same NULLs it always did.
+        .with_tokens(
+            exchange
+                .tokens
+                .and_then(|tokens| i64::try_from(tokens.input).ok()),
+            exchange
+                .tokens
+                .and_then(|tokens| i64::try_from(tokens.output).ok()),
+            exchange
+                .tokens
+                .and_then(|tokens| tokens.cached)
+                .and_then(|cached| i64::try_from(cached).ok()),
+        );
 
         // Best-effort, exactly like `observe_quota_headers`'s own write to
         // `GatewayQuotaCache`: the accept loop cannot fail a real session's
@@ -1062,6 +1077,7 @@ mod tests {
             // because the provider could not be reached at all.
             first_byte_at: None,
             framing: None,
+            tokens: None,
         }
     }
 
@@ -1115,6 +1131,7 @@ mod tests {
                 relayed,
                 ended,
             }),
+            tokens: None,
         }
     }
 

@@ -167,6 +167,15 @@ use crate::provider::quota::{Confidence, Freshness, Reading, ReadingSource};
 /// exists to forbid on the quota side.
 pub const MIN_SAMPLE_FOR_SUMMARY: usize = 5;
 
+/// The fallback bucket for a `routing_observations.harness` column that is
+/// `NULL`, or for a `sessions.harness` join that found no row — the same
+/// convention `crate::evaluation::UNKNOWN_COST_CLASS` gives the tier and
+/// pairing-class readers, spelled once here so
+/// [`EvidenceLedger::request_stats_by_harness`] and
+/// [`crate::evaluation::EvaluationObservations::outcomes_by_tier_and_harness`]
+/// cannot drift into two different words for the same absence.
+pub const UNKNOWN_HARNESS: &str = "unknown";
+
 /// What `routing_observations.purpose` records for a routing-model
 /// classification call — `main.rs`'s `glasshouse classify` producer writes
 /// it, and [`EvidenceLedger::classification_record`] reads it back.
@@ -1819,6 +1828,66 @@ impl RoutingOverhead {
     }
 }
 
+/// One [`EvidenceLedger::request_stats_by_harness`] row — map line 1951's
+/// token/wall-clock/request-count half for one harness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessRequestStats {
+    pub harness: String,
+    /// Every `routing_observations` row this harness produced in the
+    /// window, whether or not it carries timing or token data.
+    pub requests: i64,
+    /// `None` when no row in this window carries both `dispatched_at` and
+    /// `completed_at` — never a fabricated zero.
+    pub wall_clock: Option<WallClockSummary>,
+    /// Rows carrying an `input_tokens` count — the relay path's rows never
+    /// do (refusal register P1b), so this is `0` there, not [`Self::requests`].
+    pub token_rows_present: i64,
+    /// `input_tokens` summed over exactly [`Self::token_rows_present`] rows.
+    /// A caller must print *"not exposed on `requests -
+    /// token_rows_present` of `requests` exchanges"* rather than this sum
+    /// alone whenever `token_rows_present < requests` (map line 1951's own
+    /// mutation: printing `0` for an all-`NULL` group is refused).
+    pub input_tokens_sum: i64,
+    pub output_tokens_sum: i64,
+}
+
+impl HarnessRequestStats {
+    fn from_rows(harness: String, rows: &[RoutingObservation]) -> Self {
+        let durations: Vec<i64> = rows
+            .iter()
+            .filter_map(RoutingObservation::duration_ms)
+            .collect();
+        let wall_clock = (!durations.is_empty()).then(|| WallClockSummary {
+            sample_count: durations.len() as i64,
+            sum_ms: durations.iter().sum(),
+            median_ms: median(durations.clone()),
+        });
+        let with_tokens: Vec<&RoutingObservation> = rows
+            .iter()
+            .filter(|observation| observation.input_tokens.is_some())
+            .collect();
+        Self {
+            harness,
+            requests: rows.len() as i64,
+            wall_clock,
+            token_rows_present: with_tokens.len() as i64,
+            input_tokens_sum: with_tokens.iter().filter_map(|o| o.input_tokens).sum(),
+            output_tokens_sum: with_tokens.iter().filter_map(|o| o.output_tokens).sum(),
+        }
+    }
+}
+
+/// [`HarnessRequestStats::wall_clock`] — `completed_at - dispatched_at`
+/// over exactly the rows that carry both, matching
+/// [`RoutingObservation::duration_ms`]'s own gap: neither timestamp is
+/// invented for a row missing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WallClockSummary {
+    pub sample_count: i64,
+    pub sum_ms: i64,
+    pub median_ms: i64,
+}
+
 /// An open project database plus the routing observations inside it.
 ///
 /// Owns its connection behind a [`Mutex`] rather than borrowing one, unlike
@@ -1989,6 +2058,104 @@ impl EvidenceLedger {
             out.push(row.map_err(sql_err("read a routing observation"))??);
         }
         Ok(out)
+    }
+
+    /// **Map line 1629**'s reader: the most recent observations, newest
+    /// first, whose `purpose` is [`CLASSIFICATION_PURPOSE`] or
+    /// [`EXTRACTION_PURPOSE`] — *"which resource performed important memory
+    /// extraction or classification for debugging"* — across every
+    /// `(provider, model, route, harness)` identity at once.
+    ///
+    /// **Not [`Self::recent`].** That method requires the caller to already
+    /// name one identity via [`ObservationQuery`], and the question this
+    /// line asks is the opposite: which identity performed the work,
+    /// unknown in advance. A purpose-filtered sibling fits where `recent`'s
+    /// exact-identity shape does not.
+    pub fn recent_support_work(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RoutingObservation>, EvidenceLedgerError> {
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(
+                "SELECT * FROM routing_observations
+                 WHERE project_id = ?1 AND purpose IN (?2, ?3)
+                 ORDER BY observed_at DESC
+                 LIMIT ?4",
+            )
+            .map_err(sql_err("read support-work routing observations"))?;
+        let rows = statement
+            .query_map(
+                params![
+                    self.project_id,
+                    CLASSIFICATION_PURPOSE,
+                    EXTRACTION_PURPOSE,
+                    limit as i64
+                ],
+                row_to_observation,
+            )
+            .map_err(sql_err("read support-work routing observations"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(sql_err("read a support-work routing observation"))??);
+        }
+        Ok(out)
+    }
+
+    /// **Map line 1951**'s token/wall-clock/request-count half, grouped by
+    /// harness alone. `routing_observations.harness` is written directly by
+    /// every producer
+    /// (`crate::gateway::session::record_routing_observation`'s
+    /// `.with_harness(...)`, and `main.rs`'s five `with_purpose` call
+    /// sites), so this needs no join to `sessions` — unlike
+    /// [`crate::evaluation::EvaluationObservations::outcomes_by_tier_and_harness`]'s
+    /// outcome half, which has no harness of its own to read and joins
+    /// `sessions.harness` instead.
+    ///
+    /// Reads the raw rows and folds them in Rust rather than aggregating in
+    /// SQL — the same choice [`Self::route_correlations`] and
+    /// [`Self::throttle_scopes`] make and for the same reason: the
+    /// wall-clock median and the "rows without token data" split are
+    /// decisions worth testing without a database, not SQL to get right
+    /// once and never examine again.
+    pub fn request_stats_by_harness(
+        &self,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<HarnessRequestStats>, EvidenceLedgerError> {
+        let observations = {
+            let conn = self.lock();
+            let mut statement = conn
+                .prepare(
+                    "SELECT * FROM routing_observations
+                     WHERE project_id = ?1 AND observed_at >= ?2 AND observed_at <= ?3
+                     ORDER BY harness IS NULL, harness ASC, observed_at ASC",
+                )
+                .map_err(sql_err("read routing observations by harness"))?;
+            let rows = statement
+                .query_map(params![self.project_id, from, to], row_to_observation)
+                .map_err(sql_err("read routing observations by harness"))?;
+            let mut observations = Vec::new();
+            for row in rows {
+                observations.push(row.map_err(sql_err("read a routing observation"))??);
+            }
+            observations
+        };
+
+        let mut by_harness: std::collections::BTreeMap<String, Vec<RoutingObservation>> =
+            std::collections::BTreeMap::new();
+        for observation in observations {
+            let harness = observation
+                .harness
+                .clone()
+                .unwrap_or_else(|| UNKNOWN_HARNESS.to_owned());
+            by_harness.entry(harness).or_default().push(observation);
+        }
+
+        Ok(by_harness
+            .into_iter()
+            .map(|(harness, rows)| HarnessRequestStats::from_rows(harness, &rows))
+            .collect())
     }
 
     /// Rolling summaries for one `(provider, model, route, harness)`

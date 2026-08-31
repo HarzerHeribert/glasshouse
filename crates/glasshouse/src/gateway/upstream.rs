@@ -86,7 +86,7 @@ const REQUIRED_SCHEMES: &[&str] = &["https", "http"];
 /// before a target is **classified** — and never before it is
 /// **forwarded**: [`Route::uri_for`] still appends the target byte for byte,
 /// so the provider receives exactly the path the harness asked for.
-const VERSION_SEGMENT: &str = "/v1";
+pub(super) const VERSION_SEGMENT: &str = "/v1";
 
 /// One protocol the gateway serves: which request targets belong to it, and
 /// where they go.
@@ -200,7 +200,7 @@ impl Route {
 }
 
 /// A request target's path: everything before a query or a fragment.
-fn path_of(target: &str) -> &str {
+pub(super) fn path_of(target: &str) -> &str {
     let end = target.find(['?', '#']).unwrap_or(target.len());
     &target[..end]
 }
@@ -314,6 +314,15 @@ impl UpstreamBackend {
     /// sent somewhere nobody asked for it to go.
     pub(super) fn route_for(&self, target: &str) -> Option<&Route> {
         self.routes.iter().find(|route| route.claims(target))
+    }
+
+    /// The route for `protocol`, by slug, or `None` when this backend does
+    /// not serve it. What a translated exchange forwards through: the pair
+    /// table named the served protocol, and this is where it goes.
+    pub(super) fn route_named(&self, protocol: &str) -> Option<&Route> {
+        self.routes
+            .iter()
+            .find(|route| route.protocol() == protocol)
     }
 
     /// The `authorization` header the gateway attaches, replacing whatever

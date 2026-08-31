@@ -26,7 +26,9 @@
 //! Here: a listener, an address, a token, an upstream, and the moment each of
 //! them stops existing. In `ingress`: what happens on one connection. In
 //! `http`: the small amount of HTTP that routing needs. In [`upstream`]:
-//! where a request goes and the credential it goes with.
+//! where a request goes and the credential it goes with. In [`translate`]:
+//! the one branch of the ingress that may parse a body — a target the
+//! provider does not serve, for a pair the table supports (Phase 56).
 //!
 //! # Loopback, and an ephemeral port
 //!
@@ -75,6 +77,7 @@
 mod http;
 mod ingress;
 pub mod session;
+pub mod translate;
 pub mod upstream;
 
 use std::fmt;
@@ -914,12 +917,46 @@ mod tests {
     /// scanning them would be scanning the tests for the rules the tests
     /// exist to check.
     fn gateway_sources() -> Vec<(&'static str, &'static str)> {
+        let mut sources = relay_sources();
+        sources.extend(translate_sources());
+        sources
+    }
+
+    /// The relay: the files that move bytes and may never read them.
+    fn relay_sources() -> Vec<(&'static str, &'static str)> {
         vec![
             ("gateway/mod.rs", include_str!("mod.rs")),
             ("gateway/http.rs", include_str!("http.rs")),
             ("gateway/ingress.rs", include_str!("ingress.rs")),
             ("gateway/session.rs", include_str!("session.rs")),
             ("gateway/upstream.rs", include_str!("upstream.rs")),
+        ]
+    }
+
+    /// The codecs: the one part of this directory that parses a body, by
+    /// the Phase 56 ruling — and only for a target the provider does not
+    /// serve. Held to the harness-import rule like every other file here,
+    /// and deliberately **not** to the no-deserialization rule, which is the
+    /// relay's.
+    fn translate_sources() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("gateway/translate/mod.rs", include_str!("translate/mod.rs")),
+            (
+                "gateway/translate/canonical.rs",
+                include_str!("translate/canonical.rs"),
+            ),
+            (
+                "gateway/translate/anthropic.rs",
+                include_str!("translate/anthropic.rs"),
+            ),
+            (
+                "gateway/translate/openai_chat.rs",
+                include_str!("translate/openai_chat.rs"),
+            ),
+            (
+                "gateway/translate/stream.rs",
+                include_str!("translate/stream.rs"),
+            ),
         ]
     }
 
@@ -1661,22 +1698,29 @@ mod tests {
         assert!(!production_code(tested).contains("crate::session"));
         // ... and the file list it runs over is not empty, which would make
         // every assertion in it vacuous.
-        assert_eq!(gateway_sources().len(), 5);
+        assert_eq!(gateway_sources().len(), 10);
     }
 
-    /// No file in this directory may deserialize anything. The whole of
+    /// No file of the **relay** may deserialize anything. The whole of
     /// "preserve tool-call payloads without lossy rewriting" and "keep the
     /// first gateway implementation protocol pass-through" rests on nothing
-    /// here ever looking at a body, so a serialization crate reaching this
-    /// directory is the change that would quietly undo both — and it is the
+    /// here ever looking at a body, so a serialization crate reaching these
+    /// files is the change that would quietly undo both — and it is the
     /// change that would look most reasonable in a diff ("just read
     /// `error.type` for the log").
+    ///
+    /// Phase 56 narrowed this rule and did not repeal it: `translate/` is
+    /// the one place a body is parsed, entered only from the branch that
+    /// answered `404`, and it is held apart here on purpose. The second half
+    /// of this test is what keeps that split honest — the codecs *do*
+    /// deserialize, so a relay file that started to would be caught by the
+    /// first half and not excused by the second.
     ///
     /// A scan cannot prove the absence of a hand-rolled parser, and this one
     /// does not claim to. What it does catch is the realistic version: the
     /// `use serde_json` that a body inspection would be written on top of.
     #[test]
-    fn no_part_of_the_gateway_deserializes_anything() {
+    fn no_part_of_the_relay_deserializes_anything() {
         const FORBIDDEN: [&str; 5] = [
             "serde_json",
             "serde::",
@@ -1684,17 +1728,27 @@ mod tests {
             "from_str::<",
             "toml::",
         ];
-        for (name, source) in gateway_sources() {
+        for (name, source) in relay_sources() {
             let code = production_code(source);
             for forbidden in FORBIDDEN {
                 assert!(
                     !code.contains(forbidden),
-                    "{name} names `{forbidden}` in production code: the gateway has started \
+                    "{name} names `{forbidden}` in production code: the relay has started \
                      looking at a body it is supposed to be unable to distinguish from any \
                      other bytes"
                 );
             }
         }
+        // The exception is real and confined: the codecs deserialize, and
+        // nothing outside `translate/` does.
+        let codecs_parse = translate_sources()
+            .iter()
+            .any(|(_, source)| production_code(source).contains("serde_json"));
+        assert!(
+            codecs_parse,
+            "translate/ no longer deserializes anything, so the split above proves nothing"
+        );
+        assert_eq!(relay_sources().len(), 5);
 
         // ... and the scan fires on the change it exists to catch, rather
         // than passing because the needle was misspelled.

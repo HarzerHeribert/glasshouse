@@ -131,3 +131,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 - does not make the loss durable or queryable -- a migration was forbidden, so the record is the stderr line and the existing routing-observation row
 
 ---
+
+#### Follow-up landed same day: the notice names the cause honestly
+
+Package `GH-EXTRACT-MODEL-ERROR-WORDING`, 2026-08-31, Sonnet at low (Green). `transport_error` gained one arm before the catch-all: a non-timeout `ureq::Error::Io(_)` — a refused, reset or dropped connection — answers `Failed { phrase: "the extraction model could not be reached" }` instead of falling through to `Unavailable`, so a person with a configured model on a closed port is no longer told *"no extraction model is available"*. Fixed phrase, nothing interpolated, per `transport_error`'s own rule. Mutation `drop-io-arm` KILLED by the closed-port test asserting the phrase present and the old phrase absent.

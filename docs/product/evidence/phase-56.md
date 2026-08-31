@@ -140,3 +140,161 @@ Recorded scope limits — stated by the worker, not discovered later:
 - macOS only; the #[cfg(windows)] fake-harness arm is copied from route_command.rs and untested here
 
 ---
+
+---
+
+
+---
+
+### Lines 1948, 1949, 1950, 1956 — translation T1: the canonical form, two codecs, the pair table, and the first pair end to end
+
+Package `GH-GATEWAY-TRANSLATE`, 2026-08-31, Fable 5 at xhigh (Red). Implements design-decisions §Phase 56 *"the user's answer on pairs: all of them"*: one canonical form, one codec per wire protocol, a pair a decoder and an encoder meeting in the middle. The relay rule is narrowed, not repealed — a served target is still forwarded byte for byte (tested), and only the branch that answered `404` may enter a codec. 4/4 mutations KILLED (a first batch's verdicts were void on an exit-127 `--test-cmd` misuse, detected and re-run). The integrator's one seam fix, on the merged tree and quoted by the report: `harness/pairing.rs`'s pinned tripwire `no_pair_of_protocols_is_translated_today` — whose own doc says a failure means this report exists — updated to pin exactly the supported pair, because the file was FORBIDDEN to the worker (the packet's own scoping).
+
+### Serve any supported harness through Glasshouse's bundled API gateway from any subscription or model whose wire protocol the gateway can translate to the harness's native protocol. (line 1948)
+
+Contract: Given a supported harness and an entitlement whose wire protocol the gateway can translate to the harness's native protocol, when the harness sends its native request to the bundled gateway, Glasshouse serves it through the translated pair end to end, while preserving the byte-for-byte relay for every natively served target.
+
+State: PARTIALLY VERIFIED — ruled 2026-08-31 by the orchestrator, agreeing with the worker's `open`: this line quantifies over every supported pair, and exactly one exists. T1's evidence stands in this entry (the canonical form, both codecs, the seam that only ever enters on the target the provider does not serve, and the end-to-end test through the shipped binary for Claude Code on an OpenAI-Chat entitlement — ids preserved, streaming in Anthropic's order, refusal by name with nothing opened upstream, byte-for-byte relay untouched). Successors: T2 (openai-responses codec) and T3 (Gemini codec + adapter).
+
+Production evidence:
+- `src/gateway/translate/mod.rs` — `serve`
+- `src/gateway/ingress.rs` — `unrouted`
+- `src/gateway/upstream.rs` — `UpstreamBackend::route_named`
+
+Regression evidence:
+- `gateway_translate::a_claude_code_request_is_translated_to_chat_completions_and_the_answer_back_with_ids_preserved`
+- `gateway_translate::a_streamed_request_is_translated_event_by_event_in_anthropics_order_and_terminated`
+- `gateway_translate::the_shipped_binary_still_refuses_claude_code_on_a_chat_only_entitlement_at_profile_resolution`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| ingress.rs: before `let Some(uri) = route.uri_for(&head.target) else {`, insert `if let translate::Placement::Translate(pair) = translate::place(&head.target, &["openai-chat"]) { return translate::serve(head, reader, out, upstream, serving, agent, pair); }` | `served-target-enters-codec` | **killed** | `gateway_translate::a_target_the_provider_serves_natively_is_relayed_byte_for_byte_even_though_a_codec_exists` |
+
+> served-target-enters-codec observed: test ... FAILED; panicked at tests/gateway_translate.rs:178: assertion `left == right` failed: exactly one request at the fixture (the mutated gateway refused the relay-only body and the fixture saw nothing)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- NOT closable by this package: profile::apply_gateway (profile/mod.rs:1157-1175, forbidden file) refuses GatewayProtocolUnserved before the harness starts; (a)-(c) are proven at gateway::start_if_required_with_degrade_sink — the door main.rs calls — with the upstream built by production profile::gateway_upstream; the witness test pins the refusal and fails the day the profile packet lifts it. Successor: GH-GATEWAY-TRANSLATE-LAUNCH (Amber, profile/mod.rs).
+
+---
+
+### Translate between wire protocols at the gateway for concrete harness/provider pairs as each is required, recording every supported pairing and every refused one by name. (line 1949)
+
+Contract: Given any ordered pair of wire protocols, when translation is asked for or a request needs it, Glasshouse answers from one table that lists every pair exactly once — supported (only behind its end-to-end test) or refused with its reason by name — while preserving that protocol_fit and the ingress refusal bodies are the table's production consumers.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator. The pair table lists every ordered pair of `WireProtocol` exactly once, supported or refused with its reason; its two production consumers are `protocol_fit` (through `translation_available`, no longer the all-false stub) and the 4xx refusal body; the refusal path is mutation-killed and the every-pair-once test pins the table. `translate::pairs` (the enumeration for a later CLI view) has no production caller and was not counted as evidence.
+
+Production evidence:
+- `src/gateway/translate/mod.rs` — `TABLE / lookup / is_supported`
+- `src/provider/mod.rs` — `translation_available`
+- `src/gateway/ingress.rs` — `unrouted (404 body naming pair and reason)`
+
+Regression evidence:
+- `gateway::translate::tests::every_ordered_pair_appears_exactly_once`
+- `gateway::translate::tests::exactly_the_first_pair_is_supported_and_every_other_row_carries_a_reason`
+- `provider::tests::every_wire_protocol_pair_has_exactly_one_row_in_the_gateway_table`
+- `gateway_translate::a_request_the_pair_cannot_carry_is_refused_by_name_and_nothing_is_opened_upstream`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| translate/mod.rs: `status: PairStatus::Refused(NOT_YET_REVERSE),` -> `status: PairStatus::Supported,` | `refused-pair-marked-supported` | **killed** | `gateway_translate::a_request_the_pair_cannot_carry_is_refused_by_name_and_nothing_is_opened_upstream` |
+
+> refused-pair-marked-supported observed: test ... FAILED; panicked at tests/gateway_translate.rs:1048 (the reverse pair was translated instead of refused with its 1956 reason)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- translate::pairs() (the enumeration for a later CLI view) has no production caller and is not evidence for this line; the two production consumers are protocol_fit via translation_available, and the ingress refusal bodies.
+- harness/pairing.rs's pinned test no_pair_of_protocols_is_translated_today now fails by design (forbidden file); integrator's one-line fix quoted in the report.
+
+---
+
+### Keep a harness's native tooling — editing, shell, repository, and tool-call behaviour — intact when it is served by a non-native provider, and refuse the pairing by name when it cannot be kept. (line 1950)
+
+Contract: Given a harness served through a translated pair, when tool definitions, tool calls, tool results (erroring included), parallel calls, stop reasons and system prompts cross the gateway, Glasshouse preserves them with ids verbatim in both directions, while refusing per request, by field name and before anything is opened upstream, whatever the pair cannot carry.
+
+State: PARTIALLY VERIFIED — ruled 2026-08-31 by the orchestrator, agreeing with the worker's `open`: this line quantifies over every supported pair, and exactly one exists. T1's evidence stands in this entry (the canonical form, both codecs, the seam that only ever enters on the target the provider does not serve, and the end-to-end test through the shipped binary for Claude Code on an OpenAI-Chat entitlement — ids preserved, streaming in Anthropic's order, refusal by name with nothing opened upstream, byte-for-byte relay untouched). Successors: T2 (openai-responses codec) and T3 (Gemini codec + adapter).
+
+Production evidence:
+- `src/gateway/translate/anthropic.rs` — `decode_request / encode_response / REFUSED_FIELDS`
+- `src/gateway/translate/openai_chat.rs` — `encode_request / decode_response / TOOL_ERROR_MARKER`
+- `src/gateway/translate/mod.rs` — `TranslationRefusal`
+
+Regression evidence:
+- `gateway_translate::a_claude_code_request_is_translated_to_chat_completions_and_the_answer_back_with_ids_preserved`
+- `gateway_translate::a_request_the_pair_cannot_carry_is_refused_by_name_and_nothing_is_opened_upstream`
+- `gateway::translate::openai_chat::tests::an_erroring_tool_result_is_carried_as_a_labelled_tool_message_and_restored`
+- `gateway::translate::anthropic::tests::every_refused_request_field_is_refused_by_its_name`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| openai_chat.rs decode_response: `let id = call.require_string("id")?;` -> `let _real_id = call.require_string("id")?; let id = format!("toolu_{index}");` | `swap-tool-use-id` | **killed** | `gateway_translate::a_claude_code_request_is_translated_to_chat_completions_and_the_answer_back_with_ids_preserved` |
+| openai_chat.rs: `"tool_calls" | "function_call" => StopReason::ToolUse,` -> `=> StopReason::EndTurn,` | `drop-stop-reason-mapping` | **killed** | `gateway_translate::a_streamed_request_is_translated_event_by_event_in_anthropics_order_and_terminated` |
+
+> swap-tool-use-id observed: test ... FAILED; panicked at tests/gateway_translate.rs:758: assertion `left == right` failed: the tool_use id is the fixture's tool_call id, verbatim
+
+> drop-stop-reason-mapping observed: test ... FAILED; panicked at tests/gateway_translate.rs:901: assertion `left == right` failed (message_delta stop_reason)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Same blocked launch link as 1948: the fidelity is proven through the real gateway door and real sockets, not yet under a real launched harness; closes with 1948.
+- is_error crosses OpenAI Chat as a labelled first-line content marker (no wire field exists); cache_control is refused per the packet, so a default Claude Code needs DISABLE_PROMPT_CACHING=1 — both flagged for orchestrator ruling.
+
+---
+
+### Cover each supported harness/provider/protocol pairing with an end-to-end test through the shipped binary against a fixture upstream before offering it. (line 1956)
+
+Contract: Given a harness/provider/protocol pairing, when it is offered as supported, Glasshouse has covered it end to end against a fixture upstream before offering it, while preserving that unoffered pairs stay refused by name.
+
+State: PARTIALLY VERIFIED — ruled 2026-08-31 by the orchestrator, agreeing with the worker's `open`: this line quantifies over every supported pair, and exactly one exists. T1's evidence stands in this entry (the canonical form, both codecs, the seam that only ever enters on the target the provider does not serve, and the end-to-end test through the shipped binary for Claude Code on an OpenAI-Chat entitlement — ids preserved, streaming in Anthropic's order, refusal by name with nothing opened upstream, byte-for-byte relay untouched). Successors: T2 (openai-responses codec) and T3 (Gemini codec + adapter).
+
+Production evidence:
+- `src/gateway/translate/mod.rs` — `TABLE (the supported row exists only with its test)`
+
+Regression evidence:
+- `gateway_translate.rs (a)-(e): 6 tests, fixture speaks only openai-chat and records requests`
+- `gateway_translate::the_shipped_binary_still_refuses_claude_code_on_a_chat_only_entitlement_at_profile_resolution`
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The test enters at gateway::start_if_required_with_degrade_sink (the binary's own door, real accept loop, real sockets, production gateway_upstream), NOT at `glasshouse launch` — blocked by the profile link; the witness test converts the day it lifts. 'Through the shipped binary' is therefore not yet literally satisfied, which is why this stays open.
+
+---
+
+---
+
+
+### Line 1951 — per-harness task efficiency, read from rows production already writes
+
+Package `GH-HARNESS-EFFICIENCY`, 2026-08-31, Sonnet at high (Amber). Two readers in the `outcomes_by_tier` shape: `outcomes_by_tier_and_harness` (outcome by task class per harness, same minimum-sample gate, `undecided` never counted as failed) and `request_stats_by_harness` (request count, wall-clock sum/median, tokens where present with `token_rows_present` beside them), rendered by `harness_efficiency_section` in `glasshouse route`'s report so a harness can be compared for a task class without knowing which vendor bills.
+### Record per-harness task efficiency — tokens, wall-clock, request count, and outcome by task class — so that harness choice can rest on evidence rather than on which vendor bills for it. (line 1951)
+
+Contract: Given a window of routing_observations and evaluation_observations rows, when Glasshouse renders glasshouse route, it reports per-harness token totals (over rows that have them, with the count of rows that do not), wall-clock sum/median (over rows carrying both dispatched_at and completed_at), request count, and outcome-by-task-class (gated at MIN_SAMPLE_FOR_SUMMARY, undecided never counted as failed), while preserving that a harness or task class with no rows is carried with its count rather than hidden or rendered as zero
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's artifacts (4/4 mutations KILLED with killing tests named; real `test result:` lines; three blast runs with every red attributed — a doc-link defect fixed, the rest pre-existing load flakes — and `integrate.sh`'s merged-tree blast, see the commit). Tokens are carried where a row has them and `token_rows_present == 0` never prints a zero (`print-zero-for-null-tokens` KILLED); token data begins arriving with translated pairs (T1).
+
+Production evidence:
+- `crates/glasshouse/src/evaluation/mod.rs` — `EvaluationObservations::outcomes_by_tier_and_harness`
+- `crates/glasshouse/src/evaluation/mod.rs` — `HarnessTierOutcome`
+- `crates/glasshouse/src/routing/evidence.rs` — `EvidenceLedger::request_stats_by_harness`
+- `crates/glasshouse/src/routing/evidence.rs` — `HarnessRequestStats, HarnessRequestStats::from_rows, WallClockSummary`
+- `crates/glasshouse/src/main.rs` — `harness_efficiency_section`
+- `crates/glasshouse/src/main.rs` — `route_report (wiring)`
+
+Regression evidence:
+- `harness_efficiency::outcomes_by_tier_and_harness_and_request_stats_by_harness_join_by_the_right_key`
+- `harness_efficiency::the_route_command_prints_the_harness_efficiency_section`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| EvaluationKind::RoutingTierObserved.as_str(), -> EvaluationKind::RoutingCostClassObserved.as_str(), (evaluation/mod.rs, outcomes_by_tier_and_harness) | `join-wrong-key-harness` | **killed** | `harness_efficiency::outcomes_by_tier_and_harness_and_request_stats_by_harness_join_by_the_right_key` |
+| failed: counts.failed, -> failed: counts.failed + counts.sessions_without_outcome, (evaluation/mod.rs, TierOutcome::from_counts) | `count-undecided-as-failed-harness` | **killed** | `harness_efficiency::outcomes_by_tier_and_harness_and_request_stats_by_harness_join_by_the_right_key` |
+| Some(stats) if stats.token_rows_present == 0 => format!( -> Some(stats) if false => format!( (main.rs, harness_efficiency_section) | `print-zero-for-null-tokens` | **killed** | `harness_efficiency::the_route_command_prints_the_harness_efficiency_section` |
+
+> join-wrong-key-harness observed: no `heavy`/`leaf` bucket found among the cost-class vocabulary the mutated query now reads; both harness_efficiency tests panicked
+
+> count-undecided-as-failed-harness observed: assertion left == right failed: claude-code/heavy's two undecided sessions were folded into failed: TierOutcome { bucket: "heavy", undecided: 2, verdict: Measured { successful: 5, failed: 2, sample_size: 5 } }
+
+> print-zero-for-null-tokens observed: the codex row's expected exact text 'tokens: not exposed on 3 of 3 exchanges' no longer appeared in stdout
+
+Recorded scope limits — stated by the worker, not discovered later:
+- no Windows leg run
+- sessions.harness fallback-to-unknown path shares route_outcomes_by_pairing_class's already-tested behavior rather than a dedicated new test
+- wall-clock sum/median is not gated by MIN_SAMPLE_FOR_SUMMARY, per the packet's own wording
+
+---

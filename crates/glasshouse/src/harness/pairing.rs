@@ -1308,12 +1308,14 @@ mod tests {
         assert_eq!(incompatible.class(), PairingClass::Unknown);
     }
 
-    /// V1 translates nothing, and the class that would describe a translation
-    /// is unreachable because of that rather than because it is missing. If
-    /// this ever fails, an adapter was added and this phase's report is what
-    /// should be re-read.
+    /// Exactly the pairs the gateway's translation table supports are
+    /// translated — one today: an Anthropic Messages harness served from an
+    /// OpenAI Chat upstream (T1, 2026-08-31, `gateway::translate`). If this
+    /// fails, a codec pair was added or removed; the pair table in
+    /// `gateway::translate` and `docs/product/evidence/phase-56.md` are what
+    /// should be re-read, and this pin updated with them.
     #[test]
-    fn no_pair_of_protocols_is_translated_today() {
+    fn exactly_the_supported_pairs_are_translated() {
         for from in [
             WireProtocol::AnthropicMessages,
             WireProtocol::OpenAiResponses,
@@ -1324,9 +1326,12 @@ mod tests {
                 WireProtocol::OpenAiResponses,
                 WireProtocol::OpenAiChat,
             ] {
-                assert!(
-                    !crate::provider::translation_available(from, to),
-                    "{from} -> {to} claims a translation adapter"
+                let expected =
+                    from == WireProtocol::AnthropicMessages && to == WireProtocol::OpenAiChat;
+                assert_eq!(
+                    crate::provider::translation_available(from, to),
+                    expected,
+                    "{from} -> {to}: the translation table disagrees with this pin"
                 );
             }
         }

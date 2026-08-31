@@ -529,6 +529,21 @@ fn a_precompact_hook_that_records_nothing_says_so_with_no_logging_configured() {
          stderr was:\n{}",
         run.stderr
     );
+
+    // A closed port is a *configured* model that refused the connection, not
+    // an unconfigured one; the two must not read the same on stderr.
+    assert!(
+        run.stderr
+            .contains("the extraction model could not be reached"),
+        "a configured model on a closed port must be named unreachable; stderr was:\n{}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("no extraction model is available"),
+        "a closed port is a configured model refusing the connection, not the \
+         no-model-configured case; stderr was:\n{}",
+        run.stderr
+    );
 }
 
 /// A loopback address with nothing listening on it.

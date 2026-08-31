@@ -1893,6 +1893,8 @@ fn route_report(
     report.push('\n');
     report.push_str(&route_outcomes_section(runtime));
     report.push_str(&tier_outcome_section(runtime));
+    report.push_str(&harness_efficiency_section(runtime));
+    report.push_str(&support_work_section(runtime));
     report.push_str(&route_correlations_section(runtime));
     report.push_str(&throttle_scope_section(runtime));
     Ok(report)
@@ -2294,6 +2296,216 @@ fn tier_outcome_section(runtime: &Runtime) -> String {
                 ),
             );
         }
+    }
+    out
+}
+
+/// How many of [`support_work_section`]'s rows to print — the packet's own
+/// "most recent N (say 10)".
+const SUPPORT_WORK_RECENT_LIMIT: usize = 10;
+
+/// Map line 1951, printed for a person: per-harness task efficiency —
+/// tokens, wall-clock, request count, and outcome by task class — so that
+/// harness choice can rest on evidence rather than on which vendor bills
+/// for it.
+///
+/// Two ledgers, joined in Rust rather than in SQL, because they hold
+/// different rows for different reasons. The outcome-and-task-class half
+/// comes from
+/// [`glasshouse::evaluation::EvaluationObservations::outcomes_by_tier_and_harness`]
+/// — `evaluation_observations` joined to `sessions.harness`, exactly
+/// [`tier_outcome_section`]'s own join with a harness dimension added, one
+/// row per (harness, task class). The token/wall-clock/request-count half
+/// comes from
+/// [`glasshouse::routing::evidence::EvidenceLedger::request_stats_by_harness`]
+/// — `routing_observations.harness`, written directly at record time — and
+/// is computed once per harness rather than per task class, because
+/// `routing_observations` carries no tier at all; the same per-harness
+/// figures are printed on every task-class row for that harness. That is
+/// the box line's own split: *"tokens, wall-clock, request count"*
+/// unqualified, *"outcome … by task class"* qualified.
+///
+/// A harness with no `routing_observations` rows in the window (every
+/// session routed but nothing dispatched yet) prints `0 request(s)` and
+/// *"not exposed on 0 of 0 exchanges"* rather than being silently dropped
+/// from the token/wall-clock figures.
+fn harness_efficiency_section(runtime: &Runtime) -> String {
+    use glasshouse::evaluation::{EvaluationObservations, TierOutcomeVerdict};
+    use glasshouse::routing::evidence::EvidenceLedger;
+
+    let header =
+        "\nPer-harness task efficiency in this project, last 30 days (map line 1951)\n".to_owned();
+
+    let to = glasshouse::evaluation::now_unix();
+    let from = to - ROUTE_OUTCOME_WINDOW_DAYS * 24 * 60 * 60;
+
+    let outcomes = match EvaluationObservations::open(runtime) {
+        Ok(ledger) => match ledger.outcomes_by_tier_and_harness(from, to) {
+            Ok(outcomes) => outcomes,
+            Err(err) => return format!("{header}\n  {err}\n"),
+        },
+        Err(err) => {
+            tracing::debug!(
+                error = %format!("{err:#}"),
+                "could not open the evaluation ledger for the harness-efficiency section"
+            );
+            return format!("{header}\n  the evaluation ledger could not be opened\n");
+        }
+    };
+
+    let stats = match EvidenceLedger::open(runtime) {
+        Ok(ledger) => match ledger.request_stats_by_harness(from, to) {
+            Ok(stats) => stats,
+            Err(err) => return format!("{header}\n  {err}\n"),
+        },
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "could not open the routing evidence ledger for the harness-efficiency section"
+            );
+            return format!("{header}\n  the routing evidence ledger could not be opened\n");
+        }
+    };
+
+    let mut out = header;
+    out.push('\n');
+    if outcomes.is_empty() {
+        out.push_str("  no routed sessions recorded in this window\n");
+        return out;
+    }
+
+    for row in outcomes.iter() {
+        let request_stats = stats.iter().find(|s| s.harness == row.harness);
+
+        let outcome_clause = match row.outcome.verdict {
+            TierOutcomeVerdict::InsufficientEvidence {
+                sample_size,
+                required,
+            } => format!(
+                "insufficient evidence — {sample_size} of the {required} reported turns a tier \
+                 summary needs; treated as no summary"
+            ),
+            TierOutcomeVerdict::Measured {
+                successful,
+                failed,
+                sample_size,
+            } => {
+                format!("{successful} of {sample_size} reported turns succeeded, {failed} failed")
+            }
+        };
+        let undecided_clause = if row.outcome.undecided > 0 {
+            format!("; {} undecided", row.outcome.undecided)
+        } else {
+            String::new()
+        };
+
+        let requests = request_stats.map_or(0, |stats| stats.requests);
+        let wall_clock_clause = match request_stats.and_then(|stats| stats.wall_clock) {
+            Some(wall_clock) => format!(
+                ", median wall-clock {}ms across {} timed exchange(s)",
+                wall_clock.median_ms, wall_clock.sample_count
+            ),
+            None => String::new(),
+        };
+        // Below, `token_rows_present == 0` must render as an absence, never
+        // as a printed `0` — the mutation this line is written to catch is
+        // exactly `input_tokens_sum`/`output_tokens_sum` printed unguarded
+        // when every row in the group left both `NULL`.
+        let tokens_clause = match request_stats {
+            None => "tokens: not exposed on 0 of 0 exchanges".to_owned(),
+            Some(stats) if stats.token_rows_present == 0 => format!(
+                "tokens: not exposed on {} of {} exchanges",
+                stats.requests, stats.requests
+            ),
+            Some(stats) if stats.token_rows_present == stats.requests => format!(
+                "tokens: {} in / {} out",
+                stats.input_tokens_sum, stats.output_tokens_sum
+            ),
+            Some(stats) => format!(
+                "tokens: {} in / {} out on {} of {} exchanges; not exposed on {}",
+                stats.input_tokens_sum,
+                stats.output_tokens_sum,
+                stats.token_rows_present,
+                stats.requests,
+                stats.requests - stats.token_rows_present
+            ),
+        };
+
+        let _ = writeln_str(
+            &mut out,
+            format!(
+                "  {} — {}: {outcome_clause}{undecided_clause}; {requests} request(s)\
+                 {wall_clock_clause}; {tokens_clause}",
+                row.harness, row.outcome.bucket
+            ),
+        );
+    }
+    out
+}
+
+/// Map line 1629, printed for a person: which resource performed important
+/// support work — classification or memory extraction — most recently, so
+/// a person debugging *"which model classified this task?"* finds the
+/// answer here rather than in the raw ledger.
+///
+/// Reads
+/// [`glasshouse::routing::evidence::EvidenceLedger::recent_support_work`],
+/// the purpose-filtered sibling of `Self::recent` that this line needs:
+/// `recent` requires the caller to already name one `(provider, model,
+/// route, harness)` identity, and the whole point of this section is that
+/// the identity is unknown in advance — it is the question a person is
+/// asking.
+fn support_work_section(runtime: &Runtime) -> String {
+    use glasshouse::routing::evidence::EvidenceLedger;
+
+    let header = "\nRecent support work in this project (map line 1629) — which resource \
+                   classified or extracted, for debugging\n"
+        .to_owned();
+    let ledger = match EvidenceLedger::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "could not open the routing evidence ledger for the support-work section"
+            );
+            return format!("{header}\n  the routing evidence ledger could not be opened\n");
+        }
+    };
+    let recent = match ledger.recent_support_work(SUPPORT_WORK_RECENT_LIMIT) {
+        Ok(rows) => rows,
+        Err(err) => return format!("{header}\n  {err}\n"),
+    };
+
+    let mut out = header;
+    out.push('\n');
+    if recent.is_empty() {
+        out.push_str("  no classification or memory-extraction call recorded yet\n");
+        return out;
+    }
+    for observation in recent.iter() {
+        let purpose = observation
+            .purpose
+            .as_deref()
+            .unwrap_or("(no purpose recorded)");
+        let route = observation
+            .route
+            .as_deref()
+            .unwrap_or("(no route recorded)");
+        let outcome = observation
+            .outcome
+            .map(glasshouse::routing::evidence::Outcome::as_str)
+            .unwrap_or("unknown");
+        let wall_clock = observation
+            .duration_ms()
+            .map(|ms| format!("{ms}ms"))
+            .unwrap_or_else(|| "(not timed)".to_owned());
+        let _ = writeln_str(
+            &mut out,
+            format!(
+                "  at {}: {purpose} by {} / {} via {route} — {outcome}, {wall_clock}",
+                observation.observed_at_unix, observation.provider, observation.model
+            ),
+        );
     }
     out
 }

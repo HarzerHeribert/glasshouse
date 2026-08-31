@@ -312,15 +312,23 @@ impl ProtocolCompatibleProvider<'_> {
     }
 }
 
-/// Whether an explicit adapter exists to translate `from` into `to`.
+/// Whether a codec pair exists to translate `from` into `to`.
 ///
-/// Always `false` today, and that is the capability rather than a gap: V1
-/// prefers pass-through, and translation must never happen because two
-/// protocols merely looked close. The seam exists so an adapter can be added
-/// later for one concrete pair, with its own tests.
+/// Answered from the gateway's pair table, [`crate::gateway::translate`],
+/// which lists every ordered pair of wire protocols exactly once —
+/// supported, or refused by name with its reason (capability map line
+/// 1949). The table is keyed by slug because no file under `gateway/` may
+/// name [`WireProtocol`]; this is the one place the enum meets the slug, and
+/// `every_wire_protocol_pair_has_exactly_one_row_in_the_gateway_table` holds
+/// the table complete against the enum.
+///
+/// Translation still never happens because two protocols merely looked
+/// close: a row is supported only behind its own end-to-end test through
+/// the shipped binary against a fixture upstream (line 1956), and the first
+/// row — Claude Code's Anthropic Messages served by an OpenAI-Chat
+/// entitlement — is the only one today.
 pub fn translation_available(from: WireProtocol, to: WireProtocol) -> bool {
-    let _ = (from, to);
-    false
+    crate::gateway::translate::is_supported(from.slug(), to.slug())
 }
 
 /// `protocol` served at `base_url`, with nothing beyond that established.
@@ -809,23 +817,30 @@ mod tests {
         );
     }
 
+    /// Line 410 and Phase 56: translation is never implicit. Every ordered
+    /// pair of `WireProtocol` — including each with itself — has exactly one
+    /// row in the gateway's table, exactly one pair is supported, and a
+    /// protocol is never "translated" to itself. The table may not name the
+    /// enum, so this is the test that holds it complete against it.
     #[test]
-    fn no_translation_is_available_between_any_two_protocols() {
-        // Line 410: translation is possible to add later, never implicit.
+    fn every_wire_protocol_pair_has_exactly_one_row_in_the_gateway_table() {
         const ALL: [WireProtocol; 3] = [
             WireProtocol::AnthropicMessages,
             WireProtocol::OpenAiResponses,
             WireProtocol::OpenAiChat,
         ];
+        let table = crate::gateway::translate::pairs();
+        assert_eq!(table.len(), ALL.len() * ALL.len());
         for &from in &ALL {
             for &to in &ALL {
-                if from == to {
-                    continue;
-                }
-                assert!(
-                    !translation_available(from, to),
-                    "{from} -> {to} must not be available"
-                );
+                let rows = table
+                    .iter()
+                    .filter(|pair| pair.from == from.slug() && pair.to == to.slug())
+                    .count();
+                assert_eq!(rows, 1, "{from} -> {to} has {rows} rows");
+                let supported =
+                    from == WireProtocol::AnthropicMessages && to == WireProtocol::OpenAiChat;
+                assert_eq!(translation_available(from, to), supported, "{from} -> {to}");
             }
         }
     }

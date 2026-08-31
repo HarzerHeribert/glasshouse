@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`████████████████████████████████░░░░░░░░` 1058 / 1305 mandatory capabilities (81%)
+`████████████████████████████████░░░░░░░░` 1067 / 1305 mandatory capabilities (81%)
 
 <details>
 <summary>Per-phase breakdown (58 of 106 phases complete)</summary>
@@ -112,7 +112,7 @@ the authoritative specification and tracks what is done.
 | Phase 36 — Session affinity | 8/8 ✅ |
 | Phase 37 — Basic session-aware router | 10/11 |
 | Phase 38 — Quota-preserving routing | 5/7 |
-| Phase 39 — Gateway-backed disposable jobs | 7/9 |
+| Phase 39 — Gateway-backed disposable jobs | 8/9 |
 | Phase 40 — Fresh-session handoff | 9/9 ✅ |
 | Phase 41 — Project overview | 15/15 ✅ |
 | Phase 42 — External control API | 13/13 ✅ |
@@ -129,8 +129,8 @@ the authoritative specification and tracks what is done.
 | Phase 53 — Criteria before adding graph storage | 0/5 |
 | Phase 54 — Criteria before deeper cmux coupling | 4/4 ✅ |
 | Phase 54A — Setup and portability completion criteria | 0/10 |
-| Phase 55 — V1 completion definition | 15/23 |
-| Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 2/12 |
+| Phase 55 — V1 completion definition | 21/23 |
+| Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 4/12 |
 | Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler | 0/13 |
 
 </details>

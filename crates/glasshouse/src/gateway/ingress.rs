@@ -93,6 +93,29 @@
 //! beyond what forwarding already buffers, or matched against anything — the
 //! boundary that stays is the one this module has always kept, and the
 //! source-scan tests in `tests/gateway_failure_taxonomy.rs` hold it.
+//!
+//! # The relay rule, narrowed and not repealed (Phase 56)
+//!
+//! Capability map lines 1948–1950, under the ruling recorded in
+//! `docs/product/design-decisions.md` as *"codecs around one canonical
+//! form; the relay rule narrowed, not repealed"*. A request whose target
+//! belongs to a protocol the provider serves is relayed exactly as above —
+//! [`forward`] is unchanged for it, and it never enters a codec. Only a
+//! target the provider does **not** serve — the branch that used to answer
+//! `404` with nothing opened upstream — is asked a second question, in
+//! [`unrouted`]: does the pair table name a supported pair from the
+//! target's protocol to one this provider serves? If so, the exchange is
+//! [`super::translate`]'s, recorded under the pair's own name; if the pair
+//! is refused, the `404` stays and its body names the pair and the reason;
+//! otherwise the `404` is exactly what it was.
+//!
+//! **This file still decodes nothing.** The decision is made from the
+//! target alone, before a byte of the body is read, and every parse lives
+//! in `translate/` — the source scan in `tests/gateway_failure_taxonomy.rs`
+//! that holds this file's production half free of any decoding call is
+//! unchanged and still green. [`Tokens`] is the one thing a translated
+//! exchange adds to [`Exchange`]: three counts the provider stated, exact
+//! because that response was parsed, and `None` on every relayed exchange.
 
 use std::io::{BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -105,7 +128,8 @@ use crate::provider::telemetry::RateLimitHeaders;
 
 use super::GatewayToken;
 use super::http::{self, HeadError};
-use super::upstream::{Route, Upstream};
+use super::translate;
+use super::upstream::{Route, Upstream, UpstreamBackend};
 
 /// The `authorization` scheme the gateway accepts from a child harness.
 ///
@@ -177,6 +201,25 @@ pub(super) struct Exchange {
     /// `first_byte_at`. See this module's own "a fourth thing may now be
     /// recorded".
     pub(super) framing: Option<Framing>,
+    /// Token counts the provider stated, on a **translated** exchange only —
+    /// see the module's "narrowed and not repealed". `None` on every relayed
+    /// exchange, whose body this gateway never reads.
+    pub(super) tokens: Option<Tokens>,
+}
+
+/// Token counts the provider stated for a translated exchange — Phase 56's
+/// consequence for the refusal register's P1b: *"a translated exchange has a
+/// parsed response, so its usage is recorded as exact where the provider
+/// states it; relayed exchanges are unchanged."*
+///
+/// Three counts and nothing else. `an_exchange_has_nowhere_to_put_a_body`
+/// scans this declaration under [`Outcome`]'s stricter list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Tokens {
+    pub(super) input: u64,
+    pub(super) output: u64,
+    /// Input tokens the provider served from a prompt cache, when it said.
+    pub(super) cached: Option<u64>,
 }
 
 /// How the provider's response was framed and how its stream ended — the
@@ -346,6 +389,7 @@ impl Exchange {
             provider = %self.provider,
             protocol = ?self.protocol,
             host = %self.host,
+            tokens = ?self.tokens,
             "glasshouse gateway exchange"
         );
     }
@@ -508,7 +552,7 @@ pub(super) fn serve(
 /// `crate::profile::ingress_targets`' OpenAI Responses entry.
 fn forward(
     head: http::RequestHead,
-    mut reader: BufReader<TcpStream>,
+    reader: BufReader<TcpStream>,
     out: &mut TcpStream,
     upstream: &Upstream,
     agent: &Agent,
@@ -519,20 +563,9 @@ fn forward(
     // from one provider and its credential from another.
     let serving = upstream.serving();
     let Some(route) = serving.route_for(&head.target) else {
-        refuse(
-            out,
-            StatusCode::NOT_FOUND,
-            "not_found_error",
-            "this request target does not belong to any protocol the Glasshouse gateway is \
-             serving; a gateway ingress carries only the protocols the configured provider \
-             declares a base URL for, and forwards nothing it cannot place",
-            Some(&head.method),
-        );
-        // Drained before the socket closes for the same reason the `401`
-        // path drains: a client still writing a body would get a connection
-        // reset instead of the status that explains what was wrong.
-        settle(&mut reader, out, head.content_length);
-        return (exchange(Outcome::Unrouted, 404, upstream, None), no_quota());
+        // Phase 56's one branch — see `unrouted`. A served target has a
+        // route and never reaches it.
+        return unrouted(head, reader, out, upstream, serving, agent);
     };
 
     let Some(uri) = route.uri_for(&head.target) else {
@@ -751,6 +784,57 @@ fn forward(
     )
 }
 
+/// The `404` a target belonging to no served protocol has always been
+/// answered with.
+const UNROUTED_MESSAGE: &str = "this request target does not belong to any protocol the \
+                                Glasshouse gateway is serving; a gateway ingress carries only \
+                                the protocols the configured provider declares a base URL for, \
+                                and forwards nothing it cannot place";
+
+/// A target the serving backend has no route for — the one branch a codec
+/// may enter (Phase 56), and the branch that stays a `404` otherwise.
+///
+/// The decision is made from the target alone, by [`translate::place`], and
+/// it is made *after* `route_for` said no: a served target was relayed byte
+/// for byte by [`forward`] and never arrives here. A supported pair hands
+/// the whole exchange to [`translate::serve`], which records it under the
+/// pair's name. A refused pair, or a target under a translated protocol
+/// other than its one endpoint, is a `404` whose body names the pair and
+/// the table's reason. Anything else is the `404` exactly as before, and
+/// **nothing is opened upstream** on any refusing path.
+fn unrouted(
+    head: http::RequestHead,
+    mut reader: BufReader<TcpStream>,
+    out: &mut TcpStream,
+    upstream: &Upstream,
+    serving: &UpstreamBackend,
+    agent: &Agent,
+) -> (Exchange, RateLimitHeaders) {
+    let served = serving.served_protocols();
+    let message = match translate::place(&head.target, &served) {
+        translate::Placement::Translate(pair) => {
+            return translate::serve(head, reader, out, upstream, serving, agent, pair);
+        }
+        translate::Placement::PairRefused { from, refused } => {
+            translate::pair_refusal_message(from, &refused)
+        }
+        translate::Placement::TargetRefused { from } => translate::target_refusal_message(from),
+        translate::Placement::Unplaceable => UNROUTED_MESSAGE.to_owned(),
+    };
+    refuse(
+        out,
+        StatusCode::NOT_FOUND,
+        "not_found_error",
+        &message,
+        Some(&head.method),
+    );
+    // Drained before the socket closes for the same reason the `401` path
+    // drains: a client still writing a body would get a connection reset
+    // instead of the status that explains what was wrong.
+    settle(&mut reader, out, head.content_length);
+    (exchange(Outcome::Unrouted, 404, upstream, None), no_quota())
+}
+
 /// No response was received, so there is nothing a quota reading could have
 /// come from — every early-return path in [`serve`] and [`forward`] before a
 /// provider answers.
@@ -837,7 +921,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// today, for the reason its own doc gives, so this arm is a mapping with no
 /// live producer until one is configured; the constant exists so that the
 /// day one is, nothing else has to change.
-fn transport_detail(err: &ureq::Error) -> &'static str {
+pub(super) fn transport_detail(err: &ureq::Error) -> &'static str {
     match err {
         ureq::Error::HostNotFound => "the provider's host name did not resolve",
         ureq::Error::ConnectionFailed => "the connection to the provider could not be made",
@@ -930,7 +1014,11 @@ fn refuse(
 /// ([`SETTLE_TIMEOUT`]) are there because this is work done on behalf of a
 /// request that has already been refused: neither a large body nor a client
 /// that stops sending may hold this thread.
-fn settle(reader: &mut BufReader<TcpStream>, out: &mut TcpStream, content_length: Option<u64>) {
+pub(super) fn settle(
+    reader: &mut BufReader<TcpStream>,
+    out: &mut TcpStream,
+    content_length: Option<u64>,
+) {
     let _ = reader.get_ref().set_read_timeout(Some(SETTLE_TIMEOUT));
     let cap = content_length.unwrap_or(DRAIN_CAP).min(DRAIN_CAP);
     let _ = std::io::copy(&mut reader.take(cap), &mut std::io::sink());
@@ -966,6 +1054,7 @@ fn exchange(outcome: Outcome, status: u16, upstream: &Upstream, route: Option<&R
         // both of these with the real readings via struct-update syntax.
         first_byte_at: None,
         framing: None,
+        tokens: None,
     }
 }
 
@@ -1128,6 +1217,11 @@ mod tests {
                     relayed: Some(4096),
                     ended: StreamEnd::Complete,
                 }),
+                tokens: Some(Tokens {
+                    input: 120,
+                    output: 33,
+                    cached: Some(100),
+                }),
             };
             let line = recorded(&exchange);
 
@@ -1221,6 +1315,14 @@ mod tests {
             (
                 "StreamEnd",
                 "pub(super) enum StreamEnd {",
+                body_shaped_or_foreign_text.clone(),
+            ),
+            // Three counts a translated exchange adds — held to the same
+            // list, because a count is where "just the usage object" would
+            // otherwise be kept whole.
+            (
+                "Tokens",
+                "pub(super) struct Tokens {",
                 body_shaped_or_foreign_text,
             ),
         ] {

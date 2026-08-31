@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1058 / 1305 mandatory capabilities (81%)** — 247 open across 48 phases.
+**1067 / 1305 mandatory capabilities (82%)** — 238 open across 48 phases.
 
 ## Where the work is
 
@@ -36,6 +36,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 34B | Routing-model role | **1** | 14 | `1406` |
 | Phase 34E | Router economics | **1** | 8 | `1461` |
 | Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
+| Phase 39 | Gateway-backed disposable jobs | **1** | 8 | `1614` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 9E | Secret storage | **2** | 11 | `432` |
 | Phase 9J | Harness-model pairing model | **2** | 18 | `545` |
@@ -44,7 +45,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
-| Phase 39 | Gateway-backed disposable jobs | **2** | 7 | `1614` |
+| Phase 55 | V1 completion definition | **2** | 21 | `1910` |
 | Phase 28 | File-aware memory lookup | **3** | 2 | `1137` |
 | Phase 34C | Automatic routing-model selection | **3** | 10 | `1429` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
@@ -57,13 +58,12 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 52 | Criteria before adding semantic/vector retrieval | **6** | 0 | `1858` |
 | Phase 47 | Observability without spectacle | **7** | 8 | `1750` |
 | Phase 32A | Unified quota and capacity model | **8** | 13 | `1196` |
-| Phase 55 | V1 completion definition | **8** | 15 | `1910` |
+| Phase 56 | Harness–subscription decoupling: choose the harness, route the subscription and model | **8** | 4 | `1941` |
 | Phase 32E | Burn rate and exhaustion forecasting | **10** | 0 | `1272` |
 | Phase 32G | Provider-aware request-cost estimation | **10** | 0 | `1296` |
 | Phase 34F | Model capability and tier calibration | **10** | 1 | `1473` |
 | Phase 35A | Candidate generation | **10** | 1 | `1504` |
 | Phase 54A | Setup and portability completion criteria | **10** | 0 | `1897` |
-| Phase 56 | Harness–subscription decoupling: choose the harness, route the subscription and model | **10** | 2 | `1941` |
 | Phase 9K | Harness-aware response profiles | **11** | 26 | `578` |
 | Phase 35B | Candidate scoring | **11** | 14 | `1523` |
 | Phase 32C | Subscription capacity estimation | **12** | 0 | `1242` |
@@ -77,7 +77,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~209 open lines are not.
+other ~199 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -142,6 +142,10 @@ these unwrapped.
 
 - **1594** ☐ Prefer a fresh session when existing relevant sessions are cold, bloated, or semantically poor and a good checkpoint exists.
 
+### Phase 39 — Gateway-backed disposable jobs  (1 open, 8 closed)
+
+- **1625** ☐ Use disposable jobs for classification, memory extraction, reranking, and other bounded support tasks.
+
 ### Phase 9 — Antigravity adapter  (2 open, 5 closed)
 
 - **340** ☐ Integrate structured Antigravity lifecycle events where the CLI exposes them.
@@ -182,10 +186,10 @@ these unwrapped.
 - **1608** ☐ Prefer cheap resources for simple repository summarization when no valuable warm session already exists.
 - **1610** ☐ Avoid migrating a nearly completed task solely to preserve a small amount of quota.
 
-### Phase 39 — Gateway-backed disposable jobs  (2 open, 7 closed)
+### Phase 55 — V1 completion definition  (2 open, 21 closed)
 
-- **1625** ☐ Use disposable jobs for classification, memory extraction, reranking, and other bounded support tasks.
-- **1629** ☐ Record which resource performed important memory extraction or classification for debugging.
+- **1923** ☐ Consider V1 usable when a compatible vendor-native pairing receives an inspectable initial prior without overriding stronger observed evidence or user choice.
+- **1924** ☐ Consider V1 usable when a response profile can control user-facing communication without reducing verification or replacing native harness coding instructions.
 
 ### Phase 28 — File-aware memory lookup  (3 open, 2 closed)
 

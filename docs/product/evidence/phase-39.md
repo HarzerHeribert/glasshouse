@@ -278,3 +278,37 @@ Regression evidence:
 Recorded scope limits — stated by the worker, not discovered later:
 - Text scan of the literal, not a live HTTP call — proves the request Glasshouse builds asks for a non-streaming reply; does not exercise a real provider's response handling for that field.
 
+
+
+---
+
+### Line 1629 — which resource performed important support work, for debugging
+
+Package `GH-HARNESS-EFFICIENCY`, 2026-08-31, Sonnet at high (Amber; same package as Phase 56's 1951).
+
+### Record which resource performed important memory extraction or classification for debugging. (line 1629)
+
+Contract: Given routing_observations rows in this project, when Glasshouse renders glasshouse route, it lists the most recent 10 rows whose purpose is classification or memory-extraction — when, purpose, provider, model, route, outcome, wall-clock — while never including a row with no purpose or a purpose outside that pair
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's artifacts (4/4 mutations KILLED with killing tests named; real `test result:` lines; three blast runs with every red attributed — a doc-link defect fixed, the rest pre-existing load flakes — and `integrate.sh`'s merged-tree blast, see the commit). Tokens are carried where a row has them and `token_rows_present == 0` never prints a zero (`print-zero-for-null-tokens` KILLED); token data begins arriving with translated pairs (T1).
+
+Production evidence:
+- `crates/glasshouse/src/routing/evidence.rs` — `EvidenceLedger::recent_support_work`
+- `crates/glasshouse/src/main.rs` — `support_work_section`
+- `crates/glasshouse/src/main.rs` — `route_report (wiring)`
+
+Regression evidence:
+- `support_work_debug::recent_support_work_reads_only_the_two_support_purposes_newest_first`
+- `support_work_debug::the_route_command_prints_the_support_work_section`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| project_id = ?1 AND purpose IN (?2, ?3) -> project_id = ?1 AND (purpose IN (?2, ?3) OR harness IS NOT NULL) (routing/evidence.rs, recent_support_work) | `drop-purpose-filter` | **killed** | `support_work_debug::recent_support_work_reads_only_the_two_support_purposes_newest_first` |
+
+> drop-purpose-filter observed: assertion left == right failed: the interactive coding-agent row (provider: "anyrouter", purpose: None, harness: Some("claude-code")) and the routing-latency row leaked into the result; recent.len() became 7 where 5 was asserted
+
+Recorded scope limits — stated by the worker, not discovered later:
+- no Windows leg run
+- EvidenceLedger::recent (the exact-identity reader) is unchanged; this is a new sibling, not a rewrite of it
+
+---

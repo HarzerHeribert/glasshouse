@@ -402,3 +402,154 @@ Recorded scope limits — stated by the worker, not discovered later:
 - the new test covers the CLI door only; the MCP door's equivalent case was already covered by mcp_project_scope.rs and is cited above rather than re-added
 
 ---
+
+---
+
+
+### Lines 1925–1929 and 1938 — orchestration wake-up, worker control, optional cmux, and the memory criteria
+
+Package `GH-PROVE-IT-V1-ORCH-MEMORY`, 2026-08-31, Sonnet at medium (Green — tests and mutations only; no production change). One new file, `tests/v1_criteria_orch_memory.rs`, six tests, 6/6 mutations KILLED, no packet errors. Notable honest limits: 1926's mutation targets the client delivery path because the door has no per-session ownership gate to mutate (`MessageOrigin` does not distinguish a person's input — by design); 1928 proves FTS5 phrase-token semantics across indexed columns against a substring scan, and prefix-`*` semantics do not exist for any caller (`sanitize_query` quotes every token).
+
+### Consider V1 usable when a worker completion event can reliably wake or notify the orchestrator. (line 1925)
+
+Contract: Given an orchestrator that watched a worker, when a real lifecycle hook reports the worker's turn ended, Glasshouse types one worker-completion line into the orchestrator's own terminal, while never touching the worker itself.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator. A Phase 55 line is a completion CRITERION over a phase already ruled COMPLETE in its own entry; this test is the criterion's tripwire. Artifacts: `test result: ok. 6 passed`, the five neighbouring suites green, one KILLED mutation per line, clean porcelain after every mutation.
+
+Production evidence:
+- `src/api/unix.rs` — `pump_watches`
+- `src/api/unix.rs` — `Completion::line`
+
+Regression evidence:
+- `v1_criteria_orch_memory::worker_control::a_workers_completion_event_reliably_wakes_the_orchestrator`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| match api.send_text(&watch.notify, &completion.line(), MessageOrigin::Machine) { -> match Ok::<(), ApiError>(()) { | `drop-the-completion-notification` | **killed** | `v1_criteria_orch_memory::worker_control::a_workers_completion_event_reliably_wakes_the_orchestrator` |
+
+> drop-the-completion-notification observed: timed out waiting for the orchestrator to be woken (v1_criteria_orch_memory.rs:285)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- does not re-prove the dedup/ordering guarantees (lines 733/739) — tests/worker_wakeup.rs already does and was re-run green
+
+---
+
+### Consider V1 usable when the user can enter and directly control any orchestrated worker. (line 1926)
+
+Contract: Given a live orchestrated worker, a person from their own terminal can send text, interrupt it with a real SIGINT, and read back its terminal output, and the session survives the interrupt.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator. A Phase 55 line is a completion CRITERION over a phase already ruled COMPLETE in its own entry; this test is the criterion's tripwire. Artifacts: `test result: ok. 6 passed`, the five neighbouring suites green, one KILLED mutation per line, clean porcelain after every mutation.
+
+Production evidence:
+- `src/api/client.rs` — `send_message`
+- `src/api/client.rs` — `interrupt`
+- `src/api/client.rs` — `read_output`
+- `src/session/api.rs` — `SessionApi::recent_output`
+
+Regression evidence:
+- `v1_criteria_orch_memory::worker_control::a_user_can_enter_and_directly_control_an_orchestrated_worker`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| "op": "send_message", -> "op": "noop", | `refuse-a-persons-delivery` | **killed** | `v1_criteria_orch_memory::worker_control::a_user_can_enter_and_directly_control_an_orchestrated_worker` |
+
+> refuse-a-persons-delivery observed: timed out waiting for the worker to read the line a person sent (v1_criteria_orch_memory.rs:409)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- the mutation targets the client's delivery path rather than a per-session ownership gate, because the door has no such gate to mutate (phase-15.md/phase-16.md: MessageOrigin does not distinguish a person's input from an orchestrator's on this door)
+
+---
+
+### Consider V1 usable when cmux integration can expose or spawn a session externally without being required for normal operation. (line 1938)
+
+Contract: Given cmux absent, every command runs unchanged; given cmux present, a launch asking for a pane opens one and records it as presentation metadata on the SAME session row, never a second identity.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator. A Phase 55 line is a completion CRITERION over a phase already ruled COMPLETE in its own entry; this test is the criterion's tripwire. Artifacts: `test result: ok. 6 passed`, the five neighbouring suites green, one KILLED mutation per line, clean porcelain after every mutation.
+
+Production evidence:
+- `src/main.rs` — `launch_session (Absent arm eprintln)`
+- `src/integrations/cmux.rs` — `CmuxCli`
+- `src/session/store.rs` — `SessionRecord::presentation_ref`
+
+Regression evidence:
+- `v1_criteria_orch_memory::cmux_optional::cmux_exposes_a_session_externally_and_is_never_required_for_normal_operation`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| eprintln!("glasshouse: cmux is not available ({reason}); the session runs {here}"); -> anyhow::bail!("cmux is not available ({reason})"); | `refuse-instead-of-degrade` | **killed** | `v1_criteria_orch_memory::cmux_optional::cmux_exposes_a_session_externally_and_is_never_required_for_normal_operation` |
+
+> refuse-instead-of-degrade observed: the launch that asked for a pane with no cmux present no longer succeeded (v1_criteria_orch_memory.rs:651)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- --fresh was needed on two launches to avoid the router continuing an existing stopped session, which is Phase 42's documented behaviour, not this line's concern
+
+---
+
+### Consider V1 usable when project-specific durable memory can store the six initial memory kinds. (line 1927)
+
+Contract: Given a memory recorded under any of Phase 20's six kinds, the kind returned at write time and the kind read back afresh by id are both the one asked for.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator. A Phase 55 line is a completion CRITERION over a phase already ruled COMPLETE in its own entry; this test is the criterion's tripwire. Artifacts: `test result: ok. 6 passed`, the five neighbouring suites green, one KILLED mutation per line, clean porcelain after every mutation.
+
+Production evidence:
+- `src/memory/store.rs` — `MemoryStore::record`
+- `src/memory/store.rs` — `MemoryStore::get`
+
+Regression evidence:
+- `v1_criteria_orch_memory::project_memory_stores_each_of_the_six_kinds_and_reads_each_back_with_its_kind_intact`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| kind: new.kind, -> kind: if matches!(new.kind, MemoryKind::Constraint) { MemoryKind::Decision } else { new.kind }, | `collapse-two-kinds-into-one` | **killed** | `v1_criteria_orch_memory::project_memory_stores_each_of_the_six_kinds_and_reads_each_back_with_its_kind_intact` |
+
+> collapse-two-kinds-into-one observed: the kind handed back at write time must be the one asked for (v1_criteria_orch_memory.rs:803)
+
+---
+
+### Consider V1 usable when project memory can be searched with FTS5. (line 1928)
+
+Contract: A two-word query whose terms sit in different indexed columns of one memory, and never appear together as a literal substring, is found by FTS5 MATCH's cross-column AND semantics.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator. A Phase 55 line is a completion CRITERION over a phase already ruled COMPLETE in its own entry; this test is the criterion's tripwire. Artifacts: `test result: ok. 6 passed`, the five neighbouring suites green, one KILLED mutation per line, clean porcelain after every mutation.
+
+Production evidence:
+- `src/memory/search.rs` — `MemoryStore::search_matching`
+- `src/memory/search.rs` — `sanitize_query`
+
+Regression evidence:
+- `v1_criteria_orch_memory::project_memory_is_searched_with_fts5_across_indexed_columns_not_a_substring_scan`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| memories_fts MATCH ?1 -> memories.subject LIKE ?1 | `route-through-a-non-fts-path` | **killed** | `v1_criteria_orch_memory::project_memory_is_searched_with_fts5_across_indexed_columns_not_a_substring_scan` |
+
+> route-through-a-non-fts-path observed: an FTS5 MATCH joins a term in the subject with a term in the body; a substring scan of either column alone could not: [] (v1_criteria_orch_memory.rs:871)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- does not test prefix-* semantics: sanitize_query quotes every token as an exact phrase and exposes no prefix operator to any caller
+
+---
+
+### Consider V1 usable when a small portable checkpoint can hand work from one harness to another. (line 1929)
+
+Contract: A checkpoint written under one harness starts a fresh session under a DIFFERENT harness the launch asks for, that session's own process receives the objective and state, and the source session's record is left untouched.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator. A Phase 55 line is a completion CRITERION over a phase already ruled COMPLETE in its own entry; this test is the criterion's tripwire. Artifacts: `test result: ok. 6 passed`, the five neighbouring suites green, one KILLED mutation per line, clean porcelain after every mutation.
+
+Production evidence:
+- `src/main.rs` — `launch_session (resolve_bootstrap_prompt, checkpoint_command)`
+- `src/session/select.rs` — `select_with`
+
+Regression evidence:
+- `v1_criteria_orch_memory::checkpoint_handoff::a_checkpoint_written_under_one_harness_hands_work_to_a_session_of_a_different_harness`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| NewSession::embedded(selection.id().slug()) -> NewSession::embedded("antigravity") | `bind-checkpoint-to-the-writing-harness` | **killed** | `v1_criteria_orch_memory::checkpoint_handoff::a_checkpoint_written_under_one_harness_hands_work_to_a_session_of_a_different_harness` |
+
+> bind-checkpoint-to-the-writing-harness observed: assertion `left == right` failed (v1_criteria_orch_memory.rs:1005) — the fresh session was recorded under a fixed harness rather than the one the launch asked for
+
+Recorded scope limits — stated by the worker, not discovered later:
+- does not re-prove bootstrap_prompt()'s field ordering or plain-text/no-harness-naming shape — checkpoint_portability.rs and handoff_lines.rs already do and are unchanged
+
+---
