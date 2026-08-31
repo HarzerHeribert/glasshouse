@@ -2038,7 +2038,7 @@ costs a material share of it is not, however small its absolute price.
   "explicit opt-in" indistinguishable from a default, which is the exact wording
   `MeteredUse`'s own doc warns against.
 - **Nothing here authorises spending premium interactive capacity on bookkeeping.**
-  Map line 1611 and the Product Rule at line 2218 still stand.
+  Map line 1611 and the Product Rule at line 2236 still stand.
 
 ### The sub-question this leaves genuinely open, and it must not be faked
 
@@ -3006,4 +3006,54 @@ never-charge rule (line 1954), which is what makes the whole thing
 inspectable.
 
 Not yet packaged; every package owes its Phase −1 from production code.
+
+## Phase 56A: the entitlement is the unit of capacity, and a broker stands between every harness and the pool
+
+**Instruction of record, 2026-08-31, from the user, refining Phase 56.** The
+full text is quoted in the map at Phase 56A's intro; the essence: several
+entitlements of the same vendor (two Claude Max 5x accounts) consumed evenly by
+the scheduler, optimised around reset boundaries — *"A at 12% resetting in
+1h20m and B at 61% resetting in 4d ⇒ burn A; A at 12% resetting in 4d ⇒
+preserve A, route B"* — with independent workers distributed across a pool
+(Claude A, Claude B, Codex, OpenRouter, API fallback) and long-running sessions
+sticky to their account; scored by *available capacity × time-until-reset ×
+recent throttle × session affinity × model availability*; layered as harness →
+protocol adapter → authentication → entitlement → inference. Map lines
+1962–1974, thirteen mandatory lines.
+
+**Does this throw today's work overboard? No — it names what it was missing.**
+Everything that landed on 2026-08-31 is per-resource machinery: capacity bands
+and reset proximity (subscription-pressure), throttle scope and health
+(rate-limit-scope, evaluation-producers), affinity (affinity), reserve rules
+(support-work-economy). All of it keys on `ResourceKind::NativeSubscription
+{ harness }` — **one account per harness**, which is exactly the inefficiency
+the user names. Phase 56A changes the unit: the entitlement. Every one of those
+producers becomes per-entitlement without changing what it measures. Phase 56's
+first package (`subscription-rules`, 1946/1947/1954) is the *rules* half of an
+entitlement and stays; its type is the seed of the pool's per-entitlement rule.
+
+**Order of work, from the tree as it stands.**
+1. **The entitlement as a configured resource, several per vendor** (lines
+   1962, 1963, 1964, 1973) — config and data model: `[entitlements.<name>]`
+   with `kind`, `vendor`, its own credential reference (Phase 9E's secret
+   storage; never shared across entries), and `native_harness` optional.
+   `ResourceKind::NativeSubscription { harness }` becomes one shape of an
+   entitlement, not the shape. No routing change yet.
+2. **Per-entitlement telemetry** (line 1965) — `CapacityFacts`/`CapacityState`,
+   `ObservedHealth`, `ThrottleScope` keyed by entitlement. Only what the
+   provider exposes (Cluster E discipline); an entitlement with no telemetry
+   reads as *unknown*, never as full or empty.
+3. **The broker's score and placement** (lines 1966, 1967, 1968, 1969) — the
+   five-factor score as named contributions in the existing router
+   (`RouterInputs` gains the pool), the reset-boundary rule as its own term
+   with the user's two examples as its tests, stickiness reusing `session_affinity`.
+4. **Fallback order and the announcement** (lines 1970, 1971, 1972) — one
+   stated order, every fallback recorded with a purpose in the evidence
+   ledger, one `glasshouse entitlements` view.
+5. **The end-to-end test** (line 1974) — fixture entitlements, a reset
+   boundary crossed, an exhaustion fallback, through the shipped binary.
+
+Phase 56's translation lines (1948–1950) remain a separate track and still
+wait for the user to name the first pair. **Pursue Phase 56A as the core of
+Phase 56.**
 

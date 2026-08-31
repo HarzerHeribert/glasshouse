@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████████████░░░░░░░░░` 1027 / 1292 mandatory capabilities (79%)
+`███████████████████████████████░░░░░░░░░` 1038 / 1305 mandatory capabilities (79%)
 
 <details>
-<summary>Per-phase breakdown (58 of 105 phases complete)</summary>
+<summary>Per-phase breakdown (58 of 106 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -86,7 +86,7 @@ the authoritative specification and tracks what is done.
 | Phase 30 — Session context metadata | 7/8 |
 | Phase 31 — Compaction-aware behavior | 1/7 |
 | Phase 32 — Resource registry | 12/12 ✅ |
-| Phase 32A — Unified quota and capacity model | 12/21 |
+| Phase 32A — Unified quota and capacity model | 13/21 |
 | Phase 32B — Quota telemetry sources | 13/14 |
 | Phase 32C — Subscription capacity estimation | 0/12 |
 | Phase 32D — Normalized remaining-capacity score | 10/12 |
@@ -103,16 +103,16 @@ the authoritative specification and tracks what is done.
 | Phase 34C — Automatic routing-model selection | 10/13 |
 | Phase 34D — Router request schema | 13/13 ✅ |
 | Phase 34E — Router economics | 8/9 |
-| Phase 34F — Model capability and tier calibration | 0/11 |
+| Phase 34F — Model capability and tier calibration | 1/11 |
 | Phase 35 — Lightweight task classification | 14/14 ✅ |
 | Phase 35A — Candidate generation | 1/11 |
-| Phase 35B — Candidate scoring | 12/25 |
+| Phase 35B — Candidate scoring | 14/25 |
 | Phase 35C — Capacity-aware tier escalation and downgrade | 9/9 ✅ |
 | Phase 35D — Routing under subscription pressure | 8/8 ✅ |
 | Phase 36 — Session affinity | 8/8 ✅ |
 | Phase 37 — Basic session-aware router | 10/11 |
 | Phase 38 — Quota-preserving routing | 5/7 |
-| Phase 39 — Gateway-backed disposable jobs | 0/9 |
+| Phase 39 — Gateway-backed disposable jobs | 7/9 |
 | Phase 40 — Fresh-session handoff | 9/9 ✅ |
 | Phase 41 — Project overview | 15/15 ✅ |
 | Phase 42 — External control API | 13/13 ✅ |
@@ -131,6 +131,7 @@ the authoritative specification and tracks what is done.
 | Phase 54A — Setup and portability completion criteria | 0/10 |
 | Phase 55 — V1 completion definition | 0/23 |
 | Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 0/12 |
+| Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler | 0/13 |
 
 </details>
 <!-- progress:end -->
