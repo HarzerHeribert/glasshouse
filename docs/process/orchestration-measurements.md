@@ -3985,3 +3985,16 @@ Dispatched 16:0x–16:3x with six workers live at the peak (two Fable, one Opus,
 | prove-it-v1-sessions (Sonnet, Green) | 55 1917–1922, 1939 | 7 | 7/7 (+2 SURVIVED, retargeted) | `HarnessAdapter::id` has no production caller; `IntegrationId::slug` is the seam. **1921 was reported `open` because the packet paraphrased the criterion with a clause the map does not contain** ("with its owning orchestrator"); the orchestrator overruled its own packet |
 
 Two packet errors were the orchestrator's, and both are the same shape: per-line guidance in a prove-it packet is read by the worker AS the criterion. Quote the map line's words in the objective; put the suggested seam in a separate sentence marked as a suggestion. The Green tier's own rule held: neither prove-it needed a diff read — the ruling came from the report's artifacts and one grep each.
+
+## Batch 63 outcomes — 2026-08-31, four disjoint packages in one integration
+
+One `integrate.sh` call, one blast radius (89 targets over 19 changed files), one commit (`e03f252`). **9 boxes; every mutation KILLED.** The one red was the pinned pairing tripwire whose own doc comment names exactly this event; the integrator applied the report's quoted one-line fix on the merged tree and the lib target went green (1734).
+
+| package | lines | boxes | mutations | notable |
+|---|---|---|---|---|
+| gateway-translate (Fable, Red) | 56 1949 (+1948/1950/1956 PARTIALLY VERIFIED) | 1 | 4/4 (first batch's verdicts void on an exit-127 `--test-cmd` misuse — detected and re-run by the worker) | codecs around one canonical form; byte-for-byte relay kept and tested; the worker's honest `open` on the three every-pair lines accepted |
+| harness-efficiency (Sonnet, Amber) | 56 1951 + 39 1629 | 2 | 4/4 | tokens carried only where rows have them; `print-zero-for-null-tokens` KILLED |
+| prove-it-v1-orch-memory (Sonnet, Green) | 55 1925–1929, 1938 | 6 | 6/6 | Phase 55 now 21/23 |
+| extract-model-error-wording (Sonnet, Green) | (1174 wording; no box) | 0 | 1/1 | dispatched from the Red report's §8 within the hour |
+
+Recurring defect, now in memory (`detached-gates-die-without-exit-lines`): three detached worker gates died mid-run without exit lines today; both affected workers idled on a `tail -f` that could never fire and looked like "done, no report". The recovery each time: `ps` for the real process (excluding the watchers that match the name), then a `cmux send` + `send-key Enter` nudge.
