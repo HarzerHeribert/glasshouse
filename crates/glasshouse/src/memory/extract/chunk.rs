@@ -98,6 +98,7 @@ impl SessionChunk {
         limits: ChunkLimits,
     ) -> Self {
         let all: Vec<String> = activity.into_iter().collect();
+        let supplied = all.len();
 
         let mut dropped = 0;
         let mut truncated = 0;
@@ -107,13 +108,20 @@ impl SessionChunk {
 
         // Walk backwards so the newest entries claim the budget first, then
         // restore chronological order once the budget has bound.
-        for entry in all.into_iter().rev() {
+        //
+        // The kept set must be a contiguous *tail* of `activity`, because
+        // `lifecycle::chunk_for_session` derives a memory's source-event
+        // range from `kept.len()` alone. Both budget refusals below therefore
+        // stop the walk rather than skipping one entry and admitting an
+        // older, shorter one behind it, which would leave a hole the
+        // provenance arithmetic cannot describe.
+        for (index, entry) in all.iter().rev().enumerate() {
             if kept.len() >= limits.max_entries {
-                dropped += 1;
-                continue;
+                dropped += supplied - index;
+                break;
             }
 
-            let scrubbed = credentials::scrub(&entry);
+            let scrubbed = credentials::scrub(entry);
             redactions += scrubbed.removals();
 
             let mut text = scrubbed.text().trim().to_owned();
@@ -133,8 +141,8 @@ impl SessionChunk {
                 // dropped rather than partially admitted: half an entry
                 // arriving as if it were whole is worse than a reported
                 // absence.
-                dropped += 1;
-                continue;
+                dropped += supplied - index;
+                break;
             }
 
             total += length;
@@ -249,6 +257,42 @@ mod tests {
             limits.max_total_chars
         );
         assert!(chunk.dropped() > 0, "4990+ entries went somewhere");
+    }
+
+    /// The whole-chunk cap refusing a large newer entry must not leave a hole
+    /// for a smaller *older* entry to fill — `chunk_for_session` derives a
+    /// memory's `source_events` range from `kept.len()` alone, which is only
+    /// correct if the kept set is a contiguous tail of `activity`. Finding
+    /// break/memory#4.
+    ///
+    /// Walking newest-to-oldest: `"new"` (3 chars) fits under a 10-char
+    /// budget. The 50-char entry behind it does not, and the bug this guards
+    /// is `continue`ing past that refusal instead of stopping the walk: two
+    /// older, smaller entries then squeeze into the remaining budget, kept
+    /// alongside `"new"` while the 50-char entry between them is dropped —
+    /// a hole neither `chunk_for_session` nor a reader of `entries()` can see
+    /// coming. The fixed walk stops at the first refusal, so whatever
+    /// survives is always a suffix of `activity`.
+    #[test]
+    fn a_refused_entry_does_not_leave_a_hole_for_a_smaller_older_one_to_fill() {
+        let limits = ChunkLimits {
+            max_entries: 10,
+            max_entry_chars: 200,
+            max_total_chars: 10,
+        };
+        let activity = vec![
+            "old".to_owned(),
+            "mid".to_owned(),
+            "x".repeat(50),
+            "new".to_owned(),
+        ];
+        let chunk = SessionChunk::build("s1", None::<String>, activity.clone(), limits);
+
+        assert!(
+            activity.ends_with(chunk.entries()),
+            "the kept set {:?} is not a contiguous tail of {activity:?}",
+            chunk.entries()
+        );
     }
 
     /// The per-entry cap alone does not bound a chunk. Many entries each

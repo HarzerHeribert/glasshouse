@@ -3105,3 +3105,83 @@ Phase 56's translation lines (1948–1950) remain a separate track and still
 wait for the user to name the first pair. **Pursue Phase 56A as the core of
 Phase 56.**
 
+### Step 4's fallback order — the user's ruling, 2026-08-31
+
+`entitlement-fallback-view` closed line 1972 and **refused line 1970**, on the
+ground that the order it names ("subscription to subscription to API credits")
+is an order over *kinds*, and the only two ways to express it were both barred:
+routing on `EntitlementKind` would falsify that field's own documented
+invariant — *"No rule depends on it — so a wrong `kind` misdescribes an
+entitlement and never misroutes one"* — and it is `Option` and absent by
+default; the alternative needed a new `EntitlementConfig` field. The worker
+stopped and asked rather than invent policy, and left no dead code behind.
+
+**The user's answer, in their words:** *"switch to another subscription always
+if same model or model of similar capability is available in another. You can't
+put a fable 5 task and switch it to a nemotron v3 so we have to think in model
+tiers. These are determined by public benchmarks if this possible to find out as
+a baseline. A user can assign tiers to models I think that's a better plan for
+UX. Determining model if they are api or subscription is just which entitlement
+brings them. A api key or a subscription isn't that the distinction?"* — and,
+completing the order: *"If subscription model of capability is not available
+switch to api one - if available."*
+
+**The order, therefore, and its missing constraint.** Line 1970's order stands
+as written, but it is **tier-preserving**, which the line does not say and which
+is the part that matters:
+
+1. another **subscription** entitlement that can serve the **same model, or a
+   model of the same capability tier**;
+2. failing that, an **API-credit** entitlement that can serve that tier;
+3. never a fallback that changes the capability tier. *"You can't put a fable 5
+   task and switch it to a nemotron v3."* A fallback that silently downgrades
+   the model is worse than a refusal, because the work continues and looks fine.
+
+**Three consequences for the implementer, each checked against the tree.**
+
+**(a) The subscription/API distinction needs no new field and no
+routing-significant `kind`.** It is already structural:
+`EntitlementBacking::NativeHarness(_)` authenticates *through the harness* —
+that is a subscription — and `EntitlementBacking::Provider(_)` carries a
+credential, which is an API key. The separation is not merely conventional, it
+is **enforced**: an entry that is a native sign-in *and* names its own
+credential is refused as `NativeSignInWithOwnCredential`, which is map line
+1973's isolation rule. So `EntitlementKind`'s invariant survives intact, and the
+user's hope — *"isn't that the distinction?"* — is already true in the data
+model.
+
+**The gap is one level up:** `ResolvedEntitlement::to_routing` renders the
+backing as a **human string** ("no backing stated", and so on) rather than
+carrying the discriminant, so the router cannot branch on it today. Making
+`routing::Entitlement` carry the backing as data is the first piece of work.
+
+**(b) "Model tier" is a new axis, and the existing `tier` vocabulary is not
+it.** `WorkloadTier` (`routing/classify.rs`) ranks **how hard the task is** —
+`Deterministic`, `Leaf`, `Standard`, and up — and `EntitlementConfig`'s
+`allow_tiers`/`deny_tiers` are `ConfiguredWorkloadTier`, the same axis.
+`routing/capability.rs` describes **hard capabilities** (`CapabilityAxis`,
+`ResourceCapabilities`), which is *can it do this at all*, not *how capable is
+it*. **Nothing in the tree ranks models by capability class.** That is the
+second piece of work, and its home is **Phase 34F, "Model capability and tier
+calibration"** — not Phase 56A, which should consume the axis rather than define
+it.
+
+**(c) User-assigned tiers are the source of truth; benchmarks are a default.**
+The user's UX preference is explicit — *"A user can assign tiers to models I
+think that's a better plan for UX"* — with public benchmarks as *"a baseline"*.
+That ordering matters: a shipped benchmark table is a **seed** a user may
+override, never an authority that overrides them, and a model the table does not
+know must read **unknown** rather than be guessed into a tier (the same Cluster E
+discipline the pool view already applies to capacity). A wrong tier here does
+not misdescribe an entitlement, it **misroutes work** — which is exactly the
+property `EntitlementKind` was kept free of.
+
+**Order of work this implies:** (1) carry the backing discriminant into
+`routing::Entitlement`; (2) define the model-capability tier under Phase 34F,
+user-assignable with a benchmark-seeded default and an honest `unknown`;
+(3) then line 1970's fallback becomes a post-ranking reselection over
+`Routed::considered()`'s already-complete list — which preserves *additive,
+never a filter* — recorded on the launch path with a new purpose constant beside
+`TIER_ESCALATION_PURPOSE`, exactly as `record_tier_movement` does.
+
+

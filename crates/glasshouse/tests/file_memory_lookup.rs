@@ -307,6 +307,95 @@ fn the_file_observed_section_is_dropped_whole_rather_than_truncated() {
     );
 }
 
+/// A task naming more distinct paths than `inject::MAX_OBSERVED_PATHS` (8,
+/// private to that module) must never reach the ones named after the bound: a
+/// memory observed only beside a ninth named path must never appear, however
+/// current and however unambiguous the association would otherwise be.
+///
+/// Paths 1-8 have no observed memories at all, so the only way this test can
+/// pass with a non-empty result is if the ninth path was looked up — which
+/// the bound must prevent. Task text and memory body share no tokens, so
+/// nothing here can be explained by the text search instead.
+#[test]
+fn a_task_naming_more_paths_than_the_bound_never_reaches_the_one_named_last() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let project = fixture.memory();
+    let store = project.store();
+
+    let beyond_bound = store
+        .record(NewMemory::new(
+            MemoryKind::Finding,
+            "walrus quokka retry loop past the bound",
+        ))
+        .unwrap()
+        .id;
+    store
+        .record_observed_files(
+            std::slice::from_ref(&beyond_bound),
+            &["src/zzzlast.rs".to_owned()],
+        )
+        .unwrap();
+
+    let mut paths: Vec<String> = (1..=8).map(|n| format!("src/f{n}.rs")).collect();
+    paths.push("src/zzzlast.rs".to_owned());
+    let task = format!("touch {}", paths.join(" "));
+
+    let result = briefing(&store, &task, &HashSet::new()).unwrap();
+    if let Some(injection) = result {
+        assert!(
+            !injection.memories().contains(&beyond_bound),
+            "the ninth named path must never be looked up: {}",
+            injection.text()
+        );
+    }
+}
+
+/// For an in-bounds task (fewer named paths than the bound), the returned
+/// file-observed records must be identical — same ids, same order — to what
+/// the old `retain` + `truncate(3)` kept: the first three, in first-mention
+/// path order, of the ones that pass the currency filter.
+#[test]
+fn the_file_observed_records_for_an_in_bounds_task_keep_the_old_order_and_count() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let project = fixture.memory();
+    let store = project.store();
+
+    let mut ids: Vec<MemoryId> = Vec::new();
+    for label in ["alpha", "bravo", "charlie", "delta"] {
+        let id = store
+            .record(NewMemory::new(
+                MemoryKind::Finding,
+                format!("gerbil {label} habit unrelated to the task text"),
+            ))
+            .unwrap()
+            .id;
+        store
+            .record_observed_files(std::slice::from_ref(&id), &[format!("src/{label}.rs")])
+            .unwrap();
+        ids.push(id);
+    }
+
+    let task = "touch src/alpha.rs src/bravo.rs src/charlie.rs src/delta.rs";
+    let injection = briefing(&store, task, &HashSet::new())
+        .unwrap()
+        .expect("four observed paths must inject something");
+
+    assert_eq!(
+        injection.memories(),
+        &ids[0..3],
+        "the first three named paths' memories, in that order, must be exactly what the \
+         section carries: {}",
+        injection.text()
+    );
+    assert!(
+        !injection.memories().contains(&ids[3]),
+        "the fourth path's memory must be truncated away exactly as `truncate(3)` did: {}",
+        injection.text()
+    );
+}
+
 // -------------------------------------------------------------------------
 // Line 1143 — `query_memory`'s `path` mode, against the shipped binary.
 // -------------------------------------------------------------------------

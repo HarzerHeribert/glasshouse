@@ -31,8 +31,14 @@ pub enum ShimError {
 
     /// A name would be interpolated into the generated script, and it
     /// carries a character that a shell or `cmd.exe` would act on.
+    ///
+    /// `name` is formatted with `{name:?}` (escaped, quoted) rather than
+    /// `{name}` (raw) — the rejected value is exactly the one that failed a
+    /// character check, so it may itself contain a newline or other control
+    /// character, and echoing that verbatim into a log would let the
+    /// refused input inject a fake line into it.
     #[error(
-        "refusing to generate a shim for {field} `{name}`: it contains `{offending}`, which a \
+        "refusing to generate a shim for {field} {name:?}: it contains `{offending}`, which a \
          shell would interpret rather than pass through. Names may use letters, digits, `-`, \
          `_` and `.` only"
     )]
@@ -40,6 +46,17 @@ pub enum ShimError {
         field: &'static str,
         name: String,
         offending: char,
+    },
+
+    /// `--name` (the on-disk write target) failed a check beyond the
+    /// character allow-list [`UnsafeName`](ShimError::UnsafeName) applies —
+    /// see `check_file_name` in this module. `reason` is always a fixed
+    /// string, never built from the rejected value, so there is nothing here
+    /// for an attacker-controlled name to inject.
+    #[error("refusing to generate a shim for {field}: {reason}")]
+    InvalidName {
+        field: &'static str,
+        reason: &'static str,
     },
 
     /// The file (or its permissions, on Unix) could not be written.
@@ -103,6 +120,39 @@ fn check_name(field: &'static str, name: &str) -> Result<(), ShimError> {
     Ok(())
 }
 
+/// Refuse a `--name` that would make [`generate`]'s write land somewhere
+/// other than `request.dir.join(<name>)`.
+///
+/// `--name` becomes the on-disk write target, not a script interpolation
+/// like `harness` or `profile` — the hazard is worse, not smaller: an
+/// absolute path (or, on Windows, a drive- or UNC-qualified one) makes
+/// `request.dir.join(file_name)` discard `dir` entirely, and a path
+/// separator lets `name` climb out of `dir` via `..`. [`check_name`]'s
+/// character allow-list already refuses every `/`, `\` and `:` — refusing by
+/// character set rather than trying to parse a path, so this closes both a
+/// Unix absolute path and every Windows spelling (`C:\x`, `\\?\x`, bare
+/// `C:x`) the same way. Two values pass that allow-list unchanged and still
+/// need a name of their own: the empty string, and a bare `..`, which today
+/// is inert (it resolves to `dir`'s own parent, an existing directory, so
+/// `std::fs::write` fails with "is a directory" rather than writing
+/// anywhere) but is refused explicitly so that stays true regardless of how
+/// the path is computed later.
+fn check_file_name(name: &str) -> Result<(), ShimError> {
+    if name.is_empty() {
+        return Err(ShimError::InvalidName {
+            field: "name",
+            reason: "may not be empty",
+        });
+    }
+    if name == ".." {
+        return Err(ShimError::InvalidName {
+            field: "name",
+            reason: "may not be `..`",
+        });
+    }
+    check_name("name", name)
+}
+
 /// The file name a shim gets when the caller does not choose one.
 fn default_file_name(platform: HostPlatform, harness: &str) -> String {
     if platform.is_windows() {
@@ -141,6 +191,12 @@ pub fn generate(platform: HostPlatform, request: &ShimRequest<'_>) -> Result<Pat
     // interpolated into a script, so an unsafe one is refused outright.
     check_name("harness", request.harness)?;
     check_name("profile", request.profile)?;
+    // `request.name`, when given, becomes the write target itself — see
+    // `check_file_name`'s doc for why it needs more than the interpolation
+    // check above.
+    if let Some(name) = request.name {
+        check_file_name(name)?;
+    }
 
     let file_name = request
         .name
@@ -452,5 +508,94 @@ mod tests {
         let path = generate(HostPlatform::Linux, &forced).unwrap();
         assert_eq!(path, existing);
         assert_ne!(std::fs::read_to_string(&path).unwrap(), "PRE-EXISTING");
+    }
+
+    /// `--name` becomes the write target, not a script interpolation, so a
+    /// hostile value here is a path-traversal hazard: an absolute path, a
+    /// `..` component, or a separator can make `request.dir.join(name)` land
+    /// outside `request.dir` entirely (finding GH-BREAK-CLI-SURFACE #1). This
+    /// table is what `scripts/mutate.sh` kills when the `check_file_name`
+    /// call on `request.name` is removed from `generate`.
+    #[test]
+    fn a_hostile_name_is_refused_and_writes_nothing_anywhere() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A directory outside `dir` an absolute `--name` could point into —
+        // never `/tmp` directly, so this test cannot escape into the real
+        // filesystem.
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let absolute_target = elsewhere.join("poc");
+
+        let exe = PathBuf::from("/opt/glasshouse/bin/glasshouse");
+
+        let hostile_names: Vec<String> = vec![
+            absolute_target.to_str().unwrap().to_owned(), // absolute path
+            "../x".to_owned(),                            // multi-level traversal
+            "a/b".to_owned(),                             // Unix separator
+            "a\\b".to_owned(),                            // Windows separator
+            "C:\\x".to_owned(),                           // Windows drive-qualified
+            "..".to_owned(),                              // bare parent component
+            String::new(),                                // empty
+        ];
+
+        for name in &hostile_names {
+            let req = ShimRequest {
+                harness: "claude-code",
+                profile: "fast",
+                glasshouse_exe: &exe,
+                dir: &dir,
+                name: Some(name.as_str()),
+                force: true,
+            };
+            let err = generate(HostPlatform::Linux, &req).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ShimError::UnsafeName { .. } | ShimError::InvalidName { .. }
+                ),
+                "name {name:?} should be refused, got: {err}"
+            );
+        }
+
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "a refused --name must leave the target directory untouched"
+        );
+        assert!(
+            !absolute_target.exists(),
+            "a refused absolute --name must not write outside --dir"
+        );
+        assert_eq!(
+            std::fs::read_dir(&elsewhere).unwrap().count(),
+            0,
+            "a refused absolute --name must not write outside --dir"
+        );
+        // `../x`'s would-be target: one level above `dir`, i.e. directly
+        // inside `tmp`.
+        assert!(
+            !tmp.path().join("x").exists(),
+            "a refused `../x` --name must not escape --dir"
+        );
+    }
+
+    /// The control case for the table above: an ordinary `--name` is
+    /// unaffected by the new check and still writes exactly one file at
+    /// `dir.join(name)`, as it did before this fix.
+    #[test]
+    fn an_ordinary_name_still_writes_exactly_at_dir_join_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = PathBuf::from("/opt/glasshouse/bin/glasshouse");
+
+        let req = request("claude-code", "fast", &exe, &dir, Some("my-shim.sh"), false);
+        let path = generate(HostPlatform::Linux, &req).unwrap();
+
+        assert_eq!(path, dir.join("my-shim.sh"));
+        assert!(path.exists());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     }
 }

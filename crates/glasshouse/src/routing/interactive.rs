@@ -806,8 +806,7 @@ impl InteractiveRouting {
         }
 
         if !same_model.is_empty() {
-            let (to, explanation, domain_effect) = best(same_model);
-            let cache = CacheLocality::between(current.backend(), to.backend());
+            let (to, cache, explanation, domain_effect) = ranked_with_cache(current, same_model);
             return FailureResponse::FailOver {
                 to,
                 cache,
@@ -817,8 +816,7 @@ impl InteractiveRouting {
         }
 
         if !migration.is_empty() {
-            let (to, explanation, domain_effect) = best(migration);
-            let cache = CacheLocality::between(current.backend(), to.backend());
+            let (to, cache, explanation, domain_effect) = ranked_with_cache(current, migration);
             return FailureResponse::OfferMigration {
                 to,
                 cache,
@@ -1263,6 +1261,26 @@ fn best(
             correlation_displaced,
         },
     )
+}
+
+/// The setup both [`FailureResponse::FailOver`] and
+/// [`FailureResponse::OfferMigration`] need: the best-ranked candidate from
+/// [`best`], plus the cache locality of moving to it from `current`. Shared
+/// because the two arms of [`InteractiveRouting::on_provider_failure`] built
+/// this identically before this extraction — they differ only in which
+/// variant wraps the result.
+fn ranked_with_cache(
+    current: &Assignment,
+    candidates: Vec<(Assignment, RoutingExplanation)>,
+) -> (
+    Assignment,
+    CacheLocality,
+    RoutingExplanation,
+    FailureDomainEffect,
+) {
+    let (to, explanation, domain_effect) = best(candidates);
+    let cache = CacheLocality::between(current.backend(), to.backend());
+    (to, cache, explanation, domain_effect)
 }
 
 /// The index of the highest `score`, preferring the first on a tie — the
@@ -1906,6 +1924,37 @@ mod tests {
                 );
             }
             other => panic!("a material model change must not be taken transparently: {other:?}"),
+        }
+    }
+
+    /// Characterizes `ranked_with_cache`, extracted from the identical
+    /// `best` + `CacheLocality::between` setup the `FailOver` and
+    /// `OfferMigration` arms used to repeat: the migration arm's offered
+    /// candidate carries the same cache-locality computation as the failover
+    /// arm's, not a private copy that could silently drift from it.
+    #[test]
+    fn a_migration_offer_carries_the_same_cache_locality_computation_as_failover() {
+        let routing = InteractiveRouting::new();
+        let current = session();
+        let response = routing.on_provider_failure(
+            &current,
+            ProviderFailure::Refused { status: 503 },
+            &[backend("kilo", "a-different-model")],
+            PairingPreference::Strong,
+            &pairing::PairingOverrides::default(),
+            &NoObservations,
+            &RouteCorrelations::default(),
+        );
+        match response {
+            FailureResponse::OfferMigration { to, cache, .. } => {
+                assert_eq!(
+                    cache,
+                    CacheLocality::between(current.backend(), to.backend()),
+                    "the migration arm's cache locality must be the same computation the \
+                     failover arm shares through `ranked_with_cache`"
+                );
+            }
+            other => panic!("expected an offered migration: {other:?}"),
         }
     }
 

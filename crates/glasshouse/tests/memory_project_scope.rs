@@ -186,3 +186,55 @@ fn the_review_queue_and_the_status_count_never_reach_a_memory_planted_from_anoth
         .unwrap();
     assert_eq!(planted_status, "needs_review");
 }
+
+/// `MemoryStore::resolve_id` — the read door behind every prefix a user
+/// copies off a listing. A prefix that is unique *within the current
+/// project* must resolve to that project's own row even when a row belonging
+/// to another project shares the same leading characters.
+///
+/// The premise is asserted first: both rows are planted with the identical
+/// 8-character prefix, so an unscoped `resolve_id` sees two matches and
+/// answers `NotFound` — the defect this fix removes. The scoped version must
+/// instead break the tie in favour of this project, without ever letting the
+/// foreign row's identifier be the one returned.
+#[test]
+fn a_prefix_unique_within_this_project_resolves_even_when_another_project_shares_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alpha = Fixture::new(tmp.path(), "alpha");
+    let beta = Fixture::new(tmp.path(), "beta");
+
+    let shared_prefix = "beefbeef";
+    let alpha_id = format!("{shared_prefix}{}", "0".repeat(24));
+    let beta_id = format!("{shared_prefix}{}", "1".repeat(24));
+    assert_eq!(alpha_id.len(), 32);
+    assert_eq!(beta_id.len(), 32);
+
+    let conn = beta.raw_connection();
+    plant_foreign_memory(
+        &conn,
+        &alpha_id,
+        alpha.project_id(),
+        "active",
+        "alpha's row, sharing beta's prefix",
+    );
+    plant_foreign_memory(
+        &conn,
+        &beta_id,
+        beta.project_id(),
+        "active",
+        "beta's own row, sharing alpha's prefix",
+    );
+    drop(conn);
+
+    let beta_memory = beta.memory();
+    let beta_store = beta_memory.store();
+
+    let resolved = beta_store
+        .resolve_id(shared_prefix)
+        .unwrap_or_else(|err| panic!("a prefix unique within this project must resolve: {err}"));
+    assert_eq!(
+        resolved.as_str(),
+        beta_id,
+        "the resolved id must be this project's own row, never the foreign one"
+    );
+}

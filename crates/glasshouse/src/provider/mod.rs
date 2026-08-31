@@ -343,6 +343,28 @@ fn unverified_support(protocol: WireProtocol, base_url: &str) -> ProtocolSupport
     }
 }
 
+/// A provider that declares exactly one protocol and nothing beyond it: no
+/// model-list endpoint, no usage telemetry, no extra headers established.
+/// The shape seven of [`templates`]'s built-ins share verbatim; the
+/// providers with a second protocol, a verified endpoint, or a header stay
+/// spelled out as full [`Provider`] literals because this helper would not
+/// save them anything true.
+fn unverified_provider(
+    name: &str,
+    protocol: WireProtocol,
+    base_url: &str,
+    credential_env: Vec<String>,
+) -> Provider {
+    Provider {
+        name: name.to_owned(),
+        protocols: vec![unverified_support(protocol, base_url)],
+        model_list_endpoint: Declared::Unverified,
+        usage_telemetry: Declared::Unverified,
+        credential_env,
+        headers: vec![],
+    }
+}
+
 /// The built-in provider templates — see the module documentation for what
 /// "built-in" means here and what was deliberately left out.
 pub fn templates() -> Vec<Provider> {
@@ -441,23 +463,18 @@ pub fn templates() -> Vec<Provider> {
             credential_env: vec!["ANYROUTER_API_KEY".to_owned()],
             headers: vec![],
         },
-        Provider {
-            name: "zai".to_owned(),
-            protocols: vec![unverified_support(
-                WireProtocol::OpenAiChat,
-                "https://api.z.ai/api/paas/v4",
-            )],
-            // Deliberately NOT promoted, unlike the five beside it. z.ai
-            // answers `401` to every path under `/api/paas/v4/`, including
-            // ones that plainly do not exist, so its `401` on `/models`
-            // establishes nothing about `/models`. The full control run is in
-            // the module documentation. Promoting this needs one
-            // authenticated request, not another unauthenticated one.
-            model_list_endpoint: Declared::Unverified,
-            usage_telemetry: Declared::Unverified,
-            credential_env: vec!["ZAI_API_KEY".to_owned()],
-            headers: vec![],
-        },
+        // Deliberately NOT promoted, unlike the five beside it. z.ai answers
+        // `401` to every path under `/api/paas/v4/`, including ones that
+        // plainly do not exist, so its `401` on `/models` establishes
+        // nothing about `/models`. The full control run is in the module
+        // documentation. Promoting this needs one authenticated request, not
+        // another unauthenticated one.
+        unverified_provider(
+            "zai",
+            WireProtocol::OpenAiChat,
+            "https://api.z.ai/api/paas/v4",
+            vec!["ZAI_API_KEY".to_owned()],
+        ),
         // Kilo and Nous, both added 2026-08-26 from a live `GET /models` —
         // see the module documentation. Until that date both were named in
         // `DELIBERATELY_UNTEMPLATED` precisely because no endpoint had been
@@ -496,60 +513,40 @@ pub fn templates() -> Vec<Provider> {
             credential_env: vec!["NOUS_API_KEY".to_owned()],
             headers: vec![],
         },
-        Provider {
-            name: "opencode-zen".to_owned(),
-            protocols: vec![unverified_support(
-                WireProtocol::OpenAiChat,
-                "https://opencode.ai/zen/v1",
-            )],
-            model_list_endpoint: Declared::Unverified,
-            usage_telemetry: Declared::Unverified,
-            // No credential environment variable was established for this
-            // one — see the module documentation on guessing.
-            credential_env: vec![],
-            headers: vec![],
-        },
-        Provider {
-            name: "ollama".to_owned(),
-            protocols: vec![unverified_support(
-                WireProtocol::OpenAiChat,
-                "http://localhost:11434/v1",
-            )],
-            model_list_endpoint: Declared::Unverified,
-            usage_telemetry: Declared::Unverified,
-            credential_env: vec![],
-            headers: vec![],
-        },
-        Provider {
-            name: "llama-cpp".to_owned(),
-            protocols: vec![unverified_support(
-                WireProtocol::OpenAiChat,
-                "http://localhost:8080/v1",
-            )],
-            model_list_endpoint: Declared::Unverified,
-            usage_telemetry: Declared::Unverified,
-            credential_env: vec![],
-            headers: vec![],
-        },
-        Provider {
-            name: "nvidia".to_owned(),
-            // `docs.api.nvidia.com/nim/reference/llm-apis` gives base
-            // `https://integrate.api.nvidia.com` with `POST
-            // /v1/chat/completions`; NVIDIA's own `build.nvidia.com` model
-            // pages use `base_url = "https://integrate.api.nvidia.com/v1"`.
-            // Read 2026-08-25. `openai-chat` only — no Responses endpoint
-            // was established, so this template cannot back Codex, which
-            // needs `openai-responses`.
-            protocols: vec![unverified_support(
-                WireProtocol::OpenAiChat,
-                "https://integrate.api.nvidia.com/v1",
-            )],
-            model_list_endpoint: Declared::Unverified,
-            usage_telemetry: Declared::Unverified,
-            // NVIDIA's own sample reads `api_key = "$NVIDIA_API_KEY"`.
-            credential_env: vec!["NVIDIA_API_KEY".to_owned()],
-            headers: vec![],
-        },
+        // No credential environment variable was established for
+        // opencode-zen — see the module documentation on guessing.
+        unverified_provider(
+            "opencode-zen",
+            WireProtocol::OpenAiChat,
+            "https://opencode.ai/zen/v1",
+            vec![],
+        ),
+        unverified_provider(
+            "ollama",
+            WireProtocol::OpenAiChat,
+            "http://localhost:11434/v1",
+            vec![],
+        ),
+        unverified_provider(
+            "llama-cpp",
+            WireProtocol::OpenAiChat,
+            "http://localhost:8080/v1",
+            vec![],
+        ),
+        // `docs.api.nvidia.com/nim/reference/llm-apis` gives base
+        // `https://integrate.api.nvidia.com` with `POST
+        // /v1/chat/completions`; NVIDIA's own `build.nvidia.com` model
+        // pages use `base_url = "https://integrate.api.nvidia.com/v1"`.
+        // Read 2026-08-25. `openai-chat` only — no Responses endpoint
+        // was established, so this template cannot back Codex, which
+        // needs `openai-responses`. NVIDIA's own sample reads
+        // `api_key = "$NVIDIA_API_KEY"`.
+        unverified_provider(
+            "nvidia",
+            WireProtocol::OpenAiChat,
+            "https://integrate.api.nvidia.com/v1",
+            vec!["NVIDIA_API_KEY".to_owned()],
+        ),
         Provider {
             name: "groq".to_owned(),
             // Base URL and wire protocol read off the live service itself,
@@ -613,22 +610,13 @@ pub fn templates() -> Vec<Provider> {
         // (OpenAI-compatible chat completions, or Anthropic Messages), but
         // the base URL and credential are the user's to supply — there is no
         // one service behind either name.
-        Provider {
-            name: "openai-compatible".to_owned(),
-            protocols: vec![unverified_support(WireProtocol::OpenAiChat, "")],
-            model_list_endpoint: Declared::Unverified,
-            usage_telemetry: Declared::Unverified,
-            credential_env: vec![],
-            headers: vec![],
-        },
-        Provider {
-            name: "anthropic-compatible".to_owned(),
-            protocols: vec![unverified_support(WireProtocol::AnthropicMessages, "")],
-            model_list_endpoint: Declared::Unverified,
-            usage_telemetry: Declared::Unverified,
-            credential_env: vec![],
-            headers: vec![],
-        },
+        unverified_provider("openai-compatible", WireProtocol::OpenAiChat, "", vec![]),
+        unverified_provider(
+            "anthropic-compatible",
+            WireProtocol::AnthropicMessages,
+            "",
+            vec![],
+        ),
     ]
 }
 
@@ -1231,5 +1219,29 @@ mod tests {
                 provider.name
             );
         }
+    }
+
+    // --- GH-DEDUP-PROVIDER finding #3: templates() output is pinned --------
+
+    /// Pins `templates()`'s `Debug` output, captured **before** the
+    /// `unverified_provider` refactor that collapses seven of its fourteen
+    /// `Provider` literals into one call each. `Provider` and every type it
+    /// contains derive `Debug` deterministically (field order, no `HashMap`),
+    /// so a byte-for-byte match here is the same claim as "every provider's
+    /// every field is unchanged" — the proof the packet's finding #3 requires
+    /// before the literal-collapsing refactor is admissible. The fixture was
+    /// generated by running `templates()` against the pre-refactor source and
+    /// writing its `Debug` output verbatim; it is data, not something to hand
+    /// edit.
+    #[test]
+    fn templates_output_is_unchanged_by_the_literal_dedup_refactor() {
+        let pinned = include_str!("testdata/templates_pin.txt");
+        assert_eq!(
+            format!("{:?}", templates()),
+            pinned,
+            "templates() no longer produces byte-identical output to the \
+             pre-refactor fixture — finding #3's refactor must not change \
+             what any provider template contains"
+        );
     }
 }

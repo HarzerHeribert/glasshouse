@@ -151,6 +151,16 @@ const CANDIDATE_LIMIT: usize = 40;
 /// not with every row `memory_files` happens to hold.
 const MAX_FILE_OBSERVED_MEMORIES: usize = 3;
 
+/// The most of a task's named paths line 1140 looks up.
+///
+/// `paths_named_in` is a spelling test over caller-supplied prose and has no
+/// cap of its own, and each path here is one SQL query. [`MAX_QUERY_CHARS`]
+/// bounds the retrieval half of `briefing` for the same reason — no caller
+/// input may raise a ceiling — and this is that bound for the other half.
+/// Paths are in first-mention order, so what a bound drops is what the task
+/// named last.
+const MAX_OBSERVED_PATHS: usize = 8;
+
 /// A labelled block of this project's memory, ready to deliver.
 ///
 /// Constructed only by [`briefing`]. There is no `new`, no `From<String>` and
@@ -313,23 +323,32 @@ fn file_observed_memories(
     excluded.extend(already_selected.iter().map(|record| record.id.clone()));
 
     let mut observed: Vec<MemoryRecord> = Vec::new();
-    for path in &paths {
+    for path in paths.iter().take(MAX_OBSERVED_PATHS) {
+        if observed.len() >= MAX_FILE_OBSERVED_MEMORIES {
+            break;
+        }
         let grouped = store.for_path(path, SearchScope::Current, CANDIDATE_LIMIT)?;
         for record in grouped
             .invariants_and_constraints
             .into_iter()
             .chain(grouped.other)
         {
+            if observed.len() >= MAX_FILE_OBSERVED_MEMORIES {
+                break;
+            }
             if excluded.contains(&record.id) {
                 continue;
             }
             excluded.insert(record.id.clone());
-            observed.push(record);
+            // Filtered here rather than after the loop so the early exit
+            // above keeps exactly the records the old `retain` + `truncate`
+            // kept: same order, same predicate, same first three.
+            if record.is_current() && !is_unreaffirmed_idea(&record) {
+                observed.push(record);
+            }
         }
     }
 
-    observed.retain(|record| record.is_current() && !is_unreaffirmed_idea(record));
-    observed.truncate(MAX_FILE_OBSERVED_MEMORIES);
     Ok(observed)
 }
 
@@ -366,7 +385,13 @@ fn render(selected: &[MemoryRecord], file_observed: &[MemoryRecord]) -> Option<I
         let entry = render_entry(index + 1, selected.len(), record, None);
         let cost = entry.len() + 1;
         if used + cost > MAX_INJECTED_BYTES {
-            break;
+            // `continue`, not `break`. The per-field budgets are counted in
+            // `char`s and this ceiling is counted in bytes, so entry sizes
+            // vary by up to 4x with the alphabet a memory is written in: a
+            // single multi-byte entry can exceed the whole ceiling on its
+            // own, and breaking here would drop the entries behind it too —
+            // delivering nothing rather than delivering what fits.
+            continue;
         }
         used += cost;
         entries.push(entry);
@@ -727,5 +752,67 @@ mod tests {
         let task = "x".repeat(MAX_QUERY_CHARS * 40);
         let query: String = task.chars().take(MAX_QUERY_CHARS).collect();
         assert_eq!(query.chars().count(), MAX_QUERY_CHARS);
+    }
+
+    /// A minimal, otherwise-unremarkable record whose body is `body` — enough
+    /// to drive `render` without touching a real store.
+    fn record_with_body(body: &str) -> MemoryRecord {
+        MemoryRecord {
+            id: MemoryId::new("0123456789abcdef0123456789abcdef"),
+            project_id: "test-project".to_owned(),
+            kind: MemoryKind::Finding,
+            authority: None,
+            status: crate::memory::store::MemoryStatus::Active,
+            subject: None,
+            body: body.to_owned(),
+            source_session_id: None,
+            source_commit: None,
+            extraction_trigger: None,
+            source_events: None,
+            provenance: crate::memory::store::DecisionProvenance::default(),
+            superseded_by: None,
+            superseded_reason: None,
+            validity_conditions: None,
+            invalidation_conditions: None,
+            review_reason: None,
+            review_marked_at: None,
+            last_validated_at: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// A record with every quotable field maxed out in a multi-byte
+    /// alphabet — the finding's own worst case: subject, body and all three
+    /// binding-detail fields at their full `char` budget, each byte multiple
+    /// of that budget rather than 1, so the one entry alone exceeds
+    /// [`MAX_INJECTED_BYTES`] regardless of what else is in the block.
+    fn maximal_record(glyph: &str) -> MemoryRecord {
+        let mut record = record_with_body(&glyph.repeat(MAX_INJECTED_BODY_CHARS));
+        record.kind = MemoryKind::Constraint;
+        record.authority = Some(MemoryAuthority::Constraint);
+        record.subject = Some(glyph.repeat(MAX_INJECTED_SUBJECT_CHARS));
+        record.provenance = crate::memory::store::DecisionProvenance {
+            rationale: Some(glyph.repeat(MAX_INJECTED_DETAIL_CHARS)),
+            ..Default::default()
+        };
+        record.validity_conditions = Some(glyph.repeat(MAX_INJECTED_DETAIL_CHARS));
+        record.invalidation_conditions = Some(glyph.repeat(MAX_INJECTED_DETAIL_CHARS));
+        record
+    }
+
+    /// A memory whose quoted fields are multi-byte can exceed the byte
+    /// ceiling on its own. It must cost its own slot, not the whole block —
+    /// finding break/memory#2.
+    #[test]
+    fn one_oversized_entry_does_not_suppress_the_entries_behind_it() {
+        let selected = vec![
+            maximal_record("漢"),
+            record_with_body("keep me"),
+            record_with_body("keep me too"),
+        ];
+        let injection = render(&selected, &[]).expect("something fits");
+        assert_eq!(injection.memories().len(), 2, "{}", injection.text());
+        assert!(injection.text().len() <= MAX_INJECTED_BYTES);
     }
 }

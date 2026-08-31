@@ -251,6 +251,28 @@ pub struct RateLimitHeaders {
 /// second one — see its own doc comment.
 pub(crate) const MINUTE_SECONDS: i64 = 60;
 
+/// `current` if it is no longer readable (a subscription's opaque pool, say)
+/// or `value` was not carried by this header set; otherwise `value` wrapped
+/// as a fresh [`Capacity::Measured`] reading. The one "did this header
+/// actually supply something, and is the pool still willing to accept it"
+/// check [`RateLimitHeaders::apply_to`] repeated four times inline.
+fn fill_measured(
+    current: Capacity<NativeAmount>,
+    value: Option<i64>,
+    unit: &str,
+    observed_at_unix: i64,
+    source: ReadingSource,
+) -> Capacity<NativeAmount> {
+    match (current.is_readable(), value) {
+        (true, Some(value)) => Capacity::Measured(Reading::new(
+            NativeAmount::whole(value, unit),
+            observed_at_unix,
+            source,
+        )),
+        _ => current,
+    }
+}
+
 impl RateLimitHeaders {
     /// Read whichever of [`RATE_LIMIT_HEADERS`] are present.
     ///
@@ -447,28 +469,26 @@ impl RateLimitHeaders {
         ]));
 
         let mut requests = state.requests().clone();
-        if requests.limit().is_readable()
-            && let Some(limit) = self.limit
-        {
-            requests = requests.with_limit(Capacity::Measured(Reading::new(
-                NativeAmount::whole(limit, "requests"),
-                observed_at_unix,
-                requests_source.clone(),
-            )));
-        }
-        if requests.remaining().is_readable()
-            && let Some(remaining) = self.remaining
-        {
-            requests = requests.with_remaining(Capacity::Measured(Reading::new(
-                NativeAmount::whole(remaining, "requests"),
-                observed_at_unix,
-                source(self.name_for(&[
-                    "ratelimit-remaining",
-                    "x-ratelimit-remaining",
-                    "x-ratelimit-remaining-requests",
-                ])),
-            )));
-        }
+        let new_limit = fill_measured(
+            requests.limit().clone(),
+            self.limit,
+            "requests",
+            observed_at_unix,
+            requests_source.clone(),
+        );
+        requests = requests.with_limit(new_limit);
+        let new_remaining = fill_measured(
+            requests.remaining().clone(),
+            self.remaining,
+            "requests",
+            observed_at_unix,
+            source(self.name_for(&[
+                "ratelimit-remaining",
+                "x-ratelimit-remaining",
+                "x-ratelimit-remaining-requests",
+            ])),
+        );
+        requests = requests.with_remaining(new_remaining);
 
         // The token pool — capability map line 1199. Only ever filled by
         // Groq's `-tokens` spelling; every other host measured here sends
@@ -476,24 +496,22 @@ impl RateLimitHeaders {
         // them rather than a guess dressed as a reading.
         let mut tokens = state.tokens().clone();
         let mut combined = tokens.combined().clone();
-        if combined.limit().is_readable()
-            && let Some(limit) = self.token_limit
-        {
-            combined = combined.with_limit(Capacity::Measured(Reading::new(
-                NativeAmount::whole(limit, "tokens"),
-                observed_at_unix,
-                source(self.name_for(&["x-ratelimit-limit-tokens"])),
-            )));
-        }
-        if combined.remaining().is_readable()
-            && let Some(remaining) = self.token_remaining
-        {
-            combined = combined.with_remaining(Capacity::Measured(Reading::new(
-                NativeAmount::whole(remaining, "tokens"),
-                observed_at_unix,
-                source(self.name_for(&["x-ratelimit-remaining-tokens"])),
-            )));
-        }
+        let new_combined_limit = fill_measured(
+            combined.limit().clone(),
+            self.token_limit,
+            "tokens",
+            observed_at_unix,
+            source(self.name_for(&["x-ratelimit-limit-tokens"])),
+        );
+        combined = combined.with_limit(new_combined_limit);
+        let new_combined_remaining = fill_measured(
+            combined.remaining().clone(),
+            self.token_remaining,
+            "tokens",
+            observed_at_unix,
+            source(self.name_for(&["x-ratelimit-remaining-tokens"])),
+        );
+        combined = combined.with_remaining(new_combined_remaining);
         tokens = tokens.with_combined(combined);
 
         // Capability map lines 1199 and 1200: a resource that has just been
@@ -1178,10 +1196,7 @@ impl GatewayQuotaCache {
     }
 
     fn path_for(&self, provider: &str) -> PathBuf {
-        self.root.join(format!(
-            "{}.json",
-            crate::provider::cache::file_stem(provider)
-        ))
+        crate::provider::cache::provider_json_path(&self.root, provider)
     }
 
     /// The most recent gateway-captured reading for `provider`, if the
@@ -1278,11 +1293,7 @@ impl GatewayQuotaCache {
         };
         let encoded = serde_json::to_vec_pretty(&stored)
             .map_err(|err| std::io::Error::other(err.to_string()))?;
-        let path = self.path_for(provider);
-        let temporary = path.with_extension("json.writing");
-        std::fs::write(&temporary, &encoded)?;
-        std::fs::rename(&temporary, &path)?;
-        Ok(())
+        crate::provider::cache::write_json_atomically(&self.path_for(provider), &encoded)
     }
 }
 
@@ -1403,10 +1414,7 @@ impl RoutingStickyCache {
         };
         let encoded = serde_json::to_vec_pretty(&stored)
             .map_err(|err| std::io::Error::other(err.to_string()))?;
-        let temporary = self.path.with_extension("json.writing");
-        std::fs::write(&temporary, &encoded)?;
-        std::fs::rename(&temporary, &self.path)?;
-        Ok(())
+        crate::provider::cache::write_json_atomically(&self.path, &encoded)
     }
 }
 
@@ -1633,10 +1641,7 @@ impl GatewayHealthCache {
     }
 
     fn path_for(&self, provider: &str) -> PathBuf {
-        self.root.join(format!(
-            "{}.json",
-            crate::provider::cache::file_stem(provider)
-        ))
+        crate::provider::cache::provider_json_path(&self.root, provider)
     }
 
     /// Every resource's health this cache holds for `provider`, if the
@@ -1777,11 +1782,7 @@ impl GatewayHealthCache {
         };
         let encoded = serde_json::to_vec_pretty(&stored)
             .map_err(|err| std::io::Error::other(err.to_string()))?;
-        let path = self.path_for(provider);
-        let temporary = path.with_extension("json.writing");
-        std::fs::write(&temporary, &encoded)?;
-        std::fs::rename(&temporary, &path)?;
-        Ok(())
+        crate::provider::cache::write_json_atomically(&self.path_for(provider), &encoded)
     }
 }
 

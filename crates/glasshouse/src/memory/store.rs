@@ -1312,15 +1312,15 @@ impl<'a> MemoryStore<'a> {
 
         let mut statement = self
             .conn
-            .prepare("SELECT id FROM memories WHERE substr(id, 1, ?2) = ?1 ORDER BY id")
+            .prepare("SELECT id, project_id FROM memories WHERE substr(id, 1, ?2) = ?1 ORDER BY id")
             .map_err(|source| MemoryStoreError::Sql {
                 action: "prepare the memory lookup",
                 source,
             })?;
-        let matches: Vec<MemoryId> = statement
+        let matches: Vec<(MemoryId, String)> = statement
             .query_map(
                 rusqlite::params![&prefix, i64::try_from(prefix.len()).unwrap_or(i64::MAX)],
-                |row| row.get::<_, String>(0).map(MemoryId),
+                |row| Ok((MemoryId(row.get::<_, String>(0)?), row.get::<_, String>(1)?)),
             )
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
             .map_err(|source| MemoryStoreError::Sql {
@@ -1328,11 +1328,29 @@ impl<'a> MemoryStore<'a> {
                 source,
             })?;
 
+        // The lookup stays unscoped on purpose — `api::unix::get_memory`
+        // explains why: a single foreign match must reach `get` and come back
+        // as `ForeignProject`, never as a silent absence. But that argument
+        // does not cover a prefix that is unambiguous *within this project*
+        // and merely collides with a foreign row; answering that with
+        // `NotFound` is the very silence the design refuses. So a tie is
+        // broken in favour of this project, and only a tie inside this
+        // project is still genuinely ambiguous.
         match matches.as_slice() {
-            [only] => Ok(only.clone()),
-            _ => Err(MemoryStoreError::NotFound {
-                id: MemoryId(prefix),
-            }),
+            [(only, _)] => Ok(only.clone()),
+            _ => {
+                let mine: Vec<&MemoryId> = matches
+                    .iter()
+                    .filter(|(_, project)| *project == self.project_id)
+                    .map(|(id, _)| id)
+                    .collect();
+                match mine.as_slice() {
+                    [only] => Ok((*only).clone()),
+                    _ => Err(MemoryStoreError::NotFound {
+                        id: MemoryId(prefix),
+                    }),
+                }
+            }
         }
     }
 

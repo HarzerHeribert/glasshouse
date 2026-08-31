@@ -223,7 +223,7 @@ impl ModelCache {
     /// `[a-z0-9-]+`, which cannot contain a separator, cannot be `.` or `..`,
     /// and stays unique across names that slugify the same way.
     pub fn path_for(&self, provider: &str) -> PathBuf {
-        self.root.join(format!("{}.json", file_stem(provider)))
+        provider_json_path(&self.root, provider)
     }
 
     /// The cached catalogue for `provider`, or `None`.
@@ -278,12 +278,7 @@ impl ModelCache {
             })?;
 
         let path = self.path_for(&catalogue.provider);
-        let temporary = path.with_extension("json.writing");
-        std::fs::write(&temporary, &encoded).map_err(|source| CacheError::Write {
-            path: temporary.clone(),
-            source,
-        })?;
-        std::fs::rename(&temporary, &path).map_err(|source| CacheError::Write {
+        write_json_atomically(&path, &encoded).map_err(|source| CacheError::Write {
             path: path.clone(),
             source,
         })?;
@@ -303,6 +298,34 @@ impl ModelCache {
             Err(source) => Err(CacheError::Write { path, source }),
         }
     }
+}
+
+/// A provider-keyed JSON path under `root` — `[a-z0-9-]+.json`, guaranteed to
+/// be one path component under `root` by [`file_stem`]'s own guarantee.
+///
+/// `pub(crate)`, for the identical reason `file_stem` is: `telemetry`'s
+/// `GatewayQuotaCache` and `GatewayHealthCache` key a per-provider directory
+/// the same way, and a second copy of the path-join is a second place for the
+/// escape guarantee to go stale.
+pub(crate) fn provider_json_path(root: &Path, provider: &str) -> PathBuf {
+    root.join(format!("{}.json", file_stem(provider)))
+}
+
+/// Write `encoded` to `path` via a same-directory `.json.writing` temporary
+/// file, then rename into place, so a crash or a full disk mid-write leaves
+/// whatever was at `path` before intact rather than a half-written file a
+/// later read would have to quietly discard. Does **not** create `path`'s
+/// parent directory — every call site already does that itself, with its own
+/// error type, before calling this.
+///
+/// The one atomic-write primitive [`ModelCache::store`],
+/// `telemetry::GatewayQuotaCache::try_store`,
+/// `telemetry::GatewayHealthCache::try_store` and
+/// `telemetry::RoutingStickyCache::try_store` used to reimplement separately.
+pub(crate) fn write_json_atomically(path: &Path, encoded: &[u8]) -> std::io::Result<()> {
+    let temporary = path.with_extension("json.writing");
+    std::fs::write(&temporary, encoded)?;
+    std::fs::rename(&temporary, path)
 }
 
 /// A file-name stem for `provider` that is guaranteed to be one path
@@ -565,6 +588,89 @@ mod tests {
             "the temporary file must be renamed away, not left behind"
         );
         assert!(cache.load("p").is_some());
+    }
+
+    // --- GH-DEDUP-PROVIDER: the shared atomic-write helper -----------------
+
+    /// [`write_json_atomically`] directly, at the primitive four caches now
+    /// share: after a successful call the target exists with the full
+    /// contents and no `.json.writing` sibling remains — the one property
+    /// `ModelCache::store`, `GatewayQuotaCache::try_store`,
+    /// `GatewayHealthCache::try_store` and `RoutingStickyCache::try_store`
+    /// all rely on it for.
+    #[test]
+    fn write_json_atomically_leaves_the_target_whole_and_no_temporary_behind() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("reading.json");
+        write_json_atomically(&path, b"{\"a\":1}").expect("written");
+
+        assert_eq!(
+            std::fs::read(&path).expect("readable"),
+            b"{\"a\":1}",
+            "the target must hold the full contents"
+        );
+        let temporary = path.with_extension("json.writing");
+        assert!(
+            !temporary.exists(),
+            "the temporary file must be renamed away, not left behind"
+        );
+    }
+
+    /// The end-state check above (target holds the full content, no
+    /// `.json.writing` sibling) is satisfied just as well by a direct
+    /// `std::fs::write(path, encoded)` on the happy path — it is not, on its
+    /// own, a test of the temp-then-rename crash-safety pattern rather than
+    /// of the function's return value. This one actually distinguishes the
+    /// two: creating a **new** file (the temporary) needs write permission on
+    /// its parent directory, but overwriting a file that **already exists**
+    /// there does not (Unix `open(2)`: `O_TRUNC` on an existing path checks
+    /// the file's own permission bits, not the directory's, unless a new
+    /// directory entry has to be created). So with a read-only directory and
+    /// a pre-existing target, the real implementation fails — it cannot
+    /// create the temporary — while a direct-write implementation would
+    /// happily overwrite the target and report success.
+    #[cfg(unix)]
+    #[test]
+    fn write_json_atomically_cannot_succeed_by_writing_the_target_directly() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("reading.json");
+        std::fs::write(&path, b"old").expect("seeded");
+
+        let mut perms = std::fs::metadata(dir.path())
+            .expect("metadata")
+            .permissions();
+        perms.set_mode(0o500); // read + execute, no write: no new directory entry
+        std::fs::set_permissions(dir.path(), perms.clone()).expect("locked down");
+
+        let result = write_json_atomically(&path, b"new");
+
+        // Restore write permission unconditionally so `tempdir`'s own Drop
+        // can clean up, regardless of which assertion below fires.
+        perms.set_mode(0o700);
+        std::fs::set_permissions(dir.path(), perms).expect("restored");
+
+        assert!(
+            result.is_err(),
+            "a real temp-then-rename write cannot create its temporary file in a \
+             directory it has no write permission on — a passing result here means \
+             the implementation wrote the target directly instead"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("still readable"),
+            b"old",
+            "a failed write must leave the previous target untouched"
+        );
+    }
+
+    #[test]
+    fn provider_json_path_matches_model_caches_own_path_for() {
+        let cache = ModelCache::at("/tmp/does-not-need-to-exist");
+        assert_eq!(
+            provider_json_path(cache.root(), "openrouter"),
+            cache.path_for("openrouter")
+        );
     }
 
     // --- a changed base URL -----------------------------------------------

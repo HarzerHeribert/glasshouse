@@ -460,41 +460,13 @@ pub fn read_response_body(request: &ProbeRequest, timeouts: ProbeTimeouts) -> Bo
 /// that, and says so plainly when it is not, because "this provider does not
 /// offer model discovery" is an answer and not an error.
 pub fn model_catalogue(request: &ProbeRequest, timeouts: ProbeTimeouts) -> ModelFetch {
-    let started = Instant::now();
-    let mut response = match send(request, timeouts) {
-        Ok(response) => response,
-        Err(err) => return ModelFetch::Probe(transport_outcome(&err, started)),
-    };
-
-    let status = response.status().as_u16();
-    let outcome = classify(status);
-    if !matches!(outcome, ProbeOutcome::Reached { .. }) {
-        return ModelFetch::Probe(outcome);
-    }
-
-    let body = match response
-        .body_mut()
-        .with_config()
-        .limit(MAX_BODY_BYTES)
-        .read_to_string()
-    {
-        Ok(body) => body,
-        Err(ureq::Error::Timeout(_)) => {
-            return ModelFetch::Probe(ProbeOutcome::TimedOut {
-                waited_ms: elapsed_ms(started),
-            });
-        }
-        Err(_) => {
-            return ModelFetch::NotACatalogue {
-                status,
-                reason: "the response body could not be read".to_owned(),
-            };
-        }
-    };
-
-    match parse_catalogue(&body) {
-        Ok(models) => ModelFetch::Catalogue(models),
-        Err(reason) => ModelFetch::NotACatalogue { status, reason },
+    match read_response_body(request, timeouts) {
+        BodyFetch::Answered { status, body } => match parse_catalogue(&body) {
+            Ok(models) => ModelFetch::Catalogue(models),
+            Err(reason) => ModelFetch::NotACatalogue { status, reason },
+        },
+        BodyFetch::NotRead { status, reason } => ModelFetch::NotACatalogue { status, reason },
+        BodyFetch::Probe(outcome) => ModelFetch::Probe(outcome),
     }
 }
 

@@ -1177,15 +1177,13 @@ impl DisposableRouting {
                 .filter(|candidate| pool.is_available(&candidate.value().as_free_resource(), now));
             return match pinned {
                 Some(candidate) => {
-                    let mut explanation = self.score_pinned(candidate);
-                    for note in refusal_notes.iter().cloned() {
-                        explanation.push(note);
-                    }
-                    Ok(self.choice(
+                    let explanation = self.score_pinned(candidate);
+                    Ok(self.finish(
                         job,
                         candidate.value(),
                         UseReason::UserPreference,
                         explanation,
+                        &refusal_notes,
                     ))
                 }
                 None => Err(NoResource::PinnedResourceUnavailable {
@@ -1225,11 +1223,14 @@ impl DisposableRouting {
                     // metered resource happens to be configured beside it.
                     UseReason::QuotaPreservation
                 };
-                let mut explanation = self.score(candidate, Some(position), arranged.len(), None);
-                for note in refusal_notes.iter().cloned() {
-                    explanation.push(note);
-                }
-                return Ok(self.choice(job, candidate.value(), reason, explanation));
+                let explanation = self.score(candidate, Some(position), arranged.len(), None);
+                return Ok(self.finish(
+                    job,
+                    candidate.value(),
+                    reason,
+                    explanation,
+                    &refusal_notes,
+                ));
             }
         }
 
@@ -1311,12 +1312,13 @@ impl DisposableRouting {
         }
 
         match best {
-            Some((candidate, mut explanation, _)) => {
-                for note in refusal_notes.iter().cloned() {
-                    explanation.push(note);
-                }
-                Ok(self.choice(job, candidate.value(), UseReason::Fallback, explanation))
-            }
+            Some((candidate, explanation, _)) => Ok(self.finish(
+                job,
+                candidate.value(),
+                UseReason::Fallback,
+                explanation,
+                &refusal_notes,
+            )),
             None if denied_reasons.is_empty() => {
                 Err(NoResource::NoFreeResourceAndMeteredWithheld {
                     withheld: self.metered.clone(),
@@ -1326,6 +1328,23 @@ impl DisposableRouting {
                 reasons: denied_reasons,
             }),
         }
+    }
+
+    /// Attach every entitlement-refusal note to `explanation` and build the
+    /// [`DisposableChoice`] — the sequence all three surviving arms of
+    /// [`Self::choose`] repeated verbatim before this extraction.
+    fn finish(
+        &self,
+        job: JobKind,
+        candidate: &DisposableCandidate,
+        reason: UseReason,
+        mut explanation: RoutingExplanation,
+        refusal_notes: &[Contribution],
+    ) -> DisposableChoice {
+        for note in refusal_notes.iter().cloned() {
+            explanation.push(note);
+        }
+        self.choice(job, candidate, reason, explanation)
     }
 
     /// Map lines 1441 and 1442, for the one caller they name —
@@ -1912,6 +1931,7 @@ fn cheaper_adequate_resource_exists(
 mod tests {
     use super::*;
     use crate::routing::free::WorkloadOutcome;
+    use crate::routing::{Entitlement, EntitlementRules};
     use crate::secret::SecretRef;
     use std::time::Duration;
 
@@ -2213,6 +2233,50 @@ mod tests {
             )
             .expect("one free model is allowed");
         assert_eq!(choice.model(), "allowed-model");
+    }
+
+    /// Characterizes `Self::finish`, extracted from three copies of the same
+    /// "attach refusal notes, build the choice" sequence: whichever arm of
+    /// `choose` wins still carries every entitlement refusal note on its
+    /// explanation, with the note's own wording (map line 1947) unchanged.
+    /// Pins the winner via the pin arm, since it is the cheapest of the three
+    /// arms to reach directly.
+    #[test]
+    fn a_winning_choice_still_carries_every_entitlement_refusal_note() {
+        let denied = free("openrouter", "denied-model").with_entitlement(Some(Entitlement::new(
+            "no-extraction",
+            EntitlementRules::UNRESTRICTED.deny_job_kinds([JobKind::MemoryExtraction]),
+        )));
+        let pinned = free("openrouter", "the-pinned-model");
+
+        let routing = DisposableRouting::for_support_work(
+            true,
+            FreePreferences::new()
+                .with_pin(Some(FreeResourceKey::new("openrouter", "the-pinned-model"))),
+        );
+        let choice = routing
+            .choose(
+                JobKind::MemoryExtraction,
+                &[denied, pinned],
+                &FreePool::new(),
+                Instant::now(),
+                None,
+            )
+            .expect("the pinned candidate is available");
+
+        assert_eq!(choice.model(), "the-pinned-model");
+        let note = choice
+            .explanation()
+            .contributions()
+            .iter()
+            .find(|contribution| contribution.name() == "entitlement rule")
+            .expect("the denied candidate's refusal note travels with the winner");
+        assert!(
+            note.evidence()
+                .contains("denied-model on openrouter is not a candidate"),
+            "unexpected refusal note text: {}",
+            note.evidence()
+        );
     }
 
     /// Map line 1530 and 1554: the winning candidate's explanation names

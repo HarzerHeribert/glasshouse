@@ -287,6 +287,11 @@ pub enum CmuxError {
     InvalidRef(InvalidPaneRef),
     /// The reference names a surface, and the operation needs a workspace.
     NotAWorkspace(PaneRef),
+    /// The payload for `send_line` contains a backslash, which cmux's
+    /// escape language cannot carry as data. The message deliberately does
+    /// not echo the payload: it may be the very injection this refusal
+    /// exists to stop.
+    PayloadHasBackslash,
 }
 
 impl fmt::Display for CmuxError {
@@ -309,6 +314,12 @@ impl fmt::Display for CmuxError {
             CmuxError::NotAWorkspace(pane) => write!(
                 f,
                 "`{pane}` names a surface; focusing needs a workspace reference"
+            ),
+            CmuxError::PayloadHasBackslash => write!(
+                f,
+                "text for `cmux send` cannot contain a backslash: cmux has no \
+                 escape-of-escape, so a backslash in the payload cannot be \
+                 carried as data"
             ),
         }
     }
@@ -442,6 +453,34 @@ fn caller_workspace_ref(json: &str) -> Option<PaneRef> {
     PaneRef::parse(&value[..close]).ok()
 }
 
+/// The exact argument `cmux send -- …` is given for one line of text, or a
+/// refusal if the text cannot be carried as data.
+///
+/// cmux reads its payload as an escape language — a literal `\r` in it is
+/// Enter — so text Glasshouse carries as *data* must never let cmux see one.
+/// Doubling backslashes (`\` → `\\`) looks like the standard escape for this,
+/// but is not: measured against a live cmux, doubling does not prevent the
+/// injection it is meant to stop. cmux advances through the payload one
+/// character at a time; an unrecognized backslash is emitted literally
+/// (confirmed: `A\\B` renders as `A\\B`, two backslashes, not one), but the
+/// very next backslash is still checked on its own, so a doubled backslash
+/// immediately followed by `r` — `\\r` — still ends in a recognized `\r` and
+/// still submits, while also leaving a spurious extra backslash in the pane.
+/// cmux has no escape-of-escape, so a backslash in the payload cannot be
+/// carried as data at all: the only correct move is to refuse it, not to
+/// transform it. `cli::ApiCommand::Send` promises the text "is not expanded,
+/// interpreted, or given to a shell anywhere on its way to the session";
+/// this refusal is what keeps that true for a payload doubling cannot save.
+fn submitted_line(text: &str) -> Result<String, CmuxError> {
+    if text.contains('\\') {
+        return Err(CmuxError::PayloadHasBackslash);
+    }
+    let mut line = String::with_capacity(text.len() + 2);
+    line.push_str(text);
+    line.push_str("\\r");
+    Ok(line)
+}
+
 impl CmuxControl for CmuxCli {
     fn ping(&self) -> Result<(), CmuxError> {
         self.run(Subcommand::Ping, &[]).map(|_| ())
@@ -486,10 +525,10 @@ impl CmuxControl for CmuxCli {
         // cmux's documented escape: a literal `\r` in the text is Enter. It
         // is appended rather than a real carriage return because the text
         // travels as a command-line argument, and this is the form the
-        // command documents for submitting a line.
-        let mut line = String::with_capacity(text.len() + 2);
-        line.push_str(text);
-        line.push_str("\\r");
+        // command documents for submitting a line. `submitted_line` refuses
+        // a payload containing a backslash rather than trying to escape it —
+        // see its doc comment for the measured reason doubling cannot work.
+        let line = submitted_line(text)?;
         let target = if pane.is_workspace() {
             "--workspace"
         } else {
@@ -1000,6 +1039,33 @@ mod tests {
         let err = focus("workspace:1; cmux workspace close workspace:2", &cmux).unwrap_err();
         assert!(matches!(err, CmuxError::InvalidRef(_)), "{err}");
         assert!(cmux.calls().is_empty(), "an invalid ref reaches cmux never");
+    }
+
+    #[test]
+    fn a_backslash_in_the_payload_is_refused_not_escaped() {
+        // No backslash: unchanged pass-through, `\r` appended once.
+        assert_eq!(submitted_line("hello there").unwrap(), "hello there\\r");
+
+        // A literal `\r` — the finding's own repro — is refused rather than
+        // doubled: doubling does not stop the submission (measured against a
+        // live cmux, see `submitted_line`'s doc comment), so refusal is the
+        // only correct response.
+        assert!(matches!(
+            submitted_line("x\\rrm -rf ~"),
+            Err(CmuxError::PayloadHasBackslash)
+        ));
+
+        // Any backslash at all is refused, not only one that spells `\r` —
+        // a Windows path is refused too, since doubling could not carry it
+        // as data either.
+        assert!(matches!(
+            submitted_line(r"C:\reports\x"),
+            Err(CmuxError::PayloadHasBackslash)
+        ));
+
+        // The refusal's message does not echo the payload.
+        let message = submitted_line("x\\rrm -rf ~").unwrap_err().to_string();
+        assert!(!message.contains("rm -rf"), "{message}");
     }
 
     #[test]
